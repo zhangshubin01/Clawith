@@ -6,18 +6,36 @@ Reference: https://modelcontextprotocol.io/docs
 
 import httpx
 import json
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 
 class MCPClient:
     """Client for connecting to MCP servers via HTTP+SSE transport."""
 
     def __init__(self, server_url: str):
-        self.server_url = server_url.rstrip("/")
+        # Extract apiKey from URL query params and move to Authorization header
+        parsed = urlparse(server_url)
+        qs = parse_qs(parsed.query, keep_blank_values=True)
+
+        self.api_key = None
+        if "apiKey" in qs:
+            self.api_key = qs.pop("apiKey")[0]
+
+        # Rebuild URL without apiKey in query string
+        remaining_qs = urlencode({k: v[0] for k, v in qs.items()}) if qs else ""
+        self.server_url = urlunparse(parsed._replace(query=remaining_qs)).rstrip("/")
+
+    def _headers(self) -> dict:
+        """Build headers with Authorization if apiKey is available."""
+        h = {"Content-Type": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
 
     async def list_tools(self) -> list[dict]:
         """Fetch available tools from the MCP server."""
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
                 # MCP uses JSON-RPC 2.0 over HTTP
                 resp = await client.post(
                     self.server_url,
@@ -26,14 +44,17 @@ class MCPClient:
                         "id": 1,
                         "method": "tools/list",
                     },
-                    headers={"Content-Type": "application/json"},
+                    headers=self._headers(),
                 )
                 data = resp.json()
 
                 if "error" in data:
-                    raise Exception(f"MCP error: {data['error'].get('message', str(data['error']))}")
+                    err = data["error"]
+                    msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                    raise Exception(f"MCP error: {msg}")
 
-                tools = data.get("result", {}).get("tools", [])
+                result = data.get("result", {})
+                tools = result.get("tools", []) if isinstance(result, dict) else []
                 return [
                     {
                         "name": t.get("name", ""),
@@ -48,7 +69,7 @@ class MCPClient:
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool on the MCP server."""
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
                 resp = await client.post(
                     self.server_url,
                     json={
@@ -60,7 +81,7 @@ class MCPClient:
                             "arguments": arguments,
                         },
                     },
-                    headers={"Content-Type": "application/json"},
+                    headers=self._headers(),
                 )
                 data = resp.json()
 
