@@ -2997,16 +2997,15 @@ async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
                 if existing.is_enabled:
                     return f"❌ Trigger '{name}' already exists and is active. Use update_trigger to modify it, or cancel_trigger first."
                 else:
-                    # Re-enable disabled trigger with new config
+                    # Re-enable disabled trigger with new config (preserve fire history)
                     existing.type = ttype
                     existing.config = config
                     existing.reason = reason
                     existing.focus_ref = focus_ref or None
                     existing.is_enabled = True
-                    existing.fire_count = 0
-                    existing.last_fired_at = None
+                    # Keep fire_count and last_fired_at — they are cumulative stats
                     await db.commit()
-                    return f"✅ Trigger '{name}' re-enabled with new configuration ({ttype})"
+                    return f"✅ Trigger '{name}' re-enabled with new configuration ({ttype}, fired {existing.fire_count} times so far)"
 
             trigger = AgentTrigger(
                 agent_id=agent_id,
