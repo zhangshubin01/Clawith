@@ -162,7 +162,11 @@ class BaseOrgSyncAdapter(ABC):
                 for user in users:
                     try:
                         async with db.begin_nested():
-                            await self._upsert_member(db, provider, user, dept.external_id)
+                            stats = await self._upsert_member(db, provider, user, dept.external_id)
+                            if stats.get("user_created"):
+                                user_count += 1
+                            if stats.get("profile_synced"):
+                                profile_count += 1
                         member_count += 1
                     except Exception as e:
                         logger.error(f"[OrgSync] Failed to sync member {user.external_id} ({user.name}): {e}")
@@ -426,6 +430,7 @@ class BaseOrgSyncAdapter(ABC):
             existing_member.synced_at = now
             if user_id and not existing_member.user_id:
                 existing_member.user_id = user_id
+            stats["profile_synced"] = True
         else:
             translit_full = "".join([i[0] for i in pinyin(user.name, style=Style.NORMAL)])
             translit_initial = "".join([i[0] for i in pinyin(user.name, style=Style.FIRST_LETTER)])
@@ -450,6 +455,7 @@ class BaseOrgSyncAdapter(ABC):
                 synced_at=now,
             )
             db.add(new_member)
+            stats["profile_synced"] = True
 
         # Sync email/phone from OrgMember to User (if linked)
         target_user = platform_user
