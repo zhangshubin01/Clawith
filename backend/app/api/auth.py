@@ -1,5 +1,6 @@
 """Authentication API routes."""
 
+import uuid
 from datetime import datetime, timezone
 
 from typing import Any
