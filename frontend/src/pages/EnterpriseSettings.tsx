@@ -2677,62 +2677,7 @@ export default function EnterpriseSettings() {
                                                                     </div>
 
                                                                     {/* Inline config editing form (per-tool only) */}
-                                                                    {isEditing && hasOwnConfig && (
-                                                                        <div style={{ borderTop: '1px solid var(--border-color)', padding: '16px', background: 'var(--bg-secondary)' }}>
-                                                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                                                                {(tool.config_schema.fields || []).map((field: any) => {
-                                                                                    // Check depends_on
-                                                                                    if (field.depends_on) {
-                                                                                        const visible = Object.entries(field.depends_on).every(([k, vals]: [string, any]) =>
-                                                                                            vals.includes(editingConfig[k])
-                                                                                        );
-                                                                                        if (!visible) return null;
-                                                                                    }
-                                                                                    return (
-                                                                                        <div key={field.key}>
-                                                                                            <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, marginBottom: '4px' }}>{field.label}</label>
-                                                                                            {field.type === 'select' ? (
-                                                                                                <select className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))}>
-                                                                                                    {(field.options || []).map((opt: any) => (
-                                                                                                        <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                                                                                    ))}
-                                                                                                </select>
-                                                                                            ) : field.type === 'number' ? (
-                                                                                                <input type="number" className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} min={field.min} max={field.max}
-                                                                                                    onChange={e => setEditingConfig(p => ({ ...p, [field.key]: Number(e.target.value) }))} />
-                                                                                            ) : field.type === 'password' ? (
-                                                                                                <input type="password" autoComplete="new-password" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
-                                                                                                    onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
-                                                                                            ) : (
-                                                                                                <input type="text" className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} placeholder={field.placeholder || ''}
-                                                                                                    onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
-                                                                                            )}
-                                                                                        </div>
-                                                                                    );
-                                                                                })}
-                                                                                <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
-                                                                                    <button className="btn btn-primary" onClick={async () => {
-                                                                                        if (tool.name === 'jina_search' || tool.name === 'jina_read') {
-                                                                                            // Save api_key to system_settings (shared by both jina tools)
-                                                                                            if (editingConfig.api_key) {
-                                                                                                const token = localStorage.getItem('token');
-                                                                                                await fetch('/api/enterprise/system-settings/jina_api_key', {
-                                                                                                    method: 'PUT',
-                                                                                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                                                                                                    body: JSON.stringify({ value: { api_key: editingConfig.api_key } }),
-                                                                                                });
-                                                                                            }
-                                                                                        } else {
-                                                                                            await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig }) });
-                                                                                        }
-                                                                                        setEditingToolId(null);
-                                                                                        loadAllTools();
-                                                                                    }}>{t('enterprise.tools.saveConfig')}</button>
-                                                                                    <button className="btn btn-secondary" onClick={() => setEditingToolId(null)}>{t('common.cancel')}</button>
-                                                                                </div>
-                                                                            </div>
-                                                                        </div>
-                                                                    )}
+                                                                    {/* Inline config editing form replaced by global modal */}
                                                                 </div>
                                                             );
                                                         })}
@@ -2740,6 +2685,97 @@ export default function EnterpriseSettings() {
                                                 </div>
                                             );
                                         })}
+                                    </div>
+                                );
+                            })()}
+
+                            {/* Per-Tool Config Modal */}
+                            {editingToolId && (() => {
+                                const tool = allTools.find(t => t.id === editingToolId);
+                                if (!tool) return null;
+                                return (
+                                    <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.55)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                        onClick={() => setEditingToolId(null)}>
+                                        <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', width: '480px', maxWidth: '95vw', maxHeight: '80vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                                                <div>
+                                                    <h3 style={{ margin: 0 }}>⚙️ {tool.display_name}</h3>
+                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>Global configuration used by all agents</div>
+                                                </div>
+                                                <button onClick={() => setEditingToolId(null)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)' }}>✕</button>
+                                            </div>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                                {(tool.config_schema.fields || []).map((field: any) => {
+                                                    // Check depends_on
+                                                    if (field.depends_on) {
+                                                        const visible = Object.entries(field.depends_on).every(([k, vals]: [string, any]) =>
+                                                            vals.includes(editingConfig[k])
+                                                        );
+                                                        if (!visible) return null;
+                                                    }
+                                                    return (
+                                                        <div key={field.key}>
+                                                            <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, marginBottom: '4px' }}>{field.label}</label>
+                                                            {field.type === 'checkbox' ? (
+                                                                <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer' }}>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={editingConfig[field.key] ?? field.default ?? false}
+                                                                        onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.checked }))}
+                                                                        style={{ opacity: 0, width: 0, height: 0 }}
+                                                                    />
+                                                                    <span style={{
+                                                                        position: 'absolute', inset: 0,
+                                                                        background: (editingConfig[field.key] ?? field.default) ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
+                                                                        borderRadius: '11px', transition: 'background 0.2s',
+                                                                    }}>
+                                                                        <span style={{
+                                                                            position: 'absolute', left: (editingConfig[field.key] ?? field.default) ? '20px' : '2px', top: '2px',
+                                                                            width: '18px', height: '18px', background: '#fff',
+                                                                            borderRadius: '50%', transition: 'left 0.2s',
+                                                                        }} />
+                                                                    </span>
+                                                                </label>
+                                                            ) : field.type === 'select' ? (
+                                                                <select className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))}>
+                                                                    {(field.options || []).map((opt: any) => (
+                                                                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                                                    ))}
+                                                                </select>
+                                                            ) : field.type === 'number' ? (
+                                                                <input type="number" className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} min={field.min} max={field.max}
+                                                                    onChange={e => setEditingConfig(p => ({ ...p, [field.key]: Number(e.target.value) }))} />
+                                                            ) : field.type === 'password' ? (
+                                                                <input type="password" autoComplete="new-password" className="form-input" value={editingConfig[field.key] ?? ''} placeholder={field.placeholder || ''}
+                                                                    onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
+                                                            ) : (
+                                                                <input type="text" className="form-input" value={editingConfig[field.key] ?? field.default ?? ''} placeholder={field.placeholder || ''}
+                                                                    onChange={e => setEditingConfig(p => ({ ...p, [field.key]: e.target.value }))} />
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                                <div style={{ display: 'flex', gap: '8px', marginTop: '12px', justifyContent: 'flex-end', borderTop: '1px solid var(--border-subtle)', paddingTop: '16px' }}>
+                                                    <button className="btn btn-secondary" onClick={() => setEditingToolId(null)}>{t('common.cancel')}</button>
+                                                    <button className="btn btn-primary" onClick={async () => {
+                                                        if (tool.name === 'jina_search' || tool.name === 'jina_read') {
+                                                            if (editingConfig.api_key) {
+                                                                const token = localStorage.getItem('token');
+                                                                await fetch('/api/enterprise/system-settings/jina_api_key', {
+                                                                    method: 'PUT',
+                                                                    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                                                    body: JSON.stringify({ value: { api_key: editingConfig.api_key } }),
+                                                                });
+                                                            }
+                                                        } else {
+                                                            await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig }) });
+                                                        }
+                                                        setEditingToolId(null);
+                                                        loadAllTools();
+                                                    }}>{t('enterprise.tools.saveConfig')}</button>
+                                                </div>
+                                            </div>
+                                        </div>
                                     </div>
                                 );
                             })()}
