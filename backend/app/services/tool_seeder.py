@@ -263,10 +263,10 @@ BUILTIN_TOOLS = [
     },
     {
         "name": "web_search",
-        "display_name": "DuckDuckGo Search",
-        "description": "Search the internet via DuckDuckGo. May be unavailable on some networks. Use Bing Search as an alternative.",
+        "display_name": "Web Search",
+        "description": "Search the internet using a configurable search engine. Supports DuckDuckGo (free), Tavily, Google, and Bing. Configure the search engine in the tool settings.",
         "category": "search",
-        "icon": "🦆",
+        "icon": "🔍",
         "is_default": True,
         "parameters_schema": {
             "type": "object",

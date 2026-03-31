@@ -1584,7 +1584,7 @@ async def _execute_tool_direct(
             logger.info(f"[DirectTool] Executing code with arguments: {arguments}")
             return await _execute_code(agent_id, ws, arguments)
         elif tool_name == "web_search":
-            return await _web_search(arguments)
+            return await _web_search(arguments, agent_id)
         elif tool_name == "jina_search":
             return await _jina_search(arguments)
         elif tool_name == "send_feishu_message":
@@ -1694,7 +1694,7 @@ async def execute_tool(
         elif tool_name == "send_channel_file":
             result = await _send_channel_file(agent_id, ws, arguments)
         elif tool_name == "web_search":
-            result = await _web_search(arguments)
+            result = await _web_search(arguments, agent_id)
         elif tool_name == "jina_search":
             result = await _jina_search(arguments)
         elif tool_name == "bing_search":
@@ -1837,8 +1837,11 @@ async def execute_tool(
         return f"Tool execution error ({tool_name}): {type(e).__name__}: {str(e)[:200]}"
 
 
-async def _web_search(arguments: dict) -> str:
-    """Search the web using a configurable search engine (reads config from DB)."""
+async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str:
+    """Search the web using a configurable search engine.
+
+    Config resolution priority: Agent config > Company config > Defaults.
+    """
     import httpx
     import re
 
@@ -1846,15 +1849,33 @@ async def _web_search(arguments: dict) -> str:
     if not query:
         return "❌ Please provide search keywords"
 
-    # Load config from DB
+    # Load config with priority: Agent > Company > Default
     config = {}
     try:
         from app.models.tool import Tool
+        from app.models.agent_tool import AgentTool
+        from app.api.tools import _decrypt_sensitive_fields
         async with async_session() as db:
             r = await db.execute(select(Tool).where(Tool.name == "web_search"))
             tool = r.scalar_one_or_none()
+            schema = tool.config_schema if tool else None
+            # Company-level config (from Tool.config)
             if tool and tool.config:
-                config = tool.config
+                config = _decrypt_sensitive_fields(tool.config, schema)
+
+            # Agent-level override (from AgentTool.config) — takes precedence
+            if agent_id and tool:
+                at_r = await db.execute(
+                    select(AgentTool).where(
+                        AgentTool.agent_id == agent_id,
+                        AgentTool.tool_id == tool.id,
+                    )
+                )
+                at = at_r.scalar_one_or_none()
+                if at and at.config:
+                    agent_cfg = _decrypt_sensitive_fields(at.config, schema)
+                    # Merge: agent values override company values
+                    config = {**config, **{k: v for k, v in agent_cfg.items() if v}}
     except Exception:
         pass
 
