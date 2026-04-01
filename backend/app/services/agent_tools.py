@@ -5090,6 +5090,7 @@ async def _generate_image(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str
             image_bytes = await _generate_image_google(
                 api_key,
                 model or "gemini-2.5-flash-image",
+                base_url or "https://generativelanguage.googleapis.com/v1beta",
                 prompt, size,
             )
         else:
@@ -5212,9 +5213,9 @@ async def _generate_image_openai(
 
 
 async def _generate_image_google(
-    api_key: str, model: str, prompt: str, size: str
+    api_key: str, model: str, base_url: str, prompt: str, size: str
 ) -> bytes:
-    """Generate image via Google Gemini Native Image API (Nano Banana).
+    """Generate image via Google Gemini Native Image API (Nano Banana) or Vertex AI.
 
     Uses the Gemini generateContent endpoint with responseModalities=["IMAGE"].
     Converts WxH size to aspect ratio format (e.g. 1024x1024 -> 1:1).
@@ -5223,10 +5224,7 @@ async def _generate_image_google(
     import httpx
     import base64
 
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/"
-        f"models/{model}:generateContent?key={api_key}"
-    )
+    url = f"{base_url.rstrip('/')}/models/{model}:generateContent?key={api_key}"
 
     # Convert WxH size to aspect ratio for Gemini API
     # Supported: 1:1, 3:4, 4:3, 9:16, 16:9
