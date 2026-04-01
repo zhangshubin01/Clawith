@@ -28,6 +28,7 @@ from mcp import types
 
 CLAWITH_URL = os.environ.get("CLAWITH_URL", "http://localhost:8000").rstrip("/")
 CLAWITH_API_KEY = os.environ.get("CLAWITH_API_KEY", "")
+CLAWITH_DEFAULT_AGENT_ID = os.environ.get("CLAWITH_DEFAULT_AGENT_ID", "")
 
 app = Server("clawith")
 
@@ -49,13 +50,20 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="call_agent",
-            description="向指定的 Clawith 智能体发送消息，等待并返回完整回复",
+            description=(
+                "向 Clawith 智能体发送消息，等待并返回完整回复。"
+                + (f" 默认智能体: {CLAWITH_DEFAULT_AGENT_ID}" if CLAWITH_DEFAULT_AGENT_ID else " 需传入 agent_id。")
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "agent_id": {
                         "type": "string",
-                        "description": "智能体的 UUID（可通过 list_agents 获取）",
+                        "description": (
+                            f"智能体 UUID，不传则使用默认智能体 {CLAWITH_DEFAULT_AGENT_ID}"
+                            if CLAWITH_DEFAULT_AGENT_ID
+                            else "智能体 UUID（必填，可通过 list_agents 获取）"
+                        ),
                     },
                     "message": {
                         "type": "string",
@@ -66,7 +74,7 @@ async def list_tools() -> list[types.Tool]:
                         "description": "（可选）指定会话 ID，不传则自动复用最近会话",
                     },
                 },
-                "required": ["agent_id", "message"],
+                "required": ["message"],
             },
         ),
     ]
@@ -113,7 +121,9 @@ async def _list_agents(client: httpx.AsyncClient) -> list[types.TextContent]:
 
 
 async def _call_agent(client: httpx.AsyncClient, arguments: dict) -> list[types.TextContent]:
-    agent_id = arguments["agent_id"]
+    agent_id = arguments.get("agent_id") or CLAWITH_DEFAULT_AGENT_ID
+    if not agent_id:
+        raise ValueError("未指定 agent_id，且未配置 CLAWITH_DEFAULT_AGENT_ID 环境变量")
     message = arguments["message"]
     session_id = arguments.get("session_id")
 
