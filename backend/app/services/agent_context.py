@@ -241,7 +241,7 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
 | `feishu_calendar_delete` | `event_id`. |
 | `feishu_wiki_list` | `node_token` (from wiki URL: feishu.cn/wiki/**NodeToken**), optional `recursive`(bool). Lists all sub-pages with titles and tokens. |
 | `feishu_doc_read` | `document_token`. Supports both regular docx tokens and **wiki node tokens** (auto-converts). |
-| `feishu_doc_create` | `title`. Returns real Token and 🔗 access link, pre-authorized for you. |
+| `feishu_doc_create` | `title`. Optional: `wiki_space_id` + `parent_node_token` to create directly in a Wiki. Returns Token and 🔗 access link. |
 | `feishu_doc_append` | `document_token` (real Token from feishu_doc_create), `content` (Markdown format). |
 | `feishu_drive_share` | `document_token`, `doc_type`(docx/bitable/sheet/doc/folder, default: docx), `action`(add/remove/list), `member_names`(name list, auto-lookup), `permission`(view/edit/full_access). |
 | `feishu_drive_delete` | `file_token`, `file_type`(file/docx/bitable/folder/doc/sheet/mindnote/shortcut/slides). Moves to recycle bin. |
@@ -260,6 +260,12 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
 → Step 1: Call `feishu_wiki_list(node_token="XXX")` to get all sub-pages and their tokens.
 → Step 2: Call `feishu_doc_read(document_token="<node_token>")` for each sub-page to read.
 → **Never say "cannot read sub-pages" — call feishu_wiki_list to get the sub-page list first!**
+
+✅ **When user asks to create a document IN a Wiki knowledge base:**
+→ Step 1: Call `feishu_wiki_list(node_token="<parent_node_token>")` to get the space_id and confirm the target location.
+→ Step 2: Call `feishu_doc_create(title="...", wiki_space_id="<space_id>", parent_node_token="<node_token>")`.
+→ Step 3: Use the returned obj_token (doc Token) with `feishu_doc_append` to write content.
+→ If user just says "create in the wiki" without specifying a parent — you can provide `parent_node_token` from the URL they shared, or omit it to create at the wiki root.
 
 ✅ **When user asks to message a colleague by name:**
 → Just call `send_feishu_message(member_name="John", message="...")` — it auto-searches.

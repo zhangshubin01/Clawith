@@ -541,53 +541,40 @@ export default function ChannelConfig({ mode, agentId, canManage = true, values,
                     ))}
                 </ol>
                 {ch.showPermJson && (
-                    <div style={{ margin: '8px 0', borderRadius: '6px', border: '1px solid var(--border-color)', overflow: 'hidden', background: 'var(--bg-secondary)' }}>
-                        <div style={{ padding: '6px 10px', borderBottom: '1px solid var(--border-color)' }}>
-                            <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '8px', fontWeight: 500 }}>
-                                {t('channelGuide.feishuPermLevels', '权限配置 / Permissions Level')}
+                    <div style={{ margin: '8px 0', borderRadius: '6px', border: '1px solid var(--border-color)', overflow: 'hidden' }}>
+                        {/* Segmented control header */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '2px', background: 'var(--bg-primary)', borderRadius: '5px', padding: '2px', border: '1px solid var(--border-color)' }}>
+                                {(['basic', 'full'] as const).map(mode => (
+                                    <button
+                                        key={mode}
+                                        type="button"
+                                        onClick={(e) => { e.preventDefault(); setFeishuPermMode(mode); }}
+                                        style={{
+                                            padding: '3px 10px', fontSize: '10px', borderRadius: '4px', cursor: 'pointer',
+                                            border: 'none', transition: 'all 0.15s ease',
+                                            background: feishuPermMode === mode ? 'var(--accent-primary, #5e6ad2)' : 'transparent',
+                                            color: feishuPermMode === mode ? '#fff' : 'var(--text-tertiary)',
+                                            fontWeight: 500,
+                                        }}>
+                                        {t(`channelGuide.feishuPerm${mode === 'basic' ? 'Basic' : 'Full'}`)}
+                                    </button>
+                                ))}
                             </div>
-                            <div style={{ display: 'flex', gap: '8px' }}>
-                                <button
-                                    type="button"
-                                    onClick={(e) => { e.preventDefault(); setFeishuPermMode('basic'); }}
-                                    style={{
-                                        padding: '4px 12px', fontSize: '11px', borderRadius: '4px', cursor: 'pointer', border: '1px solid',
-                                        backgroundColor: feishuPermMode === 'basic' ? 'var(--bg-primary)' : 'transparent',
-                                        borderColor: feishuPermMode === 'basic' ? 'var(--border-color)' : 'transparent',
-                                        color: feishuPermMode === 'basic' ? 'var(--text-primary)' : 'var(--text-secondary)',
-                                        fontWeight: feishuPermMode === 'basic' ? 500 : 400
-                                    }}>
-                                    基础权限 (Basic)
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={(e) => { e.preventDefault(); setFeishuPermMode('full'); }}
-                                    style={{
-                                        padding: '4px 12px', fontSize: '11px', borderRadius: '4px', cursor: 'pointer', border: '1px solid',
-                                        backgroundColor: feishuPermMode === 'full' ? 'var(--bg-primary)' : 'transparent',
-                                        borderColor: feishuPermMode === 'full' ? 'var(--border-color)' : 'transparent',
-                                        color: feishuPermMode === 'full' ? 'var(--text-primary)' : 'var(--text-secondary)',
-                                        fontWeight: feishuPermMode === 'full' ? 500 : 400
-                                    }}>
-                                    全量权限 (Full: Docs/Drive/Bitable/Calendar)
-                                </button>
-                            </div>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 10px', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }}>
-                            <span style={{ fontSize: '10px', color: 'var(--text-quaternary)', fontWeight: 500 }}>
-                              {feishuPermMode === 'basic' ? t('channelGuide.feishuPermBasicDesc', 'Basic chat & messaging scopes') : t('channelGuide.feishuPermFullDesc', 'Extended scopes for advanced agent functions')}
-                            </span>
                             <LinearCopyButton
                                 textToCopy={feishuPermMode === 'basic' ? FEISHU_PERM_BASIC_JSON : FEISHU_PERM_FULL_JSON}
-                                label={t('channelGuide.feishuPermCopy', 'Copy')}
-                                copiedLabel={t('channelGuide.feishuPermCopied', 'Copied')}
+                                label={t('channelGuide.feishuPermCopy')}
+                                copiedLabel={t('channelGuide.feishuPermCopied')}
                                 className=""
                                 style={{ fontSize: '10px', padding: '1px 7px', cursor: 'pointer', borderRadius: '3px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-secondary)' }}
                             />
                         </div>
-                        <pre style={{ margin: 0, padding: '6px 10px', fontSize: '10px', fontFamily: 'var(--font-mono)', lineHeight: 1.5, background: 'var(--bg-primary)', color: 'var(--text-secondary)', overflowX: 'auto', userSelect: 'all', maxHeight: '200px', overflowY: 'auto' }}>
-                            {feishuPermMode === 'basic' ? FEISHU_PERM_BASIC_DISPLAY : FEISHU_PERM_FULL_DISPLAY}
-                        </pre>
+                        {/* Description */}
+                        <div style={{ padding: '4px 10px', fontSize: '10px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)' }}>
+                            {feishuPermMode === 'basic' ? t('channelGuide.feishuPermBasicDesc') : t('channelGuide.feishuPermFullDesc')}
+                        </div>
+                        {/* JSON code block */}
+                        <pre style={{ margin: 0, padding: '6px 10px', fontSize: '10px', fontFamily: 'var(--font-mono)', lineHeight: 1.5, background: 'var(--bg-primary)', color: 'var(--text-secondary)', overflowX: 'auto', userSelect: 'all', maxHeight: '200px', overflowY: 'auto' }}>{feishuPermMode === 'basic' ? FEISHU_PERM_BASIC_DISPLAY : FEISHU_PERM_FULL_DISPLAY}</pre>
                     </div>
                 )}
                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-secondary)', padding: '6px 10px', borderRadius: '6px' }}>

@@ -854,7 +854,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "feishu_doc_create",
-            "description": "Create a new Feishu document with a given title. Returns the new document token and URL.",
+            "description": "Create a new Feishu document. Supports creating in personal Drive (default) or directly inside a Wiki knowledge base (provide wiki_space_id). Returns the document token and URL.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -864,7 +864,15 @@ AGENT_TOOLS = [
                     },
                     "folder_token": {
                         "type": "string",
-                        "description": "Optional: parent folder token. Leave empty to create in root My Drive.",
+                        "description": "Optional: parent folder token in Drive. Leave empty to create in root My Drive. Ignored when wiki_space_id is provided.",
+                    },
+                    "wiki_space_id": {
+                        "type": "string",
+                        "description": "Optional: Wiki space ID. When provided, creates the document as a node inside this Wiki space instead of personal Drive. Get this from feishu_wiki_list or from the wiki URL.",
+                    },
+                    "parent_node_token": {
+                        "type": "string",
+                        "description": "Optional: parent node token within the Wiki space. When provided together with wiki_space_id, creates the document under this specific wiki node. If omitted, creates at the wiki space root.",
                     },
                 },
                 "required": ["title"],
@@ -6079,7 +6087,7 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
     if not pages:
         return f"📂 Wiki 页面 `{node_token}` 下没有子页面。"
 
-    lines = [f"📂 Wiki 页面 `{node_token}` 的子页面（共 {len(pages)} 个）：\n"]
+    lines = [f"📂 Wiki 页面 `{node_token}` 的子页面（共 {len(pages)} 个）：\nspace_id: `{space_id}`\n"]
     for p in pages:
         indent = "  " * p["depth"]
         child_hint = " _(有子页面)_" if p["has_child"] else ""
@@ -6091,6 +6099,7 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
     lines.append(
         "\n💡 用 `feishu_doc_read(document_token=\"<node_token>\")` 读取每个子页面的内容。"
         "\n   对有子页面的条目，再次调用 `feishu_wiki_list(node_token=\"...\")` 继续展开。"
+        f"\n📝 在此知识库中创建文档: `feishu_doc_create(title=\"...\", wiki_space_id=\"{space_id}\", parent_node_token=\"<node_token>\")`"
     )
     return "\n".join(lines)
 
@@ -6151,19 +6160,66 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     if not app_id or not app_secret:
         return "Failed: Feishu app credentials not configured for this agent."
-        
+
     folder_token = arguments.get("folder_token")
-    
+    wiki_space_id = (arguments.get("wiki_space_id") or "").strip()
+    parent_node_token = (arguments.get("parent_node_token") or "").strip()
+
     from app.services.feishu_service import feishu_service
+    tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+
     try:
+        import httpx
+
+        # ── Wiki branch: create as a wiki node ──────────────────────────
+        # If parent_node_token is given but wiki_space_id is not,
+        # resolve space_id from the parent node automatically.
+        if parent_node_token and not wiki_space_id:
+            node_info = await _feishu_wiki_get_node(parent_node_token, tenant_token)
+            if node_info and node_info.get("space_id"):
+                wiki_space_id = node_info["space_id"]
+
+        if wiki_space_id:
+            body: dict = {
+                "obj_type": "docx",
+                "title": title,
+            }
+            if parent_node_token:
+                body["parent_node_token"] = parent_node_token
+
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{wiki_space_id}/nodes",
+                    json=body,
+                    headers={"Authorization": f"Bearer {tenant_token}"},
+                )
+            result = resp.json()
+            err = _check_feishu_err(result)
+            if err:
+                return err
+
+            node = result.get("data", {}).get("node", {})
+            # obj_token is the underlying docx token used by feishu_doc_append
+            doc_token = node.get("obj_token", "")
+            node_token = node.get("node_token", "")
+            doc_url = await _get_feishu_tenant_doc_url(tenant_token, node_token or doc_token)
+
+            return (
+                f"✅ 知识库文档创建成功！\n"
+                f"标题：{title}\n"
+                f"文档 Token（用于 feishu_doc_append）：{doc_token}\n"
+                f"Wiki Node Token：{node_token}\n"
+                f"🔗 访问链接：{doc_url}\n"
+                f"下一步：调用 feishu_doc_append(document_token=\"{doc_token}\", content=\"...\") 写入正文内容。"
+            )
+
+        # ── Regular Drive branch (original behavior) ─────────────────────
         resp = await feishu_service.create_feishu_doc(app_id, app_secret, folder_token, title)
         err = _check_feishu_err(resp)
         if err: return err
         
         doc = resp.get("data", {}).get("document", {})
         doc_token = doc.get("document_id", "")
-        # Get tenant-specific doc URL via tenant domain resolution
-        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
         doc_url = await _get_feishu_tenant_doc_url(tenant_token, doc_token)
         
         # Auto-share with the Feishu sender so they can access the document
@@ -6172,8 +6228,6 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
             from app.api.websocket_chat import channel_feishu_sender_open_id
             sender_open_id = channel_feishu_sender_open_id.get(None)
             if sender_open_id and doc_token:
-                import httpx
-                tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
                 async with httpx.AsyncClient(timeout=10) as client:
                     share_resp = await client.post(
                         f"https://open.feishu.cn/open-apis/drive/v1/permissions/{doc_token}/members",
