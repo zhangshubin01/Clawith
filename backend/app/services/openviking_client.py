@@ -56,8 +56,9 @@ async def is_available() -> bool:
     if _available is not None and now - _available_checked_at < _AVAILABILITY_TTL:
         return _available
     try:
-        resp = await _get_client().get("/api/v1/system/health", timeout=1.0)
-        _available = resp.status_code < 500
+        resp = await _get_client().get("/health", timeout=1.0)
+        data = resp.json() if resp.status_code == 200 else {}
+        _available = data.get("healthy", False) or resp.status_code < 500
     except Exception:
         _available = False
     _available_checked_at = now
