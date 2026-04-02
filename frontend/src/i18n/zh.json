@@ -1083,6 +1083,10 @@
   "channelGuide": {
     "setupGuide": "配置说明",
     "feishuPermJson": "权限批量导入 JSON",
+    "feishuPermBasic": "基础权限",
+    "feishuPermFull": "全量权限",
+    "feishuPermBasicDesc": "仅聊天和消息收发",
+    "feishuPermFullDesc": "包含文档、云空间、多维表格、日历、审批等全部功能",
     "feishuPermCopy": "复制",
     "feishuPermCopied": "✓ 已复制",
     "slack": {
