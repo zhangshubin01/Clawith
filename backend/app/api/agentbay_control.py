@@ -700,8 +700,8 @@ async def control_lock(
     message instead of executing browser/computer tools.
     """
     _agent, access_level = await check_agent_access(db, current_user, agent_id)
-    if access_level not in ("manage",) and current_user.role not in ("platform_admin", "org_admin"):
-        raise HTTPException(status_code=403, detail="Manage access required")
+    # Allow any user with access (manage or use) — Take Control is part of
+    # the normal interaction flow, not an admin-only operation.
 
     key = (str(agent_id), data.session_id)
     existing = _take_control_locks.get(key)
@@ -786,15 +786,50 @@ async def _export_cookies_from_session(
 
     Returns the number of cookies exported.
     """
-    # Build and execute a Node.js script to export cookies via CDP
+    # Build and execute a Node.js script to export ALL cookies via CDP.
+    #
+    # Key design decisions:
+    # 1. We call context.cookies() WITHOUT a URL filter, which returns every cookie
+    #    in the browser profile regardless of which page is currently open.
+    # 2. We sanitize each cookie object before exporting:
+    #    - Normalize 'sameSite' to the exact casing Playwright addCookies() expects
+    #      ('Strict' | 'Lax' | 'None'). CDP returns lowercase; Playwright wants title-case.
+    #    - Strip 'expires: -1' (session cookies) — Playwright will reject negative expiry.
+    #    - Ensure 'domain' does NOT have a leading dot for addCookies() compatibility.
+    #      (Playwright's addCookies prefers 'example.com' not '.example.com'.)
     import base64
-    export_script = """
+    export_script = r"""
 const { chromium } = require('/usr/local/lib/node_modules/playwright');
 (async () => {
     try {
         const browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
-        const cookies = await context.cookies();
+        // Fetch ALL cookies from the browser profile (no URL filter = full export)
+        const rawCookies = await context.cookies();
+
+        // Sanitize cookies so they can be re-injected by Playwright's addCookies()
+        const sameSiteMap = { none: 'None', lax: 'Lax', strict: 'Strict' };
+        const cookies = rawCookies.map(c => {
+            const out = { ...c };
+            // Normalize sameSite casing
+            if (out.sameSite != null) {
+                out.sameSite = sameSiteMap[String(out.sameSite).toLowerCase()] || 'Lax';
+            }
+            // Remove negative or zero expires (session cookies) — addCookies rejects them
+            if (out.expires != null && out.expires <= 0) {
+                delete out.expires;
+            }
+            // Ensure domain has leading dot so it matches subdomains.
+            // Playwright's context.cookies() strips the leading dot from
+            // domain cookies, turning them into host-only. Chrome's CDP
+            // Network.setCookie needs the dot to match subdomains (e.g.,
+            // ".xiaohongshu.com" matches www.xiaohongshu.com).
+            if (out.domain && !out.domain.startsWith('.')) {
+                out.domain = '.' + out.domain;
+            }
+            return out;
+        });
+
         console.log('COOKIES_EXPORT:' + JSON.stringify(cookies));
         process.exit(0);
     } catch (e) {
