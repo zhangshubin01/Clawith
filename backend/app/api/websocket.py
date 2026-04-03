@@ -250,6 +250,23 @@ async def call_llm(
     from app.services.token_tracker import record_token_usage, extract_usage_tokens, estimate_tokens_from_chars
     _accumulated_tokens = 0
 
+    _any_tools_used = False  # Will be set True if any tool calls happen in any round
+    _cache_query = ""  # Will hold last user message for cache key
+    if agent_id:
+        for _m in reversed(messages):
+            if _m.get("role") == "user" and isinstance(_m.get("content"), str):
+                _cache_query = _m["content"].strip()
+                break
+        if _cache_query:
+            try:
+                from app.services.openviking_client import search_llm_cache
+                _cached_reply = await search_llm_cache(_cache_query, str(agent_id))
+                if _cached_reply:
+                    logger.info(f"[LLM][cache] Semantic cache HIT for agent {agent_id}")
+                    return _cached_reply
+            except Exception as _ce:
+                logger.debug(f"[LLM][cache] lookup failed: {_ce}")
+
     # Tool-calling loop (configurable per agent, default 50)
     for round_i in range(_max_tool_rounds):
         # ── Dynamic tool-call limit warning (Aware engine) ──
@@ -315,6 +332,14 @@ async def call_llm(
             if agent_id and _accumulated_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_tokens)
             await client.close()
+            # ── Store result in semantic cache (no tools used, cacheable) ──
+            if agent_id and _cache_query and not _any_tools_used:
+                try:
+                    from app.services.openviking_client import store_llm_cache
+                    import asyncio as _aio_cache
+                    _aio_cache.create_task(store_llm_cache(_cache_query, response.content or "", str(agent_id)))
+                except Exception:
+                    pass
             return response.content or "[LLM returned empty content]"
 
         # Execute tool calls
@@ -334,9 +359,14 @@ async def call_llm(
 
         full_reasoning_content = response.reasoning_content or ""
 
-        # Tools that require arguments — if LLM sends empty args, skip and ask to retry
-        _TOOLS_REQUIRING_ARGS = {"write_file", "read_file", "delete_file", "read_document", "send_message_to_agent", "send_feishu_message", "send_email"}
+        _any_tools_used = True  # Track for semantic cache: don't cache tool-heavy responses
 
+        # ── Parallel tool execution ──────────────────────────────────────────
+        _TOOLS_REQUIRING_ARGS = {"write_file", "read_file", "delete_file", "read_document", "send_message_to_agent", "send_feishu_message", "send_email"}
+        _MAX_PARALLEL_TOOLS = 4
+
+        # Phase 1: validate + parse all tool calls, reject empty-args ones immediately
+        _valid_calls: list[tuple] = []  # (tc, tool_name, args)
         for tc in response.tool_calls:
             fn = tc["function"]
             tool_name = fn["name"]
@@ -346,10 +376,6 @@ async def call_llm(
                 args = json.loads(raw_args) if raw_args else {}
             except json.JSONDecodeError:
                 args = {}
-
-            # Guard: if a tool that requires arguments received empty args,
-            # return an error to LLM instead of executing (Claude sometimes
-            # emits tool_use blocks with no input_json_delta events)
             if not args and tool_name in _TOOLS_REQUIRING_ARGS:
                 logger.warning(f"[LLM] Empty arguments for {tool_name}, asking LLM to retry")
                 api_messages.append(LLMMessage(
@@ -358,64 +384,76 @@ async def call_llm(
                     tool_call_id=tc.get("id", ""),
                 ))
                 continue
+            _valid_calls.append((tc, tool_name, args))
 
-            logger.info(f"[LLM] Calling tool: {tool_name}({args})")
-            # Notify client about tool call (in-progress)
-            if on_tool_call:
-                try:
-                    await on_tool_call({
-                        "name": tool_name,
-                        "args": args,
-                        "status": "running",
-                        "reasoning_content": full_reasoning_content
-                    })
-                except Exception:
-                    pass
+        # Phase 2: execute valid calls in parallel (semaphore-limited)
+        if _valid_calls:
+            import asyncio as _aio_tools
+            _tool_sem = _aio_tools.Semaphore(_MAX_PARALLEL_TOOLS)
 
-            result = await execute_tool(
-                tool_name, args,
-                agent_id=agent_id,
-                user_id=user_id or agent_id,
-                session_id=session_id,
+            async def _run_one_tool(tc, tool_name, args):
+                async with _tool_sem:
+                    logger.info(f"[LLM] Calling tool: {tool_name}({args})")
+                    if on_tool_call:
+                        try:
+                            await on_tool_call({
+                                "name": tool_name, "args": args, "status": "running",
+                                "reasoning_content": full_reasoning_content,
+                            })
+                        except Exception:
+                            pass
+                    result = await execute_tool(
+                        tool_name, args,
+                        agent_id=agent_id,
+                        user_id=user_id or agent_id,
+                        session_id=session_id,
+                    )
+                    logger.debug(f"[LLM] Tool result: {result[:100]}")
+                    if on_tool_call:
+                        try:
+                            await on_tool_call({
+                                "name": tool_name, "args": args, "status": "done",
+                                "result": result, "reasoning_content": full_reasoning_content,
+                            })
+                        except Exception as _cb_err:
+                            logger.warning(f"[LLM] on_tool_call callback error: {_cb_err}")
+                    # Vision injection
+                    tool_content: str | list = str(result)
+                    if supports_vision and agent_id:
+                        try:
+                            from app.services.vision_inject import try_inject_screenshot_vision
+                            from app.services.agent_tools import WORKSPACE_ROOT
+                            ws_path = WORKSPACE_ROOT / str(agent_id)
+                            vision_content = try_inject_screenshot_vision(tool_name, str(result), ws_path)
+                            if vision_content:
+                                tool_content = vision_content
+                                logger.info(f"[LLM] Injected screenshot vision for {tool_name}")
+                        except Exception as e:
+                            logger.warning(f"[LLM] Vision injection failed for {tool_name}: {e}")
+                    return tc["id"], tool_content
+
+            _tool_results = await _aio_tools.gather(
+                *[_run_one_tool(tc, tool_name, args) for tc, tool_name, args in _valid_calls],
+                return_exceptions=True,
             )
-            logger.debug(f"[LLM] Tool result: {result[:100]}")
 
-            # Notify client about tool call result
-            if on_tool_call:
-                try:
-                    await on_tool_call({
-                        "name": tool_name,
-                        "args": args,
-                        "status": "done",
-                        "result": result,
-                        "reasoning_content": full_reasoning_content
-                    })
-                except Exception as _cb_err:
-                    logger.warning(f"[LLM] on_tool_call callback error: {_cb_err}")
-
-            # ── Vision injection for screenshot tools ──
-            # If the model supports vision, try to inject the actual screenshot
-            # image into the tool result so the LLM can SEE what's on screen.
-            # Without this, the LLM only gets text like "Screenshot saved to ..."
-            # and blindly guesses the page content.
-            tool_content: str | list = str(result)
-            if supports_vision and agent_id:
-                try:
-                    from app.services.vision_inject import try_inject_screenshot_vision
-                    from app.services.agent_tools import WORKSPACE_ROOT
-                    ws_path = WORKSPACE_ROOT / str(agent_id)
-                    vision_content = try_inject_screenshot_vision(tool_name, str(result), ws_path)
-                    if vision_content:
-                        tool_content = vision_content
-                        logger.info(f"[LLM] Injected screenshot vision for {tool_name}")
-                except Exception as e:
-                    logger.warning(f"[LLM] Vision injection failed for {tool_name}: {e}")
-
-            api_messages.append(LLMMessage(
-                role="tool",
-                tool_call_id=tc["id"],
-                content=tool_content,
-            ))
+            # Phase 3: append results in original order (order matters for LLM context)
+            for (_tc, _tool_name, _args), _res in zip(_valid_calls, _tool_results):
+                if isinstance(_res, Exception):
+                    logger.error(f"[LLM] Tool {_tool_name} raised exception: {_res}")
+                    api_messages.append(LLMMessage(
+                        role="tool",
+                        tool_call_id=_tc["id"],
+                        content=f"Error executing tool: {_res}",
+                    ))
+                else:
+                    _tc_id, _tool_content = _res
+                    api_messages.append(LLMMessage(
+                        role="tool",
+                        tool_call_id=_tc_id,
+                        content=_tool_content,
+                    ))
+        # ── End parallel tool execution ──────────────────────────────────────
 
     # Record tokens even on "too many rounds" exit
     if agent_id and _accumulated_tokens > 0:
