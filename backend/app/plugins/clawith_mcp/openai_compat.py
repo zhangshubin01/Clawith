@@ -175,6 +175,7 @@ async def _resolve_agent(model: str, db: AsyncSession):
 # ── 主路由 ───────────────────────────────────────────────────────────────────
 
 @router.post("/v1/chat/completions")
+@router.post("/chat/completions")   # Android Studio omits /v1 prefix
 async def openai_chat_completions(
     body: OAIChatRequest,
     current_user: User = Depends(get_current_user),
