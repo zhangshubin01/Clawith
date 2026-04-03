@@ -29,6 +29,41 @@ def _get_headers() -> dict[str, str]:
         headers["Authorization"] = f"Bearer {OPENVIKING_API_KEY}"
     return headers
 
+OPENVIKING_TIMEOUT = float(os.environ.get("OPENVIKING_TIMEOUT", "3.0"))
+OPENVIKING_SCORE_THRESHOLD = float(os.environ.get("OPENVIKING_SCORE_THRESHOLD", "0.35"))
+
+# ── Scope constants ────────────────────────────────────────────────────────
+_ENTERPRISE_SCOPE = "enterprise"
+_SKILLS_SCOPE = "skills"
+_CLAWITH_SCOPE = "clawith"
+
+def _agent_scope(agent_id: str) -> str:
+    """Return the OpenViking scope identifier for a given agent."""
+    return str(agent_id)
+
+# ── 持久化连接池（进程级单例）──────────────────────────────────────────────
+_ov_client: httpx.AsyncClient | None = None
+
+def _get_client() -> httpx.AsyncClient:
+    global _ov_client
+    if _ov_client is None or _ov_client.is_closed:
+        _ov_client = httpx.AsyncClient(
+            base_url=OPENVIKING_URL,
+            headers=_get_headers(),
+            timeout=OPENVIKING_TIMEOUT,
+            limits=httpx.Limits(
+                max_connections=10,
+                max_keepalive_connections=5,
+                keepalive_expiry=30,
+            ),
+        )
+    return _ov_client
+
+def _invalidate_availability_cache() -> None:
+    global _cached_available, _last_available_check
+    _cached_available = None
+    _last_available_check = 0.0
+
 async def is_available() -> bool:
     """Check if OpenViking server is reachable and healthy. Cache result for 30 seconds."""
     global _last_available_check, _cached_available
@@ -392,3 +427,71 @@ async def search_all_agents(
     except Exception as e:
         logger.debug(f"[OpenViking] search_all_agents failed: {e}")
         return []
+
+
+async def search_llm_cache(
+    query: str,
+    agent_id: str,
+    score_threshold: float = 0.92,
+) -> str | None:
+    """Search LLM response cache for semantically similar query.
+
+    Returns the cached response text if similarity >= score_threshold, else None.
+    Cache entries are stored in scope '_llm_cache_{agent_id}'.
+    Format: '[Q] {query}\\n[A] {response}'
+    """
+    if not await is_available():
+        return None
+    try:
+        scope = f"_llm_cache_{agent_id}"
+        resp = await _get_client().post(
+            "/api/v1/search/find",
+            json={
+                "query": query,
+                "target_uri": scope,
+                "limit": 1,
+                "score_threshold": score_threshold,
+            },
+            timeout=OPENVIKING_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return None
+        memories = resp.json().get("result", {}).get("memories", [])
+        if not memories:
+            return None
+        content = memories[0].get("content") or memories[0].get("abstract") or ""
+        if "[A] " in content:
+            return content.split("[A] ", 1)[1].strip()
+        return None
+    except Exception as e:
+        logger.debug(f"[OpenViking] search_llm_cache failed: {e}")
+        return None
+
+
+async def store_llm_cache(
+    query: str,
+    response: str,
+    agent_id: str,
+    max_response_chars: int = 3000,
+) -> bool:
+    """Store a query-response pair in the LLM response cache.
+
+    Indexed in scope '_llm_cache_{agent_id}' for per-agent isolation.
+    Truncates long responses to avoid polluting similarity search.
+    """
+    if not await is_available():
+        return False
+    try:
+        scope = f"_llm_cache_{agent_id}"
+        truncated = response[:max_response_chars]
+        content = f"[Q] {query}\n[A] {truncated}"
+        resp = await _get_client().post(
+            "/api/v1/skills",
+            json={"data": content, "wait": False},
+            headers={"X-OpenViking-Agent": scope},
+            timeout=OPENVIKING_TIMEOUT * 2,
+        )
+        return resp.status_code < 300
+    except Exception as e:
+        logger.debug(f"[OpenViking] store_llm_cache failed: {e}")
+        return False
