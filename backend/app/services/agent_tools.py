@@ -553,7 +553,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "execute_code",
-            "description": "Execute code (Python, Bash, or Node.js) in a sandboxed environment within the agent's root directory. Useful for data processing, calculations, file transformations, and automation scripts. Code runs with the agent root as the working directory, so you can access skills/, workspace/, memory/ etc. directly. Security restrictions apply: no network access commands, no system-level operations, 30-second timeout.",
+            "description": "Execute code (Python, Bash, or Node.js) in a local sandboxed subprocess within the agent's root directory. Useful for data processing, calculations, file transformations, and automation scripts. Code runs with the agent root as the working directory, so you can access skills/, workspace/, memory/ etc. directly. Security restrictions apply: no network access commands, no system-level operations, 30-second timeout.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -565,6 +565,32 @@ AGENT_TOOLS = [
                     "code": {
                         "type": "string",
                         "description": "Code to execute. For Python, you can import standard libraries (json, csv, math, re, collections, etc.). Working directory is the agent root (skills/, workspace/, memory/ are accessible).",
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Max execution time in seconds (default 30, max 60)",
+                    },
+                },
+                "required": ["language", "code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_code_e2b",
+            "description": "Execute code (Python, Bash, or Node.js) in a secure E2B cloud sandbox. The sandbox has full network access and is fully isolated from the server. Use this when local execution is insufficient or when network access is required inside the code.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "language": {
+                        "type": "string",
+                        "enum": ["python", "bash", "node"],
+                        "description": "Programming language to execute",
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "Code to execute in the E2B cloud sandbox.",
                     },
                     "timeout": {
                         "type": "integer",
@@ -854,7 +880,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "feishu_doc_create",
-            "description": "Create a new Feishu document with a given title. Returns the new document token and URL.",
+            "description": "Create a new Feishu document. Supports creating in personal Drive (default) or directly inside a Wiki knowledge base (provide wiki_space_id). Returns the document token and URL.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -864,7 +890,15 @@ AGENT_TOOLS = [
                     },
                     "folder_token": {
                         "type": "string",
-                        "description": "Optional: parent folder token. Leave empty to create in root My Drive.",
+                        "description": "Optional: parent folder token in Drive. Leave empty to create in root My Drive. Ignored when wiki_space_id is provided.",
+                    },
+                    "wiki_space_id": {
+                        "type": "string",
+                        "description": "Optional: Wiki space ID. When provided, creates the document as a node inside this Wiki space instead of personal Drive. Get this from feishu_wiki_list or from the wiki URL.",
+                    },
+                    "parent_node_token": {
+                        "type": "string",
+                        "description": "Optional: parent node token within the Wiki space. When provided together with wiki_space_id, creates the document under this specific wiki node. If omitted, creates at the wiki space root.",
                     },
                 },
                 "required": ["title"],
@@ -1444,11 +1478,13 @@ AGENT_TOOLS = [
 
 # Core tools that should always be available to agents regardless of
 # DB configuration.
+# Note: send_channel_message is intentionally NOT here — it lives in
+# _CHANNEL_MESSAGE_TOOL_NAMES and is only added when a channel is configured,
+# to avoid sending duplicate tool definitions to the LLM.
 _ALWAYS_INCLUDE_CORE = {
     "send_channel_file",
     "send_file_to_agent",
     "write_file",
-    "send_channel_message",
 }
 # Channel message tool - available when any channel (Feishu/DingTalk/WeCom) is configured
 _CHANNEL_MESSAGE_TOOL_NAMES = {
@@ -1678,6 +1714,7 @@ _TOOL_AUTONOMY_MAP = {
     "send_file_to_agent": "send_feishu_message",
     "web_search": "web_search",
     "execute_code": "execute_code",
+    "execute_code_e2b": "execute_code",
 }
 
 
@@ -1716,20 +1753,10 @@ async def _execute_tool_direct(
             content = arguments.get("content", "")
             if not path:
                 return "Missing path"
-            result = _write_file(ws, path, content, tenant_id=_agent_tenant_id)
-            # 写入 memory.md 后异步触发 OpenViking 索引（失败不影响写入结果）
-            if "memory" in path and path.endswith(".md"):
-                try:
-                    import asyncio
-                    from app.services.openviking_client import index_memory_file
-                    file_path = (ws / path).resolve()
-                    asyncio.create_task(index_memory_file(str(agent_id), file_path))
-                except Exception:
-                    pass
-            return result
-        elif tool_name == "execute_code":
-            logger.info(f"[DirectTool] Executing code with arguments: {arguments}")
-            return await _execute_code(agent_id, ws, arguments)
+            return _write_file(ws, path, content, tenant_id=_agent_tenant_id)
+        elif tool_name in ("execute_code", "execute_code_e2b"):
+            logger.info(f"[DirectTool] Executing code ({tool_name}) with arguments: {arguments}")
+            return await _execute_code(agent_id, ws, arguments, tool_name=tool_name)
         elif tool_name == "web_search":
             return await _web_search(arguments, agent_id)
         elif tool_name == "jina_search":
@@ -1867,9 +1894,9 @@ async def execute_tool(
             result = await _plaza_create_post(agent_id, arguments)
         elif tool_name == "plaza_add_comment":
             result = await _plaza_add_comment(agent_id, arguments)
-        elif tool_name == "execute_code":
-            logger.info(f"[DirectTool] Executing code with arguments: {arguments}")
-            result = await _execute_code(agent_id, ws, arguments)
+        elif tool_name in ("execute_code", "execute_code_e2b"):
+            logger.info(f"[DirectTool] Executing code ({tool_name}) with arguments: {arguments}")
+            result = await _execute_code(agent_id, ws, arguments, tool_name=tool_name)
         elif tool_name == "upload_image":
             result = await _upload_image(agent_id, ws, arguments)
         elif tool_name == "generate_image_siliconflow":
@@ -4515,8 +4542,23 @@ def _check_code_safety(language: str, code: str) -> str | None:
     return None
 
 
-async def _execute_code(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
-    """Execute code using the configured sandbox backend."""
+async def _execute_code(
+    agent_id: Optional[uuid.UUID],
+    ws: Path,
+    arguments: dict,
+    *,
+    tool_name: str = "execute_code",
+) -> str:
+    """Execute code using the configured sandbox backend.
+
+    Args:
+        agent_id: The agent's UUID (used to fetch per-agent tool config).
+        ws: Agent workspace root path.
+        arguments: Tool call arguments (language, code, timeout).
+        tool_name: The originating tool name — either 'execute_code' (local)
+                   or 'execute_code_e2b' (cloud).  Used to look up the
+                   correct per-agent tool config entry in the database.
+    """
     language = arguments.get("language", "python")
     code = arguments.get("code", "")
     timeout = min(arguments.get("timeout", 30), 60)  # Max 60 seconds
@@ -4527,10 +4569,14 @@ async def _execute_code(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict
     if language not in ("python", "bash", "node"):
         return f"❌ Unsupported language: {language}. Use: python, bash, or node"
 
-    # Working directory is the agent's root directory (must be absolute)
-    # This allows code to access skills/, workspace/, memory/ etc. directly
+    # Working directory is the agent's root directory (must be absolute).
+    # This allows code to access skills/, workspace/, memory/ etc. directly.
     work_dir = ws.resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    # For E2B tool: do NOT fall back to local subprocess on error —
+    # the user explicitly chose cloud execution.
+    is_e2b_tool = (tool_name == "execute_code_e2b")
 
     try:
         # Import here to avoid circular imports
@@ -4538,18 +4584,19 @@ async def _execute_code(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict
         from app.services.sandbox.config import SandboxConfig
         from app.services.sandbox.registry import get_sandbox_backend
 
-        # Get sandbox config: prefer tool config from DB, fallback to env vars
+        # Get sandbox config: prefer per-agent tool config from DB,
+        # fall back to the platform-level env-var config.
         fallback_config = get_sandbox_config()
-        tool_config = await _get_tool_config(agent_id, "execute_code")
+        tool_config = await _get_tool_config(agent_id, tool_name)
 
         if tool_config:
             sandbox_config = SandboxConfig.from_dict(tool_config, fallback_config)
         else:
             sandbox_config = fallback_config
-            logger.info(f"[Sandbox] Using fallback config for agent {agent_id}")
+            logger.info(f"[Sandbox] No per-agent config found for '{tool_name}', using fallback")
 
         backend = get_sandbox_backend(sandbox_config)
-        logger.info(f"[Sandbox] Executing code with backend: {backend.__class__.__name__}")
+        logger.info(f"[Sandbox] Executing code with backend: {backend.__class__.__name__} (tool={tool_name})")
         result = await backend.execute(
             code=code,
             language=language,
@@ -4561,16 +4608,22 @@ async def _execute_code(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict
         return backend._format_result(result)
 
     except ValueError as e:
-        # Sandbox disabled or misconfigured - fall back to legacy subprocess
-        logger.warning(f"[Sandbox] Config issue, falling back to legacy: {e}")
+        # Sandbox disabled or misconfigured
+        if is_e2b_tool:
+            # Do not silently fall back — surface the config error to the user
+            return f"❌ E2B sandbox configuration error: {str(e)[:300]}\nPlease check the API key in the tool settings."
+        logger.warning(f"[Sandbox] Config issue, falling back to legacy subprocess: {e}")
         return await _execute_code_legacy(ws, arguments)
 
     except Exception as e:
-        logger.exception(f"[Sandbox] Execution failed for agent {agent_id}")
-        # Try fallback to legacy subprocess
+        logger.exception(f"[Sandbox] Execution failed for agent {agent_id} (tool={tool_name})")
+        if is_e2b_tool:
+            # Do not silently fall back to local execution
+            return f"❌ E2B execution error: {str(e)[:200]}"
+        # For local tool: try legacy subprocess as last resort
         try:
             return await _execute_code_legacy(ws, arguments)
-        except Exception as fallback_error:
+        except Exception:
             logger.exception(f"[Sandbox] Fallback also failed for agent {agent_id}")
             return f"❌ Execution error: {str(e)[:200]}"
 
@@ -6079,7 +6132,7 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
     if not pages:
         return f"📂 Wiki 页面 `{node_token}` 下没有子页面。"
 
-    lines = [f"📂 Wiki 页面 `{node_token}` 的子页面（共 {len(pages)} 个）：\n"]
+    lines = [f"📂 Wiki 页面 `{node_token}` 的子页面（共 {len(pages)} 个）：\nspace_id: `{space_id}`\n"]
     for p in pages:
         indent = "  " * p["depth"]
         child_hint = " _(有子页面)_" if p["has_child"] else ""
@@ -6151,19 +6204,83 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
     app_id, app_secret = await _get_feishu_credentials(agent_id)
     if not app_id or not app_secret:
         return "Failed: Feishu app credentials not configured for this agent."
-        
-    folder_token = arguments.get("folder_token")
-    
+
+    folder_token = (arguments.get("folder_token") or "").strip()
+    wiki_space_id = (arguments.get("wiki_space_id") or "").strip()
+    parent_node_token = (arguments.get("parent_node_token") or "").strip()
+
     from app.services.feishu_service import feishu_service
+    tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+
     try:
+        import httpx
+
+        # ── Smart fallback: if folder_token is actually a wiki node token,
+        #    auto-redirect to wiki creation branch. This handles LLMs that
+        #    pass the wiki node token via the old folder_token param.
+        if folder_token and not wiki_space_id and not parent_node_token:
+            probe = await _feishu_wiki_get_node(folder_token, tenant_token)
+            if probe and probe.get("space_id"):
+                wiki_space_id = probe["space_id"]
+                parent_node_token = probe.get("node_token", folder_token)
+                folder_token = ""  # Don't use as Drive folder
+
+        # ── Wiki branch: create as a wiki node ──────────────────────────
+        # If parent_node_token is given but wiki_space_id is not,
+        # resolve space_id from the parent node automatically.
+        if parent_node_token and not wiki_space_id:
+            node_info = await _feishu_wiki_get_node(parent_node_token, tenant_token)
+            if node_info and node_info.get("space_id"):
+                wiki_space_id = node_info["space_id"]
+
+        if wiki_space_id:
+            body: dict = {
+                "obj_type": "docx",
+                "node_type": "origin",  # Required by Feishu Wiki API: "origin" = new entity
+                "title": title,
+            }
+            if parent_node_token:
+                body["parent_node_token"] = parent_node_token
+
+            import logging
+            _wiki_log = logging.getLogger("feishu_wiki_create")
+            _wiki_log.info(f"Creating wiki node in space={wiki_space_id}, body={body}")
+
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{wiki_space_id}/nodes",
+                    json=body,
+                    headers={"Authorization": f"Bearer {tenant_token}"},
+                )
+            result = resp.json()
+            _wiki_log.info(f"Wiki create response: code={result.get('code')}, msg={result.get('msg')}")
+            err = _check_feishu_err(result)
+            if err:
+                return err
+
+            node = result.get("data", {}).get("node", {})
+            # obj_token is the underlying docx token used by feishu_doc_append
+            doc_token = node.get("obj_token", "")
+            node_token = node.get("node_token", "")
+            # Wiki docs are accessed via /wiki/{node_token}, not /docx/{obj_token}
+            doc_url = await _get_feishu_tenant_doc_url(tenant_token, node_token, doc_type="wiki")
+
+            return (
+                f"✅ 知识库文档创建成功！\n"
+                f"标题：{title}\n"
+                f"文档 Token（用于 feishu_doc_append）：{doc_token}\n"
+                f"Wiki Node Token：{node_token}\n"
+                f"🔗 访问链接：{doc_url}\n"
+                f"下一步：调用 feishu_doc_append(document_token=\"{doc_token}\", content=\"...\") 写入正文内容。"
+            )
+
+        # ── Regular Drive branch (original behavior) ─────────────────────
         resp = await feishu_service.create_feishu_doc(app_id, app_secret, folder_token, title)
         err = _check_feishu_err(resp)
         if err: return err
         
         doc = resp.get("data", {}).get("document", {})
         doc_token = doc.get("document_id", "")
-        # Get tenant-specific doc URL via tenant domain resolution
-        tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
         doc_url = await _get_feishu_tenant_doc_url(tenant_token, doc_token)
         
         # Auto-share with the Feishu sender so they can access the document
@@ -6172,8 +6289,6 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
             from app.api.websocket_chat import channel_feishu_sender_open_id
             sender_open_id = channel_feishu_sender_open_id.get(None)
             if sender_open_id and doc_token:
-                import httpx
-                tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
                 async with httpx.AsyncClient(timeout=10) as client:
                     share_resp = await client.post(
                         f"https://open.feishu.cn/open-apis/drive/v1/permissions/{doc_token}/members",
