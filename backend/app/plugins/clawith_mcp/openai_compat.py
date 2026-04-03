@@ -46,6 +46,7 @@ router = APIRouter(tags=["openai-compat"])
 # ── GET /v1/models — 供 Android Studio / Cursor 拉取可用"模型"列表 ────────────
 
 @router.get("/v1/models")
+@router.get("/models")           # Android Studio omits /v1 prefix
 async def list_models(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
