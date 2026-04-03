@@ -232,11 +232,12 @@ async def openai_chat_completions(
         raise HTTPException(status_code=400, detail="Agent LLM model is unavailable")
 
     # 将 OAI messages 转为 dict 列表（call_llm 直接接受 OpenAI 格式）
-    # 过滤掉空内容消息，将 list/multipart content 转为纯文本
+    # role 映射：developer(新版 OpenAI) → system；过滤空消息
+    _ROLE_MAP = {"developer": "system"}
     messages = [
-        {"role": m.role, "content": m.text()}
+        {"role": _ROLE_MAP.get(m.role, m.role), "content": m.text()}
         for m in body.messages
-        if m.text().strip()  # 跳过空消息（如 system prompt 为 null 的情况）
+        if m.text().strip()
     ]
 
     # 查找或创建会话
