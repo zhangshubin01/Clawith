@@ -180,16 +180,34 @@ async def lifespan(app: FastAPI):
 
     try:
         from app.services.openviking_client import is_available, index_enterprise_info, index_all_skills
-        from pathlib import Path as _Path
+        from app.services.openviking_client import is_available, index_enterprise_info, index_all_skills, index_all_agents
+        _project_root = _Path(__file__).parent.parent.parent  # backend/app/main.py -> project root
+        if await is_available():
+            await index_enterprise_info(_project_root)
         _project_root = _Path(__file__).parent.parent.parent  # backend/app/main.py -> project root
         if await is_available():
             await index_enterprise_info(_project_root)
             await index_all_skills(_project_root)
-            logger.info("[startup] OpenViking: enterprise info and skills indexed")
+            # Index all agents' core documents for cross-agent search
+            import os
+            from pathlib import Path
+            clawith_data = Path(os.path.expanduser("~/.clawith/data"))
+            await index_all_agents(clawith_data)
         else:
             logger.debug("[startup] OpenViking not available, skipping index")
     except Exception as e:
         logger.warning(f"[startup] OpenViking index failed: {e}")
+
+    # Start OpenViking incremental indexing file watcher
+    try:
+        from app.services.openviking_client import is_available
+        from app.services.openviking_watcher import start_watcher
+        if await is_available():
+            observer = start_watcher()
+            if observer:
+                logger.info("[startup] OpenViking incremental watcher started")
+    except Exception as e:
+        logger.warning(f"[startup] OpenViking watcher failed: {e}")
 
     try:
         from app.services.agent_seeder import seed_default_agents
