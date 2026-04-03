@@ -43,6 +43,40 @@ from app.models.user import User
 router = APIRouter(tags=["openai-compat"])
 
 
+# ── GET /v1/models — 供 Android Studio / Cursor 拉取可用"模型"列表 ────────────
+
+@router.get("/v1/models")
+async def list_models(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """OpenAI-compatible model list endpoint.
+
+    Returns all agents accessible to the current user as "models".
+    Android Studio and Cursor call this to populate the model picker.
+    """
+    from app.models.agent import Agent
+    import time as _time
+    result = await db.execute(
+        select(Agent).where(Agent.creator_id == current_user.id).order_by(Agent.name)
+    )
+    agents = result.scalars().all()
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": a.name,                    # 用名称作 model id，方便人类识别
+                "object": "model",
+                "created": int(_time.time()),
+                "owned_by": "clawith",
+                "description": a.role_description or "",
+                "uuid": str(a.id),               # 扩展字段，方便按 UUID 调用
+            }
+            for a in agents
+        ],
+    }
+
+
 # ── Pydantic 模型 ────────────────────────────────────────────────────────────
 
 class OAIMessage(BaseModel):
