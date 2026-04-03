@@ -179,20 +179,16 @@ async def lifespan(app: FastAPI):
         logger.warning(f"[startup] Skills seed failed: {e}")
 
     try:
-        from app.services.openviking_client import is_available, index_enterprise_info, index_all_skills
         from app.services.openviking_client import is_available, index_enterprise_info, index_all_skills, index_all_agents
         _project_root = _Path(__file__).parent.parent.parent  # backend/app/main.py -> project root
         if await is_available():
             await index_enterprise_info(_project_root)
-        _project_root = _Path(__file__).parent.parent.parent  # backend/app/main.py -> project root
-        if await is_available():
-            await index_enterprise_info(_project_root)
             await index_all_skills(_project_root)
-            # Index all agents' core documents for cross-agent search
             import os
             from pathlib import Path
             clawith_data = Path(os.path.expanduser("~/.clawith/data"))
             await index_all_agents(clawith_data)
+            logger.info("[startup] OpenViking: enterprise info, skills, and agents indexed")
         else:
             logger.debug("[startup] OpenViking not available, skipping index")
     except Exception as e:
