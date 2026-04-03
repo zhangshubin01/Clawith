@@ -81,16 +81,36 @@ async def list_models(
 # ── Pydantic 模型 ────────────────────────────────────────────────────────────
 
 class OAIMessage(BaseModel):
+    model_config = {"extra": "ignore"}   # 忽略未知字段（name, tool_calls 等）
+
     role: str
-    content: str
+    # content 可以是字符串、list（vision/multipart）或 null
+    content: Optional[str | list] = None
+
+    def text(self) -> str:
+        """提取纯文本内容，兼容多模态 list 格式。"""
+        if self.content is None:
+            return ""
+        if isinstance(self.content, str):
+            return self.content
+        # list 格式: [{"type":"text","text":"..."},...]
+        parts = []
+        for part in self.content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+        return "\n".join(parts)
 
 
 class OAIChatRequest(BaseModel):
-    model: str                            # 智能体 UUID 或名称
+    model_config = {"extra": "ignore"}   # 忽略 Android Studio 发的额外字段
+
+    model: str                                      # 智能体 UUID 或名称
     messages: list[OAIMessage]
     stream: bool = False
-    temperature: Optional[float] = None  # 接受但忽略（智能体使用自己的模型配置）
-    max_tokens: Optional[int] = None     # 接受但忽略
+    temperature: Optional[float] = None             # 接受但忽略
+    max_tokens: Optional[int] = None                # 接受但忽略
+    max_completion_tokens: Optional[int] = None     # 新版 OpenAI 字段，忽略
+    store: Optional[bool] = None                    # 新版 OpenAI 字段，忽略
 
 
 # ── 格式化辅助函数 ────────────────────────────────────────────────────────────
@@ -212,7 +232,12 @@ async def openai_chat_completions(
         raise HTTPException(status_code=400, detail="Agent LLM model is unavailable")
 
     # 将 OAI messages 转为 dict 列表（call_llm 直接接受 OpenAI 格式）
-    messages = [{"role": m.role, "content": m.content} for m in body.messages]
+    # 过滤掉空内容消息，将 list/multipart content 转为纯文本
+    messages = [
+        {"role": m.role, "content": m.text()}
+        for m in body.messages
+        if m.text().strip()  # 跳过空消息（如 system prompt 为 null 的情况）
+    ]
 
     # 查找或创建会话
     sess_r = await db.execute(
