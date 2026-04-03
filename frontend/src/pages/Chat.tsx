@@ -60,6 +60,45 @@ export default function Chat() {
     const token = useAuthStore((s) => s.token);
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
+
+    // Load messages from localStorage on mount (persist across refresh)
+    useEffect(() => {
+        if (!id) return;
+        const key = `clawith:chat:${id}:messages`;
+        const stored = localStorage.getItem(key);
+        if (stored) {
+            try {
+                const parsed = JSON.parse(stored);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    setMessages(parsed);
+                }
+            } catch (e) {
+                console.error("Failed to parse stored messages", e);
+                localStorage.removeItem(key);
+            }
+        }
+    }, [id]);
+
+    // Save messages to localStorage whenever they change (max 80 messages to avoid quota)
+    useEffect(() => {
+        if (!id) return;
+        const key = `clawith:chat:${id}:messages`;
+        if (messages.length > 0) {
+            try {
+                const toSave = messages.length > 80 ? messages.slice(-80) : messages;
+                localStorage.setItem(key, JSON.stringify(toSave));
+            } catch (e) {
+                // QuotaExceededError — clear this key and try once more with fewer messages
+                try {
+                    localStorage.removeItem(key);
+                    const toSave = messages.slice(-20);
+                    localStorage.setItem(key, JSON.stringify(toSave));
+                } catch {
+                    // Give up silently if storage is completely full
+                }
+            }
+        }
+    }, [messages, id]);
     const [connected, setConnected] = useState(false);
     const [uploadProgress, setUploadProgress] = useState<{
         name: string;
