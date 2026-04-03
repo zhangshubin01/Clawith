@@ -1,0 +1,13 @@
+{
+  "name": "clawith-mcp",
+  "version": "1.0.0",
+  "description": "MCP server (stdio+HTTP) and OpenAI-compatible API for Clawith agents",
+  "author": "Clawith",
+  "min_clawith_version": "1.0.0",
+  "routes": [
+    {"path": "/mcp", "methods": ["POST"], "description": "Streamable HTTP MCP (Cursor)"},
+    {"path": "/mcp/sse", "methods": ["GET"], "description": "SSE MCP connect (Continue/Android Studio)"},
+    {"path": "/mcp/messages", "methods": ["POST"], "description": "SSE MCP messages"},
+    {"path": "/v1/chat/completions", "methods": ["POST"], "description": "OpenAI-compatible chat completions"}
+  ]
+}
