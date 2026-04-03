@@ -350,6 +350,10 @@ app.include_router(pages_public_router)  # Public endpoint for /p/{short_id}, no
 app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
 
+# 加载插件（放在所有 include_router 之后）
+from app.plugins import load_plugins
+load_plugins(app)
+
 
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])
 async def health_check():
