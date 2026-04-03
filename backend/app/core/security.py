@@ -165,7 +165,25 @@ async def get_current_user(
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked API key")
         return user
 
-    # ── Method 2: Bearer JWT ─────────────────────────────
+    # ── Method 2: Bearer cw-xxx (Android Studio / clients that send API key as Bearer) ──
+    if credentials and credentials.credentials.startswith("cw-"):
+        api_key = credentials.credentials
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+        result = await db.execute(
+            select(User)
+            .where(User.api_key_hash == key_hash)
+            .options(selectinload(User.identity))
+        )
+        user = result.scalar_one_or_none()
+        if (
+            not user
+            or not user.is_active
+            or not hmac.compare_digest(user.api_key_hash, key_hash)
+        ):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked API key")
+        return user
+
+    # ── Method 3: Bearer JWT ─────────────────────────────
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
