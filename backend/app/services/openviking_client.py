@@ -61,136 +61,80 @@ async def search_memory(
     agent_id: str,
     top_k: int = 5,
     grep_filter: str | None = None,
-) -> list[dict]:
-    """
-    Search agent's personal memory for semantic similarity to query.
-
-    Args:
-        query: Search query text
-        agent_id: Agent ID (scopes search to this agent's memory)
-        top_k: Number of top results to return
-        grep_filter: Optional keyword filter to filter documents before search
-
-    Returns:
-        List of results with "path", "content", "score" keys, sorted by score descending
-    """
-    available = await is_available()
-    if not available:
+) -> list[str]:
+    """Search agent's personal memory for semantic similarity to query."""
+    if not await is_available():
         return []
-
     try:
-        payload = {
+        body: dict = {
             "query": query,
-            "scope": f"agent:{agent_id}",
-            "top_k": top_k,
+            "target_uri": _agent_scope(agent_id),
+            "limit": top_k,
+            "score_threshold": OPENVIKING_SCORE_THRESHOLD,
         }
         if grep_filter:
-            payload["grep_filter"] = grep_filter
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{OPENVIKING_URL}/search",
-                json=payload,
-                headers=_get_headers(),
-                timeout=10.0,
-            )
-            response.raise_for_status()
-            result = response.json()
-            return result.get("results", [])
+            body["grep_filter"] = grep_filter
+        resp = await _get_client().post("/api/v1/search/find", json=body, timeout=OPENVIKING_TIMEOUT)
+        if resp.status_code != 200:
+            return []
+        memories = resp.json().get("result", {}).get("memories", [])
+        return [m.get("content") or m.get("abstract") or "" for m in memories if m.get("content") or m.get("abstract")]
+    except httpx.ConnectError:
+        _invalidate_availability_cache()
+        return []
     except Exception as e:
-        logger.warning(f"[OpenViking] search_memory failed: {e}")
+        logger.debug(f"[OpenViking] search_memory failed: {e}")
         return []
 
-async def index_memory_file(
-    file_path: str,
-    agent_id: str,
-    content: str | None = None,
-) -> bool:
-    """
-    Index or update a single memory file for an agent.
-    Called automatically after writing to memory.md to keep index fresh.
 
-    Args:
-        file_path: Full path to the file
-        agent_id: Agent ID for scoping
-        content: Optional pre-read content (avoids re-reading)
-
-    Returns:
-        True if indexing succeeded, False otherwise
-    """
-    available = await is_available()
-    if not available:
+async def index_memory_file(agent_id: str, file_path: Path) -> bool:
+    """Reindex a memory file under the agent's OpenViking scope (non-blocking)."""
+    if not Path(file_path).exists():
         return False
-
-    if content is None:
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception as e:
-            logger.warning(f"[OpenViking] Failed to read {file_path}: {e}")
-            return False
-
+    if not await is_available():
+        return False
     try:
-        payload = {
-            "path": file_path,
-            "content": content,
-            "scope": f"agent:{agent_id}",
-        }
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{OPENVIKING_URL}/index",
-                json=payload,
-                headers=_get_headers(),
-                timeout=10.0,
-            )
-            response.raise_for_status()
-            logger.debug(f"[OpenViking] Indexed {file_path} in scope agent:{agent_id}")
-            return True
-    except Exception as e:
-        logger.warning(f"[OpenViking] index_memory_file failed: {e}")
+        resp = await _get_client().post(
+            "/api/v1/resources",
+            json={"path": str(file_path), "to": _agent_scope(agent_id), "wait": False},
+            timeout=OPENVIKING_TIMEOUT * 2,
+        )
+        return resp.status_code < 300
+    except httpx.ConnectError:
+        _invalidate_availability_cache()
         return False
+    except Exception as e:
+        logger.debug(f"[OpenViking] index_memory_file error: {e}")
+        return False
+
 
 async def search_enterprise(
     query: str,
     top_k: int = 5,
     grep_filter: str | None = None,
-) -> list[dict]:
-    """
-    Search enterprise shared information (enterprise_info/ directory) for semantic similarity.
-
-    Args:
-        query: Search query text
-        top_k: Number of top results to return
-        grep_filter: Optional keyword filter to filter documents before search
-
-    Returns:
-        List of results with "path", "content", "score" keys, sorted by score descending
-    """
-    available = await is_available()
-    if not available:
+) -> list[str]:
+    """Search enterprise shared information from enterprise_info/ scope."""
+    if not await is_available():
         return []
-
     try:
-        payload = {
+        body: dict = {
             "query": query,
-            "scope": "enterprise",
-            "top_k": top_k,
+            "target_uri": _ENTERPRISE_SCOPE,
+            "limit": top_k,
+            "score_threshold": OPENVIKING_SCORE_THRESHOLD,
         }
         if grep_filter:
-            payload["grep_filter"] = grep_filter
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{OPENVIKING_URL}/search",
-                json=payload,
-                headers=_get_headers(),
-                timeout=10.0,
-            )
-            response.raise_for_status()
-            result = response.json()
-            return result.get("results", [])
+            body["grep_filter"] = grep_filter
+        resp = await _get_client().post("/api/v1/search/find", json=body, timeout=OPENVIKING_TIMEOUT)
+        if resp.status_code != 200:
+            return []
+        memories = resp.json().get("result", {}).get("memories", [])
+        return [m.get("content") or m.get("abstract") or "" for m in memories if m.get("content") or m.get("abstract")]
+    except httpx.ConnectError:
+        _invalidate_availability_cache()
+        return []
     except Exception as e:
-        logger.warning(f"[OpenViking] search_enterprise failed: {e}")
+        logger.debug(f"[OpenViking] search_enterprise failed: {e}")
         return []
 
 def _find_enterprise_dir(root_path: Path) -> Path | None:
@@ -242,25 +186,20 @@ async def index_enterprise_info(root_path: Path) -> bool:
     fail_count = 0
 
     for md_path in enterprise_dir.rglob("*.md"):
+        if md_path.name.startswith("."):
+            continue
         try:
-            content = md_path.read_text(encoding="utf-8")
-            rel_path = str(md_path.relative_to(enterprise_dir.parent))
-            payload = {
-                "path": rel_path,
-                "content": content,
-                "scope": "enterprise",
-            }
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{OPENVIKING_URL}/index",
-                    json=payload,
-                    headers=_get_headers(),
-                    timeout=10.0,
-                )
-                response.raise_for_status()
+            resp = await _get_client().post(
+                "/api/v1/resources",
+                json={"path": str(md_path), "to": _ENTERPRISE_SCOPE, "wait": False},
+                timeout=OPENVIKING_TIMEOUT * 2,
+            )
+            if resp.status_code < 300:
                 success_count += 1
+            else:
+                fail_count += 1
         except Exception as e:
-            logger.warning(f"[OpenViking] Failed to index {md_path}: {e}")
+            logger.debug(f"[OpenViking] Failed to index {md_path}: {e}")
             fail_count += 1
 
     logger.info(f"[OpenViking] Indexed enterprise_info: {success_count} succeeded, {fail_count} failed")
@@ -270,98 +209,70 @@ async def search_skills(
     query: str,
     top_k: int = 5,
     grep_filter: str | None = None,
-) -> list[dict]:
-    """
-    Search installed skills documentation for semantic similarity.
-
-    Args:
-        query: Search query text
-        top_k: Number of top results to return
-        grep_filter: Optional keyword filter to filter documents before search
-
-    Returns:
-        List of results with "path", "content", "score" keys, sorted by score descending
-    """
-    available = await is_available()
-    if not available:
+) -> list[str]:
+    """Semantic search over installed skills to find relevant skills."""
+    if not await is_available():
         return []
-
     try:
-        payload = {
+        body: dict = {
             "query": query,
-            "scope": "skills",
-            "top_k": top_k,
+            "target_uri": _SKILLS_SCOPE,
+            "limit": top_k,
+            "score_threshold": OPENVIKING_SCORE_THRESHOLD,
         }
         if grep_filter:
-            payload["grep_filter"] = grep_filter
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{OPENVIKING_URL}/search",
-                json=payload,
-                headers=_get_headers(),
-                timeout=10.0,
-            )
-            response.raise_for_status()
-            result = response.json()
-            return result.get("results", [])
+            body["grep_filter"] = grep_filter
+        resp = await _get_client().post("/api/v1/search/find", json=body, timeout=OPENVIKING_TIMEOUT)
+        if resp.status_code != 200:
+            return []
+        memories = resp.json().get("result", {}).get("memories", [])
+        return [m.get("content") or m.get("abstract") or "" for m in memories if m.get("content") or m.get("abstract")]
+    except httpx.ConnectError:
+        _invalidate_availability_cache()
+        return []
     except Exception as e:
-        logger.warning(f"[OpenViking] search_skills failed: {e}")
+        logger.debug(f"[OpenViking] search_skills failed: {e}")
         return []
 
+
 async def index_all_skills(root_path: Path) -> bool:
-    """
-    Index all installed skills (skills/*/*SKILL.md) into skills scope.
-    Called on startup to keep skill recommendations semantic-searchable.
-
-    Args:
-        root_path: Project root path
-
-    Returns:
-        True if indexing succeeded (partial success counts as True)
-    """
-    available = await is_available()
-    if not available:
-        logger.info("[OpenViking] Not available, skipping skills index")
+    """Index all installed skills' SKILL.md to shared skills scope."""
+    if not await is_available():
         return False
 
     skills_dir = _find_skills_dir(root_path)
     if skills_dir is None:
-        logger.info("[OpenViking] skills directory not found, skipping")
+        logger.debug("[OpenViking] skills directory not found, skipping")
         return False
 
-    success_count = 0
-    fail_count = 0
+    skill_files = []
+    for entry in skills_dir.iterdir():
+        if entry.name.startswith("."):
+            continue
+        if entry.is_dir():
+            for name in ("SKILL.md", "skill.md"):
+                if (entry / name).exists():
+                    skill_files.append(entry / name)
+                    break
+        elif entry.suffix == ".md":
+            skill_files.append(entry)
 
-    for skill_dir in skills_dir.iterdir():
-        if not skill_dir.is_dir():
-            continue
-        skill_file = skill_dir / "SKILL.md"
-        if not skill_file.exists():
-            continue
+    success = True
+    for skill_file in skill_files:
         try:
-            content = skill_file.read_text(encoding="utf-8")
-            rel_path = str(skill_file.relative_to(skills_dir.parent))
-            payload = {
-                "path": rel_path,
-                "content": content,
-                "scope": "skills",
-            }
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{OPENVIKING_URL}/index",
-                    json=payload,
-                    headers=_get_headers(),
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-                success_count += 1
+            resp = await _get_client().post(
+                "/api/v1/resources",
+                json={"path": str(skill_file), "to": _SKILLS_SCOPE, "wait": False},
+                timeout=OPENVIKING_TIMEOUT * 2,
+            )
+            if resp.status_code >= 300:
+                success = False
         except Exception as e:
-            logger.warning(f"[OpenViking] Failed to index skill {skill_file}: {e}")
-            fail_count += 1
+            logger.debug(f"[OpenViking] index_all_skills error on {skill_file}: {e}")
+            success = False
 
-    logger.info(f"[OpenViking] Indexed skills: {success_count} succeeded, {fail_count} failed")
-    return fail_count == 0
+    logger.info(f"[OpenViking] Indexed {len(skill_files)} skill(s)")
+    return success
 
 async def index_all_agents(clawith_data_root: Path) -> bool:
     """
@@ -400,37 +311,28 @@ async def index_all_agents(clawith_data_root: Path) -> bool:
             if ".venv" in str(doc_path) or "node_modules" in str(doc_path):
                 continue
             try:
-                content = doc_path.read_text(encoding="utf-8")
-                # Get relative path from home
-                rel_path = str(doc_path.relative_to(Path.home()))
-                # Try to extract agent_id from path components (UUID-like directories)
-                agent_id = "unknown"
-                parts = doc_path.parts
-                for part in parts:
-                    # Agent directories are UUIDs with dashes and 36 chars
-                    if len(part) == 36 and '-' in part:
-                        agent_id = part
+                # Extract agent_id from path components (UUID-like directories)
+                doc_agent_id = "unknown"
+                for part in doc_path.parts:
+                    if len(part) == 36 and part.count('-') == 4:
+                        doc_agent_id = part
                         break
-                payload = {
-                    "path": rel_path,
-                    "content": content,
-                    "scope": "agent_docs",
-                    "metadata": {
-                        "agent_id": agent_id,
-                        "document_type": target.split(".")[0],
-                    }
-                }
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        f"{OPENVIKING_URL}/index",
-                        json=payload,
-                        headers=_get_headers(),
-                        timeout=10.0,
-                    )
-                    response.raise_for_status()
+                resp = await _get_client().post(
+                    "/api/v1/resources",
+                    json={
+                        "path": str(doc_path),
+                        "to": _agent_scope(doc_agent_id),
+                        "wait": False,
+                    },
+                    timeout=OPENVIKING_TIMEOUT * 2,
+                )
+                if resp.status_code < 300:
                     success_count += 1
+                else:
+                    fail_count += 1
+                    logger.debug(f"[OpenViking] index_all_agents: {doc_path.name} -> {resp.status_code}")
             except Exception as e:
-                logger.warning(f"[OpenViking] Failed to index agent doc {doc_path}: {e}")
+                logger.debug(f"[OpenViking] Failed to index agent doc {doc_path}: {e}")
                 fail_count += 1
 
     logger.info(f"[OpenViking] Indexed all agents: {success_count} succeeded, {fail_count} failed")
@@ -459,26 +361,29 @@ async def search_all_agents(
         return []
 
     try:
-        payload = {
+        # Search across all agent scopes using a wildcard-style URI
+        body: dict = {
             "query": query,
-            "scope": "agent_docs",
-            "top_k": top_k,
+            "target_uri": _CLAWITH_SCOPE,
+            "limit": top_k,
+            "score_threshold": OPENVIKING_SCORE_THRESHOLD,
         }
         if grep_filter:
-            payload["grep_filter"] = grep_filter
-        if agent_id:
-            payload["metadata_filter"] = {"agent_id": agent_id}
+            body["grep_filter"] = grep_filter
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{OPENVIKING_URL}/search",
-                json=payload,
-                headers=_get_headers(),
-                timeout=10.0,
-            )
-            response.raise_for_status()
-            result = response.json()
-            return result.get("results", [])
+        resp = await _get_client().post("/api/v1/search/find", json=body, timeout=OPENVIKING_TIMEOUT)
+        if resp.status_code != 200:
+            return []
+        memories = resp.json().get("result", {}).get("memories", [])
+        snippets = []
+        for m in memories:
+            content = m.get("content") or m.get("abstract") or ""
+            if content:
+                snippets.append({"content": content.strip(), "path": m.get("uri", "")})
+        # Filter by agent_id if requested
+        if agent_id:
+            snippets = [s for s in snippets if agent_id in s.get("path", "")]
+        return snippets
     except Exception as e:
-        logger.warning(f"[OpenViking] search_all_agents failed: {e}")
+        logger.debug(f"[OpenViking] search_all_agents failed: {e}")
         return []
