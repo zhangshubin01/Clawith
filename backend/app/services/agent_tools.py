@@ -6662,10 +6662,11 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
         doc_token = doc.get("document_id", "")
         doc_url = await _get_feishu_tenant_doc_url(tenant_token, doc_token)
         
-        # Auto-share with the Feishu sender so they can access the document
+        # Auto-share with the Feishu sender so they can access the document.
+        # channel_feishu_sender_open_id is a module-level ContextVar defined in this file;
+        # no import needed — it is already in scope.
         share_note = ""
         try:
-            from app.api.websocket_chat import channel_feishu_sender_open_id
             sender_open_id = channel_feishu_sender_open_id.get(None)
             if sender_open_id and doc_token:
                 async with httpx.AsyncClient(timeout=10) as client:
@@ -6794,8 +6795,13 @@ def _markdown_to_feishu_blocks(markdown: str) -> list[dict]:
 
         # ── Divider ──────────────────────────────────────────────────────────
         if _re.fullmatch(r'[-*_]{3,}', line.strip()):
-            # block_type 22 = Divider; no extra fields allowed (empty dict causes validation error)
-            blocks.append({"block_type": 22})
+            # NOTE: block_type 22 (Feishu native divider) is rejected by the batch children
+            # creation API with error 99992402 (field validation failed).  Render as a plain
+            # text block containing a visual em-dash separator instead — always accepted.
+            blocks.append({
+                "block_type": 2,
+                "text": {"elements": [{"text_run": {"content": "\u2500" * 24}}]},
+            })
             i += 1
             continue
 
@@ -6901,7 +6907,10 @@ async def _feishu_doc_append(agent_id: uuid.UUID, arguments: dict) -> str:
 
             result = (await client.post(
                 f"https://open.feishu.cn/open-apis/docx/v1/documents/{docx_token}/blocks/{body_block_id}/children",
-                json={"children": children, "index": -1}, # -1 appends to end
+                # Do NOT pass index: -1.  Omitting the field lets Feishu default to
+                # append-at-end, which is always valid.  Passing -1 explicitly can
+                # trigger error 1770001 (invalid param) with certain block type mixes.
+                json={"children": children},
                 headers={"Authorization": f"Bearer {tenant_token}"},
             )).json()
 

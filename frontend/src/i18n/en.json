@@ -372,8 +372,15 @@
       "cancel": "Cancel"
     },
     "chat": {
+      "sessionListTitle": "Session list",
+      "collapseSidebar": "Collapse session list",
       "mySessions": "My Sessions",
       "allUsers": "All Users",
+      "viewOtherUsersSessions": "View other users' sessions",
+      "otherUsersTab": "Other users",
+      "selectUserToView": "Select user",
+      "selectUserFirstHint": "Choose a user above to view their sessions with this agent (read-only).",
+      "noOtherUsersSessions": "No other users have sessions with this agent yet.",
       "newSession": "New Session",
       "noSessionsYet": "No sessions yet.",
       "clickToStart": "Click \"New Session\" to start.",
@@ -390,7 +397,9 @@
       "askAboutFile": "Ask about {{name}}...",
       "thinking": "Thinking...",
       "collapseSessions": "Collapse sessions",
-      "showSessions": "Show chat sessions"
+      "showSessions": "Show chat sessions",
+      "toolCallChain": "Tools Used",
+      "analysing": "Analysing"
     },
     "activityLog": {
       "title": "Activity Log",
@@ -1456,7 +1465,8 @@
     "lightMode": "Light Mode",
     "darkMode": "Dark Mode",
     "collapseSidebar": "Collapse Sidebar",
-    "expandSidebar": "Expand Sidebar"
+    "expandSidebar": "Expand Sidebar",
+    "deleting": "Deleting..."
   },
   "openclaw": {
     "created": "OpenClaw Agent Created",
