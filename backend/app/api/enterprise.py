@@ -1328,6 +1328,66 @@ async def trigger_org_sync(
     return await org_sync_service.sync_provider(db, provider_id)
 
 
+@router.get("/org/wecom-verify/{provider_id}")
+async def wecom_org_sync_verify(
+    provider_id: uuid.UUID,
+    msg_signature: str = "",
+    timestamp: str = "",
+    nonce: str = "",
+    echostr: str = "",
+    db: AsyncSession = Depends(get_db),
+):
+    """Handle WeCom receive-message-server URL verification for the org sync app.
+
+    WeCom sends a GET request with msg_signature, timestamp, nonce, echostr when
+    the admin first saves the receive message server URL in the app settings.
+    This endpoint decrypts and returns the echostr to complete the handshake.
+
+    After this verification succeeds, the WeCom app's trusted IP whitelist becomes
+    configurable, which is the prerequisite for using App-level credentials (AgentID +
+    Secret) that have full contact read permission.
+
+    Configure URL in WeCom: {BASE_URL}/api/enterprise/org/wecom-verify/{provider_id}
+
+    Required provider config keys (set via Clawith WeCom config page):
+      - verify_token:   the Token string set in both WeCom and Clawith
+      - verify_aes_key: the EncodingAESKey provided by WeCom (43 chars, base64url)
+    """
+    from fastapi.responses import Response as _Response
+    from app.api.wecom import _decrypt_msg, _verify_signature
+
+    result = await db.execute(select(IdentityProvider).where(IdentityProvider.id == provider_id))
+    provider = result.scalar_one_or_none()
+    if not provider:
+        return _Response(status_code=404)
+
+    config = provider.config or {}
+    token = config.get("verify_token", "")
+    aes_key = config.get("verify_aes_key", "")
+
+    if not token or not aes_key:
+        logger.warning(
+            f"[WeCom Verify] Provider {provider_id} is missing verify_token or verify_aes_key in config. "
+            "Please configure them in the WeCom provider settings."
+        )
+        return _Response(status_code=400)
+
+    # Verify signature to authenticate the request from WeCom
+    expected_sig = _verify_signature(token, timestamp, nonce, echostr)
+    if expected_sig != msg_signature:
+        logger.warning(f"[WeCom Verify] Signature mismatch for provider {provider_id}")
+        return _Response(status_code=403)
+
+    # Decrypt echostr and return plaintext (WeCom confirms URL ownership)
+    try:
+        decrypted, _ = _decrypt_msg(aes_key, echostr)
+        logger.info(f"[WeCom Verify] Successfully verified org sync callback for provider {provider_id}")
+        return _Response(content=decrypted, media_type="text/plain")
+    except Exception as e:
+        logger.error(f"[WeCom Verify] Failed to decrypt echostr for provider {provider_id}: {e}")
+        return _Response(status_code=500)
+
+
 # ─── Invitation Codes ───────────────────────────────────
 
 from app.models.invitation_code import InvitationCode
