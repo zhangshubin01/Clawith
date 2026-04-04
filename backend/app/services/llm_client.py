@@ -538,8 +538,9 @@ class OpenAICompatibleClient(LLMClient):
 
                         if chunk.finish_reason:
                             last_finish_reason = chunk.finish_reason
+                            break
 
-                break  # Success
+                break
 
             except (httpx.TransportError, httpx.ConnectTimeout) as e:
                 # TransportError covers all network-layer issues:
@@ -1299,8 +1300,10 @@ class GeminiClient(LLMClient):
                     if not line.startswith("data:"):
                         continue
                     data_str = line[len("data:"):].strip()
-                    if not data_str or data_str == "[DONE]":
+                    if not data_str:
                         continue
+                    if data_str == "[DONE]":
+                        break
 
                     try:
                         data = json.loads(data_str)
@@ -1319,6 +1322,8 @@ class GeminiClient(LLMClient):
                         continue
                     candidate = candidates[0]
                     final_finish_reason = candidate.get("finishReason") or final_finish_reason
+                    if final_finish_reason:
+                        break
                     content_obj = candidate.get("content", {}) or {}
                     for part in content_obj.get("parts", []) or []:
                         text = part.get("text")
