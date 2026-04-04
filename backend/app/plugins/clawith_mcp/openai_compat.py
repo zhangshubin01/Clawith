@@ -146,7 +146,7 @@ def _oai_chunk(cid: str, model: str, content: str, finish_reason=None) -> str:
             "finish_reason": finish_reason,
         }],
     }
-    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+    return f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
 
 
 def _oai_chunk_role(cid: str, model: str) -> str:
@@ -162,7 +162,7 @@ def _oai_chunk_role(cid: str, model: str) -> str:
             "finish_reason": None,
         }],
     }
-    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+    return f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n"
 
 
 # ── 智能体解析 ───────────────────────────────────────────────────────────────
