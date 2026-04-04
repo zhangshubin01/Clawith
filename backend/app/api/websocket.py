@@ -1,6 +1,7 @@
 """WebSocket chat endpoint for real-time agent conversations."""
 
 import json
+import re
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -804,7 +805,11 @@ async def websocket_chat(
                     async def stream_to_ws(text: str):
                         """Send each chunk to client in real-time."""
                         partial_chunks.append(text)
-                        await websocket.send_json({"type": "chunk", "content": text})
+                        # Normalize token-per-line artifacts (e.g. ark-code-latest outputs
+                        # one token followed by \n for every streaming chunk).
+                        # Remove single \n that are NOT part of a \n\n paragraph break.
+                        normalized = re.sub(r'(?<!\n)\n(?!\n)', '', text)
+                        await websocket.send_json({"type": "chunk", "content": normalized or text})
                     
                     # Track which agentbay live URLs have been sent to avoid redundant pushes
                     _sent_live_envs: set[str] = set()
@@ -923,6 +928,8 @@ async def websocket_chat(
                         logger.info(f"[WS] LLM aborted, partial: {assistant_response[:80]}")
                     else:
                         assistant_response = await llm_task
+                        # Normalize token-per-line artifacts in final assembled content
+                        assistant_response = re.sub(r'(?<!\n)\n(?!\n)', '', assistant_response)
                         logger.info(f"[WS] LLM response: {assistant_response[:80]}")
 
                     # Update last_active_at
