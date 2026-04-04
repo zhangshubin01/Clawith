@@ -277,16 +277,14 @@ class BaseOrgSyncAdapter(ABC):
         update_mappings = [{"id": d_id, "member_count": d_data["total"]} for d_id, d_data in dept_map.items()]
         
         if update_mappings:
-            # Bulk-update member counts via SQLAlchemy ORM session (no raw engine needed)
-            from sqlalchemy import bindparam
-            stmt = (
-                update(OrgDepartment)
-                .where(OrgDepartment.id == bindparam("b_id"))
-                .values(member_count=bindparam("b_count"))
-            )
-            bind_mappings = [{"b_id": m["id"], "b_count": m["member_count"]} for m in update_mappings]
-            # synchronize_session=None required for bulk update with bindparams in SQLAlchemy 2.x
-            await db.execute(stmt, bind_mappings, execution_options={"synchronize_session": None})
+            # Execute individual UPDATE statements to avoid SQLAlchemy 2.x
+            # "Bulk UPDATE by Primary Key" ambiguity when passing a list to execute().
+            for m in update_mappings:
+                await db.execute(
+                    update(OrgDepartment)
+                    .where(OrgDepartment.id == m["id"])
+                    .values(member_count=m["member_count"])
+                )
 
     async def _ensure_provider(self, db: AsyncSession) -> IdentityProvider:
         """Ensure IdentityProvider record exists."""
@@ -1131,9 +1129,21 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
                     item = resp.json()
                     if item.get("errcode") != 0:
                         logger.warning(
-                            f"[WeCom Sync] user/get failed for {uid}: {item.get('errmsg')}"
+                            f"[WeCom Sync] user/get failed for {uid}: {item.get('errmsg')}, "
+                            "hint: " + str(item.get("hint", "")) +
+                            ", from ip: " + str(item.get("invalidstaffip", "")) +
+                            f", more info at https://open.work.weixin.qq.com/devtool/query?e={item.get('errcode')}"
                         )
-                        return None
+                        # Degraded mode: save a minimal member entry so the user appears in the org chart.
+                        # Full details (name, email, avatar) require a non-contact-assistant Secret or
+                        # a whitelisted self-built App (AgentID + Secret with user_read scope).
+                        return ExternalUser(
+                            external_id=uid,
+                            name=uid,  # Use userid as display name until full details are available
+                            open_id=open_id_map.get(uid, ""),
+                            department_external_id=department_external_id,
+                            department_ids=[department_external_id],
+                        )
                     # Inject open_userid obtained from list_id step
                     item.setdefault("open_userid", open_id_map.get(uid, ""))
                     return self._wecom_item_to_external_user(item, department_external_id)
