@@ -285,7 +285,8 @@ class BaseOrgSyncAdapter(ABC):
                 .values(member_count=bindparam("b_count"))
             )
             bind_mappings = [{"b_id": m["id"], "b_count": m["member_count"]} for m in update_mappings]
-            await db.execute(stmt, bind_mappings)
+            # synchronize_session=None required for bulk update with bindparams in SQLAlchemy 2.x
+            await db.execute(stmt, bind_mappings, execution_options={"synchronize_session": None})
 
     async def _ensure_provider(self, db: AsyncSession) -> IdentityProvider:
         """Ensure IdentityProvider record exists."""
