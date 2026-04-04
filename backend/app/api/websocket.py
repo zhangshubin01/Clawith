@@ -291,6 +291,7 @@ async def call_llm(
             return f"[LLM call error] {type(e).__name__}: {str(e)[:200]}"
 
         # ── Track tokens for this round ──
+        logger.info(f"[LLM] stream() returned: {len(response.content or '')} chars, finish={response.finish_reason}, tools={len(response.tool_calls or [])}")
         real_tokens = extract_usage_tokens(response.usage)
         if real_tokens:
             _accumulated_tokens += real_tokens
@@ -301,9 +302,12 @@ async def call_llm(
 
         # If no tool calls, return the final content
         if not response.tool_calls:
+            logger.info("[LLM] No tool calls, recording tokens and closing client")
             if agent_id and _accumulated_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_tokens)
+            logger.info("[LLM] Tokens recorded, closing client")
             await client.close()
+            logger.info(f"[LLM] Client closed, returning content: {len(response.content or '')} chars")
             return response.content or "[LLM returned empty content]"
 
         # Execute tool calls

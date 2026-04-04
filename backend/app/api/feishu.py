@@ -735,6 +735,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             _llm_done = False
             _last_flushed_hash: int = 0
             _last_flushed_text: str = ""
+            _flush_lock = asyncio.Lock()
 
             def _build_card(
                 answer_text: str,
@@ -848,43 +849,38 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                 nonlocal _last_flush_time, _last_flushed_hash, cardkit_sequence, _last_flushed_text
                 if not cardkit_card_id and not msg_id_for_patch:
                     return
-                now = time.time()
-                flush_interval = _FLUSH_INTERVAL_CARDKIT if cardkit_card_id else _FLUSH_INTERVAL_PATCH
-                if not force and now - _last_flush_time < flush_interval:
-                    return
-
-                accumulated = "".join(_stream_buffer)
-
-                if cardkit_card_id:
-                    if accumulated != _last_flushed_text:
-                        cardkit_sequence += 1
-                        try:
-                            await feishu_service.stream_card_content(
-                                config.app_id, config.app_secret,
-                                cardkit_card_id, "streaming_content",
-                                accumulated, cardkit_sequence,
-                            )
-                            _last_flushed_text = accumulated
-                        except Exception as e:
-                            logger.warning(f"[Feishu] CardKit stream failed: {e}")
-                elif msg_id_for_patch:
-                    card = _build_card(
-                        accumulated,
-                        "".join(_thinking_buffer),
-                        streaming=True,
-                    )
-                    current_hash = hash(
-                        accumulated
-                        + "".join(_thinking_buffer)
-                        + str(_tool_status_done)
-                        + str(list(_tool_status_running.values()))
-                    )
-                    if reason == "heartbeat" and current_hash == _last_flushed_hash:
+                async with _flush_lock:
+                    logger.debug(f"[Feishu] flush({reason}): seq={cardkit_sequence}")
+                    now = time.time()
+                    flush_interval = _FLUSH_INTERVAL_CARDKIT if cardkit_card_id else _FLUSH_INTERVAL_PATCH
+                    if not force and now - _last_flush_time < flush_interval:
                         return
-                    _last_flushed_hash = current_hash
-                    await _queue_patch_card(card, stage=f"stream_{reason}")
-
-                _last_flush_time = now
+                    accumulated = "".join(_stream_buffer)
+                    if cardkit_card_id:
+                        if accumulated != _last_flushed_text:
+                            cardkit_sequence += 1
+                            try:
+                                await asyncio.wait_for(
+                                    feishu_service.stream_card_content(
+                                        config.app_id, config.app_secret,
+                                        cardkit_card_id, "streaming_content",
+                                        accumulated, cardkit_sequence,
+                                    ),
+                                    timeout=5.0,
+                                )
+                                _last_flushed_text = accumulated
+                            except asyncio.TimeoutError:
+                                logger.warning(f"[Feishu] CardKit stream timed out, seq={cardkit_sequence}")
+                            except Exception as e:
+                                logger.warning(f"[Feishu] CardKit stream failed: {e}")
+                    elif msg_id_for_patch:
+                        card = _build_card(accumulated, "".join(_thinking_buffer), streaming=True)
+                        current_hash = hash(accumulated + "".join(_thinking_buffer) + str(_tool_status_done) + str(list(_tool_status_running.values())))
+                        if reason == "heartbeat" and current_hash == _last_flushed_hash:
+                            return
+                        _last_flushed_hash = current_hash
+                        await _queue_patch_card(card, stage=f"stream_{reason}")
+                    _last_flush_time = now
 
             async def _ws_on_chunk(text: str):
                 if not cardkit_card_id and not msg_id_for_patch:
@@ -948,7 +944,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     _heartbeat_task.cancel()
                     try:
                         await _heartbeat_task
-                    except Exception:
+                    except (Exception, asyncio.CancelledError):
                         pass
                 _cfs.reset(_cfs_token)
                 _cfso.reset(_cfso_token)
@@ -958,15 +954,21 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             if cardkit_card_id:
                 try:
                     cardkit_sequence += 1
-                    await feishu_service.set_card_streaming_mode(
-                        config.app_id, config.app_secret,
-                        cardkit_card_id, 0, cardkit_sequence,
+                    await asyncio.wait_for(
+                        feishu_service.set_card_streaming_mode(
+                            config.app_id, config.app_secret,
+                            cardkit_card_id, 0, cardkit_sequence,
+                        ),
+                        timeout=10.0,
                     )
                     cardkit_sequence += 1
                     final_card = _build_final_cardkit_card(reply_text, "".join(_thinking_buffer))
-                    await feishu_service.update_cardkit_card(
-                        config.app_id, config.app_secret,
-                        cardkit_card_id, final_card, cardkit_sequence,
+                    await asyncio.wait_for(
+                        feishu_service.update_cardkit_card(
+                            config.app_id, config.app_secret,
+                            cardkit_card_id, final_card, cardkit_sequence,
+                        ),
+                        timeout=10.0,
                     )
                 except Exception as e:
                     logger.error(f"[Feishu] CardKit final update failed: {e}")
