@@ -689,7 +689,7 @@ async def chat_with_agent_stream(
             kind, payload = await queue.get()
             if kind == "chunk":
                 full_reply += payload
-                yield f"data: {_json.dumps({'type': 'chunk', 'text': payload})}\n\n"
+                yield f"data: {_json.dumps({'type': 'chunk', 'text': payload}, ensure_ascii=True)}\n\n"
             elif kind == "done":
                 # payload is the full reply (from sync fallback or streaming completion)
                 if not full_reply:
@@ -712,10 +712,10 @@ async def chat_with_agent_stream(
                         sess_obj.last_message_at = datetime.now(tz_.utc)
                     await _db.commit()
                     break
-                yield f"data: {_json.dumps({'type': 'done', 'session_id': session_id_str, 'reply': full_reply})}\n\n"
+                yield f"data: {_json.dumps({'type': 'done', 'session_id': session_id_str, 'reply': full_reply}, ensure_ascii=True)}\n\n"
                 break
             elif kind == "error":
-                yield f"data: {_json.dumps({'type': 'error', 'message': payload})}\n\n"
+                yield f"data: {_json.dumps({'type': 'error', 'message': payload}, ensure_ascii=True)}\n\n"
                 break
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

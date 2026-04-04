@@ -63,14 +63,26 @@ function markdownToHtml(md: string): string {
     let inBlockquote = false;
     let inTable = false;
     let tableHeader = false;
+    // Buffer for accumulating consecutive plain-text lines into one paragraph.
+    // Single \n becomes <br>; only a blank line starts a new paragraph.
+    let paraLines: string[] = [];
 
+    const flushPara = () => {
+        if (paraLines.length > 0) {
+            html += `<p style="margin:4px 0;line-height:1.7">${paraLines.map(renderInline).join('<br>')}</p>`;
+            paraLines = [];
+        }
+    };
     const flushList = () => {
+        flushPara();
         if (inList) { html += inList === 'ul' ? '</ul>' : '</ol>'; inList = null; }
     };
     const flushBlockquote = () => {
+        flushPara();
         if (inBlockquote) { html += '</blockquote>'; inBlockquote = false; }
     };
     const flushTable = () => {
+        flushPara();
         if (inTable) { html += '</tbody></table>'; inTable = false; tableHeader = false; }
     };
 
@@ -80,7 +92,7 @@ function markdownToHtml(md: string): string {
         // Code block
         if (line.startsWith('```')) {
             if (!inCodeBlock) {
-                flushList(); flushBlockquote(); flushTable();
+                flushPara(); flushList(); flushBlockquote(); flushTable();
                 inCodeBlock = true;
                 codeLang = line.slice(3).trim();
                 codeLines = [];
@@ -95,17 +107,16 @@ function markdownToHtml(md: string): string {
         }
         if (inCodeBlock) { codeLines.push(line); continue; }
 
-        // Blank line
+        // Blank line — flush current paragraph; visual gap comes from <p> margin
         if (line.trim() === '') {
-            flushList(); flushBlockquote(); flushTable();
-            html += '<br>';
+            flushPara(); flushList(); flushBlockquote(); flushTable();
             continue;
         }
 
         // Headings
         const hMatch = line.match(/^(#{1,6})\s+(.*)/);
         if (hMatch) {
-            flushList(); flushBlockquote(); flushTable();
+            flushPara(); flushList(); flushBlockquote(); flushTable();
             const level = hMatch[1].length;
             const sizes = ['1.6em', '1.4em', '1.2em', '1.1em', '1em', '0.9em'];
             const margins = ['20px 0 8px', '16px 0 6px', '14px 0 5px', '12px 0 4px', '10px 0 4px', '8px 0 4px'];
@@ -115,14 +126,14 @@ function markdownToHtml(md: string): string {
 
         // Horizontal rule
         if (/^[-*_]{3,}$/.test(line.trim())) {
-            flushList(); flushBlockquote(); flushTable();
+            flushPara(); flushList(); flushBlockquote(); flushTable();
             html += '<hr style="border:none;border-top:1px solid var(--border-color);margin:12px 0">';
             continue;
         }
 
         // Blockquote
         if (line.startsWith('> ')) {
-            flushList(); flushTable();
+            flushPara(); flushList(); flushTable();
             if (!inBlockquote) {
                 html += '<blockquote style="border-left:3px solid var(--accent-primary);margin:8px 0;padding:4px 12px;color:var(--text-secondary);background:var(--bg-secondary);border-radius:0 4px 4px 0">';
                 inBlockquote = true;
@@ -135,7 +146,7 @@ function markdownToHtml(md: string): string {
 
         // Tables
         if (line.includes('|')) {
-            flushList(); flushBlockquote();
+            flushPara(); flushList(); flushBlockquote();
             const cols = line.split('|').map(c => c.trim()).filter((_, i, a) => i > 0 && i < a.length - 1);
             // Separator row
             if (cols.every(c => /^[-:]+$/.test(c))) {
@@ -160,7 +171,7 @@ function markdownToHtml(md: string): string {
         // Unordered list
         const ulMatch = line.match(/^(\s*)[*\-+]\s+(.*)/);
         if (ulMatch) {
-            flushBlockquote(); flushTable();
+            flushPara(); flushBlockquote(); flushTable();
             if (inList !== 'ul') { if (inList) flushList(); html += '<ul style="margin:6px 0;padding-left:24px">'; inList = 'ul'; }
             html += `<li style="margin:2px 0">${renderInline(ulMatch[2])}</li>`;
             continue;
@@ -169,19 +180,19 @@ function markdownToHtml(md: string): string {
         // Ordered list
         const olMatch = line.match(/^(\s*)\d+\.\s+(.*)/);
         if (olMatch) {
-            flushBlockquote(); flushTable();
+            flushPara(); flushBlockquote(); flushTable();
             if (inList !== 'ol') { if (inList) flushList(); html += '<ol style="margin:6px 0;padding-left:24px">'; inList = 'ol'; }
             html += `<li style="margin:2px 0">${renderInline(olMatch[2])}</li>`;
             continue;
         }
 
-        // Regular paragraph
+        // Regular paragraph line — accumulate; flush on blank line or block element
         flushList(); flushBlockquote(); flushTable();
-        html += `<p style="margin:4px 0;line-height:1.7">${renderInline(line)}</p>`;
+        paraLines.push(line);
     }
 
     // Close any open structures
-    flushList(); flushBlockquote(); flushTable();
+    flushPara(); flushList(); flushBlockquote(); flushTable();
     if (inCodeBlock) {
         html += `<pre style="background:var(--bg-secondary);border-radius:8px;padding:12px 16px"><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`;
     }

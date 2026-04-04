@@ -30,7 +30,7 @@ import uuid as _uuid
 from datetime import datetime, timezone as tz_
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, func as _func
@@ -98,7 +98,7 @@ class OAIMessage(BaseModel):
         for part in self.content:
             if isinstance(part, dict) and part.get("type") == "text":
                 parts.append(part.get("text", ""))
-        return "\n".join(parts)
+        return "".join(parts)
 
 
 class OAIChatRequest(BaseModel):
@@ -197,6 +197,7 @@ async def _resolve_agent(model: str, db: AsyncSession):
 @router.post("/v1/chat/completions")
 @router.post("/chat/completions")   # Android Studio omits /v1 prefix
 async def openai_chat_completions(
+    request: Request,
     body: OAIChatRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -285,8 +286,13 @@ async def openai_chat_completions(
 
     cid = _completion_id()
 
+    # Android Studio AI 插件的流式渲染会把每个 SSE chunk 显示为独立行，
+    # 导致逐字换行的视觉问题。检测到 Android Studio 时强制使用非流式响应。
+    _ua = request.headers.get("user-agent", "").lower()
+    _is_android_studio = any(k in _ua for k in ("android studio", "google-aiplugin", "aiplugin", "gemini-plugin"))
+
     # ── 非流式 ─────────────────────────────────────────────────────────────
-    if not body.stream:
+    if not body.stream or _is_android_studio:
         reply = await call_llm(
             model=llm_model,
             messages=messages,
