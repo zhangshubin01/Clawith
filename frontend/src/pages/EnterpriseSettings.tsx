@@ -557,7 +557,7 @@ function OrgTab({ tenant }: { tenant: any }) {
             const defaults: any = {
                 feishu: { app_id: '', app_secret: '', corp_id: '' },
                 dingtalk: { app_key: '', app_secret: '', corp_id: '' },
-                wecom: { corp_id: '', secret: '', agent_id: '', bot_id: '', bot_secret: '', verify_token: '', verify_aes_key: '' },
+                wecom: { corp_id: '', secret: '', agent_id: '', app_secret: '', bot_id: '', bot_secret: '', verify_token: '', verify_aes_key: '' },
             };
             const nameMap: Record<string, string> = { feishu: 'Feishu', wecom: 'WeCom', dingtalk: 'DingTalk', oauth2: 'OAuth2' };
             setForm({
@@ -671,9 +671,17 @@ function OrgTab({ tenant }: { tenant: any }) {
                         </div>
                         <div className="form-group">
                             <label className="form-label">Agent ID (Optional)</label>
-                            <input className="form-input" value={form.config.agent_id || ''} onChange={e => setForm({ ...form, config: { ...form.config, agent_id: e.target.value } })} />
+                            <input className="form-input" value={form.config.agent_id || ''} onChange={e => setForm({ ...form, config: { ...form.config, agent_id: e.target.value } })} placeholder="1000010" />
                         </div>
-                        <div style={{ gridColumn: '1 / -1', height: '1px', background: 'var(--border-subtle)', margin: '8px 0' }} />
+                        <div className="form-group">
+                            <label className="form-label">App Secret (for full user details)</label>
+                            <input className="form-input" type="password" value={form.config.app_secret || ''} onChange={e => setForm({ ...form, config: { ...form.config, app_secret: e.target.value } })} placeholder="from App Management > Sync Contacts" />
+                        </div>
+                        <div style={{ gridColumn: '1 / -1', fontSize: '11px', color: 'var(--text-tertiary)', background: 'var(--bg-primary)', padding: '8px 10px', borderRadius: '6px', lineHeight: 1.5 }}>
+                            WeCom API restriction (since Aug 2022): The address book sync credential can only fetch user IDs, not full details (name, email, avatar).
+                            To get full details, go to App Management &rarr; Sync Contacts (AgentID 1000010) &rarr; configure Enterprise Trusted IP with your server IP, then paste the App Secret above.
+                        </div>
+                        <div style={{ gridColumn: '1 / -1', height: '1px', background: 'var(--border-subtle)', margin: '4px 0' }} />
                         <div className="form-group">
                             <label className="form-label">Bot ID (Intelligent Robot)</label>
                             <input className="form-input" value={form.config.bot_id || ''} onChange={e => setForm({ ...form, config: { ...form.config, bot_id: e.target.value } })} placeholder="aibXXXXXXXXXXXX" />
