@@ -746,7 +746,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                     )}
                 </div>
                 {/* WeCom App IP Whitelist verification URL — show only when verify_token + verify_aes_key are configured */}
-                {type === 'wecom' && editingId && existingProvider?.config?.verify_token && existingProvider?.config?.verify_aes_key && (
+                {type === 'wecom' && editingId && (existingProvider?.config?.verify_token || form.config?.verify_token) && (
                     <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-primary)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
                         <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
                             WeCom Receive Message Server URL
