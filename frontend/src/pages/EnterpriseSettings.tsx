@@ -753,28 +753,53 @@ function OrgTab({ tenant }: { tenant: any }) {
                         </button>
                     )}
                 </div>
-                {/* WeCom App IP Whitelist verification URL — show only when verify_token + verify_aes_key are configured */}
-                {type === 'wecom' && editingId && (existingProvider?.config?.verify_token || form.config?.verify_token) && (
-                    <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-primary)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
-                        <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                            WeCom Receive Message Server URL
+                {/* WeCom App IP Whitelist verification URL — shown when verify_token is set */}
+                {type === 'wecom' && editingId && (existingProvider?.config?.verify_token || form.config?.verify_token) && (() => {
+                    const verifyToken = form.config?.verify_token || existingProvider?.config?.verify_token || '';
+                    const aesKey = form.config?.verify_aes_key || existingProvider?.config?.verify_aes_key || '';
+                    // Use window.location.origin as the base, but if it's a private/non-standard URL let user know
+                    const base = window.location.origin;
+                    const callbackUrl = aesKey
+                        ? `${base}/api/enterprise/org/wecom-callback/${verifyToken}?aes_key=${aesKey}`
+                        : `${base}/api/enterprise/org/wecom-callback/${verifyToken}?aes_key=(configure EncodingAESKey above first)`;
+                    return (
+                        <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-primary)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+                            <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                                WeCom Receive Message Server URL
+                            </div>
+                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
+                                Step 1: Go to WeCom App Management (AgentID 1000010) → App Settings → Set Receive Message Server URL.
+                                Use this URL. In the Token field, enter your Verify Token. In EncodingAESKey, enter your key below.
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <code style={{ flex: 1, fontSize: '11px', padding: '6px 10px', background: 'var(--bg-secondary)', borderRadius: '4px', wordBreak: 'break-all', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
+                                    {callbackUrl}
+                                </code>
+                                {aesKey && (
+                                    <LinearCopyButton
+                                        className="btn btn-ghost"
+                                        style={{ fontSize: '11px', padding: '4px 8px', whiteSpace: 'nowrap', flexShrink: 0 }}
+                                        textToCopy={callbackUrl}
+                                        label="Copy"
+                                        copiedLabel="Copied"
+                                    />
+                                )}
+                            </div>
+                            {!aesKey && (
+                                <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--warning, #f59e0b)' }}>
+                                    Configure the Verify Token and EncodingAESKey fields above, then Save to generate the final URL.
+                                </div>
+                            )}
+                            <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                Step 2: After URL verification passes, configure Enterprise Trusted IP with your server IPs in the WeCom console.
+                            </div>
+                            <div style={{ marginTop: '4px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                Step 3: Paste the App Secret (from that same app page) into the App Secret field above.
+                            </div>
                         </div>
-                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}
-                        >Paste this URL into your WeCom app's "Receive Message Server URL" field to unlock the IP whitelist configuration.</div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <code style={{ flex: 1, fontSize: '11px', padding: '6px 10px', background: 'var(--bg-secondary)', borderRadius: '4px', wordBreak: 'break-all', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
-                                {window.location.origin}/api/enterprise/org/wecom-verify/{editingId}
-                            </code>
-                            <LinearCopyButton
-                                className="btn btn-ghost"
-                                style={{ fontSize: '11px', padding: '4px 8px', whiteSpace: 'nowrap', flexShrink: 0 }}
-                                textToCopy={`${window.location.origin}/api/enterprise/org/wecom-verify/${editingId}`}
-                                label="Copy"
-                                copiedLabel="Copied"
-                            />
-                        </div>
-                    </div>
-                )}
+                    );
+                })()}
+
             </div>
         );
     };

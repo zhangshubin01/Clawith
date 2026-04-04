@@ -1388,6 +1388,59 @@ async def wecom_org_sync_verify(
         return _Response(status_code=500)
 
 
+@router.get("/org/wecom-callback/{token}", include_in_schema=False)
+async def wecom_callback_verify_universal(
+    token: str,
+    aes_key: str = "",
+    msg_signature: str = "",
+    timestamp: str = "",
+    nonce: str = "",
+    echostr: str = "",
+):
+    """Universal WeCom callback URL verification endpoint (no database lookup required).
+
+    Used to unlock the 企业可信IP configuration in the WeCom admin console.
+    Unlike the provider-based endpoint, this accepts the verify_token in the URL
+    path and the EncodingAESKey as a query parameter, so any tenant can use the
+    publicly accessible server (e.g. try.clawith.ai) regardless of which server
+    the WeCom provider is actually configured on.
+
+    URL format to configure in WeCom App → 接收消息服务器URL:
+      https://{public_host}/api/enterprise/org/wecom-callback/{verify_token}?aes_key={encoding_aes_key}
+
+    WeCom will append msg_signature, timestamp, nonce, echostr to this URL automatically.
+    Once WeCom verifies this URL, the app's 企业可信IP whitelist becomes configurable and
+    the user can add their API server IPs to allow App-level user/get calls.
+    """
+    from fastapi.responses import Response as _Response
+    from app.api.wecom import _decrypt_msg, _verify_signature
+
+    if not token:
+        return _Response(status_code=400, content="verify_token is required in URL path")
+
+    if not aes_key:
+        logger.warning("[WeCom Callback] Missing aes_key query param in universal callback URL")
+        return _Response(status_code=400, content="aes_key query param is required")
+
+    # Verify signature to authenticate the request as coming from WeCom servers
+    expected_sig = _verify_signature(token, timestamp, nonce, echostr)
+    if expected_sig != msg_signature:
+        logger.warning(
+            f"[WeCom Callback] Signature mismatch: token={token[:8]}... "
+            f"expected={expected_sig[:16]}... got={msg_signature[:16]}..."
+        )
+        return _Response(status_code=403)
+
+    # Decrypt echostr and return plaintext to complete WeCom URL verification
+    try:
+        decrypted, _ = _decrypt_msg(aes_key, echostr)
+        logger.info(f"[WeCom Callback] Universal callback verified successfully for token={token[:8]}...")
+        return _Response(content=decrypted, media_type="text/plain")
+    except Exception as e:
+        logger.error(f"[WeCom Callback] Failed to decrypt echostr: {e}")
+        return _Response(status_code=500)
+
+
 # ─── Invitation Codes ───────────────────────────────────
 
 from app.models.invitation_code import InvitationCode
