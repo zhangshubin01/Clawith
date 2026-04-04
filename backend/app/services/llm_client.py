@@ -1618,7 +1618,7 @@ class AnthropicClient(LLMClient):
                         
                     data_str = line[len("data:"):].strip()
                     if data_str == "[DONE]":
-                        logger.info("[Anthropic SSE] received [DONE]")
+                        logger.debug("[Anthropic SSE] received [DONE]")
                         break
                         
                     try:
@@ -1672,12 +1672,12 @@ class AnthropicClient(LLMClient):
                                 
                     elif current_event == "message_delta":
                         delta = data.get("delta", {})
-                        logger.info(f"[Anthropic SSE] message_delta: stop_reason={delta.get('stop_reason')}, usage={bool(data.get('usage'))}")
+                        logger.debug(f"[Anthropic SSE] message_delta: stop_reason={delta.get('stop_reason')}, usage={bool(data.get('usage'))}")
                         if data.get("usage"):
                             final_usage = data["usage"]
                         if delta.get("stop_reason"):
                             last_finish_reason = delta["stop_reason"]
-                            logger.info("[Anthropic SSE] breaking on stop_reason")
+                            logger.debug("[Anthropic SSE] breaking on stop_reason")
                             break
                             
                     elif current_event == "error":
@@ -1687,7 +1687,7 @@ class AnthropicClient(LLMClient):
                     elif current_event == "message_stop":
                         break
 
-            logger.info(f"[Anthropic SSE] stream loop ended, content={len(full_content)} chars, finish={last_finish_reason}, tools={len(tool_calls_data)}")
+            logger.debug(f"[Anthropic SSE] stream loop ended, content={len(full_content)} chars, finish={last_finish_reason}, tools={len(tool_calls_data)}")
 
         except (httpx.TransportError, httpx.ConnectTimeout) as e:
             # TransportError covers NetworkError (ConnectError, ReadError) and
@@ -1700,7 +1700,7 @@ class AnthropicClient(LLMClient):
         elif last_finish_reason == "tool_use":
             last_finish_reason = "tool_calls"
 
-        logger.info(f"[Anthropic SSE] returning LLMResponse: {len(full_content)} chars, finish={last_finish_reason}")
+        logger.debug(f"[Anthropic SSE] returning LLMResponse: {len(full_content)} chars, finish={last_finish_reason}")
 
         return LLMResponse(
             content=full_content,
