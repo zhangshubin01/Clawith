@@ -1,0 +1,2 @@
+agent-client-protocol
+websockets>=13.0

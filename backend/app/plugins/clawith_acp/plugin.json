@@ -1,0 +1,10 @@
+{
+  "name": "clawith-acp",
+  "version": "0.2.0",
+  "description": "Agent Client Protocol (ACP) Remote WebSocket Server",
+  "author": "Clawith",
+  "min_clawith_version": "1.0.0",
+  "routes": [
+    {"path": "/ws", "methods": ["WS"], "description": "ACP remote WebSocket endpoint"}
+  ]
+}

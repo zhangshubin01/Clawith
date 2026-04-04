@@ -237,6 +237,63 @@ async def get_authenticated_user(
     return user
 
 
+async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
+    """Authenticate thin clients that pass `cw-` API key or JWT in a query param (e.g. ACP WebSocket).
+
+    Raises:
+        HTTPException: 401 if token is missing, invalid, or user inactive.
+    """
+    from app.database import async_session
+    from app.models.user import User
+
+    if not token or not str(token).strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing token",
+        )
+    raw = str(token).strip()
+
+    async with async_session() as db:
+        if raw.startswith("cw-"):
+            key_hash = hashlib.sha256(raw.encode()).hexdigest()
+            result = await db.execute(
+                select(User)
+                .where(User.api_key_hash == key_hash)
+                .options(selectinload(User.identity))
+            )
+            user = result.scalar_one_or_none()
+            if (
+                not user
+                or not user.is_active
+                or not hmac.compare_digest(user.api_key_hash, key_hash)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or revoked API key",
+                )
+            return user.id
+
+        payload = decode_access_token(raw)
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token",
+            )
+        result = await db.execute(
+            select(User)
+            .where(User.id == uuid.UUID(str(user_id)))
+            .options(selectinload(User.identity))
+        )
+        user = result.scalar_one_or_none()
+        if not user or not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found or inactive",
+            )
+        return user.id
+
+
 async def get_current_admin(current_user=Depends(get_current_user)):
     """Dependency to require admin role (platform_admin or org_admin)."""
     if current_user.role not in ("platform_admin", "org_admin"):
