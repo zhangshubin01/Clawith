@@ -265,11 +265,11 @@ async def _tc_browser_cleanup(agent_id: uuid.UUID, session_id: str) -> None:
     if not cleanup_client:
         return
 
-    # Navigate to about:blank to guarantee the browser page is in a fully
-    # settled, neutral state. This cancels any navigation triggered by a TC
-    # click (e.g. user clicked a link) so the AgentBay SDK's next
-    # browser.operator.navigate() call does not wait for a stale in-progress
-    # navigation to finish. about:blank always loads instantly.
+    # Cancel any pending navigation and release mouse buttons so Chrome is in a
+    # clean, stable state before the AgentBay SDK's browser.operator resumes.
+    # NOTE: We intentionally do NOT navigate to about:blank here — doing so can
+    # pollute the page list so subsequent TC sessions pick the wrong page via
+    # context.pages()[0].
     cleanup_script = """
 const { chromium } = require('/usr/local/lib/node_modules/playwright');
 let browser;
@@ -277,12 +277,11 @@ let browser;
     try {
         browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
-        const page = context.pages()[0];
-        // Stop any pending navigation first, then navigate to blank for a clean slate
+        const pages = context.pages();
+        const page = pages.slice().reverse().find(p => p.url() !== 'about:blank') || pages[pages.length - 1];
+        // Stop any pending navigation left from TC interactions
         try { await page.evaluate(() => window.stop()); } catch(e) {}
-        try {
-            await page.goto('about:blank', { waitUntil: 'commit', timeout: 5000 });
-        } catch(e) {}
+        // Release any mouse buttons that may have been left pressed
         try { await page.mouse.up(); } catch(e) {}
         console.log('CLEANUP_OK');
     } catch(e) {
@@ -320,7 +319,11 @@ let browser;
     try {{
         browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
-        const page = context.pages()[0];
+        // Pick the last non-blank page so we always target the visible content page.
+        // pages()[0] may be about:blank if a previous TC session left stale state.
+        const pages = context.pages();
+        const page = pages.slice().reverse().find(p => p.url() !== 'about:blank') || pages[pages.length - 1];
+        console.log('TARGET_PAGE:' + page.url());
         await page.mouse.click({x}, {y}, {{ button: '{button}' }});
         console.log('CLICK_OK');
         ok = true;
@@ -369,7 +372,8 @@ let browser;
     try {{
         browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
-        const page = context.pages()[0];
+        const pages = context.pages();
+        const page = pages.slice().reverse().find(p => p.url() !== 'about:blank') || pages[pages.length - 1];
         const textToType = decodeURIComponent('{encoded_text}');
         await page.keyboard.type(textToType);
         console.log('TYPE_OK');
@@ -423,7 +427,8 @@ let browser;
     try {{
         browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
-        const page = context.pages()[0];
+        const pages = context.pages();
+        const page = pages.slice().reverse().find(p => p.url() !== 'about:blank') || pages[pages.length - 1];
         await page.keyboard.press('{combined}');
         console.log('PRESS_OK');
         ok = true;
@@ -476,7 +481,8 @@ let browser;
     try {{
         browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
-        const page = context.pages()[0];
+        const pages = context.pages();
+        const page = pages.slice().reverse().find(p => p.url() !== 'about:blank') || pages[pages.length - 1];
 
         const steps = 30;
         const duration = {duration_ms};
