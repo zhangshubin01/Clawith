@@ -1349,7 +1349,17 @@
       "botId": "Bot ID (Intelligent Robot)",
       "botSecret": "Bot Secret",
       "appKey": "App Key",
-      "appSecret": "App Secret"
+      "appSecret": "App Secret",
+      "wecomNotice": {
+        "title": "Prerequisites for WeCom Integration",
+        "syncTitle": "1. User Directory Sync",
+        "syncDesc": "Directory sync via the contacts secret works for fetching user IDs. However, fetching full user details (name, avatar, email) requires the self-built app's IP to be whitelisted in WeCom — a setting that must be configured by the WeCom enterprise admin.",
+        "ssoTitle": "2. SSO Login (Single Sign-On)",
+        "ssoDesc": "WeCom OAuth requires the callback domain to be ICP-filed with a business entity matching the WeCom enterprise's registration. The platform domain (clawith.ai) is a .ai TLD which cannot be ICP-filed in mainland China, making SSO unavailable on the current domain. Requires either an ICP-filed .com/.cn domain or WeCom ISV (service provider) registration.",
+        "messagingTitle": "3. Proactive 1-to-1 Messaging (AI-initiated)",
+        "messagingDesc": "Sending messages to individual users requires a valid WeCom API access token, which can only be obtained from a server IP that has been whitelisted in the self-built app's settings. Unlike Feishu, WeCom mandates IP-level restrictions on all API calls — there is no token-only authentication option.",
+        "footerText": "Due to the above constraints, WeCom integration currently cannot be easily set up by most users. We are actively exploring alternative approaches — including WeCom ISV (service provider) registration and lower-friction API options — or we may advocate for WeCom to relax these restrictions for SaaS platforms. Configuration will be re-enabled once a viable path is available."
+      }
     },
     "dangerZone": "️ Danger Zone",
     "deleteCompanyDesc": "Permanently delete this company and all its data, including agents, models, tools, and skills. This action cannot be undone.",

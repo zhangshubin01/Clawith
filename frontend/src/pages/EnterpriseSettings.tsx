@@ -656,7 +656,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                     </div>
                 ) : type === 'wecom' ? (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0' }}>
-                        {/* Prerequisites notice */}
+                        {/* Prerequisites notice — all strings via i18n */}
                         <div style={{
                             padding: '16px',
                             borderRadius: '8px',
@@ -667,39 +667,40 @@ function OrgTab({ tenant }: { tenant: any }) {
                             color: 'var(--text-secondary)',
                         }}>
                             <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-primary)', marginBottom: '10px' }}>
-                                Prerequisites for WeCom Integration
+                                {t('enterprise.identity.wecomNotice.title')}
                             </div>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                                 <div>
                                     <div style={{ fontWeight: 500, color: 'var(--text-primary)', marginBottom: '3px' }}>
-                                        1. User Directory Sync
+                                        {t('enterprise.identity.wecomNotice.syncTitle')}
                                     </div>
                                     <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
-                                        Directory sync via the contacts secret works for fetching user IDs. However, fetching full user details (name, avatar, email) requires the self-built app's IP to be whitelisted in WeCom — a setting that must be configured by the WeCom enterprise admin.
+                                        {t('enterprise.identity.wecomNotice.syncDesc')}
                                     </div>
                                 </div>
                                 <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '10px' }}>
                                     <div style={{ fontWeight: 500, color: 'var(--text-primary)', marginBottom: '3px' }}>
-                                        2. SSO Login (Single Sign-On)
+                                        {t('enterprise.identity.wecomNotice.ssoTitle')}
                                     </div>
                                     <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
-                                        WeCom OAuth requires the callback domain to be ICP-filed with a business entity matching the WeCom enterprise's registration. The platform domain (<code style={{ fontFamily: 'var(--font-mono)', fontSize: '11px' }}>clawith.ai</code>) is a <code style={{ fontFamily: 'var(--font-mono)', fontSize: '11px' }}>.ai</code> TLD which cannot be ICP-filed in mainland China, making SSO unavailable on the current domain. Requires either an ICP-filed <code style={{ fontFamily: 'var(--font-mono)', fontSize: '11px' }}>.com/.cn</code> domain or WeCom ISV (service provider) registration.
+                                        {t('enterprise.identity.wecomNotice.ssoDesc')}
                                     </div>
                                 </div>
                                 <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '10px' }}>
                                     <div style={{ fontWeight: 500, color: 'var(--text-primary)', marginBottom: '3px' }}>
-                                        3. Proactive 1-to-1 Messaging (AI-initiated)
+                                        {t('enterprise.identity.wecomNotice.messagingTitle')}
                                     </div>
                                     <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
-                                        Sending messages to individual users requires a valid WeCom API access token, which can only be obtained from a server IP that has been whitelisted in the self-built app's settings.  Unlike Feishu, WeCom mandates IP-level restrictions on all API calls — there is no token-only authentication option.
+                                        {t('enterprise.identity.wecomNotice.messagingDesc')}
                                     </div>
                                 </div>
                             </div>
                             <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px solid var(--border-subtle)', fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
-                                Due to the above platform-level constraints, WeCom integration currently cannot be easily set up by most users. We are actively exploring alternative approaches — including WeCom ISV (service provider) registration and lower-friction API options — or we may advocate for WeCom to relax these restrictions for SaaS platforms. Configuration will be re-enabled once a viable path is available.
+                                {t('enterprise.identity.wecomNotice.footerText')}
                             </div>
                         </div>
                     </div>
+
 
                 ) : type === 'dingtalk' ? (
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>

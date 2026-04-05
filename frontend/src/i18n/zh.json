@@ -1515,7 +1515,17 @@
       "botId": "机器人 ID（智能机器人）",
       "botSecret": "机器人密钥",
       "appKey": "App Key",
-      "appSecret": "App Secret"
+      "appSecret": "App Secret",
+      "wecomNotice": {
+        "title": "企业微信集成前置条件",
+        "syncTitle": "1. 通讯录同步",
+        "syncDesc": "通过通讯录 Secret 可以获取成员 ID，但要同步完整信息（姓名、头像、邮箱），需要将服务器 IP 加入企微自建应用的「企业可信IP」白名单，该操作需由企微管理员完成。",
+        "ssoTitle": "2. SSO 登录（单点登录）",
+        "ssoDesc": "企业微信 OAuth 要求回调域名完成 ICP 备案，且备案主体须与企微企业一致。当前平台域名（clawith.ai）属于 .ai 顶级域名，在中国大陆无法完成 ICP 备案，因此 SSO 功能暂时无法使用。需要已备案的 .com/.cn 域名，或通过企微服务商（ISV）渠道接入。",
+        "messagingTitle": "3. AI 主动发送一对一消息",
+        "messagingDesc": "向企微成员主动发消息，需先获取有效的 API access_token，而获取 token 的请求 IP 必须在自建应用的「企业可信IP」白名单中。与飞书不同，企微对所有 API 调用均强制要求 IP 白名单，没有仅凭 token 认证的选项。",
+        "footerText": "由于上述限制，目前大多数用户无法轻松完成企业微信集成配置。我们正在积极探索替代方案——包括申请企微服务商（ISV）资质及寻找限制更少的接入方式——同时也希望企微能够降低对 SaaS 平台的接入门槛。待可行路径明确后，配置入口将重新开启。"
+      }
     }
   },
   "common": {
