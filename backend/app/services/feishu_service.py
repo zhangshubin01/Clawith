@@ -1,6 +1,7 @@
 """Feishu (Lark) OAuth and API integration service."""
 
 import json
+from collections import OrderedDict
 
 import httpx
 from loguru import logger
@@ -30,11 +31,20 @@ FEISHU_SEND_MSG_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
 class FeishuService:
     """Service for Feishu OAuth login and message API."""
 
+    # Maximum number of lark SDK client instances to keep alive simultaneously.
+    # Each entry corresponds to a unique (app_id, app_secret) pair.  Excess entries
+    # are evicted in LRU order (oldest-accessed first) to bound memory usage in
+    # long-running multi-tenant deployments.
+    _LARK_CLIENT_CACHE_MAX = 50
+
     def __init__(self):
         self.app_id = settings.FEISHU_APP_ID
         self.app_secret = settings.FEISHU_APP_SECRET
         self._app_access_token: str | None = None
-        self._lark_clients: dict[str, lark.Client] = {}
+        # OrderedDict is used as a simple LRU cache: move_to_end() on each hit
+        # keeps the most-recently-used entries at the tail so we can evict from
+        # the head when the cache is full.
+        self._lark_clients: OrderedDict[str, lark.Client] = OrderedDict()
 
     @staticmethod
     def _parse_api_response(
@@ -708,14 +718,25 @@ class FeishuService:
     # --- CardKit Streaming API ---
 
     def _get_lark_client(self, app_id: str, app_secret: str):
-        """Get or create a cached lark-oapi SDK client for the given app credentials."""
+        """Get or create a cached lark-oapi SDK client for the given app credentials.
+
+        Implements a simple LRU eviction policy: when the cache exceeds
+        _LARK_CLIENT_CACHE_MAX entries, the least-recently-used client is removed.
+        """
         if not _HAS_LARK:
             raise RuntimeError("lark-oapi package is not installed. Install with: pip install lark-oapi")
         cache_key = f"{app_id}:{app_secret}"
         client = self._lark_clients.get(cache_key)
         if client is None:
+            # Evict the oldest entry if the cache is at capacity.
+            if len(self._lark_clients) >= self._LARK_CLIENT_CACHE_MAX:
+                evicted_key, _ = self._lark_clients.popitem(last=False)
+                logger.debug(f"[Feishu] _lark_clients LRU evict: {evicted_key[:8]}...")
             client = lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
             self._lark_clients[cache_key] = client
+        else:
+            # Move hit entry to the tail so it is considered most-recently-used.
+            self._lark_clients.move_to_end(cache_key)
         return client
 
     async def create_card_entity(

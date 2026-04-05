@@ -19,29 +19,61 @@ except ImportError:
 if _HAS_LARK:
     try:
         import websockets as _websockets
-        _orig_connect = _websockets.connect
+        # Keep a reference to the original connect so we can restore it if needed.
+        _orig_websockets_connect = _websockets.connect
+        _PROXY_PATCH_AVAILABLE = True
+    except ImportError:
+        _PROXY_PATCH_AVAILABLE = False
+else:
+    _PROXY_PATCH_AVAILABLE = False
 
-        class _NoProxyConnect:
-            def __init__(self, *args, **kwargs):
-                kwargs.setdefault("proxy", None)
-                self._coro = _orig_connect(*args, **kwargs)
-                self._ws = None
 
-            def __await__(self):
-                return self._coro.__await__()
+def _make_no_proxy_connect(orig_connect):
+    """Return a drop-in replacement for websockets.connect that forces proxy=None.
 
-            async def __aenter__(self):
-                self._ws = await self._coro
-                return self._ws
+    This is intentionally NOT applied at module import time to avoid polluting
+    the global websockets namespace for other modules in the process.  Instead
+    it is applied as a scoped context manager around lark-oapi's _connect() call.
+    """
+    import contextlib
 
-            async def __aexit__(self, *exc):
-                if self._ws:
-                    await self._ws.close()
+    class _NoProxyConnect:
+        """Wraps websockets.connect to inject proxy=None, preventing macOS
+        system-proxy interference with long-lived SSE / WebSocket connections."""
 
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("proxy", None)
+            self._coro = orig_connect(*args, **kwargs)
+            self._ws = None
+
+        def __await__(self):
+            return self._coro.__await__()
+
+        async def __aenter__(self):
+            self._ws = await self._coro
+            return self._ws
+
+        async def __aexit__(self, *exc):
+            if self._ws:
+                await self._ws.close()
+
+    @contextlib.asynccontextmanager
+    async def _scoped_no_proxy():
+        """Context manager that temporarily replaces websockets.connect for
+        the duration of the lark-oapi connection handshake only."""
+        if not _PROXY_PATCH_AVAILABLE:
+            yield
+            return
+        old = _websockets.connect
         _websockets.connect = _NoProxyConnect
-        logger.info("[Feishu WS] Patched websockets.connect to bypass system proxy")
-    except Exception as _patch_err:
-        logger.warning(f"[Feishu WS] Failed to patch websockets: {_patch_err}")
+        logger.debug("[Feishu WS] Scoped websockets proxy bypass: active")
+        try:
+            yield
+        finally:
+            _websockets.connect = old
+            logger.debug("[Feishu WS] Scoped websockets proxy bypass: restored")
+
+    return _scoped_no_proxy
 
 from app.database import async_session
 from app.models.channel_config import ChannelConfig
@@ -216,12 +248,25 @@ class FeishuWSManager:
         )
         self._clients[agent_id] = client
 
+        # Build scoped proxy bypass: active only during _connect() to avoid
+        # permanently replacing websockets.connect for the whole process.
+        _no_proxy_ctx = (
+            _make_no_proxy_connect(_orig_websockets_connect)
+            if _PROXY_PATCH_AVAILABLE
+            else None
+        )
+
         # Direct Async runner bypassing the faulty client.start()
         async def _run_async_client():
             try:
-                # Internally _connect() opens socket and drops _receive_message_loop() onto the global loop
-                await client._connect()
-                # Start ping loop natively
+                # Wrap _connect() in the scoped proxy bypass so macOS system proxy
+                # settings cannot interfere with the WebSocket handshake.
+                if _no_proxy_ctx:
+                    async with _no_proxy_ctx():
+                        await client._connect()
+                else:
+                    await client._connect()
+                # Start ping loop natively after connection is established
                 ping_task = asyncio.create_task(client._ping_loop())
                 
                 # Keep this task alive so it doesn't get canceled, and handle reconnections

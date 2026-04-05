@@ -857,18 +857,30 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                         return
                     accumulated = "".join(_stream_buffer)
                     if cardkit_card_id:
-                        if accumulated != _last_flushed_text:
+                        # Build composite content: tool status lines + answer text.
+                        # This mirrors the IM Patch path where _build_card() includes the
+                        # tool status section, so CardKit users also see which tools are
+                        # running or completed during the LLM turn.
+                        done_visible = _tool_status_done[-_TOOL_STATUS_KEEP_LINES:]
+                        running_visible = list(_tool_status_running.values())
+                        all_tool_lines = done_visible + running_visible
+                        if all_tool_lines:
+                            tool_section = "\n".join(all_tool_lines)
+                            cardkit_text = f"{tool_section}\n---\n{accumulated}" if accumulated else tool_section
+                        else:
+                            cardkit_text = accumulated
+                        if cardkit_text != _last_flushed_text:
                             cardkit_sequence += 1
                             try:
                                 await asyncio.wait_for(
                                     feishu_service.stream_card_content(
                                         config.app_id, config.app_secret,
                                         cardkit_card_id, "streaming_content",
-                                        accumulated, cardkit_sequence,
+                                        cardkit_text, cardkit_sequence,
                                     ),
                                     timeout=5.0,
                                 )
-                                _last_flushed_text = accumulated
+                                _last_flushed_text = cardkit_text
                             except asyncio.TimeoutError:
                                 logger.warning(f"[Feishu] CardKit stream timed out, seq={cardkit_sequence}")
                             except Exception as e:
