@@ -208,12 +208,17 @@ class SSOService:
     ) -> Any:
         """Link an external identity to an existing user via OrgMember.
 
+        When an OrgMember already exists (e.g. from org-sync), this also
+        enriches its profile fields with fresh SSO data so placeholder
+        records become fully hydrated over time.
+
         Args:
             db: Database session
             user_id: User ID to link to
             provider_type: Type of provider
             provider_user_id: User ID in the external system
-            identity_data: Additional identity data (unused now, stored in OrgMember if needed)
+            identity_data: Raw data from the provider (ExternalUserInfo.raw_data);
+                           used for passive profile enrichment.
             tenant_id: Optional tenant ID for provider lookup
 
         Returns:
@@ -233,7 +238,9 @@ class SSOService:
         if not provider:
             raise ValueError(f"Provider {provider_type} not found for tenant {tenant_id}")
 
-        # Check if OrgMember already exists (only active members)
+        uid = uuid.UUID(user_id) if isinstance(user_id, str) else user_id
+
+        # Check if OrgMember already exists for this provider user
         member_query = select(OrgMember).where(
             OrgMember.provider_id == provider.id,
             OrgMember.status == "active",
@@ -247,21 +254,59 @@ class SSOService:
         member = member_result.scalar_one_or_none()
 
         if member:
-            # Link existing member to user
-            member.user_id = uuid.UUID(user_id) if isinstance(user_id, str) else user_id
+            # Always link user
+            member.user_id = uid
+
+            # Passive identity enrichment: update profile fields from SSO data.
+            # OrgMember records created by org-sync may have placeholder values
+            # (e.g. name=userid, no avatar/email). We fill them in here so they
+            # become accurate after the user's first SSO login, without needing
+            # IP-whitelisted batch calls.
+            if identity_data:
+                incoming_name = (
+                    identity_data.get("name")
+                    or identity_data.get("display_name")
+                )
+                # Only overwrite name if the current value looks like a placeholder
+                # (e.g. was set to the raw userid during degraded org sync)
+                is_placeholder_name = (
+                    not member.name
+                    or member.name == member.external_id
+                    or member.name == provider_user_id
+                    or member.name.startswith(f"{provider_type.capitalize()} User")
+                )
+                if incoming_name and is_placeholder_name:
+                    member.name = incoming_name
+
+                incoming_email = identity_data.get("email") or identity_data.get("biz_mail")
+                if incoming_email and not member.email:
+                    member.email = incoming_email
+
+                incoming_avatar = identity_data.get("avatar")
+                if incoming_avatar and not member.avatar_url:
+                    member.avatar_url = incoming_avatar
+
+                incoming_mobile = identity_data.get("mobile")
+                if incoming_mobile and not member.phone:
+                    member.phone = incoming_mobile
+
         else:
-            # Create a shell OrgMember if not synced yet (though usually they should exist)
-            member_name = identity_data.get("name") if identity_data else None
-            if not member_name:
-                # Try to get name from user_info if passed differently
-                member_name = identity_data.get("display_name") if identity_data else None
+            # Create a shell OrgMember if not synced yet.
+            # This handles organizations that skip org-sync and rely purely on SSO.
+            member_name = (
+                (identity_data.get("name") or identity_data.get("display_name"))
+                if identity_data else None
+            )
             member = OrgMember(
                 name=member_name or f"{provider_type.capitalize()} User {provider_user_id[:8]}",
-                email=identity_data.get("email") if identity_data else None,
+                email=(identity_data.get("email") or identity_data.get("biz_mail")) if identity_data else None,
+                avatar_url=identity_data.get("avatar") if identity_data else None,
+                phone=identity_data.get("mobile") if identity_data else None,
                 provider_id=provider.id,
-                user_id=uuid.UUID(user_id) if isinstance(user_id, str) else user_id,
+                user_id=uid,
                 tenant_id=tenant_id,
                 external_id=provider_user_id,
+                # For WeCom, external_id IS the userid; unionid is a different concept
                 unionid=provider_user_id if provider_type != "wecom" else None
             )
             db.add(member)
