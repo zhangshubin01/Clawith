@@ -19,7 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.identity import IdentityProvider
 from app.models.org import OrgDepartment, OrgMember
 from app.models.user import User, Identity
-from pypinyin import pinyin, Style
+from pypinyin import pinyin, lazy_pinyin, Style
+from anyascii import anyascii as _anyascii
 
 from app.core.security import hash_password
 
@@ -461,8 +462,10 @@ class BaseOrgSyncAdapter(ABC):
         # Update/Create OrgMember
         if existing_member:
             existing_member.name = user.name
-            # Generate transliteration
-            existing_member.name_translit_full = "".join([i[0] for i in pinyin(user.name, style=Style.NORMAL)])
+            # Generate transliteration using layered strategy:
+            # 1. pypinyin converts CJK characters to pinyin
+            # 2. anyascii handles remaining non-ASCII scripts (Korean, Japanese kana, Arabic, etc.)
+            existing_member.name_translit_full = _anyascii("".join(lazy_pinyin(user.name, errors="default")))
             existing_member.name_translit_initial = "".join([i[0] for i in pinyin(user.name, style=Style.FIRST_LETTER)])
             
             if email is not None:
@@ -486,7 +489,10 @@ class BaseOrgSyncAdapter(ABC):
                 existing_member.user_id = user_id
             stats["profile_synced"] = True
         else:
-            translit_full = "".join([i[0] for i in pinyin(user.name, style=Style.NORMAL)])
+            # Generate transliteration using layered strategy:
+            # 1. pypinyin converts CJK characters to pinyin
+            # 2. anyascii handles remaining non-ASCII scripts (Korean, Japanese kana, Arabic, etc.)
+            translit_full = _anyascii("".join(lazy_pinyin(user.name, errors="default")))
             translit_initial = "".join([i[0] for i in pinyin(user.name, style=Style.FIRST_LETTER)])
             
             new_member = OrgMember(

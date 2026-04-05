@@ -56,36 +56,46 @@ class TenantUpdate(BaseModel):
 def _slugify(name: str) -> str:
     """Generate a URL-friendly slug from a company name.
 
-    Converts CJK characters (Chinese, Japanese Kanji) to their pinyin
-    romanization before slugifying. This prevents names like "卷卷的公司"
-    from collapsing to the generic "company" fallback.
+    Uses a layered transliteration strategy so non-Latin company names produce
+    meaningful, readable slugs instead of collapsing to the generic 'company'
+    placeholder:
 
-    For other non-ASCII scripts (Korean Hangul, Arabic, etc.) the function
-    gracefully falls back to the existing "company" placeholder because
-    those characters cannot be mapped to ASCII without additional libraries.
+      1. pypinyin   — CJK/Chinese characters → pinyin (e.g. '公司' → 'gongsi')
+      2. anyascii   — remaining non-ASCII scripts → closest ASCII approximation
+                      (Korean '안녕' → 'annyeong', Japanese 'ひらがな' → 'hiragana',
+                       Arabic 'مرحبا' → 'mrhb', Cyrillic 'Привет' → 'Privet', …)
+      3. NFKD norm  — accented Latin chars stripped of diacritics (é → e)
+
+    A short random hex suffix is always appended to guarantee global uniqueness
+    even when two tenants choose the same company name.
     """
     import unicodedata
     from pypinyin import lazy_pinyin
+    from anyascii import anyascii
 
-    # Step 1: Transliterate CJK characters to pinyin; pass non-CJK chars through.
-    # lazy_pinyin returns each character as a list element. errors='default'
-    # keeps non-CJK characters (Latin letters, digits, spaces, symbols) unchanged.
+    # Step 1: Convert CJK characters to pinyin; non-CJK chars pass through unchanged.
+    # lazy_pinyin with errors='default' keeps non-CJK chars as-is so they are
+    # handled by the subsequent anyascii pass rather than being silently dropped.
     parts = lazy_pinyin(name, errors="default")
     text = "".join(parts)
 
-    # Step 2: Normalize unicode and drop any remaining non-ASCII bytes.
-    # NFKD decomposition converts accented characters (e.g. é → e + combining accent).
-    # ASCII encoding then drops the non-ASCII combining marks and unrecognised scripts.
+    # Step 2: Convert remaining non-ASCII characters using anyascii.
+    # anyascii is a no-op on ASCII input, so it is safe to apply to the whole
+    # string after pypinyin has already processed the CJK portion.
+    text = anyascii(text)
+
+    # Step 3: Normalize any remaining accented Latin chars (é → e, ü → u, etc.)
+    # and drop anything that still cannot be represented in ASCII.
     text = unicodedata.normalize("NFKD", text)
     text = text.encode("ascii", "ignore").decode("ascii")
 
-    # Step 3: Lowercase, collapse non-alphanumeric runs to hyphens, trim to 40 chars.
+    # Step 4: Lowercase, collapse non-alphanumeric runs to hyphens, trim to 40 chars.
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower().strip())
     slug = slug.strip("-")[:40]
 
     if not slug:
-        # Nothing survived transliteration (e.g. pure Korean / Arabic input).
-        # Fall back to a generic placeholder so the slug is not empty.
+        # Extremely unlikely after anyascii, but keep as a safety net
+        # for inputs that are entirely punctuation or whitespace.
         slug = "company"
 
     # Add a short random hex suffix to ensure global uniqueness.
