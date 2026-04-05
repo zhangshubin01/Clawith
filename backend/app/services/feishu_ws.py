@@ -16,6 +16,33 @@ except ImportError:
     ws = None    # type: ignore
     _HAS_LARK = False
 
+if _HAS_LARK:
+    try:
+        import websockets as _websockets
+        _orig_connect = _websockets.connect
+
+        class _NoProxyConnect:
+            def __init__(self, *args, **kwargs):
+                kwargs.setdefault("proxy", None)
+                self._coro = _orig_connect(*args, **kwargs)
+                self._ws = None
+
+            def __await__(self):
+                return self._coro.__await__()
+
+            async def __aenter__(self):
+                self._ws = await self._coro
+                return self._ws
+
+            async def __aexit__(self, *exc):
+                if self._ws:
+                    await self._ws.close()
+
+        _websockets.connect = _NoProxyConnect
+        logger.info("[Feishu WS] Patched websockets.connect to bypass system proxy")
+    except Exception as _patch_err:
+        logger.warning(f"[Feishu WS] Failed to patch websockets: {_patch_err}")
+
 from app.database import async_session
 from app.models.channel_config import ChannelConfig
 from sqlalchemy import select

@@ -291,11 +291,11 @@ async def call_llm(
             return f"[LLM call error] {type(e).__name__}: {str(e)[:200]}"
 
         # ── Track tokens for this round ──
+        logger.debug(f"[LLM] stream() returned: {len(response.content or '')} chars, finish={response.finish_reason}, tools={len(response.tool_calls or [])}")
         real_tokens = extract_usage_tokens(response.usage)
         if real_tokens:
             _accumulated_tokens += real_tokens
         else:
-            # Fallback: estimate from message content length
             round_chars = sum(len(m.content or '') if isinstance(m.content, str) else 0 for m in api_messages) + len(response.content or '')
             _accumulated_tokens += estimate_tokens_from_chars(round_chars)
 
