@@ -125,11 +125,18 @@ export default function App() {
         // Cross-domain tenant switch: the backend appends ?token=<jwt> to the redirect URL
         // so the new domain receives a fresh scoped token. Consume it here (before any other
         // auth logic) so it always takes precedence over a stale token in localStorage.
+        //
+        // IMPORTANT: Only apply this on paths that do NOT use ?token= for their own purposes.
+        // /reset-password and /verify-email both receive a one-time token for their own flow —
+        // consuming it here as a session JWT would call /auth/me, fail, log out the user,
+        // and redirect them to /login instead of showing the correct page.
         const urlParams = new URLSearchParams(window.location.search);
         const urlToken = urlParams.get('token');
+        const currentPath = window.location.pathname;
+        const pathsWithOwnToken = ['/reset-password', '/verify-email'];
         let effectiveToken = token;
 
-        if (urlToken) {
+        if (urlToken && !pathsWithOwnToken.includes(currentPath)) {
             // Persist the new token and update the zustand store's in-memory value
             localStorage.setItem('token', urlToken);
             useAuthStore.setState({ token: urlToken, user: null });
@@ -144,6 +151,7 @@ export default function App() {
                 + window.location.hash;
             window.history.replaceState({}, '', cleanUrl);
         }
+
 
         if (effectiveToken && !user) {
             authApi.me()
