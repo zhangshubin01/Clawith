@@ -333,7 +333,7 @@ let browser;
 }})();
 """
         res = await _eval_cdp_script(client, script)
-        return {{"success": res.get("success", False) and "CLICK_OK" in res.get("output", ""), "method": "cdp_click", "output": "Clicked" if "CLICK_OK" in res.get("output", "") else res.get("output", "Unknown error")}}
+        return {"success": res.get("success", False) and "CLICK_OK" in res.get("output", ""), "method": "cdp_click", "output": "Clicked" if "CLICK_OK" in res.get("output", "") else res.get("output", "Unknown error")}
 
     # Desktop session — use Computer API
     try:
@@ -512,11 +512,11 @@ let browser;
 }})();
 """
         res = await _eval_cdp_script(client, script)
-        return {{
+        return {
             "success": res.get("success", False) and "TC_OK" in res.get("output", ""),
             "method": "cdp_drag",
             "output": f"Dragged ({from_x},{from_y}) -> ({to_x},{to_y})" if "TC_OK" in res.get("output", "") else res.get("output", "Unknown error"),
-        }}
+        }
 
 
 
