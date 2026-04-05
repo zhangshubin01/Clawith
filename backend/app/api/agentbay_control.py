@@ -265,8 +265,11 @@ async def _tc_browser_cleanup(agent_id: uuid.UUID, session_id: str) -> None:
     if not cleanup_client:
         return
 
-    # Stop lingering TC navigation and release any held mouse buttons.
-    # Uses the same connectOverCDP pathway as TC so it can reach Chrome's CDP port.
+    # Navigate to about:blank to guarantee the browser page is in a fully
+    # settled, neutral state. This cancels any navigation triggered by a TC
+    # click (e.g. user clicked a link) so the AgentBay SDK's next
+    # browser.operator.navigate() call does not wait for a stale in-progress
+    # navigation to finish. about:blank always loads instantly.
     cleanup_script = """
 const { chromium } = require('/usr/local/lib/node_modules/playwright');
 let browser;
@@ -275,7 +278,11 @@ let browser;
         browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
         const page = context.pages()[0];
+        // Stop any pending navigation first, then navigate to blank for a clean slate
         try { await page.evaluate(() => window.stop()); } catch(e) {}
+        try {
+            await page.goto('about:blank', { waitUntil: 'commit', timeout: 5000 });
+        } catch(e) {}
         try { await page.mouse.up(); } catch(e) {}
         console.log('CLEANUP_OK');
     } catch(e) {
@@ -296,15 +303,39 @@ let browser;
 async def _perform_click(client, x: int, y: int, button: str = "left"):
     """Click at (x, y) on the remote session.
 
-    Uses the Computer API for all session types (both browser and desktop).
-    Previously, browser sessions used connectOverCDP, but that created a
-    competing Playwright connection that corrupted the AgentBay SDK's
-    browser.operator state, causing navigate calls to hang after TC exits.
-    The Computer API is confirmed reliable for browser sessions too.
+    Browser sessions use connectOverCDP because the Computer API's click_mouse
+    tool is only available in the computer image type, not browser_latest.
+    Each CDP script uses try/catch/finally with browser.close() to ensure a
+    graceful disconnect so Chrome's DevTools session does not leak.
     """
     image_type = getattr(client, '_image_type', 'unknown')
     logger.info(f"[TakeControl] Click at ({x}, {y}), button={button}, image_type={image_type}")
 
+    if _is_browser_session(client):
+        script = f"""
+const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
+let browser;
+(async () => {{
+    let ok = false;
+    try {{
+        browser = await chromium.connectOverCDP('http://localhost:9222');
+        const context = browser.contexts()[0];
+        const page = context.pages()[0];
+        await page.mouse.click({x}, {y}, {{ button: '{button}' }});
+        console.log('CLICK_OK');
+        ok = true;
+    }} catch (e) {{
+        console.error('CLICK_FAIL:' + e.message);
+    }} finally {{
+        if (browser) await browser.close().catch(() => {{}});
+    }}
+    process.exit(ok ? 0 : 1);
+}})();
+"""
+        res = await _eval_cdp_script(client, script)
+        return {{"success": res.get("success", False) and "CLICK_OK" in res.get("output", ""), "method": "cdp_click", "output": "Clicked" if "CLICK_OK" in res.get("output", "") else res.get("output", "Unknown error")}}
+
+    # Desktop session — use Computer API
     try:
         result = await asyncio.to_thread(
             client._session.computer.click_mouse, x, y, button
@@ -318,13 +349,41 @@ async def _perform_click(client, x: int, y: int, button: str = "left"):
 
 
 
+
 async def _perform_type(client, text: str):
     """Type text into the remote session.
 
-    Uses the Computer API (input_text) for all session types.
+    Browser sessions use CDP keyboard API; desktop sessions use computer.input_text.
     """
     image_type = getattr(client, '_image_type', 'unknown')
     logger.info(f"[TakeControl] Type text: '{text[:30]}', image_type={image_type}")
+
+    if _is_browser_session(client):
+        import urllib.parse
+        encoded_text = urllib.parse.quote(text)
+        script = f"""
+const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
+let browser;
+(async () => {{
+    let ok = false;
+    try {{
+        browser = await chromium.connectOverCDP('http://localhost:9222');
+        const context = browser.contexts()[0];
+        const page = context.pages()[0];
+        const textToType = decodeURIComponent('{encoded_text}');
+        await page.keyboard.type(textToType);
+        console.log('TYPE_OK');
+        ok = true;
+    }} catch (e) {{
+        console.error('TYPE_FAIL:' + e.message);
+    }} finally {{
+        if (browser) await browser.close().catch(() => {{}});
+    }}
+    process.exit(ok ? 0 : 1);
+}})();
+"""
+        res = await _eval_cdp_script(client, script)
+        return {"success": res.get("success", False) and "TYPE_OK" in res.get("output", ""), "method": "cdp_type", "output": "Text typed" if "TYPE_OK" in res.get("output", "") else res.get("output", "Unknown error")}
 
     try:
         result = await asyncio.to_thread(
@@ -339,13 +398,45 @@ async def _perform_type(client, text: str):
 
 
 
+
 async def _perform_press_keys(client, keys: list[str]):
     """Press key combination on the remote session.
 
-    Uses the Computer API (press_keys) for all session types.
+    Browser sessions use CDP keyboard API; desktop sessions use computer.press_keys.
     """
     key_desc = "+".join(keys)
     logger.info(f"[TakeControl] Press keys: {key_desc}")
+
+    if _is_browser_session(client):
+        # Convert key names to the Playwright format (e.g. 'ctrl' → 'Control')
+        key_map = {
+            'ctrl': 'Control', 'alt': 'Alt', 'shift': 'Shift', 'meta': 'Meta',
+            'enter': 'Enter', 'backspace': 'Backspace', 'esc': 'Escape', 'tab': 'Tab',
+        }
+        playwright_keys = [key_map.get(k.lower(), k.upper() if len(k) == 1 else k) for k in keys]
+        combined = "+".join(playwright_keys)
+        script = f"""
+const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
+let browser;
+(async () => {{
+    let ok = false;
+    try {{
+        browser = await chromium.connectOverCDP('http://localhost:9222');
+        const context = browser.contexts()[0];
+        const page = context.pages()[0];
+        await page.keyboard.press('{combined}');
+        console.log('PRESS_OK');
+        ok = true;
+    }} catch (e) {{
+        console.error('PRESS_FAIL:' + e.message);
+    }} finally {{
+        if (browser) await browser.close().catch(() => {{}});
+    }}
+    process.exit(ok ? 0 : 1);
+}})();
+"""
+        res = await _eval_cdp_script(client, script)
+        return {"success": res.get("success", False) and "PRESS_OK" in res.get("output", ""), "method": "cdp_press", "output": f"Pressed {key_desc}" if "PRESS_OK" in res.get("output", "") else res.get("output", "Unknown error")}
 
     try:
         result = await asyncio.to_thread(
@@ -360,71 +451,72 @@ async def _perform_press_keys(client, keys: list[str]):
 
 
 
+
 async def _perform_drag(
     client, from_x: int, from_y: int, to_x: int, to_y: int, duration_ms: int = 600
 ) -> dict:
     """Simulate a human-like mouse drag using a Bezier curve trajectory.
 
-    Uses the Computer API (move_mouse) for all session types. Previously,
-    browser sessions used connectOverCDP with Playwright which created
-    competing CDP connections. The Computer API is safer and avoids
-    browser.operator state corruption after TC exits.
-
-    Generates intermediate points along a cubic Bezier curve to mimic
-    natural hand movement for CAPTCHA slider detection.
+    Browser sessions use CDP to send precise mouse events with a Bezier
+    curve trajectory and sub-pixel jitter for CAPTCHA bypass.
+    Desktop sessions use the Computer API move_mouse sequence.
+    All CDP scripts use browser.close() for graceful disconnect.
     """
     logger.info(
         f"[TakeControl] Drag: ({from_x},{from_y}) -> ({to_x},{to_y}), "
         f"duration={duration_ms}ms"
     )
 
-    try:
-        steps = 30
-        sleep_per_step = duration_ms / 1000 / steps
+    if _is_browser_session(client):
+        script = f"""
+const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
+let browser;
+(async () => {{
+    let ok = false;
+    try {{
+        browser = await chromium.connectOverCDP('http://localhost:9222');
+        const context = browser.contexts()[0];
+        const page = context.pages()[0];
 
-        # Cubic Bezier control points with a perpendicular offset for a natural arc
-        dx = to_x - from_x
-        dy = to_y - from_y
-        perp_x = -dy * 0.15
-        perp_y = dx * 0.15
-        x1 = from_x + dx * 0.3 + perp_x
-        y1 = from_y + dy * 0.3 + perp_y
-        x2 = from_x + dx * 0.7 - perp_x
-        y2 = from_y + dy * 0.7 - perp_y
-
-        def bezier(t: float):
-            u = 1 - t
-            return (
-                u**3 * from_x + 3 * u**2 * t * x1 + 3 * u * t**2 * x2 + t**3 * to_x,
-                u**3 * from_y + 3 * u**2 * t * y1 + 3 * u * t**2 * y2 + t**3 * to_y,
-            )
-
-        # Move to start position, then step along the Bezier curve
-        await asyncio.to_thread(client._session.computer.move_mouse, from_x, from_y)
-        for i in range(1, steps + 1):
-            bx, by = bezier(i / steps)
-            # Add tiny random jitter to fool trajectory analysis
-            import random
-            jx = random.uniform(-1, 1)
-            jy = random.uniform(-1, 1)
-            await asyncio.to_thread(
-                client._session.computer.move_mouse,
-                int(round(bx + jx)),
-                int(round(by + jy)),
-            )
-            await asyncio.sleep(sleep_per_step)
-
-        # Final precise move to end position
-        await asyncio.to_thread(client._session.computer.move_mouse, to_x, to_y)
-
-        return {
-            "success": True,
-            "method": "computer_drag",
-            "output": f"Dragged ({from_x},{from_y}) -> ({to_x},{to_y})",
-        }
-    except Exception as e:
-        logger.warning(f"[TakeControl] Computer drag failed: {e}")
-        return {"success": False, "output": f"Drag failed: {str(e)[:200]}"}
+        const steps = 30;
+        const duration = {duration_ms};
+        const x0 = {from_x}, y0 = {from_y};
+        const x3 = {to_x},  y3 = {to_y};
+        const dx = x3 - x0, dy = y3 - y0;
+        const perpX = -dy * 0.15, perpY = dx * 0.15;
+        const x1 = x0 + dx * 0.3 + perpX, y1 = y0 + dy * 0.3 + perpY;
+        const x2 = x0 + dx * 0.7 - perpX, y2 = y0 + dy * 0.7 - perpY;
+        const bezier = (t) => {{
+            const u = 1 - t;
+            return {{ x: u*u*u*x0+3*u*u*t*x1+3*u*t*t*x2+t*t*t*x3, y: u*u*u*y0+3*u*u*t*y1+3*u*t*t*y2+t*t*t*y3 }};
+        }};
+        await page.mouse.move(x0, y0);
+        await page.mouse.down();
+        for (let i = 1; i <= steps; i++) {{
+            const pt = bezier(i / steps);
+            const jx = (Math.random() - 0.5) * 2;
+            const jy = (Math.random() - 0.5) * 2;
+            await page.mouse.move(Math.round(pt.x + jx), Math.round(pt.y + jy));
+            await new Promise(r => setTimeout(r, duration / steps));
+        }}
+        await page.mouse.move(x3, y3);
+        await page.mouse.up();
+        console.log('TC_OK: drag complete');
+        ok = true;
+    }} catch (e) {{
+        console.error('TC_FAIL: ' + e.message);
+    }} finally {{
+        if (browser) await browser.close().catch(() => {{}});
+    }}
+    process.exit(ok ? 0 : 1);
+}})();
+"""
+        res = await _eval_cdp_script(client, script)
+        return {{
+            "success": res.get("success", False) and "TC_OK" in res.get("output", ""),
+            "method": "cdp_drag",
+            "output": f"Dragged ({from_x},{from_y}) -> ({to_x},{to_y})" if "TC_OK" in res.get("output", "") else res.get("output", "Unknown error"),
+        }}
 
 
 
