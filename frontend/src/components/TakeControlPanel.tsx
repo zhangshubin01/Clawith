@@ -495,7 +495,7 @@ export default function TakeControlPanel({ agentId, sessionId, onClose, onLastSc
                 {/* ── Action bar ── */}
                 <div className="tc-action-bar">
                     <div className="tc-domain-row">
-                        <span className="tc-domain-label">保存登录状态到</span>
+                        <span className="tc-domain-label">Save login state to</span>
                         <input
                             className="tc-domain-input"
                             type="text"
@@ -506,14 +506,14 @@ export default function TakeControlPanel({ agentId, sessionId, onClose, onLastSc
                     </div>
                     <div className="tc-action-buttons">
                         <button className="tc-btn-cancel" onClick={handleCancel}>
-                            退出接管
+                            Exit
                         </button>
                         <button
                             className="tc-btn-save"
                             onClick={handleComplete}
                             disabled={!locked}
                         >
-                            {SaveIcon} 保存登录状态
+                            {SaveIcon} Save Login State
                         </button>
                     </div>
                 </div>
