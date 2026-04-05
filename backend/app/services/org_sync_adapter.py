@@ -663,9 +663,18 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
     async def fetch_users(self, department_external_id: str) -> list[ExternalUser]:
         """Fetch users in a department.
 
-        Uses user_id_type=open_id which does NOT require the contact:user.employee_id:readonly
-        permission. open_id is stable per-user-per-app and sufficient as the OrgMember
-        external_id. The user_id (employee_id) is stored in raw_data for reference if needed.
+        IMPORTANT: Uses user_id_type=user_id (employee_id), which requires the
+        'contact:user.employee_id:readonly' permission in the Feishu app.
+
+        WHY user_id (not open_id or union_id):
+        - open_id is app-specific: the same user has a different open_id in each Feishu app.
+          Using open_id would break matching between org-sync users and Feishu bot channel users,
+          since they use different apps.
+        - union_id is ISV-scoped (same across apps from the same ISV), but not universal.
+        - user_id (employee_id) is the only enterprise-wide stable identifier that works
+          consistently across org sync, SSO, and bot channel user resolution.
+
+        This permission requires app re-publishing in Feishu console (not instant like DingTalk).
         """
         token = await self.get_access_token()
         users: list[ExternalUser] = []
@@ -676,10 +685,9 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                 params = {
                     "department_id": department_external_id,
                     "department_id_type": "open_department_id",
-                    # Use open_id instead of user_id to avoid requiring
-                    # the contact:user.employee_id:readonly permission.
-                    # open_id is stable per-user-per-app and works with basic contact permissions.
-                    "user_id_type": "open_id",
+                    # user_id (employee_id) is the enterprise-wide stable identifier.
+                    # Requires 'contact:user.employee_id:readonly' permission + app re-publish.
+                    "user_id_type": "user_id",
                     "page_size": "50",
                 }
                 if page_token:
@@ -702,9 +710,10 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                     raise RuntimeError(
                         f"Feishu API error (code {error_code}): {error_msg}. "
                         f"Access denied. One of the following scopes is required: "
-                        f"[contact:user.base:readonly]. "
-                        f"Please ensure the Feishu app has basic contact read permission "
-                        f"enabled and published."
+                        f"[contact:user.employee_id:readonly]. "
+                        f"Please enable this permission in Feishu Open Platform -> App -> "
+                        f"Permissions -> search 'employee_id' -> enable and publish a new version. "
+                        f"Note: unlike DingTalk, Feishu permissions require app re-publishing to take effect."
                     )
 
                 res_data = data.get("data", {})
