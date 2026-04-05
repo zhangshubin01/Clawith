@@ -246,6 +246,53 @@ async def _eval_cdp_script(client, script_body: str) -> dict:
         logger.error(f"[TakeControl] CDP exception: {e}")
         return {"success": False, "output": str(e)}
 
+
+async def _tc_browser_cleanup(agent_id: uuid.UUID, session_id: str) -> None:
+    """Best-effort CDP cleanup run immediately after Take Control exits.
+
+    Cancels any pending navigation and releases held mouse buttons so Chrome
+    is in a stable, known-good state before the AgentBay SDK's browser.operator
+    takes back control. All failures are intentionally swallowed.
+    """
+    from app.services.agentbay_client import _agentbay_sessions
+
+    cleanup_client = None
+    for img_type in ("browser", "browser_latest"):
+        ck = (agent_id, session_id, img_type)
+        if ck in _agentbay_sessions:
+            cleanup_client = _agentbay_sessions[ck][0]
+            break
+    if not cleanup_client:
+        return
+
+    # Stop lingering TC navigation and release any held mouse buttons.
+    # Uses the same connectOverCDP pathway as TC so it can reach Chrome's CDP port.
+    cleanup_script = """
+const { chromium } = require('/usr/local/lib/node_modules/playwright');
+let browser;
+(async () => {
+    try {
+        browser = await chromium.connectOverCDP('http://localhost:9222');
+        const context = browser.contexts()[0];
+        const page = context.pages()[0];
+        try { await page.evaluate(() => window.stop()); } catch(e) {}
+        try { await page.mouse.up(); } catch(e) {}
+        console.log('CLEANUP_OK');
+    } catch(e) {
+        console.error('CLEANUP_FAIL: ' + e.message);
+    } finally {
+        if (browser) await browser.close().catch(() => {});
+    }
+    process.exit(0);
+})();
+"""
+    try:
+        res = await _eval_cdp_script(cleanup_client, cleanup_script)
+        logger.info(f"[TakeControl] Post-unlock CDP cleanup: {res.get('output', '')[:100]}")
+    except Exception as e:
+        logger.warning(f"[TakeControl] Post-unlock CDP cleanup failed (non-fatal): {e}")
+
+
 async def _perform_click(client, x: int, y: int, button: str = "left"):
     """Click at (x, y) on the remote session."""
     image_type = getattr(client, '_image_type', 'unknown')
@@ -254,18 +301,26 @@ async def _perform_click(client, x: int, y: int, button: str = "left"):
     if _is_browser_session(client):
         script = f"""
 const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
+let browser;
 (async () => {{
+    let ok = false;
     try {{
-        const browser = await chromium.connectOverCDP('http://localhost:9222');
+        browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
         const page = context.pages()[0];
         await page.mouse.click({x}, {y}, {{ button: '{button}' }});
         console.log('CLICK_OK');
-        process.exit(0);
+        ok = true;
     }} catch (e) {{
         console.error('CLICK_FAIL:' + e.message);
-        process.exit(1);
+    }} finally {{
+        // Always close the CDP connection cleanly so Chrome can clean up its
+        // DevTools session. Without this, process.exit() drops the TCP
+        // connection abruptly, leaving Chrome in an undefined state that
+        // causes the next AgentBay SDK navigate call to hang.
+        if (browser) await browser.close().catch(() => {{}});
     }}
+    process.exit(ok ? 0 : 1);
 }})();
 """
         res = await _eval_cdp_script(client, script)
@@ -296,19 +351,23 @@ async def _perform_type(client, text: str):
         encoded_text = urllib.parse.quote(text)
         script = f"""
 const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
+let browser;
 (async () => {{
+    let ok = false;
     try {{
-        const browser = await chromium.connectOverCDP('http://localhost:9222');
+        browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
         const page = context.pages()[0];
         const textToType = decodeURIComponent('{encoded_text}');
         await page.keyboard.type(textToType);
         console.log('TYPE_OK');
-        process.exit(0);
+        ok = true;
     }} catch (e) {{
         console.error('TYPE_FAIL:' + e.message);
-        process.exit(1);
+    }} finally {{
+        if (browser) await browser.close().catch(() => {{}});
     }}
+    process.exit(ok ? 0 : 1);
 }})();
 """
         res = await _eval_cdp_script(client, script)
@@ -349,18 +408,22 @@ async def _perform_press_keys(client, keys: list[str]):
         combined = "+".join(playwright_keys)
         script = f"""
 const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
+let browser;
 (async () => {{
+    let ok = false;
     try {{
-        const browser = await chromium.connectOverCDP('http://localhost:9222');
+        browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
         const page = context.pages()[0];
         await page.keyboard.press('{combined}');
         console.log('PRESS_OK');
-        process.exit(0);
+        ok = true;
     }} catch (e) {{
         console.error('PRESS_FAIL:' + e.message);
-        process.exit(1);
+    }} finally {{
+        if (browser) await browser.close().catch(() => {{}});
     }}
+    process.exit(ok ? 0 : 1);
 }})();
 """
         res = await _eval_cdp_script(client, script)
@@ -397,9 +460,11 @@ async def _perform_drag(
         # arc. Control points are offset slightly perpendicular to the drag axis.
         script = f"""
  const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
+ let browser;
  (async () => {{
+     let ok = false;
      try {{
-         const browser = await chromium.connectOverCDP('http://localhost:9222');
+         browser = await chromium.connectOverCDP('http://localhost:9222');
          const context = browser.contexts()[0];
          const page = context.pages()[0];
 
@@ -445,11 +510,13 @@ async def _perform_drag(
          await page.mouse.up();
 
          console.log('TC_OK: drag complete');
-         process.exit(0);
+         ok = true;
      }} catch (e) {{
          console.error('TC_FAIL: ' + e.message);
-         process.exit(1);
+     }} finally {{
+         if (browser) await browser.close().catch(() => {{}});
      }}
+     process.exit(ok ? 0 : 1);
  }})();
  """
         res = await _eval_cdp_script(client, script)
@@ -501,18 +568,22 @@ async def control_current_url(
 
     script = """
 const { chromium } = require('/usr/local/lib/node_modules/playwright');
+let browser;
 (async () => {
+    let ok = false;
     try {
-        const browser = await chromium.connectOverCDP('http://localhost:9222');
+        browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
         const page = context.pages()[0];
         const url = page.url();
         console.log('URL_OK:' + url);
-        process.exit(0);
+        ok = true;
     } catch (e) {
         console.error('URL_FAIL:' + e.message);
-        process.exit(1);
+    } finally {
+        if (browser) await browser.close().catch(() => {});
     }
+    process.exit(ok ? 0 : 1);
 })();
 """
     try:
@@ -768,6 +839,27 @@ async def control_unlock(
         logger.info(
             f"[TakeControl] Lock released: agent={agent_id}, session={data.session_id}"
         )
+        # Reset browser initialization flag so the next agentbay browser tool
+        # call re-initializes the SDK's browser.operator. This clears any stale
+        # page references left by TC's CDP interactions that would otherwise
+        # cause browser.operator.navigate to hang indefinitely.
+        from app.services.agentbay_client import _agentbay_sessions
+        for _img_type in ("browser", "browser_latest"):
+            _ck = (agent_id, data.session_id, _img_type)
+            if _ck in _agentbay_sessions:
+                _tc_client, _ts = _agentbay_sessions[_ck]
+                _tc_client._browser_initialized = False
+                logger.info(
+                    f"[TakeControl] Reset _browser_initialized after TC unlock "
+                    f"for session={data.session_id[:8]}"
+                )
+        # Clear from the control-layer initialization tracking set as well
+        _browser_initialized.discard((agent_id, data.session_id, "browser"))
+        _browser_initialized.discard((agent_id, data.session_id, "browser_latest"))
+
+    # Post-unlock CDP cleanup: cancel any in-progress navigations and release
+    # held mouse buttons before the agent resumes its browser tool calls.
+    await _tc_browser_cleanup(agent_id, data.session_id)
 
     return {
         "status": "unlocked",
@@ -800,9 +892,11 @@ async def _export_cookies_from_session(
     import base64
     export_script = r"""
 const { chromium } = require('/usr/local/lib/node_modules/playwright');
+let browser;
 (async () => {
+    let ok = false;
     try {
-        const browser = await chromium.connectOverCDP('http://localhost:9222');
+        browser = await chromium.connectOverCDP('http://localhost:9222');
         const context = browser.contexts()[0];
         // Fetch ALL cookies from the browser profile (no URL filter = full export)
         const rawCookies = await context.cookies();
@@ -831,11 +925,13 @@ const { chromium } = require('/usr/local/lib/node_modules/playwright');
         });
 
         console.log('COOKIES_EXPORT:' + JSON.stringify(cookies));
-        process.exit(0);
+        ok = true;
     } catch (e) {
         console.error('EXPORT_FAIL:' + e.message);
-        process.exit(1);
+    } finally {
+        if (browser) await browser.close().catch(() => {});
     }
+    process.exit(ok ? 0 : 1);
 })();
 """
     # Use base64 encoding to write script to current directory (not /tmp, which may lack write perms)
