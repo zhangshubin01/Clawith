@@ -1690,8 +1690,24 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                         "parameters": t.parameters_schema or {"type": "object", "properties": {}},
                     },
                 }
+                # Defensive dedup: skip if this name was already added.
+                # Normally the UNIQUE constraint on tool.name prevents duplicate
+                # rows, but old DB dumps (pre-constraint) may have them. Without
+                # this guard, the LLM would receive duplicate tool names and
+                # return HTTP 400 "Tool names must be unique".
+                if t.name in db_tool_names:
+                    logger.warning(
+                        f"[Tools] Duplicate tool name '{t.name}' found in DB "
+                        f"(id={t.id}). Skipping to avoid LLM error. "
+                        "Run: DELETE FROM tools WHERE id IN (SELECT id FROM "
+                        "(SELECT id, ROW_NUMBER() OVER (PARTITION BY name "
+                        "ORDER BY created_at DESC) AS rn FROM tools) t WHERE rn > 1);"
+                    )
+                    continue
+
                 result.append(tool_def)
                 db_tool_names.add(t.name)
+
 
             if result:
                 # Append always-available system tools that aren't already in the DB list
