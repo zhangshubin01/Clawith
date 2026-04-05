@@ -4404,47 +4404,101 @@ function AgentDetailInner() {
                                                 </div>
                                             )}
                                             {(() => {
-                                                // Build an interleaved AnalysisItem[] from consecutive thinking + tool_call
-                                                // messages. Only real content messages (user text, assistant with content)
-                                                // flush the current group and are rendered as normal chat bubbles.
+                                                // ── Grouping Algorithm (lookahead-based) ──
+                                                //
+                                                // Goal: merge all "analysis" steps (thinking + tool calls +
+                                                // mid-flow assistant text) into a single AnalysisCard, and
+                                                // only emit a real assistant bubble for the *final* answer.
+                                                //
+                                                // Problem with naive flushing:
+                                                //   Claude and minimax sometimes emit an assistant message with
+                                                //   real content (e.g. "Let me search…") BETWEEN reasoning and
+                                                //   tool calls. The old approach flushed the group on any
+                                                //   assistant content, producing multiple fragmented cards.
+                                                //
+                                                // Solution — two-pass lookahead:
+                                                //   Pass 1: pre-classify every message as either
+                                                //     "analysis"  — part of the internal reasoning/tool loop
+                                                //     "final"     — the actual answer to show the user
+                                                //   Classification rule: an assistant message (even with content)
+                                                //   is "analysis" if there is *at least one more tool_call
+                                                //   somewhere after it in the same sequence*.
+                                                //   Pass 2: build GroupedEntry[] based on classifications.
+
+                                                // Pass 1: mark each index as 'analysis' or 'final'
+                                                const msgClass: ('analysis' | 'final')[] = new Array(chatMessages.length).fill('final');
+
+                                                // Walk backwards: once we see a tool_call, all preceding
+                                                // assistant messages (until the previous user turn or start)
+                                                // are reclassified as 'analysis'.
+                                                let hasFutureTool = false;
+                                                for (let i = chatMessages.length - 1; i >= 0; i--) {
+                                                    const msg = chatMessages[i];
+                                                    if (msg.role === 'tool_call') {
+                                                        msgClass[i] = 'analysis';
+                                                        hasFutureTool = true;
+                                                    } else if (msg.role === 'user') {
+                                                        // User turn resets the lookahead boundary
+                                                        hasFutureTool = false;
+                                                    } else if (msg.role === 'assistant') {
+                                                        if (hasFutureTool) {
+                                                            // This assistant message (thinking-only or with content)
+                                                            // precedes more tool calls → it's part of the analysis
+                                                            msgClass[i] = 'analysis';
+                                                        }
+                                                        // else: it's a final answer, keep 'final'
+                                                    }
+                                                }
+
+                                                // Pass 2: build grouped entries
                                                 type GroupedEntry =
                                                     | { type: 'analysis_group'; items: AnalysisItem[]; key: number }
                                                     | { type: 'msg'; msg: any; i: number };
-
                                                 const grouped: GroupedEntry[] = [];
                                                 let currentGroup: AnalysisItem[] | null = null;
                                                 let groupStartKey = 0;
-
                                                 const flushGroup = () => {
                                                     if (currentGroup && currentGroup.length > 0) {
                                                         grouped.push({ type: 'analysis_group', items: currentGroup, key: groupStartKey });
                                                         currentGroup = null;
                                                     }
                                                 };
-
                                                 for (let i = 0; i < chatMessages.length; i++) {
+
                                                     const msg = chatMessages[i];
-                                                    if (msg.role === 'tool_call') {
-                                                        // Start a new group at the first tool_call if none open
+                                                    if (msgClass[i] === 'analysis') {
+                                                        // Open a new group if needed
                                                         if (!currentGroup) { currentGroup = []; groupStartKey = i; }
-                                                        currentGroup.push({
-                                                            type: 'tool',
-                                                            name: msg.toolName || 'tool',
-                                                            args: msg.toolArgs || {},
-                                                            status: msg.toolStatus === 'running' ? 'running' : 'done',
-                                                            result: msg.toolResult || undefined,
-                                                        });
-                                                    } else if (msg.role === 'assistant' && !msg.content?.trim() && msg.thinking) {
-                                                        // Thinking-only message: also part of the analysis group
-                                                        if (!currentGroup) { currentGroup = []; groupStartKey = i; }
-                                                        currentGroup.push({ type: 'thinking', content: msg.thinking });
+                                                        if (msg.role === 'tool_call') {
+                                                            currentGroup.push({
+                                                                type: 'tool',
+                                                                name: msg.toolName || 'tool',
+                                                                args: msg.toolArgs || {},
+                                                                status: msg.toolStatus === 'running' ? 'running' : 'done',
+                                                                result: msg.toolResult || undefined,
+                                                            });
+                                                        } else if (msg.role === 'assistant') {
+                                                            // Could be thinking-only OR has content (mid-flow text)
+                                                            const thinkingText = msg.thinking || '';
+                                                            const contentText = msg.content?.trim() || '';
+                                                            // Add thinking block first (if present)
+                                                            if (thinkingText) {
+                                                                currentGroup.push({ type: 'thinking', content: thinkingText });
+                                                            }
+                                                            // Add mid-flow content as a thinking block too
+                                                            // (displayed with slightly different style to distinguish)
+                                                            if (contentText) {
+                                                                currentGroup.push({ type: 'thinking', content: contentText });
+                                                            }
+                                                        }
                                                     } else {
-                                                        // Real content (user message or assistant with text): flush and emit
+                                                        // 'final': flush any open group first, then emit as chat bubble
                                                         flushGroup();
                                                         grouped.push({ type: 'msg', msg, i });
                                                     }
                                                 }
                                                 flushGroup(); // flush any trailing group
+
 
                                                 return grouped.map((entry, entryIdx) => {
                                                     if (entry.type === 'analysis_group') {

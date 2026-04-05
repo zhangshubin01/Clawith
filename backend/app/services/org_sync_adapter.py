@@ -943,56 +943,49 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
 
     def __init__(self, provider: IdentityProvider | None = None, config: dict | None = None, tenant_id: uuid.UUID | None = None):
         super().__init__(provider, config, tenant_id)
-        # Handle various config key naming conventions
+        # corp_id: the enterprise's WeCom corp ID
+        # secret: the 通讯录同步 (contact-sync) secret — used for department/simplelist and user/list_id
         self.corp_id = self.config.get("corp_id") or self.config.get("app_id") or self.config.get("corpid")
-        self.secret = self.config.get("secret") or self.config.get("app_secret") or self.config.get("corpsecret") or self.config.get("bot_secret")
-        self.bot_id = self.config.get("bot_id")
-        self.bot_secret = self.config.get("bot_secret") or self.secret
+        self.secret = self.config.get("secret") or self.config.get("app_secret") or self.config.get("corpsecret")
         self._access_token: str | None = None
         self._token_expires_at: datetime | None = None
+
+    async def _fetch_token(self, corp_id: str, secret: str) -> str:
+        """Fetch a fresh WeCom access_token for the given corp_id/secret pair."""
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                self.WECOM_TOKEN_URL,
+                params={"corpid": corp_id, "corpsecret": secret},
+            )
+            data = resp.json()
+            if data.get("errcode") == 0:
+                return data.get("access_token") or ""
+            raise RuntimeError(f"[WeCom] gettoken failed for corpid={corp_id}: {data}")
 
     @property
     def api_base_url(self) -> str:
         return self.WECOM_API_URL
 
     async def get_access_token(self) -> str:
-        """Get valid access token for WeCom API."""
+        """Get valid access token using the 通讯录同步 (contact-sync) secret.
+
+        This token can call department/simplelist and user/list_id.
+        It cannot call user/list or user/get (those raise errcode 48009).
+        Full user profiles are obtained passively via SSO login instead.
+        """
         if self._access_token and self._token_expires_at and datetime.now() < self._token_expires_at:
             return self._access_token
 
-        # Priority 1: Standard CorpID + Secret
-        if self.corp_id and self.secret:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    self.WECOM_TOKEN_URL,
-                    params={"corpid": self.corp_id, "corpsecret": self.secret},
-                )
-                data = resp.json()
-                if data.get("errcode") == 0:
-                    token = data.get("access_token") or ""
-                    expires_in = int(data.get("expires_in") or 7200)
-                    self._access_token = token
-                    self._token_expires_at = datetime.now() + timedelta(seconds=max(expires_in - 300, 300))
-                    return token
-                else:
-                    logger.error(f"[WeCom Sync] Token error with corp_id: {data}")
+        if not self.corp_id or not self.secret:
+            raise ValueError("WeCom corp_id or secret missing in provider config")
 
-        # Priority 2: Try bot_id as corp_id if no corp_id provided (fallback)
-        if not self.corp_id and self.bot_id and self.bot_secret:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    self.WECOM_TOKEN_URL,
-                    params={"corpid": self.bot_id, "corpsecret": self.bot_secret},
-                )
-                data = resp.json()
-                if data.get("errcode") == 0:
-                    token = data.get("access_token") or ""
-                    expires_in = int(data.get("expires_in") or 7200)
-                    self._access_token = token
-                    self._token_expires_at = datetime.now() + timedelta(seconds=max(expires_in - 300, 300))
-                    return token
+        token = await self._fetch_token(self.corp_id, self.secret)
+        self._access_token = token
+        # Refresh slightly before true expiry to avoid clock-skew issues
+        self._token_expires_at = datetime.now() + timedelta(seconds=7200 - 300)
+        return token
 
-        raise ValueError("WeCom credentials (corp_id/secret or bot_id/secret) missing or invalid")
+
 
     async def fetch_departments(self) -> list[ExternalDepartment]:
         """Fetch all departments from WeCom using the simplelist endpoint.
@@ -1033,64 +1026,35 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
         return all_depts
 
     async def fetch_users(self, department_external_id: str) -> list[ExternalUser]:
-        """Fetch user details in a department from WeCom.
+        """Fetch user stubs for a department using user/list_id.
 
-        Tries the fast bulk API (user/list) first.  If the contact assistant
-        token returns 48009 ('api forbidden for contact assistant'), falls back
-        to the two-step approach: user/list_id (IDs only) then user/get per
-        user.  Both fallback APIs ARE accessible to the contact assistant.
+        WeCom API strategy for org sync:
+        - user/list  (bulk detail) → errcode 48009 for contact-sync token; removed.
+        - user/get   (per-user detail) → IP-whitelisted only; removed.
+        - user/list_id (ID only)   → works with contact-sync token; used here.
+
+        Only userid and open_userid are obtained in org sync. Full profile
+        data (name, avatar, email, mobile) is enriched passively when each
+        user completes their first WeCom SSO login (via auth/getuserdetail).
         """
         token = await self.get_access_token()
-        try:
-            return await self._fetch_users_bulk(token, department_external_id)
-        except RuntimeError as exc:
-            if "48009" in str(exc) or "forbidden for contact assistant" in str(exc):
-                logger.info(
-                    f"[WeCom Sync] user/list returned 48009 for dept {department_external_id}, "
-                    "falling back to list_id + user/get (contact assistant mode)"
-                )
-                return await self._fetch_users_by_id(token, department_external_id)
-            raise
+        return await self._fetch_user_stubs(token, department_external_id)
 
-    async def _fetch_users_bulk(self, token: str, department_external_id: str) -> list[ExternalUser]:
-        """Fast path: fetch all users in one request using user/list."""
-        users: list[ExternalUser] = []
+    async def _fetch_user_stubs(self, sync_token: str, department_external_id: str) -> list[ExternalUser]:
+        """Fetch minimal user stubs via user/list_id.
 
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                self.WECOM_USER_LIST_URL,
-                params={
-                    "access_token": token,
-                    "department_id": department_external_id,
-                    "fetch_child": 0,
-                },
-            )
-            data = resp.json()
-            if data.get("errcode") != 0:
-                raise RuntimeError(f"WeCom user list error: {data.get('errmsg') or data}")
-
-            for item in data.get("userlist", []):
-                users.append(self._wecom_item_to_external_user(item, department_external_id))
-
-        return users
-
-    async def _fetch_users_by_id(self, token: str, department_external_id: str) -> list[ExternalUser]:
-        """Fallback path for contact assistant token: list_id + individual user/get.
-
-        1. user/list_id  → get {userid, open_userid} for all dept members
-        2. user/get      → get full details for each userid (concurrent, up to 10 at a time)
+        Returns placeholder ExternalUser objects with only userid and open_userid
+        populated. The name is intentionally set to the userid so the passive
+        SSO enrichment in sso_service.link_identity() can detect the placeholder
+        and overwrite it with the real name from auth/getuserdetail.
         """
-        import asyncio
-
-        # Step 1: collect all user IDs in the department
-        user_ids: list[str] = []
-        open_id_map: dict[str, str] = {}  # userid -> open_userid
+        user_stubs: list[ExternalUser] = []
         cursor = ""
 
         async with httpx.AsyncClient(timeout=15) as client:
             while True:
                 params: dict = {
-                    "access_token": token,
+                    "access_token": sync_token,
                     "department_id": department_external_id,
                     "limit": 1000,
                 }
@@ -1104,74 +1068,23 @@ class WeComOrgSyncAdapter(BaseOrgSyncAdapter):
 
                 for entry in data.get("dept_user", []):
                     uid = entry.get("userid", "")
-                    if uid:
-                        user_ids.append(uid)
-                        open_id_map[uid] = entry.get("open_userid", "")
+                    if not uid:
+                        continue
+                    # Use userid as the name placeholder so link_identity() knows
+                    # to overwrite it once the user logs in via SSO.
+                    user_stubs.append(ExternalUser(
+                        external_id=uid,
+                        name=uid,  # placeholder — enriched on first SSO login
+                        open_id=entry.get("open_userid", ""),
+                        department_external_id=department_external_id,
+                        department_ids=[department_external_id],
+                    ))
 
                 cursor = data.get("next_cursor", "")
                 if not cursor:
                     break
 
-        if not user_ids:
-            return []
-
-        # Step 2: fetch details for each user concurrently (max 10 at a time)
-        sem = asyncio.Semaphore(10)
-        users: list[ExternalUser] = []
-
-        async def get_one(uid: str) -> ExternalUser | None:
-            async with sem:
-                async with httpx.AsyncClient(timeout=10) as cl:
-                    resp = await cl.get(
-                        self.WECOM_USER_GET_URL,
-                        params={"access_token": token, "userid": uid},
-                    )
-                    item = resp.json()
-                    if item.get("errcode") != 0:
-                        logger.warning(
-                            f"[WeCom Sync] user/get failed for {uid}: {item.get('errmsg')}, "
-                            "hint: " + str(item.get("hint", "")) +
-                            ", from ip: " + str(item.get("invalidstaffip", "")) +
-                            f", more info at https://open.work.weixin.qq.com/devtool/query?e={item.get('errcode')}"
-                        )
-                        # Degraded mode: save a minimal member entry so the user appears in the org chart.
-                        # Full details (name, email, avatar) require a non-contact-assistant Secret or
-                        # a whitelisted self-built App (AgentID + Secret with user_read scope).
-                        return ExternalUser(
-                            external_id=uid,
-                            name=uid,  # Use userid as display name until full details are available
-                            open_id=open_id_map.get(uid, ""),
-                            department_external_id=department_external_id,
-                            department_ids=[department_external_id],
-                        )
-                    # Inject open_userid obtained from list_id step
-                    item.setdefault("open_userid", open_id_map.get(uid, ""))
-                    return self._wecom_item_to_external_user(item, department_external_id)
-
-        results = await asyncio.gather(*[get_one(uid) for uid in user_ids])
-        users = [u for u in results if u is not None]
-        return users
-
-    def _wecom_item_to_external_user(self, item: dict, department_external_id: str) -> ExternalUser:
-        """Convert a WeCom user dict (from user/list or user/get) to ExternalUser."""
-        external_id = item.get("userid", "")
-        dept_ids = [str(did) for did in item.get("department", [])]
-        if not dept_ids:
-            dept_ids = [department_external_id]
-
-        return ExternalUser(
-            external_id=external_id,
-            name=item.get("name", ""),
-            open_id=item.get("open_userid", "") or item.get("openid", ""),
-            email=item.get("email", "") or item.get("biz_mail", ""),
-            avatar_url=item.get("avatar", ""),
-            title=item.get("position", ""),
-            department_external_id=department_external_id,
-            department_ids=dept_ids,
-            mobile=item.get("mobile", ""),
-            status="active" if item.get("status") == 1 else "inactive",
-            raw_data=item,
-        )
+        return user_stubs
 
 
 # Adapter class mapping

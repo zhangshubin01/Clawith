@@ -1225,12 +1225,12 @@
           "step7": "Left sidebar → App Release → Create Version (set Availability to All Employees) → Release for Review → approve it in your admin console"
         },
         "dingtalk": {
-          "step1": "Go to open.dingtalk.com → log in → Developer Console → Create Enterprise Internal App → fill in name",
-          "step2": "App Features → click Add next to Contacts",
-          "step3": "App Info → copy AppKey and AppSecret",
-          "step4": "Contacts Permission → enable reading permissions for Departments and Members",
-          "step5": "Paste AppKey and AppSecret below → click Save",
-          "step6": "If you need SSO via DingTalk: Turn on the 'SSO Login' switch below, then in DingTalk configure: Login & Sharing → Add the 'Redirect URL' below as the Callback Domain. Share the 'SSO Login URL' with your team."
+          "step1": "Go to open.dingtalk.com → log in → go to App Development → Create Internal Enterprise App → enter a name",
+          "step2": "Once the app is created, go to the app page → left sidebar 'Credentials & Basic Info' → copy AppKey and AppSecret, paste them below and save",
+          "step3": "Left sidebar 'Development Config' → 'Permission Management' → Under the 'Contacts Management' category, find each permission below and click 'Enable Now' (no approval required, takes effect immediately): ① Contacts Dept Read Permission (includes: Get Department List [qyapi_get_department_list], Get Department Details, Get All Parent Depts of a Dept); ② Member Info Read Permission (Query User Details); ③ Employee Mobile Number (fieldMobile); ④ Email & Personal Info (fieldEmail)",
+          "step4": "On the same 'Permission Management' page → switch to the 'Contacts Permission Scope' tab → set it to 'All Employees' (or select specific departments, but ensure coverage of all members you want to sync)",
+          "step5": "Paste AppKey and AppSecret below → click Save Config → click 'Sync' to run the first sync",
+          "step6": "If you need DingTalk SSO: Turn on the 'SSO Login' switch below, then in the DingTalk developer console → Development Config → Login & Sharing → add your Redirect URL domain as the Callback Domain → share the SSO Login URL with your team for one-click login"
         },
         "wecom": {
           "step1": "Log in to WeCom Admin Console → Management Tools → Address Book Sync",
@@ -1349,7 +1349,17 @@
       "botId": "Bot ID (Intelligent Robot)",
       "botSecret": "Bot Secret",
       "appKey": "App Key",
-      "appSecret": "App Secret"
+      "appSecret": "App Secret",
+      "wecomNotice": {
+        "title": "Prerequisites for WeCom Integration",
+        "syncTitle": "1. User Directory Sync",
+        "syncDesc": "Directory sync via the contacts secret works for fetching user IDs. However, fetching full user details (name, avatar, email) requires the self-built app's IP to be whitelisted in WeCom — a setting that must be configured by the WeCom enterprise admin.",
+        "ssoTitle": "2. SSO Login (Single Sign-On)",
+        "ssoDesc": "WeCom OAuth requires the callback domain to be ICP-filed with a business entity matching the WeCom enterprise's registration. The platform domain (clawith.ai) is a .ai TLD which cannot be ICP-filed in mainland China, making SSO unavailable on the current domain. Requires either an ICP-filed .com/.cn domain or WeCom ISV (service provider) registration.",
+        "messagingTitle": "3. Proactive 1-to-1 Messaging (AI-initiated)",
+        "messagingDesc": "Sending messages to individual users requires a valid WeCom API access token, which can only be obtained from a server IP that has been whitelisted in the self-built app's settings. Unlike Feishu, WeCom mandates IP-level restrictions on all API calls — there is no token-only authentication option.",
+        "footerText": "Due to the above constraints, WeCom integration currently cannot be easily set up by most users. We are actively exploring alternative approaches — including WeCom ISV (service provider) registration and lower-friction API options — or we may advocate for WeCom to relax these restrictions for SaaS platforms. Configuration will be re-enabled once a viable path is available."
+      }
     },
     "dangerZone": "️ Danger Zone",
     "deleteCompanyDesc": "Permanently delete this company and all its data, including agents, models, tools, and skills. This action cannot be undone.",
