@@ -745,8 +745,8 @@ function OrgTab({ tenant }: { tenant: any }) {
                         </button>
                     )}
                 </div>
-                {/* WeCom App IP Whitelist verification URL — shown when verify_token is set */}
-                {type === 'wecom' && editingId && (existingProvider?.config?.verify_token || form.config?.verify_token) && (() => {
+                {/* WeCom App IP Whitelist verification URL — hidden while WeCom config is disabled */}
+                {type === 'wecom' && false && editingId && (existingProvider?.config?.verify_token || form.config?.verify_token) && (() => {
                     const verifyToken = form.config?.verify_token || existingProvider?.config?.verify_token || '';
                     const aesKey = form.config?.verify_aes_key || existingProvider?.config?.verify_aes_key || '';
                     // Use window.location.origin as the base, but if it's a private/non-standard URL let user know
@@ -803,7 +803,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                     <div style={{ fontWeight: 500, fontSize: '14px' }}>{t('enterprise.org.orgBrowser', 'Organization Browser')}</div>
 
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
-                        {['feishu', 'dingtalk', 'wecom'].includes(p.provider_type) && (
+                        {['feishu', 'dingtalk'].includes(p.provider_type) && (
                             <button className="btn btn-secondary btn-sm" style={{ fontSize: '12px' }} onClick={() => triggerSync(p.id)} disabled={!!syncing}>
                                 {syncing === p.id ? 'Syncing...' : 'Sync Directory'}
                             </button>
@@ -914,7 +914,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                                                 t={t}
                                             />
                                         )}
-                                        {existingProvider && renderOrgBrowser(existingProvider)}
+                                        {existingProvider && idp.type !== 'wecom' && renderOrgBrowser(existingProvider)}
                                     </div>
                                 )}
                             </div>
