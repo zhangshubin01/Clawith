@@ -16,8 +16,13 @@ if (Get-Command py -ErrorAction SilentlyContinue) {
     Write-Error "未找到 Python。请安装 https://www.python.org/downloads/ 并勾选 Add to PATH，或安装 Windows Python Launcher (py)。"
 }
 
+$reqLock = Join-Path $Root "requirements.lock.txt"
+$reqTxt = Join-Path $Root "requirements.txt"
+$reqFile = if (Test-Path $reqLock) { $reqLock } else { $reqTxt }
+
 & "$Root\.venv\Scripts\pip.exe" install -U pip
-& "$Root\.venv\Scripts\pip.exe" install -r "$Root\requirements.txt"
+& "$Root\.venv\Scripts\pip.exe" install --no-cache-dir -r $reqFile
+Write-Host "已安装依赖: $reqFile"
 
 $envFile = Join-Path $Root ".env"
 $example = Join-Path $Root "env.example"

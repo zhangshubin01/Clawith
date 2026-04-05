@@ -1,5 +1,6 @@
 """WebSocket chat endpoint for real-time agent conversations."""
 
+import asyncio
 import json
 import re
 import uuid
@@ -122,6 +123,7 @@ async def call_llm(
     on_tool_call=None,
     on_thinking=None,
     supports_vision=False,
+    cancel_event: asyncio.Event | None = None,
 ) -> str:
     """Call LLM via unified client with function-calling tool loop.
 
@@ -129,6 +131,9 @@ async def call_llm(
         on_chunk: Optional async callback(text: str) for streaming chunks to client.
         on_thinking: Optional async callback(text: str) for reasoning/thinking content.
         on_tool_call: Optional async callback(dict) for tool call status updates.
+            Payload includes ``tool_call_id`` (OpenAI tool call id) when available.
+        cancel_event: When set (e.g. ACP ``cancel``), aborts before the next LLM round and is passed
+            into ``client.stream(..., cancel_event=...)`` so streaming providers can close the HTTP body early.
     """
     from app.services.agent_tools import AGENT_TOOLS, execute_tool, get_agent_tools_for_llm
     from app.services.llm_utils import create_llm_client, get_max_tokens, LLMMessage, LLMError
@@ -196,7 +201,12 @@ async def call_llm(
     if supports_vision:
         import re as _re_v
         for i, msg in enumerate(api_messages):
-            if msg.role != "user" or not msg.content or not isinstance(msg.content, str):
+            if msg.role != "user" or not msg.content:
+                continue
+            # Already OpenAI-style multipart (e.g. ACP IDE prompt_parts)
+            if isinstance(msg.content, list):
+                continue
+            if not isinstance(msg.content, str):
                 continue
             content_str = msg.content
             # Find [image_data:data:image/...;base64,...] markers
@@ -221,7 +231,29 @@ async def call_llm(
         import re as _re_strip
         _img_pattern = r'\[image_data:data:image/[^;]+;base64,[A-Za-z0-9+/=]+\]'
         for i, msg in enumerate(api_messages):
-            if msg.role != "user" or not isinstance(msg.content, str):
+            if msg.role != "user" or not msg.content:
+                continue
+            if isinstance(msg.content, list):
+                text_bits: list[str] = []
+                n_img = 0
+                for part in msg.content:
+                    if not isinstance(part, dict):
+                        continue
+                    pt = part.get("type")
+                    if pt == "text":
+                        tx = part.get("text") or ""
+                        if tx:
+                            text_bits.append(tx)
+                    elif pt == "image_url":
+                        n_img += 1
+                cleaned = "\n".join(text_bits).strip()
+                if n_img > 0:
+                    cleaned = (
+                        (cleaned + "\n") if cleaned else ""
+                    ) + f"[用户发送了 {n_img} 张图片，但当前模型不支持视觉，无法查看图片内容]"
+                api_messages[i] = LLMMessage(role=msg.role, content=cleaned or "…")
+                continue
+            if not isinstance(msg.content, str):
                 continue
             if "[image_data:" in msg.content:
                 _n_imgs = len(_re_strip.findall(_img_pattern, msg.content))
@@ -255,8 +287,19 @@ async def call_llm(
     _cache_query = ""  # Will hold last user message for cache key
     if agent_id:
         for _m in reversed(messages):
-            if _m.get("role") == "user" and isinstance(_m.get("content"), str):
-                _cache_query = _m["content"].strip()
+            if _m.get("role") != "user":
+                continue
+            _c = _m.get("content")
+            if isinstance(_c, str):
+                _cache_query = _c.strip()
+                break
+            if isinstance(_c, list):
+                _bits = [
+                    (p.get("text") or "")
+                    for p in _c
+                    if isinstance(p, dict) and p.get("type") == "text"
+                ]
+                _cache_query = "\n".join(_bits).strip()
                 break
         if _cache_query:
             try:
@@ -270,6 +313,12 @@ async def call_llm(
 
     # Tool-calling loop (configurable per agent, default 50)
     for round_i in range(_max_tool_rounds):
+        if cancel_event is not None and cancel_event.is_set():
+            if agent_id and _accumulated_tokens > 0:
+                await record_token_usage(agent_id, _accumulated_tokens)
+            await client.close()
+            return "[Cancelled]"
+
         # ── Dynamic tool-call limit warning (Aware engine) ──
         # Don't tell the agent about limits at the start — only warn when approaching.
         # This prevents models from rushing to complete tasks prematurely.
@@ -291,6 +340,11 @@ async def call_llm(
             ))
 
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                if agent_id and _accumulated_tokens > 0:
+                    await record_token_usage(agent_id, _accumulated_tokens)
+                await client.close()
+                return "[Cancelled]"
             # Use streaming API for real-time responses
             response = await client.stream(
                 messages=api_messages,
@@ -299,6 +353,7 @@ async def call_llm(
                 max_tokens=max_tokens,
                 on_chunk=on_chunk,
                 on_thinking=on_thinking,
+                cancel_event=cancel_event,
             )
         except LLMError as e:
             # Record accumulated tokens before returning error
@@ -320,16 +375,47 @@ async def call_llm(
             return f"[LLM call error] {type(e).__name__}: {str(e)[:200]}"
 
         # ── Track tokens for this round ──
-        logger.debug(f"[LLM] stream() returned: {len(response.content or '')} chars, finish={response.finish_reason}, tools={len(response.tool_calls or [])}")
+        if cancel_event is not None:
+            logger.info(
+                "[LLM][ACP] stream round=%s content_len=%s finish=%s tool_calls=%s",
+                round_i + 1,
+                len(response.content or ""),
+                response.finish_reason,
+                len(response.tool_calls or []),
+            )
+        else:
+            logger.debug(
+                f"[LLM] stream() returned: {len(response.content or '')} chars, finish={response.finish_reason}, tools={len(response.tool_calls or [])}"
+            )
         real_tokens = extract_usage_tokens(response.usage)
         if real_tokens:
             _accumulated_tokens += real_tokens
         else:
-            round_chars = sum(len(m.content or '') if isinstance(m.content, str) else 0 for m in api_messages) + len(response.content or '')
+            # Fallback: estimate from message content length (str or multipart list for vision/ACP)
+            def _approx_len(c):
+                if isinstance(c, str):
+                    return len(c)
+                if isinstance(c, list):
+                    return sum(len(str(p)) for p in c)
+                return 0
+
+            round_chars = sum(_approx_len(m.content) for m in api_messages) + len(response.content or '')
             _accumulated_tokens += estimate_tokens_from_chars(round_chars)
+
+        if cancel_event is not None and cancel_event.is_set():
+            if agent_id and _accumulated_tokens > 0:
+                await record_token_usage(agent_id, _accumulated_tokens)
+            await client.close()
+            return "[Cancelled]"
 
         # If no tool calls, return the final content
         if not response.tool_calls:
+            if cancel_event is not None:
+                logger.info(
+                    "[LLM][ACP] final reply round=%s content_len=%s",
+                    round_i + 1,
+                    len(response.content or ""),
+                )
             if agent_id and _accumulated_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_tokens)
             await client.close()
@@ -363,7 +449,21 @@ async def call_llm(
         _any_tools_used = True  # Track for semantic cache: don't cache tool-heavy responses
 
         # ── Parallel tool execution ──────────────────────────────────────────
-        _TOOLS_REQUIRING_ARGS = {"write_file", "read_file", "delete_file", "read_document", "send_message_to_agent", "send_feishu_message", "send_email"}
+        _TOOLS_REQUIRING_ARGS = {
+            "write_file",
+            "read_file",
+            "delete_file",
+            "read_document",
+            "send_message_to_agent",
+            "send_feishu_message",
+            "send_email",
+            "ide_read_file",
+            "ide_write_file",
+            "ide_execute_command",
+            "ide_create_terminal",
+            "ide_kill_terminal",
+            "ide_release_terminal",
+        }
         _MAX_PARALLEL_TOOLS = 4
 
         # Phase 1: validate + parse all tool calls, reject empty-args ones immediately
@@ -398,7 +498,10 @@ async def call_llm(
                     if on_tool_call:
                         try:
                             await on_tool_call({
-                                "name": tool_name, "args": args, "status": "running",
+                                "name": tool_name,
+                                "args": args,
+                                "status": "running",
+                                "tool_call_id": tc.get("id", ""),
                                 "reasoning_content": full_reasoning_content,
                             })
                         except Exception:
@@ -413,8 +516,12 @@ async def call_llm(
                     if on_tool_call:
                         try:
                             await on_tool_call({
-                                "name": tool_name, "args": args, "status": "done",
-                                "result": result, "reasoning_content": full_reasoning_content,
+                                "name": tool_name,
+                                "args": args,
+                                "status": "done",
+                                "tool_call_id": tc.get("id", ""),
+                                "result": result,
+                                "reasoning_content": full_reasoning_content,
                             })
                         except Exception as _cb_err:
                             logger.warning(f"[LLM] on_tool_call callback error: {_cb_err}")
@@ -454,6 +561,12 @@ async def call_llm(
                         tool_call_id=_tc_id,
                         content=_tool_content,
                     ))
+            if cancel_event is not None and _valid_calls:
+                logger.info(
+                    "[LLM][ACP] round %s committed %s tool result(s); requesting next stream",
+                    round_i + 1,
+                    len(_valid_calls),
+                )
         # ── End parallel tool execution ──────────────────────────────────────
 
     # Record tokens even on "too many rounds" exit

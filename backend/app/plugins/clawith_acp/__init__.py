@@ -11,9 +11,12 @@ class ClawithAcpPlugin(ClawithPlugin):
     description = "Agent Client Protocol (ACP) remote WebSocket for IDE thin clients"
 
     def register(self, app: FastAPI) -> None:
-        from app.plugins.clawith_acp.router import router
+        from app.plugins.clawith_acp.router import install_acp_tool_hooks, router
 
-        # Must match clawith_acp/server.py (thin client) ws path
+        # Idempotent; prefer explicit install here over relying on import side effects only.
+        install_acp_tool_hooks()
+
+        # Must match integrations/clawith-ide-acp/server.py WebSocket path
         app.include_router(router, prefix="/api/plugins/clawith-acp")
 
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 在 macOS 上创建虚拟环境并安装依赖。用法：在仓库中执行 bash scripts/setup-mac.sh
+# 在 macOS 上创建虚拟环境并安装依赖。用法：在 clawith-ide-acp 根目录执行 bash scripts/setup-mac.sh
+# 企业装机：优先使用 requirements.lock.txt（与 ENTERPRISE.md 一致）
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -9,9 +10,15 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+REQ="$ROOT/requirements.lock.txt"
+if [[ ! -f "$REQ" ]]; then
+  REQ="$ROOT/requirements.txt"
+fi
+
 python3 -m venv "$ROOT/.venv"
 "$ROOT/.venv/bin/pip" install -U pip
-"$ROOT/.venv/bin/pip" install -r "$ROOT/requirements.txt"
+"$ROOT/.venv/bin/pip" install --no-cache-dir -r "$REQ"
+echo "已安装依赖: $REQ"
 
 if [[ ! -f "$ROOT/.env" ]]; then
   cp "$ROOT/env.example" "$ROOT/.env"

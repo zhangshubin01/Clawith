@@ -96,7 +96,37 @@ class LLMMessage:
                     }
                 ]
             }
-            
+
+        # User message: OpenAI-style multipart (text + image_url) → Anthropic content blocks
+        if role == "user" and isinstance(self.content, list):
+            _blocks: list[dict[str, Any]] = []
+            for part in self.content:
+                if not isinstance(part, dict):
+                    continue
+                pt = part.get("type")
+                if pt == "text":
+                    _blocks.append({"type": "text", "text": part.get("text", "") or ""})
+                elif pt == "image_url":
+                    img_url = (part.get("image_url") or {}).get("url", "")
+                    if img_url.startswith("data:image/"):
+                        header, b64_data = img_url.split(",", 1)
+                        media_type = header.split(":")[1].split(";")[0]
+                        _blocks.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": b64_data,
+                                },
+                            }
+                        )
+            if _blocks:
+                if len(_blocks) == 1 and _blocks[0].get("type") == "text":
+                    return {"role": "user", "content": _blocks[0].get("text", "")}
+                return {"role": "user", "content": _blocks}
+            return {"role": "user", "content": ""}
+
         content_blocks = []
         
         # Add reasoning/thinking content if present
@@ -213,7 +243,12 @@ class LLMClient(ABC):
         on_thinking: ThinkingCallback | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        """Send a streaming request and return the aggregated response."""
+        """Send a streaming request and return the aggregated response.
+
+        Implementations may accept ``cancel_event`` in ``kwargs`` (``asyncio.Event``): when set during
+        streaming, the client should close the upstream stream and return ``finish_reason='cancelled'``
+        with partial content and no tool calls.
+        """
         pass
 
     @abstractmethod
@@ -473,8 +508,10 @@ class OpenAICompatibleClient(LLMClient):
         **kwargs: Any,
     ) -> LLMResponse:
         """Streaming completion."""
+        stream_kw = dict(kwargs)
+        cancel_event = stream_kw.pop("cancel_event", None)
         url = f"{self._normalize_base_url()}/chat/completions"
-        payload = self._build_payload(messages, tools, temperature, max_tokens, stream=True, **kwargs)
+        payload = self._build_payload(messages, tools, temperature, max_tokens, stream=True, **stream_kw)
 
         full_content = ""
         full_reasoning = ""
@@ -499,6 +536,16 @@ class OpenAICompatibleClient(LLMClient):
                         raise LLMError(f"HTTP {resp.status_code}: {error_body[:500]}")
 
                     async for line in resp.aiter_lines():
+                        if cancel_event is not None and cancel_event.is_set():
+                            await resp.aclose()
+                            return LLMResponse(
+                                content=full_content,
+                                tool_calls=[],
+                                reasoning_content=full_reasoning or None,
+                                finish_reason="cancelled",
+                                usage=final_usage,
+                                model=self.model,
+                            )
                         chunk, in_think, tag_buffer, json_buffer = self._parse_stream_line(
                             line, in_think, tag_buffer, json_buffer
                         )
@@ -861,12 +908,21 @@ class OpenAIResponsesClient(LLMClient):
 
         Minimal implementation: fallback to non-streaming and forward final text.
         """
+        stream_kw = dict(kwargs)
+        cancel_event = stream_kw.pop("cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            return LLMResponse(
+                content="",
+                tool_calls=[],
+                finish_reason="cancelled",
+                model=self.model,
+            )
         response = await self.complete(
             messages=messages,
             tools=tools,
             temperature=temperature,
             max_tokens=max_tokens,
-            **kwargs,
+            **stream_kw,
         )
         if on_chunk and response.content:
             await on_chunk(response.content)
@@ -1258,6 +1314,8 @@ class GeminiClient(LLMClient):
         **kwargs: Any,
     ) -> LLMResponse:
         """Streaming completion using Gemini SSE endpoint."""
+        stream_kw = dict(kwargs)
+        cancel_event = stream_kw.pop("cancel_event", None)
         if self._is_openai_compatible_base():
             fallback = await self._get_openai_fallback_client()
             return await fallback.stream(
@@ -1267,12 +1325,13 @@ class GeminiClient(LLMClient):
                 max_tokens=max_tokens,
                 on_chunk=on_chunk,
                 on_thinking=on_thinking,
-                **kwargs,
+                cancel_event=cancel_event,
+                **stream_kw,
             )
 
         model_name = self._normalize_model_name()
         url = f"{self._normalize_base_url()}/models/{model_name}:streamGenerateContent"
-        payload = self._build_payload(messages, tools, temperature, max_tokens, **kwargs)
+        payload = self._build_payload(messages, tools, temperature, max_tokens, **stream_kw)
 
         full_text = ""
         tool_calls: list[dict[str, Any]] = []
@@ -1297,6 +1356,16 @@ class GeminiClient(LLMClient):
                     raise LLMError(f"HTTP {resp.status_code}: {error_body[:500]}")
 
                 async for line in resp.aiter_lines():
+                    if cancel_event is not None and cancel_event.is_set():
+                        await resp.aclose()
+                        return LLMResponse(
+                            content=full_text,
+                            tool_calls=[],
+                            reasoning_content=None,
+                            finish_reason="cancelled",
+                            usage=final_usage,
+                            model=self.model,
+                        )
                     if not line.startswith("data:"):
                         continue
                     data_str = line[len("data:"):].strip()
@@ -1580,8 +1649,10 @@ class AnthropicClient(LLMClient):
         **kwargs: Any,
     ) -> LLMResponse:
         """Streaming completion."""
+        stream_kw = dict(kwargs)
+        cancel_event = stream_kw.pop("cancel_event", None)
         url = f"{self._normalize_base_url()}/v1/messages"
-        payload = self._build_payload(messages, tools, temperature, max_tokens, stream=True, **kwargs)
+        payload = self._build_payload(messages, tools, temperature, max_tokens, stream=True, **stream_kw)
 
         full_content = ""
         full_reasoning = ""
@@ -1605,6 +1676,17 @@ class AnthropicClient(LLMClient):
                 current_event = None
                 
                 async for line in resp.aiter_lines():
+                    if cancel_event is not None and cancel_event.is_set():
+                        await resp.aclose()
+                        return LLMResponse(
+                            content=full_content,
+                            tool_calls=[],
+                            reasoning_content=full_reasoning or None,
+                            reasoning_signature=full_signature,
+                            finish_reason="cancelled",
+                            usage=final_usage,
+                            model=final_model,
+                        )
                     if not line.strip():
                         continue
                         
