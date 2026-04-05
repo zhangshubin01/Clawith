@@ -4703,6 +4703,15 @@ function AgentDetailInner() {
                                         onToggle={() => setLivePanelVisible(v => !v)}
                                         agentId={id}
                                         sessionId={wsSessionId}
+                                        onLiveUpdate={(env, screenshotDataUri) => {
+                                            // Refresh the live preview with the final screenshot
+                                            // captured by TakeControlPanel on close, so the panel
+                                            // reflects the state the user left the browser in.
+                                            setLiveState(prev => ({
+                                                ...prev,
+                                                [env]: { screenshotUrl: screenshotDataUri },
+                                            }));
+                                        }}
                                     />
                                 )}
                             </div>

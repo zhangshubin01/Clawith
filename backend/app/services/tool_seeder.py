@@ -248,24 +248,9 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
-    {
-        "name": "send_feishu_message",
-        "display_name": "Feishu Message",
-        "description": "Send a message to a human colleague via Feishu. Can only message people in your relationships.",
-        "category": "communication",
-        "icon": "💬",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "member_name": {"type": "string", "description": "Recipient name"},
-                "message": {"type": "string", "description": "Message content"},
-            },
-            "required": ["member_name", "message"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
+    # NOTE: send_feishu_message is defined in the 'feishu' category section below.
+    # It was previously duplicated here under 'communication', which could cause
+    # 'Tool names must be unique' errors when the DB lacked a UNIQUE constraint.
     {
         "name": "send_web_message",
         "display_name": "Web Message",

@@ -1690,8 +1690,24 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                         "parameters": t.parameters_schema or {"type": "object", "properties": {}},
                     },
                 }
+                # Defensive dedup: skip if this name was already added.
+                # Normally the UNIQUE constraint on tool.name prevents duplicate
+                # rows, but old DB dumps (pre-constraint) may have them. Without
+                # this guard, the LLM would receive duplicate tool names and
+                # return HTTP 400 "Tool names must be unique".
+                if t.name in db_tool_names:
+                    logger.warning(
+                        f"[Tools] Duplicate tool name '{t.name}' found in DB "
+                        f"(id={t.id}). Skipping to avoid LLM error. "
+                        "Run: DELETE FROM tools WHERE id IN (SELECT id FROM "
+                        "(SELECT id, ROW_NUMBER() OVER (PARTITION BY name "
+                        "ORDER BY created_at DESC) AS rn FROM tools) t WHERE rn > 1);"
+                    )
+                    continue
+
                 result.append(tool_def)
                 db_tool_names.add(t.name)
+
 
             if result:
                 # Append always-available system tools that aren't already in the DB list
@@ -7844,14 +7860,34 @@ async def _publish_page(agent_id: uuid.UUID, user_id: uuid.UUID, ws: Path, argum
     except Exception as e:
         return f"Failed to publish: {e}"
 
-    # Build public URL using configured PUBLIC_BASE_URL
-    from app.services.platform_service import platform_service
-    async with async_session() as db2:
-        public_base = await platform_service.get_public_base_url(db2)
+    # Build public URL.
+    # _publish_page is called from a tool handler — there is no HTTP request
+    # object available, so platform_service.get_public_base_url() would fall
+    # back to the hardcoded 'https://try.clawith.ai' when PUBLIC_BASE_URL is
+    # not set. Instead, read the env var directly and surface a clear error
+    # when it is missing, so source-code deployers know exactly what to fix.
+    public_base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    if not public_base:
+        # Relative path works inside the same deployment; include a note so
+        # the user can configure PUBLIC_BASE_URL for a fully-qualified link.
+        url = f"/p/{short_id}"
+        url_note = (
+            "\n\n> Note: PUBLIC_BASE_URL is not configured on this server. "
+            "The link above is a relative path — prepend your server's domain "
+            "to get the full URL. Set PUBLIC_BASE_URL in your .env to have "
+            "the agent generate complete links automatically."
+        )
+    else:
+        url = f"{public_base}/p/{short_id}"
+        url_note = ""
 
-    url = f"{public_base}/p/{short_id}" if public_base else f"/p/{short_id}"
+    return (
+        f"Published successfully!\n\n"
+        f"Public URL: {url}\n"
+        f"Title: {title}\n\n"
+        f"Anyone can access this page without logging in.{url_note}"
+    )
 
-    return f"Published successfully!\n\nPublic URL: {url}\nTitle: {title}\n\nAnyone can access this page without logging in."
 
 
 async def _list_published_pages(agent_id: uuid.UUID) -> str:

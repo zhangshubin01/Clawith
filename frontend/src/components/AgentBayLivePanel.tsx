@@ -79,6 +79,13 @@ function calcHalfContainerWidth(): number {
 export default function AgentBayLivePanel({ liveState, visible, onToggle, agentId, sessionId, onLiveUpdate }: Props) {
     const { t } = useTranslation();
 
+    // Keep a ref to the latest onLiveUpdate so TakeControl callbacks always
+    // call the current version, even when captured in stale closures.
+    const onLiveUpdateRef = useRef(onLiveUpdate);
+    useEffect(() => {
+        onLiveUpdateRef.current = onLiveUpdate;
+    });
+
     // Take Control state
     const [showTakeControl, setShowTakeControl] = useState(false);
 
@@ -307,10 +314,11 @@ export default function AgentBayLivePanel({ liveState, visible, onToggle, agentI
                     sessionId={sessionId}
                     onClose={() => setShowTakeControl(false)}
                     onLastScreenshot={(dataUri) => {
-                        // Push the final TC screenshot to the live preview
-                        console.log('[LivePanel] Received last screenshot from TC, size:', dataUri.length, 'onLiveUpdate:', !!onLiveUpdate);
-                        if (onLiveUpdate) {
-                            onLiveUpdate('browser', dataUri);
+                        // Use the ref to always call the LATEST onLiveUpdate,
+                        // avoids React closure-staleness in async handleCancel.
+                        console.log('[LivePanel] Received last screenshot from TC, size:', dataUri.length, 'onLiveUpdate:', !!onLiveUpdateRef.current);
+                        if (onLiveUpdateRef.current) {
+                            onLiveUpdateRef.current('browser', dataUri);
                         }
                     }}
                 />

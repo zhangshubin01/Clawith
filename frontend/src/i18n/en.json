@@ -1218,19 +1218,19 @@
         "feishu": {
           "step1": "Go to open.feishu.cn → log in → Developer Console → Create Enterprise Self-Built App",
           "step2": "Left sidebar → Credentials & Basic Info → copy App ID and App Secret, paste below and Setup",
-          "step3": "Left sidebar → Permissions & Scopes → click Bulk Import/Export Permissions → paste the permission JSON below → confirm import",
+          "step3": "Left sidebar → Permissions & Scopes → click Bulk Import/Export Permissions → paste the permission JSON below → confirm import. [IMPORTANT] Org sync uses user_id (employee_id) as the stable user identifier, which is required to correctly match org members with Feishu bot channel users across different apps (open_id is app-specific and cannot be used as a cross-app identifier). Therefore, contact:user.employee_id:readonly is a mandatory permission.",
           "step4": "[For SSO] Left sidebar → Add App Capabilities → add Web App (网页应用), and paste the SSO Login URL below into the Desktop and Mobile homepage fields",
           "step5": "[For SSO] Left sidebar → Security Settings → Add the Redirect URL below into 'Redirect URLs'",
           "step6": "[For SSO] Turn on the 'SSO Login' switch below. Team members can now log in via the SSO Login URL with one click.",
-          "step7": "Left sidebar → App Release → Create Version (set Availability to All Employees) → Release for Review → approve it in your admin console"
+          "step7": "[REQUIRED] Left sidebar → App Release → Create Version (set Availability to All Employees) → Release for Review → approve it in your admin console. Note: unlike DingTalk, Feishu permissions only take effect after publishing a new version and getting enterprise admin approval. Sync and SSO will not work until the app is published and approved."
         },
         "dingtalk": {
           "step1": "Go to open.dingtalk.com → log in → go to App Development → Create Internal Enterprise App → enter a name",
           "step2": "Once the app is created, go to the app page → left sidebar 'Credentials & Basic Info' → copy AppKey and AppSecret, paste them below and save",
-          "step3": "Left sidebar 'Development Config' → 'Permission Management' → Under the 'Contacts Management' category, find each permission below and click 'Enable Now' (no approval required, takes effect immediately): ① Contacts Dept Read Permission (includes: Get Department List [qyapi_get_department_list], Get Department Details, Get All Parent Depts of a Dept); ② Member Info Read Permission (Query User Details); ③ Employee Mobile Number (fieldMobile); ④ Email & Personal Info (fieldEmail)",
+          "step3": "Left sidebar 'Development Config' → 'Permission Management' → Under the 'Contacts Management' category, find each permission below and click 'Enable Now' (no approval required, takes effect immediately): ① Contacts Dept Read Permission (includes: Get Department List [qyapi_get_department_list], Get Department Details, Get All Parent Depts of a Dept); ② Member Info Read Permission (qyapi_get_member, Query User Details); ③ Get Department Member Details (qyapi_get_department_member, required to sync dept user list); ④ Employee Mobile Number (fieldMobile); ⑤ Email & Personal Info (fieldEmail)",
           "step4": "On the same 'Permission Management' page → switch to the 'Contacts Permission Scope' tab → set it to 'All Employees' (or select specific departments, but ensure coverage of all members you want to sync)",
           "step5": "Paste AppKey and AppSecret below → click Save Config → click 'Sync' to run the first sync",
-          "step6": "If you need DingTalk SSO: Turn on the 'SSO Login' switch below, then in the DingTalk developer console → Development Config → Login & Sharing → add your Redirect URL domain as the Callback Domain → share the SSO Login URL with your team for one-click login"
+          "step6": "If you need DingTalk SSO: ① In Permission Management → Personal Permissions category, find 'Contacts Personal Info Read' (Contact.User.Read) → Enable Now (required to fetch user info on SSO login); ② Turn on the 'SSO Login' switch below; ③ In the DingTalk developer console → Development Config → Share Settings → Login Access → add the Callback URL below as the Callback Domain; ④ Share the SSO Login URL below with your team for one-click login"
         },
         "wecom": {
           "step1": "Log in to WeCom Admin Console → Management Tools → Address Book Sync",

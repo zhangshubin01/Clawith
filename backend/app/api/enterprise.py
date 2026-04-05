@@ -1263,12 +1263,7 @@ async def list_org_members(
             # Fallback: exact match
             query = query.where(OrgMember.department_id == uuid.UUID(department_id))
     if provider_id:
-        query = query.where(
-            or_(
-                OrgMember.provider_id == uuid.UUID(provider_id),
-                OrgMember.provider_id.is_(None)
-            )
-        )
+        query = query.where(OrgMember.provider_id == uuid.UUID(provider_id))
     if search:
         query = query.where(
             or_(

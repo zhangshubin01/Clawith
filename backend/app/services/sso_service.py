@@ -240,15 +240,37 @@ class SSOService:
 
         uid = uuid.UUID(user_id) if isinstance(user_id, str) else user_id
 
-        # Check if OrgMember already exists for this provider user
+        # Extract the raw open_id from identity_data (raw provider response).
+        # For Feishu: raw_data has 'open_id' and 'union_id' as separate fields.
+        # For DingTalk: raw_data has 'openId' and 'unionId'.
+        # Storing open_id separately prevents duplicate user creation when the
+        # lookup key alternates between open_id and union_id across SSO sessions.
+        raw_open_id = None
+        if identity_data:
+            raw_open_id = (
+                identity_data.get("open_id")      # Feishu
+                or identity_data.get("openId")    # DingTalk
+            )
+
+        # Check if OrgMember already exists for this provider user.
+        # Search across unionid, external_id, and open_id to handle the case where
+        # the lookup key differs between sync (uses user_id/employee_id as external_id)
+        # and SSO (uses union_id or open_id as provider_user_id).
+        conditions = [
+            OrgMember.unionid == provider_user_id,
+            OrgMember.external_id == provider_user_id,
+            OrgMember.open_id == provider_user_id,
+        ]
+        if raw_open_id and raw_open_id != provider_user_id:
+            # Also search by the actual open_id from raw data, in case the member
+            # was created with open_id as its primary key (e.g. from a previous SSO login)
+            conditions.append(OrgMember.open_id == raw_open_id)
+            conditions.append(OrgMember.external_id == raw_open_id)
+
         member_query = select(OrgMember).where(
             OrgMember.provider_id == provider.id,
             OrgMember.status == "active",
-            or_(
-                OrgMember.unionid == provider_user_id,
-                OrgMember.external_id == provider_user_id,
-                OrgMember.open_id == provider_user_id
-            )
+            or_(*conditions)
         )
         member_result = await db.execute(member_query)
         member = member_result.scalar_one_or_none()
@@ -256,6 +278,10 @@ class SSOService:
         if member:
             # Always link user
             member.user_id = uid
+
+            # Fill in open_id if not already set — prevents future lookup misses
+            if raw_open_id and not member.open_id:
+                member.open_id = raw_open_id
 
             # Passive identity enrichment: update profile fields from SSO data.
             # OrgMember records created by org-sync may have placeholder values
@@ -305,9 +331,13 @@ class SSOService:
                 provider_id=provider.id,
                 user_id=uid,
                 tenant_id=tenant_id,
+                # For Feishu/DingTalk: external_id stores union_id (cross-app stable).
+                # open_id is stored separately so it can also be matched on next login.
                 external_id=provider_user_id,
-                # For WeCom, external_id IS the userid; unionid is a different concept
-                unionid=provider_user_id if provider_type != "wecom" else None
+                unionid=provider_user_id if provider_type != "wecom" else None,
+                # Explicitly store the raw open_id so future SSO lookups can match on it
+                # even if the lookup key is union_id (and vice versa).
+                open_id=raw_open_id,
             )
             db.add(member)
         
