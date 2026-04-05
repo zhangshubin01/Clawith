@@ -732,19 +732,22 @@ function OrgTab({ tenant }: { tenant: any }) {
                     </div>
                 ) : null}
 
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '16px' }}>
-                    <button className="btn btn-primary btn-sm" onClick={save} disabled={savingProvider}>
-                        {savingProvider ? t('common.loading') : t('common.save', 'Save')}
-                    </button>
-                    {saveProviderOk && (
-                        <span style={{ fontSize: '12px', color: 'var(--success)' }}>Saved</span>
-                    )}
-                    {existingProvider && (
-                        <button className="btn btn-ghost btn-sm" style={{ color: 'var(--error)' }} onClick={() => confirm('Are you sure you want to delete this configuration?') && deleteProvider.mutate(existingProvider.id)}>
-                            {t('common.delete', 'Delete')}
+                {/* Hide save/delete for WeCom while config is disabled */}
+                {type !== 'wecom' && (
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '16px' }}>
+                        <button className="btn btn-primary btn-sm" onClick={save} disabled={savingProvider}>
+                            {savingProvider ? t('common.loading') : t('common.save', 'Save')}
                         </button>
-                    )}
-                </div>
+                        {saveProviderOk && (
+                            <span style={{ fontSize: '12px', color: 'var(--success)' }}>Saved</span>
+                        )}
+                        {existingProvider && (
+                            <button className="btn btn-ghost btn-sm" style={{ color: 'var(--error)' }} onClick={() => confirm('Are you sure you want to delete this configuration?') && deleteProvider.mutate(existingProvider.id)}>
+                                {t('common.delete', 'Delete')}
+                            </button>
+                        )}
+                    </div>
+                )}
                 {/* WeCom App IP Whitelist verification URL — hidden while WeCom config is disabled */}
                 {type === 'wecom' && false && editingId && (existingProvider?.config?.verify_token || form.config?.verify_token) && (() => {
                     const verifyToken = form.config?.verify_token || existingProvider?.config?.verify_token || '';
@@ -809,8 +812,17 @@ function OrgTab({ tenant }: { tenant: any }) {
                             </button>
                         )}
                         {syncResult && (
-                            <div style={{ padding: '6px 10px', borderRadius: '4px', fontSize: '11px', background: syncResult.error ? 'rgba(255,0,0,0.1)' : 'rgba(0,200,0,0.1)' }}>
-                                {syncResult.error ? `Error: ${syncResult.error}` : `Sync complete: ${syncResult.users_created || 0} users created, ${syncResult.profiles_synced || 0} profiles synced.`}
+                            <div style={{ padding: '6px 10px', borderRadius: '4px', fontSize: '11px', background: syncResult.error || (syncResult.errors && syncResult.errors.length > 0) ? 'rgba(255,100,0,0.1)' : 'rgba(0,200,0,0.1)' }}>
+                                {syncResult.error
+                                    ? `Error: ${syncResult.error}`
+                                    : `Sync complete: ${syncResult.departments || 0} depts, ${syncResult.members || 0} members synced.`}
+                                {syncResult.errors && syncResult.errors.length > 0 && (
+                                    <div style={{ marginTop: '4px', color: 'var(--color-warning, #f90)' }}>
+                                        {/* Show first error to help diagnose permission issues */}
+                                        {`Warning: ${syncResult.errors[0]}`}
+                                        {syncResult.errors.length > 1 && ` (+${syncResult.errors.length - 1} more)`}
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
