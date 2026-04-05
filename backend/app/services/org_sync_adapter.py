@@ -662,10 +662,10 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
 
     async def fetch_users(self, department_external_id: str) -> list[ExternalUser]:
         """Fetch users in a department.
-        
-        Uses user_id_type=user_id which requires the contact:user.employee_id:readonly
-        permission. If the Feishu API returns an error due to missing permission, raises
-        a clear error instructing the user to add the required scope.
+
+        Uses user_id_type=open_id which does NOT require the contact:user.employee_id:readonly
+        permission. open_id is stable per-user-per-app and sufficient as the OrgMember
+        external_id. The user_id (employee_id) is stored in raw_data for reference if needed.
         """
         token = await self.get_access_token()
         users: list[ExternalUser] = []
@@ -676,7 +676,10 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                 params = {
                     "department_id": department_external_id,
                     "department_id_type": "open_department_id",
-                    "user_id_type": "user_id",  # Requires contact:user.employee_id:readonly
+                    # Use open_id instead of user_id to avoid requiring
+                    # the contact:user.employee_id:readonly permission.
+                    # open_id is stable per-user-per-app and works with basic contact permissions.
+                    "user_id_type": "open_id",
                     "page_size": "50",
                 }
                 if page_token:
@@ -696,12 +699,12 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                         f"Feishu fetch users error for dept {department_external_id}: "
                         f"code={error_code}, msg={error_msg}"
                     )
-                    # Raise a user-friendly error for permission issues
                     raise RuntimeError(
                         f"Feishu API error (code {error_code}): {error_msg}. "
-                        f"Please ensure the Feishu app has the 'contact:user.employee_id:readonly' "
-                        f"permission enabled. Go to Feishu Open Platform -> App -> Permissions -> "
-                        f"search 'employee_id' -> enable and publish a new version."
+                        f"Access denied. One of the following scopes is required: "
+                        f"[contact:user.base:readonly]. "
+                        f"Please ensure the Feishu app has basic contact read permission "
+                        f"enabled and published."
                     )
 
                 res_data = data.get("data", {})
@@ -711,8 +714,11 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                     raw_dept_ids = item.get("department_ids", [])
                     department_ids = [str(did) for did in raw_dept_ids] if raw_dept_ids else [department_external_id]
                     
+                    # When user_id_type=open_id, Feishu returns the open_id value in the
+                    # "user_id" field of the response. So external_id == open_id == open_id field.
+                    # The open_id field is also present for consistency.
                     external_id = item.get("user_id", "") or item.get("open_id", "")
-                    
+
                     # For Feishu, a user is considered inactive if they are explicitly frozen or resigned.
                     # Merely not being activated (is_activated=False) shouldn't hide them from the org chart.
                     feishu_status = item.get("status", {})
