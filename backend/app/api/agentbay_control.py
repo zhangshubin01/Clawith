@@ -41,6 +41,19 @@ _LOCK_TIMEOUT_SECONDS = 600  # Auto-expire stale locks after 10 minutes
 # Avoids redundant _ensure_browser_initialized() on every screenshot poll.
 _browser_initialized: set[tuple] = set()
 
+# Per-session interaction locks to serialize concurrent TC interactions.
+# Without this, two rapid clicks both write tc_action.js simultaneously,
+# corrupting one script's execution. Each TC session gets its own Lock.
+_tc_interaction_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_interaction_lock(agent_id: uuid.UUID, session_id: str) -> asyncio.Lock:
+    """Get or create the per-session asyncio.Lock for TC interactions."""
+    key = f"{agent_id}:{session_id}"
+    if key not in _tc_interaction_locks:
+        _tc_interaction_locks[key] = asyncio.Lock()
+    return _tc_interaction_locks[key]
+
 
 def is_session_locked(agent_id: str, session_id: str) -> bool:
     """Check if a session is currently under human Take Control.
@@ -265,18 +278,22 @@ async def _tc_browser_cleanup(agent_id: uuid.UUID, session_id: str) -> None:
     if not cleanup_client:
         return
 
-    # Cancel any pending navigation and release mouse buttons so Chrome is in a
-    # clean, stable state before the AgentBay SDK's browser.operator resumes.
+    # Navigate to about:blank to give the AgentBay SDK a completely clean browser
+    # state before it resumes control.
     #
-    # CRITICAL: We use CDP-level Page.stopLoading instead of DOM-level window.stop().
-    # When a TC click triggers page navigation, Chrome emits Page.frameStartedLoading
-    # to ALL connected CDP clients — including the AgentBay service's own Playwright.
-    # DOM-level window.stop() cancels the load but does NOT cause Chrome to emit the
-    # corresponding CDP-level Page.frameStoppedLoading event. This leaves the AgentBay
-    # service's Playwright stuck in "navigating" state, so its next page.goto() call
-    # hangs for 60s waiting for the "current" navigation to finish.
-    # CDP-level Page.stopLoading IS a DevTools Protocol command — Chrome properly emits
-    # lifecycle events (frameStoppedLoading) to ALL clients, clearing the stale state.
+    # ROOT CAUSE of post-TC navigation hangs (experimentally confirmed):
+    # Pages like baidu.com run continuous background JS/XHR (analytics, lazy-load,
+    # ads). The AgentBay service-side page.goto() may wait for the current page to
+    # reach a stable state (networkidle) before issuing a new navigation. With an
+    # active baidu.com page, networkidle is never reached → 60s timeout.
+    #
+    # about:blank loads instantly, has ZERO network activity, and is immediately
+    # networkidle. The next page.goto() from the AgentBay service starts fresh with
+    # no waiting.
+    #
+    # Smart page selector handles subsequent TC sessions: by the time TC is re-entered
+    # the agent has already navigated from about:blank to the target URL, so
+    # context.pages()[0].url() is the target URL (not about:blank).
     cleanup_script = """
 const { chromium } = require('/usr/local/lib/node_modules/playwright');
 let browser;
@@ -287,14 +304,21 @@ let browser;
         const pages = context.pages();
         const page = pages.slice().reverse().find(p => p.url() !== 'about:blank') || pages[pages.length - 1];
 
-        // Use CDP Page.stopLoading instead of window.stop() — emits proper
-        // lifecycle events to ALL connected CDP clients (including AgentBay's).
-        const cdp = await page.context().newCDPSession(page);
-        try { await cdp.send('Page.stopLoading'); } catch(e) {}
-        try { await cdp.detach(); } catch(e) {}
-
-        // Release any mouse buttons that may have been left pressed
+        // Release any held mouse buttons first
         try { await page.mouse.up(); } catch(e) {}
+
+        // Navigate to about:blank — this immediately cancels all in-flight network
+        // requests (XHR, images, WebSockets) and stops all JS timers. The AgentBay
+        // service's page.goto() can then proceed without waiting for background
+        // activity from the previously-visible page.
+        // waitUntil:'commit' completes as soon as Chrome commits the navigation
+        // (no waiting for resources), making this effectively instant.
+        try {
+            await page.goto('about:blank', { waitUntil: 'commit', timeout: 5000 });
+        } catch(e) {
+            // If goto fails, fall back to just stopping navigation
+            try { const cdp = await context.newCDPSession(page); await cdp.send('Page.stopLoading'); await cdp.detach(); } catch(_) {}
+        }
 
         console.log('CLEANUP_OK');
     } catch(e) {
@@ -614,16 +638,19 @@ async def control_click(
         raise HTTPException(status_code=400, detail="Session is not in Take Control mode")
 
     client = await _get_client(agent_id, data.session_id)
-    try:
-        result = await _perform_click(client, data.x, data.y, data.button)
-        if result.get("success"):
-            return {"status": "ok", "detail": f"Clicked at ({data.x}, {data.y})"}
-        else:
-            detail = result.get("stderr") or result.get("output") or "Click operation failed"
-            return {"status": "error", "detail": detail[:500]}
-    except Exception as e:
-        logger.error(f"[TakeControl] Click exception: {e}")
-        return {"status": "error", "detail": str(e)[:500]}
+    # Serialize interactions per-session: rapid clicks would otherwise overwrite
+    # tc_action.js concurrently, causing the second script to read wrong content.
+    async with _get_interaction_lock(agent_id, data.session_id):
+        try:
+            result = await _perform_click(client, data.x, data.y, data.button)
+            if result.get("success"):
+                return {"status": "ok", "detail": f"Clicked at ({data.x}, {data.y})"}
+            else:
+                detail = result.get("stderr") or result.get("output") or "Click operation failed"
+                return {"status": "error", "detail": detail[:500]}
+        except Exception as e:
+            logger.error(f"[TakeControl] Click exception: {e}")
+            return {"status": "error", "detail": str(e)[:500]}
 
 
 @router.post("/type")
@@ -639,16 +666,17 @@ async def control_type(
         raise HTTPException(status_code=400, detail="Session is not in Take Control mode")
 
     client = await _get_client(agent_id, data.session_id)
-    try:
-        result = await _perform_type(client, data.text)
-        if result.get("success"):
-            return {"status": "ok", "detail": "Text sent"}
-        else:
-            detail = result.get("stderr") or result.get("output") or "Type operation failed"
-            return {"status": "error", "detail": detail[:500]}
-    except Exception as e:
-        logger.error(f"[TakeControl] Type exception: {e}")
-        return {"status": "error", "detail": str(e)[:500]}
+    async with _get_interaction_lock(agent_id, data.session_id):
+        try:
+            result = await _perform_type(client, data.text)
+            if result.get("success"):
+                return {"status": "ok", "detail": "Text sent"}
+            else:
+                detail = result.get("stderr") or result.get("output") or "Type operation failed"
+                return {"status": "error", "detail": detail[:500]}
+        except Exception as e:
+            logger.error(f"[TakeControl] Type exception: {e}")
+            return {"status": "error", "detail": str(e)[:500]}
 
 
 @router.post("/press_keys")
@@ -664,16 +692,17 @@ async def control_press_keys(
         raise HTTPException(status_code=400, detail="Session is not in Take Control mode")
 
     client = await _get_client(agent_id, data.session_id)
-    try:
-        result = await _perform_press_keys(client, data.keys)
-        if result.get("success"):
-            return {"status": "ok", "detail": f"Pressed: {'+'.join(data.keys)}"}
-        else:
-            detail = result.get("stderr") or result.get("output") or "Key press failed"
-            return {"status": "error", "detail": detail[:500]}
-    except Exception as e:
-        logger.error(f"[TakeControl] Press keys exception: {e}")
-        return {"status": "error", "detail": str(e)[:500]}
+    async with _get_interaction_lock(agent_id, data.session_id):
+        try:
+            result = await _perform_press_keys(client, data.keys)
+            if result.get("success"):
+                return {"status": "ok", "detail": f"Pressed: {'+'.join(data.keys)}"}
+            else:
+                detail = result.get("stderr") or result.get("output") or "Key press failed"
+                return {"status": "error", "detail": detail[:500]}
+        except Exception as e:
+            logger.error(f"[TakeControl] Press keys exception: {e}")
+            return {"status": "error", "detail": str(e)[:500]}
 
 
 @router.post("/drag")
@@ -694,20 +723,21 @@ async def control_drag(
         raise HTTPException(status_code=400, detail="Session is not in Take Control mode")
 
     client = await _get_client(agent_id, data.session_id)
-    try:
-        result = await _perform_drag(
-            client,
-            data.from_x, data.from_y,
-            data.to_x, data.to_y,
-            data.duration_ms,
-        )
-        if result.get("success"):
-            return {"status": "ok", "detail": result.get("output", "Drag complete")}
-        else:
-            return {"status": "error", "detail": result.get("output", "Drag failed")[:500]}
-    except Exception as e:
-        logger.error(f"[TakeControl] Drag exception: {e}")
-        return {"status": "error", "detail": str(e)[:500]}
+    async with _get_interaction_lock(agent_id, data.session_id):
+        try:
+            result = await _perform_drag(
+                client,
+                data.from_x, data.from_y,
+                data.to_x, data.to_y,
+                data.duration_ms,
+            )
+            if result.get("success"):
+                return {"status": "ok", "detail": result.get("output", "Drag complete")}
+            else:
+                return {"status": "error", "detail": result.get("output", "Drag failed")[:500]}
+        except Exception as e:
+            logger.error(f"[TakeControl] Drag exception: {e}")
+            return {"status": "error", "detail": str(e)[:500]}
 
 
 @router.post("/screenshot")
