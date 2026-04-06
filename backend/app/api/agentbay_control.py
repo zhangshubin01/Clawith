@@ -427,7 +427,7 @@ const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
 }})();
 """
         res = await _eval_cdp_script(client, script)
-        return {{"success": res.get("success", False) and "CLICK_OK" in res.get("output", ""), "method": "cdp_click", "output": "Clicked" if "CLICK_OK" in res.get("output", "") else res.get("output", "Unknown error")}}
+        return {"success": res.get("success", False) and "CLICK_OK" in res.get("output", ""), "method": "cdp_click", "output": "Clicked" if "CLICK_OK" in res.get("output", "") else res.get("output", "Unknown error")}
 
     # Desktop session — use Computer API
     try:
