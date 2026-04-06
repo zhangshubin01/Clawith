@@ -395,29 +395,18 @@ const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
         console.log('CLICK_OK');
         ok = true;
 
-        // Wait up to 4 seconds for any triggered navigation to commit.
+        // Wait 2 seconds for any triggered navigation to commit before releasing
+        // the interaction lock. This covers both cases:
+        //   A) Same-tab navigation: URL commits in ~0.5-1s
+        //   B) New-tab navigation (target=_blank): new tab URL transitions from
+        //      about:blank to the target URL in ~1-2s
         //
-        // WHY: without this wait, the interaction lock is released in ~1s —
-        // before same-tab navigation commits (URL unchanged) or before a new
-        // tab's URL transitions from about:blank to its target URL. The next
-        // click then picks the WRONG page (finds the pre-navigation URL or
-        // the still-blank new tab), making it appear as if the second click
-        // has no effect.
-        //
-        // A 4-second ceiling is safe: same-tab navigations commit in 0.5-2s;
-        // new-tab URL commits in 1-3s. We break early once the state changes.
-        const deadline = Date.now() + 4000;
-        while (Date.now() < deadline) {{
-            await new Promise(r => setTimeout(r, 200));
-            const currentPages = context.pages();
-            // Case A: same-tab navigation committed (URL changed)
-            if (page.url() !== initialUrl) break;
-            // Case B: new tab opened and its URL has committed (no longer about:blank)
-            if (currentPages.length > initialPageCount) {{
-                const newest = currentPages[currentPages.length - 1];
-                if (newest.url() !== 'about:blank') break;
-            }}
-        }}
+        // WHY a fixed sleep instead of polling context.pages() every 200ms:
+        // Polling makes ~20 CDP calls while Chrome is loading a heavy new tab.
+        // Under that combined load, Chrome's DevTools HTTP server stops responding,
+        // causing the NEXT connectOverCDP to time out with a 30-second error.
+        // A passive sleep has zero CDP overhead and achieves the same goal.
+        await new Promise(r => setTimeout(r, 2000));
     }} catch (e) {{
         console.error('CLICK_FAIL:' + e.message);
     }}
