@@ -288,20 +288,55 @@ async def _tc_browser_cleanup(agent_id: uuid.UUID, session_id: str) -> None:
         return
 
     try:
-        # Navigate to about:blank via the SDK's own Playwright path.
-        # This is the ONLY safe way to clear page state: no new CDP connections,
-        # no session attach/detach events that confuse the service's Playwright.
-        # about:blank loads instantly (zero network activity), ensuring the
-        # service's next page.goto() starts from a completely clean slate.
-        await asyncio.to_thread(
-            cleanup_client._session.browser.operator.navigate, "about:blank"
-        )
+        # Use a CDP script to navigate to about:blank via raw Page.navigate command.
+        # The SDK's browser.operator.navigate() rejects about:blank ("must start with
+        # http or https"), but Chrome's CDP Page.navigate command accepts any URL.
+        #
+        # WHY about:blank: Any TC click that triggers page navigation (tieba, zhihu,
+        # etc.) leaves Chrome loading that page for 30-60s. The AgentBay service's
+        # page.goto() queues BEHIND the in-progress page load — timing out before
+        # the heavy page finishes. Raw Page.navigate to about:blank immediately
+        # overrides the slow navigation; about:blank finishes in <50ms.
+        #
+        # WHY no browser.close(): explicit Target.detachFromTarget (what browser.close
+        # sends) arrives at the service's Playwright mid-navigation and triggers a
+        # ~60s internal recovery cycle. Exiting with process.exit() leaves Chrome to
+        # handle the WebSocket close AFTER the page is stable (at about:blank).
+        cleanup_script = """
+const { chromium } = require('/usr/local/lib/node_modules/playwright');
+(async () => {
+    try {
+        const browser = await chromium.connectOverCDP('http://localhost:9222');
+        const context = browser.contexts()[0];
+        const pages = context.pages();
+        // Target the currently visible content page (skip existing about:blank tabs)
+        const page = pages.slice().reverse().find(p => p.url() !== 'about:blank')
+                     || pages[pages.length - 1];
+        // Send raw CDP Page.navigate — bypasses SDK URL validation that blocks about:blank.
+        // This immediately overrides any in-progress TC navigation (tieba/baidu/etc)
+        // with about:blank, which Chrome loads in <50ms.
+        const cdp = await context.newCDPSession(page);
+        await cdp.send('Page.navigate', { url: 'about:blank' });
+        // Wait for about:blank to fully load before exiting. When process.exit() runs
+        // with the page already at a stable about:blank, Chrome fires
+        // Target.detachedFromTarget while the page state is clean — no 60-second
+        // service recovery cycle.
+        await new Promise(r => setTimeout(r, 300));
+        console.log('CLEANUP_OK');
+    } catch(e) {
+        console.error('CLEANUP_FAIL: ' + e.message);
+    }
+    // No browser.close() — let Chrome handle the WebSocket close gracefully.
+    process.exit(0);
+})();
+"""
+        res = await _eval_cdp_script(cleanup_client, cleanup_script)
         logger.info(
-            f"[TakeControl] Cleanup: navigated to about:blank via SDK "
+            f"[TakeControl] Cleanup: {res.get('output', 'no output')[:100]} "
             f"for session={session_id[:8]}"
         )
     except Exception as e:
-        logger.warning(f"[TakeControl] Cleanup navigate failed (non-fatal): {e}")
+        logger.warning(f"[TakeControl] Cleanup failed (non-fatal): {e}")
 
 
 async def _perform_click(client, x: int, y: int, button: str = "left"):
