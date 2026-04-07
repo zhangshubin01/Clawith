@@ -1444,7 +1444,14 @@ AGENTBAY_TOOLS = [
             "properties": {
                 "url": {"type": "string", "description": "要访问的网址"},
                 "wait_for": {"type": "string", "description": "等待元素选择器（可选）"},
-                "screenshot": {"type": "boolean", "description": "是否截图", "default": False},
+                "save_to_workspace": {
+                    "type": "boolean",
+                    # Set to True ONLY when the user explicitly asks to SEE or SAVE
+                    # a screenshot (e.g. "截图给我看", "保存截图"). Default False means
+                    # the screenshot is held in memory for LLM vision only (invisible to user).
+                    "description": "CRITICAL: Set to True IF AND ONLY IF the user explicitly asked you to SHOW them a screenshot or save it (e.g. \"截图给我看\", \"截图看看\", \"把截图发出来\"). If True, the image is saved to their workspace and you get a Markdown link. Default is False (internal in-memory analysis only, completely invisible to the user).",
+                    "default": False,
+                },
             },
             "required": ["url"],
         },
@@ -1479,7 +1486,18 @@ AGENTBAY_TOOLS = [
         "category": "agentbay",
         "icon": "📸",
         "is_default": False,
-        "parameters_schema": {"type": "object", "properties": {}},
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "save_to_workspace": {
+                    "type": "boolean",
+                    # Set to True ONLY when the user explicitly asks to SEE or SAVE
+                    # a screenshot. Default False = in-memory for LLM vision only.
+                    "description": "CRITICAL: Set to True IF AND ONLY IF the user explicitly asked you to SHOW them a screenshot or save it (e.g. \"截图给我看\", \"截图看看\", \"把截图发出来\"). If True, the image is saved to their workspace and you get a Markdown link. Default is False (internal in-memory analysis only, completely invisible to the user).",
+                    "default": False,
+                },
+            },
+        },
         "config": {},
         "config_schema": {},
     },
