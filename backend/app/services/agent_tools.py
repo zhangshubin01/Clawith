@@ -1567,14 +1567,16 @@ AGENT_TOOLS = [
             "name": "agentbay_file_transfer",
             "description": (
                 "Transfer a file between any two endpoints: the agent workspace, "
-                "the AgentBay browser environment, the cloud desktop, or the code sandbox. "
-                "Specify from_type/from_path (source) and to_type/to_path (destination). "
-                "Use type='workspace' for the agent workspace (relative path, e.g. 'workspace/file.csv'). "
-                "Use type='browser'/'computer'/'code' for the AgentBay cloud environment "
-                "(absolute path, e.g. '/root/file.csv' on Linux or 'C:\\\\Users\\\\user\\\\file.csv' on Windows). "
-                "Workspace is only involved when you explicitly specify it. "
-                "Environment-to-environment transfers use a transparent backend temp path, "
-                "no workspace pollution."
+                "the AgentBay browser environment, the cloud desktop (computer), or the code sandbox.\n\n"
+                "VERIFIED PATH CONVENTIONS (all Linux environments run as user 'wuying', HOME=/home/wuying/):\n"
+                "- code env:     use /home/wuying/<filename>  (working directory, e.g. /home/wuying/data.csv)\n"
+                "- browser env:  use /home/wuying/下载/<filename>  (download folder, e.g. /home/wuying/下载/file.pdf)\n"
+                "- computer env: use /home/wuying/桌面/<filename>  (Desktop, e.g. /home/wuying/桌面/report.xlsx)\n"
+                "- workspace:    use relative path, e.g. 'workspace/data.csv'\n\n"
+                "Transfer directions:\n"
+                "- workspace -> env: upload a workspace file into a cloud environment\n"
+                "- env -> workspace: download a file from a cloud environment into the workspace\n"
+                "- env A -> env B:   transfer between environments (transparent backend temp, no workspace involvement)"
             ),
             "parameters": {
                 "type": "object",
@@ -1582,20 +1584,28 @@ AGENT_TOOLS = [
                     "from_type": {
                         "type": "string",
                         "enum": ["workspace", "browser", "computer", "code"],
-                        "description": "Source endpoint type: 'workspace' for agent workspace, or the AgentBay environment name.",
+                        "description": "Source endpoint: 'workspace' for agent workspace, or the AgentBay environment name.",
                     },
                     "from_path": {
                         "type": "string",
-                        "description": "Source path. Relative if workspace (e.g. 'workspace/data.csv'), absolute if env (e.g. '/root/data.csv').",
+                        "description": (
+                            "Source path. Relative if workspace (e.g. 'workspace/data.csv'). "
+                            "Absolute if env: code → /home/wuying/file, "
+                            "browser → /home/wuying/下载/file, computer → /home/wuying/桌面/file."
+                        ),
                     },
                     "to_type": {
                         "type": "string",
                         "enum": ["workspace", "browser", "computer", "code"],
-                        "description": "Destination endpoint type: 'workspace' for agent workspace, or the AgentBay environment name.",
+                        "description": "Destination endpoint: 'workspace' for agent workspace, or the AgentBay environment name.",
                     },
                     "to_path": {
                         "type": "string",
-                        "description": "Destination path. Relative if workspace (e.g. 'workspace/output.csv'), absolute if env (e.g. '/root/output.csv').",
+                        "description": (
+                            "Destination path. Relative if workspace (e.g. 'workspace/output.csv'). "
+                            "Absolute if env: code → /home/wuying/file, "
+                            "browser → /home/wuying/下载/file, computer → /home/wuying/桌面/file."
+                        ),
                     },
                 },
                 "required": ["from_type", "from_path", "to_type", "to_path"],
