@@ -1661,6 +1661,111 @@ _feishu_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _FEISHU_TOOL
 _channel_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _CHANNEL_MESSAGE_TOOL_NAMES]
 
 
+async def _get_computer_os_type(agent_id: uuid.UUID) -> str:
+    """Return the configured OS type for the agent's computer tool.
+
+    Reads from agentbay_browser_navigate tool config (which stores all AgentBay
+    settings including os_type). Defaults to 'windows' to match AgentBay's default.
+    """
+    try:
+        config = await _get_tool_config(agent_id, "agentbay_browser_navigate")
+        return (config or {}).get("os_type", "windows")
+    except Exception:
+        return "windows"
+
+
+def _patch_computer_tool_descriptions(tools: list[dict], os_type: str) -> list[dict]:
+    """Rewrite path examples in agentbay_file_transfer to match the agent's OS.
+
+    This ensures the Agent always sees the correct desktop and home-directory
+    paths for its specific computer environment without having to guess.
+    """
+    import copy
+
+    if os_type == "windows":
+        # Windows paths used by AgentBay's windows_latest image
+        desktop_path = r"C:\Users\Administrator\Desktop"
+        home_path    = r"C:\Users\Administrator"
+        computer_os_label = "Windows"
+    else:
+        # Linux paths used by AgentBay's linux_latest image
+        desktop_path = "/home/wuying/Desktop"
+        home_path    = "/home/wuying"
+        computer_os_label = "Linux"
+
+    # Build the OS-aware description for agentbay_file_transfer
+    new_file_transfer_desc = (
+        "Transfer a file between any two endpoints: the agent workspace, "
+        "the AgentBay browser environment, the cloud desktop (computer), or the code sandbox.\n\n"
+        f"COMPUTER ENVIRONMENT OS: {computer_os_label}\n"
+        f"VERIFIED PATH CONVENTIONS for the computer environment ({computer_os_label}):\n"
+        f"- computer desktop: {desktop_path}\\<filename>  (e.g. {desktop_path}\\report.xlsx)\n"
+        f"- computer home:    {home_path}\\<filename>\n\n"
+        "Other environments (Linux-based, user 'wuying', HOME=/home/wuying/):\n"
+        "- code env:     /home/wuying/<filename>  (e.g. /home/wuying/data.csv)\n"
+        "- browser env:  /home/wuying/下载/<filename>  (download folder)\n"
+        "- workspace:    relative path, e.g. 'workspace/data.csv'\n\n"
+        "Transfer directions:\n"
+        "- workspace -> env: upload a workspace file into a cloud environment\n"
+        "- env -> workspace: download a file from a cloud environment into the workspace\n"
+        "- env A -> env B:   transfer between environments (transparent backend temp)"
+    ) if os_type == "windows" else (
+        "Transfer a file between any two endpoints: the agent workspace, "
+        "the AgentBay browser environment, the cloud desktop (computer), or the code sandbox.\n\n"
+        f"COMPUTER ENVIRONMENT OS: {computer_os_label}\n"
+        f"VERIFIED PATH CONVENTIONS for the computer environment ({computer_os_label}):\n"
+        f"- computer desktop: {desktop_path}/<filename>  (e.g. {desktop_path}/report.xlsx)\n"
+        f"- computer home:    {home_path}/<filename>\n\n"
+        "Other environments (also Linux, user 'wuying'):\n"
+        "- code env:     /home/wuying/<filename>  (e.g. /home/wuying/data.csv)\n"
+        "- browser env:  /home/wuying/下载/<filename>  (download folder)\n"
+        "- workspace:    relative path, e.g. 'workspace/data.csv'\n\n"
+        "Transfer directions:\n"
+        "- workspace -> env: upload a workspace file into a cloud environment\n"
+        "- env -> workspace: download a file from a cloud environment into the workspace\n"
+        "- env A -> env B:   transfer between environments (transparent backend temp)"
+    )
+
+    patched = []
+    for tool in tools:
+        fn = tool.get("function", {})
+        name = fn.get("name", "")
+        if name == "agentbay_file_transfer":
+            # Deep copy to avoid mutating the shared AGENT_TOOLS constant
+            tool = copy.deepcopy(tool)
+            tool["function"]["description"] = new_file_transfer_desc
+            # Also patch from_path and to_path parameter hints
+            props = tool["function"].get("parameters", {}).get("properties", {})
+            if "from_path" in props:
+                if os_type == "windows":
+                    props["from_path"]["description"] = (
+                        r"Source path. Relative if workspace (e.g. 'workspace/data.csv'). "
+                        r"Absolute if env: computer → C:\Users\Administrator\Desktop\file, "
+                        r"code → /home/wuying/file, browser → /home/wuying/下载/file."
+                    )
+                else:
+                    props["from_path"]["description"] = (
+                        "Source path. Relative if workspace (e.g. 'workspace/data.csv'). "
+                        "Absolute if env: computer → /home/wuying/Desktop/file, "
+                        "code → /home/wuying/file, browser → /home/wuying/下载/file."
+                    )
+            if "to_path" in props:
+                if os_type == "windows":
+                    props["to_path"]["description"] = (
+                        r"Destination path. Relative if workspace (e.g. 'workspace/output.csv'). "
+                        r"Absolute if env: computer → C:\Users\Administrator\Desktop\file, "
+                        r"code → /home/wuying/file, browser → /home/wuying/下载/file."
+                    )
+                else:
+                    props["to_path"]["description"] = (
+                        "Destination path. Relative if workspace (e.g. 'workspace/output.csv'). "
+                        "Absolute if env: computer → /home/wuying/Desktop/file, "
+                        "code → /home/wuying/file, browser → /home/wuying/下载/file."
+                    )
+        patched.append(tool)
+    return patched
+
+
 async def _agent_has_feishu(agent_id: uuid.UUID) -> bool:
     """Check if agent has a configured Feishu channel."""
     try:
@@ -1703,10 +1808,16 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     Always includes core system tools (send_channel_file, write_file).
     Feishu tools are only included when the agent has a configured Feishu channel.
     send_channel_message is included when any channel (Feishu/DingTalk/WeCom) is configured.
+
+    Also patches agentbay_file_transfer description with OS-specific paths based on
+    the agent's computer tool configuration (os_type: 'windows' | 'linux').
     """
     has_feishu = await _agent_has_feishu(agent_id)
     has_any_channel = await _agent_has_any_channel(agent_id)
     _always_tools = _always_core_tools + (_feishu_tools if has_feishu else []) + (_channel_tools if has_any_channel else [])
+
+    # Read os_type once; used to patch agentbay_file_transfer paths below
+    computer_os_type = await _get_computer_os_type(agent_id)
 
     try:
         from app.models.tool import Tool, AgentTool
@@ -1766,12 +1877,13 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 for t in _always_tools:
                     if t["function"]["name"] not in db_tool_names:
                         result.append(t)
-                return result
+                # Inject OS-aware paths into computer-related tool descriptions
+                return _patch_computer_tool_descriptions(result, computer_os_type)
     except Exception as e:
         logger.error(f"[Tools] DB load failed, using fallback: {e}")
 
-    # Fallback to hardcoded tools
-    return AGENT_TOOLS
+    # Fallback to hardcoded tools (still apply OS-aware path patching)
+    return _patch_computer_tool_descriptions(AGENT_TOOLS, computer_os_type)
 
 
 # ─── Workspace initialization ──────────────────────────────────
