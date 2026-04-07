@@ -12,6 +12,7 @@ The agent's workspace uses well-known paths:
 The agent reads/writes these files directly. No per-concept tools needed.
 """
 
+import asyncio
 import json
 import os
 import uuid
