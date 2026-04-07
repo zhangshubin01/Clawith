@@ -8992,10 +8992,22 @@ async def _agentbay_file_transfer(agent_id: Optional[uuid.UUID], ws: Path, argum
                 local_path, to_path
             )
             if result.success:
-                return (
+                msg = (
                     f"Transferred workspace/{from_path} → [{to_type}]{to_path} "
                     f"({result.bytes_sent} bytes)"
                 )
+                # After uploading to the computer desktop directory, notify the GNOME
+                # file manager so the file icon appears immediately without manual refresh.
+                desktop_dir = "/home/wuying/桌面"
+                if to_type == "computer" and to_path.startswith(desktop_dir):
+                    try:
+                        await asyncio.to_thread(
+                            client._session.command.exec,
+                            f"DISPLAY=:0 gio info '{to_path}' 2>/dev/null || true"
+                        )
+                    except Exception:
+                        pass  # Non-critical: desktop refresh failure doesn't affect transfer result
+                return msg
             return f"Upload failed: {result.error_message}"
 
         # ── Case 2: env → workspace ──────────────────────────────────────────
