@@ -308,6 +308,7 @@ async def _acp_await_client_permission(
     pending_permissions: dict[str, asyncio.Future],
     tool_name: str,
     args: dict[str, Any],
+    *,
     session_id: str = "",
     timeout: float = 120.0,
     extra_payload: dict | None = None,
