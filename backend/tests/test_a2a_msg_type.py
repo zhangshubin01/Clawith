@@ -457,7 +457,7 @@ async def test_wake_agent_async_calls_trigger_daemon():
 
     with patch("app.services.trigger_daemon.wake_agent_with_context", new_callable=AsyncMock) as mock_wake:
         await _wake_agent_async(agent_id, context)
-        mock_wake.assert_awaited_once_with(agent_id, context)
+        mock_wake.assert_awaited_once_with(agent_id, context, from_agent_id=None)
 
 
 @pytest.mark.asyncio
