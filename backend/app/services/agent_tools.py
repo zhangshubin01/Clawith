@@ -4742,13 +4742,13 @@ async def _append_focus_item(agent_id: uuid.UUID, identifier: str, description: 
         logger.warning(f"[A2A] Failed to update focus.md for agent {agent_id}: {e}")
 
 
-async def _wake_agent_async(agent_id: uuid.UUID, reason_context: str) -> None:
+async def _wake_agent_async(agent_id: uuid.UUID, reason_context: str, *, from_agent_id: uuid.UUID | None = None) -> None:
     """Wake an agent asynchronously via the trigger invocation path.
 
     Delegates to the public wake_agent_with_context API in trigger_daemon.
     """
     from app.services.trigger_daemon import wake_agent_with_context
-    await wake_agent_with_context(agent_id, reason_context)
+    await wake_agent_with_context(agent_id, reason_context, from_agent_id=from_agent_id)
 
 
 async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
@@ -4911,17 +4911,24 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
 
             # ── notify: fire-and-forget ──
             if msg_type == "notify":
-                from app.services.activity_logger import log_activity
-                await log_activity(
-                    from_agent_id, "agent_msg_sent",
-                    f"Sent notification to {target.name}",
-                    detail={"partner": target.name, "message": message_text[:200], "msg_type": "notify"},
-                )
+                try:
+                    from app.services.activity_logger import log_activity
+                    await log_activity(
+                        from_agent_id, "agent_msg_sent",
+                        f"Sent notification to {target.name}",
+                        detail={"partner": target.name, "message": message_text[:200], "msg_type": "notify"},
+                    )
+                except Exception:
+                    pass
 
-                await _wake_agent_async(
-                    target.id,
-                    f"[From {source_name}] {message_text}",
-                )
+                try:
+                    await _wake_agent_async(
+                        target.id,
+                        f"[From {source_name}] {message_text}",
+                        from_agent_id=from_agent_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"[A2A] Failed to wake {target.name} for notify: {e}")
 
                 return f"✅ Notification sent to {target.name}. They will process it asynchronously."
 
@@ -4930,7 +4937,10 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 focus_id = f"wait_{target.name.lower().replace(' ', '_')}_task"
                 focus_desc = f"Waiting for {target.name} to complete delegated task: {message_text[:100]}"
 
-                await _append_focus_item(from_agent_id, focus_id, focus_desc)
+                try:
+                    await _append_focus_item(from_agent_id, focus_id, focus_desc)
+                except Exception as e:
+                    logger.warning(f"[A2A] Failed to write focus for delegate: {e}")
 
                 trigger_name = f"a2a_wait_{target.name.lower().replace(' ', '_')}"
                 trigger_reason = (
@@ -4941,25 +4951,35 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                     f"3) Mark focus item '{focus_id}' as completed. "
                     f"4) Cancel this trigger."
                 )
-                await _create_on_message_trigger(
-                    agent_id=from_agent_id,
-                    trigger_name=trigger_name,
-                    from_agent_name=target.name,
-                    reason=trigger_reason,
-                    focus_ref=focus_id,
-                )
+                try:
+                    await _create_on_message_trigger(
+                        agent_id=from_agent_id,
+                        trigger_name=trigger_name,
+                        from_agent_name=target.name,
+                        reason=trigger_reason,
+                        focus_ref=focus_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"[A2A] Failed to create trigger for delegate: {e}")
 
-                from app.services.activity_logger import log_activity
-                await log_activity(
-                    from_agent_id, "agent_msg_sent",
-                    f"Delegated task to {target.name}",
-                    detail={"partner": target.name, "message": message_text[:200], "msg_type": "task_delegate"},
-                )
+                try:
+                    from app.services.activity_logger import log_activity
+                    await log_activity(
+                        from_agent_id, "agent_msg_sent",
+                        f"Delegated task to {target.name}",
+                        detail={"partner": target.name, "message": message_text[:200], "msg_type": "task_delegate"},
+                    )
+                except Exception:
+                    pass
 
-                await _wake_agent_async(
-                    target.id,
-                    f"[From {source_name}] {message_text}",
-                )
+                try:
+                    await _wake_agent_async(
+                        target.id,
+                        f"[From {source_name}] {message_text}",
+                        from_agent_id=from_agent_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"[A2A] Failed to wake {target.name} for delegate: {e}")
 
                 return f"✅ Task delegated to {target.name}. You will be notified when they complete it."
 

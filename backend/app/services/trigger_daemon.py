@@ -30,8 +30,11 @@ DEDUP_WINDOW = 30   # seconds — same agent won't be invoked twice within this 
 MAX_AGENT_CHAIN_DEPTH = 5  # A→B→A→B→A max depth before stopping
 MIN_POLL_INTERVAL_MINUTES = 5  # minimum poll interval to prevent abuse
 
-# Track last invocation time per agent to enforce dedup window
 _last_invoke: dict[uuid.UUID, datetime] = {}
+
+_A2A_WAKE_CHAIN: dict[str, int] = {}
+_A2A_WAKE_CHAIN_TTL = 300
+_A2A_MAX_WAKE_DEPTH = 3
 
 # Webhook rate limiter: token -> list of timestamps
 _webhook_hits: dict[str, list[float]] = {}
@@ -693,14 +696,49 @@ async def _tick():
         asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers))
 
 
-async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str) -> None:
+async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, from_agent_id: uuid.UUID | None = None) -> None:
     """Public API: wake an agent asynchronously with a message context.
 
     Creates a synthetic trigger invocation so the agent processes the
     message in a Reflection Session via the standard trigger path.
     Safe to call from any async context.
+
+    Args:
+        agent_id: The agent to wake.
+        message_context: The message to deliver.
+        from_agent_id: The agent that initiated this wake (for chain depth tracking).
     """
+    import time as _time
+
     now = datetime.now(timezone.utc)
+
+    if from_agent_id:
+        chain_key = f"{from_agent_id}->{agent_id}"
+        current_depth = _A2A_WAKE_CHAIN.get(chain_key, 0)
+        if current_depth >= _A2A_MAX_WAKE_DEPTH:
+            logger.warning(
+                f"[A2A] Wake chain depth {current_depth} reached for {chain_key}, "
+                f"stopping to prevent wake storm"
+            )
+            return
+
+        _A2A_WAKE_CHAIN[chain_key] = current_depth + 1
+
+        def _decay_chain():
+            _A2A_WAKE_CHAIN.pop(chain_key, None)
+        asyncio.get_event_loop().call_later(_A2A_WAKE_CHAIN_TTL, _decay_chain)
+
+    if agent_id in _last_invoke:
+        elapsed = (now - _last_invoke[agent_id]).total_seconds()
+        if elapsed < DEDUP_WINDOW:
+            logger.info(
+                f"[A2A] Skipping wake for agent {agent_id} — "
+                f"invoked {elapsed:.0f}s ago (dedup window {DEDUP_WINDOW}s)"
+            )
+            return
+
+    _last_invoke[agent_id] = now
+
     dummy_trigger = AgentTrigger(
         id=uuid.uuid4(),
         agent_id=agent_id,
