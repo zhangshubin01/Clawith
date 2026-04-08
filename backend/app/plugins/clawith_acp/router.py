@@ -354,6 +354,35 @@ async def _acp_await_client_permission(
     finally:
         pending_permissions.pop(perm_id, None)
 
+async def _read_file_for_diff(
+    ws: WebSocket,
+    pending: dict[str, asyncio.Future],
+    file_path: str,
+    session_id: str = "",
+) -> str:
+    """通过 IDE bridge 读取文件现有内容，供 diff 展示用。文件不存在或读取失败时返回空字符串。"""
+    call_id = str(uuid.uuid4())
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    pending[call_id] = future
+    try:
+        await ws.send_json(
+            _acp_ws_envelope(
+                {
+                    "type": "execute_tool",
+                    "call_id": call_id,
+                    "name": "ide_read_file",
+                    "args": {"path": file_path},
+                }
+            )
+        )
+        result = await asyncio.wait_for(future, timeout=10.0)
+        return str(result) if result else ""
+    except Exception:
+        return ""
+    finally:
+        pending.pop(call_id, None)
+
 async def _custom_get_tools(agent_id):
     tools = await _original_get_tools(agent_id)
     if current_acp_ws.get() is not None:
@@ -384,8 +413,18 @@ async def _custom_execute_tool(
 
     if ws and tool_name in _IDE_BRIDGE_TOOL_NAMES:
         if tool_name in _IDE_TOOLS_REQUIRING_PERMISSION:
+            extra: dict[str, Any] = {}
+            if tool_name == "ide_write_file":
+                file_path = args.get("path", "")
+                old_content = await _read_file_for_diff(ws, pending, file_path, session_id)
+                extra = {
+                    "file_path": file_path,
+                    "old_content": old_content,
+                    "new_content": args.get("content", ""),
+                }
             allowed = await _acp_await_client_permission(
-                ws, pending_perm, tool_name, args, session_id=session_id
+                ws, pending_perm, tool_name, args, session_id=session_id,
+                extra_payload=extra if extra else None,
             )
             if not allowed:
                 logger.info(
