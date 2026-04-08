@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 
 import ConfirmModal from '../components/ConfirmModal';
+import PermissionModal, { PendingPermission } from '../components/PermissionModal';
 import type { FileBrowserApi } from '../components/FileBrowser';
 import FileBrowser from '../components/FileBrowser';
 import ChannelConfig from '../components/ChannelConfig';
@@ -1430,6 +1431,7 @@ function AgentDetailInner() {
     const [sessionsLoading, setSessionsLoading] = useState(false);
     const [allSessionsLoading, setAllSessionsLoading] = useState(false);
     const [agentExpired, setAgentExpired] = useState(false);
+    const [pendingPermission, setPendingPermission] = useState<PendingPermission | null>(null);
     // Websocket chat state (for 'me' conversation)
     const token = useAuthStore((s) => s.token);
     const currentUser = useAuthStore((s) => s.user);
@@ -1930,6 +1932,20 @@ function AgentDetailInner() {
         });
     }, [id, token, activeTab, currentUser?.id]);
 
+    const handlePermissionResult = (granted: boolean) => {
+        if (!pendingPermission) return;
+        const socket = wsMapRef.current[pendingPermission.wsKey];
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+                schemaVersion: 3,
+                type: 'permission_result',
+                permission_id: pendingPermission.permissionId,
+                granted,
+            }));
+        }
+        setPendingPermission(null);
+    };
+
     const ensureSessionSocket = (sess: any, agentId: string, authToken: string) => {
         const sessionId = String(sess.id);
         const key = buildSessionRuntimeKey(agentId, sessionId);
@@ -1986,6 +2002,18 @@ function AgentDetailInner() {
         };
         ws.onmessage = (e) => {
             const d = JSON.parse(e.data);
+            if (d.type === 'permission_request') {
+                setPendingPermission({
+                    permissionId: d.permission_id,
+                    wsKey: key,
+                    toolName: d.tool_name,
+                    filePath: d.file_path,
+                    oldContent: d.old_content ?? '',
+                    newContent: d.new_content ?? '',
+                    argsSummary: d.args_summary ?? '',
+                });
+                return;
+            }
             const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
             if (['thinking', 'chunk', 'tool_call', 'done', 'error', 'quota_exceeded'].includes(d.type)) {
                 const nextStreaming = ['thinking', 'chunk', 'tool_call'].includes(d.type);
@@ -5686,6 +5714,11 @@ function AgentDetailInner() {
                         setFileDraft(template);
                     }
                 }}
+            />
+
+            <PermissionModal
+                permission={pendingPermission}
+                onResult={handlePermissionResult}
             />
 
             <ConfirmModal
