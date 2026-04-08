@@ -16,6 +16,7 @@ from app.models.agent import Agent, AgentPermission
 from app.models.org import AgentAgentRelationship
 from app.models.skill import Skill, SkillFile
 from app.models.tool import Tool, AgentTool
+from app.models.trigger import AgentTrigger
 from app.models.user import User
 from app.config import get_settings
 
@@ -448,6 +449,8 @@ async def seed_okr_agent():
             creator_id=admin.id,
             tenant_id=admin.tenant_id,
             status="idle",
+            # System agent: protected from user deletion
+            is_system=True,
             # Enable heartbeat so OKR Agent runs its collection cycle automatically
             heartbeat_enabled=True,
             heartbeat_interval_minutes=240,  # Check every 4 hours
@@ -531,14 +534,21 @@ async def seed_okr_agent():
             db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
 
         # OKR-specific tools: assigned explicitly (is_default=False)
-        # Includes all 6 OKR tools: read, self-report, batch-collect, report, settings
+        # All 10 OKR tools: 3 global read/self-report + 3 scheduler + 4 management (OKR Agent exclusive)
         okr_tool_names = [
+            # Global tools (all agents can use these)
             "get_okr",
             "get_my_okr",
             "update_kr_progress",
+            # Scheduler tools (OKR Agent uses these during heartbeat)
             "collect_okr_progress",
             "generate_okr_report",
             "get_okr_settings",
+            # Management tools (OKR Agent exclusive — create/modify objectives for any member)
+            "create_objective",
+            "create_key_result",
+            "update_objective",
+            "update_any_kr_progress",
         ]
         for tool_name in okr_tool_names:
             tool_result = await db.execute(select(Tool).where(Tool.name == tool_name))
@@ -560,6 +570,12 @@ async def seed_okr_agent():
         await db.commit()
         logger.info(f"[AgentSeeder] Created OKR Agent ({okr_agent.id})")
 
+        # ── System cron triggers for precise report scheduling ──
+        # These triggers fire OKR Agent at exact times (supplement the 4-hour heartbeat).
+        # is_system=True prevents users from deleting them (only enable/disable).
+        await _seed_okr_triggers(db, okr_agent.id)
+        await db.commit()
+
     # Update seed marker
     _append_seed_marker(seed_marker, f"okr_agent={okr_agent.id}")
     logger.info(f"[AgentSeeder] OKR Agent seeded, id={okr_agent.id}")
@@ -574,4 +590,114 @@ def _append_seed_marker(marker_path: Path, line: str):
             f.write(f"{line}\n")
 
 
+async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
+    """Create system cron triggers for the OKR Agent.
 
+    Two triggers:
+      - daily_okr_report:  fires at 18:00 every day  (0 18 * * *)
+      - weekly_okr_report: fires at 09:00 every Monday (0 9 * * 1)
+
+    These supplement the 4-hour heartbeat with precise scheduled firing.
+    is_system=True prevents users from deleting them.
+    """
+    triggers_to_create = [
+        {
+            "name": "daily_okr_report",
+            "type": "cron",
+            "config": {"expr": "0 18 * * *"},
+            "reason": (
+                "System trigger: fires OKR Agent at 18:00 daily to collect progress "
+                "and generate the daily report if daily_report_enabled is true."
+            ),
+            "cooldown_seconds": 3600,  # 1 hour minimum between fires
+            "is_system": True,
+        },
+        {
+            "name": "weekly_okr_report",
+            "type": "cron",
+            "config": {"expr": "0 9 * * 1"},
+            "reason": (
+                "System trigger: fires OKR Agent at 09:00 every Monday to generate "
+                "the weekly report if weekly_report_enabled is true."
+            ),
+            "cooldown_seconds": 3600,
+            "is_system": True,
+        },
+    ]
+
+    for t in triggers_to_create:
+        # Idempotent: skip if trigger with same name already exists
+        existing = await db.execute(
+            select(AgentTrigger).where(
+                AgentTrigger.agent_id == agent_id,
+                AgentTrigger.name == t["name"],
+            )
+        )
+        if existing.scalar_one_or_none():
+            logger.info(f"[AgentSeeder] Trigger '{t['name']}' already exists, skipping")
+            continue
+
+        trigger = AgentTrigger(
+            agent_id=agent_id,
+            name=t["name"],
+            type=t["type"],
+            config=t["config"],
+            reason=t["reason"],
+            cooldown_seconds=t["cooldown_seconds"],
+            is_system=t["is_system"],
+            is_enabled=True,
+        )
+        db.add(trigger)
+        logger.info(f"[AgentSeeder] Created system trigger '{t['name']}' for OKR Agent")
+
+
+async def patch_existing_okr_agent() -> None:
+    """Patch an already-seeded OKR Agent with new fields added in later versions.
+
+    Called at startup after seed_okr_agent(). Safe to run on every startup —
+    all operations are idempotent. Handles:
+      - Setting is_system=True on existing OKR Agent
+      - Creating missing system cron triggers
+      - Assigning any newly-added OKR tools
+    """
+    async with async_session() as db:
+        result = await db.execute(select(Agent).where(Agent.name == "OKR Agent").limit(1))
+        agent = result.scalar_one_or_none()
+        if not agent:
+            return  # OKR Agent not seeded yet, nothing to patch
+
+        changed = False
+
+        # Ensure is_system=True
+        if not agent.is_system:
+            agent.is_system = True
+            changed = True
+            logger.info("[AgentSeeder] Patched OKR Agent: set is_system=True")
+
+        await db.flush()
+
+        # Ensure all OKR tool assignments exist
+        all_okr_tools = [
+            "get_okr", "get_my_okr", "update_kr_progress",
+            "collect_okr_progress", "generate_okr_report", "get_okr_settings",
+            "create_objective", "create_key_result", "update_objective", "update_any_kr_progress",
+        ]
+        for tool_name in all_okr_tools:
+            tool_res = await db.execute(select(Tool).where(Tool.name == tool_name))
+            tool = tool_res.scalar_one_or_none()
+            if not tool:
+                continue
+            at_res = await db.execute(
+                select(AgentTool).where(AgentTool.agent_id == agent.id, AgentTool.tool_id == tool.id)
+            )
+            if not at_res.scalar_one_or_none():
+                db.add(AgentTool(agent_id=agent.id, tool_id=tool.id, enabled=True))
+                changed = True
+                logger.info(f"[AgentSeeder] Patched OKR Agent: assigned tool '{tool_name}'")
+
+        # Ensure system cron triggers exist
+        await _seed_okr_triggers(db, agent.id)
+
+        if changed:
+            await db.commit()
+            logger.info("[AgentSeeder] OKR Agent patch complete")

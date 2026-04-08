@@ -202,6 +202,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[startup] OKR Agent seed failed: {e}")
 
+    try:
+        # Patch existing OKR Agent with new fields/tools/triggers added in later versions
+        from app.services.agent_seeder import patch_existing_okr_agent
+        await patch_existing_okr_agent()
+    except Exception as e:
+        logger.warning(f"[startup] OKR Agent patch failed: {e}")
+
     # Start background tasks (always, even if seeding failed)
     try:
         logger.info("[startup] starting background tasks...")

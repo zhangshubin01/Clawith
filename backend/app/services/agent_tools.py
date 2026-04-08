@@ -2335,6 +2335,15 @@ async def execute_tool(
         # get_okr_settings: read tenant OKR configuration for scheduling decisions
         elif tool_name == "get_okr_settings":
             result = await _get_okr_settings_tool(agent_id)
+        # ── OKR Management Tools (OKR Agent exclusive) ──
+        elif tool_name == "create_objective":
+            result = await _create_objective(agent_id, arguments)
+        elif tool_name == "create_key_result":
+            result = await _create_key_result(agent_id, arguments)
+        elif tool_name == "update_objective":
+            result = await _update_objective(agent_id, arguments)
+        elif tool_name == "update_any_kr_progress":
+            result = await _update_any_kr_progress(agent_id, arguments)
         else:
 
             # Try MCP tool execution
@@ -9611,3 +9620,193 @@ async def _get_okr_settings_tool(agent_id: uuid.UUID | None) -> str:
     except Exception as e:
         logger.exception(f"[OKR] get_okr_settings failed for agent {agent_id}")
         return f"Failed to get OKR settings: {str(e)[:200]}"
+
+
+async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
+    if not agent_id:
+        return "OKR tools require agent context."
+    try:
+        from app.models.agent import Agent as AgentModel
+        from app.models.okr import OKRObjective
+        async with async_session() as db:
+            ag_res = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            ag = ag_res.scalar_one_or_none()
+            if not ag:
+                return "Agent not found."
+            
+            title = arguments.get("title")
+            owner_type = arguments.get("owner_type")
+            period_start = arguments.get("period_start")
+            period_end = arguments.get("period_end")
+            if not all([title, owner_type, period_start, period_end]):
+                return "Missing required fields: title, owner_type, period_start, period_end"
+
+            from datetime import date
+            p_start = date.fromisoformat(period_start)
+            p_end = date.fromisoformat(period_end)
+
+            owner_id_str = arguments.get("owner_id")
+            owner_id = uuid.UUID(owner_id_str) if owner_id_str else None
+
+            obj = OKRObjective(
+                tenant_id=ag.tenant_id,
+                title=title,
+                description=arguments.get("description"),
+                owner_type=owner_type,
+                owner_id=owner_id,
+                period_start=p_start,
+                period_end=p_end,
+                status="active"
+            )
+            db.add(obj)
+            await db.commit()
+            return f"Successfully created Objective '{obj.title}' (ID: {obj.id})"
+    except Exception as e:
+        logger.exception(f"[OKR] create_objective failed")
+        return f"Failed to create objective: {str(e)[:200]}"
+
+
+async def _create_key_result(agent_id: uuid.UUID | None, arguments: dict) -> str:
+    if not agent_id:
+        return "OKR tools require agent context."
+    try:
+        from app.models.okr import OKRObjective, OKRKeyResult
+        async with async_session() as db:
+            obj_id_str = arguments.get("objective_id")
+            if not obj_id_str:
+                return "Missing objective_id"
+            try:
+                obj_id = uuid.UUID(obj_id_str)
+            except ValueError:
+                return "Invalid formatted objective_id (must be UUID)"
+
+            # Verify objective exists
+            obj_res = await db.execute(select(OKRObjective).where(OKRObjective.id == obj_id))
+            if not obj_res.scalar_one_or_none():
+                return f"Objective {obj_id} not found."
+
+            kr = OKRKeyResult(
+                objective_id=obj_id,
+                title=arguments.get("title"),
+                target_value=float(arguments.get("target_value", 100)),
+                current_value=0.0,
+                unit=arguments.get("unit"),
+                focus_ref=arguments.get("focus_ref")
+            )
+            db.add(kr)
+            await db.commit()
+            return f"Successfully created Key Result '{kr.title}' (ID: {kr.id})"
+    except Exception as e:
+        logger.exception(f"[OKR] create_key_result failed")
+        return f"Failed to create key result: {str(e)[:200]}"
+
+
+async def _update_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
+    if not agent_id:
+        return "OKR tools require agent context."
+    try:
+        from app.models.okr import OKRObjective
+        async with async_session() as db:
+            obj_id_str = arguments.get("objective_id")
+            if not obj_id_str:
+                return "Missing objective_id"
+            try:
+                obj_id = uuid.UUID(obj_id_str)
+            except ValueError:
+                return "Invalid formatted objective_id (must be UUID)"
+
+            obj_res = await db.execute(select(OKRObjective).where(OKRObjective.id == obj_id))
+            obj = obj_res.scalar_one_or_none()
+            if not obj:
+                return f"Objective {obj_id} not found."
+
+            updates = []
+            if "title" in arguments:
+                obj.title = arguments["title"]
+                updates.append("title")
+            if "description" in arguments:
+                obj.description = arguments["description"]
+                updates.append("description")
+            if "status" in arguments:
+                obj.status = arguments["status"]
+                updates.append("status")
+            if "period_start" in arguments:
+                from datetime import date
+                obj.period_start = date.fromisoformat(arguments["period_start"])
+                updates.append("period_start")
+            if "period_end" in arguments:
+                from datetime import date
+                obj.period_end = date.fromisoformat(arguments["period_end"])
+                updates.append("period_end")
+
+            if not updates:
+                return "No supported fields provided to update."
+
+            await db.commit()
+            return f"Successfully updated Objective {obj.id}. Changed fields: {', '.join(updates)}"
+    except Exception as e:
+        logger.exception(f"[OKR] update_objective failed")
+        return f"Failed to update objective: {str(e)[:200]}"
+
+
+async def _update_any_kr_progress(agent_id: uuid.UUID | None, arguments: dict) -> str:
+    """OKR Agent exclusive version of update_kr_progress."""
+    if not agent_id:
+        return "OKR tools require agent context."
+    try:
+        from app.models.agent import Agent as AgentModel
+        from app.models.okr import OKRKeyResult, OKRProgressLog
+        async with async_session() as db:
+            kr_id_str = arguments.get("kr_id")
+            val = arguments.get("value")
+            if not kr_id_str or val is None:
+                return "Missing kr_id or value"
+            try:
+                kr_id = uuid.UUID(kr_id_str)
+            except ValueError:
+                return "Invalid formatted kr_id (must be UUID)"
+
+            kr_res = await db.execute(select(OKRKeyResult).where(OKRKeyResult.id == kr_id))
+            kr = kr_res.scalar_one_or_none()
+            if not kr:
+                return f"Key Result {kr_id} not found."
+
+            ag_res = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            ag = ag_res.scalar_one_or_none()
+
+            old_val = kr.current_value
+            kr.current_value = float(val)
+
+            # Auto-compute status if not explicitly given
+            explicit_status = arguments.get("status")
+            if explicit_status:
+                kr.status = explicit_status
+            else:
+                progress = kr.current_value / kr.target_value if kr.target_value != 0 else 0
+                if progress >= 1.0:
+                    kr.status = "completed"
+                elif progress >= 0.7:
+                    kr.status = "on_track"
+                elif progress >= 0.4:
+                    kr.status = "at_risk"
+                else:
+                    kr.status = "behind"
+
+            from datetime import datetime
+            kr.last_updated_at = datetime.utcnow()
+
+            note = arguments.get("note", "Updated by OKR Agent after check-in")
+            log_entry = OKRProgressLog(
+                kr_id=kr.id,
+                previous_value=old_val,
+                new_value=kr.current_value,
+                source="okr_agent" if (ag and ag.is_system) else "agent",
+                note=note
+            )
+            db.add(log_entry)
+            await db.commit()
+
+            return f"Successfully updated KR '{kr.title}'. Progress: {old_val} -> {kr.current_value} {kr.unit or ''}. Status: {kr.status}"
+    except Exception as e:
+        logger.exception(f"[OKR] update_any_kr_progress failed")
+        return f"Failed to update kr progress: {str(e)[:200]}"

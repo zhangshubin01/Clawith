@@ -290,6 +290,12 @@ async def create_agent(
         agent.api_key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         agent.status = "idle"
         await db.commit()
+
+        from app.services.okr_agent_hook import hook_new_agent
+        if agent.tenant_id:
+            await hook_new_agent(db, agent.id, agent.tenant_id)
+            await db.commit()
+
         out = AgentOut.model_validate(agent).model_dump()
         out["api_key"] = raw_key  # Return once on creation
         return out
@@ -339,6 +345,11 @@ async def create_agent(
     # Start container
     await agent_manager.start_container(db, agent)
     await db.flush()
+
+    from app.services.okr_agent_hook import hook_new_agent
+    if agent.tenant_id:
+        await hook_new_agent(db, agent.id, agent.tenant_id)
+        await db.commit()
 
     return AgentOut.model_validate(agent)
 

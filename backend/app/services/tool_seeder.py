@@ -1135,6 +1135,185 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
+    {
+        # create_objective — OKR Agent uses this after conversation-based confirmation
+        # to create an O for the company, a user, or an agent. Only OKR Agent has this tool.
+        "name": "create_objective",
+        "display_name": "Create Objective",
+        "description": (
+            "Create an OKR Objective for the company, a specific user, or a specific agent. "
+            "Call this after confirming the objective with the relevant person through conversation. "
+            "owner_type must be 'company', 'user', or 'agent'. "
+            "owner_id is not required for company-level objectives. "
+            "period_start and period_end must be ISO date strings (YYYY-MM-DD)."
+        ),
+        "category": "okr",
+        "icon": "🎯",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "The objective title (concise, inspiring, directional).",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional detailed description of the objective.",
+                },
+                "owner_type": {
+                    "type": "string",
+                    "enum": ["company", "user", "agent"],
+                    "description": "Who this objective belongs to.",
+                },
+                "owner_id": {
+                    "type": "string",
+                    "description": "UUID of the owner (user or agent). Omit for company-level objectives.",
+                },
+                "period_start": {
+                    "type": "string",
+                    "description": "ISO date string for the start of the OKR period (e.g. '2026-04-01').",
+                },
+                "period_end": {
+                    "type": "string",
+                    "description": "ISO date string for the end of the OKR period (e.g. '2026-06-30').",
+                },
+            },
+            "required": ["title", "owner_type", "period_start", "period_end"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        # create_key_result — OKR Agent creates a measurable KR under a confirmed objective.
+        "name": "create_key_result",
+        "display_name": "Create Key Result",
+        "description": (
+            "Create a Key Result (KR) under an existing Objective. "
+            "Get the objective_id first using get_okr. "
+            "target_value is the goal number (e.g. 50000 for 50000 followers). "
+            "unit is optional but recommended for clarity (e.g. '%', 'NPS', '万元', 'followers')."
+        ),
+        "category": "okr",
+        "icon": "🔑",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "objective_id": {
+                    "type": "string",
+                    "description": "UUID of the parent Objective.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "The KR title (specific, measurable outcome).",
+                },
+                "target_value": {
+                    "type": "number",
+                    "description": "The target number to achieve (e.g. 50000).",
+                },
+                "unit": {
+                    "type": "string",
+                    "description": "Optional unit label (e.g. '%', 'followers', '万元', 'NPS score').",
+                },
+                "focus_ref": {
+                    "type": "string",
+                    "description": "Optional: basename of the focus file that tracks this KR (e.g. 'content_quality').",
+                },
+            },
+            "required": ["objective_id", "title", "target_value"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        # update_objective — OKR Agent modifies an O's metadata, status, or period.
+        "name": "update_objective",
+        "display_name": "Update Objective",
+        "description": (
+            "Modify an existing Objective's title, description, status, or period dates. "
+            "Use this when a team member wants to adjust their O, or to archive a completed one. "
+            "Get the objective_id from get_okr. Only provide the fields you want to change."
+        ),
+        "category": "okr",
+        "icon": "✏️",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "objective_id": {
+                    "type": "string",
+                    "description": "UUID of the Objective to update.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "New title for the objective.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "New description.",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["draft", "active", "completed", "archived"],
+                    "description": "New status for the objective.",
+                },
+                "period_start": {
+                    "type": "string",
+                    "description": "New period start date (YYYY-MM-DD).",
+                },
+                "period_end": {
+                    "type": "string",
+                    "description": "New period end date (YYYY-MM-DD).",
+                },
+            },
+            "required": ["objective_id"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        # update_any_kr_progress — OKR Agent exclusive: update KR for any member.
+        # Unlike update_kr_progress (self-report), this can update anyone's KR.
+        # Used after collecting progress data through conversation.
+        "name": "update_any_kr_progress",
+        "display_name": "Update Any KR Progress",
+        "description": (
+            "Update the progress value of any team member's Key Result. "
+            "This is the OKR Agent's exclusive version of update_kr_progress — it can update "
+            "KRs belonging to any user or agent, not just the caller's own. "
+            "Use this ONLY after confirming the value with the KR owner through conversation. "
+            "Get kr_id from get_okr. Optionally provide a note explaining the source."
+        ),
+        "category": "okr",
+        "icon": "📈",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "kr_id": {
+                    "type": "string",
+                    "description": "UUID of the Key Result to update. Get from get_okr.",
+                },
+                "value": {
+                    "type": "number",
+                    "description": "New current value for this KR.",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Source or context note (e.g. 'Reported by user in weekly check-in').",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["on_track", "at_risk", "behind", "completed"],
+                    "description": "Optional: override the auto-computed status.",
+                },
+            },
+            "required": ["kr_id", "value"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
 
     # --- Feishu Integration Tools ---
     # These tools require a configured Feishu channel to function.

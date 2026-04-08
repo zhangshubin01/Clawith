@@ -491,6 +491,20 @@ class RegistrationService:
                 user.primary_mobile = member.phone
             
             await db.flush()
+        else:
+            member = OrgMember(
+                name=user.display_name or "User",
+                email=user.email,
+                phone=user.primary_mobile,
+                tenant_id=user.tenant_id,
+                user_id=user.id,
+                status="active"
+            )
+            db.add(member)
+            await db.flush()
+
+        from app.services.okr_agent_hook import hook_new_org_member
+        await hook_new_org_member(db, member.id, user.tenant_id)
 
     async def sync_org_member_contact_from_user(
         self,

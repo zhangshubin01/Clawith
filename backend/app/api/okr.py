@@ -20,7 +20,7 @@ from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 from app.api.auth import get_current_user
 from app.database import async_session
@@ -467,6 +467,30 @@ async def update_objective(
         return _obj_to_out(obj)
 
 
+@router.delete("/objectives/{objective_id}")
+async def delete_objective(
+    objective_id: uuid.UUID,
+    user=Depends(get_current_user),
+):
+    """Soft delete an Objective (set status to archived)."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(OKRObjective).where(
+                OKRObjective.id == objective_id,
+                OKRObjective.tenant_id == user.tenant_id,
+            )
+        )
+        obj = result.scalar_one_or_none()
+        if not obj:
+            raise HTTPException(404, "Objective not found")
+
+        # Soft delete
+        obj.status = "archived"
+        await db.commit()
+
+        return {"status": "success"}
+
+
 # ─── Key Results ──────────────────────────────────────────────────────────────
 
 
@@ -638,6 +662,35 @@ async def update_kr_progress_endpoint(
         await db.commit()
         await db.refresh(kr)
         return _kr_to_out(kr)
+
+
+@router.delete("/key-results/{kr_id}")
+async def delete_key_result(
+    kr_id: uuid.UUID,
+    user=Depends(get_current_user),
+):
+    """Hard delete a key result."""
+    from app.models.okr import OKRProgressLog
+    async with async_session() as db:
+        result = await db.execute(
+            select(OKRKeyResult, OKRObjective)
+            .join(OKRObjective, OKRKeyResult.objective_id == OKRObjective.id)
+            .where(
+                OKRKeyResult.id == kr_id,
+                OKRObjective.tenant_id == user.tenant_id,
+            )
+        )
+        row = result.first()
+        if not row:
+            raise HTTPException(404, "Key Result not found")
+        kr, _ = row
+
+        # Manual cascade delete logs
+        await db.execute(delete(OKRProgressLog).where(OKRProgressLog.kr_id == kr_id))
+        await db.execute(delete(OKRKeyResult).where(OKRKeyResult.id == kr_id))
+        
+        await db.commit()
+        return {"status": "success"}
 
 
 # ─── Reports ──────────────────────────────────────────────────────────────────

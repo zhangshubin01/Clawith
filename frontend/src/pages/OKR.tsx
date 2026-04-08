@@ -63,6 +63,16 @@ interface Period {
     is_current: boolean;
 }
 
+interface WorkReport {
+    id: string;
+    tenant_id: string;
+    okr_agent_id: string;
+    report_type: string;
+    period_label: string;
+    content: string;
+    created_at: string;
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const STATUS_COLOR: Record<string, string> = {
@@ -137,11 +147,13 @@ function KRCard({
     kr,
     isChinese,
     onUpdateProgress,
+    onDelete,
     canEdit,
 }: {
     kr: KeyResult;
     isChinese: boolean;
     onUpdateProgress: (krId: string, value: number, status: string, note: string) => void;
+    onDelete?: (krId: string) => void;
     canEdit: boolean;
 }) {
     const pct = progressPercent(kr);
@@ -199,6 +211,32 @@ function KRCard({
                             }}
                         >
                             {isChinese ? '更新进度' : 'Update'}
+                        </button>
+                    )}
+                    {canEdit && !editing && onDelete && (
+                        <button
+                            onClick={() => {
+                                if (window.confirm(isChinese ? '确定要删除这个 Key Result 吗？此操作不可恢复。' : 'Are you sure you want to delete this Key Result?')) {
+                                    onDelete(kr.id);
+                                }
+                            }}
+                            title={isChinese ? '删除' : 'Delete'}
+                            style={{
+                                background: 'none', border: '1px solid var(--border-subtle)',
+                                borderRadius: '4px', padding: '2px 6px',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                color: 'var(--text-tertiary)', cursor: 'pointer', transition: 'all 0.15s',
+                            }}
+                            onMouseEnter={e => {
+                                (e.currentTarget as HTMLButtonElement).style.borderColor = '#ef4444';
+                                (e.currentTarget as HTMLButtonElement).style.color = '#ef4444';
+                            }}
+                            onMouseLeave={e => {
+                                (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--border-subtle)';
+                                (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-tertiary)';
+                            }}
+                        >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                         </button>
                     )}
                 </div>
@@ -423,12 +461,14 @@ function ObjectiveCard({
     ownerLabel,
     canEdit,
     onInvalidate,
+    onDelete,
 }: {
     obj: Objective;
     isChinese: boolean;
     ownerLabel?: string;
     canEdit: boolean;
     onInvalidate: () => void;
+    onDelete?: (objId: string) => void;
 }) {
     const [expanded, setExpanded] = useState(true);
     const [addingKR, setAddingKR] = useState(false);
@@ -497,6 +537,34 @@ function ObjectiveCard({
                         <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 500, minWidth: 30 }}>{pct}%</span>
                     </div>
                     <StatusBadge status={overallStatus} isChinese={isChinese} />
+                    {canEdit && onDelete && (
+                        <button
+                            onClick={e => {
+                                e.stopPropagation();
+                                if (window.confirm(isChinese ? '确定要删除这个目标及其所有相关的 Key Results 吗？（此操作实际上是将目标归档）' : 'Are you sure you want to delete this Objective and all its Key Results? (This will archive the objective)')) {
+                                    onDelete(obj.id);
+                                }
+                            }}
+                            title={isChinese ? '删除 / 归档' : 'Delete / Archive'}
+                            style={{
+                                background: 'none', border: '1px solid transparent',
+                                borderRadius: '4px', padding: '4px',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                color: 'var(--text-tertiary)', cursor: 'pointer', transition: 'all 0.15s',
+                                marginLeft: '8px'
+                            }}
+                            onMouseEnter={e => {
+                                (e.currentTarget as HTMLButtonElement).style.borderColor = '#ef4444';
+                                (e.currentTarget as HTMLButtonElement).style.color = '#ef4444';
+                            }}
+                            onMouseLeave={e => {
+                                (e.currentTarget as HTMLButtonElement).style.borderColor = 'transparent';
+                                (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-tertiary)';
+                            }}
+                        >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -509,6 +577,10 @@ function ObjectiveCard({
                             kr={kr}
                             isChinese={isChinese}
                             onUpdateProgress={handleKRProgressUpdate}
+                            onDelete={async (krId) => {
+                                await fetchJson(`/okr/key-results/${krId}`, { method: 'DELETE' });
+                                onInvalidate();
+                            }}
                             canEdit={canEdit}
                         />
                     ))}
@@ -684,6 +756,7 @@ export default function OKR() {
 
     const [selectedPeriod, setSelectedPeriod] = useState<Period | null>(null);
     const [creating, setCreating] = useState(false);
+    const [activeTab, setActiveTab] = useState<'dashboards' | 'reports'>('dashboards');
 
     // Fetch OKR settings
     const { data: settings, isLoading: settingsLoading } = useQuery<OKRSettings>({
@@ -803,7 +876,35 @@ export default function OKR() {
                     </div>
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', background: 'var(--bg-secondary)', padding: '2px', borderRadius: '8px' }}>
+                    <button
+                        onClick={() => setActiveTab('dashboards')}
+                        style={{
+                            padding: '6px 16px', borderRadius: '6px', fontSize: '13px', fontWeight: 500,
+                            background: activeTab === 'dashboards' ? 'var(--bg-primary)' : 'transparent',
+                            color: activeTab === 'dashboards' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                            boxShadow: activeTab === 'dashboards' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+                            border: 'none', cursor: 'pointer', transition: 'all 0.15s',
+                        }}
+                    >
+                        {isChinese ? '概览 (Dashboard)' : 'Dashboard'}
+                    </button>
+                    <button
+                        onClick={() => setActiveTab('reports')}
+                        style={{
+                            padding: '6px 16px', borderRadius: '6px', fontSize: '13px', fontWeight: 500,
+                            background: activeTab === 'reports' ? 'var(--bg-primary)' : 'transparent',
+                            color: activeTab === 'reports' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                            boxShadow: activeTab === 'reports' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+                            border: 'none', cursor: 'pointer', transition: 'all 0.15s',
+                        }}
+                    >
+                        {isChinese ? '工作汇报 (Reports)' : 'Reports'}
+                    </button>
+                </div>
+
+                {activeTab === 'dashboards' && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                     {/* Period Selector */}
                     {periods.length > 0 && (
                         <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
@@ -851,92 +952,168 @@ export default function OKR() {
                         </button>
                     )}
                 </div>
+                )}
             </div>
 
-            {/* Create Objective form */}
-            {creating && selectedPeriod && (
-                <div style={{ marginBottom: '24px' }}>
-                    <CreateObjectiveForm
-                        isChinese={isChinese}
-                        isAdmin={!!isAdmin}
-                        userId={user?.id ?? ''}
-                        selectedPeriod={selectedPeriod}
-                        onCreated={() => { setCreating(false); invalidateObjectives(); }}
-                        onCancel={() => setCreating(false)}
-                    />
-                </div>
-            )}
-
-            {/* Loading */}
-            {objLoading && (
-                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
-                    {isChinese ? '加载中...' : 'Loading...'}
-                </div>
-            )}
-
-            {/* Empty state */}
-            {!objLoading && objectives.length === 0 && (
-                <div style={{
-                    textAlign: 'center', padding: '60px 24px',
-                    border: '1px dashed var(--border-subtle)', borderRadius: '12px',
-                    color: 'var(--text-tertiary)', fontSize: '13px',
-                }}>
-                    {isChinese
-                        ? '当前周期暂无 OKR。点击右上角「新建目标」或联系 OKR Agent 来设定目标。'
-                        : 'No OKRs for this period yet. Click "New Objective" or ask the OKR Agent.'}
-                </div>
-            )}
-
-            {/* Company Objectives */}
-            {!objLoading && companyObjs.length > 0 && (
-                <section style={{ marginBottom: '32px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-                        <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
-                            {t('okr.companyObjectives', isChinese ? '公司目标' : 'Company Objectives')}
-                        </span>
-                        <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
-                        <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{companyObjs.length}</span>
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        {companyObjs.map(obj => (
-                            <ObjectiveCard
-                                key={obj.id}
-                                obj={obj}
+            {activeTab === 'dashboards' && (
+                <>
+                    {/* Create Objective form */}
+                    {creating && selectedPeriod && (
+                        <div style={{ marginBottom: '24px' }}>
+                            <CreateObjectiveForm
                                 isChinese={isChinese}
-                                canEdit={!!isAdmin}
-                                onInvalidate={invalidateObjectives}
+                                isAdmin={!!isAdmin}
+                                userId={user?.id ?? ''}
+                                selectedPeriod={selectedPeriod}
+                                onCreated={() => { setCreating(false); invalidateObjectives(); }}
+                                onCancel={() => setCreating(false)}
                             />
-                        ))}
-                    </div>
-                </section>
+                        </div>
+                    )}
+
+                    {/* Loading */}
+                    {objLoading && (
+                        <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
+                            {isChinese ? '加载中...' : 'Loading...'}
+                        </div>
+                    )}
+
+                    {/* Empty state */}
+                    {!objLoading && objectives.length === 0 && (
+                        <div style={{
+                            textAlign: 'center', padding: '60px 24px',
+                            border: '1px dashed var(--border-subtle)', borderRadius: '12px',
+                            color: 'var(--text-tertiary)', fontSize: '13px',
+                        }}>
+                            {isChinese
+                                ? '当前周期暂无 OKR。点击右上角「新建目标」或联系 OKR Agent 来设定目标。'
+                                : 'No OKRs for this period yet. Click "New Objective" or ask the OKR Agent.'}
+                        </div>
+                    )}
+
+                    {/* Company Objectives */}
+                    {!objLoading && companyObjs.length > 0 && (
+                        <section style={{ marginBottom: '32px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                                <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
+                                    {t('okr.companyObjectives', isChinese ? '公司目标' : 'Company Objectives')}
+                                </span>
+                                <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
+                                <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{companyObjs.length}</span>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                {companyObjs.map(obj => (
+                                    <ObjectiveCard
+                                        key={obj.id}
+                                        obj={obj}
+                                        isChinese={isChinese}
+                                        canEdit={!!isAdmin}
+                                        onInvalidate={invalidateObjectives}
+                                        onDelete={async (id) => {
+                                            await fetchJson(`/okr/objectives/${id}`, { method: 'DELETE' });
+                                            invalidateObjectives();
+                                        }}
+                                    />
+                                ))}
+                            </div>
+                        </section>
+                    )}
+
+                    {/* Member Objectives */}
+                    {!objLoading && Object.keys(memberGroups).length > 0 && (
+                        <section>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                                <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
+                                    {t('okr.memberObjectives', isChinese ? '成员目标' : 'Member Objectives')}
+                                </span>
+                                <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
+                                <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{memberObjs.length}</span>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                {Object.entries(memberGroups).map(([ownerKey, group]) => (
+                                    group.objs.map(obj => (
+                                        <ObjectiveCard
+                                            key={obj.id}
+                                            obj={obj}
+                                            isChinese={isChinese}
+                                            ownerLabel={group.label}
+                                            canEdit={true}
+                                            onInvalidate={invalidateObjectives}
+                                            onDelete={async (id) => {
+                                                await fetchJson(`/okr/objectives/${id}`, { method: 'DELETE' });
+                                                invalidateObjectives();
+                                            }}
+                                        />
+                                    ))
+                                ))}
+                            </div>
+                        </section>
+                    )}
+                </>
             )}
 
-            {/* Member Objectives */}
-            {!objLoading && Object.keys(memberGroups).length > 0 && (
-                <section>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-                        <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
-                            {t('okr.memberObjectives', isChinese ? '成员目标' : 'Member Objectives')}
-                        </span>
-                        <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
-                        <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{memberObjs.length}</span>
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        {Object.entries(memberGroups).map(([ownerKey, group]) => (
-                            group.objs.map(obj => (
-                                <ObjectiveCard
-                                    key={obj.id}
-                                    obj={obj}
-                                    isChinese={isChinese}
-                                    ownerLabel={group.label}
-                                    canEdit={true}
-                                    onInvalidate={invalidateObjectives}
-                                />
-                            ))
-                        ))}
-                    </div>
-                </section>
+            {activeTab === 'reports' && (
+                <ReportsTab isChinese={isChinese} />
             )}
+        </div>
+    );
+}
+
+function ReportsTab({ isChinese }: { isChinese: boolean }) {
+    const { data: reports = [], isLoading } = useQuery<WorkReport[]>({
+        queryKey: ['okr-reports'],
+        queryFn: () => fetchJson<WorkReport[]>('/okr/reports'),
+    });
+
+    if (isLoading) {
+        return <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>{isChinese ? '加载中...' : 'Loading...'}</div>;
+    }
+
+    if (reports.length === 0) {
+        return (
+            <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px', background: 'var(--bg-secondary)', borderRadius: '12px' }}>
+                {isChinese ? '暂无 OKR 工作汇报。请确保 OKR Agent 在运行中并设定了周期。' : 'No OKR reports yet. Make sure OKR Agent is running.'}
+            </div>
+        );
+    }
+
+    return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {reports.map((report) => (
+                <div key={report.id} style={{
+                    padding: '20px',
+                    background: 'var(--bg-primary)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '12px',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.02)'
+                }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '12px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{
+                                padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600,
+                                background: report.report_type === 'weekly' ? '#6366f115' : '#14b8a615',
+                                color: report.report_type === 'weekly' ? '#6366f1' : '#14b8a6',
+                            }}>
+                                {report.report_type.toUpperCase()}
+                            </span>
+                            <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                {report.period_label}
+                            </span>
+                        </div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                            {new Date(report.created_at).toLocaleString()}
+                        </div>
+                    </div>
+                    {/* Render markdown content simply or parse it. Since we don't have a markdown parser available directly in this file without imports, we use pre/code block */}
+                    <pre style={{
+                        margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                        fontSize: '13px', lineHeight: '1.6', color: 'var(--text-secondary)',
+                        fontFamily: 'inherit',
+                    }}>
+                        {report.content}
+                    </pre>
+                </div>
+            ))}
         </div>
     );
 }
