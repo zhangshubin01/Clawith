@@ -2326,6 +2326,15 @@ async def execute_tool(
             result = await _get_my_okr(agent_id, arguments)
         elif tool_name == "update_kr_progress":
             result = await _update_kr_progress(agent_id, arguments)
+        # collect_okr_progress: batch-read all focus.md files and sync progress to DB
+        elif tool_name == "collect_okr_progress":
+            result = await _collect_okr_progress(agent_id)
+        # generate_okr_report: build daily/weekly structured report and store it
+        elif tool_name == "generate_okr_report":
+            result = await _generate_okr_report(agent_id, arguments)
+        # get_okr_settings: read tenant OKR configuration for scheduling decisions
+        elif tool_name == "get_okr_settings":
+            result = await _get_okr_settings_tool(agent_id)
         else:
 
             # Try MCP tool execution
@@ -9501,3 +9510,104 @@ async def _update_kr_progress(agent_id: uuid.UUID | None, arguments: dict) -> st
     except Exception as e:
         logger.exception(f"[OKR] update_kr_progress failed for agent {agent_id}")
         return f"Failed to update KR progress: {str(e)[:200]}"
+
+
+async def _collect_okr_progress(agent_id: uuid.UUID | None) -> str:
+    """Batch-collect KR progress from all team members' focus.md files.
+
+    Delegates to okr_scheduler.collect_all_focus_updates(). The calling agent
+    must be the OKR Agent — we look up its tenant from the DB.
+    """
+    if not agent_id:
+        return "OKR tools require agent context."
+
+    try:
+        from app.models.agent import Agent as AgentModel
+        from app.services.okr_scheduler import collect_all_focus_updates
+
+        async with async_session() as db:
+            agent_result = await db.execute(
+                select(AgentModel).where(AgentModel.id == agent_id)
+            )
+            agent = agent_result.scalar_one_or_none()
+            if not agent:
+                return "Agent not found."
+
+        return await collect_all_focus_updates(
+            tenant_id=agent.tenant_id,
+            okr_agent_id=agent_id,
+        )
+
+    except Exception as e:
+        logger.exception(f"[OKR] collect_okr_progress failed for agent {agent_id}")
+        return f"Failed to collect OKR progress: {str(e)[:200]}"
+
+
+async def _generate_okr_report(agent_id: uuid.UUID | None, arguments: dict) -> str:
+    """Generate a daily or weekly OKR report.
+
+    Writes to WorkReport table and returns the markdown content for posting.
+    """
+    if not agent_id:
+        return "OKR tools require agent context."
+
+    report_type = arguments.get("report_type", "daily").lower()
+    if report_type not in ("daily", "weekly"):
+        return "Invalid report_type. Must be 'daily' or 'weekly'."
+
+    try:
+        from app.models.agent import Agent as AgentModel
+        from app.services.okr_scheduler import generate_daily_report, generate_weekly_report
+
+        async with async_session() as db:
+            agent_result = await db.execute(
+                select(AgentModel).where(AgentModel.id == agent_id)
+            )
+            agent = agent_result.scalar_one_or_none()
+            if not agent:
+                return "Agent not found."
+
+        if report_type == "daily":
+            return await generate_daily_report(
+                tenant_id=agent.tenant_id,
+                okr_agent_id=agent_id,
+            )
+        else:
+            return await generate_weekly_report(
+                tenant_id=agent.tenant_id,
+                okr_agent_id=agent_id,
+            )
+
+    except Exception as e:
+        logger.exception(f"[OKR] generate_okr_report failed for agent {agent_id}")
+        return f"Failed to generate OKR report: {str(e)[:200]}"
+
+
+async def _get_okr_settings_tool(agent_id: uuid.UUID | None) -> str:
+    """Return OKR settings for the agent's tenant as a formatted string.
+
+    The OKR Agent uses this to determine report schedule and period config
+    without needing to make HTTP calls to its own API.
+    """
+    if not agent_id:
+        return "OKR tools require agent context."
+
+    try:
+        from app.models.agent import Agent as AgentModel
+        from app.services.okr_scheduler import get_okr_settings_for_agent
+        import json as _json
+
+        async with async_session() as db:
+            agent_result = await db.execute(
+                select(AgentModel).where(AgentModel.id == agent_id)
+            )
+            agent = agent_result.scalar_one_or_none()
+            if not agent:
+                return "Agent not found."
+
+        settings = await get_okr_settings_for_agent(agent.tenant_id)
+        return _json.dumps(settings, indent=2, ensure_ascii=False)
+
+    except Exception as e:
+        logger.exception(f"[OKR] get_okr_settings failed for agent {agent_id}")
+        return f"Failed to get OKR settings: {str(e)[:200]}"

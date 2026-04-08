@@ -1060,6 +1060,81 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
+    {
+        # collect_okr_progress — OKR Agent uses this during heartbeat to batch-read
+        # all team members' focus.md files and sync KR values to the database.
+        # This replaces the need to contact each member individually.
+        "name": "collect_okr_progress",
+        "display_name": "Collect OKR Progress",
+        "description": (
+            "Scan all team members' focus.md files and sync their reported KR progress "
+            "to the OKR database. For each Agent workspace that has a focus.md, the tool "
+            "reads current KR values and creates progress log entries. Returns a summary "
+            "of how many KRs were updated. Use this during your heartbeat cycle before "
+            "generating a report to ensure you have the latest data."
+        ),
+        "category": "okr",
+        "icon": "📊",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        # generate_okr_report — OKR Agent calls this to produce the structured report.
+        # The tool writes the report to WorkReport table and returns the markdown content
+        # so the Agent can choose to post it to Plaza or send it to specific channels.
+        "name": "generate_okr_report",
+        "display_name": "Generate OKR Report",
+        "description": (
+            "Generate a structured OKR progress report (daily or weekly) for the current "
+            "period. The report summarizes all Objectives and Key Results, highlights items "
+            "at risk or behind, and shows overall team health metrics. The report is saved "
+            "to the database and to your workspace/reports/ folder. Returns the full report "
+            "markdown so you can post it to Plaza or share with the team."
+        ),
+        "category": "okr",
+        "icon": "📋",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "report_type": {
+                    "type": "string",
+                    "enum": ["daily", "weekly"],
+                    "description": "Whether to generate a daily or weekly report.",
+                },
+            },
+            "required": ["report_type"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        # get_okr_settings — lets OKR Agent read the tenant's OKR configuration so it
+        # can determine whether reports are due, what time they're scheduled, etc.
+        "name": "get_okr_settings",
+        "display_name": "Get OKR Settings",
+        "description": (
+            "Read the OKR configuration for this team, including whether daily/weekly "
+            "reports are enabled, the configured report time, period frequency, and more. "
+            "Use this at the start of your heartbeat to decide whether a report is due today."
+        ),
+        "category": "okr",
+        "icon": "⚙️",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "config": {},
+        "config_schema": {},
+    },
 
     # --- Feishu Integration Tools ---
     # These tools require a configured Feishu channel to function.

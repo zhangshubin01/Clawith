@@ -134,58 +134,68 @@ MEESEEKS_SKILLS = [
 # OKR Agent heartbeat instruction (written into HEARTBEAT.md so it overrides default)
 OKR_AGENT_HEARTBEAT = """# OKR Agent Heartbeat Protocol
 
-As the OKR Agent, your periodic heartbeat has the following responsibilities:
+As the OKR Agent, your periodic heartbeat has the following responsibilities.
+Execute each phase in order. If a step fails, log the error and continue.
 
-## Phase 1: Sync OKR Board
+## Phase 1: Load Configuration
 
-1. Call `get_okr` to fetch the current OKR board for this period
+1. Call `get_okr_settings` to read the current OKR configuration.
+   - Note `daily_report_enabled`, `daily_report_time`, `weekly_report_enabled`, `weekly_report_day`
+   - Note `period_frequency` to understand the current cycle
+2. Determine the current date and day of week.
+
+## Phase 2: Sync OKR Board
+
+1. Call `get_okr` to fetch the full OKR board for the current period.
 2. Review all Key Results, paying attention to:
    - KRs with `behind` or `at_risk` status
    - KRs that haven't been updated recently (check `last_updated_at`)
-3. Write a brief status snapshot to `workspace/reports/last_sync.md`
+3. Write a brief status snapshot to `workspace/reports/last_sync.md` using `write_file`.
 
-## Phase 2: Collect Progress Updates
+## Phase 3: Collect Focus File Updates
 
-For each Agent team member who has OKRs:
-1. Use `send_message_to_agent` to ask them for their latest KR progress
-   - Message: "Hi, this is your OKR check-in. Could you share your current progress on your Key Results? Please provide the current value for each KR along with any context."
-2. Parse their response and call `update_kr_progress` for each KR mentioned
+1. Call `collect_okr_progress` to batch-read all team members' focus.md files.
+   - This tool automatically reads each Agent's workspace/focus.md,
+     extracts KR progress values, and writes them to the database.
+   - Review the returned summary to see what changed.
+2. If any Agent does not have a focus.md yet, use `send_message_to_agent` to
+   ask them to create one. Provide the focus.md template format.
+3. For human team members needing updates, send a check-in via `send_web_message`.
 
-For human team members, send a brief check-in via `send_channel_message` or `send_web_message`.
+## Phase 4: Generate Reports (if scheduled)
 
-## Phase 3: Generate Reports (if scheduled)
+Check the settings from Phase 1 to decide if a report is due:
 
-Check if a report is due today (based on OKR settings):
+**Daily Report** (if `daily_report_enabled` is true):
+1. Call `generate_okr_report` with `report_type: "daily"`
+2. Review the returned report markdown
+3. Post a summary to Plaza using `plaza_create_post`
 
-**Daily Report** (if daily_report_enabled):
-1. Use `get_okr` to build a comprehensive view
-2. Generate a structured markdown report covering:
-   - Overall OKR health summary (on_track/at_risk/behind counts)
-   - Top highlights (biggest progress this period)
-   - Items needing attention (at_risk or behind KRs)
-   - Individual member progress summaries
-3. Save to `workspace/reports/daily_YYYYMMDD.md`
-4. Post a summary to Plaza using `plaza_create_post`
+**Weekly Report** (if `weekly_report_enabled` is true AND today matches `weekly_report_day`):
+1. Call `generate_okr_report` with `report_type: "weekly"`
+2. Review the returned report markdown
+3. Post a detailed summary to Plaza using `plaza_create_post`
 
-**Weekly Report** (if weekly_report_enabled, on configured day):
-1. Generate a more comprehensive weekly summary
-2. Save to `workspace/reports/weekly_YYYYWW.md`
-3. Post to Plaza with a full breakdown
+## Phase 5: Proactive Team Outreach (optional)
 
-## Phase 4: Update Focus Files Protocol
+If you notice high-risk items (behind/at_risk KRs with no recent updates):
+1. Use `send_message_to_agent` to reach the responsible Agent
+2. Use `send_web_message` to notify the responsible human team member
+Message tone: supportive, not accusatory. Focus on "how can I help?"
 
-If you identify a team member who needs their KRs updated in focus.md, send them
-a message explaining what to add. The focus.md format is:
+## Focus File Format
 
-```
+The standard format for a team member's focus.md is:
+
+```markdown
 # Focus — [Period Label]
 
 ## KR: [KR Title]
 - **KR ID**: [kr_uuid]
 - **Current Progress**: [value] / [target] [unit]
-- **Last Updated**: [date]
+- **Last Updated**: [YYYY-MM-DD]
 - **This Week**: [brief note on what you did]
-- **Next Steps**: [what you plan to do]
+- **Next Steps**: [what you plan to do next]
 ```
 
 ## Key Principles
@@ -194,14 +204,11 @@ a message explaining what to add. The focus.md format is:
 - DO keep reports concise — executives scan, they don't read novels
 - DO flag risks early — better to raise concerns than to stay quiet
 - DO update progress values from verified reports, not estimates
-- NEVER share individual performance data publicly without appropriate context
-
-## Privacy Rules
-
-- NEVER post individual performance details to Plaza without permission context
-- You may share overall OKR health trends on Plaza
-- Individual KR details go in internal reports only
+- Call `collect_okr_progress` BEFORE `generate_okr_report` to get fresh data
+- NEVER share individual performance details on Plaza without appropriate context
+  (overall health trends are OK; individual underperformance is internal only)
 """
+
 
 
 async def seed_default_agents():
@@ -523,8 +530,16 @@ async def seed_okr_agent():
         for tool in default_tools:
             db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
 
-        # OKR-specific tools: get_okr, get_my_okr, update_kr_progress
-        okr_tool_names = ["get_okr", "get_my_okr", "update_kr_progress"]
+        # OKR-specific tools: assigned explicitly (is_default=False)
+        # Includes all 6 OKR tools: read, self-report, batch-collect, report, settings
+        okr_tool_names = [
+            "get_okr",
+            "get_my_okr",
+            "update_kr_progress",
+            "collect_okr_progress",
+            "generate_okr_report",
+            "get_okr_settings",
+        ]
         for tool_name in okr_tool_names:
             tool_result = await db.execute(select(Tool).where(Tool.name == tool_name))
             tool = tool_result.scalar_one_or_none()
