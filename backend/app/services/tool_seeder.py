@@ -964,6 +964,103 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
+    # --- OKR Tools ---
+    # These tools expose the OKR system to agents. Not default — assigned explicitly
+    # to the OKR Agent and to other agents that want to self-report progress.
+    {
+        "name": "get_okr",
+        "display_name": "Get OKR Board",
+        "description": (
+            "Get the full OKR board for the current period. Returns all Objectives and Key Results "
+            "for the tenant, organized by company and member level. Includes kr_id values so you "
+            "can call update_kr_progress to update specific KRs. Used by the OKR Agent to generate "
+            "progress reports and monitor team performance."
+        ),
+        "category": "okr",
+        "icon": "🎯",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "period_start": {
+                    "type": "string",
+                    "description": "Optional: ISO date string (YYYY-MM-DD) to filter by period start. Defaults to current period.",
+                },
+                "period_end": {
+                    "type": "string",
+                    "description": "Optional: ISO date string (YYYY-MM-DD) to filter by period end.",
+                },
+            },
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "get_my_okr",
+        "display_name": "My OKR",
+        "description": (
+            "Get your own OKR Objectives and Key Results for the current period. "
+            "Returns a structured view of your goals, current progress values, and kr_id references "
+            "you need to call update_kr_progress. Call this before reporting progress to confirm your KR IDs."
+        ),
+        "category": "okr",
+        "icon": "🎯",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "period_start": {
+                    "type": "string",
+                    "description": "Optional: ISO date string (YYYY-MM-DD). Defaults to current period.",
+                },
+                "period_end": {
+                    "type": "string",
+                    "description": "Optional: ISO date string (YYYY-MM-DD).",
+                },
+            },
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "update_kr_progress",
+        "display_name": "Update KR Progress",
+        "description": (
+            "Update the current progress value for a Key Result. Use get_my_okr first to obtain "
+            "the kr_id. The status (on_track / at_risk / behind / completed) is automatically "
+            "computed from the progress ratio, or you can override it explicitly. "
+            "A progress log entry is recorded for full audit history."
+        ),
+        "category": "okr",
+        "icon": "📈",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "kr_id": {
+                    "type": "string",
+                    "description": "UUID of the Key Result to update. Get this from get_my_okr.",
+                },
+                "value": {
+                    "type": "number",
+                    "description": "New current value (e.g. 4.2 for a KR with target 5.0).",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Optional note explaining the progress update (e.g. 'Completed weekly review session').",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["on_track", "at_risk", "behind", "completed"],
+                    "description": "Optional: override the auto-computed status.",
+                },
+            },
+            "required": ["kr_id", "value"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+
     # --- Feishu Integration Tools ---
     # These tools require a configured Feishu channel to function.
     # They are NOT enabled by default — agents with Feishu channels should enable them.

@@ -1,18 +1,18 @@
 /**
- * OKR Page — Objectives & Key Results dashboard.
+ * OKR Page — Objectives & Key Results dashboard with full editing support.
  *
- * When OKR is disabled in the tenant settings, shows a guide panel
- * directing admins to enable the feature in Company Settings.
- *
- * When enabled, shows:
- *   - Period selector
- *   - Company-level objectives
- *   - Member (user + agent) objectives
- *   - Work report list
+ * Features:
+ *   - Period selector (computed from OKR settings)
+ *   - Company-level and member objectives with progress visualization
+ *   - Create Objective (admin: company level; users: own level)
+ *   - Add Key Result to an objective
+ *   - Inline KR progress editing (current_value update)
+ *   - KR status manual override (on_track / at_risk / behind / completed)
+ *   - Disabled state: guide panel directing to OKR settings
  */
 
 import { useState, useEffect } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { fetchJson } from '../services/api';
@@ -63,21 +63,23 @@ interface Period {
     is_current: boolean;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const STATUS_COLOR: Record<string, string> = {
-    on_track: '#22c55e',   // green
-    at_risk: '#f59e0b',    // amber
-    behind: '#ef4444',     // red
-    completed: '#6366f1',  // purple
+    on_track: '#22c55e',
+    at_risk: '#f59e0b',
+    behind: '#ef4444',
+    completed: '#6366f1',
 };
 
-const STATUS_LABEL_ZH: Record<string, string> = {
-    on_track: '按计划',
-    at_risk: '有风险',
-    behind: '落后',
-    completed: '已完成',
+const STATUS_LABELS: Record<string, { zh: string; en: string }> = {
+    on_track:  { zh: '按计划', en: 'On Track' },
+    at_risk:   { zh: '有风险', en: 'At Risk' },
+    behind:    { zh: '落后',   en: 'Behind' },
+    completed: { zh: '已完成', en: 'Completed' },
 };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function progressPercent(kr: KeyResult): number {
     if (!kr.target_value) return 0;
@@ -90,13 +92,19 @@ function objectiveProgress(obj: Objective): number {
     return Math.round(avg);
 }
 
+function deriveStatus(pct: number, explicit?: string): string {
+    if (explicit && explicit !== 'auto') return explicit;
+    if (pct >= 100) return 'completed';
+    if (pct >= 70)  return 'on_track';
+    if (pct >= 40)  return 'at_risk';
+    return 'behind';
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function StatusBadge({ status, isChinese }: { status: string; isChinese: boolean }) {
     const color = STATUS_COLOR[status] ?? 'var(--text-tertiary)';
-    const label = isChinese
-        ? (STATUS_LABEL_ZH[status] ?? status)
-        : status.replace('_', ' ');
+    const label = isChinese ? (STATUS_LABELS[status]?.zh ?? status) : (STATUS_LABELS[status]?.en ?? status);
     return (
         <span style={{
             display: 'inline-flex', alignItems: 'center', gap: '4px',
@@ -104,7 +112,6 @@ function StatusBadge({ status, isChinese }: { status: string; isChinese: boolean
             background: `${color}18`,
             border: `1px solid ${color}40`,
             color, fontSize: '11px', fontWeight: 500,
-            textTransform: 'capitalize',
         }}>
             <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
             {label}
@@ -118,50 +125,324 @@ function ProgressBar({ pct, status }: { pct: number; status: string }) {
         <div style={{ height: 4, background: 'var(--bg-tertiary)', borderRadius: 2, overflow: 'hidden', flexGrow: 1 }}>
             <div style={{
                 height: '100%', borderRadius: 2,
-                background: color,
-                width: `${pct}%`,
+                background: color, width: `${pct}%`,
                 transition: 'width 0.6s ease',
             }} />
         </div>
     );
 }
 
-function KRCard({ kr, isChinese }: { kr: KeyResult; isChinese: boolean }) {
+// ── KR Card: displays a key result with inline progress editing ──
+function KRCard({
+    kr,
+    isChinese,
+    onUpdateProgress,
+    canEdit,
+}: {
+    kr: KeyResult;
+    isChinese: boolean;
+    onUpdateProgress: (krId: string, value: number, status: string, note: string) => void;
+    canEdit: boolean;
+}) {
     const pct = progressPercent(kr);
+    const [editing, setEditing] = useState(false);
+    const [editValue, setEditValue] = useState(String(kr.current_value));
+    const [editStatus, setEditStatus] = useState('auto');
+    const [editNote, setEditNote] = useState('');
+    const [saving, setSaving] = useState(false);
+
+    async function handleSave() {
+        const val = parseFloat(editValue);
+        if (isNaN(val)) return;
+        setSaving(true);
+        try {
+            await onUpdateProgress(kr.id, val, editStatus, editNote);
+            setEditing(false);
+            setEditNote('');
+        } finally {
+            setSaving(false);
+        }
+    }
+
     return (
         <div style={{
-            padding: '10px 14px',
+            padding: editing ? '12px 14px' : '10px 14px',
             background: 'var(--bg-secondary)',
-            border: '1px solid var(--border-subtle)',
+            border: `1px solid ${editing ? 'var(--accent-primary)40' : 'var(--border-subtle)'}`,
             borderRadius: '8px',
             display: 'flex', flexDirection: 'column', gap: '8px',
+            transition: 'border-color 0.15s',
         }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '12px' }}>
+            {/* Title row */}
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px' }}>
                 <span style={{ fontSize: '13px', color: 'var(--text-primary)', flex: 1 }}>{kr.title}</span>
-                <StatusBadge status={kr.status} isChinese={isChinese} />
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                    <StatusBadge status={kr.status} isChinese={isChinese} />
+                    {canEdit && !editing && (
+                        <button
+                            id={`kr-edit-${kr.id}`}
+                            onClick={() => { setEditing(true); setEditValue(String(kr.current_value)); }}
+                            style={{
+                                background: 'none', border: '1px solid var(--border-subtle)',
+                                borderRadius: '4px', padding: '2px 8px',
+                                fontSize: '11px', color: 'var(--text-tertiary)',
+                                cursor: 'pointer', transition: 'all 0.15s',
+                                whiteSpace: 'nowrap',
+                            }}
+                            onMouseEnter={e => {
+                                (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--accent-primary)';
+                                (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent-primary)';
+                            }}
+                            onMouseLeave={e => {
+                                (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--border-subtle)';
+                                (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-tertiary)';
+                            }}
+                        >
+                            {isChinese ? '更新进度' : 'Update'}
+                        </button>
+                    )}
+                </div>
             </div>
+
+            {/* Progress bar */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <ProgressBar pct={pct} status={kr.status} />
-                <span style={{ fontSize: '11px', color: 'var(--text-secondary)', whiteSpace: 'nowrap', minWidth: 60, textAlign: 'right' }}>
+                <span style={{ fontSize: '11px', color: 'var(--text-secondary)', whiteSpace: 'nowrap', minWidth: 64, textAlign: 'right' }}>
                     {kr.current_value} / {kr.target_value}
                     {kr.unit ? ` ${kr.unit}` : ''} ({pct}%)
                 </span>
+            </div>
+
+            {/* Inline editing form */}
+            {editing && (
+                <div style={{
+                    borderTop: '1px solid var(--border-subtle)',
+                    paddingTop: '10px',
+                    display: 'flex', flexDirection: 'column', gap: '8px',
+                }}>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                {isChinese ? '当前值' : 'Value'}
+                            </span>
+                            <input
+                                type="number"
+                                value={editValue}
+                                onChange={e => setEditValue(e.target.value)}
+                                style={{
+                                    width: 80, padding: '4px 8px',
+                                    background: 'var(--bg-primary)',
+                                    border: '1px solid var(--border-subtle)',
+                                    borderRadius: '4px', color: 'var(--text-primary)',
+                                    fontSize: '13px',
+                                }}
+                            />
+                            {kr.unit && <span style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>{kr.unit}</span>}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                {isChinese ? '状态' : 'Status'}
+                            </span>
+                            <select
+                                value={editStatus}
+                                onChange={e => setEditStatus(e.target.value)}
+                                style={{
+                                    padding: '4px 8px',
+                                    background: 'var(--bg-primary)',
+                                    border: '1px solid var(--border-subtle)',
+                                    borderRadius: '4px', color: 'var(--text-primary)',
+                                    fontSize: '12px',
+                                }}
+                            >
+                                <option value="auto">{isChinese ? '自动计算' : 'Auto'}</option>
+                                <option value="on_track">{isChinese ? '按计划' : 'On Track'}</option>
+                                <option value="at_risk">{isChinese ? '有风险' : 'At Risk'}</option>
+                                <option value="behind">{isChinese ? '落后' : 'Behind'}</option>
+                                <option value="completed">{isChinese ? '已完成' : 'Completed'}</option>
+                            </select>
+                        </div>
+                    </div>
+                    <input
+                        type="text"
+                        value={editNote}
+                        onChange={e => setEditNote(e.target.value)}
+                        placeholder={isChinese ? '更新说明（可选）' : 'Update note (optional)'}
+                        style={{
+                            padding: '6px 10px',
+                            background: 'var(--bg-primary)',
+                            border: '1px solid var(--border-subtle)',
+                            borderRadius: '4px', color: 'var(--text-primary)',
+                            fontSize: '12px',
+                        }}
+                    />
+                    <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                        <button
+                            onClick={() => setEditing(false)}
+                            style={{
+                                padding: '5px 12px', borderRadius: '4px',
+                                border: '1px solid var(--border-subtle)',
+                                background: 'none', color: 'var(--text-secondary)',
+                                fontSize: '12px', cursor: 'pointer',
+                            }}
+                        >
+                            {isChinese ? '取消' : 'Cancel'}
+                        </button>
+                        <button
+                            onClick={handleSave}
+                            disabled={saving}
+                            style={{
+                                padding: '5px 12px', borderRadius: '4px',
+                                border: 'none',
+                                background: 'var(--accent-primary)', color: '#fff',
+                                fontSize: '12px', cursor: saving ? 'wait' : 'pointer',
+                                opacity: saving ? 0.7 : 1,
+                            }}
+                        >
+                            {saving ? (isChinese ? '保存中...' : 'Saving...') : (isChinese ? '保存' : 'Save')}
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ── Add KR inline form ──
+function AddKRForm({
+    objectiveId,
+    periodStart,
+    periodEnd,
+    isChinese,
+    onCreated,
+    onCancel,
+}: {
+    objectiveId: string;
+    periodStart: string;
+    periodEnd: string;
+    isChinese: boolean;
+    onCreated: () => void;
+    onCancel: () => void;
+}) {
+    const [title, setTitle] = useState('');
+    const [targetValue, setTargetValue] = useState('100');
+    const [unit, setUnit] = useState('');
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState('');
+
+    async function handleSubmit() {
+        if (!title.trim()) { setError(isChinese ? '请输入 Key Result 描述' : 'Please enter a description'); return; }
+        setSaving(true);
+        setError('');
+        try {
+            await fetchJson(`/okr/objectives/${objectiveId}/key-results`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    title: title.trim(),
+                    target_value: parseFloat(targetValue) || 100,
+                    unit: unit.trim() || undefined,
+                }),
+            });
+            onCreated();
+        } catch (e: any) {
+            setError(e.message ?? 'Error');
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    return (
+        <div style={{
+            padding: '12px 14px',
+            background: 'var(--bg-tertiary)',
+            border: '1px dashed var(--border-subtle)',
+            borderRadius: '8px',
+            display: 'flex', flexDirection: 'column', gap: '8px',
+        }}>
+            <input
+                type="text"
+                value={title}
+                onChange={e => setTitle(e.target.value)}
+                placeholder={isChinese ? 'Key Result 描述，例如：用户满意度达到 4.5 分' : 'e.g. Increase NPS to 50'}
+                autoFocus
+                style={{
+                    padding: '6px 10px',
+                    background: 'var(--bg-primary)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '4px', color: 'var(--text-primary)',
+                    fontSize: '13px',
+                }}
+                onKeyDown={e => { if (e.key === 'Enter') handleSubmit(); if (e.key === 'Escape') onCancel(); }}
+            />
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    {isChinese ? '目标值' : 'Target'}
+                </span>
+                <input
+                    type="number"
+                    value={targetValue}
+                    onChange={e => setTargetValue(e.target.value)}
+                    style={{
+                        width: 80, padding: '4px 8px',
+                        background: 'var(--bg-primary)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: '4px', color: 'var(--text-primary)',
+                        fontSize: '13px',
+                    }}
+                />
+                <input
+                    type="text"
+                    value={unit}
+                    onChange={e => setUnit(e.target.value)}
+                    placeholder={isChinese ? '单位（可选，如 %、万元）' : 'Unit (e.g. %, pts)'}
+                    style={{
+                        flex: 1, padding: '4px 8px',
+                        background: 'var(--bg-primary)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: '4px', color: 'var(--text-primary)',
+                        fontSize: '12px',
+                    }}
+                />
+            </div>
+            {error && <div style={{ fontSize: '12px', color: '#ef4444' }}>{error}</div>}
+            <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                <button onClick={onCancel} style={{ padding: '5px 12px', borderRadius: '4px', border: '1px solid var(--border-subtle)', background: 'none', color: 'var(--text-secondary)', fontSize: '12px', cursor: 'pointer' }}>
+                    {isChinese ? '取消' : 'Cancel'}
+                </button>
+                <button onClick={handleSubmit} disabled={saving} style={{ padding: '5px 12px', borderRadius: '4px', border: 'none', background: 'var(--accent-primary)', color: '#fff', fontSize: '12px', cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.7 : 1 }}>
+                    {saving ? (isChinese ? '创建中...' : 'Creating...') : (isChinese ? '添加 KR' : 'Add KR')}
+                </button>
             </div>
         </div>
     );
 }
 
-function ObjectiveCard({ obj, isChinese, ownerLabel }: {
+// ── Objective Card ──
+function ObjectiveCard({
+    obj,
+    isChinese,
+    ownerLabel,
+    canEdit,
+    onInvalidate,
+}: {
     obj: Objective;
     isChinese: boolean;
     ownerLabel?: string;
+    canEdit: boolean;
+    onInvalidate: () => void;
 }) {
     const [expanded, setExpanded] = useState(true);
+    const [addingKR, setAddingKR] = useState(false);
     const pct = objectiveProgress(obj);
-    const overallStatus = obj.status === 'completed' ? 'completed'
-        : pct >= 70 ? 'on_track'
-        : pct >= 40 ? 'at_risk'
-        : 'behind';
+    const overallStatus = obj.status === 'completed' ? 'completed' : deriveStatus(pct);
+
+    // Update KR progress
+    async function handleKRProgressUpdate(krId: string, value: number, status: string, note: string) {
+        await fetchJson(`/okr/key-results/${krId}/progress`, {
+            method: 'POST',
+            body: JSON.stringify({ value, status: status === 'auto' ? undefined : status, note: note || undefined }),
+        });
+        onInvalidate();
+    }
 
     return (
         <div style={{
@@ -179,12 +460,11 @@ function ObjectiveCard({ obj, isChinese, ownerLabel }: {
                     display: 'flex', alignItems: 'center', gap: '12px',
                     cursor: 'pointer',
                     borderBottom: expanded ? '1px solid var(--border-subtle)' : 'none',
-                    transition: 'background 0.15s',
                 }}
                 onClick={() => setExpanded(v => !v)}
                 onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') setExpanded(v => !v); }}
             >
-                {/* Expand/collapse chevron */}
+                {/* Chevron */}
                 <svg
                     width="14" height="14" viewBox="0 0 24 24" fill="none"
                     stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
@@ -214,27 +494,180 @@ function ObjectiveCard({ obj, isChinese, ownerLabel }: {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 80 }}>
                         <ProgressBar pct={pct} status={overallStatus} />
-                        <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 500, minWidth: 30 }}>
-                            {pct}%
-                        </span>
+                        <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 500, minWidth: 30 }}>{pct}%</span>
                     </div>
                     <StatusBadge status={overallStatus} isChinese={isChinese} />
                 </div>
             </div>
 
             {/* KR list */}
-            {expanded && obj.key_results.length > 0 && (
+            {expanded && (
                 <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {obj.key_results.map(kr => (
-                        <KRCard key={kr.id} kr={kr} isChinese={isChinese} />
+                        <KRCard
+                            key={kr.id}
+                            kr={kr}
+                            isChinese={isChinese}
+                            onUpdateProgress={handleKRProgressUpdate}
+                            canEdit={canEdit}
+                        />
                     ))}
+                    {obj.key_results.length === 0 && !addingKR && (
+                        <div style={{ color: 'var(--text-tertiary)', fontSize: '13px', textAlign: 'center', padding: '8px 0' }}>
+                            {isChinese ? '暂无 Key Results' : 'No Key Results yet'}
+                        </div>
+                    )}
+                    {addingKR && (
+                        <AddKRForm
+                            objectiveId={obj.id}
+                            periodStart={obj.period_start}
+                            periodEnd={obj.period_end}
+                            isChinese={isChinese}
+                            onCreated={() => { setAddingKR(false); onInvalidate(); }}
+                            onCancel={() => setAddingKR(false)}
+                        />
+                    )}
+                    {canEdit && !addingKR && (
+                        <button
+                            id={`add-kr-${obj.id}`}
+                            onClick={e => { e.stopPropagation(); setAddingKR(true); }}
+                            style={{
+                                display: 'flex', alignItems: 'center', gap: '6px',
+                                padding: '6px 10px', borderRadius: '6px',
+                                border: '1px dashed var(--border-subtle)',
+                                background: 'none', color: 'var(--text-tertiary)',
+                                fontSize: '12px', cursor: 'pointer',
+                                transition: 'all 0.15s', alignSelf: 'flex-start',
+                            }}
+                            onMouseEnter={e => {
+                                (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--accent-primary)';
+                                (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent-primary)';
+                            }}
+                            onMouseLeave={e => {
+                                (e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--border-subtle)';
+                                (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-tertiary)';
+                            }}
+                        >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            {isChinese ? '添加 Key Result' : 'Add Key Result'}
+                        </button>
+                    )}
                 </div>
             )}
-            {expanded && obj.key_results.length === 0 && (
-                <div style={{ padding: '16px', color: 'var(--text-tertiary)', fontSize: '13px', textAlign: 'center' }}>
-                    {isChinese ? '暂无 Key Results' : 'No Key Results yet'}
+        </div>
+    );
+}
+
+// ── Create Objective Form ──
+function CreateObjectiveForm({
+    isChinese,
+    isAdmin,
+    userId,
+    selectedPeriod,
+    onCreated,
+    onCancel,
+}: {
+    isChinese: boolean;
+    isAdmin: boolean;
+    userId: string;
+    selectedPeriod: Period;
+    onCreated: () => void;
+    onCancel: () => void;
+}) {
+    const [title, setTitle] = useState('');
+    const [description, setDescription] = useState('');
+    const [ownerType, setOwnerType] = useState<'company' | 'user'>(isAdmin ? 'company' : 'user');
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState('');
+
+    async function handleSubmit() {
+        if (!title.trim()) { setError(isChinese ? '请输入目标标题' : 'Please enter a title'); return; }
+        setSaving(true);
+        setError('');
+        try {
+            await fetchJson('/okr/objectives', {
+                method: 'POST',
+                body: JSON.stringify({
+                    title: title.trim(),
+                    description: description.trim() || undefined,
+                    owner_type: ownerType,
+                    owner_id: ownerType === 'user' ? userId : undefined,
+                    period_start: selectedPeriod.start,
+                    period_end: selectedPeriod.end,
+                }),
+            });
+            onCreated();
+        } catch (e: any) {
+            setError(e.message ?? 'Error');
+        } finally {
+            setSaving(false);
+        }
+    }
+
+    return (
+        <div style={{
+            padding: '16px',
+            background: 'var(--bg-primary)',
+            border: '1px solid var(--accent-primary)40',
+            borderRadius: '10px',
+            display: 'flex', flexDirection: 'column', gap: '12px',
+        }}>
+            <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                {isChinese ? '新建目标' : 'New Objective'}
+            </div>
+            <input
+                type="text"
+                value={title}
+                onChange={e => setTitle(e.target.value)}
+                placeholder={isChinese ? '目标标题，例如：提升用户体验' : 'e.g. Improve customer experience'}
+                autoFocus
+                style={{
+                    padding: '8px 12px',
+                    background: 'var(--bg-secondary)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '6px', color: 'var(--text-primary)',
+                    fontSize: '14px',
+                }}
+                onKeyDown={e => { if (e.key === 'Enter') handleSubmit(); if (e.key === 'Escape') onCancel(); }}
+            />
+            <textarea
+                value={description}
+                onChange={e => setDescription(e.target.value)}
+                placeholder={isChinese ? '说明（可选）' : 'Description (optional)'}
+                rows={2}
+                style={{
+                    padding: '8px 12px',
+                    background: 'var(--bg-secondary)',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: '6px', color: 'var(--text-primary)',
+                    fontSize: '13px', resize: 'vertical',
+                    fontFamily: 'inherit',
+                }}
+            />
+            {isAdmin && (
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                        {isChinese ? '层级' : 'Level'}
+                    </span>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+                        <input type="radio" name="ownerType" value="company" checked={ownerType === 'company'} onChange={() => setOwnerType('company')} />
+                        <span style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{isChinese ? '公司级' : 'Company'}</span>
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+                        <input type="radio" name="ownerType" value="user" checked={ownerType === 'user'} onChange={() => setOwnerType('user')} />
+                        <span style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{isChinese ? '个人' : 'Personal'}</span>
+                    </label>
                 </div>
             )}
+            {error && <div style={{ fontSize: '12px', color: '#ef4444' }}>{error}</div>}
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                <button onClick={onCancel} style={{ padding: '7px 14px', borderRadius: '6px', border: '1px solid var(--border-subtle)', background: 'none', color: 'var(--text-secondary)', fontSize: '13px', cursor: 'pointer' }}>
+                    {isChinese ? '取消' : 'Cancel'}
+                </button>
+                <button onClick={handleSubmit} disabled={saving} style={{ padding: '7px 14px', borderRadius: '6px', border: 'none', background: 'var(--accent-primary)', color: '#fff', fontSize: '13px', cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.7 : 1 }}>
+                    {saving ? (isChinese ? '创建中...' : 'Creating...') : (isChinese ? '创建目标' : 'Create')}
+                </button>
+            </div>
         </div>
     );
 }
@@ -246,8 +679,11 @@ export default function OKR() {
     const navigate = useNavigate();
     const user = useAuthStore(s => s.user);
     const isChinese = i18n.language?.startsWith('zh');
+    const isAdmin = user && ['platform_admin', 'org_admin'].includes(user.role);
+    const queryClient = useQueryClient();
 
     const [selectedPeriod, setSelectedPeriod] = useState<Period | null>(null);
+    const [creating, setCreating] = useState(false);
 
     // Fetch OKR settings
     const { data: settings, isLoading: settingsLoading } = useQuery<OKRSettings>({
@@ -262,7 +698,7 @@ export default function OKR() {
         enabled: !!settings?.enabled,
     });
 
-    // Auto-select current period on first load
+    // Auto-select current period
     useEffect(() => {
         if (!selectedPeriod && periods.length > 0) {
             const current = periods.find(p => p.is_current) ?? periods[periods.length - 1];
@@ -279,7 +715,11 @@ export default function OKR() {
         enabled: !!settings?.enabled && !!selectedPeriod,
     });
 
-    // ── Loading state ─────────────────────────────────────────────────────────
+    function invalidateObjectives() {
+        queryClient.invalidateQueries({ queryKey: ['okr-objectives'] });
+    }
+
+    // ── Loading ─────────────────────────────────────────────────────────────
     if (settingsLoading) {
         return (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '50vh', color: 'var(--text-tertiary)' }}>
@@ -288,15 +728,13 @@ export default function OKR() {
         );
     }
 
-    // ── OKR Disabled — guide panel ─────────────────────────────────────────────
+    // ── Disabled guide panel ─────────────────────────────────────────────────
     if (!settings?.enabled) {
-        const isAdmin = user && ['platform_admin', 'org_admin'].includes(user.role);
         return (
             <div style={{
                 display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                 height: '70vh', gap: '16px', color: 'var(--text-secondary)', textAlign: 'center', padding: '24px',
             }}>
-                {/* Target icon */}
                 <div style={{
                     width: 64, height: 64, borderRadius: '50%',
                     background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)',
@@ -321,6 +759,7 @@ export default function OKR() {
                 </div>
                 {isAdmin && (
                     <button
+                        id="okr-enable-btn"
                         className="btn btn-primary"
                         onClick={() => navigate('/enterprise?tab=okr')}
                         style={{ padding: '8px 20px', fontSize: '13px' }}
@@ -337,15 +776,18 @@ export default function OKR() {
         );
     }
 
-    // ── OKR Enabled ────────────────────────────────────────────────────────────
+    // ── Enabled OKR dashboard ────────────────────────────────────────────────
     const companyObjs = objectives.filter(o => o.owner_type === 'company');
     const memberObjs = objectives.filter(o => o.owner_type !== 'company');
 
     // Group member objectives by owner
-    const memberGroups: Record<string, Objective[]> = {};
+    const memberGroups: Record<string, { label: string; objs: Objective[] }> = {};
     for (const obj of memberObjs) {
         const key = `${obj.owner_type}:${obj.owner_id ?? ''}`;
-        memberGroups[key] = [...(memberGroups[key] ?? []), obj];
+        if (!memberGroups[key]) {
+            memberGroups[key] = { label: obj.owner_type, objs: [] };
+        }
+        memberGroups[key].objs.push(obj);
     }
 
     return (
@@ -361,41 +803,78 @@ export default function OKR() {
                     </div>
                 </div>
 
-                {/* Period Selector */}
-                {periods.length > 0 && (
-                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                        {periods.map(p => (
-                            <button
-                                key={p.start}
-                                onClick={() => setSelectedPeriod(p)}
-                                style={{
-                                    padding: '5px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 500,
-                                    border: '1px solid',
-                                    borderColor: selectedPeriod?.start === p.start ? 'var(--accent-primary)' : 'var(--border-subtle)',
-                                    background: selectedPeriod?.start === p.start ? 'var(--accent-primary)' : 'var(--bg-secondary)',
-                                    color: selectedPeriod?.start === p.start ? '#fff' : 'var(--text-secondary)',
-                                    cursor: 'pointer', transition: 'all 0.15s',
-                                }}
-                            >
-                                {p.label}
-                                {p.is_current && (
-                                    <span style={{ marginLeft: '4px', opacity: 0.7, fontSize: '10px' }}>
-                                        {isChinese ? '(当前)' : '(now)'}
-                                    </span>
-                                )}
-                            </button>
-                        ))}
-                    </div>
-                )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                    {/* Period Selector */}
+                    {periods.length > 0 && (
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                            {periods.map(p => (
+                                <button
+                                    key={p.start}
+                                    onClick={() => setSelectedPeriod(p)}
+                                    style={{
+                                        padding: '5px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 500,
+                                        border: '1px solid',
+                                        borderColor: selectedPeriod?.start === p.start ? 'var(--accent-primary)' : 'var(--border-subtle)',
+                                        background: selectedPeriod?.start === p.start ? 'var(--accent-primary)' : 'var(--bg-secondary)',
+                                        color: selectedPeriod?.start === p.start ? '#fff' : 'var(--text-secondary)',
+                                        cursor: 'pointer', transition: 'all 0.15s',
+                                    }}
+                                >
+                                    {p.label}
+                                    {p.is_current && (
+                                        <span style={{ marginLeft: '4px', opacity: 0.7, fontSize: '10px' }}>
+                                            {isChinese ? '(当前)' : '(now)'}
+                                        </span>
+                                    )}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* Create Objective button */}
+                    {selectedPeriod && !creating && (
+                        <button
+                            id="create-objective-btn"
+                            onClick={() => setCreating(true)}
+                            style={{
+                                display: 'flex', alignItems: 'center', gap: '6px',
+                                padding: '7px 14px', borderRadius: '6px',
+                                border: 'none', background: 'var(--accent-primary)',
+                                color: '#fff', fontSize: '13px', cursor: 'pointer',
+                                fontWeight: 500, transition: 'opacity 0.15s',
+                            }}
+                            onMouseEnter={e => (e.currentTarget as HTMLButtonElement).style.opacity = '0.85'}
+                            onMouseLeave={e => (e.currentTarget as HTMLButtonElement).style.opacity = '1'}
+                        >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            {isChinese ? '新建目标' : 'New Objective'}
+                        </button>
+                    )}
+                </div>
             </div>
 
-            {/* Loading objectives */}
+            {/* Create Objective form */}
+            {creating && selectedPeriod && (
+                <div style={{ marginBottom: '24px' }}>
+                    <CreateObjectiveForm
+                        isChinese={isChinese}
+                        isAdmin={!!isAdmin}
+                        userId={user?.id ?? ''}
+                        selectedPeriod={selectedPeriod}
+                        onCreated={() => { setCreating(false); invalidateObjectives(); }}
+                        onCancel={() => setCreating(false)}
+                    />
+                </div>
+            )}
+
+            {/* Loading */}
             {objLoading && (
                 <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
                     {isChinese ? '加载中...' : 'Loading...'}
                 </div>
             )}
 
+            {/* Empty state */}
             {!objLoading && objectives.length === 0 && (
                 <div style={{
                     textAlign: 'center', padding: '60px 24px',
@@ -403,8 +882,8 @@ export default function OKR() {
                     color: 'var(--text-tertiary)', fontSize: '13px',
                 }}>
                     {isChinese
-                        ? '当前周期暂无 OKR。请联系 OKR Agent 来设定公司和个人目标。'
-                        : 'No OKRs for this period yet. Ask the OKR Agent to set up objectives.'}
+                        ? '当前周期暂无 OKR。点击右上角「新建目标」或联系 OKR Agent 来设定目标。'
+                        : 'No OKRs for this period yet. Click "New Objective" or ask the OKR Agent.'}
                 </div>
             )}
 
@@ -416,10 +895,17 @@ export default function OKR() {
                             {t('okr.companyObjectives', isChinese ? '公司目标' : 'Company Objectives')}
                         </span>
                         <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
+                        <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{companyObjs.length}</span>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                         {companyObjs.map(obj => (
-                            <ObjectiveCard key={obj.id} obj={obj} isChinese={isChinese} />
+                            <ObjectiveCard
+                                key={obj.id}
+                                obj={obj}
+                                isChinese={isChinese}
+                                canEdit={!!isAdmin}
+                                onInvalidate={invalidateObjectives}
+                            />
                         ))}
                     </div>
                 </section>
@@ -433,19 +919,20 @@ export default function OKR() {
                             {t('okr.memberObjectives', isChinese ? '成员目标' : 'Member Objectives')}
                         </span>
                         <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
+                        <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{memberObjs.length}</span>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        {Object.entries(memberGroups).map(([ownerKey, objs]) => (
-                            <div key={ownerKey}>
-                                {objs.map(obj => (
-                                    <ObjectiveCard
-                                        key={obj.id}
-                                        obj={obj}
-                                        isChinese={isChinese}
-                                        ownerLabel={obj.owner_type}
-                                    />
-                                ))}
-                            </div>
+                        {Object.entries(memberGroups).map(([ownerKey, group]) => (
+                            group.objs.map(obj => (
+                                <ObjectiveCard
+                                    key={obj.id}
+                                    obj={obj}
+                                    isChinese={isChinese}
+                                    ownerLabel={group.label}
+                                    canEdit={true}
+                                    onInvalidate={invalidateObjectives}
+                                />
+                            ))
                         ))}
                     </div>
                 </section>

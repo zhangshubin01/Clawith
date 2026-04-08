@@ -171,6 +171,8 @@ class KeyResultUpdate(BaseModel):
 class ProgressUpdate(BaseModel):
     value: float
     note: str | None = None
+    # Optional explicit status override; when omitted, auto-computed from progress ratio
+    status: str | None = None
 
 
 class PeriodOut(BaseModel):
@@ -611,11 +613,25 @@ async def update_kr_progress_endpoint(
         kr.current_value = body.value
         kr.last_updated_at = datetime.utcnow()
 
+        # Update status: use explicit override or auto-compute from progress ratio
+        if body.status and body.status in ("on_track", "at_risk", "behind", "completed"):
+            kr.status = body.status
+        elif kr.target_value:
+            ratio = body.value / kr.target_value
+            if ratio >= 1.0:
+                kr.status = "completed"
+            elif ratio >= 0.7:
+                kr.status = "on_track"
+            elif ratio >= 0.4:
+                kr.status = "at_risk"
+            else:
+                kr.status = "behind"
+
         log = OKRProgressLog(
             kr_id=kr_id,
             previous_value=prev_value,
             new_value=body.value,
-            source="self_report",
+            source="manual",
             note=body.note,
         )
         db.add(log)

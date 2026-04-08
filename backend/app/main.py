@@ -195,6 +195,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[startup] Default agents seed failed: {e}")
 
+    try:
+        # Seed OKR Agent independently (supports retroactive creation on existing deployments)
+        from app.services.agent_seeder import seed_okr_agent
+        await seed_okr_agent()
+    except Exception as e:
+        logger.warning(f"[startup] OKR Agent seed failed: {e}")
+
     # Start background tasks (always, even if seeding failed)
     try:
         logger.info("[startup] starting background tasks...")
