@@ -59,11 +59,14 @@ export default function PermissionModal({ permission, onResult }: PermissionModa
         : `执行操作：${permission.toolName}`;
 
     return (
-        <div style={{
-            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-            background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center',
-            justifyContent: 'center', zIndex: 10000,
-        }}>
+        <div
+            style={{
+                position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center',
+                justifyContent: 'center', zIndex: 10000,
+            }}
+            onClick={(e) => { if (e.target === e.currentTarget) onResult(false); }}
+        >
             <div style={{
                 background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px',
                 width: isWriteFile ? '80vw' : '420px', maxWidth: '95vw',
@@ -93,7 +96,7 @@ export default function PermissionModal({ permission, onResult }: PermissionModa
                 <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', flexShrink: 0 }}>
                     <button className="btn btn-secondary" onClick={() => onResult(false)}>拒绝</button>
                     <button ref={confirmBtnRef} className="btn btn-primary" onClick={() => onResult(true)}>
-                        同意写入
+                        {isWriteFile ? '同意写入' : '同意执行'}
                     </button>
                 </div>
             </div>
