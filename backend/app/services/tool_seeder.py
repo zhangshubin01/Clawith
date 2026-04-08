@@ -281,7 +281,7 @@ BUILTIN_TOOLS = [
             "properties": {
                 "agent_name": {"type": "string", "description": "Target agent name"},
                 "message": {"type": "string", "description": "Message content"},
-                "msg_type": {"type": "string", "enum": ["chat", "task_request", "info_share"], "description": "Message type"},
+                "msg_type": {"type": "string", "enum": ["notify", "consult", "task_delegate"], "description": "Message type: notify (notification), consult (ask a question), task_delegate (delegate a task)"},
             },
             "required": ["agent_name", "message"],
         },
@@ -1831,6 +1831,46 @@ AGENTBAY_TOOLS = [
         "icon": "📋",
         "is_default": False,
         "parameters_schema": {"type": "object", "properties": {}},
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "agentbay_file_transfer",
+        "display_name": "AgentBay: File Transfer",
+        "description": (
+            "Transfer a file between any two endpoints: the agent workspace, "
+            "the AgentBay browser environment, the cloud desktop, or the code sandbox. "
+            "Workspace -> env: upload a workspace file into a cloud environment. "
+            "Env -> workspace: download a file from a cloud environment into the workspace. "
+            "Env -> env: transfer between environments transparently (no workspace involvement)."
+        ),
+        "category": "agentbay",
+        "icon": "🔄",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "from_type": {
+                    "type": "string",
+                    "enum": ["workspace", "browser", "computer", "code"],
+                    "description": "Source endpoint: 'workspace' for agent workspace, or the AgentBay environment name.",
+                },
+                "from_path": {
+                    "type": "string",
+                    "description": "Source path. Relative if workspace (e.g. 'workspace/data.csv'), absolute if env (e.g. '/root/data.csv').",
+                },
+                "to_type": {
+                    "type": "string",
+                    "enum": ["workspace", "browser", "computer", "code"],
+                    "description": "Destination endpoint: 'workspace' for agent workspace, or the AgentBay environment name.",
+                },
+                "to_path": {
+                    "type": "string",
+                    "description": "Destination path. Relative if workspace (e.g. 'workspace/output.csv'), absolute if env (e.g. '/root/output.csv').",
+                },
+            },
+            "required": ["from_type", "from_path", "to_type", "to_path"],
+        },
         "config": {},
         "config_schema": {},
     },
