@@ -327,7 +327,8 @@ async def _acp_await_client_permission(
             "args_summary": summary,
         }
         if extra_payload:
-            payload.update(extra_payload)
+            _RESERVED = {"type", "permission_id", "tool_name", "args_summary", "schemaVersion"}
+            payload.update({k: v for k, v in extra_payload.items() if k not in _RESERVED})
         await websocket.send_json(_acp_ws_envelope(payload))
         logger.info(
             "ACP permission_request sent session_id={} tool={} perm_id={}",
@@ -430,10 +431,16 @@ async def _custom_execute_tool(
             if tool_name == "ide_write_file":
                 file_path = args.get("path", "")
                 old_content = await _read_file_for_diff(ws, pending, file_path, session_id) if file_path else ""
+                new_content = args.get("content", "")
+                MAX_DIFF_SIZE = 100_000  # 100KB per side
+                if len(old_content) > MAX_DIFF_SIZE:
+                    old_content = old_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(old_content)} 字符)"
+                if len(new_content) > MAX_DIFF_SIZE:
+                    new_content = new_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(new_content)} 字符)"
                 extra = {
                     "file_path": file_path,
                     "old_content": old_content,
-                    "new_content": args.get("content", ""),
+                    "new_content": new_content,
                 }
             allowed = await _acp_await_client_permission(
                 ws, pending_perm, tool_name, args, session_id=session_id,
