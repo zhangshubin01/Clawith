@@ -538,7 +538,10 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
 
         # Push trigger result to user's active WebSocket connections
         final_reply = reply or "".join(collected_content)
-        if final_reply:
+
+        is_a2a_internal = all(t.name == "a2a_wake" for t in triggers)
+
+        if final_reply and not is_a2a_internal:
             try:
                 from app.api.websocket import manager as ws_manager
                 agent_id_str = str(agent_id)
