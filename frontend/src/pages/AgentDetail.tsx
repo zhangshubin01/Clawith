@@ -1431,7 +1431,7 @@ function AgentDetailInner() {
     const [sessionsLoading, setSessionsLoading] = useState(false);
     const [allSessionsLoading, setAllSessionsLoading] = useState(false);
     const [agentExpired, setAgentExpired] = useState(false);
-    const [pendingPermission, setPendingPermission] = useState<PendingPermission | null>(null);
+    const [permissionQueue, setPermissionQueue] = useState<PendingPermission[]>([]);
     // Websocket chat state (for 'me' conversation)
     const token = useAuthStore((s) => s.token);
     const currentUser = useAuthStore((s) => s.user);
@@ -1933,17 +1933,20 @@ function AgentDetailInner() {
     }, [id, token, activeTab, currentUser?.id]);
 
     const handlePermissionResult = (granted: boolean) => {
-        if (!pendingPermission) return;
-        const socket = wsMapRef.current[pendingPermission.wsKey];
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({
-                schemaVersion: 3,
-                type: 'permission_result',
-                permission_id: pendingPermission.permissionId,
-                granted,
-            }));
-        }
-        setPendingPermission(null);
+        setPermissionQueue(prev => {
+            const current = prev[0];
+            if (!current) return prev;
+            const socket = wsMapRef.current[current.wsKey];
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({
+                    schemaVersion: 3,
+                    type: 'permission_result',
+                    permission_id: current.permissionId,
+                    granted,
+                }));
+            }
+            return prev.slice(1);
+        });
     };
 
     const ensureSessionSocket = (sess: any, agentId: string, authToken: string) => {
@@ -1990,10 +1993,10 @@ function AgentDetailInner() {
                 reconnectDisabledRef.current[key] = true;
                 clearReconnectTimer(key);
                 if (isActiveRuntime && e.code === 4003) setAgentExpired(true);
-                setPendingPermission(prev => prev?.wsKey === key ? null : prev);
+                setPermissionQueue(prev => prev.filter(p => p.wsKey !== key));
                 return;
             }
-            setPendingPermission(prev => prev?.wsKey === key ? null : prev);
+            setPermissionQueue(prev => prev.filter(p => p.wsKey !== key));
             scheduleReconnect();
         };
         ws.onerror = (error) => {
@@ -2007,7 +2010,7 @@ function AgentDetailInner() {
             const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
             if (d.type === 'permission_request') {
                 if (isActiveRuntime) {
-                    setPendingPermission({
+                    setPermissionQueue(prev => [...prev, {
                         permissionId: d.permission_id,
                         wsKey: key,
                         toolName: d.tool_name,
@@ -2015,7 +2018,7 @@ function AgentDetailInner() {
                         oldContent: d.old_content ?? '',
                         newContent: d.new_content ?? '',
                         argsSummary: d.args_summary ?? '',
-                    });
+                    }]);
                 }
                 return;
             }
@@ -5721,7 +5724,7 @@ function AgentDetailInner() {
             />
 
             <PermissionModal
-                permission={pendingPermission}
+                permission={permissionQueue[0] ?? null}
                 onResult={handlePermissionResult}
             />
 
