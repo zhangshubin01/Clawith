@@ -1,8 +1,17 @@
+"""ACP WebSocket bridge (IDE thin client ↔ cloud).
+
+Verbose backend tracing (uvicorn process):
+  CLAWITH_ACP_VERBOSE=1 — stream summary, tool/thinking traces, inbound WS types
+  CLAWITH_ACP_LOG_CHUNKS=1 — log every outbound text chunk (very noisy; implies detailed streaming)
+"""
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Query, Depends
 import uuid
 import json
 import asyncio
 import contextlib
+import os
+import time
 from datetime import timezone as tz_
 from typing import Any
 
@@ -128,6 +137,16 @@ def install_acp_tool_hooks() -> None:
 current_acp_ws = ContextVar("current_acp_ws", default=None)
 current_acp_pending_tools = ContextVar("current_acp_pending_tools", default={})
 current_acp_pending_permissions = ContextVar("current_acp_pending_permissions", default={})
+# While `call_llm` runs for a prompt, recv_loop can correlate `tool_result` / `permission_result` with this session.
+current_acp_prompt_session_id = ContextVar("current_acp_prompt_session_id", default=None)
+
+
+def _acp_verbose() -> bool:
+    return (os.environ.get("CLAWITH_ACP_VERBOSE") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _acp_log_chunks() -> bool:
+    return (os.environ.get("CLAWITH_ACP_LOG_CHUNKS") or "").strip().lower() in ("1", "true", "yes", "on")
 
 # IDE tools that must receive an affirmative `permission_result` before `execute_tool` is sent.
 _IDE_TOOLS_REQUIRING_PERMISSION = frozenset(
@@ -148,6 +167,7 @@ _IDE_BRIDGE_TOOL_NAMES = frozenset(
         "ide_kill_terminal",
         "ide_release_terminal",
         "ide_create_terminal",
+        "ide_terminal_output",
     }
 )
 
@@ -224,6 +244,15 @@ IDE_TOOLS = [
                         "type": "string",
                         "description": "Optional working directory (defaults to session cwd when omitted)",
                     },
+                    "env": {
+                        "type": "object",
+                        "description": "Optional extra environment variables as key→value dict (N14)",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "output_byte_limit": {
+                        "type": "integer",
+                        "description": "Optional max bytes to buffer in terminal output (N14)",
+                    },
                 },
                 "required": ["command"],
             },
@@ -257,6 +286,20 @@ IDE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ide_terminal_output",
+            "description": "Retrieve the current output of a terminal created with ide_create_terminal.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "terminal_id": {"type": "string", "description": "Terminal id from ide_create_terminal"},
+                },
+                "required": ["terminal_id"],
+            },
+        },
+    },
 ]
 
 
@@ -265,7 +308,9 @@ async def _acp_await_client_permission(
     pending_permissions: dict[str, asyncio.Future],
     tool_name: str,
     args: dict[str, Any],
+    session_id: str = "",
     timeout: float = 120.0,
+    extra_payload: dict | None = None,
 ) -> bool:
     """Ask the thin client / IDE to confirm a sensitive ide_* action; returns True if allowed."""
     perm_id = str(uuid.uuid4())
@@ -274,22 +319,36 @@ async def _acp_await_client_permission(
     pending_permissions[perm_id] = fut
     try:
         summary = json.dumps(args, ensure_ascii=False)[:800]
-        await websocket.send_json(
-            _acp_ws_envelope(
-                {
-                    "type": "permission_request",
-                    "permission_id": perm_id,
-                    "tool_name": tool_name,
-                    "args_summary": summary,
-                }
-            )
+        payload: dict[str, Any] = {
+            "type": "permission_request",
+            "permission_id": perm_id,
+            "tool_name": tool_name,
+            "args_summary": summary,
+        }
+        if extra_payload:
+            payload.update(extra_payload)
+        await websocket.send_json(_acp_ws_envelope(payload))
+        logger.info(
+            "ACP permission_request sent session_id={} tool={} perm_id={}",
+            session_id or "-",
+            tool_name,
+            perm_id,
         )
-        logger.info("ACP permission_request sent tool={} perm_id={}", tool_name, perm_id)
         allowed = bool(await asyncio.wait_for(fut, timeout=timeout))
-        logger.info("ACP permission resolved tool={} perm_id={} allowed={}", tool_name, perm_id, allowed)
+        logger.info(
+            "ACP permission resolved session_id={} tool={} perm_id={} allowed={}",
+            session_id or "-",
+            tool_name,
+            perm_id,
+            allowed,
+        )
         return allowed
     except asyncio.TimeoutError:
-        logger.warning("ACP permission timeout for %s", tool_name)
+        logger.warning(
+            "ACP permission timeout session_id={} tool={}",
+            session_id or "-",
+            tool_name,
+        )
         return False
     finally:
         pending_permissions.pop(perm_id, None)
@@ -306,13 +365,33 @@ async def _custom_execute_tool(
     """Must match ``agent_tools.execute_tool`` arity: session_id defaults for scheduler/heartbeat/A2A callers."""
     ws = current_acp_ws.get()
     pending = current_acp_pending_tools.get()
-    pending_perm: dict[str, asyncio.Future] = current_acp_pending_permissions.get() or {}
+    pending_perm: dict[str, asyncio.Future] = current_acp_pending_permissions.get()
+
+    # IDE 工具必须走当前请求关联的 ACP WebSocket；网页聊天没有该连接，IDE 里点同意也不会作用到这条请求上。
+    if not ws and tool_name in _IDE_BRIDGE_TOOL_NAMES:
+        logger.info(
+            "[ACP] ide tool skipped: no active ACP ws session_id={} tool={}",
+            session_id or "-",
+            tool_name,
+        )
+        return (
+            "[无 IDE 桥接] ide_write_file / ide_read_file 等仅在与本后端建立了 ACP WebSocket 的 "
+            "JetBrains 智能体会话中可用。若你在浏览器里聊天，请在 IntelliJ / Android Studio 的 "
+            "Clawith Agent 对话里重试同一指令；若要在网页会话里写文件，请让智能体使用 write_file "
+            "（写入智能体服务器工作区，不是本机工程目录）。"
+        )
 
     if ws and tool_name in _IDE_BRIDGE_TOOL_NAMES:
         if tool_name in _IDE_TOOLS_REQUIRING_PERMISSION:
-            allowed = await _acp_await_client_permission(ws, pending_perm, tool_name, args)
+            allowed = await _acp_await_client_permission(
+                ws, pending_perm, tool_name, args, session_id=session_id
+            )
             if not allowed:
-                logger.info("ACP ide tool blocked by permission: {}", tool_name)
+                logger.info(
+                    "ACP ide tool blocked by permission session_id={} tool={}",
+                    session_id or "-",
+                    tool_name,
+                )
                 return f"Permission denied for {tool_name} (IDE user rejected or timed out)."
 
         call_id = str(uuid.uuid4())
@@ -322,7 +401,8 @@ async def _custom_execute_tool(
 
         try:
             logger.info(
-                "ACP execute_tool outbound name={} call_id={} path_or_cmd={}",
+                "ACP execute_tool outbound session_id={} name={} call_id={} path_or_cmd={}",
+                session_id or "-",
                 tool_name,
                 call_id,
                 (args.get("path") or args.get("command") or "")[:120],
@@ -337,16 +417,28 @@ async def _custom_execute_tool(
                     }
                 )
             )
+            logger.info(
+                "[ACP] execute_tool SENT; blocking until tool_result call_id={} pending_keys_ct={}",
+                call_id,
+                len(pending),
+            )
 
             result = await asyncio.wait_for(future, timeout=120.0)
             logger.info(
-                "ACP tool_result received name={} call_id={} result_len={}",
+                "ACP tool_result received session_id={} name={} call_id={} result_len={}",
+                session_id or "-",
                 tool_name,
                 call_id,
                 len(str(result or "")),
             )
             return result
         except asyncio.TimeoutError:
+            logger.error(
+                "[ACP] execute_tool TIMEOUT waiting tool_result call_id={} tool={} pending_keys={}",
+                call_id,
+                tool_name,
+                list(pending.keys())[:8] if pending else [],
+            )
             pending.pop(call_id, None)
             return f"IDE tool execution timed out: {tool_name}"
         except Exception as e:
@@ -364,11 +456,81 @@ async def _hydrate_if_needed_acp(
     agent_obj: AgentModel,
     user_id: uuid.UUID,
     session_messages: dict[str, list],
+    parent_session_id: str | None = None,
 ) -> None:
-    """First prompt for this session on this WebSocket: load user/assistant turns from DB."""
+    """First prompt for this session on this WebSocket: load user/assistant turns from DB.
+
+    O4: if this is a forked session (parent_session_id set) and no own history exists yet,
+    copy the parent session's history as the starting context.
+    """
     if session_id in session_messages and len(session_messages[session_id]) > 0:
         return
-    session_messages[session_id] = await _load_acp_history_from_db(session_id, agent_obj.id, user_id)
+    own = await _load_acp_history_from_db(session_id, agent_obj.id, user_id)
+    if own:
+        session_messages[session_id] = own
+        return
+    # O4: new fork — seed from parent history (user-owned, any agent)
+    if parent_session_id:
+        parent_history = await _load_acp_history_by_owner(parent_session_id, user_id)
+        if parent_history:
+            logger.info(
+                "ACP fork hydrate: session=%s seeded from parent=%s turns=%d",
+                session_id,
+                parent_session_id,
+                len(parent_history),
+            )
+            session_messages[session_id] = list(parent_history)
+            return
+    session_messages[session_id] = []
+
+
+async def _load_acp_history_by_owner(session_id: str, user_id: uuid.UUID) -> list[dict]:
+    """O4: Load chat history for any session owned by user_id (no agent constraint)."""
+    try:
+        sid_uuid = uuid.UUID(session_id)
+    except ValueError:
+        return []
+    async with async_session() as db:
+        sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid))
+        sess = sr.scalar_one_or_none()
+        if not sess or sess.user_id != user_id:
+            return []
+        mr = await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.conversation_id == str(sid_uuid))
+            .where(ChatMessage.user_id == user_id)
+            .where(ChatMessage.role.in_(("user", "assistant")))
+            .order_by(ChatMessage.created_at.asc())
+        )
+        rows = mr.scalars().all()
+        return [{"role": m.role, "content": m.content} for m in rows]
+
+
+async def _resolve_agent_override(
+    override: str, user_id: uuid.UUID
+) -> tuple[AgentModel, LLMModel] | None:
+    """O5: Look up agent by UUID or name, return (agent, model) or None if not found."""
+    async with async_session() as db:
+        # Try UUID first, fall back to name
+        agent = None
+        try:
+            aid = uuid.UUID(override)
+            ar = await db.execute(select(AgentModel).where(AgentModel.id == aid))
+            agent = ar.scalar_one_or_none()
+        except ValueError:
+            pass
+        if agent is None:
+            ar = await db.execute(select(AgentModel).where(AgentModel.name == override))
+            agent = ar.scalar_one_or_none()
+        if agent is None:
+            logger.warning("ACP agent_override %r not found, ignoring", override)
+            return None
+        mr = await db.execute(select(LLMModel).where(LLMModel.id == agent.primary_model_id))
+        model = mr.scalar_one_or_none()
+        if model is None:
+            logger.warning("ACP agent_override %r has no model, ignoring", override)
+            return None
+        return agent, model
 
 
 async def _load_acp_history_from_db(
@@ -426,12 +588,21 @@ async def acp_websocket(
     token: str = Query(None),
 ):
     await websocket.accept()
-    
-    # 验证 token
+
+    # 验证 token（query 已由 Starlette 解码；瘦客户端应对 token 做 URL 编码）
     try:
         user_id = await verify_api_key_or_token(token)
-    except Exception as e:
-        await websocket.send_json({"type": "error", "content": "Unauthorized"})
+    except HTTPException as e:
+        msg = e.detail if isinstance(e.detail, str) else "Unauthorized"
+        logger.warning("ACP WS auth failed: {}", msg)
+        await websocket.send_json(_acp_ws_envelope({"type": "error", "content": msg}))
+        await websocket.close(code=4001)
+        return
+    except Exception:
+        logger.exception("ACP WebSocket auth error")
+        await websocket.send_json(
+            _acp_ws_envelope({"type": "error", "content": "Unauthorized"})
+        )
         await websocket.close(code=4001)
         return
 
@@ -456,6 +627,14 @@ async def acp_websocket(
             await websocket.close(code=4000)
             return
 
+    logger.info(
+        "ACP WS connected agent_id={} agent_name={} user_id={} model_id={}",
+        agent_obj.id,
+        agent_obj.name,
+        user_id,
+        model_obj.id,
+    )
+
     # Per-connection state: a dedicated receive task must keep reading while `call_llm` awaits IDE tools.
     current_acp_ws.set(websocket)
     pending_tools: dict[str, asyncio.Future] = {}
@@ -472,6 +651,25 @@ async def acp_websocket(
                 raw_data = await websocket.receive_text()
                 data = json.loads(raw_data)
                 msg_type = data.get("type")
+                # Always log inbound frames (thin client → cloud); required for hang repro.
+                _extra = data.get("call_id") or data.get("permission_id") or data.get("tool_name")
+                logger.info(
+                    "[ACP] ws-recv type={} session_id={} extra={}",
+                    msg_type,
+                    data.get("session_id"),
+                    _extra,
+                )
+                if _acp_verbose() and msg_type not in ("tool_result", "permission_result"):
+                    if msg_type == "prompt":
+                        parts = data.get("prompt_parts")
+                        logger.info(
+                            "ACP WS inbound type=prompt session_id={} has_parts={} text_len={}",
+                            data.get("session_id"),
+                            isinstance(parts, list) and len(parts),
+                            len((data.get("text") or "") if isinstance(data.get("text"), str) else ""),
+                        )
+                    else:
+                        logger.info("ACP WS inbound type={}", msg_type)
                 client_sv = data.get("schemaVersion")
                 if client_sv is not None and client_sv > ACP_WS_SCHEMA_VERSION:
                     logger.warning(
@@ -481,38 +679,53 @@ async def acp_websocket(
                     )
 
                 if msg_type == "tool_result":
-                    call_id = data.get("call_id")
+                    # JSON may parse numeric ids; dict keys are str — normalize to match pending_tools.
+                    _raw_cid = data.get("call_id")
+                    call_id = str(_raw_cid) if _raw_cid is not None else ""
                     result = data.get("result")
+                    if not call_id:
+                        logger.warning("ACP WS tool_result missing call_id")
+                        continue
                     fut = pending_tools.pop(call_id, None)
+                    sid_ctx = current_acp_prompt_session_id.get()
                     if fut is not None and not fut.done():
                         fut.set_result(result)
                         logger.info(
-                            "ACP WS tool_result matched call_id={} result_len={}",
+                            "ACP WS tool_result matched session_id={} call_id={} result_len={}",
+                            sid_ctx or "-",
                             call_id,
                             len(str(result or "")),
                         )
                     else:
-                        logger.warning(
-                            "ACP WS tool_result unmatched or duplicate call_id={} pending_keys_sample={}",
+                        logger.error(
+                            "[ACP] tool_result UNMATCHED session_id={} call_id={} pending_keys={}",
+                            sid_ctx or "-",
                             call_id,
-                            list(pending_tools.keys())[:3],
+                            list(pending_tools.keys())[:8],
                         )
                     continue
 
                 if msg_type == "permission_result":
-                    perm_id = data.get("permission_id")
+                    _raw_pid = data.get("permission_id")
+                    perm_id = str(_raw_pid) if _raw_pid is not None else ""
                     granted = bool(data.get("granted"))
+                    if not perm_id:
+                        logger.warning("[ACP] permission_result missing permission_id")
+                        continue
                     fut = pending_permissions.pop(perm_id, None)
+                    sid_ctx = current_acp_prompt_session_id.get()
                     if fut is not None and not fut.done():
                         fut.set_result(granted)
                         logger.info(
-                            "ACP WS permission_result matched perm_id={} granted={}",
+                            "ACP WS permission_result matched session_id={} perm_id={} granted={}",
+                            sid_ctx or "-",
                             perm_id,
                             granted,
                         )
                     else:
                         logger.warning(
-                            "ACP WS permission_result unmatched perm_id={}",
+                            "ACP WS permission_result unmatched session_id={} perm_id={}",
+                            sid_ctx or "-",
                             perm_id,
                         )
                     continue
@@ -537,7 +750,11 @@ async def acp_websocket(
 
                 await main_queue.put(data)
         except WebSocketDisconnect:
-            logger.info("ACP WebSocket disconnected for agent %s", agent_id)
+            logger.info(
+                "ACP WebSocket disconnected agent_query={} user_id={}",
+                agent_id,
+                user_id,
+            )
         except Exception as e:
             logger.exception("ACP WebSocket receive_loop error: %s", e)
         finally:
@@ -560,8 +777,19 @@ async def acp_websocket(
                 break
 
             msg_type = data.get("type")
+            logger.info(
+                "[ACP] main dispatch type={} session_id={}",
+                msg_type,
+                data.get("session_id"),
+            )
 
             if msg_type == "list_sessions":
+                if _acp_verbose():
+                    logger.info(
+                        "ACP list_sessions user_id={} agent_id={}",
+                        user_id,
+                        agent_obj.id,
+                    )
                 rows = await _list_acp_chat_sessions(user_id, agent_obj.id)
                 cwd_fallback = data.get("cwd") or "/"
                 sessions_out: list[dict[str, Any]] = []
@@ -593,22 +821,64 @@ async def acp_websocket(
 
             if msg_type == "prompt":
                 session_id = data.get("session_id")
+                session_cwd = (data.get("cwd") or "").strip() or "/"
+                parent_session_id = (data.get("parent_session_id") or "").strip() or None  # O4
+                agent_override_id = (data.get("agent_override") or "").strip() or None      # O5
+                # A: IDE-declared MCP servers forwarded by thin client (stored for future MCP bridging)
+                mcp_servers_from_ide = data.get("mcp_servers") or []
+                if mcp_servers_from_ide:
+                    logger.info(
+                        "ACP mcp_servers_from_ide session_id={} count={} servers={}",
+                        session_id,
+                        len(mcp_servers_from_ide),
+                        [s.get("url") or s.get("command") for s in mcp_servers_from_ide[:5]],
+                    )
                 user_content, user_display = _build_acp_user_turn_from_ws(data)
 
-                await _hydrate_if_needed_acp(session_id, agent_obj, user_id, session_messages)
+                # O5: resolve agent/model override for this turn
+                turn_agent = agent_obj
+                turn_model = model_obj
+                if agent_override_id:
+                    resolved = await _resolve_agent_override(agent_override_id, user_id)
+                    if resolved:
+                        turn_agent, turn_model = resolved
+                        logger.info(
+                            "ACP agent_override session_id={} override={} -> agent={} model={}",
+                            session_id, agent_override_id, turn_agent.name, turn_model.id,
+                        )
+
+                # O4: hydrate history, seeding from parent for forked sessions
+                await _hydrate_if_needed_acp(session_id, turn_agent, user_id, session_messages, parent_session_id)
                 if session_id not in session_messages:
                     session_messages[session_id] = []
                 history = session_messages[session_id]
                 history.append({"role": "user", "content": user_content})
 
                 _tool_ui_seen: set[str] = set()
+                stream_stats: dict[str, int] = {"chunks": 0, "chars": 0}
 
                 async def on_chunk(text: str):
                     if text:
+                        stream_stats["chunks"] += 1
+                        stream_stats["chars"] += len(text)
+                        n = stream_stats["chunks"]
+                        if n == 1 or n % 25 == 0 or _acp_log_chunks():
+                            logger.info(
+                                "[ACP] ws-send chunk n={} len={} session_id={}",
+                                n,
+                                len(text),
+                                session_id,
+                            )
                         await websocket.send_json(_acp_ws_envelope({"type": "chunk", "content": text}))
 
                 async def on_thinking(text: str):
                     if text:
+                        if _acp_verbose():
+                            logger.info(
+                                "ACP outbound thinking session_id={} len={}",
+                                session_id,
+                                len(text),
+                            )
                         await websocket.send_json(
                             _acp_ws_envelope({"type": "thinking", "content": text})
                         )
@@ -617,6 +887,21 @@ async def acp_websocket(
                     status = tdata.get("status")
                     name = tdata.get("name") or "tool"
                     tid = (tdata.get("tool_call_id") or tdata.get("id") or "").strip()
+                    logger.info(
+                        "[ACP] tool_round status={} name={} tool_call_id={} session_id={}",
+                        status,
+                        name,
+                        tid or "-",
+                        session_id,
+                    )
+                    if _acp_verbose():
+                        logger.info(
+                            "ACP tool_ui session_id={} status={} name={} tool_call_id={}",
+                            session_id,
+                            status,
+                            name,
+                            tid or "-",
+                        )
                     if status == "running":
                         if tid and tid not in _tool_ui_seen:
                             _tool_ui_seen.add(tid)
@@ -645,10 +930,11 @@ async def acp_websocket(
                         )
                         _tool_ui_seen.discard(tid)
 
-                supports_vision = bool(getattr(model_obj, "supports_vision", False))
+                supports_vision = bool(getattr(turn_model, "supports_vision", False))
 
                 ide_prompt = (
                     "\n\n[IDE 环境提示]\n"
+                    f"当前会话工作目录（项目根）: {session_cwd}\n"
                     "你现在正在通过 Agent Client Protocol (ACP) 连接到用户的本地 IDE。\n"
                     "你拥有以下额外的 IDE 专用工具：\n"
                     "- `ide_read_file`: 读取本地文件（可选 `limit` / `line` 控制长度与起始行）\n"
@@ -661,7 +947,7 @@ async def acp_websocket(
                     "遇到需要修改代码或查看本地**源码文本**时，请优先使用这些 `ide_` 开头的工具！"
                 )
 
-                cancel_key = (str(agent_obj.id), str(user_id), str(session_id))
+                cancel_key = (str(turn_agent.id), str(user_id), str(session_id))
                 cancel_prompt = asyncio.Event()
                 async with _acp_cancel_registry_lock:
                     if cancel_key in _acp_cancel_registry:
@@ -676,14 +962,21 @@ async def acp_websocket(
                         history.pop()
                         continue
                     _acp_cancel_registry[cancel_key] = cancel_prompt
+                _prompt_sid_token = current_acp_prompt_session_id.set(str(session_id))
                 try:
-                    logger.info("ACP calling LLM for agent %s", agent_obj.name)
+                    logger.info(
+                        "ACP calling LLM session_id={} agent={} history_len={}",
+                        session_id,
+                        turn_agent.name,
+                        len(history),
+                    )
+                    t_llm = time.monotonic()
                     reply = await ws_module.call_llm(
-                        model=model_obj,
+                        model=turn_model,
                         messages=history,
-                        agent_name=agent_obj.name,
-                        role_description=(agent_obj.role_description or "") + ide_prompt,
-                        agent_id=agent_obj.id,
+                        agent_name=turn_agent.name,
+                        role_description=(turn_agent.role_description or "") + ide_prompt,
+                        agent_id=turn_agent.id,
                         user_id=user_id,
                         session_id=session_id,
                         on_chunk=on_chunk,
@@ -692,19 +985,34 @@ async def acp_websocket(
                         supports_vision=supports_vision,
                         cancel_event=cancel_prompt,
                     )
+                    elapsed_llm = time.monotonic() - t_llm
 
                     cancelled = reply == "[Cancelled]"
                     logger.info(
-                        "ACP call_llm returned session_id={} cancelled={} reply_len={}",
+                        "[ACP] call_llm RETURN session_id={} cancelled={} reply_len={} elapsed_s={:.2f}",
                         session_id,
                         cancelled,
                         len(reply or ""),
+                        elapsed_llm,
                     )
+                    if elapsed_llm > 45.0:
+                        logger.warning(
+                            "ACP call_llm slow session_id={} elapsed_s={:.2f}",
+                            session_id,
+                            elapsed_llm,
+                        )
+                    if _acp_verbose():
+                        logger.info(
+                            "ACP outbound stream summary session_id={} chunks={} total_chars={}",
+                            session_id,
+                            stream_stats["chunks"],
+                            stream_stats["chars"],
+                        )
                     history.append({"role": "assistant", "content": reply})
 
                     _t = asyncio.create_task(
                         _persist_chat_turn(
-                            agent_id=agent_obj.id,
+                            agent_id=turn_agent.id,
                             session_id=session_id,
                             user_text=user_display,
                             reply_text=reply,
@@ -720,18 +1028,35 @@ async def acp_websocket(
                             _acp_ws_envelope({"type": "cancelled", "session_id": session_id})
                         )
                     else:
-                        logger.info("ACP outbound done session_id={}", session_id)
+                        logger.info(
+                            "[ACP] ws-send type=done session_id={} reply_len={} chunks_out={}",
+                            session_id,
+                            len(reply or ""),
+                            stream_stats["chunks"],
+                        )
+                        # N3: send usage stats before done so thin client can show IDE token meter
+                        await websocket.send_json(_acp_ws_envelope({
+                            "type": "usage",
+                            "used": stream_stats["chars"] // 4,   # output chars → token estimate
+                            "size": 200000,                        # approx context window (tokens)
+                        }))
                         await websocket.send_json(_acp_ws_envelope({"type": "done"}))
+                        logger.info("[ACP] ws-send type=done COMPLETE session_id={}", session_id)
                 except Exception as e:
-                    logger.error("Error calling LLM: %s", e)
+                    logger.error("ACP Error calling LLM session_id={}: {}", session_id, e)
                     await websocket.send_json(_acp_ws_envelope({"type": "error", "content": str(e)}))
                 finally:
+                    current_acp_prompt_session_id.reset(_prompt_sid_token)
                     async with _acp_cancel_registry_lock:
                         if _acp_cancel_registry.get(cancel_key) is cancel_prompt:
                             _acp_cancel_registry.pop(cancel_key, None)
                 continue
 
-            logger.warning("ACP WS ignored unknown message type: %s", msg_type)
+            logger.warning(
+                "ACP WS ignored unknown message type={} keys_sample={}",
+                msg_type,
+                list(data.keys())[:8] if isinstance(data, dict) else [],
+            )
     finally:
         recv_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
