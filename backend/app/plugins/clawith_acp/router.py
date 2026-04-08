@@ -378,7 +378,20 @@ async def _read_file_for_diff(
         )
         result = await asyncio.wait_for(future, timeout=10.0)
         return str(result) if result else ""
-    except Exception:
+    except asyncio.TimeoutError:
+        logger.warning(
+            "_read_file_for_diff timeout session_id={} path={}",
+            session_id or "-",
+            file_path,
+        )
+        return ""
+    except Exception as exc:
+        logger.debug(
+            "_read_file_for_diff failed session_id={} path={} err={}",
+            session_id or "-",
+            file_path,
+            exc,
+        )
         return ""
     finally:
         pending.pop(call_id, None)
@@ -413,10 +426,10 @@ async def _custom_execute_tool(
 
     if ws and tool_name in _IDE_BRIDGE_TOOL_NAMES:
         if tool_name in _IDE_TOOLS_REQUIRING_PERMISSION:
-            extra: dict[str, Any] = {}
+            extra: dict[str, Any] | None = None
             if tool_name == "ide_write_file":
                 file_path = args.get("path", "")
-                old_content = await _read_file_for_diff(ws, pending, file_path, session_id)
+                old_content = await _read_file_for_diff(ws, pending, file_path, session_id) if file_path else ""
                 extra = {
                     "file_path": file_path,
                     "old_content": old_content,
@@ -424,7 +437,7 @@ async def _custom_execute_tool(
                 }
             allowed = await _acp_await_client_permission(
                 ws, pending_perm, tool_name, args, session_id=session_id,
-                extra_payload=extra if extra else None,
+                extra_payload=extra,
             )
             if not allowed:
                 logger.info(
