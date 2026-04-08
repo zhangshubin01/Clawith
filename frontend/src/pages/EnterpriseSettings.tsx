@@ -1734,11 +1734,137 @@ function BroadcastSection() {
 
 
 // ─── Identity Providers Tab ──────────────────────────
+function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
+    const qc = useQueryClient();
+    const { data: settings, isLoading } = useQuery({
+        queryKey: ['okr-settings', tenantId],
+        queryFn: () => fetchJson<any>('/okr/settings')
+    });
+    const updateSettings = useMutation({
+        mutationFn: (data: any) => fetchJson('/okr/settings', { method: 'PUT', body: JSON.stringify(data) }),
+        onSuccess: () => qc.invalidateQueries({ queryKey: ['okr-settings'] })
+    });
+
+    if (isLoading) return <div style={{ padding: '20px' }}>{t('common.loading', 'Loading...')}</div>;
+    const s = settings || { enabled: false, daily_report_enabled: false, daily_report_time: '18:00', weekly_report_enabled: false, weekly_report_day: 4, period_frequency: 'quarterly', period_length_days: null };
+
+    return (
+        <div style={{ maxWidth: '800px' }}>
+            <div className="card" style={{ marginBottom: '24px' }}>
+                <div style={{ padding: '20px', borderBottom: '1px solid var(--border-subtle)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                            <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)', marginBottom: '4px' }}>
+                                OKR 系统开关
+                            </div>
+                            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                启用后，组织内成员和数字员工均可使用 OKR 功能管理目标。Agent 将主动跟进并报告进展。
+                            </div>
+                        </div>
+                        <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '24px' }}>
+                            <input
+                                type="checkbox"
+                                checked={s.enabled}
+                                onChange={(e) => updateSettings.mutate({ ...s, enabled: e.target.checked })}
+                                style={{ opacity: 0, width: 0, height: 0 }}
+                            />
+                            <span style={{
+                                position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '24px', cursor: 'pointer',
+                                background: s.enabled ? 'var(--accent-primary)' : 'var(--border-subtle)', transition: '0.2s'
+                            }}>
+                                <span style={{
+                                    position: 'absolute', left: s.enabled ? '18px' : '2px', top: '2px', width: '20px', height: '20px',
+                                    borderRadius: '50%', background: '#fff', transition: '0.2s', boxShadow: '0 1px 2px rgba(0,0,0,0.1)'
+                                }} />
+                            </span>
+                        </label>
+                    </div>
+                </div>
+                
+                {s.enabled && (
+                    <div style={{ padding: '20px' }}>
+                        <div style={{ marginBottom: '24px' }}>
+                            <div style={{ fontWeight: 500, marginBottom: '12px', fontSize: '13px' }}>周期偏好</div>
+                            <select 
+                                className="form-input" 
+                                value={s.period_frequency}
+                                onChange={(e) => updateSettings.mutate({ ...s, period_frequency: e.target.value })}
+                                style={{ maxWidth: '300px' }}
+                            >
+                                <option value="quarterly">按季度 (Quarterly)</option>
+                                <option value="monthly">按月 (Monthly)</option>
+                            </select>
+                        </div>
+
+                        <div style={{ marginBottom: '24px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                                <input 
+                                    type="checkbox" 
+                                    checked={s.daily_report_enabled}
+                                    onChange={(e) => updateSettings.mutate({ ...s, daily_report_enabled: e.target.checked })}
+                                />
+                                <div>
+                                    <div style={{ fontWeight: 500, fontSize: '13px' }}>启用自动日报</div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>OKR Agent 每天定时收集并生成全员进展日报</div>
+                                </div>
+                            </div>
+                            {s.daily_report_enabled && (
+                                <div style={{ marginLeft: '28px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>日报发送时间:</div>
+                                    <input 
+                                        type="time" 
+                                        className="form-input" 
+                                        value={s.daily_report_time}
+                                        onChange={(e) => updateSettings.mutate({ ...s, daily_report_time: e.target.value })}
+                                        style={{ width: '120px' }}
+                                    />
+                                </div>
+                            )}
+                        </div>
+
+                        <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                                <input 
+                                    type="checkbox" 
+                                    checked={s.weekly_report_enabled}
+                                    onChange={(e) => updateSettings.mutate({ ...s, weekly_report_enabled: e.target.checked })}
+                                />
+                                <div>
+                                    <div style={{ fontWeight: 500, fontSize: '13px' }}>启用自动周报</div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>OKR Agent 每周定时收集并生成全员进展周报</div>
+                                </div>
+                            </div>
+                            {s.weekly_report_enabled && (
+                                <div style={{ marginLeft: '28px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>周报发送日:</div>
+                                    <select 
+                                        className="form-input" 
+                                        value={s.weekly_report_day}
+                                        onChange={(e) => updateSettings.mutate({ ...s, weekly_report_day: parseInt(e.target.value) })}
+                                        style={{ width: '120px' }}
+                                    >
+                                        <option value={0}>周一</option>
+                                        <option value={1}>周二</option>
+                                        <option value={2}>周三</option>
+                                        <option value={3}>周四</option>
+                                        <option value={4}>周五</option>
+                                        <option value={5}>周六</option>
+                                        <option value={6}>周日</option>
+                                    </select>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
 
 export default function EnterpriseSettings() {
     const { t } = useTranslation();
     const qc = useQueryClient();
-    const [activeTab, setActiveTab] = useState<'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites'>('info');
+    const [activeTab, setActiveTab] = useState<'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr'>('info');
 
     // Track selected tenant as state so page refreshes on company switch
     const [selectedTenantId, setSelectedTenantId] = useState(localStorage.getItem('current_tenant_id') || '');
@@ -2022,12 +2148,14 @@ export default function EnterpriseSettings() {
                 </div>
 
                 <div className="tabs">
-                    {(['info', 'llm', 'tools', 'skills', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'] as const).map(tab => (
+                    {(['info', 'llm', 'tools', 'skills', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit', 'okr'] as const).map(tab => (
                         <div key={tab} className={`tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
-                            {tab === 'quotas' ? t('enterprise.tabs.quotas', 'Quotas') : tab === 'users' ? t('enterprise.tabs.users', 'Users') : tab === 'invites' ? t('enterprise.tabs.invites', 'Invitations') : t(`enterprise.tabs.${tab}`)}
+                            {tab === 'quotas' ? t('enterprise.tabs.quotas', 'Quotas') : tab === 'users' ? t('enterprise.tabs.users', 'Users') : tab === 'invites' ? t('enterprise.tabs.invites', 'Invitations') : tab === 'okr' ? t('nav.okr', 'OKR') : t(`enterprise.tabs.${tab}`)}
                         </div>
                     ))}
                 </div>
+
+                {activeTab === 'okr' && <OkrTab tenantId={selectedTenantId} t={t} />}
 
                 {/* ── LLM Model Pool ── */}
                 {activeTab === 'llm' && (
