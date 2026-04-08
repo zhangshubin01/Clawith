@@ -1990,8 +1990,10 @@ function AgentDetailInner() {
                 reconnectDisabledRef.current[key] = true;
                 clearReconnectTimer(key);
                 if (isActiveRuntime && e.code === 4003) setAgentExpired(true);
+                setPendingPermission(prev => prev?.wsKey === key ? null : prev);
                 return;
             }
+            setPendingPermission(prev => prev?.wsKey === key ? null : prev);
             scheduleReconnect();
         };
         ws.onerror = (error) => {
@@ -2002,19 +2004,21 @@ function AgentDetailInner() {
         };
         ws.onmessage = (e) => {
             const d = JSON.parse(e.data);
+            const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
             if (d.type === 'permission_request') {
-                setPendingPermission({
-                    permissionId: d.permission_id,
-                    wsKey: key,
-                    toolName: d.tool_name,
-                    filePath: d.file_path,
-                    oldContent: d.old_content ?? '',
-                    newContent: d.new_content ?? '',
-                    argsSummary: d.args_summary ?? '',
-                });
+                if (isActiveRuntime) {
+                    setPendingPermission({
+                        permissionId: d.permission_id,
+                        wsKey: key,
+                        toolName: d.tool_name,
+                        filePath: d.file_path,
+                        oldContent: d.old_content ?? '',
+                        newContent: d.new_content ?? '',
+                        argsSummary: d.args_summary ?? '',
+                    });
+                }
                 return;
             }
-            const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
             if (['thinking', 'chunk', 'tool_call', 'done', 'error', 'quota_exceeded'].includes(d.type)) {
                 const nextStreaming = ['thinking', 'chunk', 'tool_call'].includes(d.type);
                 const endStreaming = ['done', 'error', 'quota_exceeded'].includes(d.type);
