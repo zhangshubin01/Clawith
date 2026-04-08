@@ -214,7 +214,9 @@ async def get_okr_settings(user=Depends(get_current_user)):
 @router.put("/settings", response_model=OKRSettingsOut)
 async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_user)):
     """Update OKR configuration. Org admins only."""
-    if not getattr(user, "is_admin", False):
+    # Allow org admins and platform admins to modify OKR settings.
+    # user.role is the canonical authority; is_admin is not a real field.
+    if getattr(user, "role", None) not in ("org_admin", "platform_admin"):
         raise HTTPException(403, "Only org admins can modify OKR settings")
 
     async with async_session() as db:
