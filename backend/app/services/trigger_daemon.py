@@ -693,6 +693,28 @@ async def _tick():
         asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers))
 
 
+async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str) -> None:
+    """Public API: wake an agent asynchronously with a message context.
+
+    Creates a synthetic trigger invocation so the agent processes the
+    message in a Reflection Session via the standard trigger path.
+    Safe to call from any async context.
+    """
+    now = datetime.now(timezone.utc)
+    dummy_trigger = AgentTrigger(
+        id=uuid.uuid4(),
+        agent_id=agent_id,
+        name="a2a_wake",
+        type="on_message",
+        config={"from_agent_name": "", "_matched_message": message_context[:2000], "_matched_from": "agent"},
+        reason="Received an A2A message. Process it and act accordingly.",
+        is_enabled=True,
+        last_fired_at=now,
+        fire_count=0,
+    )
+    asyncio.create_task(_invoke_agent_for_triggers(agent_id, [dummy_trigger]))
+
+
 async def start_trigger_daemon():
     """Start the background trigger daemon loop. Called from FastAPI startup."""
     logger.info("⚡ Trigger Daemon started (15s tick, heartbeat every ~60s)")

@@ -532,7 +532,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_message_to_agent",
-            "description": "Send a message to a digital employee colleague and receive a reply. The recipient is another AI agent, not a human. This triggers the recipient's LLM reasoning and returns their response. Suitable for asking questions, delegating tasks, or collaboration. Your relationships.md lists available digital employees under 'Digital Employee Colleagues'.",
+            "description": "Send a message to a digital employee colleague. The recipient is another AI agent, not a human. Behaviour depends on msg_type: notify = fire-and-forget, returns immediately; consult = synchronous, waits for reply; task_delegate = async, returns immediately and you will be notified when they finish. Your relationships.md lists available digital employees under 'Digital Employee Colleagues'.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -547,7 +547,7 @@ AGENT_TOOLS = [
                     "msg_type": {
                         "type": "string",
                         "enum": ["notify", "consult", "task_delegate"],
-                        "description": "Message type: notify (notification), consult (ask a question), task_delegate (delegate a task). Defaults to notify.",
+                        "description": "Message type: notify = fire-and-forget notification (async, no reply expected, returns immediately); consult = synchronous question (waits for reply); task_delegate = delegate a task (async, returns immediately, you will be woken when the target completes). Defaults to notify.",
                     },
                 },
                 "required": ["agent_name", "message"],
@@ -4376,13 +4376,191 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
         return f"❌ Agent file send error: {str(e)[:200]}"
 
 
+async def _resolve_a2a_target(
+    db, from_agent_id: uuid.UUID, agent_name: str
+) -> tuple[AgentModel | None, str | None]:
+    """Resolve the target agent for A2A communication.
+
+    Returns (target_agent, error_message). If target is None, error_message
+    explains why.  Caller is responsible for relationship / expiry checks.
+    """
+    src_result = await db.execute(select(AgentModel).where(AgentModel.id == from_agent_id))
+    source_agent = src_result.scalar_one_or_none()
+    source_tenant_id = source_agent.tenant_id if source_agent else None
+
+    base_filter = [AgentModel.id != from_agent_id]
+    if source_tenant_id:
+        base_filter.append(AgentModel.tenant_id == source_tenant_id)
+
+    exact_result = await db.execute(
+        select(AgentModel).where(AgentModel.name == agent_name, *base_filter)
+    )
+    target = exact_result.scalars().first()
+    if not target:
+        safe_name = agent_name.replace("%", "").replace("_", r"\_")
+        fuzzy_result = await db.execute(
+            select(AgentModel).where(AgentModel.name.ilike(f"%{safe_name}%"), *base_filter)
+        )
+        target = fuzzy_result.scalars().first()
+    if not target:
+        rel_r = await db.execute(
+            select(AgentModel.name).join(
+                AgentAgentRelationship,
+                (AgentAgentRelationship.target_agent_id == AgentModel.id) & (AgentAgentRelationship.agent_id == from_agent_id)
+            )
+        )
+        rel_names = [n for (n,) in rel_r.all()]
+        return None, f"❌ No agent found matching '{agent_name}'. Your connected colleagues: {', '.join(rel_names) if rel_names else 'none — ask your administrator to set up relationships'}"
+
+    return target, None
+
+
+async def _ensure_a2a_session(
+    db, from_agent_id: uuid.UUID, target_id: uuid.UUID, source_name: str, owner_id: uuid.UUID
+) -> tuple[ChatSession, str]:
+    """Find or create the ChatSession for a pair of agents.
+
+    Returns (chat_session, session_id_str).
+    """
+    from app.models.participant import Participant
+
+    session_agent_id = min(from_agent_id, target_id, key=str)
+    session_peer_id = max(from_agent_id, target_id, key=str)
+    sess_r = await db.execute(
+        select(ChatSession).where(
+            ChatSession.agent_id == session_agent_id,
+            ChatSession.peer_agent_id == session_peer_id,
+            ChatSession.source_channel == "agent",
+        )
+    )
+    chat_session = sess_r.scalar_one_or_none()
+    if not chat_session:
+        src_part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == from_agent_id))
+        src_participant = src_part_r.scalar_one_or_none()
+        src_part_id = src_participant.id if src_participant else None
+        chat_session = ChatSession(
+            agent_id=session_agent_id,
+            user_id=owner_id,
+            title=f"{source_name} ↔ {(await db.execute(select(AgentModel.name).where(AgentModel.id == target_id))).scalar() or 'Unknown'}",
+            source_channel="agent",
+            participant_id=src_part_id,
+            peer_agent_id=session_peer_id,
+        )
+        db.add(chat_session)
+        await db.flush()
+    return chat_session, str(chat_session.id)
+
+
+async def _create_on_message_trigger(
+    agent_id: uuid.UUID,
+    trigger_name: str,
+    from_agent_name: str,
+    reason: str,
+    focus_ref: str | None = None,
+) -> None:
+    """Programmatically create an on_message trigger for an agent."""
+    from app.models.trigger import AgentTrigger
+
+    config: dict = {"from_agent_name": from_agent_name}
+
+    try:
+        from app.models.audit import ChatMessage as _CM
+        from app.models.chat_session import ChatSession as _CS
+        from sqlalchemy import cast as sa_cast, String as SaString
+        async with async_session() as _snap_db:
+            _snap_q = select(_CM.created_at).join(
+                _CS, _CM.conversation_id == sa_cast(_CS.id, SaString)
+            ).where(
+                _CS.agent_id == agent_id,
+                _CM.created_at.isnot(None),
+            ).order_by(_CM.created_at.desc()).limit(1)
+            _snap_r = await _snap_db.execute(_snap_q)
+            _latest_ts = _snap_r.scalar_one_or_none()
+            if _latest_ts:
+                config["_since_ts"] = _latest_ts.isoformat()
+    except Exception:
+        pass
+
+    async with async_session() as db:
+        result = await db.execute(
+            select(AgentTrigger).where(
+                AgentTrigger.agent_id == agent_id,
+                AgentTrigger.name == trigger_name,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            if existing.is_enabled:
+                existing.config = {**(existing.config or {}), **config}
+                existing.reason = reason
+                if focus_ref:
+                    existing.focus_ref = focus_ref
+                await db.commit()
+                return
+            else:
+                existing.type = "on_message"
+                existing.config = config
+                existing.reason = reason
+                existing.focus_ref = focus_ref or None
+                existing.is_enabled = True
+                await db.commit()
+                return
+
+        trigger = AgentTrigger(
+            agent_id=agent_id,
+            name=trigger_name,
+            type="on_message",
+            config=config,
+            reason=reason,
+            focus_ref=focus_ref or None,
+        )
+        db.add(trigger)
+        await db.commit()
+
+
+async def _append_focus_item(agent_id: uuid.UUID, identifier: str, description: str) -> None:
+    """Append a pending focus item to the agent's focus.md."""
+    focus_path = WORKSPACE_ROOT / str(agent_id) / "focus.md"
+    line = f"- [ ] {identifier}: {description}\n"
+    try:
+        if focus_path.exists():
+            content = focus_path.read_text(encoding="utf-8")
+            if identifier in content:
+                return
+            if not content.endswith("\n"):
+                content += "\n"
+            content += line
+        else:
+            content = f"# Focus\n\n{line}"
+        focus_path.parent.mkdir(parents=True, exist_ok=True)
+        focus_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[A2A] Failed to update focus.md for agent {agent_id}: {e}")
+
+
+async def _wake_agent_async(agent_id: uuid.UUID, reason_context: str) -> None:
+    """Wake an agent asynchronously via the trigger invocation path.
+
+    Delegates to the public wake_agent_with_context API in trigger_daemon.
+    """
+    from app.services.trigger_daemon import wake_agent_with_context
+    await wake_agent_with_context(agent_id, reason_context)
+
+
 async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
-    """Send a message to another digital employee. Uses a single request-response pattern:
-    the source agent sends a message, the target agent replies once, and the result is returned.
-    If the source agent needs to continue the conversation, it can call this tool again.
+    """Send a message to another digital employee.
+
+    Behaviour depends on ``msg_type``:
+    - notify:   fire-and-forget — message is saved, target is woken asynchronously.
+                Returns immediately.
+    - task_delegate: async with callback — message is saved, source agent sets up
+                a focus item + on_message trigger so it is notified when the
+                target completes the task.  Returns immediately.
+    - consult:  synchronous request-response (original behaviour).
     """
     agent_name = args.get("agent_name", "").strip()
     message_text = args.get("message", "").strip()
+    msg_type = args.get("msg_type", "notify").strip().lower()
 
     if not agent_name or not message_text:
         return "❌ Please provide target agent name and message content"
@@ -4513,6 +4691,75 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 status_hint = "online" if online else "offline (message will be delivered on next heartbeat)"
                 return f"✅ Message sent to {target.name} (OpenClaw agent, currently {status_hint}). The message has been queued and will be delivered when the agent polls for updates."
 
+            # ── Native target: branch by msg_type ──
+
+            # Save source message (common to all paths)
+            db.add(ChatMessage(
+                agent_id=session_agent_id,
+                user_id=owner_id,
+                role="user",
+                content=message_text,
+                conversation_id=session_id,
+                participant_id=src_participant.id if src_participant else None,
+            ))
+            chat_session.last_message_at = datetime.now(timezone.utc)
+            await db.commit()
+
+            # ── notify: fire-and-forget ──
+            if msg_type == "notify":
+                from app.services.activity_logger import log_activity
+                await log_activity(
+                    from_agent_id, "agent_msg_sent",
+                    f"Sent notification to {target.name}",
+                    detail={"partner": target.name, "message": message_text[:200], "msg_type": "notify"},
+                )
+
+                await _wake_agent_async(
+                    target.id,
+                    f"[From {source_name}] {message_text}",
+                )
+
+                return f"✅ Notification sent to {target.name}. They will process it asynchronously."
+
+            # ── task_delegate: async with callback ──
+            if msg_type == "task_delegate":
+                focus_id = f"wait_{target.name.lower().replace(' ', '_')}_task"
+                focus_desc = f"Waiting for {target.name} to complete delegated task: {message_text[:100]}"
+
+                await _append_focus_item(from_agent_id, focus_id, focus_desc)
+
+                trigger_name = f"a2a_wait_{target.name.lower().replace(' ', '_')}"
+                trigger_reason = (
+                    f"{target.name} is expected to reply after completing a delegated task. "
+                    f"Original task: {message_text[:200]}. "
+                    f"When {target.name} replies: 1) Process the result. "
+                    f"2) Notify the user if needed. "
+                    f"3) Mark focus item '{focus_id}' as completed. "
+                    f"4) Cancel this trigger."
+                )
+                await _create_on_message_trigger(
+                    agent_id=from_agent_id,
+                    trigger_name=trigger_name,
+                    from_agent_name=target.name,
+                    reason=trigger_reason,
+                    focus_ref=focus_id,
+                )
+
+                from app.services.activity_logger import log_activity
+                await log_activity(
+                    from_agent_id, "agent_msg_sent",
+                    f"Delegated task to {target.name}",
+                    detail={"partner": target.name, "message": message_text[:200], "msg_type": "task_delegate"},
+                )
+
+                await _wake_agent_async(
+                    target.id,
+                    f"[From {source_name}] {message_text}",
+                )
+
+                return f"✅ Task delegated to {target.name}. You will be notified when they complete it."
+
+            # ── consult (default): synchronous request-response ──
             # Prepare target LLM
             from app.services.agent_context import build_agent_context
             from app.models.llm import LLMModel
@@ -4564,24 +4811,8 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                     role = "assistant"
                 conversation_messages.append({"role": role, "content": m.content})
 
-            # Add the new message from source
             conversation_messages.append({"role": "user", "content": f"[From {source_name}] {message_text}"})
 
-            # Save source message
-            owner_id = source_agent.creator_id if source_agent else from_agent_id
-            db.add(ChatMessage(
-                agent_id=session_agent_id,
-                user_id=owner_id,
-                role="user",
-                content=message_text,
-                conversation_id=session_id,
-                participant_id=src_participant.id if src_participant else None,
-            ))
-            chat_session.last_message_at = datetime.now(timezone.utc)
-            await db.commit()
-
-            # Call target LLM with tool support (multi-round)
-            import asyncio
             import random
             import httpx
             from app.services.llm_utils import (
