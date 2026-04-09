@@ -121,6 +121,7 @@ async def call_llm(
     on_tool_call=None,
     on_thinking=None,
     supports_vision=False,
+    max_tool_rounds_override: int | None = None,
 ) -> str:
     """Call LLM via unified client with function-calling tool loop.
 
@@ -142,12 +143,17 @@ async def call_llm(
                 _agent = _ar.scalar_one_or_none()
                 if _agent:
                     _max_tool_rounds = _agent.max_tool_rounds or 50
+                    if max_tool_rounds_override and max_tool_rounds_override < _max_tool_rounds:
+                        _max_tool_rounds = max_tool_rounds_override
                     if _agent.max_tokens_per_day and _agent.tokens_used_today >= _agent.max_tokens_per_day:
                         return f"⚠️ Daily token usage has reached the limit ({_agent.tokens_used_today:,}/{_agent.max_tokens_per_day:,}). Please try again tomorrow or ask admin to increase the limit."
                     if _agent.max_tokens_per_month and _agent.tokens_used_month >= _agent.max_tokens_per_month:
                         return f"⚠️ Monthly token usage has reached the limit ({_agent.tokens_used_month:,}/{_agent.max_tokens_per_month:,}). Please ask admin to increase the limit."
         except Exception:
             pass
+
+    if max_tool_rounds_override and max_tool_rounds_override < _max_tool_rounds:
+        _max_tool_rounds = max_tool_rounds_override
 
     # Build rich prompt with soul, memory, skills, relationships
     from app.services.agent_context import build_agent_context
