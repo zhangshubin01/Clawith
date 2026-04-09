@@ -257,7 +257,7 @@ class AgentOut(BaseModel):
     webhook_rate_limit: int = 5
     heartbeat_enabled: bool = True
     heartbeat_interval_minutes: int = 240
-    heartbeat_active_hours: str = "09:00-18:00"
+    heartbeat_active_hours: str = "09:00-23:00"
     last_heartbeat_at: datetime | None = None
     timezone: str | None = None
     expires_at: datetime | None = None

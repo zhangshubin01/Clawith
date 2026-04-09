@@ -454,7 +454,7 @@ async def _heartbeat_tick():
                 tz_name = get_agent_timezone_sync(agent, tenant)
 
                 # Check active hours (in agent's timezone)
-                if not _is_in_active_hours(agent.heartbeat_active_hours or "09:00-18:00", tz_name):
+                if not _is_in_active_hours(agent.heartbeat_active_hours or "09:00-23:00", tz_name):
                     continue
 
                 # Check interval

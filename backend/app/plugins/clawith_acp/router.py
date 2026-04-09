@@ -160,6 +160,7 @@ def _acp_log_chunks() -> bool:
 _IDE_TOOLS_REQUIRING_PERMISSION = frozenset(
     {
         "ide_write_file",
+        "delete_file",
     }
 )
 
@@ -172,6 +173,7 @@ _IDE_BRIDGE_TOOL_NAMES = frozenset(
         "ide_release_terminal",
         "ide_create_terminal",
         "ide_terminal_output",
+        "delete_file",
     }
 )
 
@@ -304,6 +306,20 @@ IDE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "description": "Delete a file from the IDE client's local filesystem.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute or relative path to the file to delete"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
 ]
 
 
@@ -332,7 +348,15 @@ async def _acp_await_client_permission(
     pending_permissions[perm_id] = fut
     _pending_permission_futures[perm_id] = fut  # global registry (kept for forward compat)
     try:
-        summary = json.dumps(args, ensure_ascii=False)[:800]
+        # ide_write_file: send full path+content so thin client can generate a proper diff.
+        # Other tools: truncate to 800 chars (content is only needed for display).
+        if tool_name == "ide_write_file":
+            summary = json.dumps(
+                {"path": args.get("path", ""), "content": args.get("content", "")},
+                ensure_ascii=False,
+            )
+        else:
+            summary = json.dumps(args, ensure_ascii=False)[:800]
         payload: dict[str, Any] = {
             "type": "permission_request",
             "permission_id": perm_id,
@@ -465,6 +489,8 @@ async def _custom_execute_tool(
             "（写入智能体服务器工作区，不是本机工程目录）。"
         )
 
+    # delete_file is an IDE bridge tool - delete happens locally on the IDE side
+
     if ws and tool_name in _IDE_BRIDGE_TOOL_NAMES:
         if tool_name in _IDE_TOOLS_REQUIRING_PERMISSION:
             # Check if auto_approve_diff is enabled in session config
@@ -493,6 +519,12 @@ async def _custom_execute_tool(
                         "old_content": old_content,
                         "new_content": new_content,
                     }
+                elif tool_name == "delete_file":
+                    file_path = args.get("path", "")
+                    if file_path:
+                        extra = {
+                            "file_path": file_path,
+                        }
                 allowed = await _acp_await_client_permission(
                     ws, pending_perm, tool_name, args,
                     agent_id=str(agent_id),
@@ -1062,9 +1094,11 @@ async def acp_websocket(
                     "- `ide_execute_command`: 在本地终端执行命令（需确认）\n"
                     "- `ide_create_terminal`: 创建不阻塞的终端会话，返回 `terminal_id`（需确认）\n"
                     "- `ide_kill_terminal` / `ide_release_terminal`: 结束或释放终端（需确认）\n"
+                    "- `delete_file`: 删除本地文件系统中的文件（需用户在 IDE 确认）\n"
                     "若用户本条消息已含 **图片/截图**（多模态），请直接根据图像回答；**不要**用 `read_file` / `ide_read_file` "
                     "去读取 `.png` `.jpg` 等二进制图片路径来「看图」。\n"
-                    "遇到需要修改代码或查看本地**源码文本**时，请优先使用这些 `ide_` 开头的工具！"
+                    "遇到需要修改代码或查看本地**源码文本**时，请优先使用这些 `ide_` 开头的工具！\n"
+                    "当你需要删除整个文件时，**请直接使用 `delete_file` 工具**，不要告诉用户手动删除！\n"
                 )
                 # Add session mode prompt if available
                 if session_mode:
