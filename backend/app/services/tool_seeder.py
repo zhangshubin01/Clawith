@@ -1081,7 +1081,7 @@ BUILTIN_TOOLS = [
             "properties": {},
             "required": [],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1111,7 +1111,7 @@ BUILTIN_TOOLS = [
             },
             "required": ["report_type"],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1132,7 +1132,7 @@ BUILTIN_TOOLS = [
             "properties": {},
             "required": [],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1181,7 +1181,7 @@ BUILTIN_TOOLS = [
             },
             "required": ["title", "owner_type", "period_start", "period_end"],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1223,7 +1223,7 @@ BUILTIN_TOOLS = [
             },
             "required": ["objective_id", "title", "target_value"],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1269,7 +1269,7 @@ BUILTIN_TOOLS = [
             },
             "required": ["objective_id"],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1311,7 +1311,7 @@ BUILTIN_TOOLS = [
             },
             "required": ["kr_id", "value"],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1333,10 +1333,9 @@ BUILTIN_TOOLS = [
             "properties": {},
             "required": [],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
-
     # --- Feishu Integration Tools ---
     # These tools require a configured Feishu channel to function.
     # They are NOT enabled by default — agents with Feishu channels should enable them.
@@ -2401,6 +2400,14 @@ async def seed_builtin_tools():
                 if not existing.config and t.get("config"):
                     existing.config = t["config"]
                     updated_fields.append("config")
+                elif t.get("config") and existing.config != t["config"]:
+                    # Merge new config keys into existing config so that flags like
+                    # okr_agent_only are propagated to already-created tool records.
+                    # Existing keys take precedence (agent-specific overrides are preserved).
+                    merged = {**t["config"], **(existing.config or {})}
+                    if merged != existing.config:
+                        existing.config = merged
+                        updated_fields.append("config")
                 if existing.parameters_schema != t["parameters_schema"]:
                     existing.parameters_schema = t["parameters_schema"]
                     updated_fields.append("parameters_schema")
