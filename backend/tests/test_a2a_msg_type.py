@@ -92,6 +92,12 @@ def _make_participant(part_id=None, ref_id=None):
     return p
 
 
+def _make_tenant(a2a_async_enabled=True):
+    t = MagicMock()
+    t.a2a_async_enabled = a2a_async_enabled
+    return t
+
+
 # ── Tests ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -119,6 +125,7 @@ async def test_notify_returns_immediately():
         DummyResult(scalar_value=src_participant),
         DummyResult(scalar_value=tgt_participant),
         DummyResult(scalar_value=session),
+        DummyResult(scalar_value=_make_tenant()),
     ])
 
     with patch("app.services.agent_tools.async_session") as mock_session_ctx, \
@@ -163,6 +170,7 @@ async def test_task_delegate_creates_focus_and_trigger():
         DummyResult(scalar_value=src_participant),
         DummyResult(scalar_value=tgt_participant),
         DummyResult(scalar_value=session),
+        DummyResult(scalar_value=_make_tenant()),
     ])
 
     with patch("app.services.agent_tools.async_session") as mock_session_ctx, \
@@ -237,6 +245,7 @@ async def test_consult_calls_llm_synchronously():
         DummyResult(scalar_value=src_participant),
         DummyResult(scalar_value=tgt_participant),
         DummyResult(scalar_value=session),
+        DummyResult(scalar_value=_make_tenant()),
         DummyResult(scalar_value=model),
         DummyResult(scalars_list=[]),
     ])
@@ -304,6 +313,7 @@ async def test_default_msg_type_is_notify():
         DummyResult(scalar_value=src_participant),
         DummyResult(scalar_value=tgt_participant),
         DummyResult(scalar_value=session),
+        DummyResult(scalar_value=_make_tenant()),
     ])
 
     with patch("app.services.agent_tools.async_session") as mock_session_ctx, \
@@ -506,7 +516,7 @@ async def test_openclaw_target_still_queues():
 
 @pytest.mark.asyncio
 async def test_feature_flag_off_falls_back_to_consult():
-    """When a2a_async_enabled=False, notify and task_delegate fall back to consult."""
+    """When tenant a2a_async_enabled=False, notify and task_delegate fall back to consult."""
     from app.services.agent_tools import _send_message_to_agent
 
     from_agent_id = uuid.uuid4()
@@ -517,8 +527,11 @@ async def test_feature_flag_off_falls_back_to_consult():
     src_participant = _make_participant(ref_id=from_agent_id)
     tgt_participant = _make_participant(ref_id=target_id)
     source_agent = _make_agent(from_agent_id, name="Alice")
-    source_agent.a2a_async_enabled = False
+    source_agent.tenant_id = uuid.uuid4()
     target_agent = _make_agent(target_id, name="Bob", primary_model_id=model_id)
+
+    tenant = MagicMock()
+    tenant.a2a_async_enabled = False
 
     session = MagicMock()
     session.id = session_id
@@ -548,6 +561,7 @@ async def test_feature_flag_off_falls_back_to_consult():
         DummyResult(scalar_value=src_participant),
         DummyResult(scalar_value=tgt_participant),
         DummyResult(scalar_value=session),
+        DummyResult(scalar_value=tenant),
         DummyResult(scalar_value=model),
         DummyResult(scalars_list=[]),
     ])
@@ -579,7 +593,7 @@ async def test_feature_flag_off_falls_back_to_consult():
 
 @pytest.mark.asyncio
 async def test_feature_flag_on_uses_notify():
-    """When a2a_async_enabled=True, notify works normally."""
+    """When tenant a2a_async_enabled=True, notify works normally."""
     from app.services.agent_tools import _send_message_to_agent
 
     from_agent_id = uuid.uuid4()
@@ -589,8 +603,11 @@ async def test_feature_flag_on_uses_notify():
     src_participant = _make_participant(ref_id=from_agent_id)
     tgt_participant = _make_participant(ref_id=target_id)
     source_agent = _make_agent(from_agent_id, name="Alice")
-    source_agent.a2a_async_enabled = True
+    source_agent.tenant_id = uuid.uuid4()
     target_agent = _make_agent(target_id, name="Bob")
+
+    tenant = MagicMock()
+    tenant.a2a_async_enabled = True
 
     session = MagicMock()
     session.id = session_id
@@ -603,6 +620,7 @@ async def test_feature_flag_on_uses_notify():
         DummyResult(scalar_value=src_participant),
         DummyResult(scalar_value=tgt_participant),
         DummyResult(scalar_value=session),
+        DummyResult(scalar_value=tenant),
     ])
 
     with patch("app.services.agent_tools.async_session") as mock_session_ctx, \
