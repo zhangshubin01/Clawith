@@ -557,7 +557,7 @@ function OrgTab({ tenant }: { tenant: any }) {
             const defaults: any = {
                 feishu: { app_id: '', app_secret: '', corp_id: '' },
                 dingtalk: { app_key: '', app_secret: '', corp_id: '' },
-                wecom: { corp_id: '', secret: '', agent_id: '', bot_id: '', bot_secret: '' },
+                wecom: { corp_id: '', secret: '', agent_id: '', app_secret: '', bot_id: '', bot_secret: '', verify_token: '', verify_aes_key: '' },
             };
             const nameMap: Record<string, string> = { feishu: 'Feishu', wecom: 'WeCom', dingtalk: 'DingTalk', oauth2: 'OAuth2' };
             setForm({
@@ -576,7 +576,7 @@ function OrgTab({ tenant }: { tenant: any }) {
         return (
             <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--border-subtle)' }}>
                 {/* Setup Guide moved to the top */}
-                {['feishu', 'dingtalk', 'wecom'].includes(type) && (
+                {['feishu', 'dingtalk'].includes(type) && (
                     <div style={{ background: 'var(--bg-primary)', padding: '16px', borderRadius: '8px', border: '1px solid var(--border-subtle)', marginBottom: '20px', fontSize: '12px' }}>
                         <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '8px', color: 'var(--text-primary)' }}>
                             👉 {t('enterprise.org.syncSetupGuide', 'Setup Guide & Required Permissions')}
@@ -655,34 +655,53 @@ function OrgTab({ tenant }: { tenant: any }) {
                         </div>
                     </div>
                 ) : type === 'wecom' ? (
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                        <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
-                                {t('enterprise.identity.providerHints.wecom')}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0' }}>
+                        {/* Prerequisites notice — all strings via i18n */}
+                        <div style={{
+                            padding: '16px',
+                            borderRadius: '8px',
+                            border: '1px solid var(--border-subtle)',
+                            background: 'var(--bg-primary)',
+                            fontSize: '13px',
+                            lineHeight: 1.7,
+                            color: 'var(--text-secondary)',
+                        }}>
+                            <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--text-primary)', marginBottom: '10px' }}>
+                                {t('enterprise.identity.wecomNotice.title')}
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                <div>
+                                    <div style={{ fontWeight: 500, color: 'var(--text-primary)', marginBottom: '3px' }}>
+                                        {t('enterprise.identity.wecomNotice.syncTitle')}
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                        {t('enterprise.identity.wecomNotice.syncDesc')}
+                                    </div>
+                                </div>
+                                <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '10px' }}>
+                                    <div style={{ fontWeight: 500, color: 'var(--text-primary)', marginBottom: '3px' }}>
+                                        {t('enterprise.identity.wecomNotice.ssoTitle')}
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                        {t('enterprise.identity.wecomNotice.ssoDesc')}
+                                    </div>
+                                </div>
+                                <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '10px' }}>
+                                    <div style={{ fontWeight: 500, color: 'var(--text-primary)', marginBottom: '3px' }}>
+                                        {t('enterprise.identity.wecomNotice.messagingTitle')}
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                        {t('enterprise.identity.wecomNotice.messagingDesc')}
+                                    </div>
+                                </div>
+                            </div>
+                            <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px solid var(--border-subtle)', fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
+                                {t('enterprise.identity.wecomNotice.footerText')}
                             </div>
                         </div>
-                        <div className="form-group">
-                            <label className="form-label">Corp ID</label>
-                            <input className="form-input" value={form.config.corp_id || ''} onChange={e => setForm({ ...form, config: { ...form.config, corp_id: e.target.value } })} placeholder="wwxxxxxxxxxxxx" />
-                        </div>
-                        <div className="form-group">
-                            <label className="form-label">Secret</label>
-                            <input className="form-input" type="password" value={form.config.secret || ''} onChange={e => setForm({ ...form, config: { ...form.config, secret: e.target.value } })} />
-                        </div>
-                        <div className="form-group">
-                            <label className="form-label">Agent ID (Optional)</label>
-                            <input className="form-input" value={form.config.agent_id || ''} onChange={e => setForm({ ...form, config: { ...form.config, agent_id: e.target.value } })} />
-                        </div>
-                        <div style={{ gridColumn: '1 / -1', height: '1px', background: 'var(--border-subtle)', margin: '8px 0' }} />
-                        <div className="form-group">
-                            <label className="form-label">Bot ID (Intelligent Robot)</label>
-                            <input className="form-input" value={form.config.bot_id || ''} onChange={e => setForm({ ...form, config: { ...form.config, bot_id: e.target.value } })} placeholder="aibXXXXXXXXXXXX" />
-                        </div>
-                        <div className="form-group">
-                            <label className="form-label">Bot Secret</label>
-                            <input className="form-input" type="password" value={form.config.bot_secret || ''} onChange={e => setForm({ ...form, config: { ...form.config, bot_secret: e.target.value } })} />
-                        </div>
                     </div>
+
+
                 ) : type === 'dingtalk' ? (
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                         <div className="form-group" style={{ gridColumn: '1 / -1' }}>
@@ -713,19 +732,69 @@ function OrgTab({ tenant }: { tenant: any }) {
                     </div>
                 ) : null}
 
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '16px' }}>
-                    <button className="btn btn-primary btn-sm" onClick={save} disabled={savingProvider}>
-                        {savingProvider ? t('common.loading') : t('common.save', 'Save')}
-                    </button>
-                    {saveProviderOk && (
-                        <span style={{ fontSize: '12px', color: 'var(--success)' }}>Saved</span>
-                    )}
-                    {existingProvider && (
-                        <button className="btn btn-ghost btn-sm" style={{ color: 'var(--error)' }} onClick={() => confirm('Are you sure you want to delete this configuration?') && deleteProvider.mutate(existingProvider.id)}>
-                            {t('common.delete', 'Delete')}
+                {/* Hide save/delete for WeCom while config is disabled */}
+                {type !== 'wecom' && (
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '16px' }}>
+                        <button className="btn btn-primary btn-sm" onClick={save} disabled={savingProvider}>
+                            {savingProvider ? t('common.loading') : t('common.save', 'Save')}
                         </button>
-                    )}
-                </div>
+                        {saveProviderOk && (
+                            <span style={{ fontSize: '12px', color: 'var(--success)' }}>Saved</span>
+                        )}
+                        {existingProvider && (
+                            <button className="btn btn-ghost btn-sm" style={{ color: 'var(--error)' }} onClick={() => confirm('Are you sure you want to delete this configuration?') && deleteProvider.mutate(existingProvider.id)}>
+                                {t('common.delete', 'Delete')}
+                            </button>
+                        )}
+                    </div>
+                )}
+                {/* WeCom App IP Whitelist verification URL — hidden while WeCom config is disabled */}
+                {type === 'wecom' && false && editingId && (existingProvider?.config?.verify_token || form.config?.verify_token) && (() => {
+                    const verifyToken = form.config?.verify_token || existingProvider?.config?.verify_token || '';
+                    const aesKey = form.config?.verify_aes_key || existingProvider?.config?.verify_aes_key || '';
+                    // Use window.location.origin as the base, but if it's a private/non-standard URL let user know
+                    const base = window.location.origin;
+                    const callbackUrl = aesKey
+                        ? `${base}/api/enterprise/org/wecom-callback/${verifyToken}?aes_key=${aesKey}`
+                        : `${base}/api/enterprise/org/wecom-callback/${verifyToken}?aes_key=(configure EncodingAESKey above first)`;
+                    return (
+                        <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-primary)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+                            <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                                WeCom Receive Message Server URL
+                            </div>
+                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
+                                Step 1: Go to WeCom App Management (AgentID 1000010) → App Settings → Set Receive Message Server URL.
+                                Use this URL. In the Token field, enter your Verify Token. In EncodingAESKey, enter your key below.
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <code style={{ flex: 1, fontSize: '11px', padding: '6px 10px', background: 'var(--bg-secondary)', borderRadius: '4px', wordBreak: 'break-all', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
+                                    {callbackUrl}
+                                </code>
+                                {aesKey && (
+                                    <LinearCopyButton
+                                        className="btn btn-ghost"
+                                        style={{ fontSize: '11px', padding: '4px 8px', whiteSpace: 'nowrap', flexShrink: 0 }}
+                                        textToCopy={callbackUrl}
+                                        label="Copy"
+                                        copiedLabel="Copied"
+                                    />
+                                )}
+                            </div>
+                            {!aesKey && (
+                                <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--warning, #f59e0b)' }}>
+                                    Configure the Verify Token and EncodingAESKey fields above, then Save to generate the final URL.
+                                </div>
+                            )}
+                            <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                Step 2: After URL verification passes, configure Enterprise Trusted IP with your server IPs in the WeCom console.
+                            </div>
+                            <div style={{ marginTop: '4px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                Step 3: Paste the App Secret (from that same app page) into the App Secret field above.
+                            </div>
+                        </div>
+                    );
+                })()}
+
             </div>
         );
     };
@@ -737,14 +806,23 @@ function OrgTab({ tenant }: { tenant: any }) {
                     <div style={{ fontWeight: 500, fontSize: '14px' }}>{t('enterprise.org.orgBrowser', 'Organization Browser')}</div>
 
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
-                        {['feishu', 'dingtalk', 'wecom'].includes(p.provider_type) && (
+                        {['feishu', 'dingtalk'].includes(p.provider_type) && (
                             <button className="btn btn-secondary btn-sm" style={{ fontSize: '12px' }} onClick={() => triggerSync(p.id)} disabled={!!syncing}>
                                 {syncing === p.id ? 'Syncing...' : 'Sync Directory'}
                             </button>
                         )}
                         {syncResult && (
-                            <div style={{ padding: '6px 10px', borderRadius: '4px', fontSize: '11px', background: syncResult.error ? 'rgba(255,0,0,0.1)' : 'rgba(0,200,0,0.1)' }}>
-                                {syncResult.error ? `Error: ${syncResult.error}` : `Sync complete: ${syncResult.users_created || 0} users created, ${syncResult.profiles_synced || 0} profiles synced.`}
+                            <div style={{ padding: '6px 10px', borderRadius: '4px', fontSize: '11px', background: syncResult.error || (syncResult.errors && syncResult.errors.length > 0) ? 'rgba(255,100,0,0.1)' : 'rgba(0,200,0,0.1)' }}>
+                                {syncResult.error
+                                    ? `Error: ${syncResult.error}`
+                                    : `Sync complete: ${syncResult.departments || 0} depts, ${syncResult.members || 0} members synced.`}
+                                {syncResult.errors && syncResult.errors.length > 0 && (
+                                    <div style={{ marginTop: '4px', color: 'var(--color-warning, #f90)' }}>
+                                        {/* Show first error to help diagnose permission issues */}
+                                        {`Warning: ${syncResult.errors[0]}`}
+                                        {syncResult.errors.length > 1 && ` (+${syncResult.errors.length - 1} more)`}
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
@@ -840,7 +918,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                                         {renderForm(idp.type, existingProvider)}
 
                                         {/* Per-channel SSO Login URLs & Toggle */}
-                                        {['feishu', 'dingtalk', 'wecom', 'oauth2'].includes(idp.type) && (
+                                        {['feishu', 'dingtalk', 'oauth2'].includes(idp.type) && (
                                             <SsoChannelSection
                                                 idpType={idp.type}
                                                 existingProvider={existingProvider}
@@ -848,7 +926,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                                                 t={t}
                                             />
                                         )}
-                                        {existingProvider && renderOrgBrowser(existingProvider)}
+                                        {existingProvider && idp.type !== 'wecom' && renderOrgBrowser(existingProvider)}
                                     </div>
                                 )}
                             </div>
@@ -2219,7 +2297,7 @@ export default function EnterpriseSettings() {
                                                     title={m.enabled ? t('enterprise.llm.clickToDisable', 'Click to disable') : t('enterprise.llm.clickToEnable', 'Click to enable')}
                                                     style={{
                                                         position: 'relative', width: '36px', height: '20px', borderRadius: '10px', border: 'none', cursor: 'pointer', transition: 'background 0.2s',
-                                                        background: m.enabled ? 'var(--success, #00b478)' : 'var(--bg-tertiary, #444)',
+                                                        background: m.enabled ? 'var(--accent-primary)' : 'var(--bg-tertiary, #444)',
                                                         padding: 0, flexShrink: 0,
                                                     }}
                                                 >

@@ -26,14 +26,16 @@ BUILTIN_TOOLS = [
     {
         "name": "read_file",
         "display_name": "Read File",
-        "description": "Read file contents from the workspace. Can read tasks.json, soul.md, memory/memory.md, skills/, and enterprise_info/.",
+        "description": "Read file contents from the workspace. Can read tasks.json, soul.md, memory/memory.md, skills/, and enterprise_info/. Use offset and limit for reading large files in chunks.",
         "category": "file",
         "icon": "📄",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path, e.g.: tasks.json, soul.md, memory/memory.md"}
+                "path": {"type": "string", "description": "File path, e.g.: tasks.json, soul.md, memory/memory.md"},
+                "offset": {"type": "integer", "description": "Starting line number (0-indexed, default 0). Use with limit for pagination."},
+                "limit": {"type": "integer", "description": "Maximum number of lines to read (default 2000). Use with offset for pagination."},
             },
             "required": ["path"],
         },
@@ -75,6 +77,65 @@ BUILTIN_TOOLS = [
                 "path": {"type": "string", "description": "File path to delete"}
             },
             "required": ["path"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    # --- Enhanced file management tools ---
+    {
+        "name": "edit_file",
+        "display_name": "Edit File",
+        "description": "Surgically replace a specific string inside an existing file without rewriting the whole content. Prefer this over write_file when you only need to change one or more sections.",
+        "category": "file",
+        "icon": "✂️",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to edit, e.g.: memory/memory.md, skills/my-skill/SKILL.md"},
+                "old_string": {"type": "string", "description": "Exact text to find and replace. Must match exactly including whitespace and newlines."},
+                "new_string": {"type": "string", "description": "Replacement text"},
+                "replace_all": {"type": "boolean", "description": "Replace all occurrences if true (default: false)"},
+            },
+            "required": ["path", "old_string", "new_string"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "search_files",
+        "display_name": "Search Files",
+        "description": "Search for content patterns across files using regex. Returns matching lines with file paths and line numbers. Results capped at 50 per query.",
+        "category": "file",
+        "icon": "🔍",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex pattern to search for, e.g.: 'API_KEY', 'def\\\\s+\\\\w+'"},
+                "path": {"type": "string", "description": "Directory to search in (default: root)"},
+                "file_pattern": {"type": "string", "description": "File pattern to match (default: all files). e.g.: '*.md', '*.py'"},
+                "ignore_case": {"type": "boolean", "description": "Case-insensitive search (default: false)"},
+            },
+            "required": ["pattern"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "find_files",
+        "display_name": "Find Files",
+        "description": "Find files matching glob patterns. Returns file paths with sizes and modification info. Results capped at 100 per query.",
+        "category": "file",
+        "icon": "📁",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob pattern to match files, e.g.: '**/*.md', 'skills/*.md'"},
+                "path": {"type": "string", "description": "Base directory for search (default: root)"},
+            },
+            "required": ["pattern"],
         },
         "config": {},
         "config_schema": {},
@@ -187,24 +248,9 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
-    {
-        "name": "send_feishu_message",
-        "display_name": "Feishu Message",
-        "description": "Send a message to a human colleague via Feishu. Can only message people in your relationships.",
-        "category": "communication",
-        "icon": "💬",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "member_name": {"type": "string", "description": "Recipient name"},
-                "message": {"type": "string", "description": "Message content"},
-            },
-            "required": ["member_name", "message"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
+    # NOTE: send_feishu_message is defined in the 'feishu' category section below.
+    # It was previously duplicated here under 'communication', which could cause
+    # 'Tool names must be unique' errors when the DB lacked a UNIQUE constraint.
     {
         "name": "send_web_message",
         "display_name": "Web Message",
@@ -235,7 +281,7 @@ BUILTIN_TOOLS = [
             "properties": {
                 "agent_name": {"type": "string", "description": "Target agent name"},
                 "message": {"type": "string", "description": "Message content"},
-                "msg_type": {"type": "string", "enum": ["chat", "task_request", "info_share"], "description": "Message type"},
+                "msg_type": {"type": "string", "enum": ["notify", "consult", "task_delegate"], "description": "Message type: notify (notification), consult (ask a question), task_delegate (delegate a task)"},
             },
             "required": ["agent_name", "message"],
         },
@@ -1398,7 +1444,14 @@ AGENTBAY_TOOLS = [
             "properties": {
                 "url": {"type": "string", "description": "要访问的网址"},
                 "wait_for": {"type": "string", "description": "等待元素选择器（可选）"},
-                "screenshot": {"type": "boolean", "description": "是否截图", "default": False},
+                "save_to_workspace": {
+                    "type": "boolean",
+                    # Set to True ONLY when the user explicitly asks to SEE or SAVE
+                    # a screenshot (e.g. "截图给我看", "保存截图"). Default False means
+                    # the screenshot is held in memory for LLM vision only (invisible to user).
+                    "description": "CRITICAL: Set to True IF AND ONLY IF the user explicitly asked you to SHOW them a screenshot or save it (e.g. \"截图给我看\", \"截图看看\", \"把截图发出来\"). If True, the image is saved to their workspace and you get a Markdown link. Default is False (internal in-memory analysis only, completely invisible to the user).",
+                    "default": False,
+                },
             },
             "required": ["url"],
         },
@@ -1433,7 +1486,18 @@ AGENTBAY_TOOLS = [
         "category": "agentbay",
         "icon": "📸",
         "is_default": False,
-        "parameters_schema": {"type": "object", "properties": {}},
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "save_to_workspace": {
+                    "type": "boolean",
+                    # Set to True ONLY when the user explicitly asks to SEE or SAVE
+                    # a screenshot. Default False = in-memory for LLM vision only.
+                    "description": "CRITICAL: Set to True IF AND ONLY IF the user explicitly asked you to SHOW them a screenshot or save it (e.g. \"截图给我看\", \"截图看看\", \"把截图发出来\"). If True, the image is saved to their workspace and you get a Markdown link. Default is False (internal in-memory analysis only, completely invisible to the user).",
+                    "default": False,
+                },
+            },
+        },
         "config": {},
         "config_schema": {},
     },
@@ -1767,6 +1831,46 @@ AGENTBAY_TOOLS = [
         "icon": "📋",
         "is_default": False,
         "parameters_schema": {"type": "object", "properties": {}},
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "agentbay_file_transfer",
+        "display_name": "AgentBay: File Transfer",
+        "description": (
+            "Transfer a file between any two endpoints: the agent workspace, "
+            "the AgentBay browser environment, the cloud desktop, or the code sandbox. "
+            "Workspace -> env: upload a workspace file into a cloud environment. "
+            "Env -> workspace: download a file from a cloud environment into the workspace. "
+            "Env -> env: transfer between environments transparently (no workspace involvement)."
+        ),
+        "category": "agentbay",
+        "icon": "🔄",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "from_type": {
+                    "type": "string",
+                    "enum": ["workspace", "browser", "computer", "code"],
+                    "description": "Source endpoint: 'workspace' for agent workspace, or the AgentBay environment name.",
+                },
+                "from_path": {
+                    "type": "string",
+                    "description": "Source path. Relative if workspace (e.g. 'workspace/data.csv'), absolute if env (e.g. '/root/data.csv').",
+                },
+                "to_type": {
+                    "type": "string",
+                    "enum": ["workspace", "browser", "computer", "code"],
+                    "description": "Destination endpoint: 'workspace' for agent workspace, or the AgentBay environment name.",
+                },
+                "to_path": {
+                    "type": "string",
+                    "description": "Destination path. Relative if workspace (e.g. 'workspace/output.csv'), absolute if env (e.g. '/root/output.csv').",
+                },
+            },
+            "required": ["from_type", "from_path", "to_type", "to_path"],
+        },
         "config": {},
         "config_schema": {},
     },

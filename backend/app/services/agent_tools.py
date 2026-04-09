@@ -12,6 +12,7 @@ The agent's workspace uses well-known paths:
 The agent reads/writes these files directly. No per-concept tools needed.
 """
 
+import asyncio
 import json
 import os
 import uuid
@@ -190,14 +191,22 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read file contents from the workspace. Can read tasks.json for tasks, soul.md for personality, memory/memory.md for memory, skills/ for skill files, and enterprise_info/ for shared company info.",
+            "description": "Read file contents from the workspace. Can read tasks.json for tasks, soul.md for personality, memory/memory.md for memory, skills/ for skill files, and enterprise_info/ for shared company info. Use offset and limit for reading large files in chunks.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "File path, e.g.: tasks.json, soul.md, memory/memory.md, skills/xxx.md, enterprise_info/company_profile.md",
-                    }
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Starting line number (0-indexed, default 0). Use with limit for pagination.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to read (default 2000). Use with offset for pagination.",
+                    },
                 },
                 "required": ["path"],
             },
@@ -207,7 +216,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write or update a file in the workspace. Can update memory/memory.md, focus.md, task_history.md, create documents in workspace/, create skills in skills/.",
+            "description": "Create or fully overwrite a file in the workspace. Use this when writing a new file or replacing the entire content. For targeted edits to an existing file (change one section without rewriting everything), prefer edit_file instead. Can update memory/memory.md, focus.md, task_history.md, create documents in workspace/, create skills in skills/.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -238,6 +247,86 @@ AGENT_TOOLS = [
                     }
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    # --- Enhanced file management tools ---
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Surgically replace a specific string inside an existing file without rewriting the whole content. Prefer this over write_file when you only need to change one or more sections — it avoids accidentally overwriting content outside the edit target and is safer in multi-agent scenarios. The old_string must match exactly (including all whitespace and newlines).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path to edit, e.g.: memory/memory.md, skills/my-skill/SKILL.md",
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "Exact text to find and replace. Must match exactly including whitespace and newlines.",
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "Replacement text",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace all occurrences if true (default: false). Set to true when you want to replace every match.",
+                    },
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": "Search for content patterns across files using regex. Returns matching lines with file paths and line numbers. Useful for finding code, configurations, or text across the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex pattern to search for, e.g.: 'API_KEY', 'def\\\\s+\\\\w+', '@app\\\\.(get|post)'",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search in (default: root). e.g.: 'skills', 'workspace', 'memory'",
+                    },
+                    "file_pattern": {
+                        "type": "string",
+                        "description": "File pattern to match (default: all files). e.g.: '*.md', '*.py', '*.json'",
+                    },
+                    "ignore_case": {
+                        "type": "boolean",
+                        "description": "Case-insensitive search (default: false)",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_files",
+            "description": "Find files matching glob patterns. Returns file paths with sizes and modification info. Useful for discovering files in the workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern to match files, e.g.: '**/*.md' (all markdown files), 'skills/*.md' (skill files), 'workspace/**/*' (all files under workspace)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Base directory for search (default: root). e.g.: 'skills', 'workspace'",
+                    },
+                },
+                "required": ["pattern"],
             },
         },
     },
@@ -1473,6 +1562,57 @@ AGENT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "agentbay_file_transfer",
+            "description": (
+                "Transfer a file between any two endpoints: the agent workspace, "
+                "the AgentBay browser environment, the cloud desktop (computer), or the code sandbox.\n\n"
+                "VERIFIED PATH CONVENTIONS (all Linux environments run as user 'wuying', HOME=/home/wuying/):\n"
+                "- code env:     use /home/wuying/<filename>  (working directory, e.g. /home/wuying/data.csv)\n"
+                "- browser env:  use /home/wuying/下载/<filename>  (download folder, e.g. /home/wuying/下载/file.pdf)\n"
+                "- computer env: use /home/wuying/桌面/<filename>  (Desktop, e.g. /home/wuying/桌面/report.xlsx)\n"
+                "- workspace:    use relative path, e.g. 'workspace/data.csv'\n\n"
+                "Transfer directions:\n"
+                "- workspace -> env: upload a workspace file into a cloud environment\n"
+                "- env -> workspace: download a file from a cloud environment into the workspace\n"
+                "- env A -> env B:   transfer between environments (transparent backend temp, no workspace involvement)"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_type": {
+                        "type": "string",
+                        "enum": ["workspace", "browser", "computer", "code"],
+                        "description": "Source endpoint: 'workspace' for agent workspace, or the AgentBay environment name.",
+                    },
+                    "from_path": {
+                        "type": "string",
+                        "description": (
+                            "Source path. Relative if workspace (e.g. 'workspace/data.csv'). "
+                            "Absolute if env: code → /home/wuying/file, "
+                            "browser → /home/wuying/下载/file, computer → /home/wuying/桌面/file."
+                        ),
+                    },
+                    "to_type": {
+                        "type": "string",
+                        "enum": ["workspace", "browser", "computer", "code"],
+                        "description": "Destination endpoint: 'workspace' for agent workspace, or the AgentBay environment name.",
+                    },
+                    "to_path": {
+                        "type": "string",
+                        "description": (
+                            "Destination path. Relative if workspace (e.g. 'workspace/output.csv'). "
+                            "Absolute if env: code → /home/wuying/file, "
+                            "browser → /home/wuying/下载/file, computer → /home/wuying/桌面/file."
+                        ),
+                    },
+                },
+                "required": ["from_type", "from_path", "to_type", "to_path"],
+            },
+        },
+    },
 ]
 
 
@@ -1521,6 +1661,111 @@ _feishu_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _FEISHU_TOOL
 _channel_tools = [t for t in AGENT_TOOLS if t["function"]["name"] in _CHANNEL_MESSAGE_TOOL_NAMES]
 
 
+async def _get_computer_os_type(agent_id: uuid.UUID) -> str:
+    """Return the configured OS type for the agent's computer tool.
+
+    Reads from agentbay_browser_navigate tool config (which stores all AgentBay
+    settings including os_type). Defaults to 'windows' to match AgentBay's default.
+    """
+    try:
+        config = await _get_tool_config(agent_id, "agentbay_browser_navigate")
+        return (config or {}).get("os_type", "windows")
+    except Exception:
+        return "windows"
+
+
+def _patch_computer_tool_descriptions(tools: list[dict], os_type: str) -> list[dict]:
+    """Rewrite path examples in agentbay_file_transfer to match the agent's OS.
+
+    This ensures the Agent always sees the correct desktop and home-directory
+    paths for its specific computer environment without having to guess.
+    """
+    import copy
+
+    if os_type == "windows":
+        # Windows paths used by AgentBay's windows_latest image
+        desktop_path = r"C:\Users\Administrator\Desktop"
+        home_path    = r"C:\Users\Administrator"
+        computer_os_label = "Windows"
+    else:
+        # Linux paths used by AgentBay's linux_latest image
+        desktop_path = "/home/wuying/Desktop"
+        home_path    = "/home/wuying"
+        computer_os_label = "Linux"
+
+    # Build the OS-aware description for agentbay_file_transfer
+    new_file_transfer_desc = (
+        "Transfer a file between any two endpoints: the agent workspace, "
+        "the AgentBay browser environment, the cloud desktop (computer), or the code sandbox.\n\n"
+        f"COMPUTER ENVIRONMENT OS: {computer_os_label}\n"
+        f"VERIFIED PATH CONVENTIONS for the computer environment ({computer_os_label}):\n"
+        f"- computer desktop: {desktop_path}\\<filename>  (e.g. {desktop_path}\\report.xlsx)\n"
+        f"- computer home:    {home_path}\\<filename>\n\n"
+        "Other environments (Linux-based, user 'wuying', HOME=/home/wuying/):\n"
+        "- code env:     /home/wuying/<filename>  (e.g. /home/wuying/data.csv)\n"
+        "- browser env:  /home/wuying/下载/<filename>  (download folder)\n"
+        "- workspace:    relative path, e.g. 'workspace/data.csv'\n\n"
+        "Transfer directions:\n"
+        "- workspace -> env: upload a workspace file into a cloud environment\n"
+        "- env -> workspace: download a file from a cloud environment into the workspace\n"
+        "- env A -> env B:   transfer between environments (transparent backend temp)"
+    ) if os_type == "windows" else (
+        "Transfer a file between any two endpoints: the agent workspace, "
+        "the AgentBay browser environment, the cloud desktop (computer), or the code sandbox.\n\n"
+        f"COMPUTER ENVIRONMENT OS: {computer_os_label}\n"
+        f"VERIFIED PATH CONVENTIONS for the computer environment ({computer_os_label}):\n"
+        f"- computer desktop: {desktop_path}/<filename>  (e.g. {desktop_path}/report.xlsx)\n"
+        f"- computer home:    {home_path}/<filename>\n\n"
+        "Other environments (also Linux, user 'wuying'):\n"
+        "- code env:     /home/wuying/<filename>  (e.g. /home/wuying/data.csv)\n"
+        "- browser env:  /home/wuying/下载/<filename>  (download folder)\n"
+        "- workspace:    relative path, e.g. 'workspace/data.csv'\n\n"
+        "Transfer directions:\n"
+        "- workspace -> env: upload a workspace file into a cloud environment\n"
+        "- env -> workspace: download a file from a cloud environment into the workspace\n"
+        "- env A -> env B:   transfer between environments (transparent backend temp)"
+    )
+
+    patched = []
+    for tool in tools:
+        fn = tool.get("function", {})
+        name = fn.get("name", "")
+        if name == "agentbay_file_transfer":
+            # Deep copy to avoid mutating the shared AGENT_TOOLS constant
+            tool = copy.deepcopy(tool)
+            tool["function"]["description"] = new_file_transfer_desc
+            # Also patch from_path and to_path parameter hints
+            props = tool["function"].get("parameters", {}).get("properties", {})
+            if "from_path" in props:
+                if os_type == "windows":
+                    props["from_path"]["description"] = (
+                        r"Source path. Relative if workspace (e.g. 'workspace/data.csv'). "
+                        r"Absolute if env: computer → C:\Users\Administrator\Desktop\file, "
+                        r"code → /home/wuying/file, browser → /home/wuying/下载/file."
+                    )
+                else:
+                    props["from_path"]["description"] = (
+                        "Source path. Relative if workspace (e.g. 'workspace/data.csv'). "
+                        "Absolute if env: computer → /home/wuying/Desktop/file, "
+                        "code → /home/wuying/file, browser → /home/wuying/下载/file."
+                    )
+            if "to_path" in props:
+                if os_type == "windows":
+                    props["to_path"]["description"] = (
+                        r"Destination path. Relative if workspace (e.g. 'workspace/output.csv'). "
+                        r"Absolute if env: computer → C:\Users\Administrator\Desktop\file, "
+                        r"code → /home/wuying/file, browser → /home/wuying/下载/file."
+                    )
+                else:
+                    props["to_path"]["description"] = (
+                        "Destination path. Relative if workspace (e.g. 'workspace/output.csv'). "
+                        "Absolute if env: computer → /home/wuying/Desktop/file, "
+                        "code → /home/wuying/file, browser → /home/wuying/下载/file."
+                    )
+        patched.append(tool)
+    return patched
+
+
 async def _agent_has_feishu(agent_id: uuid.UUID) -> bool:
     """Check if agent has a configured Feishu channel."""
     try:
@@ -1563,10 +1808,16 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     Always includes core system tools (send_channel_file, write_file).
     Feishu tools are only included when the agent has a configured Feishu channel.
     send_channel_message is included when any channel (Feishu/DingTalk/WeCom) is configured.
+
+    Also patches agentbay_file_transfer description with OS-specific paths based on
+    the agent's computer tool configuration (os_type: 'windows' | 'linux').
     """
     has_feishu = await _agent_has_feishu(agent_id)
     has_any_channel = await _agent_has_any_channel(agent_id)
     _always_tools = _always_core_tools + (_feishu_tools if has_feishu else []) + (_channel_tools if has_any_channel else [])
+
+    # Read os_type once; used to patch agentbay_file_transfer paths below
+    computer_os_type = await _get_computer_os_type(agent_id)
 
     try:
         from app.models.tool import Tool, AgentTool
@@ -1602,20 +1853,37 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                         "parameters": t.parameters_schema or {"type": "object", "properties": {}},
                     },
                 }
+                # Defensive dedup: skip if this name was already added.
+                # Normally the UNIQUE constraint on tool.name prevents duplicate
+                # rows, but old DB dumps (pre-constraint) may have them. Without
+                # this guard, the LLM would receive duplicate tool names and
+                # return HTTP 400 "Tool names must be unique".
+                if t.name in db_tool_names:
+                    logger.warning(
+                        f"[Tools] Duplicate tool name '{t.name}' found in DB "
+                        f"(id={t.id}). Skipping to avoid LLM error. "
+                        "Run: DELETE FROM tools WHERE id IN (SELECT id FROM "
+                        "(SELECT id, ROW_NUMBER() OVER (PARTITION BY name "
+                        "ORDER BY created_at DESC) AS rn FROM tools) t WHERE rn > 1);"
+                    )
+                    continue
+
                 result.append(tool_def)
                 db_tool_names.add(t.name)
+
 
             if result:
                 # Append always-available system tools that aren't already in the DB list
                 for t in _always_tools:
                     if t["function"]["name"] not in db_tool_names:
                         result.append(t)
-                return result
+                # Inject OS-aware paths into computer-related tool descriptions
+                return _patch_computer_tool_descriptions(result, computer_os_type)
     except Exception as e:
         logger.error(f"[Tools] DB load failed, using fallback: {e}")
 
-    # Fallback to hardcoded tools
-    return AGENT_TOOLS
+    # Fallback to hardcoded tools (still apply OS-aware path patching)
+    return _patch_computer_tool_descriptions(AGENT_TOOLS, computer_os_type)
 
 
 # ─── Workspace initialization ──────────────────────────────────
@@ -1839,7 +2107,9 @@ async def execute_tool(
             path = arguments.get("path")
             if not path:
                 return "❌ Missing required argument 'path' for read_file"
-            result = _read_file(ws, path, tenant_id=_agent_tenant_id)
+            offset = int(arguments.get("offset", 0))
+            limit = int(arguments.get("limit", 2000))
+            result = _read_file(ws, path, tenant_id=_agent_tenant_id, offset=offset, limit=limit)
         elif tool_name == "read_document":
             path = arguments.get("path")
             if not path:
@@ -1856,6 +2126,41 @@ async def execute_tool(
             result = _write_file(ws, path, content, tenant_id=_agent_tenant_id)
         elif tool_name == "delete_file":
             result = _delete_file(ws, arguments.get("path", ""))
+        # --- Enhanced file management tools ---
+        elif tool_name == "edit_file":
+            path = arguments.get("path")
+            old_string = arguments.get("old_string")
+            new_string = arguments.get("new_string")
+            if not path:
+                return "❌ Missing required argument 'path' for edit_file"
+            if old_string is None:
+                return "❌ Missing required argument 'old_string' for edit_file"
+            if new_string is None:
+                return "❌ Missing required argument 'new_string' for edit_file"
+            replace_all = arguments.get("replace_all", False)
+            result = _edit_file(ws, path, old_string, new_string, replace_all=replace_all, tenant_id=_agent_tenant_id)
+        elif tool_name == "search_files":
+            pattern = arguments.get("pattern")
+            if not pattern:
+                return "❌ Missing required argument 'pattern' for search_files"
+            result = _search_files(
+                ws,
+                pattern,
+                path=arguments.get("path", "."),
+                file_pattern=arguments.get("file_pattern", "*"),
+                ignore_case=arguments.get("ignore_case", False),
+                tenant_id=_agent_tenant_id
+            )
+        elif tool_name == "find_files":
+            pattern = arguments.get("pattern")
+            if not pattern:
+                return "❌ Missing required argument 'pattern' for find_files"
+            result = _find_files(
+                ws,
+                pattern,
+                path=arguments.get("path", "."),
+                tenant_id=_agent_tenant_id
+            )
         elif tool_name == "manage_tasks":
             result = await _manage_tasks(agent_id, user_id, ws, arguments)
         elif tool_name == "set_trigger":
@@ -2007,6 +2312,8 @@ async def execute_tool(
             result = await _agentbay_computer_activate_window(agent_id, ws, arguments)
         elif tool_name == "agentbay_computer_list_visible_apps":
             result = await _agentbay_computer_list_visible_apps(agent_id, ws, arguments)
+        elif tool_name == "agentbay_file_transfer":
+            result = await _agentbay_file_transfer(agent_id, ws, arguments)
         # ── Skill Management ──
         elif tool_name == "search_clawhub":
             result = await _search_clawhub(agent_id, arguments)
@@ -2826,7 +3133,19 @@ def _list_files(ws: Path, rel_path: str, tenant_id: str | None = None) -> str:
     return header + "\n".join(items)
 
 
-def _read_file(ws: Path, rel_path: str, tenant_id: str | None = None) -> str:
+def _read_file(ws: Path, rel_path: str, tenant_id: str | None = None, offset: int = 0, limit: int = 2000) -> str:
+    """Read file contents with optional line range support.
+
+    Args:
+        ws: Workspace root path
+        rel_path: Relative file path
+        tenant_id: Optional tenant ID for enterprise_info
+        offset: Starting line number (0-indexed)
+        limit: Maximum number of lines to read
+
+    Returns:
+        File content with line numbers, or error message
+    """
     # Handle enterprise_info/ as shared directory (tenant-scoped)
     if rel_path and rel_path.startswith("enterprise_info"):
         if tenant_id:
@@ -2847,9 +3166,33 @@ def _read_file(ws: Path, rel_path: str, tenant_id: str | None = None) -> str:
 
     try:
         content = file_path.read_text(encoding="utf-8", errors="replace")
-        if len(content) > 6000:
-            content = content[:6000] + f"\n\n...[truncated, {len(content)} chars total]"
-        return content
+        lines = content.splitlines()
+        total_lines = len(lines)
+
+        # Apply offset and limit
+        start = max(0, offset)
+        end = min(total_lines, start + limit)
+
+        if start >= total_lines:
+            return f"Offset {offset} exceeds file length ({total_lines} lines total)"
+
+        selected_lines = lines[start:end]
+
+        # Format with line numbers (like cat -n)
+        result = []
+        for i, line in enumerate(selected_lines, start=start):
+            result.append(f"{i+1:6}\t{line}")
+
+        output = "\n".join(result)
+
+        # Add pagination info if file is larger than what we show
+        if total_lines > end:
+            output += f"\n\n... [{total_lines - end} more lines not shown, lines {end+1}-{total_lines}]"
+
+        # Add header with file info
+        header = f"📄 {rel_path} (lines {start+1}-{end} of {total_lines})\n"
+        return header + output
+
     except Exception as e:
         return f"Read failed: {e}"
 
@@ -3032,6 +3375,214 @@ def _delete_file(ws: Path, rel_path: str) -> str:
             return f"✅ Deleted {rel_path}"
     except Exception as e:
         return f"Delete failed: {e}"
+
+
+def _edit_file(ws: Path, rel_path: str, old_string: str, new_string: str, replace_all: bool = False, tenant_id: str | None = None) -> str:
+    """Perform surgical string replacement in a file.
+
+    Args:
+        ws: Workspace root path
+        rel_path: Relative file path
+        old_string: Exact text to find and replace
+        new_string: Replacement text
+        replace_all: Replace all occurrences if True
+        tenant_id: Optional tenant ID for enterprise_info
+
+    Returns:
+        Success message or error
+    """
+    # Handle enterprise_info/ as shared directory (tenant-scoped)
+    if rel_path and rel_path.startswith("enterprise_info"):
+        if tenant_id:
+            enterprise_root = (WORKSPACE_ROOT / f"enterprise_info_{tenant_id}").resolve()
+        else:
+            enterprise_root = (WORKSPACE_ROOT / "enterprise_info").resolve()
+        sub = rel_path[len("enterprise_info"):].lstrip("/")
+        file_path = (enterprise_root / sub).resolve() if sub else enterprise_root
+        if not str(file_path).startswith(str(enterprise_root)):
+            return "Access denied for this path"
+    else:
+        file_path = (ws / rel_path).resolve()
+        if not str(file_path).startswith(str(ws.resolve())):
+            return "Access denied for this path"
+
+    if not file_path.exists():
+        return f"File not found: {rel_path}"
+
+    if not file_path.is_file():
+        return f"Not a file: {rel_path}"
+
+    try:
+        content = file_path.read_text(encoding="utf-8")
+
+        if old_string not in content:
+            return f"❌ 'old_string' not found in {rel_path}. Please check the exact text including whitespace and newlines."
+
+        if replace_all:
+            new_content = content.replace(old_string, new_string)
+            count = content.count(old_string)
+        else:
+            # Ensure uniqueness for single replacement
+            count = content.count(old_string)
+            if count > 1:
+                return f"❌ 'old_string' appears {count} times in {rel_path}. Use replace_all=true or provide more context to make the match unique."
+            new_content = content.replace(old_string, new_string, 1)
+            count = 1
+
+        file_path.write_text(new_content, encoding="utf-8")
+        return f"✅ Replaced {count} occurrence(s) in {rel_path}"
+
+    except Exception as e:
+        return f"Edit failed: {e}"
+
+
+def _search_files(ws: Path, pattern: str, path: str = ".", file_pattern: str = "*", ignore_case: bool = False, tenant_id: str | None = None) -> str:
+    """Search for content patterns across files using regex.
+
+    Args:
+        ws: Workspace root path
+        pattern: Regex pattern to search for
+        path: Directory to search in (relative to workspace root)
+        file_pattern: File pattern to match (glob)
+        ignore_case: Case-insensitive search
+        tenant_id: Optional tenant ID for enterprise_info
+
+    Returns:
+        Matching lines with file paths and line numbers
+    """
+    # Handle enterprise_info/ as shared directory (tenant-scoped)
+    if path and path.startswith("enterprise_info"):
+        if tenant_id:
+            enterprise_root = (WORKSPACE_ROOT / f"enterprise_info_{tenant_id}").resolve()
+        else:
+            enterprise_root = (WORKSPACE_ROOT / "enterprise_info").resolve()
+        sub = path[len("enterprise_info"):].lstrip("/")
+        search_path = (enterprise_root / sub).resolve() if sub else enterprise_root
+        if not str(search_path).startswith(str(enterprise_root)):
+            return "Access denied for this path"
+        ws_for_relative = enterprise_root
+    else:
+        search_path = (ws / path).resolve() if path and path != "." else ws
+        if not str(search_path).startswith(str(ws.resolve())):
+            return "Access denied for this path"
+        ws_for_relative = ws
+
+    if not search_path.exists():
+        return f"Directory not found: {path}"
+
+    flags = re.IGNORECASE if ignore_case else 0
+
+    try:
+        regex = re.compile(pattern, flags)
+    except re.error as e:
+        return f"Invalid regex pattern: {e}"
+
+    results = []
+    total_matches = 0
+    files_searched = 0
+
+    # Use rglob for recursive search
+    for file_path in search_path.rglob(file_pattern):
+        if not file_path.is_file():
+            continue
+        # Skip hidden files and common binary/extensions
+        if file_path.name.startswith("."):
+            continue
+        suffix = file_path.suffix.lower()
+        if suffix in {".pyc", ".pyo", ".so", ".dll", ".exe", ".bin", ".png", ".jpg", ".jpeg", ".gif", ".zip", ".tar", ".gz"}:
+            continue
+
+        files_searched += 1
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+            for i, line in enumerate(content.splitlines(), 1):
+                if regex.search(line):
+                    rel_path = file_path.relative_to(ws_for_relative)
+                    # Truncate long lines
+                    display_line = line.strip()[:100]
+                    results.append(f"{rel_path}:{i}: {display_line}")
+                    total_matches += 1
+                    if len(results) >= 50:  # Limit results per query
+                        break
+        except Exception:
+            continue
+
+        if len(results) >= 50:
+            break
+
+    if not results:
+        return f"No matches found for pattern '{pattern}' in {files_searched} file(s)"
+
+    # Warn the LLM if results were capped so it knows to refine the search.
+    truncated = total_matches > len(results)
+    truncation_note = f" (showing first {len(results)} of {total_matches}+ — refine pattern or path for more)" if truncated else ""
+    header = f"🔍 Found {total_matches}+ match(es) in {files_searched} file(s) for pattern '{pattern}'{truncation_note}:\n"
+    return header + "\n".join(results)
+
+
+def _find_files(ws: Path, pattern: str, path: str = ".", tenant_id: str | None = None) -> str:
+    """Find files matching glob patterns.
+
+    Args:
+        ws: Workspace root path
+        pattern: Glob pattern to match files
+        path: Base directory for search (relative to workspace root)
+        tenant_id: Optional tenant ID for enterprise_info
+
+    Returns:
+        List of matching files with sizes
+    """
+    # Handle enterprise_info/ as shared directory (tenant-scoped)
+    if path and path.startswith("enterprise_info"):
+        if tenant_id:
+            enterprise_root = (WORKSPACE_ROOT / f"enterprise_info_{tenant_id}").resolve()
+        else:
+            enterprise_root = (WORKSPACE_ROOT / "enterprise_info").resolve()
+        sub = path[len("enterprise_info"):].lstrip("/")
+        search_path = (enterprise_root / sub).resolve() if sub else enterprise_root
+        if not str(search_path).startswith(str(enterprise_root)):
+            return "Access denied for this path"
+        ws_for_relative = enterprise_root
+    else:
+        search_path = (ws / path).resolve() if path and path != "." else ws
+        if not str(search_path).startswith(str(ws.resolve())):
+            return "Access denied for this path"
+        ws_for_relative = ws
+
+    if not search_path.exists():
+        return f"Directory not found: {path}"
+
+    try:
+        matches = list(search_path.glob(pattern))
+    except Exception as e:
+        return f"Invalid glob pattern: {e}"
+
+    if not matches:
+        return f"No files matching pattern: {pattern}"
+
+    # Sort by modification time (most recent first)
+    matches.sort(key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
+
+    results = []
+    dir_count = 0
+    file_count = 0
+
+    for m in matches[:100]:  # Limit to 100 results
+        rel_path = m.relative_to(ws_for_relative)
+        if m.is_dir():
+            dir_count += 1
+            results.append(f"📁 {rel_path}/")
+        else:
+            file_count += 1
+            try:
+                size = m.stat().st_size
+                size_str = f"{size//1024}KB" if size > 1024 else f"{size}B"
+                results.append(f"📄 {rel_path} ({size_str})")
+            except Exception:
+                results.append(f"📄 {rel_path}")
+
+    header = f"📂 Found {len(matches)} item(s) ({dir_count} dirs, {file_count} files) matching '{pattern}':\n"
+    return header + "\n".join(results)
 
 
 async def _manage_tasks(
@@ -3712,7 +4263,7 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
 
             if not target_agent:
                 # Only show agents from relationships, not all agents
-                from app.models.org import AgentAgentRelationship
+                # (AgentAgentRelationship is imported at module level — no local import needed)
                 rel_r = await db.execute(
                     select(AgentModel.name).join(
                         AgentAgentRelationship,
@@ -3882,7 +4433,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 return f"⚠️ {target.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
 
             # Enforce relationship: only allow communication with agents in relationships
-            from app.models.org import AgentAgentRelationship
+            # (AgentAgentRelationship is imported at module level — no local import needed)
             rel_check = await db.execute(
                 select(AgentAgentRelationship.id).where(
                     ((AgentAgentRelationship.agent_id == from_agent_id) & (AgentAgentRelationship.target_agent_id == target.id))
@@ -6283,10 +6834,11 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
         doc_token = doc.get("document_id", "")
         doc_url = await _get_feishu_tenant_doc_url(tenant_token, doc_token)
         
-        # Auto-share with the Feishu sender so they can access the document
+        # Auto-share with the Feishu sender so they can access the document.
+        # channel_feishu_sender_open_id is a module-level ContextVar defined in this file;
+        # no import needed — it is already in scope.
         share_note = ""
         try:
-            from app.api.websocket_chat import channel_feishu_sender_open_id
             sender_open_id = channel_feishu_sender_open_id.get(None)
             if sender_open_id and doc_token:
                 async with httpx.AsyncClient(timeout=10) as client:
@@ -6415,8 +6967,13 @@ def _markdown_to_feishu_blocks(markdown: str) -> list[dict]:
 
         # ── Divider ──────────────────────────────────────────────────────────
         if _re.fullmatch(r'[-*_]{3,}', line.strip()):
-            # block_type 22 = Divider; no extra fields allowed (empty dict causes validation error)
-            blocks.append({"block_type": 22})
+            # NOTE: block_type 22 (Feishu native divider) is rejected by the batch children
+            # creation API with error 99992402 (field validation failed).  Render as a plain
+            # text block containing a visual em-dash separator instead — always accepted.
+            blocks.append({
+                "block_type": 2,
+                "text": {"elements": [{"text_run": {"content": "\u2500" * 24}}]},
+            })
             i += 1
             continue
 
@@ -6522,7 +7079,10 @@ async def _feishu_doc_append(agent_id: uuid.UUID, arguments: dict) -> str:
 
             result = (await client.post(
                 f"https://open.feishu.cn/open-apis/docx/v1/documents/{docx_token}/blocks/{body_block_id}/children",
-                json={"children": children, "index": -1}, # -1 appends to end
+                # Do NOT pass index: -1.  Omitting the field lets Feishu default to
+                # append-at-end, which is always valid.  Passing -1 explicitly can
+                # trigger error 1770001 (invalid param) with certain block type mixes.
+                json={"children": children},
                 headers={"Authorization": f"Bearer {tenant_token}"},
             )).json()
 
@@ -7456,14 +8016,34 @@ async def _publish_page(agent_id: uuid.UUID, user_id: uuid.UUID, ws: Path, argum
     except Exception as e:
         return f"Failed to publish: {e}"
 
-    # Build public URL using configured PUBLIC_BASE_URL
-    from app.services.platform_service import platform_service
-    async with async_session() as db2:
-        public_base = await platform_service.get_public_base_url(db2)
+    # Build public URL.
+    # _publish_page is called from a tool handler — there is no HTTP request
+    # object available, so platform_service.get_public_base_url() would fall
+    # back to the hardcoded 'https://try.clawith.ai' when PUBLIC_BASE_URL is
+    # not set. Instead, read the env var directly and surface a clear error
+    # when it is missing, so source-code deployers know exactly what to fix.
+    public_base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    if not public_base:
+        # Relative path works inside the same deployment; include a note so
+        # the user can configure PUBLIC_BASE_URL for a fully-qualified link.
+        url = f"/p/{short_id}"
+        url_note = (
+            "\n\n> Note: PUBLIC_BASE_URL is not configured on this server. "
+            "The link above is a relative path — prepend your server's domain "
+            "to get the full URL. Set PUBLIC_BASE_URL in your .env to have "
+            "the agent generate complete links automatically."
+        )
+    else:
+        url = f"{public_base}/p/{short_id}"
+        url_note = ""
 
-    url = f"{public_base}/p/{short_id}" if public_base else f"/p/{short_id}"
+    return (
+        f"Published successfully!\n\n"
+        f"Public URL: {url}\n"
+        f"Title: {title}\n\n"
+        f"Anyone can access this page without logging in.{url_note}"
+    )
 
-    return f"Published successfully!\n\nPublic URL: {url}\nTitle: {title}\n\nAnyone can access this page without logging in."
 
 
 async def _list_published_pages(agent_id: uuid.UUID) -> str:
@@ -8466,3 +9046,143 @@ async def _agentbay_computer_list_visible_apps(agent_id: Optional[uuid.UUID], ws
     except Exception as e:
         logger.exception(f"[AgentBay] Computer list_visible_apps failed")
         return f"List applications failed: {str(e)[:200]}"
+
+
+async def _agentbay_file_transfer(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """Transfer a file between workspace and an AgentBay environment, or between two environments.
+
+    Supported transfer directions:
+      - workspace  → env:      upload_file(local_workspace_path, remote_path)   [single SDK call]
+      - env        → workspace: download_file(remote_path, local_workspace_path) [single SDK call]
+      - env A      → env B:    download to /tmp/<uuid>, upload to env B, cleanup /tmp [transparent]
+
+    The 'local' side of the SDK calls is always the Clawith backend server,
+    which has access to the agent workspace directory.
+    """
+    if not agent_id:
+        return "AgentBay tools require agent context"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    from_type = arguments.get("from_type", "")
+    from_path = arguments.get("from_path", "")
+    to_type   = arguments.get("to_type", "")
+    to_path   = arguments.get("to_path", "")
+    session_id = arguments.pop("_session_id", "")
+
+    if not all([from_type, from_path, to_type, to_path]):
+        return "Missing required parameters: from_type, from_path, to_type, to_path"
+
+    # Reject no-op transfers
+    if from_type == "workspace" and to_type == "workspace":
+        return "Cannot transfer workspace → workspace. Use write_file or workspace tools instead."
+    if from_type == to_type and from_type != "workspace":
+        return f"Same environment ({from_type}) transfer: use agentbay_command_exec with 'cp' to copy files within the same environment."
+
+    env_types = {"browser", "computer", "code"}
+
+    # ── Helper: resolve and validate a workspace-relative path ──────────────
+    def resolve_workspace(rel_path: str) -> tuple[str | None, str]:
+        """Return (absolute_local_path_str, error_message). error_message is '' on success."""
+        local = (ws / rel_path).resolve()
+        if not str(local).startswith(str(ws.resolve())):
+            return None, "Permission denied: path must be inside the agent workspace"
+        return str(local), ""
+
+    try:
+        # ── Case 1: workspace → env ──────────────────────────────────────────
+        if from_type == "workspace" and to_type in env_types:
+            local_path, err = resolve_workspace(from_path)
+            if err:
+                return err
+            import os
+            if not os.path.exists(local_path):
+                return f"File not found in workspace: {from_path}"
+            client = await get_agentbay_client_for_agent(agent_id, to_type, session_id=session_id)
+            result = await asyncio.to_thread(
+                client._session.file_system.upload_file,
+                local_path, to_path
+            )
+            if result.success:
+                msg = (
+                    f"Transferred workspace/{from_path} → [{to_type}]{to_path} "
+                    f"({result.bytes_sent} bytes)"
+                )
+                # After uploading to the computer desktop directory, notify the GNOME
+                # file manager so the file icon appears immediately without manual refresh.
+                desktop_dir = "/home/wuying/桌面"
+                if to_type == "computer" and to_path.startswith(desktop_dir):
+                    try:
+                        await asyncio.to_thread(
+                            client._session.command.exec,
+                            f"DISPLAY=:0 gio info '{to_path}' 2>/dev/null || true"
+                        )
+                    except Exception:
+                        pass  # Non-critical: desktop refresh failure doesn't affect transfer result
+                return msg
+            return f"Upload failed: {result.error_message}"
+
+        # ── Case 2: env → workspace ──────────────────────────────────────────
+        elif from_type in env_types and to_type == "workspace":
+            local_path, err = resolve_workspace(to_path)
+            if err:
+                return err
+            import os
+            os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+            client = await get_agentbay_client_for_agent(agent_id, from_type, session_id=session_id)
+            result = await asyncio.to_thread(
+                client._session.file_system.download_file,
+                from_path, local_path
+            )
+            if result.success:
+                return (
+                    f"Transferred [{from_type}]{from_path} → workspace/{to_path} "
+                    f"({result.bytes_received} bytes). "
+                    f"File available in workspace at: {to_path}"
+                )
+            return f"Download failed: {result.error_message}"
+
+        # ── Case 3: env A → env B (transparent /tmp/ intermediary) ──────────
+        elif from_type in env_types and to_type in env_types:
+            import uuid as _uuid
+            import os
+            tmp_path = f"/tmp/agentbay_transfer_{_uuid.uuid4().hex}"
+            try:
+                # Step 1: download from source env to backend /tmp/
+                src_client = await get_agentbay_client_for_agent(agent_id, from_type, session_id=session_id)
+                dl_result = await asyncio.to_thread(
+                    src_client._session.file_system.download_file,
+                    from_path, tmp_path
+                )
+                if not dl_result.success:
+                    return f"Transfer failed (download from {from_type}): {dl_result.error_message}"
+
+                # Step 2: upload from backend /tmp/ to destination env
+                dst_client = await get_agentbay_client_for_agent(agent_id, to_type, session_id=session_id)
+                ul_result = await asyncio.to_thread(
+                    dst_client._session.file_system.upload_file,
+                    tmp_path, to_path
+                )
+                if not ul_result.success:
+                    return f"Transfer failed (upload to {to_type}): {ul_result.error_message}"
+
+                return (
+                    f"Transferred [{from_type}]{from_path} → [{to_type}]{to_path} "
+                    f"({dl_result.bytes_received} bytes)"
+                )
+            finally:
+                # Always clean up the temporary file regardless of success or failure
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass  # Non-critical: ignore cleanup errors
+
+        else:
+            return f"Unsupported transfer: {from_type} → {to_type}"
+
+    except RuntimeError as e:
+        return f"{str(e)}"
+    except Exception as e:
+        logger.exception(f"[AgentBay] File transfer failed for agent {agent_id}")
+        return f"File transfer failed: {str(e)[:200]}"

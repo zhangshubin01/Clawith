@@ -1,55 +1,83 @@
-# v1.8.0-beta.3
+# v1.8.2 Release Notes
 
-## What's Changed
+## What's New
 
-### New Features
+### Security
+- **Fix account takeover via username collision** (#300): Prevents an attacker from creating an account with a username matching an existing SSO user's email, which could lead to unauthorized account access.
+- **Fix duplicate user creation on repeated SSO logins**: Feishu and DingTalk SSO now correctly reuse existing accounts instead of creating duplicate users.
 
-- **Split Code Executor into Local and E2B Cloud tools** — The single "Code Executor" tool has been separated into two independent tools. The local tool shows CPU/memory/network config; the E2B Cloud tool only requires an API key. E2B errors are now surfaced explicitly instead of silently falling back to local execution.
-- **MCP Server credential management** — New "Edit Server" UI and `PUT /tools/mcp-server` API endpoint for bulk-updating MCP server URLs and API keys across all tools sharing the same server.
-- **Feishu Wiki document creation** — `feishu_doc_create` now supports creating documents directly inside Wiki knowledge bases, with automatic detection of Wiki node tokens.
-- **Feishu permission JSON UI redesign** — Two-tier segmented control (Basic / Full) with i18n support for Feishu app permission configuration.
-- **Live Preview auto-sizing** — AgentBay Live Preview panel now auto-sizes to 50% of the chat container width.
+### AgentBay — Cloud Computer & Browser Automation
+- **New: `agentbay_file_transfer` tool**: Transfer files between any two environments — agent workspace, browser sandbox, cloud desktop (computer), or code sandbox — in any direction.
+- **Fix: Computer Take Control (TC) white screen**: TC now connects to the correct environment session (computer vs. browser) based on `env_type`. Previously, an existing browser session could hijack the computer TC connection.
+- **Fix: OS-aware desktop paths**: The `agentbay_file_transfer` tool description now automatically reflects the correct paths for the agent's configured OS type:
+  - Windows: `C:\Users\Administrator\Desktop\`
+  - Linux: `/home/wuying/Desktop/`
+- **Fix: Desktop file refresh**: After uploading to the Linux desktop directory, GNOME is notified to refresh icon display.
+- Multiple Take Control stability fixes: CDP polling replaced with sleep, multi-tab cleanup, 40s navigate timeout, unhashable type errors.
 
-### Bug Fixes
+### Feishu (Lark) — CardKit Streaming Cards
+- Feishu bot responses now stream as animated typing-effect cards using the CardKit API (#287).
+- Fixed SSE stream hang issues and websocket proxy bypass for system proxy conflicts.
 
-- **Plaintext SMTP relay support** — STARTTLS is now auto-negotiated based on server ESMTP capabilities instead of being forced on port 25/587. AUTH is skipped for unauthenticated IP-whitelisted internal relays. Password is no longer a required field in email configuration.
-- **Unified context window size** — Introduced `DEFAULT_CONTEXT_WINDOW_SIZE = 100` constant and unified all 9 communication channels (WebSocket, Feishu, Discord, WeCom, DingTalk, Teams, Slack) to use consistent fallback values.
-- **LLM stream retry** — Added `httpx.RemoteProtocolError` to the stream retry logic to handle upstream connection resets.
-- **Tool config double-encryption** — Fixed a bug where already-encrypted sensitive config fields were encrypted again on save.
-- **Loguru format collision** — Replaced `logger.error(..., exc_info=True)` with `logger.exception(...)` across all channel handlers to prevent crashes when error messages contain special characters.
-- **WeCom message handler** — Fixed `NameError` (`agent` vs `agent_obj`) and migrated user creation to `channel_user_service` to avoid AssociationProxy errors.
-- **Duplicate tool definition** — Removed `send_channel_message` from `_ALWAYS_INCLUDE_CORE` to prevent "Tool names must be unique" LLM errors.
-- **AgentBay connection test** — Fixed test image name (`linux_latest`) and `api_key` lookup in global tool config fallback.
-- **FastAPI route ordering** — Reordered `/tools/mcp-server/bulk` before `/tools/{tool_id}` to prevent 422 validation errors on older FastAPI versions.
-- **Other fixes** — LLM model temperature persistence, org_admin access to GitHub/ClawHub tokens, MCP tool import tenant scoping.
+### DingTalk & Organization Sync
+- Fixed DingTalk org sync permissions guide (`Contact.User.Read` scope).
+- Fixed `open_id` vs `employee_id` user type handling in Feishu org sync.
 
-### UI / i18n
+### Other Bug Fixes
+- **Fix: SSE stream protection** — `finish_reason` break guard added for OpenAI and Gemini streams to prevent runaway streams.
+- **Fix: Duplicate tool `send_feishu_message`** — Removed duplicate DB entry; added dedup guard in tool loading to prevent `Tool names must be unique` LLM errors.
+- **Fix: JWT token not consumed** on reset-password and verify-email routes.
+- **Fix: NULL username/email** for SSO-created users in `list_users`.
+- **Fix: Company name slug generation** — Added `anyascii` + `pypinyin` for universal CJK/Latin transliteration.
+- **Fix: `publish_page` URL** — Correctly generates `try.clawith.ai` links on source deployments.
+- **Fix: Agent template directory** — Dynamic default for source deployments.
+- Various i18n fixes (TakeControlPanel, DingTalk guide).
 
-- **Context Window Size terminology** — Corrected misleading "Max Rounds" / "Context Rounds" labels to industry-standard "Context Window Size" with accurate descriptions.
-- **MCP Server group header** — Displays hostname instead of full URL for cleaner display.
+---
 
-## Upgrade Notes
+## Upgrade Guide
 
-This is a **drop-in upgrade** from v1.8.0-beta.2. No breaking changes.
+> **No database migrations required.** No new environment variables.
 
-- **No database migrations required**
-- **No new dependencies**
-- **No environment variable changes**
-- The new `execute_code_e2b` tool will be automatically created by the tool seeder on startup. It is **not** a default tool — agents will not have it unless explicitly added.
-- The existing `execute_code` tool's config schema will be auto-synced (the sandbox type dropdown is removed since it's now always "subprocess").
+### Docker Deployment (Recommended)
 
-### Docker Deployment
 ```bash
 git pull origin main
 docker compose down && docker compose up -d --build
 ```
 
 ### Source Deployment
+
 ```bash
 git pull origin main
-# Backend
-pip install -r backend/requirements.txt  # no changes expected, but safe to run
-# Frontend (pre-built dist.zip is included)
-cd frontend && unzip -o dist.zip -d dist/
+
+# Install new Python dependency
+pip install anyascii>=0.3.2
+
+# Rebuild frontend
+cd frontend && npm install && npm run build
+cd ..
+
 # Restart services
 ```
+
+### nginx Update Required
+
+A new routing rule has been added to `nginx.conf`. If you manage nginx separately (not via Docker), add this block inside your `server {}` before the WebSocket proxy section:
+
+```nginx
+location ~ ^/WW_verify_[A-Za-z0-9]+\.txt$ {
+    proxy_pass http://backend:8000/api/wecom-verify$request_uri;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+```
+
+### Kubernetes (Helm)
+
+```bash
+helm upgrade clawith helm/clawith/ -f values.yaml
+```
+
+No migration job needed.
+
