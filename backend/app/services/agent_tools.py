@@ -4950,12 +4950,15 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
 
                 trigger_name = f"a2a_wait_{target.name.lower().replace(' ', '_')}"
                 trigger_reason = (
-                    f"{target.name} is expected to reply after completing a delegated task. "
+                    f"{target.name} has replied with the result of a delegated task. "
                     f"Original task: {message_text[:200]}. "
-                    f"When {target.name} replies: 1) Process the result. "
-                    f"2) Notify the user if needed. "
-                    f"3) Mark focus item '{focus_id}' as completed. "
-                    f"4) Cancel this trigger."
+                    f"Steps: 1) Process {target.name}'s reply. "
+                    f"2) Mark focus item '{focus_id}' as completed. "
+                    f"3) Cancel this trigger. "
+                    f"IMPORTANT: Your reply will be shown to the user. "
+                    f"Provide a concise summary of the task result — do NOT mention "
+                    f"triggers, focus items, internal state, or your reasoning process. "
+                    f"Just give the user the actionable outcome."
                 )
                 try:
                     await _create_on_message_trigger(
