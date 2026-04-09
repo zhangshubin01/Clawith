@@ -699,7 +699,7 @@ async def _tick():
         asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers))
 
 
-async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, from_agent_id: uuid.UUID | None = None) -> None:
+async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False) -> None:
     """Public API: wake an agent asynchronously with a message context.
 
     Creates a synthetic trigger invocation so the agent processes the
@@ -710,6 +710,9 @@ async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, 
         agent_id: The agent to wake.
         message_context: The message to deliver.
         from_agent_id: The agent that initiated this wake (for chain depth tracking).
+        skip_dedup: If True, bypass the dedup window check. Use this for
+                    genuine message deliveries (e.g. a task_delegate callback)
+                    where skipping the wake would lose a real message.
     """
     import time as _time
 
@@ -731,7 +734,7 @@ async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, 
             _A2A_WAKE_CHAIN.pop(chain_key, None)
         asyncio.get_event_loop().call_later(_A2A_WAKE_CHAIN_TTL, _decay_chain)
 
-    if agent_id in _last_invoke:
+    if not skip_dedup and agent_id in _last_invoke:
         elapsed = (now - _last_invoke[agent_id]).total_seconds()
         if elapsed < DEDUP_WINDOW:
             logger.info(
