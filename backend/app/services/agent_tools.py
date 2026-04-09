@@ -4914,8 +4914,18 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
             chat_session.last_message_at = datetime.now(timezone.utc)
             await db.commit()
 
-            # ── Feature flag: async A2A ──
-            if not getattr(source_agent, "a2a_async_enabled", False):
+            # ── Feature flag: async A2A (tenant-level) ──
+            _a2a_async = False
+            if source_agent.tenant_id:
+                try:
+                    from app.models.tenant import Tenant
+                    _t_r = await db.execute(select(Tenant).where(Tenant.id == source_agent.tenant_id))
+                    _tenant = _t_r.scalar_one_or_none()
+                    if _tenant:
+                        _a2a_async = getattr(_tenant, "a2a_async_enabled", False)
+                except Exception:
+                    pass
+            if not _a2a_async:
                 if msg_type in ("notify", "task_delegate"):
                     msg_type = "consult"
 
