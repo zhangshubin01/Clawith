@@ -4955,10 +4955,13 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                     f"Steps: 1) Process {target.name}'s reply. "
                     f"2) Mark focus item '{focus_id}' as completed. "
                     f"3) Cancel this trigger. "
-                    f"IMPORTANT: Your reply will be shown to the user. "
-                    f"Provide a concise summary of the task result — do NOT mention "
-                    f"triggers, focus items, internal state, or your reasoning process. "
-                    f"Just give the user the actionable outcome."
+                    f"USER-FACING OUTPUT RULES: Your reply goes directly to the user's chat. "
+                    f"Write in natural, conversational language as if talking to a colleague. "
+                    f"NEVER use technical terms like: trigger name, focus item, a2a_wait, "
+                    f"task_delegate, focus_ref, or any internal identifier. "
+                    f"NEVER mention your internal operations (canceling triggers, updating focus, "
+                    f"marking items complete, trigger status, etc.). "
+                    f"Just summarize the task result in plain language."
                 )
                 try:
                     await _create_on_message_trigger(
