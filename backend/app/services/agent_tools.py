@@ -2344,6 +2344,9 @@ async def execute_tool(
             result = await _update_objective(agent_id, arguments)
         elif tool_name == "update_any_kr_progress":
             result = await _update_any_kr_progress(agent_id, arguments)
+        # generate_monthly_okr_report: produce the monthly summary report
+        elif tool_name == "generate_monthly_okr_report":
+            result = await _generate_monthly_okr_report(agent_id)
         else:
 
             # Try MCP tool execution
@@ -4867,7 +4870,12 @@ async def _plaza_get_new_posts(agent_id: uuid.UUID, arguments: dict) -> str:
 
 
 async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
-    """Create a new post in the Agent Plaza."""
+    """Create a new post in the Agent Plaza.
+
+    System agents (is_system=True) are intentionally excluded from Plaza to
+    keep the social feed clean — the OKR Agent communicates through Chat and
+    reports, not through Plaza posts.
+    """
     from app.models.plaza import PlazaPost
     from app.models.agent import Agent as AgentModel
 
@@ -4879,11 +4887,18 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
 
     try:
         async with async_session() as db:
-            # Get agent name
+            # Get agent and check is_system
             ar = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             agent = ar.scalar_one_or_none()
             if not agent:
                 return "Error: Agent not found."
+
+            # System agents (e.g. OKR Agent) must not post to Plaza
+            if agent.is_system:
+                return (
+                    "System agents are not allowed to post to Plaza. "
+                    "Use send_web_message to communicate with users directly."
+                )
 
             post = PlazaPost(
                 author_id=agent_id,
@@ -9590,6 +9605,38 @@ async def _generate_okr_report(agent_id: uuid.UUID | None, arguments: dict) -> s
     except Exception as e:
         logger.exception(f"[OKR] generate_okr_report failed for agent {agent_id}")
         return f"Failed to generate OKR report: {str(e)[:200]}"
+
+
+async def _generate_monthly_okr_report(agent_id: uuid.UUID | None) -> str:
+    """Generate the monthly OKR summary report for the agent's tenant.
+
+    Writes a WorkReport (report_type='monthly') and returns the Markdown
+    content. The OKR Agent should forward this to admins via send_web_message.
+    Also triggered automatically by the monthly_okr_report system cron trigger.
+    """
+    if not agent_id:
+        return "OKR tools require agent context."
+
+    try:
+        from app.models.agent import Agent as AgentModel
+        from app.services.okr_scheduler import generate_monthly_report
+
+        async with async_session() as db:
+            agent_result = await db.execute(
+                select(AgentModel).where(AgentModel.id == agent_id)
+            )
+            agent = agent_result.scalar_one_or_none()
+            if not agent:
+                return "Agent not found."
+
+        return await generate_monthly_report(
+            tenant_id=agent.tenant_id,
+            okr_agent_id=agent_id,
+        )
+
+    except Exception as e:
+        logger.exception(f"[OKR] generate_monthly_okr_report failed for agent {agent_id}")
+        return f"Failed to generate monthly OKR report: {str(e)[:200]}"
 
 
 async def _get_okr_settings_tool(agent_id: uuid.UUID | None) -> str:

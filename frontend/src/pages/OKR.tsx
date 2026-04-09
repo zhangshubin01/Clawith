@@ -54,6 +54,13 @@ interface Objective {
     status: string;
     created_at: string;
     key_results: KeyResult[];
+    // P3: alignment annotations — each entry has target_title
+    alignments: Array<{
+        id: string;
+        target_type: string;
+        target_id: string;
+        target_title: string;
+    }>;
 }
 
 interface Period {
@@ -65,11 +72,23 @@ interface Period {
 
 interface WorkReport {
     id: string;
-    tenant_id: string;
-    okr_agent_id: string;
-    report_type: string;
-    period_label: string;
+    author_type: string;
+    author_id: string;
+    report_type: string;   // daily | weekly | monthly
+    period_date: string;   // ISO date string
     content: string;
+    source: string;
+    created_at: string;
+}
+
+// P3: Progress log entry for KR history curve
+interface ProgressLog {
+    id: string;
+    kr_id: string;
+    previous_value: number;
+    new_value: number;
+    source: string;
+    note?: string;
     created_at: string;
 }
 
@@ -454,6 +473,107 @@ function AddKRForm({
     );
 }
 
+// ── P3: KR Progress Curve — expandable SVG line chart for a single KR ──
+function KRProgressCurve({ krId, targetValue, unit }: { krId: string; targetValue: number; unit?: string }) {
+    const [expanded, setExpanded] = useState(false);
+
+    const { data: logs = [] } = useQuery<ProgressLog[]>({
+        queryKey: ['kr-progress-log', krId],
+        queryFn: () => fetchJson<ProgressLog[]>(`/okr/key-results/${krId}/progress-log`),
+        enabled: expanded,
+    });
+
+    if (!expanded) {
+        return (
+            <button
+                onClick={() => setExpanded(true)}
+                title="Show progress history"
+                style={{
+                    background: 'none', border: '1px solid var(--border-subtle)',
+                    borderRadius: '4px', padding: '1px 6px',
+                    fontSize: '10px', color: 'var(--text-tertiary)',
+                    cursor: 'pointer', lineHeight: 1.5,
+                    display: 'inline-flex', alignItems: 'center', gap: '3px',
+                }}
+            >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                </svg>
+                History
+            </button>
+        );
+    }
+
+    const data = logs;
+    const isEmpty = data.length === 0;
+
+    // SVG dimensions
+    const W = 260, H = 72, PAD = { t: 8, r: 12, b: 20, l: 32 };
+    const innerW = W - PAD.l - PAD.r;
+    const innerH = H - PAD.t - PAD.b;
+
+    let svgContent = null;
+    if (!isEmpty) {
+        const values = data.map(d => d.new_value);
+        const minV = 0;
+        const maxV = Math.max(targetValue, ...values) || 1;
+        const scaleX = (i: number) => PAD.l + (i / (data.length - 1 || 1)) * innerW;
+        const scaleY = (v: number) => PAD.t + innerH - ((v - minV) / (maxV - minV)) * innerH;
+
+        const points = data.map((d, i) => `${scaleX(i)},${scaleY(d.new_value)}`).join(' ');
+        const targetY = scaleY(targetValue);
+
+        svgContent = (
+            <svg width={W} height={H} style={{ display: 'block', overflow: 'visible' }}>
+                {/* Target line */}
+                <line x1={PAD.l} y1={targetY} x2={W - PAD.r} y2={targetY}
+                    stroke="#6366f1" strokeWidth="1" strokeDasharray="4 3" opacity={0.4} />
+                {/* Progress polyline */}
+                <polyline points={points} fill="none" stroke="#22c55e" strokeWidth="1.5"
+                    strokeLinecap="round" strokeLinejoin="round" />
+                {/* Dots */}
+                {data.map((d, i) => (
+                    <circle key={i} cx={scaleX(i)} cy={scaleY(d.new_value)} r="2.5"
+                        fill="#22c55e" stroke="var(--bg-primary)" strokeWidth="1.2" />
+                ))}
+                {/* X labels: first and last date */}
+                <text x={PAD.l} y={H - 4} fontSize="8" fill="var(--text-tertiary)" textAnchor="middle">
+                    {new Date(data[0].created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                </text>
+                <text x={W - PAD.r} y={H - 4} fontSize="8" fill="var(--text-tertiary)" textAnchor="middle">
+                    {new Date(data[data.length - 1].created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                </text>
+                {/* Y labels */}
+                <text x={PAD.l - 4} y={PAD.t + 3} fontSize="8" fill="var(--text-tertiary)" textAnchor="end">{maxV}{unit ? ` ${unit}` : ''}</text>
+                <text x={PAD.l - 4} y={H - PAD.b} fontSize="8" fill="var(--text-tertiary)" textAnchor="end">0</text>
+            </svg>
+        );
+    }
+
+    return (
+        <div style={{
+            marginTop: '6px',
+            padding: '8px 10px',
+            background: 'var(--bg-tertiary)',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: '6px',
+        }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', fontWeight: 500 }}>Progress History</span>
+                <button
+                    onClick={() => setExpanded(false)}
+                    style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: '10px', lineHeight: 1 }}
+                >
+                    collapse
+                </button>
+            </div>
+            {isEmpty ? (
+                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', textAlign: 'center', padding: '8px 0' }}>No history yet</div>
+            ) : svgContent}
+        </div>
+    );
+}
+
 // ── Objective Card ──
 function ObjectiveCard({
     obj,
@@ -513,6 +633,7 @@ function ObjectiveCard({
                     <polyline points="6 9 12 15 18 9" />
                 </svg>
 
+                {/* Title and alignment annotations */}
                 <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                         {ownerLabel && (
@@ -528,6 +649,28 @@ function ObjectiveCard({
                     </div>
                     {obj.description && (
                         <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{obj.description}</div>
+                    )}
+                    {/* P3: Alignment annotations — show "Aligned to Company O1" pills */}
+                    {obj.alignments && obj.alignments.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '4px' }}>
+                            {obj.alignments.map(al => (
+                                <span key={al.id} style={{
+                                    display: 'inline-flex', alignItems: 'center', gap: '3px',
+                                    padding: '1px 7px', borderRadius: '100px',
+                                    background: 'rgba(99,102,241,0.08)',
+                                    border: '1px solid rgba(99,102,241,0.22)',
+                                    fontSize: '10px', color: '#818cf8',
+                                }}>
+                                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                                        <polyline points="17 1 21 5 17 9" />
+                                        <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+                                        <polyline points="7 23 3 19 7 15" />
+                                        <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+                                    </svg>
+                                    Aligned to {al.target_title || al.target_id.slice(0, 8)}
+                                </span>
+                            ))}
+                        </div>
                     )}
                 </div>
 
@@ -572,17 +715,20 @@ function ObjectiveCard({
             {expanded && (
                 <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {obj.key_results.map(kr => (
-                        <KRCard
-                            key={kr.id}
-                            kr={kr}
-                            isChinese={isChinese}
-                            onUpdateProgress={handleKRProgressUpdate}
-                            onDelete={async (krId) => {
-                                await fetchJson(`/okr/key-results/${krId}`, { method: 'DELETE' });
-                                onInvalidate();
-                            }}
-                            canEdit={canEdit}
-                        />
+                        <div key={kr.id}>
+                            <KRCard
+                                kr={kr}
+                                isChinese={isChinese}
+                                onUpdateProgress={handleKRProgressUpdate}
+                                onDelete={async (krId) => {
+                                    await fetchJson(`/okr/key-results/${krId}`, { method: 'DELETE' });
+                                    onInvalidate();
+                                }}
+                                canEdit={canEdit}
+                            />
+                            {/* P3: Progress curve — expandable history chart below each KR */}
+                            <KRProgressCurve krId={kr.id} targetValue={kr.target_value} unit={kr.unit} />
+                        </div>
                     ))}
                     {obj.key_results.length === 0 && !addingKR && (
                         <div style={{ color: 'var(--text-tertiary)', fontSize: '13px', textAlign: 'center', padding: '8px 0' }}>
@@ -1079,41 +1225,53 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            {reports.map((report) => (
-                <div key={report.id} style={{
-                    padding: '20px',
-                    background: 'var(--bg-primary)',
-                    border: '1px solid var(--border-subtle)',
-                    borderRadius: '12px',
-                    boxShadow: '0 2px 8px rgba(0,0,0,0.02)'
-                }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '12px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span style={{
-                                padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600,
-                                background: report.report_type === 'weekly' ? '#6366f115' : '#14b8a615',
-                                color: report.report_type === 'weekly' ? '#6366f1' : '#14b8a6',
-                            }}>
-                                {report.report_type.toUpperCase()}
-                            </span>
-                            <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                                {report.period_label}
-                            </span>
-                        </div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
-                            {new Date(report.created_at).toLocaleString()}
-                        </div>
-                    </div>
-                    {/* Render markdown content simply or parse it. Since we don't have a markdown parser available directly in this file without imports, we use pre/code block */}
-                    <pre style={{
-                        margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                        fontSize: '13px', lineHeight: '1.6', color: 'var(--text-secondary)',
-                        fontFamily: 'inherit',
+            {reports.map((report) => {
+                // Badge color by report type
+                const typeBadge: Record<string, { bg: string; fg: string }> = {
+                    daily:   { bg: '#14b8a615', fg: '#14b8a6' },
+                    weekly:  { bg: '#6366f115', fg: '#6366f1' },
+                    monthly: { bg: '#f59e0b15', fg: '#f59e0b' },
+                };
+                const badge = typeBadge[report.report_type] ?? { bg: 'var(--bg-tertiary)', fg: 'var(--text-secondary)' };
+                // Format period_date
+                const periodLabel = report.period_date
+                    ? new Date(report.period_date + 'T00:00:00').toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+                    : '';
+
+                return (
+                    <div key={report.id} style={{
+                        padding: '20px',
+                        background: 'var(--bg-primary)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: '12px',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.02)'
                     }}>
-                        {report.content}
-                    </pre>
-                </div>
-            ))}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '12px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span style={{
+                                    padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600,
+                                    background: badge.bg, color: badge.fg,
+                                }}>
+                                    {report.report_type.toUpperCase()}
+                                </span>
+                                <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                    {periodLabel}
+                                </span>
+                            </div>
+                            <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                {new Date(report.created_at).toLocaleString()}
+                            </div>
+                        </div>
+                        <pre style={{
+                            margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                            fontSize: '13px', lineHeight: '1.6', color: 'var(--text-secondary)',
+                            fontFamily: 'inherit',
+                        }}>
+                            {report.content}
+                        </pre>
+                    </div>
+                );
+            })}
         </div>
     );
 }

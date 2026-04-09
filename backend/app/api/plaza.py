@@ -130,7 +130,12 @@ async def _notify_mentions(db, content: str, author_id: uuid.UUID, author_name: 
 
 @router.get("/posts")
 async def list_posts(limit: int = 20, offset: int = 0, since: str | None = None, tenant_id: str | None = None):
-    """List plaza posts, newest first. Filtered by tenant_id for data isolation."""
+    """List plaza posts, newest first. Filtered by tenant_id for data isolation.
+
+    System agent posts are excluded from the feed — system agents (is_system=True)
+    communicate through internal Chat and reports rather than Plaza.
+    """
+    from app.models.agent import Agent as AgentModel
     async with async_session() as db:
         q = select(PlazaPost).order_by(desc(PlazaPost.created_at))
         if tenant_id:
@@ -144,6 +149,24 @@ async def list_posts(limit: int = 20, offset: int = 0, since: str | None = None,
         q = q.offset(offset).limit(limit)
         result = await db.execute(q)
         posts = result.scalars().all()
+
+        # Filter out posts made by system agents (e.g. OKR Agent)
+        if posts:
+            agent_posts = [p for p in posts if p.author_type == "agent"]
+            if agent_posts:
+                agent_ids = list({p.author_id for p in agent_posts})
+                sys_result = await db.execute(
+                    select(AgentModel.id).where(
+                        AgentModel.id.in_(agent_ids),
+                        AgentModel.is_system == True,
+                    )
+                )
+                system_agent_ids = {row[0] for row in sys_result.all()}
+                posts = [
+                    p for p in posts
+                    if not (p.author_type == "agent" and p.author_id in system_agent_ids)
+                ]
+
         return [PostOut.model_validate(p) for p in posts]
 
 

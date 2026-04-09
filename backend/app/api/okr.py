@@ -9,9 +9,14 @@ GET/PUT   /api/okr/settings
 GET       /api/okr/periods
 GET/POST  /api/okr/objectives
 PATCH     /api/okr/objectives/{id}
+DELETE    /api/okr/objectives/{id}
 GET/POST  /api/okr/objectives/{id}/key-results
 PATCH     /api/okr/key-results/{id}
 POST      /api/okr/key-results/{id}/progress        (manual progress update)
+DELETE    /api/okr/key-results/{id}
+GET       /api/okr/key-results/{id}/progress-log    (P3: history curve)
+POST      /api/okr/alignments                       (P3: create alignment)
+DELETE    /api/okr/alignments/{id}                  (P3: remove alignment)
 GET       /api/okr/reports
 """
 
@@ -135,6 +140,8 @@ class ObjectiveOut(BaseModel):
     status: str
     created_at: str
     key_results: list[KeyResultOut] = []
+    # Alignment refs — each entry: {id, target_type, target_id, target_title}
+    alignments: list[dict] = []
 
 
 class ObjectiveCreate(BaseModel):
@@ -190,6 +197,35 @@ class WorkReportOut(BaseModel):
     period_date: str
     content: str
     source: str
+    created_at: str
+
+
+class ProgressLogOut(BaseModel):
+    """Single OKRProgressLog entry for progress curve display."""
+    id: str
+    kr_id: str
+    previous_value: float
+    new_value: float
+    source: str
+    note: str | None = None
+    created_at: str
+
+
+class AlignmentCreate(BaseModel):
+    """Create an alignment: source objective → target objective/key-result."""
+    source_type: str = "objective"   # "objective" | "key_result"
+    source_id: str
+    target_type: str = "objective"   # "objective" | "key_result"
+    target_id: str
+
+
+class AlignmentOut(BaseModel):
+    id: str
+    source_type: str
+    source_id: str
+    target_type: str
+    target_id: str
+    target_title: str = ""  # Convenience: resolved title of the target
     created_at: str
 
 
@@ -352,7 +388,7 @@ def _kr_to_out(kr: OKRKeyResult) -> KeyResultOut:
     )
 
 
-def _obj_to_out(obj: OKRObjective, krs: list[OKRKeyResult] | None = None) -> ObjectiveOut:
+def _obj_to_out(obj: OKRObjective, krs: list[OKRKeyResult] | None = None, alignments: list[dict] | None = None) -> ObjectiveOut:
     return ObjectiveOut(
         id=str(obj.id),
         title=obj.title,
@@ -364,6 +400,7 @@ def _obj_to_out(obj: OKRObjective, krs: list[OKRKeyResult] | None = None) -> Obj
         status=obj.status,
         created_at=obj.created_at.isoformat() if obj.created_at else "",
         key_results=[_kr_to_out(kr) for kr in (krs or [])],
+        alignments=alignments or [],
     )
 
 
@@ -415,7 +452,46 @@ async def list_objectives(
         for kr in all_krs:
             krs_by_obj.setdefault(kr.objective_id, []).append(kr)
 
-        return [_obj_to_out(o, krs_by_obj.get(o.id, [])) for o in objectives]
+        # Fetch alignments where source is one of these objectives, with target titles
+        alignments_result = await db.execute(
+            select(OKRAlignment)
+            .where(
+                OKRAlignment.source_type == "objective",
+                OKRAlignment.source_id.in_(obj_ids),
+            )
+        )
+        all_alignments = alignments_result.scalars().all()
+
+        # Resolve target titles from objectives table
+        target_obj_ids = [
+            a.target_id for a in all_alignments if a.target_type == "objective"
+        ]
+        target_objs: dict[uuid.UUID, str] = {}
+        if target_obj_ids:
+            target_result = await db.execute(
+                select(OKRObjective.id, OKRObjective.title)
+                .where(OKRObjective.id.in_(target_obj_ids))
+            )
+            for row in target_result.all():
+                target_objs[row[0]] = row[1]
+
+        # Group alignments by source objective id
+        alignments_by_obj: dict[uuid.UUID, list[dict]] = {}
+        for al in all_alignments:
+            target_title = target_objs.get(al.target_id, "") if al.target_type == "objective" else ""
+            alignments_by_obj.setdefault(al.source_id, []).append({
+                "id": str(al.id),
+                "source_type": al.source_type,
+                "source_id": str(al.source_id),
+                "target_type": al.target_type,
+                "target_id": str(al.target_id),
+                "target_title": target_title,
+            })
+
+        return [
+            _obj_to_out(o, krs_by_obj.get(o.id, []), alignments_by_obj.get(o.id, []))
+            for o in objectives
+        ]
 
 
 @router.post("/objectives", response_model=ObjectiveOut)
@@ -729,3 +805,158 @@ async def list_reports(
         )
         for r in reports
     ]
+
+
+# ─── Progress Log (P3) ────────────────────────────────────────────────────────
+
+
+@router.get("/key-results/{kr_id}/progress-log", response_model=list[ProgressLogOut])
+async def get_kr_progress_log(
+    kr_id: uuid.UUID,
+    user=Depends(get_current_user),
+):
+    """Return the full progress history for a single Key Result.
+
+    Results are ordered oldest-first so the frontend can render a
+    time-series line chart directly from the response.
+    """
+    async with async_session() as db:
+        # Verify the KR belongs to this tenant via the parent Objective
+        kr_result = await db.execute(
+            select(OKRKeyResult).where(OKRKeyResult.id == kr_id)
+        )
+        kr = kr_result.scalar_one_or_none()
+        if not kr:
+            raise HTTPException(404, "Key Result not found")
+
+        # Check tenant ownership through parent objective
+        obj_result = await db.execute(
+            select(OKRObjective).where(
+                OKRObjective.id == kr.objective_id,
+                OKRObjective.tenant_id == user.tenant_id,
+            )
+        )
+        if not obj_result.scalar_one_or_none():
+            raise HTTPException(403, "Access denied")
+
+        logs_result = await db.execute(
+            select(OKRProgressLog)
+            .where(OKRProgressLog.kr_id == kr_id)
+            .order_by(OKRProgressLog.created_at.asc())
+        )
+        logs = logs_result.scalars().all()
+
+    return [
+        ProgressLogOut(
+            id=str(lg.id),
+            kr_id=str(lg.kr_id),
+            previous_value=lg.previous_value,
+            new_value=lg.new_value,
+            source=lg.source,
+            note=lg.note,
+            created_at=lg.created_at.isoformat() if lg.created_at else "",
+        )
+        for lg in logs
+    ]
+
+
+# ─── Alignments (P3) ─────────────────────────────────────────────────────────
+
+
+@router.post("/alignments", response_model=AlignmentOut)
+async def create_alignment(
+    body: AlignmentCreate,
+    user=Depends(get_current_user),
+):
+    """Create an alignment relationship between two OKR entities.
+
+    Source is typically an individual's Objective; target is a company
+    Objective or Key Result they wish to align toward.
+    """
+    async with async_session() as db:
+        # Validate source objective belongs to this tenant
+        src_obj = await db.execute(
+            select(OKRObjective).where(
+                OKRObjective.id == uuid.UUID(body.source_id),
+                OKRObjective.tenant_id == user.tenant_id,
+            )
+        )
+        if not src_obj.scalar_one_or_none():
+            raise HTTPException(404, "Source Objective not found")
+
+        # Check for duplicate
+        existing = await db.execute(
+            select(OKRAlignment).where(
+                OKRAlignment.source_type == body.source_type,
+                OKRAlignment.source_id == uuid.UUID(body.source_id),
+                OKRAlignment.target_type == body.target_type,
+                OKRAlignment.target_id == uuid.UUID(body.target_id),
+            )
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(409, "Alignment already exists")
+
+        # Resolve target title for the response
+        target_title = ""
+        if body.target_type == "objective":
+            tgt_result = await db.execute(
+                select(OKRObjective.title).where(
+                    OKRObjective.id == uuid.UUID(body.target_id),
+                    OKRObjective.tenant_id == user.tenant_id,
+                )
+            )
+            row = tgt_result.scalar_one_or_none()
+            target_title = row or ""
+
+        alignment = OKRAlignment(
+            source_type=body.source_type,
+            source_id=uuid.UUID(body.source_id),
+            target_type=body.target_type,
+            target_id=uuid.UUID(body.target_id),
+        )
+        db.add(alignment)
+        await db.commit()
+        await db.refresh(alignment)
+
+    return AlignmentOut(
+        id=str(alignment.id),
+        source_type=alignment.source_type,
+        source_id=str(alignment.source_id),
+        target_type=alignment.target_type,
+        target_id=str(alignment.target_id),
+        target_title=target_title,
+        created_at=alignment.created_at.isoformat() if alignment.created_at else "",
+    )
+
+
+@router.delete("/alignments/{alignment_id}")
+async def delete_alignment(
+    alignment_id: uuid.UUID,
+    user=Depends(get_current_user),
+):
+    """Remove an alignment relationship.
+
+    Only members of the same tenant may delete alignments.
+    """
+    async with async_session() as db:
+        result = await db.execute(
+            select(OKRAlignment).where(OKRAlignment.id == alignment_id)
+        )
+        al = result.scalar_one_or_none()
+        if not al:
+            raise HTTPException(404, "Alignment not found")
+
+        # Verify tenant ownership via source objective
+        src_result = await db.execute(
+            select(OKRObjective).where(
+                OKRObjective.id == al.source_id,
+                OKRObjective.tenant_id == user.tenant_id,
+            )
+        )
+        if not src_result.scalar_one_or_none():
+            raise HTTPException(403, "Access denied")
+
+        await db.execute(delete(OKRAlignment).where(OKRAlignment.id == alignment_id))
+        await db.commit()
+
+    return {"status": "deleted"}

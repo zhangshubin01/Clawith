@@ -1314,6 +1314,28 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
+    {
+        # generate_monthly_okr_report — OKR Agent exclusive: produce the monthly summary report.
+        # Called automatically by the monthly_okr_report system cron trigger, or on-demand.
+        "name": "generate_monthly_okr_report",
+        "display_name": "Generate Monthly OKR Report",
+        "description": (
+            "Generate the monthly OKR progress summary report. Covers all Objectives and Key "
+            "Results for the current period, highlights completed and at-risk items, and provides "
+            "a closing action note. Saved to WorkReport (report_type='monthly') and "
+            "workspace/reports/. Returns the full Markdown so you can send it to admins."
+        ),
+        "category": "okr",
+        "icon": "📅",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "config": {},
+        "config_schema": {},
+    },
 
     # --- Feishu Integration Tools ---
     # These tools require a configured Feishu channel to function.

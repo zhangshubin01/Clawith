@@ -593,9 +593,11 @@ def _append_seed_marker(marker_path: Path, line: str):
 async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
     """Create system cron triggers for the OKR Agent.
 
-    Two triggers:
-      - daily_okr_report:  fires at 18:00 every day  (0 18 * * *)
-      - weekly_okr_report: fires at 09:00 every Monday (0 9 * * 1)
+    Four triggers (all is_system=True, cannot be deleted by users):
+      - daily_okr_report:     fires at 18:00 every day     (0 18 * * *)
+      - weekly_okr_report:    fires at 09:00 every Monday  (0 9 * * 1)
+      - biweekly_okr_checkin: fires at 10:00 on 1st & 15th (0 10 1,15 * *)
+      - monthly_okr_report:   fires at 08:00 on the 1st    (0 8 1 * *)
 
     These supplement the 4-hour heartbeat with precise scheduled firing.
     is_system=True prevents users from deleting them.
@@ -619,6 +621,30 @@ async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
             "reason": (
                 "System trigger: fires OKR Agent at 09:00 every Monday to generate "
                 "the weekly report if weekly_report_enabled is true."
+            ),
+            "cooldown_seconds": 3600,
+            "is_system": True,
+        },
+        {
+            "name": "biweekly_okr_checkin",
+            "type": "cron",
+            "config": {"expr": "0 10 1,15 * *"},
+            "reason": (
+                "System trigger: fires on the 1st and 15th of every month at 10:00 "
+                "to perform the mandatory bi-weekly OKR check-in. This trigger is always "
+                "enabled and cannot be disabled — OKR check-in is a core non-optional feature."
+            ),
+            "cooldown_seconds": 3600,
+            "is_system": True,
+        },
+        {
+            "name": "monthly_okr_report",
+            "type": "cron",
+            "config": {"expr": "0 8 1 * *"},
+            "reason": (
+                "System trigger: fires on the 1st of every month at 08:00 to auto-generate "
+                "and deliver the monthly OKR progress report to Admin. Fires before "
+                "biweekly_okr_checkin (which fires at 10:00) to avoid session conflicts."
             ),
             "cooldown_seconds": 3600,
             "is_system": True,
@@ -681,6 +707,7 @@ async def patch_existing_okr_agent() -> None:
             "get_okr", "get_my_okr", "update_kr_progress",
             "collect_okr_progress", "generate_okr_report", "get_okr_settings",
             "create_objective", "create_key_result", "update_objective", "update_any_kr_progress",
+            "generate_monthly_okr_report",  # P3: monthly report tool added
         ]
         for tool_name in all_okr_tools:
             tool_res = await db.execute(select(Tool).where(Tool.name == tool_name))
