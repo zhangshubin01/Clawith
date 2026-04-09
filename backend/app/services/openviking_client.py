@@ -7,137 +7,175 @@ Requires:
     openviking-server --workers 4 running at OPENVIKING_URL (default: http://127.0.0.1:1933)
 
 Falls back gracefully if OpenViking is unavailable.
+
+Scoping: memories are scoped per agent via X-OpenViking-Agent header.
+Indexing: uses session/extract pipeline (POST content as text, not file path).
 """
 
 import os
+import re
 import time
 from pathlib import Path
 
 import httpx
 from loguru import logger
 
-OPENVIKING_URL = os.environ.get("OPENVIKING_URL", "http://127.0.0.1:1933")
-OPENVIKING_API_KEY = os.environ.get("OPENVIKING_API_KEY", "")
-
-# Cache availability result for 30 seconds to avoid repeated checks
-_last_available_check = 0.0
-_cached_available: bool | None = None
-
-def _get_headers() -> dict[str, str]:
-    headers = {"Content-Type": "application/json"}
-    if OPENVIKING_API_KEY:
-        headers["Authorization"] = f"Bearer {OPENVIKING_API_KEY}"
-    return headers
-
+OPENVIKING_URL = os.environ.get("OPENVIKING_URL", "http://127.0.0.1:1933").rstrip("/")
 OPENVIKING_TIMEOUT = float(os.environ.get("OPENVIKING_TIMEOUT", "3.0"))
+OPENVIKING_LIMIT = int(os.environ.get("OPENVIKING_LIMIT", "5"))
 OPENVIKING_SCORE_THRESHOLD = float(os.environ.get("OPENVIKING_SCORE_THRESHOLD", "0.35"))
 
-# ── Scope constants ────────────────────────────────────────────────────────
-_ENTERPRISE_SCOPE = "enterprise"
-_SKILLS_SCOPE = "skills"
-_CLAWITH_SCOPE = "clawith"
+# ── 持久化连接池（进程级单例）───────────────────────────────
+_client: httpx.AsyncClient | None = None
 
-def _agent_scope(agent_id: str) -> str:
-    """Return the OpenViking scope identifier for a given agent."""
-    return str(agent_id)
-
-# ── 持久化连接池（进程级单例）──────────────────────────────────────────────
-_ov_client: httpx.AsyncClient | None = None
 
 def _get_client() -> httpx.AsyncClient:
-    global _ov_client
-    if _ov_client is None or _ov_client.is_closed:
-        _ov_client = httpx.AsyncClient(
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
             base_url=OPENVIKING_URL,
-            headers=_get_headers(),
             timeout=OPENVIKING_TIMEOUT,
             limits=httpx.Limits(
-                max_connections=10,
-                max_keepalive_connections=5,
+                max_connections=30,
+                max_keepalive_connections=20,
                 keepalive_expiry=30,
             ),
         )
-    return _ov_client
+    return _client
 
-def _invalidate_availability_cache() -> None:
-    global _cached_available, _last_available_check
-    _cached_available = None
-    _last_available_check = 0.0
+
+def _agent_headers(agent_id: str) -> dict:
+    """每个 agent 用独立的 X-OpenViking-Agent header 隔离记忆空间。"""
+    return {"X-OpenViking-Agent": f"clawith-{agent_id}"}
+
+
+# ── 可用性缓存（避免每次请求都做健康检查）─────────────────
+_available: bool | None = None
+_available_checked_at: float = 0.0
+_AVAILABILITY_TTL = 30.0
+
 
 async def is_available() -> bool:
-    """Check if OpenViking server is reachable and healthy. Cache result for 30 seconds."""
-    global _last_available_check, _cached_available
-
-    now = time.time()
-    if _cached_available is not None and (now - _last_available_check) < 30:
-        return _cached_available
-
+    """带缓存的健康检查，30 秒内只真正检查一次。"""
+    global _available, _available_checked_at
+    now = time.monotonic()
+    if _available is not None and now - _available_checked_at < _AVAILABILITY_TTL:
+        return _available
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{OPENVIKING_URL}/health",
-                headers=_get_headers(),
-                timeout=5.0
-            )
-            _cached_available = response.status_code == 200
-            if _cached_available:
-                logger.info("[OpenViking] Health check passed")
-            else:
-                logger.warning(f"[OpenViking] Health check failed: {response.status_code}")
-    except Exception as e:
-        _cached_available = False
-        logger.warning(f"[OpenViking] Health check failed: {e}")
+        resp = await _get_client().get("/health", timeout=1.0)
+        data = resp.json() if resp.status_code == 200 else {}
+        _available = data.get("healthy", False) or resp.status_code < 500
+    except Exception:
+        _available = False
+    _available_checked_at = now
+    return _available
 
-    _last_available_check = now
-    return _cached_available
 
-async def search_memory(
-    query: str,
-    agent_id: str,
-    top_k: int = 5,
-    grep_filter: str | None = None,
-) -> list[str]:
-    """Search agent's personal memory for semantic similarity to query."""
-    if not await is_available():
-        return []
+def _invalidate_availability_cache() -> None:
+    global _available, _available_checked_at
+    _available = None
+    _available_checked_at = 0.0
+
+
+async def search_memory(query: str, agent_id: str, limit: int = OPENVIKING_LIMIT) -> list[str]:
+    """Query OpenViking for memories relevant to *query* scoped to *agent_id*.
+
+    Uses X-OpenViking-Agent header for agent-level scope isolation.
+    Returns [] on any failure.
+    """
     try:
-        body: dict = {
-            "query": query,
-            "target_uri": _agent_scope(agent_id),
-            "limit": top_k,
-            "score_threshold": OPENVIKING_SCORE_THRESHOLD,
-        }
-        if grep_filter:
-            body["grep_filter"] = grep_filter
-        resp = await _get_client().post("/api/v1/search/find", json=body, timeout=OPENVIKING_TIMEOUT)
+        resp = await _get_client().post(
+            "/api/v1/search/find",
+            headers=_agent_headers(agent_id),
+            json={
+                "query": query,
+                "limit": limit,
+                "score_threshold": OPENVIKING_SCORE_THRESHOLD,
+            },
+        )
         if resp.status_code != 200:
             return []
-        memories = resp.json().get("result", {}).get("memories", [])
-        return [m.get("content") or m.get("abstract") or "" for m in memories if m.get("content") or m.get("abstract")]
+
+        data = resp.json()
+        memories = data.get("result", {}).get("memories", [])
+        snippets = []
+        for m in memories:
+            content = m.get("content") or m.get("abstract") or ""
+            if content:
+                snippets.append(content.strip())
+        return snippets
+
     except httpx.ConnectError:
         _invalidate_availability_cache()
+        logger.debug("[OpenViking] connection lost, availability cache cleared")
         return []
     except Exception as e:
         logger.debug(f"[OpenViking] search_memory failed: {e}")
         return []
 
 
+def _strip_markdown(text: str) -> str:
+    """去掉 markdown 标题符号、代码块标记，保留纯文本内容供 OpenViking 提取。"""
+    # 去掉代码块
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    # 去掉标题 # 符号
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # 去掉加粗/斜体符号
+    text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text)
+    # 去掉表格分隔行
+    text = re.sub(r"^\|[-| :]+\|$", "", text, flags=re.MULTILINE)
+    # 合并多余空行
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 async def index_memory_file(agent_id: str, file_path: Path) -> bool:
-    """Reindex a memory file under the agent's OpenViking scope (non-blocking)."""
-    file_path = Path(file_path)
+    """Index a memory file into OpenViking via the session/extract pipeline.
+
+    Reads file content → strips markdown → creates a session → sends content
+    → fires extract (no wait) → cleans up session.
+    All scoped to agent via X-OpenViking-Agent header.
+    """
     if not file_path.exists():
         return False
-    if not await is_available():
-        return False
     try:
-        content = file_path.read_text(encoding="utf-8", errors="replace")
-        resp = await _get_client().post(
-            "/api/v1/skills",
-            json={"data": content, "wait": False},
-            headers={"X-OpenViking-Agent": agent_id},
-            timeout=OPENVIKING_TIMEOUT * 2,
+        raw = file_path.read_text(encoding="utf-8").strip()
+    except Exception as e:
+        logger.debug(f"[OpenViking] index_memory_file read error: {e}")
+        return False
+
+    content = _strip_markdown(raw)
+    if not content:
+        return False
+
+    headers = _agent_headers(agent_id)
+    client = _get_client()
+    session_id = None
+    try:
+        # 1. 创建 session
+        r = await client.post("/api/v1/sessions", headers=headers, json={},
+                              timeout=OPENVIKING_TIMEOUT)
+        if r.status_code != 200:
+            return False
+        session_id = r.json().get("result", {}).get("session_id")
+        if not session_id:
+            return False
+
+        # 2. 发送 memory 内容
+        await client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            headers=headers,
+            json={"role": "user", "content": content},
+            timeout=OPENVIKING_TIMEOUT,
         )
-        return resp.status_code < 300
+
+        # 3. 触发 extract，不等待结果（LLM 提取耗时，fire-and-forget）
+        import asyncio
+        asyncio.create_task(_fire_extract(client, session_id, headers))
+
+        logger.debug(f"[OpenViking] triggered index for {file_path.name} agent={agent_id}")
+        return True
+
     except httpx.ConnectError:
         _invalidate_availability_cache()
         return False
@@ -146,352 +184,20 @@ async def index_memory_file(agent_id: str, file_path: Path) -> bool:
         return False
 
 
-async def search_enterprise(
-    query: str,
-    top_k: int = 5,
-    grep_filter: str | None = None,
-) -> list[str]:
-    """Search enterprise shared information from enterprise_info/ scope."""
-    if not await is_available():
-        return []
+async def _fire_extract(client: httpx.AsyncClient, session_id: str, headers: dict) -> None:
+    """Fire extract and cleanup in background, ignoring errors."""
     try:
-        body: dict = {
-            "query": query,
-            "target_uri": _ENTERPRISE_SCOPE,
-            "limit": top_k,
-            "score_threshold": OPENVIKING_SCORE_THRESHOLD,
-        }
-        if grep_filter:
-            body["grep_filter"] = grep_filter
-        resp = await _get_client().post("/api/v1/search/find", json=body, timeout=OPENVIKING_TIMEOUT)
-        if resp.status_code != 200:
-            return []
-        memories = resp.json().get("result", {}).get("memories", [])
-        return [m.get("content") or m.get("abstract") or "" for m in memories if m.get("content") or m.get("abstract")]
-    except httpx.ConnectError:
-        _invalidate_availability_cache()
-        return []
-    except Exception as e:
-        logger.debug(f"[OpenViking] search_enterprise failed: {e}")
-        return []
-
-def _find_enterprise_dir(root_path: Path) -> Path | None:
-    """Find enterprise_info directory, trying multiple locations."""
-    # Try given root path
-    candidate = root_path / "enterprise_info"
-    if candidate.exists():
-        return candidate
-    # Try current working directory (where agent runs)
-    candidate = Path.cwd() / "enterprise_info"
-    if candidate.exists():
-        return candidate
-    return None
-
-def _find_skills_dir(root_path: Path) -> Path | None:
-    """Find skills directory, trying multiple locations."""
-    # Try given root path
-    candidate = root_path / "skills"
-    if candidate.exists():
-        return candidate
-    # Try current working directory (where agent runs)
-    candidate = Path.cwd() / "skills"
-    if candidate.exists():
-        return candidate
-    return None
-
-async def index_enterprise_info(root_path: Path) -> bool:
-    """
-    Index all markdown files in enterprise_info/ directory into enterprise scope.
-    Called on startup to keep shared info searchable.
-
-    Args:
-        root_path: Project root path
-
-    Returns:
-        True if indexing succeeded (partial success counts as True)
-    """
-    available = await is_available()
-    if not available:
-        logger.info("[OpenViking] Not available, skipping enterprise index")
-        return False
-
-    enterprise_dir = _find_enterprise_dir(root_path)
-    if enterprise_dir is None:
-        logger.info("[OpenViking] enterprise_info directory not found, skipping")
-        return False
-
-    success_count = 0
-    fail_count = 0
-
-    for md_path in enterprise_dir.rglob("*.md"):
-        if md_path.name.startswith("."):
-            continue
-        try:
-            content = md_path.read_text(encoding="utf-8", errors="replace")
-            resp = await _get_client().post(
-                "/api/v1/skills",
-                json={"data": content, "wait": False},
-                headers={"X-OpenViking-Agent": "enterprise"},
-                timeout=OPENVIKING_TIMEOUT * 2,
-            )
-            if resp.status_code < 300:
-                success_count += 1
-            else:
-                fail_count += 1
-        except Exception as e:
-            logger.debug(f"[OpenViking] Failed to index {md_path}: {e}")
-            fail_count += 1
-
-    logger.info(f"[OpenViking] Indexed enterprise_info: {success_count} succeeded, {fail_count} failed")
-    return fail_count == 0
-
-async def search_skills(
-    query: str,
-    top_k: int = 5,
-    grep_filter: str | None = None,
-) -> list[str]:
-    """Semantic search over installed skills to find relevant skills."""
-    if not await is_available():
-        return []
-    try:
-        body: dict = {
-            "query": query,
-            "target_uri": _SKILLS_SCOPE,
-            "limit": top_k,
-            "score_threshold": OPENVIKING_SCORE_THRESHOLD,
-        }
-        if grep_filter:
-            body["grep_filter"] = grep_filter
-        resp = await _get_client().post("/api/v1/search/find", json=body, timeout=OPENVIKING_TIMEOUT)
-        if resp.status_code != 200:
-            return []
-        memories = resp.json().get("result", {}).get("memories", [])
-        return [m.get("content") or m.get("abstract") or "" for m in memories if m.get("content") or m.get("abstract")]
-    except httpx.ConnectError:
-        _invalidate_availability_cache()
-        return []
-    except Exception as e:
-        logger.debug(f"[OpenViking] search_skills failed: {e}")
-        return []
-
-
-async def index_all_skills(root_path: Path) -> bool:
-    """Index all installed skills' SKILL.md to shared skills scope."""
-    if not await is_available():
-        return False
-
-    skills_dir = _find_skills_dir(root_path)
-    if skills_dir is None:
-        logger.debug("[OpenViking] skills directory not found, skipping")
-        return False
-
-    skill_files = []
-    for entry in skills_dir.iterdir():
-        if entry.name.startswith("."):
-            continue
-        if entry.is_dir():
-            for name in ("SKILL.md", "skill.md"):
-                if (entry / name).exists():
-                    skill_files.append(entry / name)
-                    break
-        elif entry.suffix == ".md":
-            skill_files.append(entry)
-
-    success = True
-    for skill_file in skill_files:
-        try:
-            content = skill_file.read_text(encoding="utf-8", errors="replace")
-            resp = await _get_client().post(
-                "/api/v1/skills",
-                json={"data": content, "wait": False},
-                headers={"X-OpenViking-Agent": "skills"},
-                timeout=OPENVIKING_TIMEOUT * 2,
-            )
-            if resp.status_code >= 300:
-                success = False
-        except Exception as e:
-            logger.debug(f"[OpenViking] index_all_skills error on {skill_file}: {e}")
-            success = False
-
-    logger.info(f"[OpenViking] Indexed {len(skill_files)} skill(s)")
-    return success
-
-async def index_all_agents(clawith_data_root: Path) -> bool:
-    """
-    Index all agents' core documents (soul.md, memory.md, focus.md, reflections.md)
-    into a shared agent_docs scope for cross-agent semantic search.
-
-    This allows querying across all agents for knowledge and patterns.
-
-    Args:
-        clawith_data_root: Clawith data root, typically ~/.clawith/data
-
-    Returns:
-        True if indexing succeeded (partial success counts as True)
-    """
-    available = await is_available()
-    if not available:
-        logger.info("[OpenViking] Not available, skipping agents index")
-        return False
-
-    # Search from ~/.clawith recursively to catch any agent document locations
-    root = Path(os.path.expanduser("~/.clawith"))
-    if not root.exists():
-        logger.info("[OpenViking] ~/.clawith directory not found, skipping")
-        return False
-
-    success_count = 0
-    fail_count = 0
-    target_files = {"soul.md", "memory.md", "focus.md", "reflections.md"}
-
-    # Use rglob to find all target files anywhere under ~/.clawith
-    for target in target_files:
-        for doc_path in root.rglob(target):
-            if not doc_path.is_file():
-                continue
-            # Skip files inside virtual environments or node_modules
-            if ".venv" in str(doc_path) or "node_modules" in str(doc_path):
-                continue
-            try:
-                # Extract agent_id from path components (UUID-like directories)
-                doc_agent_id = "unknown"
-                for part in doc_path.parts:
-                    if len(part) == 36 and part.count('-') == 4:
-                        doc_agent_id = part
-                        break
-                content = doc_path.read_text(encoding="utf-8", errors="replace")
-                resp = await _get_client().post(
-                    "/api/v1/skills",
-                    json={"data": content, "wait": False},
-                    headers={"X-OpenViking-Agent": doc_agent_id},
-                    timeout=OPENVIKING_TIMEOUT * 2,
-                )
-                if resp.status_code < 300:
-                    success_count += 1
-                else:
-                    fail_count += 1
-                    logger.debug(f"[OpenViking] index_all_agents: {doc_path.name} -> {resp.status_code}")
-            except Exception as e:
-                logger.debug(f"[OpenViking] Failed to index agent doc {doc_path}: {e}")
-                fail_count += 1
-
-    logger.info(f"[OpenViking] Indexed all agents: {success_count} succeeded, {fail_count} failed")
-    return fail_count == 0
-
-async def search_all_agents(
-    query: str,
-    top_k: int = 5,
-    grep_filter: str | None = None,
-    agent_id: str | None = None,
-) -> list[dict]:
-    """
-    Search across all agents' indexed documents in agent_docs scope.
-
-    Args:
-        query: Search query text
-        top_k: Number of top results to return
-        grep_filter: Optional keyword filter to filter documents before search
-        agent_id: Optional filter to only search within a specific agent
-
-    Returns:
-        List of results with "path", "content", "score", "metadata" keys
-    """
-    available = await is_available()
-    if not available:
-        return []
-
-    try:
-        # Search across all agent scopes using a wildcard-style URI
-        body: dict = {
-            "query": query,
-            "target_uri": _CLAWITH_SCOPE,
-            "limit": top_k,
-            "score_threshold": OPENVIKING_SCORE_THRESHOLD,
-        }
-        if grep_filter:
-            body["grep_filter"] = grep_filter
-
-        resp = await _get_client().post("/api/v1/search/find", json=body, timeout=OPENVIKING_TIMEOUT)
-        if resp.status_code != 200:
-            return []
-        memories = resp.json().get("result", {}).get("memories", [])
-        snippets = []
-        for m in memories:
-            content = m.get("content") or m.get("abstract") or ""
-            if content:
-                snippets.append({"content": content.strip(), "path": m.get("uri", "")})
-        # Filter by agent_id if requested
-        if agent_id:
-            snippets = [s for s in snippets if agent_id in s.get("path", "")]
-        return snippets
-    except Exception as e:
-        logger.debug(f"[OpenViking] search_all_agents failed: {e}")
-        return []
-
-
-async def search_llm_cache(
-    query: str,
-    agent_id: str,
-    score_threshold: float = 0.92,
-) -> str | None:
-    """Search LLM response cache for semantically similar query.
-
-    Returns the cached response text if similarity >= score_threshold, else None.
-    Cache entries are stored in scope '_llm_cache_{agent_id}'.
-    Format: '[Q] {query}\\n[A] {response}'
-    """
-    if not await is_available():
-        return None
-    try:
-        scope = f"_llm_cache_{agent_id}"
-        resp = await _get_client().post(
-            "/api/v1/search/find",
-            json={
-                "query": query,
-                "target_uri": scope,
-                "limit": 1,
-                "score_threshold": score_threshold,
-            },
-            timeout=OPENVIKING_TIMEOUT,
+        await client.post(
+            f"/api/v1/sessions/{session_id}/extract",
+            headers=headers,
+            json={},
+            timeout=30.0,  # 给 LLM 提取足够时间
         )
-        if resp.status_code != 200:
-            return None
-        memories = resp.json().get("result", {}).get("memories", [])
-        if not memories:
-            return None
-        content = memories[0].get("content") or memories[0].get("abstract") or ""
-        if "[A] " in content:
-            return content.split("[A] ", 1)[1].strip()
-        return None
-    except Exception as e:
-        logger.debug(f"[OpenViking] search_llm_cache failed: {e}")
-        return None
-
-
-async def store_llm_cache(
-    query: str,
-    response: str,
-    agent_id: str,
-    max_response_chars: int = 3000,
-) -> bool:
-    """Store a query-response pair in the LLM response cache.
-
-    Indexed in scope '_llm_cache_{agent_id}' for per-agent isolation.
-    Truncates long responses to avoid polluting similarity search.
-    """
-    if not await is_available():
-        return False
-    try:
-        scope = f"_llm_cache_{agent_id}"
-        truncated = response[:max_response_chars]
-        content = f"[Q] {query}\n[A] {truncated}"
-        resp = await _get_client().post(
-            "/api/v1/skills",
-            json={"data": content, "wait": False},
-            headers={"X-OpenViking-Agent": scope},
-            timeout=OPENVIKING_TIMEOUT * 2,
-        )
-        return resp.status_code < 300
-    except Exception as e:
-        logger.debug(f"[OpenViking] store_llm_cache failed: {e}")
-        return False
+    except Exception:
+        pass
+    finally:
+        try:
+            await client.delete(f"/api/v1/sessions/{session_id}",
+                                headers=headers, timeout=2.0)
+        except Exception:
+            pass

@@ -520,16 +520,17 @@ You have internet access through these tools — **use them proactively when you
     # --- Memory: OpenViking semantic retrieval (falls back to full memory.md) ---
     _memory_text = ""
     if memory and memory not in ("_这里记录重要的信息和学到的知识。_", "_Record important information and knowledge here._"):
-        if query:
-            try:
-                from app.services.openviking_client import search_memory, is_available
-                if await is_available():
-                    snippets = await search_memory(query=query, agent_id=str(agent_id))
-                    if snippets:
-                        _memory_text = "\n\n".join(snippets)
-                        logger.debug(f"[OpenViking] Retrieved {len(snippets)} memory snippet(s) for agent {agent_id}")
-            except Exception as _ov_err:
-                logger.debug(f"[OpenViking] memory retrieval skipped: {_ov_err}")
+        # 无 query 时用 memory 首行内容作为摘要查询，避免全量注入
+        _ov_query = query or memory[:200]
+        try:
+            from app.services.openviking_client import search_memory, is_available
+            if await is_available():
+                snippets = await search_memory(query=_ov_query, agent_id=str(agent_id))
+                if snippets:
+                    _memory_text = "\n\n".join(snippets)
+                    logger.debug(f"[OpenViking] Retrieved {len(snippets)} memory snippet(s) for agent {agent_id}")
+        except Exception as _ov_err:
+            logger.debug(f"[OpenViking] memory retrieval skipped: {_ov_err}")
 
         # Fallback: full memory.md injection
         if not _memory_text:
