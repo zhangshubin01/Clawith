@@ -549,11 +549,15 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 # Build notification message with trigger badge
                 trigger_reasons = []
                 for t in triggers:
-                    r = (t.reason or "").strip()
-                    if r and len(r) <= 80:
-                        trigger_reasons.append(r)
-                    elif r:
-                        trigger_reasons.append(r[:77] + "...")
+                    ns = (t.config or {}).get("_notification_summary", "").strip()
+                    if ns:
+                        trigger_reasons.append(ns)
+                    else:
+                        r = (t.reason or "").strip()
+                        if r and len(r) <= 80:
+                            trigger_reasons.append(r)
+                        elif r:
+                            trigger_reasons.append(r[:77] + "...")
                 summary = trigger_reasons[0] if trigger_reasons else "有新的事件需要处理"
                 notification = f"⚡ {summary}\n\n{final_reply}"
 
