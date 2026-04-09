@@ -237,7 +237,7 @@ class AutonomyService:
                         IdentityProvider.tenant_id == creator.tenant_id,
                     )
                 )
-                provider = provider_r.scalar_one_or_none()
+                provider = provider_r.scalars().first()
                 if provider:
                     member_r = await db.execute(
                         select(OrgMember).where(
@@ -245,7 +245,7 @@ class AutonomyService:
                             OrgMember.provider_id == provider.id,
                         )
                     )
-                    member = member_r.scalar_one_or_none()
+                    member = member_r.scalars().first()
                     if member and (member.external_id or member.open_id):
                         receive_id = member.external_id or member.open_id
                         id_type = "user_id" if member.external_id else "open_id"
@@ -292,7 +292,7 @@ class AutonomyService:
                         IdentityProvider.tenant_id == creator.tenant_id,
                     )
                 )
-                provider = provider_r.scalar_one_or_none()
+                provider = provider_r.scalars().first()
                 if provider:
                     member_r = await db.execute(
                         select(OrgMember).where(
@@ -300,7 +300,7 @@ class AutonomyService:
                             OrgMember.provider_id == provider.id,
                         )
                     )
-                    member = member_r.scalar_one_or_none()
+                    member = member_r.scalars().first()
                     if member and (member.external_id or member.open_id):
                         receive_id = member.external_id or member.open_id
                         await feishu_service.send_approval_card(

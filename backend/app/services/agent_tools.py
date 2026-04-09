@@ -4444,9 +4444,9 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 return f"❌ You do not have a relationship with {target.name}. Only agents in your relationship list can be contacted. Ask your administrator to add a relationship if needed."
 
             src_part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == from_agent_id))
-            src_participant = src_part_r.scalar_one_or_none()
+            src_participant = src_part_r.scalars().first()
             tgt_part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == target.id))
-            tgt_participant = tgt_part_r.scalar_one_or_none()
+            tgt_participant = tgt_part_r.scalars().first()
 
             # Find or create ChatSession for this agent pair (ordered consistently)
             session_agent_id = min(from_agent_id, target.id, key=str)
@@ -4458,7 +4458,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                     ChatSession.source_channel == "agent",
                 )
             )
-            chat_session = sess_r.scalar_one_or_none()
+            chat_session = sess_r.scalars().first()
             owner_id = source_agent.creator_id if source_agent else from_agent_id
             if not chat_session:
                 src_part_id = src_participant.id if src_participant else None
