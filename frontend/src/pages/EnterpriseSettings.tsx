@@ -1745,8 +1745,19 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
         onSuccess: () => qc.invalidateQueries({ queryKey: ['okr-settings'] })
     });
 
+    // Fetch members-without-okr to get okr_agent_id (used for the Chat link)
+    const { data: membersData } = useQuery({
+        queryKey: ['okr-members-without-okr-settings'],
+        queryFn: () => fetchJson<any>('/okr/members-without-okr'),
+        enabled: !!settings?.enabled,
+        retry: false,
+    });
+
     if (isLoading) return <div style={{ padding: '20px' }}>{t('common.loading', 'Loading...')}</div>;
     const s = settings || { enabled: false, daily_report_enabled: false, daily_report_time: '18:00', weekly_report_enabled: false, weekly_report_day: 4, period_frequency: 'quarterly', period_length_days: null };
+
+    const okrAgentId = membersData?.okr_agent_id ?? null;
+    const companyOkrExists = membersData?.company_okr_exists ?? false;
 
     return (
         <div style={{ maxWidth: '800px' }}>
@@ -1783,6 +1794,79 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                 
                 {s.enabled && (
                     <div style={{ padding: '20px' }}>
+                        {/* Phase 1 Onboarding Guidance Card */}
+                        <div style={{
+                            marginBottom: '24px',
+                            padding: '16px 20px',
+                            borderRadius: '10px',
+                            background: companyOkrExists
+                                ? 'rgba(34,197,94,0.06)'
+                                : 'rgba(99,102,241,0.06)',
+                            border: `1px solid ${companyOkrExists ? 'rgba(34,197,94,0.2)' : 'rgba(99,102,241,0.2)'}`,
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
+                                {/* Status icon */}
+                                <div style={{
+                                    width: 36, height: 36, borderRadius: '8px', flexShrink: 0,
+                                    background: companyOkrExists ? 'rgba(34,197,94,0.15)' : 'rgba(99,102,241,0.12)',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                }}>
+                                    {companyOkrExists ? (
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                            <polyline points="20 6 9 17 4 12"/>
+                                        </svg>
+                                    ) : (
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6366f1" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                                        </svg>
+                                    )}
+                                </div>
+
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{
+                                        fontWeight: 600, fontSize: '14px',
+                                        color: companyOkrExists ? '#22c55e' : 'var(--text-primary)',
+                                        marginBottom: '4px',
+                                    }}>
+                                        {companyOkrExists ? '公司 OKR 已设定' : '第一步：设定公司 OKR'}
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                                        {companyOkrExists
+                                            ? '公司目标已记录到当前周期。你可以在 OKR 页面查看详情，或催促成员设定个人 OKR。'
+                                            : '开启 OKR 后的第一步是让 OKR Agent 帮你记录公司的目标。点击右侧按钮，跳转到 OKR Agent 的对话页面，告诉它本周期公司的目标，它会帮你创建。'
+                                        }
+                                    </div>
+                                </div>
+
+                                {/* Action button */}
+                                {okrAgentId ? (
+                                    <a
+                                        id="okr-chat-agent-btn"
+                                        href={`/chat/${okrAgentId}`}
+                                        style={{
+                                            display: 'inline-flex', alignItems: 'center', gap: '6px',
+                                            padding: '7px 14px', borderRadius: '6px',
+                                            background: companyOkrExists ? 'var(--bg-secondary)' : 'var(--accent-primary)',
+                                            color: companyOkrExists ? 'var(--text-secondary)' : '#fff',
+                                            border: companyOkrExists ? '1px solid var(--border-subtle)' : 'none',
+                                            fontSize: '12px', fontWeight: 500, textDecoration: 'none',
+                                            whiteSpace: 'nowrap', flexShrink: 0,
+                                            transition: 'opacity 0.15s',
+                                        }}
+                                    >
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                                        </svg>
+                                        {companyOkrExists ? '继续和 OKR Agent 对话' : '前往 OKR Agent 对话'}
+                                    </a>
+                                ) : (
+                                    <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', flexShrink: 0 }}>
+                                        OKR Agent 未找到
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+
                         <div style={{ marginBottom: '24px' }}>
                             <div style={{ fontWeight: 500, marginBottom: '12px', fontSize: '13px' }}>周期偏好</div>
                             <select 
@@ -1860,6 +1944,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
         </div>
     );
 }
+
 
 export default function EnterpriseSettings() {
     const { t } = useTranslation();

@@ -49,6 +49,9 @@ interface Objective {
     description?: string;
     owner_type: string; // company | user | agent
     owner_id?: string;
+    // Resolved display info for the owner (populated by backend)
+    owner_display_name?: string;
+    owner_avatar_url?: string;
     period_start: string;
     period_end: string;
     status: string;
@@ -638,10 +641,23 @@ function ObjectiveCard({
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                         {ownerLabel && (
                             <span style={{
+                                display: 'inline-flex', alignItems: 'center', gap: '5px',
                                 fontSize: '11px', color: 'var(--text-tertiary)',
                                 border: '1px solid var(--border-subtle)',
                                 borderRadius: '4px', padding: '1px 6px', flexShrink: 0,
-                            }}>{ownerLabel}</span>
+                            }}>
+                                {/* Avatar circle for owner */}
+                                <span style={{
+                                    width: 14, height: 14, borderRadius: '50%',
+                                    background: obj.owner_type === 'agent' ? 'rgba(99,102,241,0.2)' : 'rgba(16,185,129,0.2)',
+                                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                    fontSize: '8px', color: obj.owner_type === 'agent' ? '#6366f1' : '#10b981',
+                                    flexShrink: 0,
+                                }}>
+                                    {obj.owner_type === 'agent' ? 'A' : 'U'}
+                                </span>
+                                {ownerLabel}
+                            </span>
                         )}
                         <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
                             {obj.title}
@@ -773,6 +789,211 @@ function ObjectiveCard({
                 </div>
             )}
         </div>
+    );
+}
+
+// ── P4: Members Without OKR Panel ──
+// Shows admin a list of members who haven't set OKRs yet, with a nudge button.
+interface MemberWithoutOKR {
+    type: 'user' | 'agent';
+    id: string;
+    name: string;
+    avatar_url: string;
+    channel: string | null;
+    channel_user_id: string | null;
+}
+
+interface MembersWithoutOKRData {
+    period_start: string;
+    period_end: string;
+    company_okr_exists: boolean;
+    okr_agent_id: string | null;
+    members: MemberWithoutOKR[];
+}
+
+function MembersWithoutOKRPanel({
+    isChinese,
+    periodStart,
+    periodEnd,
+}: {
+    isChinese: boolean;
+    periodStart: string;
+    periodEnd: string;
+}) {
+    const queryClient = useQueryClient();
+    const [nudging, setNudging] = useState(false);
+    const [nudgeResult, setNudgeResult] = useState<string | null>(null);
+
+    const { data, isLoading } = useQuery<MembersWithoutOKRData>({
+        queryKey: ['okr-members-without-okr', periodStart, periodEnd],
+        queryFn: () => fetchJson<MembersWithoutOKRData>('/okr/members-without-okr'),
+        // Only show something meaningful when there are actually incomplete members
+        staleTime: 60_000,
+    });
+
+    // Don't render when loading or no incomplete members
+    if (isLoading || !data || data.members.length === 0) {
+        return null;
+    }
+
+    async function handleNudge() {
+        setNudging(true);
+        setNudgeResult(null);
+        try {
+            const result = await fetchJson<{ triggered: boolean; message: string; member_count: number }>(
+                '/okr/trigger-member-outreach',
+                { method: 'POST' }
+            );
+            setNudgeResult(result.message);
+            // Refresh panel after nudge
+            queryClient.invalidateQueries({ queryKey: ['okr-members-without-okr'] });
+        } catch (e: any) {
+            setNudgeResult(e.message ?? (isChinese ? '催促失败，请重试' : 'Failed to trigger outreach'));
+        } finally {
+            setNudging(false);
+        }
+    }
+
+    const { members, company_okr_exists, okr_agent_id } = data;
+
+    return (
+        <section style={{ marginTop: '8px' }}>
+            {/* Section header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
+                    {isChinese ? '未设定 OKR 的成员' : 'Members Without OKR'}
+                </span>
+                <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
+                <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{members.length}</span>
+            </div>
+
+            <div style={{
+                border: '1px solid var(--border-subtle)',
+                borderRadius: '10px',
+                overflow: 'hidden',
+                background: 'var(--bg-primary)',
+            }}>
+                {/* Member list */}
+                <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {members.map((member) => (
+                        <div key={member.id} style={{
+                            display: 'flex', alignItems: 'center', gap: '10px',
+                            padding: '8px 10px',
+                            background: 'var(--bg-secondary)',
+                            borderRadius: '6px',
+                            border: '1px solid var(--border-subtle)',
+                        }}>
+                            {/* Avatar */}
+                            <div style={{
+                                width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+                                background: member.type === 'agent' ? 'rgba(99,102,241,0.15)' : 'rgba(16,185,129,0.15)',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                fontSize: '11px', fontWeight: 600,
+                                color: member.type === 'agent' ? '#6366f1' : '#10b981',
+                            }}>
+                                {member.name.charAt(0).toUpperCase()}
+                            </div>
+
+                            {/* Name + type badge */}
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>
+                                    {member.name}
+                                </div>
+                                <div style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>
+                                    {member.type === 'agent'
+                                        ? (isChinese ? 'AI Agent' : 'AI Agent')
+                                        : member.channel
+                                            ? (isChinese ? `平台用户 (${member.channel})` : `Platform user (${member.channel})`)
+                                            : (isChinese ? '平台用户' : 'Platform user')
+                                    }
+                                </div>
+                            </div>
+
+                            {/* No OKR indicator */}
+                            <span style={{
+                                fontSize: '10px', color: 'var(--text-tertiary)',
+                                border: '1px dashed var(--border-subtle)',
+                                borderRadius: '4px', padding: '1px 6px',
+                            }}>
+                                {isChinese ? '未设定 OKR' : 'No OKR'}
+                            </span>
+                        </div>
+                    ))}
+                </div>
+
+                {/* Footer: guidance + nudge button */}
+                <div style={{
+                    padding: '12px 16px',
+                    borderTop: '1px solid var(--border-subtle)',
+                    background: 'var(--bg-secondary)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap',
+                }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', flex: 1 }}>
+                        {company_okr_exists
+                            ? (isChinese
+                                ? 'OKR Agent 将向以上成员发送消息，邀请他们设定个人 OKR。'
+                                : 'OKR Agent will message the members above and invite them to set their OKRs.')
+                            : (isChinese
+                                ? `请先\u0020${okr_agent_id ? '' : ''}与 OKR Agent 沟通确认公司 OKR，然后再催促成员。`
+                                : 'Please establish company OKRs with the OKR Agent first before nudging members.')
+                        }
+                    </div>
+                    {/* Nudge button — only active when company OKR exists */}
+                    <button
+                        id="okr-nudge-btn"
+                        onClick={handleNudge}
+                        disabled={nudging || !company_okr_exists}
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: '6px',
+                            padding: '7px 14px', borderRadius: '6px',
+                            border: 'none',
+                            background: company_okr_exists ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
+                            color: company_okr_exists ? '#fff' : 'var(--text-quaternary)',
+                            fontSize: '12px', fontWeight: 500, cursor: nudging || !company_okr_exists ? 'not-allowed' : 'pointer',
+                            opacity: nudging ? 0.7 : 1,
+                            transition: 'opacity 0.15s, background 0.15s',
+                            whiteSpace: 'nowrap',
+                        }}
+                        onMouseEnter={e => {
+                            if (company_okr_exists && !nudging)
+                                (e.currentTarget as HTMLButtonElement).style.opacity = '0.85';
+                        }}
+                        onMouseLeave={e => {
+                            (e.currentTarget as HTMLButtonElement).style.opacity = nudging ? '0.7' : '1';
+                        }}
+                    >
+                        {nudging ? (
+                            <>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                                </svg>
+                                {isChinese ? 'OKR Agent 正在发消息...' : 'OKR Agent is messaging...'}
+                            </>
+                        ) : (
+                            <>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/>
+                                </svg>
+                                {isChinese ? '催促设定 OKR' : 'Nudge Members'}
+                            </>
+                        )}
+                    </button>
+                </div>
+
+                {/* Result message */}
+                {nudgeResult && (
+                    <div style={{
+                        padding: '10px 16px',
+                        fontSize: '12px',
+                        color: 'var(--text-secondary)',
+                        background: 'var(--bg-tertiary)',
+                        borderTop: '1px solid var(--border-subtle)',
+                    }}>
+                        {nudgeResult}
+                    </div>
+                )}
+            </div>
+        </section>
     );
 }
 
@@ -999,12 +1220,14 @@ export default function OKR() {
     const companyObjs = objectives.filter(o => o.owner_type === 'company');
     const memberObjs = objectives.filter(o => o.owner_type !== 'company');
 
-    // Group member objectives by owner
-    const memberGroups: Record<string, { label: string; objs: Objective[] }> = {};
+    // Group member objectives by owner — use owner_display_name as the label when available
+    const memberGroups: Record<string, { label: string; avatarType: string; objs: Objective[] }> = {};
     for (const obj of memberObjs) {
         const key = `${obj.owner_type}:${obj.owner_id ?? ''}`;
         if (!memberGroups[key]) {
-            memberGroups[key] = { label: obj.owner_type, objs: [] };
+            // Prefer owner_display_name; fall back to owner_type tag
+            const label = obj.owner_display_name || obj.owner_type;
+            memberGroups[key] = { label, avatarType: obj.owner_type, objs: [] };
         }
         memberGroups[key].objs.push(obj);
     }
@@ -1167,7 +1390,7 @@ export default function OKR() {
 
                     {/* Member Objectives */}
                     {!objLoading && Object.keys(memberGroups).length > 0 && (
-                        <section>
+                        <section style={{ marginBottom: '24px' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
                                 <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
                                     {t('okr.memberObjectives', isChinese ? '成员目标' : 'Member Objectives')}
@@ -1194,6 +1417,15 @@ export default function OKR() {
                                 ))}
                             </div>
                         </section>
+                    )}
+
+                    {/* P4: Members Without OKR Panel */}
+                    {!objLoading && isAdmin && selectedPeriod?.is_current && (
+                        <MembersWithoutOKRPanel
+                            isChinese={isChinese}
+                            periodStart={selectedPeriod.start}
+                            periodEnd={selectedPeriod.end}
+                        />
                     )}
                 </>
             )}
