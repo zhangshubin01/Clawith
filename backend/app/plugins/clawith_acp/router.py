@@ -139,6 +139,12 @@ current_acp_pending_tools = ContextVar("current_acp_pending_tools", default={})
 current_acp_pending_permissions = ContextVar("current_acp_pending_permissions", default={})
 # While `call_llm` runs for a prompt, recv_loop can correlate `tool_result` / `permission_result` with this session.
 current_acp_prompt_session_id = ContextVar("current_acp_prompt_session_id", default=None)
+# N10: session config from client (auto_approve_diff, etc.)
+current_acp_session_config = ContextVar("current_acp_session_config", default={})
+
+# Global registry so the Clawith frontend WebSocket (/ws/chat/) can also resolve permission futures.
+# Keys are permission_id UUIDs (unique per request), so no collision risk across concurrent ACP connections.
+_pending_permission_futures: dict[str, asyncio.Future] = {}
 
 
 def _acp_verbose() -> bool:
@@ -149,13 +155,11 @@ def _acp_log_chunks() -> bool:
     return (os.environ.get("CLAWITH_ACP_LOG_CHUNKS") or "").strip().lower() in ("1", "true", "yes", "on")
 
 # IDE tools that must receive an affirmative `permission_result` before `execute_tool` is sent.
+# ide_write_file requires explicit approval via the Clawith web UI PermissionModal (IDEA ACP plugin
+# does not implement session_request_permission natively, so web UI is the only approval surface).
 _IDE_TOOLS_REQUIRING_PERMISSION = frozenset(
     {
         "ide_write_file",
-        "ide_execute_command",
-        "ide_kill_terminal",
-        "ide_release_terminal",
-        "ide_create_terminal",
     }
 )
 
@@ -309,15 +313,24 @@ async def _acp_await_client_permission(
     tool_name: str,
     args: dict[str, Any],
     *,
+    agent_id: str = "",
     session_id: str = "",
     timeout: float = 120.0,
     extra_payload: dict | None = None,
 ) -> bool:
-    """Ask the thin client / IDE to confirm a sensitive ide_* action; returns True if allowed."""
+    """Ask the thin client / IDE to confirm a sensitive ide_* action; returns True if allowed.
+
+    The permission_request is forwarded to BOTH the ACP WebSocket (IDE thin client) and the
+    Clawith frontend chat WebSocket so either the IDE PermissionBroker dialog or the web UI
+    PermissionModal can approve. Whichever resolves first wins. The thin client cancels its
+    pending _bg_permission task when execute_tool arrives, preventing ACP connection deadlocks
+    caused by IntelliJ's modal blocking write_text_file.
+    """
     perm_id = str(uuid.uuid4())
     loop = asyncio.get_running_loop()
     fut = loop.create_future()
     pending_permissions[perm_id] = fut
+    _pending_permission_futures[perm_id] = fut  # global registry (kept for forward compat)
     try:
         summary = json.dumps(args, ensure_ascii=False)[:800]
         payload: dict[str, Any] = {
@@ -331,11 +344,23 @@ async def _acp_await_client_permission(
             payload.update({k: v for k, v in extra_payload.items() if k not in _RESERVED})
         await websocket.send_json(_acp_ws_envelope(payload))
         logger.info(
-            "ACP permission_request sent session_id={} tool={} perm_id={}",
+            "ACP permission_request → thin client session_id={} tool={} perm_id={}",
             session_id or "-",
             tool_name,
             perm_id,
         )
+        # Also forward to the web UI via the chat WebSocket so browser users can approve.
+        # Whichever dialog (IDE or web) resolves first will unblock the future.
+        if agent_id and session_id:
+            try:
+                await ws_module.manager.send_to_session(str(agent_id), str(session_id), payload)
+                logger.debug(
+                    "ACP permission_request → frontend chat ws session_id={} perm_id={}",
+                    session_id or "-",
+                    perm_id,
+                )
+            except Exception:
+                pass
         allowed = bool(await asyncio.wait_for(fut, timeout=timeout))
         logger.info(
             "ACP permission resolved session_id={} tool={} perm_id={} allowed={}",
@@ -354,6 +379,21 @@ async def _acp_await_client_permission(
         return False
     finally:
         pending_permissions.pop(perm_id, None)
+        _pending_permission_futures.pop(perm_id, None)
+
+
+def resolve_acp_permission(perm_id: str, granted: bool) -> bool:
+    """Resolve a pending ACP permission from the Clawith frontend WebSocket.
+
+    Returns True if the permission was found and resolved, False if not found or already done.
+    """
+    fut = _pending_permission_futures.get(perm_id)
+    if fut is not None and not fut.done():
+        fut.set_result(granted)
+        logger.info("ACP permission resolved via frontend ws perm_id={} granted={}", perm_id, granted)
+        return True
+    logger.warning("ACP permission resolve: perm_id={} not found or already done", perm_id)
+    return False
 
 async def _read_file_for_diff(
     ws: WebSocket,
@@ -427,32 +467,45 @@ async def _custom_execute_tool(
 
     if ws and tool_name in _IDE_BRIDGE_TOOL_NAMES:
         if tool_name in _IDE_TOOLS_REQUIRING_PERMISSION:
-            extra: dict[str, Any] | None = None
-            if tool_name == "ide_write_file":
-                file_path = args.get("path", "")
-                old_content = await _read_file_for_diff(ws, pending, file_path, session_id) if file_path else ""
-                new_content = args.get("content", "")
-                MAX_DIFF_SIZE = 100_000  # 100KB per side
-                if len(old_content) > MAX_DIFF_SIZE:
-                    old_content = old_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(old_content)} 字符)"
-                if len(new_content) > MAX_DIFF_SIZE:
-                    new_content = new_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(new_content)} 字符)"
-                extra = {
-                    "file_path": file_path,
-                    "old_content": old_content,
-                    "new_content": new_content,
-                }
-            allowed = await _acp_await_client_permission(
-                ws, pending_perm, tool_name, args, session_id=session_id,
-                extra_payload=extra,
-            )
-            if not allowed:
+            # Check if auto_approve_diff is enabled in session config
+            # When enabled, IDE already shows the diff and no need for extra permission popup on web UI
+            config = current_acp_session_config.get()
+            auto_approve = config.get("auto_approve_diff") or config.get("autoApproval")
+            if auto_approve is True:
                 logger.info(
-                    "ACP ide tool blocked by permission session_id={} tool={}",
+                    "[ACP] ide_write_file auto-approved: session_id={} tool={} auto_approve_diff=true",
                     session_id or "-",
                     tool_name,
                 )
-                return f"Permission denied for {tool_name} (IDE user rejected or timed out)."
+            else:
+                extra: dict[str, Any] | None = None
+                if tool_name == "ide_write_file":
+                    file_path = args.get("path", "")
+                    old_content = await _read_file_for_diff(ws, pending, file_path, session_id) if file_path else ""
+                    new_content = args.get("content", "")
+                    MAX_DIFF_SIZE = 100_000  # 100KB per side
+                    if len(old_content) > MAX_DIFF_SIZE:
+                        old_content = old_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(old_content)} 字符)"
+                    if len(new_content) > MAX_DIFF_SIZE:
+                        new_content = new_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(new_content)} 字符)"
+                    extra = {
+                        "file_path": file_path,
+                        "old_content": old_content,
+                        "new_content": new_content,
+                    }
+                allowed = await _acp_await_client_permission(
+                    ws, pending_perm, tool_name, args,
+                    agent_id=str(agent_id),
+                    session_id=session_id,
+                    extra_payload=extra,
+                )
+                if not allowed:
+                    logger.info(
+                        "ACP ide tool blocked by permission session_id={} tool={}",
+                        session_id or "-",
+                        tool_name,
+                    )
+                    return f"Permission denied for {tool_name} (IDE user rejected or timed out)."
 
         call_id = str(uuid.uuid4())
         loop = asyncio.get_running_loop()
@@ -884,6 +937,13 @@ async def acp_websocket(
                 session_cwd = (data.get("cwd") or "").strip() or "/"
                 parent_session_id = (data.get("parent_session_id") or "").strip() or None  # O4
                 agent_override_id = (data.get("agent_override") or "").strip() or None      # O5
+                # N9: session mode from client (set by set_session_mode)
+                session_mode = data.get("mode")
+                # N10: session config options from client
+                session_config = data.get("config") or {}
+                # Store session mode and config in the connection state
+                if session_mode:
+                    logger.info("[ACP] session_mode received: session_id={} mode={}", session_id, session_mode)
                 # A: IDE-declared MCP servers forwarded by thin client (stored for future MCP bridging)
                 mcp_servers_from_ide = data.get("mcp_servers") or []
                 if mcp_servers_from_ide:
@@ -1006,6 +1066,18 @@ async def acp_websocket(
                     "去读取 `.png` `.jpg` 等二进制图片路径来「看图」。\n"
                     "遇到需要修改代码或查看本地**源码文本**时，请优先使用这些 `ide_` 开头的工具！"
                 )
+                # Add session mode prompt if available
+                if session_mode:
+                    mode_descriptions = {
+                        "chat": "聊天模式 - 自由对话，回答问题，提供建议",
+                        "code-review": "代码评审模式 - 专注于代码评审，分析代码质量，提出改进建议",
+                        "planning": "规划模式 - 帮助用户规划任务、设计架构、分解需求"
+                    }
+                    desc = mode_descriptions.get(session_mode, "")
+                    if desc:
+                        ide_prompt += f"\n\n[工作模式]\n当前模式: {session_mode} - {desc}"
+                    else:
+                        ide_prompt += f"\n\n[工作模式]\n当前模式: {session_mode}"
 
                 cancel_key = (str(turn_agent.id), str(user_id), str(session_id))
                 cancel_prompt = asyncio.Event()
@@ -1023,6 +1095,7 @@ async def acp_websocket(
                         continue
                     _acp_cancel_registry[cancel_key] = cancel_prompt
                 _prompt_sid_token = current_acp_prompt_session_id.set(str(session_id))
+                _config_token = current_acp_session_config.set(session_config)
                 try:
                     logger.info(
                         "ACP calling LLM session_id={} agent={} history_len={}",
@@ -1107,6 +1180,7 @@ async def acp_websocket(
                     await websocket.send_json(_acp_ws_envelope({"type": "error", "content": str(e)}))
                 finally:
                     current_acp_prompt_session_id.reset(_prompt_sid_token)
+                    current_acp_session_config.reset(_config_token)
                     async with _acp_cancel_registry_lock:
                         if _acp_cancel_registry.get(cancel_key) is cancel_prompt:
                             _acp_cancel_registry.pop(cancel_key, None)
@@ -1162,7 +1236,18 @@ async def _persist_chat_turn(agent_id, session_id: str, user_text: str, reply_te
                 db.add(ChatMessage(agent_id=agent_id, user_id=user_id, role="assistant", content=reply_text, conversation_id=str(sid_uuid)))
 
             await db.commit()
-            
+
+            # Notify Clawith frontend WebSocket so the web UI refreshes in real-time.
+            try:
+                sid_normalized = str(sid_uuid)
+                await ws_module.manager.send_to_session(
+                    str(agent_id),
+                    sid_normalized,
+                    {"type": "done", "role": "assistant", "content": reply_text},
+                )
+            except Exception as _fe:
+                logger.debug("ACP persist: frontend notify failed: {}", _fe)
+
             from app.services.activity_logger import log_activity
             await log_activity(
                 agent_id=agent_id,

@@ -80,7 +80,7 @@ from acp.schema import (
     SessionForkCapabilities,     # N5
     SessionInfo,
     SessionInfoUpdate,           # N2
-    SessionListCapabilities,     # N5
+    SessionListCapabilities,
     SessionResumeCapabilities,   # N5
     SetSessionConfigOptionResponse,
     SetSessionModeResponse,
@@ -353,6 +353,10 @@ class ClawithThinClientAgent(Agent):
         self._fork_parents: dict[str, str] = {}
         # O5: per-session model override — session_id → model_id (from IDE model picker)
         self._session_models: dict[str, str] = {}
+        # N9: per-session mode — session_id → mode_id (from IDE mode switcher)
+        self._session_modes: dict[str, str] = {}
+        # N10: per-session config options — session_id → (config_id → value)
+        self._session_config: dict[str, dict[str, str | bool]] = {}
         # Same WebSocket used for an in-flight `prompt` — used by `cancel` to reach the cloud loop.
         self._active_prompt_ws: Any = None
         self._sessions_titled: set[str] = set()            # N2: sessions already auto-titled
@@ -425,6 +429,46 @@ class ClawithThinClientAgent(Agent):
         **kwargs: Any,
     ) -> InitializeResponse:
         logger.info("Connected to IDE: %s", client_info)
+
+        # Extend SessionCapabilities to add mode and config capabilities
+        # This is needed because ACP 0.9.0 doesn't include these fields in the base class
+        # but JetBrains IDE expects them to be present for newer features (mode switching)
+        from pydantic import BaseModel
+        from typing import Annotated, Optional, Any
+        class ExtendedSessionCapabilities(SessionCapabilities):
+            mode: Optional[Any] = None
+            config: Optional[Any] = None
+
+        # Now add the capabilities if the types exist
+        extended_kwargs = {
+            "close": SessionCloseCapabilities(),
+            "fork": SessionForkCapabilities(),
+            "list": SessionListCapabilities(),
+            "resume": SessionResumeCapabilities(),
+        }
+
+        # Try to add mode capability if available
+        try:
+            from acp.schema import SessionModeCapabilities
+            extended_kwargs["mode"] = SessionModeCapabilities(
+                available_modes=["chat", "code-review", "planning"]
+            )
+            logger.debug("ACP thin: SessionModeCapabilities added with available modes %s", ", ".join(["chat", "code-review", "planning"]))
+        except ImportError:
+            # If not available, leave as None (still works for JSON serialization)
+            pass
+
+        # Try to add config capability if available
+        try:
+            from acp.schema import ConfigCapabilities
+            extended_kwargs["config"] = ConfigCapabilities()
+            logger.debug("ACP thin: ConfigCapabilities added")
+        except ImportError:
+            # If not available, leave as None (still works for JSON serialization)
+            pass
+
+        session_capabilities = ExtendedSessionCapabilities(**extended_kwargs)
+
         return InitializeResponse(
             protocol_version=protocol_version,
             agent_info=AgentImplementation(
@@ -440,13 +484,7 @@ class ClawithThinClientAgent(Agent):
                     embedded_context=True,
                     audio=False,
                 ),
-                # N5: declare session management capabilities so IDE shows history/fork/close UI
-                session_capabilities=SessionCapabilities(
-                    close=SessionCloseCapabilities(),
-                    fork=SessionForkCapabilities(),
-                    list=SessionListCapabilities(),
-                    resume=SessionResumeCapabilities(),
-                ),
+                session_capabilities=session_capabilities,
             ),
         )
 
@@ -572,6 +610,8 @@ class ClawithThinClientAgent(Agent):
         self._session_cwds.pop(session_id, None)
         self._fork_parents.pop(session_id, None)      # O4
         self._session_models.pop(session_id, None)    # O5
+        self._session_modes.pop(session_id, None)      # N9
+        self._session_config.pop(session_id, None)     # N10
         self._sessions_titled.discard(session_id)     # N2
         self._session_mcp_servers.pop(session_id, None)  # A
         logger.info("close_session session_id=%s (session state cleared)", session_id)
@@ -596,7 +636,8 @@ class ClawithThinClientAgent(Agent):
         return AuthenticateResponse()
 
     async def set_session_mode(self, mode_id: str, session_id: str, **kwargs: Any) -> SetSessionModeResponse | None:
-        logger.info("set_session_mode session_id=%s mode_id=%s (not forwarded to cloud)", session_id, mode_id)
+        self._session_modes[session_id] = mode_id
+        logger.info("set_session_mode session_id=%s mode_id=%s (will forward to cloud on next prompt)", session_id, mode_id)
         # N9: confirm mode switch back to IDE so the UI reflects the change
         await self._ide_session_update(
             session_id,
@@ -615,9 +656,25 @@ class ClawithThinClientAgent(Agent):
         self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
     ) -> SetSessionConfigOptionResponse | None:
         logger.debug("set_config_option session_id=%s config_id=%s value=%r", session_id, config_id, value)
+        # N10: store config option
+        if session_id not in self._session_config:
+            self._session_config[session_id] = {}
+        self._session_config[session_id][config_id] = value
+        # Convert to list of config options for response
+        config_options = [
+            {"config_id": cid, "value": cval}
+            for cid, cval in self._session_config[session_id].items()
+        ]
         # N10: echo current config state back to IDE so it reflects the acknowledged change
-        await self._ide_session_update(session_id, ConfigOptionUpdate(config_options=[], session_update="config_option_update"), "config_option_update")
-        return SetSessionConfigOptionResponse(config_options=[])
+        await self._ide_session_update(
+            session_id,
+            ConfigOptionUpdate(
+                config_options=config_options,
+                session_update="config_option_update"
+            ),
+            "config_option_update"
+        )
+        return SetSessionConfigOptionResponse(config_options=config_options)
 
     async def fork_session(
         self,
@@ -773,14 +830,22 @@ class ClawithThinClientAgent(Agent):
 
             broker = PermissionBroker(session_id, _requester)
             # B: 使用 SDK 提供的完整选项（Approve / Approve for session / Reject）
-            logger.debug("ACP thin: calling broker.request_for tid=%s", tid)
-            resp = await broker.request_for(
-                tid,
-                description=description,
-                tool_call=tc,
-                options=list(default_permission_options()),
-            )
-            logger.debug("ACP thin: broker.request_for returned")
+            # Timeout slightly less than backend's 120s so we can send permission_result before backend times out.
+            logger.info("ACP thin: calling broker.request_for tid=%s tool=%s", tid, tool_name)
+            try:
+                resp = await asyncio.wait_for(
+                    broker.request_for(
+                        tid,
+                        description=description,
+                        tool_call=tc,
+                        options=list(default_permission_options()),
+                    ),
+                    timeout=110.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("ACP thin: broker.request_for timed out tool=%s tid=%s; denying", tool_name, tid)
+                return False
+            logger.info("ACP thin: broker.request_for returned tool=%s tid=%s", tool_name, tid)
             out = resp.outcome
             # JetBrains/ACP 版本差异兼容：allow_once 或 allow_always 都视为允许
             selected_id = getattr(out, "selected_id", None) if out is not None else None
@@ -888,6 +953,7 @@ class ClawithThinClientAgent(Agent):
         _chunks: list[str] = []  # O7: accumulate full response for edit-block post-processing
         _plan_entries: list[tuple[str, str, str]] = []   # N1: (tid, title, status)
         _tool_call_id_by_name: dict[str, str] = {}        # N7/N8: tool_name → latest ACP tool_call_id
+        _active_perm_tasks: dict[str, asyncio.Task] = {}  # perm_id → _bg_permission task (for cancellation)
         try:
             proxy_kw = _websocket_proxy_kw()
             if proxy_kw.get("proxy") is None:
@@ -902,7 +968,10 @@ class ClawithThinClientAgent(Agent):
                     # (permission / execute_tool / done) while JetBrains applies chunks in order.
                     ide_q: asyncio.Queue[Any] = asyncio.Queue()
 
+                    _ide_chunk_count = 0
+
                     async def _ide_emit_worker() -> None:
+                        nonlocal _ide_chunk_count
                         while True:
                             item = await ide_q.get()
                             lab_i = "?"
@@ -910,14 +979,31 @@ class ClawithThinClientAgent(Agent):
                                 if item is None:
                                     break
                                 sid_i, upd_i, lab_i = item
-                                if lab_i != "chunk":
+                                if lab_i == "chunk":
+                                    _ide_chunk_count += 1
+                                    n_c = _ide_chunk_count
+                                    if n_c == 1 or n_c % 25 == 0:
+                                        logger.info(
+                                            "ACP thin: [trace] ide_worker chunk n=%d session_id=%s",
+                                            n_c,
+                                            session_id,
+                                        )
+                                else:
                                     logger.info(
                                         "ACP thin: [trace] ide_worker START label=%s session_id=%s",
                                         lab_i,
                                         session_id,
                                     )
                                 await self._ide_session_update(sid_i, upd_i, lab_i)
-                                if lab_i != "chunk":
+                                if lab_i == "chunk":
+                                    n_c = _ide_chunk_count
+                                    if n_c == 1 or n_c % 25 == 0:
+                                        logger.info(
+                                            "ACP thin: [trace] ide_worker chunk DONE n=%d session_id=%s",
+                                            n_c,
+                                            session_id,
+                                        )
+                                else:
                                     logger.info(
                                         "ACP thin: [trace] ide_worker END label=%s session_id=%s",
                                         lab_i,
@@ -967,6 +1053,14 @@ class ClawithThinClientAgent(Agent):
                     _model = self._session_models.get(session_id)
                     if _model:
                         prompt_body["agent_override"] = _model
+                    # N9: forward session mode so cloud uses the right mode
+                    _mode = self._session_modes.get(session_id)
+                    if _mode:
+                        prompt_body["mode"] = _mode
+                    # N10: forward session config options so cloud applies settings
+                    _config = self._session_config.get(session_id)
+                    if _config:
+                        prompt_body["config"] = _config
                     # A: forward IDE-declared MCP servers so cloud knows what's available
                     _mcp = self._session_mcp_servers.get(session_id)
                     if _mcp:
@@ -1039,43 +1133,57 @@ class ClawithThinClientAgent(Agent):
                             await _trace_join("permission_request")
                             _pid = data.get("permission_id")
                             perm_id_str = str(_pid) if _pid is not None else ""
-                            tool_name = data.get("tool_name") or "ide_tool"
-                            summary = data.get("args_summary") or ""
+                            _tool_name_perm = data.get("tool_name") or "ide_tool"
+                            _summary_perm = data.get("args_summary") or ""
                             logger.info(
                                 "ACP thin: permission_request session_id=%s tool=%s perm_id=%s",
                                 session_id,
-                                tool_name,
+                                _tool_name_perm,
                                 perm_id_str,
                             )
-                            granted = False
-                            try:
-                                granted = await self._resolve_cloud_permission(
-                                    perm_id_str or None,
-                                    tool_name,
-                                    summary,
-                                    session_id,
+
+                            # Handle permission in a background task so the inbound queue keeps
+                            # draining. This prevents a deadlock when the backend/web-UI resolves
+                            # the permission first and sends execute_tool before we finish here.
+                            async def _bg_permission(
+                                _pid_str=perm_id_str,
+                                _tname=_tool_name_perm,
+                                _summ=_summary_perm,
+                                _ws=ws,
+                            ) -> None:
+                                _granted = False
+                                try:
+                                    _granted = await self._resolve_cloud_permission(
+                                        _pid_str or None, _tname, _summ, session_id
+                                    )
+                                except Exception as _e:
+                                    logger.error("ACP thin: _resolve_cloud_permission failed: %s", _e)
+                                logger.info(
+                                    "ACP thin: permission_result bg perm_id=%s granted=%s tool=%s",
+                                    _pid_str,
+                                    _granted,
+                                    _tname,
                                 )
-                            except Exception as e:
-                                logger.error("ACP thin: _resolve_cloud_permission failed: %s", e)
-                                granted = False
-                            logger.info(
-                                "ACP thin: permission_result sending session_id=%s perm_id=%s granted=%s tool=%s",
-                                session_id,
-                                perm_id_str,
-                                granted,
-                                tool_name,
-                            )
-                            await ws.send(
-                                json.dumps(
-                                    _cloud_msg(
-                                        {
-                                            "type": "permission_result",
-                                            "permission_id": perm_id_str,
-                                            "granted": granted,
-                                        }
-                                    ),
-                                    ensure_ascii=False,
-                                )
+                                try:
+                                    await _ws.send(
+                                        json.dumps(
+                                            _cloud_msg(
+                                                {
+                                                    "type": "permission_result",
+                                                    "permission_id": _pid_str,
+                                                    "granted": _granted,
+                                                }
+                                            ),
+                                            ensure_ascii=False,
+                                        )
+                                    )
+                                except Exception as _se:
+                                    logger.debug("ACP thin: permission_result send failed: %s", _se)
+
+                            _perm_task = asyncio.create_task(_bg_permission())
+                            _active_perm_tasks[perm_id_str] = _perm_task
+                            _perm_task.add_done_callback(
+                                lambda _t, _k=perm_id_str: _active_perm_tasks.pop(_k, None)
                             )
 
                         elif msg_type == "chunk":
@@ -1194,23 +1302,41 @@ class ClawithThinClientAgent(Agent):
                                     result = res.content
                                 elif tool_name == "ide_write_file":
                                     abs_path = _abs(args["path"])
-                                    # Read existing content BEFORE overwriting so diff window has old_text
-                                    with contextlib.suppress(Exception):
-                                        _old_res = await self._conn.read_text_file(path=abs_path, session_id=session_id)
-                                        _write_old_text = _old_res.content
-                                    # 展示 diff 并等待用户审批，通过后才真正写文件
-                                    _write_approved = await self._request_edit_approval(
-                                        abs_path, args["content"], _write_old_text, session_id
+                                    # Permission was already granted by backend via permission_request/result
+                                    # before execute_tool was sent — write directly without asking again.
+                                    #
+                                    # Cancel any pending _bg_permission tasks BEFORE calling write_text_file.
+                                    # If the web UI approved first while the IDE dialog was still open,
+                                    # IntelliJ's modal blocks all ACP requests (including write_text_file),
+                                    # causing a deadlock. Cancelling the task triggers CancelledError in
+                                    # the pending request_permission call, which dismisses the IDE dialog.
+                                    if _active_perm_tasks:
+                                        for _pt in list(_active_perm_tasks.values()):
+                                            if not _pt.done():
+                                                _pt.cancel()
+                                                logger.info(
+                                                    "ACP thin: cancelled pending permission task to unblock ide_write_file"
+                                                )
+                                        _active_perm_tasks.clear()
+                                    logger.info(
+                                        "ACP thin: execute_tool ide_write_file path=%s session_id=%s",
+                                        abs_path,
+                                        session_id,
                                     )
-                                    if _write_approved:
-                                        await self._conn.write_text_file(
-                                            path=abs_path,
-                                            content=args["content"],
-                                            session_id=session_id,
+                                    try:
+                                        await asyncio.wait_for(
+                                            self._conn.write_text_file(
+                                                path=abs_path,
+                                                content=args["content"],
+                                                session_id=session_id,
+                                            ),
+                                            timeout=90.0,
                                         )
-                                        result = f"File {abs_path} successfully written."
-                                    else:
-                                        result = f"用户拒绝了对 {abs_path} 的修改，文件未变更。"
+                                    except asyncio.TimeoutError:
+                                        raise RuntimeError(
+                                            f"ide_write_file timed out after 90s (path: {abs_path})"
+                                        )
+                                    result = f"File {abs_path} successfully written."
                                 elif tool_name == "ide_execute_command":
                                     result = await self._run_shell_command(
                                         args["command"], session_id
@@ -1368,8 +1494,9 @@ class ClawithThinClientAgent(Agent):
                         elif msg_type == "done":
                             await _trace_join("done")
                             logger.info(
-                                "ACP thin: [trace] received DONE; breaking prompt loop session_id=%s",
+                                "ACP thin: [trace] received DONE; breaking prompt loop session_id=%s ide_chunks_delivered=%d",
                                 session_id,
+                                _ide_chunk_count,
                             )
                             # O7: post-process full response for annotated edit blocks
                             _full_text = "".join(_chunks)
