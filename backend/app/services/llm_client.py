@@ -2080,6 +2080,14 @@ def create_llm_client(
     Raises:
         ValueError: If provider is not supported
     """
+    _mid = (model or "").strip()
+    if not _mid:
+        raise ValueError(
+            "model is required: set the provider's model ID in Clawith (LLM model pool), "
+            "not only the API key — e.g. gpt-4o, claude-sonnet-4-20250514."
+        )
+    model = _mid
+
     normalized_provider = normalize_provider(provider)
     spec = get_provider_spec(normalized_provider)
 

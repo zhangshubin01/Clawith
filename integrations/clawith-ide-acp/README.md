@@ -129,7 +129,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force   # 若脚本被策�
 - **One folder** to copy to each developer machine: `clawith-ide-acp/`.
 - Run `**scripts/setup-mac.sh`** or `**scripts/setup-win.ps1`** to create `.venv` and install deps; configure `**.env`**.
 - Point **JetBrains `~/.jetbrains/acp.json`** `command` + `args` to that **venv Python** and `**server.py`** (absolute paths). Use `**acp.windows.json.example`** on Windows.
-- `**server.py`** connects to `**CLAWITH_URL`** over WebSocket at `**/api/plugins/clawith-acp/ws**`; set `**CLAWITH_WS_PROXY**` only if you need system proxy (SOCKS may need `**python-socks**`).
+- `**server.py`** connects to `**CLAWITH_URL`** over WebSocket at `**/api/plugins/clawith-acp/ws`**; set `**CLAWITH_WS_PROXY**` only if you need system proxy (SOCKS may need `**python-socks**`).
 
 ---
 

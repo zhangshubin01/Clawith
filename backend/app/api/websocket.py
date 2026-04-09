@@ -814,6 +814,18 @@ async def websocket_chat(
             trace_id = str(_trace_uuid.uuid4())[:12]
             set_trace_id(trace_id)
 
+            # Handle ACP permission_result from the Clawith frontend.
+            if data.get("type") == "permission_result":
+                try:
+                    from app.plugins.clawith_acp.router import resolve_acp_permission
+                    resolve_acp_permission(
+                        data.get("permission_id", ""),
+                        bool(data.get("granted", False)),
+                    )
+                except Exception:
+                    pass
+                continue
+
             content = data.get("content", "")
             display_content = data.get("display_content", "")  # User-facing display text
             file_name = data.get("file_name", "")  # Original file name for attachment display

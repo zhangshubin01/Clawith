@@ -4,11 +4,26 @@
 model 字段映射到 Clawith 智能体（UUID 或名称）。
 支持流式（stream=true）和非流式响应。
 
-Cursor 配置:
-    Settings > Models > Add Model
-    Base URL: http://localhost:8008
-    API Key:  cw-xxx
-    Model:    <智能体名称或 UUID>
+前提: 后端已加载 clawith-mcp 插件；本路由挂在应用根路径（与 API_PREFIX=/api 无关），
+客户端会请求 {Base URL}/v1/chat/completions 与 {Base URL}/v1/models。
+
+Base URL 填写「后端 HTTP 根地址」即可（不要带 /api；一般也不要带 /v1，除非你的客户端
+文档明确要求 base 以 /v1 结尾）。
+
+本地端口（以本仓库为准）:
+  - 源码 + restart.sh: 默认 BACKEND_PORT=8008 → http://127.0.0.1:8008
+  - Docker entrypoint: uvicorn --port 8000（容器内）；宿主机 URL 取决于 compose 端口映射
+
+生产: https://你的 Clawith 后端域名
+
+鉴权: Web 生成的用户 API Key（cw-...）。支持 Authorization: Bearer cw-... 或 X-Api-Key: cw-...
+
+Cursor 配置（路径以当前 Cursor 版本为准）:
+    Settings > Models > Add Model（或等效的 OpenAI 兼容 / Custom Base URL）
+    Base URL:  见上文（本地示例: http://127.0.0.1:8008）
+    API Key:   cw-xxx
+    Model:     智能体名称或 UUID（须与聊天里选用的模型一致；若客户端不发 model，服务端可设
+               环境变量 CLAWITH_OPENAI_COMPAT_DEFAULT_AGENT）
 
 Continue 配置 (~/.continue/config.json):
     {
@@ -17,7 +32,7 @@ Continue 配置 (~/.continue/config.json):
           "title": "Clawith - 我的智能体",
           "provider": "openai",
           "model": "<智能体名称>",
-          "apiBase": "http://localhost:8008",
+          "apiBase": "http://127.0.0.1:8008",
           "apiKey": "cw-xxx"
         }
       ]
@@ -31,16 +46,19 @@ from datetime import datetime, timezone as tz_
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, func as _func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import get_current_user
+from app.config import get_settings
 from app.database import get_db
 from app.models.user import User
 
 router = APIRouter(tags=["openai-compat"])
+
+security = HTTPBearer(auto_error=False)
 
 
 # ── GET /v1/models — 供 Android Studio / Cursor 拉取可用"模型"列表 ────────────
@@ -48,9 +66,21 @@ router = APIRouter(tags=["openai-compat"])
 @router.get("/v1/models")
 @router.get("/models")           # Android Studio omits /v1 prefix
 async def list_models(
-    current_user: User = Depends(get_current_user),
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
 ):
+    """Authenticate with API key (cw-...) or JWT token."""
+    from app.core.security import verify_api_key_or_token
+    user_id = await verify_api_key_or_token(
+        request.headers.get("X-Api-Key")
+        or (credentials.credentials if credentials else None)
+    )
+    from app.models.user import User
+    result = await db.execute(select(User).where(User.id == user_id))
+    current_user = result.scalar_one_or_none()
+    if not current_user or not current_user.is_active:
+        raise HTTPException(status_code=401, detail="Invalid or inactive user")
     """OpenAI-compatible model list endpoint.
 
     Returns all agents accessible to the current user as "models".
@@ -104,7 +134,8 @@ class OAIMessage(BaseModel):
 class OAIChatRequest(BaseModel):
     model_config = {"extra": "ignore"}   # 忽略 Android Studio 发的额外字段
 
-    model: str                                      # 智能体 UUID 或名称
+    # 智能体 UUID 或名称；客户端可省略，此时使用 CLAWITH_OPENAI_COMPAT_DEFAULT_AGENT
+    model: Optional[str] = None
     messages: list[OAIMessage]
     stream: bool = False
     temperature: Optional[float] = None             # 接受但忽略
@@ -199,9 +230,20 @@ async def _resolve_agent(model: str, db: AsyncSession):
 async def openai_chat_completions(
     request: Request,
     body: OAIChatRequest,
-    current_user: User = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
 ):
+    """Authenticate with API key (cw-...) or JWT token."""
+    from app.core.security import verify_api_key_or_token
+    user_id = await verify_api_key_or_token(
+        request.headers.get("X-Api-Key")
+        or (credentials.credentials if credentials else None)
+    )
+    from app.models.user import User
+    result = await db.execute(select(User).where(User.id == user_id))
+    current_user = result.scalar_one_or_none()
+    if not current_user or not current_user.is_active:
+        raise HTTPException(status_code=401, detail="Invalid or inactive user")
     """OpenAI 兼容的聊天补全端点。
 
     将 model 字段映射到 Clawith 智能体（UUID 或名称）。
@@ -217,7 +259,20 @@ async def openai_chat_completions(
     from app.core.permissions import check_agent_access, is_agent_expired
     from app.api.websocket import call_llm
 
-    agent = await _resolve_agent(body.model, db)
+    model_ref = (body.model or "").strip()
+    if not model_ref:
+        model_ref = (get_settings().CLAWITH_OPENAI_COMPAT_DEFAULT_AGENT or "").strip()
+    if not model_ref:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "model is required: set OpenAI `model` to a Clawith agent name or UUID "
+                "(see GET /v1/models), or set env CLAWITH_OPENAI_COMPAT_DEFAULT_AGENT on the server. "
+                "In Cursor: pick that agent in the model dropdown for this custom endpoint."
+            ),
+        )
+
+    agent = await _resolve_agent(model_ref, db)
     await check_agent_access(db, current_user, agent.id)  # 权限检查，失败时抛 HTTPException
 
     if is_agent_expired(agent):
@@ -231,6 +286,14 @@ async def openai_chat_completions(
     llm_model = model_result.scalar_one_or_none()
     if not llm_model or not llm_model.enabled:
         raise HTTPException(status_code=400, detail="Agent LLM model is unavailable")
+    if not (llm_model.model or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "LLM model pool entry has an empty provider model ID; open Admin → LLM models "
+                "and set Model (e.g. gpt-4o) — API key alone is not enough."
+            ),
+        )
 
     # 将 OAI messages 转为 dict 列表（call_llm 直接接受 OpenAI 格式）
     # role 映射：developer(新版 OpenAI) → system；过滤空消息
@@ -311,7 +374,7 @@ async def openai_chat_completions(
         ))
         sess.last_message_at = datetime.now(tz_.utc)
         await db.commit()
-        return _oai_response(cid, body.model, reply)
+        return _oai_response(cid, model_ref, reply)
 
     # ── 流式（SSE） ─────────────────────────────────────────────────────────
     queue: asyncio.Queue = asyncio.Queue()
@@ -338,13 +401,13 @@ async def openai_chat_completions(
     asyncio.create_task(run_llm())
 
     async def event_stream():
-        yield _oai_chunk_role(cid, body.model)   # 第一个 chunk：声明 role
+        yield _oai_chunk_role(cid, model_ref)   # 第一个 chunk：声明 role
         full_reply = ""
         while True:
             kind, payload = await queue.get()
             if kind == "chunk":
                 full_reply += payload
-                yield _oai_chunk(cid, body.model, payload)
+                yield _oai_chunk(cid, model_ref, payload)
             elif kind == "done":
                 if not full_reply:
                     full_reply = payload
@@ -366,7 +429,7 @@ async def openai_chat_completions(
                         s_obj.last_message_at = datetime.now(tz_.utc)
                     await _db.commit()
                     break
-                yield _oai_chunk(cid, body.model, "", finish_reason="stop")
+                yield _oai_chunk(cid, model_ref, "", finish_reason="stop")
                 yield "data: [DONE]\n\n"
                 break
             elif kind == "error":

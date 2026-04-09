@@ -70,6 +70,15 @@ load_env() {
     export EXTERNAL_DB
 }
 
+# macOS ships lsof in /usr/sbin (often not on non-interactive PATH); Linux usually has it in PATH.
+_lsof_path() {
+    if command -v lsof &>/dev/null; then
+        command -v lsof
+    elif [ -x /usr/sbin/lsof ]; then
+        echo /usr/sbin/lsof
+    fi
+}
+
 # ═══════════════════════════════════════════════════════
 # 清理旧进程
 # ═══════════════════════════════════════════════════════
@@ -83,11 +92,17 @@ cleanup() {
         fi
     done
 
+    local lsf
+    lsf=$(_lsof_path)
     for port in $BACKEND_PORT $FRONTEND_PORT; do
-        if command -v lsof &>/dev/null; then
-            lsof -ti:$port | xargs kill -9 2>/dev/null || true
-        elif command -v fuser &>/dev/null; then
-            fuser -k $port/tcp 2>/dev/null || true
+        if [ -n "$lsf" ]; then
+            # Prefer LISTEN sockets only so we do not touch unrelated client PIDs.
+            "$lsf" -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | xargs kill -9 2>/dev/null || true
+            # Fallback: anything still bound to the port (older lsof / edge cases)
+            "$lsf" -ti:"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
+        # macOS/BSD fuser is not Linux-style; only use fuser on Linux when lsof is missing.
+        elif [ "$(uname -s)" = "Linux" ] && command -v fuser &>/dev/null; then
+            fuser -k "$port/tcp" 2>/dev/null || true
         fi
     done
 
@@ -174,6 +189,14 @@ start_postgres() {
 # ═══════════════════════════════════════════════════════
 # 启动后端
 # ═══════════════════════════════════════════════════════
+# Return PID that is listening on TCP port (empty if none).
+_listener_pid() {
+    local port=$1 lsf
+    lsf=$(_lsof_path)
+    [ -z "$lsf" ] && return
+    "$lsf" -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1
+}
+
 start_backend() {
     echo -e "${YELLOW}🚀 Starting backend...${NC}"
     cd "$BACKEND_DIR"
@@ -181,13 +204,36 @@ start_backend() {
     # Auto-run data migrations (idempotent)
     echo -e "${YELLOW}🔄 Running data migrations...${NC}"
     .venv/bin/python -m app.scripts.migrate_schedules_to_triggers || true
+
+    # Fresh log file per start so tail/grep matches this process only.
+    echo "=== Clawith backend log started at $(date '+%Y-%m-%d %H:%M:%S') port=${BACKEND_PORT} ===" > "$BACKEND_LOG"
     nohup env PYTHONUNBUFFERED=1 \
         PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}" \
         DATABASE_URL="$DATABASE_URL" \
         .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $BACKEND_PORT \
-        > "$BACKEND_LOG" 2>&1 &
+        >> "$BACKEND_LOG" 2>&1 &
     echo $! > "$BACKEND_PID"
     wait_for_port $BACKEND_PORT "Backend" 10
+
+    local saved listen
+    saved=$(cat "$BACKEND_PID" 2>/dev/null || true)
+    if [ -z "$saved" ] || ! kill -0 "$saved" 2>/dev/null; then
+        echo -e "${RED}❌ Backend exited immediately (pidfile invalid). See: $BACKEND_LOG${NC}"
+        return 1
+    fi
+    listen=$(_listener_pid "$BACKEND_PORT")
+    if [ -z "$listen" ]; then
+        if [ -z "$(_lsof_path)" ]; then
+            echo -e "${YELLOW}⚠️  lsof not found; cannot verify port listener (pidfile $saved). Install lsof or use /usr/sbin/lsof on macOS.${NC}"
+        else
+            echo -e "${RED}❌ Nothing listening on port $BACKEND_PORT after start. See: $BACKEND_LOG${NC}"
+            return 1
+        fi
+    fi
+    if [ -n "$listen" ] && [ "$listen" != "$saved" ]; then
+        echo -e "${YELLOW}⚠️  Listener PID ($listen) ≠ nohup PID ($saved); pidfile updated to match port.${NC}"
+        echo "$listen" > "$BACKEND_PID"
+    fi
 }
 
 # ═══════════════════════════════════════════════════════
@@ -235,6 +281,8 @@ print_info() {
     echo ""
     echo -e "  Backend log:  tail -f $BACKEND_LOG"
     echo -e "  Frontend log: tail -f $FRONTEND_LOG"
+    echo -e "  ACP traces:   tail -f $BACKEND_LOG | rg '\\[ACP\\]'"
+    echo -e "  Backend PID:  $(cat "$BACKEND_PID" 2>/dev/null || echo '?') (port listener: $(_listener_pid "$BACKEND_PORT"))"
 }
 
 # ═══════════════════════════════════════════════════════
