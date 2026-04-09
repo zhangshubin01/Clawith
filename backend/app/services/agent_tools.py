@@ -4457,11 +4457,14 @@ async def _create_on_message_trigger(
     from_agent_name: str,
     reason: str,
     focus_ref: str | None = None,
+    notification_summary: str | None = None,
 ) -> None:
     """Programmatically create an on_message trigger for an agent."""
     from app.models.trigger import AgentTrigger
 
     config: dict = {"from_agent_name": from_agent_name}
+    if notification_summary:
+        config["_notification_summary"] = notification_summary
 
     try:
         from app.models.audit import ChatMessage as _CM
@@ -4757,6 +4760,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                         from_agent_name=target.name,
                         reason=trigger_reason,
                         focus_ref=focus_id,
+                        notification_summary=f"等待{target.name}完成任务并回复",
                     )
                 except Exception as e:
                     logger.warning(f"[A2A] Failed to create trigger for delegate: {e}")
