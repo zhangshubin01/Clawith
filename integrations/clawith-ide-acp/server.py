@@ -737,7 +737,9 @@ class ClawithThinClientAgent(Agent):
 
     def _abs_path(self, p: str, session_id: str) -> str:
         """Resolve relative path against session cwd."""
-        if not p or Path(p).is_absolute():
+        if not p:
+            return p
+        if Path(p).is_absolute():
             return p
         cwd = self._session_cwds.get(session_id) or "/"
         return str(Path(cwd) / p)
@@ -800,13 +802,37 @@ class ClawithThinClientAgent(Agent):
                     # Fall back to original summary if diff generation fails
                     pass
 
+            # For delete_file: use kind="delete" with file location (no diff needed)
+            _tool_kind = "edit"
+            _tool_locations = None
+            if tool_name == "delete_file":
+                try:
+                    args = json.loads(summary)
+                    path = args.get("path")
+                    if path:
+                        abs_path = Path(self._abs_path(path, session_id))
+                        abs_path_str = str(abs_path)
+                        _tool_kind = "delete"
+                        description = f"delete_file: {abs_path_str}"
+                        raw_input = {"path": abs_path_str}
+                        from acp.schema import ToolCallLocation
+                        _tool_locations = [ToolCallLocation(path=abs_path_str)]
+                        logger.info("ACP thin: delete_file permission for %s", abs_path_str)
+                except Exception as e:
+                    logger.warning("Failed to parse delete_file args: %s", e)
+
             tc = ToolCallUpdate(
                 tool_call_id=tid,
                 title=tool_name,
-                kind="edit",
+                kind=_tool_kind,
                 status="pending",
                 description=description,
             )
+            if _tool_locations is not None:
+                try:
+                    tc.locations = _tool_locations
+                except Exception:
+                    pass
             # Some ACP versions don't have content field in ToolCallUpdate, try to add if available
             if content is not None:
                 try:
@@ -1210,7 +1236,7 @@ class ClawithThinClientAgent(Agent):
                                 _tool_name_hint = title.lower()
                                 if _tool_name_hint == "ide_read_file":
                                     _tc_start = start_read_tool_call(tid, title, "")
-                                elif _tool_name_hint in ("ide_write_file",):
+                                elif _tool_name_hint in ("ide_write_file", "delete_file"):
                                     _tc_start = start_tool_call(tid, title, kind="edit", status="in_progress")
                                 elif _tool_name_hint in ("ide_execute_command", "ide_create_terminal",
                                                          "ide_kill_terminal", "ide_release_terminal",
@@ -1388,6 +1414,25 @@ class ClawithThinClientAgent(Agent):
                                             result += f"\n[信号: {_sig}]"
                                         elif _ec is not None:
                                             result += f"\n[退出码: {_ec}]"
+                                elif tool_name == "delete_file":
+                                    abs_path = _abs(args["path"])
+                                    abs_path_obj = Path(abs_path)
+                                    logger.info(
+                                        "ACP thin: delete_file executing path=%s session_id=%s",
+                                        abs_path, session_id,
+                                    )
+                                    # Delete the file from local filesystem
+                                    # ACP delete_textFile in IDE may just clear content, we do actual rm
+                                    import os
+                                    if abs_path_obj.exists():
+                                        os.remove(abs_path_obj)
+                                        logger.info(
+                                            "ACP thin: delete_file removed path=%s session_id=%s",
+                                            abs_path, session_id,
+                                        )
+                                        result = f"File {abs_path} successfully deleted from filesystem."
+                                    else:
+                                        result = f"File {abs_path} does not exist."
                             except Exception as e:
                                 logger.error("IDE tool error: %s", e)
                                 result = f"Error executing on IDE: {e}"
@@ -1407,7 +1452,7 @@ class ClawithThinClientAgent(Agent):
                                                 ),
                                                 "terminal_ref",
                                             )
-                                elif tool_name in ("ide_read_file", "ide_write_file"):
+                                elif tool_name in ("ide_read_file", "ide_write_file", "delete_file"):
                                     _fp = _abs(args.get("path", ""))
                                     if _fp:
                                         with contextlib.suppress(Exception):
@@ -1434,7 +1479,17 @@ class ClawithThinClientAgent(Agent):
                                                         ),
                                                         "file_diff_rejected",
                                                     )
-                                            else:
+                                            elif tool_name == "delete_file":
+                                                # Delete already done; just show file location
+                                                await _enqueue_ide(
+                                                    update_tool_call(
+                                                        _acp_tid,
+                                                        locations=[ToolCallLocation(path=_fp)],
+                                                        raw_input={"path": _fp},
+                                                    ),
+                                                    "file_location",
+                                                )
+                                            elif tool_name == "ide_read_file":
                                                 _line = int(args["line"]) if args.get("line") is not None else None  # D
                                                 _read_preview = (result or "")[:4000]
                                                 await _enqueue_ide(
