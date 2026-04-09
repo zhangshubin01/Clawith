@@ -9749,9 +9749,16 @@ async def _create_key_result(agent_id: uuid.UUID | None, arguments: dict) -> str
 
 
 async def _update_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
+    """Update Objective metadata.
+
+    Permission rules:
+    - Regular agents: can only modify Objectives they own (owner_type='agent', owner_id=agent_id).
+    - System agents (OKR Agent, is_system=True): can modify any Objective.
+    """
     if not agent_id:
         return "OKR tools require agent context."
     try:
+        from app.models.agent import Agent as AgentModel
         from app.models.okr import OKRObjective
         async with async_session() as db:
             obj_id_str = arguments.get("objective_id")
@@ -9766,6 +9773,17 @@ async def _update_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
             obj = obj_res.scalar_one_or_none()
             if not obj:
                 return f"Objective {obj_id} not found."
+
+            # Permission check: non-system agents can only update their own O.
+            ag_res = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            ag = ag_res.scalar_one_or_none()
+            is_system = bool(ag and ag.is_system)
+            if not is_system:
+                if not (obj.owner_type == "agent" and obj.owner_id == agent_id):
+                    return (
+                        "Permission denied: you can only update your own Objectives. "
+                        "Use get_my_okr to retrieve your own objective IDs."
+                    )
 
             updates = []
             if "title" in arguments:

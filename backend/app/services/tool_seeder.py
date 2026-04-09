@@ -1227,13 +1227,15 @@ BUILTIN_TOOLS = [
         "config_schema": {},
     },
     {
-        # update_objective — OKR Agent modifies an O's metadata, status, or period.
+        # update_objective — available to ALL agents, but with ownership enforcement:
+        # regular agents can only modify their own O; OKR Agent can modify any O.
         "name": "update_objective",
         "display_name": "Update Objective",
         "description": (
-            "Modify an existing Objective's title, description, status, or period dates. "
-            "Use this when a team member wants to adjust their O, or to archive a completed one. "
-            "Get the objective_id from get_okr. Only provide the fields you want to change."
+            "Modify an Objective's title, description, status, or period dates. "
+            "Regular agents can only update their own Objectives — call get_my_okr first "
+            "to get your objective_id. The OKR Agent can update any member's Objective. "
+            "Only provide the fields you want to change."
         ),
         "category": "okr",
         "icon": "✏️",
@@ -1243,7 +1245,7 @@ BUILTIN_TOOLS = [
             "properties": {
                 "objective_id": {
                     "type": "string",
-                    "description": "UUID of the Objective to update.",
+                    "description": "UUID of the Objective to update. Get from get_my_okr (own) or get_okr (any).",
                 },
                 "title": {
                     "type": "string",
@@ -1269,7 +1271,7 @@ BUILTIN_TOOLS = [
             },
             "required": ["objective_id"],
         },
-        "config": {"okr_agent_only": True},
+        "config": {},
         "config_schema": {},
     },
     {
