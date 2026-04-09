@@ -893,6 +893,38 @@ async def acp_websocket(
                         logger.warning("ACP cancel ignored: missing session_id")
                     continue
 
+                if msg_type == "ext_method":
+                    # IDE -> cloud: extension method call
+                    method = data.get("method")
+                    params = data.get("params", {})
+                    logger.info("[ACP] ext_method method={} params_len={}", method, len(str(params)))
+                    # Currently a placeholder - future extensions can register handlers here
+                    result: dict[str, Any] = {}
+                    await websocket.send_json(
+                        _acp_ws_envelope({
+                            "type": "ext_method_result",
+                            "result": result,
+                        })
+                    )
+                    continue
+
+                if msg_type == "ext_notification":
+                    # IDE -> cloud: extension notification (no response)
+                    method = data.get("method")
+                    params = data.get("params", {})
+                    logger.debug("[ACP] ext_notification method={}", method)
+                    # No response needed
+                    continue
+
+                if msg_type == "close_session":
+                    # IDE -> cloud: request to close the session
+                    session_id = data.get("session_id")
+                    logger.info("[ACP] close_session requested by IDE session_id={}", session_id)
+                    # The backend doesn't keep active session state in memory
+                    # The session is already persisted to DB, so nothing to clean
+                    # This is just a notification for logging/future cleanup
+                    continue
+
                 await main_queue.put(data)
         except WebSocketDisconnect:
             logger.info(
@@ -1054,6 +1086,11 @@ async def acp_websocket(
                             name,
                             tid or "-",
                         )
+                    # Only send tool UI updates to IDE for actual IDE bridge tools
+                    # Internal Clawith tools (like send_message_to_agent) should not be shown in IDE
+                    if name not in _IDE_BRIDGE_TOOL_NAMES:
+                        return
+
                     if status == "running":
                         if tid and tid not in _tool_ui_seen:
                             _tool_ui_seen.add(tid)
