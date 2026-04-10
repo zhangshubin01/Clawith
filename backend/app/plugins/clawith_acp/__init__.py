@@ -9,6 +9,23 @@ Clawith as an AI backend. It supports:
 - Cancellation support for running prompts
 - Dynamic model/mode selection
 """
-from .plugin import register_plugin
+from __future__ import annotations
 
-register_plugin()
+from typing import ClassVar
+
+from fastapi import FastAPI
+from app.plugins.base import ClawithPlugin
+
+from .router import router
+
+class ClawithAcpPlugin(ClawithPlugin):
+    name: ClassVar[str] = "clawith-acp"
+    version: ClassVar[str] = "0.2.0"
+    description: ClassVar[str] = "Agent Client Protocol (ACP) Remote WebSocket Server"
+
+    def register(self, app: FastAPI) -> None:
+        """Register the plugin with the FastAPI app."""
+        # Register API routes
+        app.include_router(router, prefix="/api/plugins/clawith-acp", tags=["acp"])
+
+plugin = ClawithAcpPlugin()
