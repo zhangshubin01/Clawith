@@ -6,7 +6,6 @@ from typing import Optional, List
 from loguru import logger
 from sqlalchemy import select
 
-from app.database import async_session
 from app.models.skill import Skill, SkillFile
 
 from .market_client import SuperpowersMarketClient
@@ -22,7 +21,7 @@ class SkillManager:
         self.client = SuperpowersMarketClient(base_dir)
         self._cache: dict[str, Skill] = {}
 
-    async def sync_skills(self) -> int:
+    def sync_skills(self) -> int:
         """Sync all available skills from marketplace to database.
 
         Returns number of skills synced.
@@ -50,7 +49,7 @@ class SkillManager:
             skill_data = to_clawith_skill(skill_name, content)
 
             # Upsert into database
-            synced = await self._upsert_skill(skill_data)
+            synced = self._upsert_skill(skill_data)
             if synced:
                 synced_count += 1
                 # Update cache
@@ -59,7 +58,7 @@ class SkillManager:
         logger.info("Synced %d Superpowers skills", synced_count)
         return synced_count
 
-    async def install_skill(self, skill_name: str) -> Optional[Skill]:
+    def install_skill(self, skill_name: str) -> Optional[Skill]:
         """Install a specific skill from marketplace.
 
         Returns the installed Skill or None if failed.
@@ -75,14 +74,14 @@ class SkillManager:
             return None
 
         skill_data = to_clawith_skill(skill_name, content)
-        skill = await self._upsert_skill(skill_data)
+        skill = self._upsert_skill(skill_data)
         if skill:
             self._cache[skill_name] = skill
             return skill
 
         return None
 
-    async def update_all(self) -> int:
+    def update_all(self) -> int:
         """Update all installed skills to latest version.
 
         Returns number of updated skills.
@@ -91,95 +90,103 @@ class SkillManager:
             return 0
 
         self.client.pull_latest()
-        return await self.sync_skills()
+        return self.sync_skills()
 
-    async def get_installed_skills(self) -> List[Skill]:
+    def get_installed_skills(self) -> List[Skill]:
         """Get all installed Superpowers skills from database."""
-        async with async_session() as db:
-            result = await db.execute(select(Skill))
-            skills = list(result.scalars().all())
-            # For now, return all skills since we don't have a source field
-            # In the future, we could filter by a specific category or name prefix
-            return skills
+        from app.database import get_db
+
+        db = next(get_db())
+        result = db.execute(select(Skill))
+        skills = list(result.scalars().all())
+        # For now, return all skills since we don't have a source field
+        # In the future, we could filter by a specific category or name prefix
+        return skills
 
     def get_skill_content(self, skill_name: str) -> Optional[str]:
         """Get the full content of a skill."""
         return self.client.get_skill_readme(skill_name)
 
-    async def uninstall_skill(self, skill_name: str) -> bool:
+    def uninstall_skill(self, skill_name: str) -> bool:
         """Uninstall a skill from database. Returns True on success."""
-        async with async_session() as db:
-            result = await db.execute(
-                select(Skill).where(Skill.name == skill_name)
-            )
-            skill = result.scalar_one_or_none()
+        from app.database import get_db
 
-            if not skill:
-                return False
+        db = next(get_db())
+        result = db.execute(
+            select(Skill).where(Skill.name == skill_name)
+        )
+        skill = result.scalar_one_or_none()
 
-            await db.delete(skill)
-            await db.commit()
+        if not skill:
+            return False
 
-            if skill_name in self._cache:
-                del self._cache[skill_name]
+        db.delete(skill)
+        db.commit()
 
-            return True
+        if skill_name in self._cache:
+            del self._cache[skill_name]
 
-    async def _upsert_skill(self, skill_data: dict) -> Optional[Skill]:
+        return True
+
+    def _upsert_skill(self, skill_data: dict) -> Optional[Skill]:
         """Upsert skill into database. Returns Skill on success."""
-        async with async_session() as db:
-            # Find existing skill by name
-            result = await db.execute(
-                select(Skill).where(Skill.name == skill_data["name"])
+        from app.database import get_db
+
+        db = next(get_db())
+        # Find existing skill by name
+        result = db.execute(
+            select(Skill).where(Skill.name == skill_data["name"])
+        )
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            # Update existing - THIS IS THE CORRECT pattern from the plan:
+            for key, value in skill_data.items():
+                if hasattr(existing, key):
+                    setattr(existing, key, value)
+            db.commit()
+            db.refresh(existing)
+
+            # Update skill file
+            file_result = db.execute(
+                select(SkillFile).where(SkillFile.skill_id == existing.id)
             )
-            existing = result.scalar_one_or_none()
-
-            if existing:
-                # Update existing
-                existing.description = skill_data["description"]
-                await db.commit()
-                await db.refresh(existing)
-
-                # Update skill file
-                file_result = await db.execute(
-                    select(SkillFile).where(SkillFile.skill_id == existing.id)
-                )
-                skill_file = file_result.scalar_one_or_none()
-                if skill_file:
-                    skill_file.content = skill_data["content"]
-                else:
-                    skill_file = SkillFile(
-                        skill_id=existing.id,
-                        path="SKILL.md",
-                        content=skill_data["content"]
-                    )
-                    db.add(skill_file)
-                await db.commit()
-                await db.refresh(existing)
-
-                return existing
+            skill_file = file_result.scalar_one_or_none()
+            if skill_file:
+                skill_file.content = skill_data["content"]
             else:
-                # Create new
-                folder_name = skill_data["name"].lower().replace(" ", "_")
-                new_skill = Skill(
-                    name=skill_data["name"],
-                    description=skill_data["description"],
-                    folder_name=folder_name,
-                    is_builtin=False,
-                    is_default=False
-                )
-                db.add(new_skill)
-                await db.commit()
-                await db.refresh(new_skill)
-
-                # Create skill file
                 skill_file = SkillFile(
-                    skill_id=new_skill.id,
+                    skill_id=existing.id,
                     path="SKILL.md",
                     content=skill_data["content"]
                 )
                 db.add(skill_file)
-                await db.commit()
-                await db.refresh(new_skill)
+            db.commit()
+            db.refresh(existing)
 
-                return new_skill
+            return existing
+        else:
+            # Create new
+            folder_name = skill_data["name"].lower().replace(" ", "_")
+            new_skill = Skill(
+                name=skill_data["name"],
+                description=skill_data["description"],
+                folder_name=folder_name,
+                is_builtin=False,
+                is_default=False
+            )
+            db.add(new_skill)
+            db.commit()
+            db.refresh(new_skill)
+
+            # Create skill file
+            skill_file = SkillFile(
+                skill_id=new_skill.id,
+                path="SKILL.md",
+                content=skill_data["content"]
+            )
+            db.add(skill_file)
+            db.commit()
+            db.refresh(new_skill)
+
+            return new_skill

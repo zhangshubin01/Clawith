@@ -478,7 +478,28 @@ class ClawithThinClientAgent(Agent):
             # If not available, leave as None (still works for JSON serialization)
             pass
 
+        # Try to add model capability if available (enables model selection dropdown in IDE)
+        # In current ACP version, model state is in SessionModelState
+        # which is part of session_capabilities
+        try:
+            from acp.schema import SessionModelState
+            from acp.schema import ModelInfo
+            # We can't get available_models from here async, so leave it empty list
+            # IDE will handle dynamic fetching if it supports it
+            extended_kwargs["model"] = SessionModelState(
+                available_models=[],
+                current_model_id=""
+            )
+            logger.debug("ACP thin: SessionModelState added to session_capabilities (enables model selection dropdown)")
+        except ImportError:
+            # If not available, leave as None (still works for JSON serialization)
+            pass
+
         session_capabilities = ExtendedSessionCapabilities(**extended_kwargs)
+
+        # Get available models from Clawith cloud - this is for AgentCapabilities.available_models
+        # which is different from SessionModelState that is in session_capabilities.model
+        available_models: list[ModelInfo] = []
 
         return InitializeResponse(
             protocol_version=protocol_version,
@@ -495,6 +516,7 @@ class ClawithThinClientAgent(Agent):
                     embedded_context=True,
                     audio=False,
                 ),
+                available_models=available_models,
                 session_capabilities=session_capabilities,
             ),
         )
@@ -553,7 +575,100 @@ class ClawithThinClientAgent(Agent):
         logger.info("New session. cwd=%s session_id=%s mcp_servers=%d", cwd, session_id, len(mcp_servers or []))
         self._log_mcp_servers("new_session", session_id, mcp_servers)
         asyncio.create_task(self._send_available_commands(session_id))  # N4
-        return NewSessionResponse(session_id=session_id)
+
+        # Add initial modes and models state for UI dropdowns
+        # This is required by JetBrains IDE to display mode and model selection controls
+        # Following the claude-agent-acp implementation pattern
+        mode_state = None
+        model_state = None
+        config_options = None
+        try:
+            from acp.schema import SessionModeState
+            from acp.schema import SessionConfigOptionSelect
+            from acp.schema import SessionConfigSelectOption
+            mode_state = SessionModeState(
+                current_mode_id="chat",
+                available_modes=["chat", "code-review", "planning"]
+            )
+            logger.debug("ACP thin: SessionModeState added to NewSessionResponse")
+
+            # Add config option for mode selection dropdown (required by JetBrains IDE)
+            mode_select_options = [
+                SessionConfigSelectOption(
+                    value="chat",
+                    name="Chat",
+                    description="General purpose chat conversation"
+                ),
+                SessionConfigSelectOption(
+                    value="code-review",
+                    name="Code Review",
+                    description="Review code and provide feedback"
+                ),
+                SessionConfigSelectOption(
+                    value="planning",
+                    name="Planning",
+                    description="Plan implementation before coding"
+                ),
+            ]
+            mode_option = SessionConfigOptionSelect(
+                id="mode",
+                name="Mode",
+                category="mode",
+                description="Session conversation mode",
+                current_value="chat",
+                options=mode_select_options
+            )
+            if config_options is None:
+                config_options = []
+            config_options.append(mode_option)
+        except ImportError:
+            pass
+
+        # We'll get available models via the existing connection later
+        # Don't create a second WebSocket connection here - authentication is already on the main connection
+        try:
+            from acp.schema import SessionModelState
+            from acp.schema import ModelInfo
+            model_state = SessionModelState(
+                available_models=[],
+                current_model_id=""
+            )
+            logger.debug("ACP thin: SessionModelState added to NewSessionResponse (empty, will fetch via existing connection)")
+        except ImportError:
+            pass
+
+        # If we have model_state and it has available_models, add config option
+        try:
+            from acp.schema import SessionConfigOptionSelect
+            from acp.schema import SessionConfigSelectOption
+            if model_state is not None and config_options is not None and hasattr(model_state, "available_models"):
+                model_select_options = [
+                    SessionConfigSelectOption(
+                        value=m.model_id,
+                        name=m.name,
+                        description=getattr(m, "description", None) or ""
+                    )
+                    for m in model_state.available_models
+                ]
+                if model_select_options:
+                    model_config = SessionConfigOptionSelect(
+                        id="model",
+                        name="Model",
+                        category="model",
+                        description="Select the LLM model to use for this session",
+                        current_value=model_state.current_model_id,
+                        options=model_select_options
+                    )
+                    config_options.append(model_config)
+        except ImportError:
+            pass
+
+        return NewSessionResponse(
+            session_id=session_id,
+            modes=mode_state,
+            models=model_state,
+            config_options=config_options
+        )
 
     async def load_session(
         self,
@@ -686,6 +801,15 @@ class ClawithThinClientAgent(Agent):
         if session_id not in self._session_config:
             self._session_config[session_id] = {}
         self._session_config[session_id][config_id] = value
+
+        # Handle special config options mode and model following claude-agent-acp pattern
+        if config_id == "mode" and isinstance(value, str):
+            # When mode is changed via config, call the dedicated set_session_mode method
+            await self.set_session_mode(mode_id=value, session_id=session_id)
+        elif config_id == "model" and isinstance(value, str):
+            # When model is changed via config, call the dedicated set_session_model method
+            await self.set_session_model(model_id=value, session_id=session_id)
+
         # Convert to list of config options for response
         config_options = [
             {"config_id": cid, "value": cval}

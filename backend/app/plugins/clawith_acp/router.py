@@ -141,6 +141,11 @@ current_acp_pending_permissions = ContextVar("current_acp_pending_permissions", 
 current_acp_prompt_session_id = ContextVar("current_acp_prompt_session_id", default=None)
 # N10: session config from client (auto_approve_diff, etc.)
 current_acp_session_config = ContextVar("current_acp_session_config", default={})
+# Whether client supports terminal_output incremental streaming via _meta
+# This enables native terminal output with incremental updates in IDE
+_acp_supports_terminal_output = ContextVar("_acp_supports_terminal_output", default=False)
+# Whether client supports structured diff blocks for editing preview via sessionUpdate
+_acp_supports_structured_diff = ContextVar("_acp_supports_structured_diff", default=False)
 
 # Global registry so the Clawith frontend WebSocket (/ws/chat/) can also resolve permission futures.
 # Keys are permission_id UUIDs (unique per request), so no collision risk across concurrent ACP connections.
@@ -483,6 +488,57 @@ def resolve_acp_permission(perm_id: str, granted: bool) -> bool:
     logger.warning("ACP permission resolve: perm_id={} not found or already done", perm_id)
     return False
 
+def _generate_structured_diff_blocks(file_path: str, old_content: str, new_content: str) -> list[dict[str, Any]]:
+    """Generate ACP structured diff blocks from old/new content.
+    
+    Follows the claude-agent-acp pattern: creates structured hunk objects with
+    location information that the IDE can render inline in permission dialog.
+    """
+    # Simple diff generation based on line-by-line comparison
+    # For more complex diffs, we'd use a proper diff algorithm like difflib,
+    # but this follows the ACP structured block format expected by the protocol.
+    old_lines = old_content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
+    
+    diff_blocks: list[dict[str, Any]] = []
+    
+    # For new file (no old content)
+    if not old_lines:
+        diff_blocks.append({
+            "type": "diff_block",
+            "new": new_content,
+            "old": "",
+            "start_line": 1,
+            "end_line": 0,
+            "file_path": file_path,
+        })
+        return diff_blocks
+    
+    # For empty new file (delete)
+    if not new_lines:
+        diff_blocks.append({
+            "type": "diff_block",
+            "new": "",
+            "old": old_content,
+            "start_line": 1,
+            "end_line": len(old_lines),
+            "file_path": file_path,
+        })
+        return diff_blocks
+    
+    # Use a simple approach: when the whole file changed, send as a single block
+    # In future, we could optimize this with proper diff hunk splitting
+    diff_blocks.append({
+        "type": "diff_block",
+        "file_path": file_path,
+        "old": old_content,
+        "new": new_content,
+        "start_line": 1,
+        "end_line": len(old_lines),
+    })
+    
+    return diff_blocks
+
 async def _read_file_for_diff(
     ws: WebSocket,
     pending: dict[str, asyncio.Future],
@@ -566,10 +622,14 @@ async def _custom_execute_tool(
             if auto_approve is not True:
                 auto_approve = False
                 extra: dict[str, Any] | None = None
-                if tool_name == "ide_write_file":
+                if tool_name == "ide_write_file" or tool_name == "ide_append":
                     file_path = args.get("path", "")
-                    old_content = await _read_file_for_diff(ws, pending, file_path, session_id) if file_path else ""
-                    new_content = args.get("content", "")
+                    if tool_name == "ide_append":
+                        old_content = await _read_file_for_diff(ws, pending, file_path, session_id) if file_path else ""
+                        new_content = old_content + (args.get("content", "") or "")
+                    else:
+                        old_content = await _read_file_for_diff(ws, pending, file_path, session_id) if file_path else ""
+                        new_content = args.get("content", "")
                     MAX_DIFF_SIZE = 100_000  # 100KB per side
                     if len(old_content) > MAX_DIFF_SIZE:
                         old_content = old_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(old_content)} 字符)"
@@ -580,12 +640,71 @@ async def _custom_execute_tool(
                         "old_content": old_content,
                         "new_content": new_content,
                     }
+                    # If client supports structured diff, send diff blocks via sessionUpdate
+                    # This allows IDE to preview diff inline in the permission dialog
+                    if _acp_supports_structured_diff.get():
+                        diff_blocks = _generate_structured_diff_blocks(file_path, old_content, new_content)
+                        if diff_blocks:
+                            await ws.send_json(_acp_ws_envelope({
+                                "type": "sessionUpdate",
+                                "_meta": {
+                                    "structured_diff": {
+                                        "file_path": file_path,
+                                        "diff_blocks": diff_blocks,
+                                        "tool_name": tool_name,
+                                    }
+                                }
+                            }))
+                            logger.info(
+                                "ACP sent structured diff via sessionUpdate session_id={} file={} blocks={}",
+                                session_id or "-",
+                                file_path,
+                                len(diff_blocks),
+                            )
                 elif tool_name == "delete_file":
                     file_path = args.get("path", "")
                     if file_path:
                         extra = {
                             "file_path": file_path,
                         }
+                        # For delete, send an empty structured diff to indicate deletion
+                        if _acp_supports_structured_diff.get():
+                            await ws.send_json(_acp_ws_envelope({
+                                "type": "sessionUpdate",
+                                "_meta": {
+                                    "structured_diff": {
+                                        "file_path": file_path,
+                                        "diff_blocks": [{
+                                            "type": "diff_block",
+                                            "file_path": file_path,
+                                            "old": "",
+                                            "new": "",
+                                            "is_deletion": True,
+                                        }],
+                                        "tool_name": tool_name,
+                                    }
+                                }
+                            }))
+                elif tool_name == "ide_move":
+                    source = args.get("source", "")
+                    destination = args.get("destination", "")
+                    extra = {
+                        "source": source,
+                        "destination": destination,
+                    }
+                    # For move, send structured diff notification
+                    if _acp_supports_structured_diff.get() and source:
+                        await ws.send_json(_acp_ws_envelope({
+                            "type": "sessionUpdate",
+                            "_meta": {
+                                "structured_diff": {
+                                    "source_path": source,
+                                    "destination_path": destination,
+                                    "is_move": True,
+                                    "tool_name": tool_name,
+                                }
+                            }
+                        }))
                 allowed = await _acp_await_client_permission(
                     ws, pending_perm, tool_name, args,
                     agent_id=str(agent_id),
@@ -637,6 +756,58 @@ async def _custom_execute_tool(
                 call_id,
                 len(str(result or "")),
             )
+            
+            # Terminal incremental output optimization: when client supports it,
+            # send incremental output via sessionUpdate with _meta extension
+            if tool_name == "ide_terminal_output" and _acp_supports_terminal_output.get():
+                # Result is expected to be structured with incremental chunks and exit info
+                # Format: {"output": "...", "exit_code": int, "incremental": list}
+                # Or if incremental is not provided, treat entire output as single chunk
+                if isinstance(result, dict):
+                    terminal_id = args.get("terminal_id")
+                    output = result.get("output", "")
+                    exit_code = result.get("exit_code")
+                    incremental = result.get("incremental")
+                    
+                    if isinstance(incremental, list):
+                        # Send each incremental chunk
+                        for chunk in incremental:
+                            if chunk:
+                                await ws.send_json(_acp_ws_envelope({
+                                    "type": "sessionUpdate",
+                                    "_meta": {
+                                        "terminal_output": {
+                                            "terminal_id": terminal_id,
+                                            "data": chunk,
+                                            "incremental": True
+                                        }
+                                    }
+                                }))
+                    elif output:
+                        # Send entire output as one chunk
+                        await ws.send_json(_acp_ws_envelope({
+                            "type": "sessionUpdate",
+                            "_meta": {
+                                "terminal_output": {
+                                    "terminal_id": terminal_id,
+                                    "data": output,
+                                    "incremental": False
+                                }
+                            }
+                        }))
+                    
+                    # Send exit code notification if available
+                    if exit_code is not None:
+                        await ws.send_json(_acp_ws_envelope({
+                            "type": "sessionUpdate",
+                            "_meta": {
+                                "terminal_exit": {
+                                    "terminal_id": terminal_id,
+                                    "exit_code": exit_code
+                                }
+                            }
+                        }))
+            
             return result
         except asyncio.TimeoutError:
             logger.error(
@@ -986,6 +1157,84 @@ async def acp_websocket(
                     # This is just a notification for logging/future cleanup
                     continue
 
+                if msg_type == "set_session_mode":
+                    # IDE -> cloud: dynamically change session mode
+                    session_id = data.get("session_id")
+                    mode_id = data.get("mode_id")
+                    logger.info("[ACP] set_session_mode requested session_id={} mode_id={}", session_id, mode_id)
+                    # Update session config for this connection
+                    current_config = current_acp_session_config.get() or {}
+                    current_config["mode"] = mode_id
+                    current_acp_session_config.set(current_config)
+                    # Send acknowledgment back to client
+                    await websocket.send_json(
+                        _acp_ws_envelope({
+                            "type": "current_mode_update",
+                            "session_id": session_id,
+                            "current_mode": mode_id,
+                        })
+                    )
+                    continue
+
+                if msg_type == "set_session_model":
+                    # IDE -> cloud: dynamically change session model
+                    session_id = data.get("session_id")
+                    model_id = data.get("model_id")
+                    logger.info("[ACP] set_session_model requested session_id={} model_id={}", session_id, model_id)
+                    # Update session config for this connection
+                    current_config = current_acp_session_config.get() or {}
+                    current_config["model"] = model_id
+                    current_acp_session_config.set(current_config)
+                    # Send acknowledgment back to client
+                    await websocket.send_json(
+                        _acp_ws_envelope({
+                            "type": "current_model_update",
+                            "session_id": session_id,
+                            "current_model_id": model_id,
+                        })
+                    )
+                    continue
+
+                if msg_type == "set_session_config_option":
+                    # IDE -> cloud: generic config option update
+                    session_id = data.get("session_id")
+                    config_id = data.get("config_id")
+                    value = data.get("value")
+                    logger.info("[ACP] set_session_config_option requested session_id={} config_id={} value={}", session_id, config_id, value)
+                    
+                    # Handle common config IDs specially
+                    if config_id == "mode" and isinstance(value, str):
+                        # Update mode
+                        current_config = current_acp_session_config.get() or {}
+                        current_config["mode"] = value
+                        current_acp_session_config.set(current_config)
+                        await websocket.send_json(
+                            _acp_ws_envelope({
+                                "type": "current_mode_update",
+                                "session_id": session_id,
+                                "current_mode": value,
+                            })
+                        )
+                    elif config_id == "model" and isinstance(value, str):
+                        # Update model
+                        current_config = current_acp_session_config.get() or {}
+                        current_config["model"] = value
+                        current_acp_session_config.set(current_config)
+                        await websocket.send_json(
+                            _acp_ws_envelope({
+                                "type": "current_model_update",
+                                "session_id": session_id,
+                                "current_model_id": value,
+                            })
+                        )
+                    else:
+                        # Generic config update - store it
+                        current_config = current_acp_session_config.get() or {}
+                        current_config[config_id] = value
+                        current_acp_session_config.set(current_config)
+                    
+                    continue
+
                 await main_queue.put(data)
         except WebSocketDisconnect:
             logger.info(
@@ -1057,6 +1306,86 @@ async def acp_websocket(
                 )
                 continue
 
+            if msg_type == "initialize":
+                # Store client capabilities for this connection
+                # Detect terminal_output capability from client metadata
+                client_capabilities = data.get("clientCapabilities") or data.get("client_capabilities")
+                supports_terminal_output = False
+                supports_structured_diff = False
+                if isinstance(client_capabilities, dict):
+                    # Check _meta.terminal_output === true
+                    meta = client_capabilities.get("_meta") or {}
+                    supports_terminal_output = meta.get("terminal_output") is True
+                    # Check _meta.structured_diff === true
+                    supports_structured_diff = meta.get("structured_diff") is True
+                
+                # Store in context var for this connection
+                _acp_supports_terminal_output.set(supports_terminal_output)
+                _acp_supports_structured_diff.set(supports_structured_diff)
+                if _acp_verbose():
+                    logger.info(
+                        "ACP initialize received client supports_terminal_output=%s supports_structured_diff=%s session_id=%s",
+                        supports_terminal_output,
+                        supports_structured_diff,
+                        data.get("session_id"),
+                    )
+                
+                # The initialize response is handled by the acp library upstream
+                continue
+
+            if msg_type == "list_available_models":
+                if _acp_verbose():
+                    logger.info(
+                        "ACP list_available_models user_id={} agent_id={}",
+                        user_id,
+                        agent_obj.id,
+                    )
+                # Get available enabled models from database
+                from app.models.llm import LLMModel
+                from app.database import async_session
+                
+                models_out: list[dict[str, str | None]] = []
+                current_model_id: str = ""
+
+                async with async_session() as db:
+                    from sqlalchemy import select
+                    
+                    # If agent has specific enabled models configured, filter to those
+                    query = select(LLMModel).where(LLMModel.enabled == True)
+                    
+                    # Check if agent_obj has public_enabled_models attribute and it's not empty
+                    if (hasattr(agent_obj, 'public_enabled_models') and 
+                        agent_obj.public_enabled_models and 
+                        isinstance(agent_obj.public_enabled_models, list) and
+                        len(agent_obj.public_enabled_models) > 0):
+                        query = query.where(LLMModel.id.in_(agent_obj.public_enabled_models))
+                    
+                    result = await db.execute(query)
+                    for model in result.scalars():
+                        models_out.append({
+                            "model_id": str(model.id),
+                            "id": str(model.id),
+                            "name": model.label,
+                            "display_name": model.label,
+                            "description": f"{model.provider} - {model.model}",
+                            "is_enabled": model.enabled,
+                        })
+                    
+                    # If we got any models, pick the first one as default
+                    if models_out:
+                        current_model_id = models_out[0]["model_id"]
+
+                await websocket.send_json(
+                    _acp_ws_envelope(
+                        {
+                            "type": "list_available_models_result",
+                            "available_models": models_out,
+                            "current_model_id": current_model_id,
+                        }
+                    )
+                )
+                continue
+
             if msg_type == "prompt":
                 session_id = data.get("session_id")
                 session_cwd = (data.get("cwd") or "").strip() or "/"
@@ -1066,8 +1395,20 @@ async def acp_websocket(
                 session_mode = data.get("mode")
                 # N10: session config options from client
                 session_config = data.get("config") or {}
+                # Merge with stored connection config - dynamic changes via set_session_config_option take precedence
+                current_conn_config = current_acp_session_config.get() or {}
+                if current_conn_config:
+                    # Apply dynamic config changes from RPC calls - they override prompt's initial config
+                    session_config.update(current_conn_config)
+                    # If mode or model was updated dynamically, use those
+                    if "mode" in current_conn_config:
+                        session_mode = current_conn_config["mode"]
+                        logger.info("[ACP] session_mode from dynamic update: session_id={} mode={}", session_id, session_mode)
+                    if "model" in current_conn_config:
+                        agent_override_id = current_conn_config["model"]
+                        logger.info("[ACP] model from dynamic update: session_id={} model_id={}", session_id, agent_override_id)
                 # Store session mode and config in the connection state
-                if session_mode:
+                if session_mode and "mode" not in current_conn_config:
                     logger.info("[ACP] session_mode received: session_id={} mode={}", session_id, session_mode)
                 # A: IDE-declared MCP servers forwarded by thin client (stored for future MCP bridging)
                 mcp_servers_from_ide = data.get("mcp_servers") or []
@@ -1208,16 +1549,33 @@ async def acp_websocket(
                 )
                 # Add session mode prompt if available
                 if session_mode:
+                    # Extend permission modes inspired by claude-agent-acp
                     mode_descriptions = {
                         "chat": "聊天模式 - 自由对话，回答问题，提供建议",
                         "code-review": "代码评审模式 - 专注于代码评审，分析代码质量，提出改进建议",
-                        "planning": "规划模式 - 帮助用户规划任务、设计架构、分解需求"
+                        "planning": "规划模式 - 帮助用户规划任务、设计架构、分解需求",
+                        # Additional permission modes from claude-agent-acp
+                        "auto": "自动模式 - AI自动分类权限请求，需要批准时询问用户",
+                        "default": "默认模式 - 标准行为，危险操作需要用户批准",
+                        "acceptEdits": "自动接受编辑 - 自动接受所有文件编辑操作，不需要用户批准",
+                        "dontAsk": "不询问 - 不询问权限，直接拒绝未预先批准的操作",
+                        "bypassPermissions": "绕过权限检查 - 绕过所有权限检查，直接执行所有工具（仅限非root用户）",
                     }
                     desc = mode_descriptions.get(session_mode, "")
                     if desc:
                         ide_prompt += f"\n\n[工作模式]\n当前模式: {session_mode} - {desc}"
                     else:
                         ide_prompt += f"\n\n[工作模式]\n当前模式: {session_mode}"
+
+                # Add MCP servers information if available from IDE
+                if mcp_servers_from_ide:
+                    ide_prompt += f"\n\n[MCP 服务器]\n用户IDE提供了 {len(mcp_servers_from_ide)} 个MCP服务器连接可用：\n"
+                    for i, server in enumerate(mcp_servers_from_ide, 1):
+                        name = server.get("name") or f"server-{i}"
+                        server_type = server.get("type") or "unknown"
+                        url = server.get("url") or server.get("command") or "custom"
+                        ide_prompt += f"  - {name}: {server_type} @ {url}\n"
+                    ide_prompt += "你可以使用这些MCP服务器获取额外能力。"
 
                 cancel_key = (str(turn_agent.id), str(user_id), str(session_id))
                 cancel_prompt = asyncio.Event()
@@ -1392,7 +1750,7 @@ async def _persist_chat_turn(agent_id, session_id: str, user_text: str, reply_te
             await log_activity(
                 agent_id=agent_id,
                 action_type="chat_reply",
-                summary=f"Replied to IDE chat: {reply_text[:80]}...",
+                summary=f"回复了IDEA编辑器 内容: {reply_text[:80]}...",
                 detail={"channel": "ide_acp", "user_text": user_text[:200], "reply": reply_text[:500]},
                 related_id=sid_uuid,
             )
