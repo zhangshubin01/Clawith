@@ -859,6 +859,7 @@ class ClawithThinClientAgent(Agent):
                     pass
 
             # For delete_file: use kind="delete" with file location (no diff needed)
+            # For ide_append / ide_move: use kind="edit" with locations for both source/destination
             _tool_kind = "edit"
             _tool_locations = None
             if tool_name == "delete_file":
@@ -876,6 +877,35 @@ class ClawithThinClientAgent(Agent):
                         logger.info("ACP thin: delete_file permission for %s", abs_path_str)
                 except Exception as e:
                     logger.warning("Failed to parse delete_file args: %s", e)
+            elif tool_name in ("ide_append", "ide_move"):
+                try:
+                    args = json.loads(summary)
+                    from acp.schema import ToolCallLocation
+                    _locations = []
+                    if tool_name == "ide_append":
+                        path = args.get("path")
+                        if path:
+                            abs_path = Path(self._abs_path(path, session_id))
+                            abs_path_str = str(abs_path)
+                            _locations.append(ToolCallLocation(path=abs_path_str))
+                            description = f"ide_append: {abs_path_str} (+{len(args.get('content', ''))} chars)"
+                            raw_input = {"path": abs_path_str, "content_len": len(args.get('content', ''))}
+                    elif tool_name == "ide_move":
+                        source = args.get("source")
+                        dest = args.get("destination")
+                        if source:
+                            abs_source = Path(self._abs_path(source, session_id))
+                            _locations.append(ToolCallLocation(path=str(abs_source)))
+                        if dest:
+                            abs_dest = Path(self._abs_path(dest, session_id))
+                            _locations.append(ToolCallLocation(path=str(abs_dest)))
+                        description = f"ide_move: {source} → {dest}"
+                        raw_input = {"source": source, "destination": dest}
+                    if _locations:
+                        _tool_locations = _locations
+                        logger.info("ACP thin: %s permission with %d locations", tool_name, len(_locations))
+                except Exception as e:
+                    logger.warning("Failed to parse %s args: %s", tool_name, e)
 
             tc = ToolCallUpdate(
                 tool_call_id=tid,
@@ -1292,12 +1322,14 @@ class ClawithThinClientAgent(Agent):
                                 _tool_name_hint = title.lower()
                                 if _tool_name_hint == "ide_read_file":
                                     _tc_start = start_read_tool_call(tid, title, "")
-                                elif _tool_name_hint in ("ide_write_file", "delete_file"):
+                                elif _tool_name_hint in ("ide_write_file", "ide_append", "delete_file"):
                                     _tc_start = start_tool_call(tid, title, kind="edit", status="in_progress")
                                 elif _tool_name_hint in ("ide_execute_command", "ide_create_terminal",
                                                          "ide_kill_terminal", "ide_release_terminal",
                                                          "ide_terminal_output"):
                                     _tc_start = start_tool_call(tid, title, kind="execute", status="in_progress")
+                                elif _tool_name_hint in ("ide_move", "ide_mkdir"):
+                                    _tc_start = start_tool_call(tid, title, kind="edit", status="in_progress")
                                 else:
                                     _tc_start = start_tool_call(tid, title, kind=_infer_tool_kind(_tool_name_hint), status="in_progress")  # E
                                 await _enqueue_ide(_tc_start, "tool_call_start")
@@ -1445,6 +1477,83 @@ class ClawithThinClientAgent(Agent):
                                     result = await self._run_shell_command(
                                         args["command"], session_id
                                     )
+                                elif tool_name == "ide_list_files":
+                                    abs_path = _abs(args["path"])
+                                    path_obj = Path(abs_path)
+                                    logger.info(
+                                        "ACP thin: ide_list_files listing path=%s session_id=%s",
+                                        abs_path, session_id,
+                                    )
+                                    if not path_obj.exists():
+                                        result = f"Path does not exist: {abs_path}"
+                                    elif not path_obj.is_dir():
+                                        result = f"Not a directory: {abs_path} (it's a file)"
+                                    else:
+                                        items = list(path_obj.iterdir())
+                                        items_sorted = sorted(items, key=lambda p: (not p.is_dir(), p.name))
+                                        lines = []
+                                        for p in items_sorted:
+                                            if p.is_dir():
+                                                lines.append(f"📁 {p.name}/")
+                                            else:
+                                                lines.append(f"📄 {p.name}")
+                                        result = f"Directory listing for {abs_path}:\n\n" + "\n".join(lines)
+                                elif tool_name == "ide_mkdir":
+                                    abs_path = _abs(args["path"])
+                                    path_obj = Path(abs_path)
+                                    logger.info(
+                                        "ACP thin: ide_mkdir creating directory=%s session_id=%s",
+                                        abs_path, session_id,
+                                    )
+                                    try:
+                                        path_obj.mkdir(parents=True, exist_ok=True)
+                                        result = f"Directory {abs_path} created successfully (parents created if missing)."
+                                    except Exception as e:
+                                        result = f"Failed to create directory {abs_path}: {e}"
+                                elif tool_name == "ide_move":
+                                    source = _abs(args["source"])
+                                    dest = _abs(args["destination"])
+                                    source_obj = Path(source)
+                                    dest_obj = Path(dest)
+                                    logger.info(
+                                        "ACP thin: ide_move moving %s -> %s session_id=%s",
+                                        source, dest, session_id,
+                                    )
+                                    try:
+                                        if not source_obj.exists():
+                                            result = f"Source does not exist: {source}"
+                                        else:
+                                            # Ensure parent directory exists for destination
+                                            dest_obj.parent.mkdir(parents=True, exist_ok=True)
+                                            # shutil.move handles both move and rename
+                                            import shutil
+                                            shutil.move(str(source_obj), str(dest_obj))
+                                            result = f"Successfully moved/renamed: {source} → {dest}"
+                                    except Exception as e:
+                                        result = f"Failed to move {source} → {dest}: {e}"
+                                elif tool_name == "ide_append":
+                                    abs_path = _abs(args["path"])
+                                    content = args["content"]
+                                    path_obj = Path(abs_path)
+                                    logger.info(
+                                        "ACP thin: ide_append append to path=%s content_len=%d session_id=%s",
+                                        abs_path, len(content), session_id,
+                                    )
+                                    try:
+                                        if not path_obj.exists():
+                                            # Create file if it doesn't exist
+                                            path_obj.write_text(content, encoding="utf-8")
+                                            result = f"File {abs_path} created with appended content (len={len(content)})."
+                                        else:
+                                            existing = path_obj.read_text(encoding="utf-8")
+                                            # Ensure we have a newline before appending
+                                            if existing and not existing.endswith("\n"):
+                                                existing += "\n"
+                                            existing += content
+                                            path_obj.write_text(existing, encoding="utf-8")
+                                            result = f"Content appended to {abs_path} (added {len(content)} chars, total {len(existing)} chars)."
+                                    except Exception as e:
+                                        result = f"Failed to append to {abs_path}: {e}"
                                 elif tool_name == "ide_create_terminal":
                                     _ct_kw: dict[str, Any] = {
                                         "command": args["command"],
@@ -1530,7 +1639,7 @@ class ClawithThinClientAgent(Agent):
                                                 ),
                                                 "terminal_ref",
                                             )
-                                elif tool_name in ("ide_read_file", "ide_write_file", "delete_file"):
+                                elif tool_name in ("ide_read_file", "ide_write_file", "ide_append", "ide_move", "delete_file"):
                                     _fp = _abs(args.get("path", ""))
                                     if _fp:
                                         with contextlib.suppress(Exception):
@@ -1557,6 +1666,31 @@ class ClawithThinClientAgent(Agent):
                                                         ),
                                                         "file_diff_rejected",
                                                     )
+                                            elif tool_name == "ide_append":
+                                                # Append done; just show file location
+                                                await _enqueue_ide(
+                                                    update_tool_call(
+                                                        _acp_tid,
+                                                        locations=[ToolCallLocation(path=_fp)],
+                                                        raw_input={"path": _fp},
+                                                    ),
+                                                    "file_location",
+                                                )
+                                            elif tool_name == "ide_move":
+                                                # Move done; show both source and destination
+                                                source = _abs(args.get("source", ""))
+                                                dest = _abs(args.get("destination", ""))
+                                                await _enqueue_ide(
+                                                    update_tool_call(
+                                                        _acp_tid,
+                                                        locations=[
+                                                            ToolCallLocation(path=source),
+                                                            ToolCallLocation(path=dest),
+                                                        ],
+                                                        raw_input={"source": source, "destination": dest},
+                                                    ),
+                                                    "file_location",
+                                                )
                                             elif tool_name == "delete_file":
                                                 # Delete already done; just show file location
                                                 await _enqueue_ide(

@@ -160,6 +160,8 @@ def _acp_log_chunks() -> bool:
 _IDE_TOOLS_REQUIRING_PERMISSION = frozenset(
     {
         "ide_write_file",
+        "ide_append",
+        "ide_move",
         "delete_file",
     }
 )
@@ -173,6 +175,10 @@ _IDE_BRIDGE_TOOL_NAMES = frozenset(
         "ide_release_terminal",
         "ide_create_terminal",
         "ide_terminal_output",
+        "ide_list_files",
+        "ide_mkdir",
+        "ide_move",
+        "ide_append",
         "delete_file",
     }
 )
@@ -317,6 +323,64 @@ IDE_TOOLS = [
                     "path": {"type": "string", "description": "Absolute or relative path to the file to delete"},
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ide_list_files",
+            "description": "List files and directories in a local directory on the IDE client's filesystem. Use this to explore the user's project structure when you need to find files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute or relative path to the directory to list"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ide_mkdir",
+            "description": "Create a new directory (and any missing parent directories) on the IDE client's filesystem.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute or relative path of the directory to create"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ide_move",
+            "description": "Move/rename a file or directory on the IDE client's filesystem. Can be used to rename an existing file or move it to a different directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": "Absolute or relative path to the source file/directory to move"},
+                    "destination": {"type": "string", "description": "Absolute or relative path to the destination"},
+                },
+                "required": ["source", "destination"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ide_append",
+            "description": "Append content to the end of an existing file on the IDE client's filesystem. Useful for adding lines to an existing file without rewriting it entirely.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute or relative path to the file"},
+                    "content": {"type": "string", "description": "Content to append to the end of the file"},
+                },
+                "required": ["path", "content"],
             },
         },
     },
@@ -1128,6 +1192,10 @@ async def acp_websocket(
                     "你拥有以下额外的 IDE 专用工具：\n"
                     "- `ide_read_file`: 读取本地文件（可选 `limit` / `line` 控制长度与起始行）\n"
                     "- `ide_write_file`: 新建或修改本地文件（需用户在 IDE 确认）\n"
+                    "- `ide_list_files`: 列出本地目录内容，探索项目结构找到文件\n"
+                    "- `ide_mkdir`: 创建本地目录（自动创建父目录）\n"
+                    "- `ide_move`: 移动/重命名本地文件或目录\n"
+                    "- `ide_append`: 追加内容到已有文件末尾\n"
                     "- `ide_execute_command`: 在本地终端执行命令（需确认）\n"
                     "- `ide_create_terminal`: 创建不阻塞的终端会话，返回 `terminal_id`（需确认）\n"
                     "- `ide_kill_terminal` / `ide_release_terminal`: 结束或释放终端（需确认）\n"
@@ -1136,6 +1204,10 @@ async def acp_websocket(
                     "去读取 `.png` `.jpg` 等二进制图片路径来「看图」。\n"
                     "遇到需要修改代码或查看本地**源码文本**时，请优先使用这些 `ide_` 开头的工具！\n"
                     "当你需要删除整个文件时，**请直接使用 `delete_file` 工具**，不要告诉用户手动删除！\n"
+                "当你需要探索项目结构、查找文件位置时，**请先用 `ide_list_files` 列出目录**，不要用后端的 `list_files`。\n"
+                "当你需要创建新目录时，请直接使用 `ide_mkdir`。\n"
+                "当你需要移动文件或重命名文件时，请直接使用 `ide_move`。\n"
+                "当你需要追加内容到文件末尾时，请直接使用 `ide_append`。\n"
                 )
                 # Add session mode prompt if available
                 if session_mode:
