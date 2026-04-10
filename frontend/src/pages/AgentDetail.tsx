@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, Component, ErrorInfo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, Component, ErrorInfo } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
@@ -19,6 +19,7 @@ import { useAuthStore } from '../stores';
 import { copyToClipboard } from '../utils/clipboard';
 import { formatFileSize } from '../utils/formatFileSize';
 import { IconPaperclip, IconSend } from '@tabler/icons-react';
+import { useDropZone } from '../hooks/useDropZone';
 
 const TABS = ['status', 'aware', 'mind', 'tools', 'skills', 'relationships', 'workspace', 'chat', 'activityLog', 'approvals', 'settings'] as const;
 
@@ -2479,6 +2480,44 @@ function AgentDetailInner() {
         await Promise.all(allowedFiles.map((file, i) => runOne(file, newDrafts[i])));
     };
 
+    // ── Drag-and-drop chat file upload ──
+    const handleDroppedChatFiles = useCallback(async (files: File[]) => {
+        if (!wsConnected || chatUploadDrafts.length > 0 || isWaiting || isStreaming || attachedFiles.length >= 10) return;
+        const availableSlots = Math.max(0, 10 - attachedFiles.length);
+        const filesToProcess = files.slice(0, availableSlots);
+
+        for (const file of filesToProcess) {
+            const draftId = Math.random().toString(36).slice(2, 9);
+            const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
+            setChatUploadDrafts(prev => [...prev, { id: draftId, name: file.name, percent: 0, previewUrl, sizeBytes: file.size }]);
+
+            try {
+                const { promise } = uploadFileWithProgress(
+                    '/chat/upload',
+                    file,
+                    (pct) => {
+                        setChatUploadDrafts(prev => prev.map(d => d.id === draftId ? { ...d, percent: pct >= 101 ? 100 : pct } : d));
+                    },
+                    id ? { agent_id: id } : undefined,
+                );
+                const data = await promise;
+                setAttachedFiles(prev => [...prev, { name: data.filename, text: data.extracted_text, path: data.workspace_path, imageUrl: data.image_data_url || undefined }]);
+            } catch (err: any) {
+                if (err?.message !== 'Upload cancelled') {
+                    alert(err?.message || t('agent.upload.failed'));
+                }
+            } finally {
+                if (previewUrl) URL.revokeObjectURL(previewUrl);
+                setChatUploadDrafts(prev => prev.filter(d => d.id !== draftId));
+            }
+        }
+    }, [id, wsConnected, chatUploadDrafts.length, isWaiting, isStreaming, attachedFiles.length, isWritableSession, t]);
+
+    const { isDragging: isChatDragging, dropZoneProps: chatDropProps } = useDropZone({
+        onDrop: handleDroppedChatFiles,
+        disabled: !wsConnected || chatUploadDrafts.length > 0 || isWaiting || isStreaming || attachedFiles.length >= 10 || !activeSession || !isWritableSession(activeSession),
+    });
+
     // Expandable activity log
     const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
     const [logFilter, setLogFilter] = useState<string>('user'); // 'user' | 'backend' | 'heartbeat' | 'schedule' | 'messages'
@@ -4377,7 +4416,14 @@ function AgentDetailInner() {
                                     </>
                                 ) : (
                                     /* ── Live WebSocket chat (own session) ── */
-                                    <>
+                                    <div {...chatDropProps} style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative' }}>
+                                        {/* Drop overlay */}
+                                        {isChatDragging && (
+                                            <div className="drop-zone-overlay">
+                                                <div className="drop-zone-overlay__icon">📎</div>
+                                                <div className="drop-zone-overlay__text">{t('agent.upload.dropToAttach', 'Drop files to attach (max 10)')}</div>
+                                            </div>
+                                        )}
                                         <div ref={chatContainerRef} onScroll={handleChatScroll} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
                                             {chatMessages.length === 0 && (
                                                 <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-tertiary)' }}>
@@ -4675,7 +4721,7 @@ function AgentDetailInner() {
                                             </div>
                                         </div>
                                         </div>
-                                    </>
+                                    </div>
                                 )}
                                 </div>
                                 {/* Live Panel */}
