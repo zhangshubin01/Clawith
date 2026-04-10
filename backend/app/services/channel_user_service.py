@@ -155,6 +155,8 @@ class ChannelUserService:
         )
         if tenant_id:
             query = query.where(IdentityProvider.tenant_id == tenant_id)
+        
+        query = query.limit(1)  # Even if multiple rows exist, just take the first one
 
         result = await db.execute(query)
         provider = result.scalar_one_or_none()

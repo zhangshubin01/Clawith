@@ -103,8 +103,9 @@ class FeishuWSManager:
             """Handle im.message.receive_v1 events from Feishu WebSocket."""
             try:
                 # The data object carries the raw event body
+                logger.info(f"[Feishu WS] ====> EVENT RECEIVED! entering handle_message for agent {agent_id}")
                 raw_body = getattr(data, "raw_body", None)
-                logger.info(f"[Feishu WS] Received event: {data}")
+                logger.info(f"[Feishu WS] Received event: type={type(data)}, data={data}")
                 if not raw_body:
                     # Some SDK versions pass the dict directly
                     if isinstance(data, dict):
@@ -151,14 +152,48 @@ class FeishuWSManager:
                 except Exception as e:
                     logger.exception(f"[Feishu WS] Could not dispatch event to main loop: {e}")
 
-        dispatcher = (
-            lark.EventDispatcherHandler.builder("", "")
-            .register_event("im.message.receive_v1", handle_message)
-            .build()
-        )
+        # For lark-oapi 1.5.x:
+        # - The SDK generates specific registration methods for all known events
+        # - im.message.receive_v1 becomes register_p2_im_message_receive_v1
+        # - Also register bot enter event to avoid 'processor not found' warnings
+        from lark_oapi import EventDispatcherHandler
+        builder = EventDispatcherHandler.builder("", "")
+        
+        # 1. Register the main message receive event (required for getting messages
+        if hasattr(builder, 'register_p2_im_message_receive_v1'):
+            builder = getattr(builder, 'register_p2_im_message_receive_v1')(handle_message)
+            logger.info("[Feishu WS] Used specific register_p2_im_message_receive_v1 method")
+        elif hasattr(builder, 'register_p2_customized_event'):
+            builder = builder.register_p2_customized_event("im.message.receive_v1", handle_message)
+            logger.info("[Feishu WS] Fallback to register_p2_customized_event for im.message.receive_v1")
+        else:
+            logger.error("[Feishu WS] No available registration method found for im.message.receive_v1!")
+        
+        # 2. Also register the bot enter p2p chat event to avoid warning logs
+        if hasattr(builder, 'register_p2_im_chat_access_event_bot_p2p_chat_entered_v1'):
+            builder = getattr(builder, 'register_p2_im_chat_access_event_bot_p2p_chat_entered_v1')(handle_message)
+            logger.info("[Feishu WS] Registered bot p2p chat enter event")
+        
+        dispatcher = builder.build()
         return dispatcher
 
-    async def _async_handle_message(self, agent_id: uuid.UUID, data: Dict[str, Any]) -> None:
+    def _convert_sdk_object_to_dict(self, obj: Any) -> Any:
+        """Recursively convert lark-oapi SDK objects to dictionaries for downstream processing."""
+        if hasattr(obj, "__dict__") and not isinstance(obj, dict):
+            # Convert SDK objects (strongly typed from codegen) to dict
+            result = {}
+            for k, v in vars(obj).items():
+                if not k.startswith("_"):  # skip private attributes
+                    result[k] = self._convert_sdk_object_to_dict(v)
+            return result
+        elif isinstance(obj, list):
+            return [self._convert_sdk_object_to_dict(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {k: self._convert_sdk_object_to_dict(v) for k, v in obj.items()}
+        else:
+            return obj
+
+    async def _async_handle_message(self, agent_id: uuid.UUID, data: Any) -> None:
         """Handle im.message.receive_v1 events from Feishu WebSocket asynchronously."""
         try:
             # The data object carries the raw event body
@@ -168,22 +203,20 @@ class FeishuWSManager:
                 if isinstance(data, dict):
                     body_dict = data
                 else:
-                    # Handle lark_oapi.event.custom.CustomizedEvent
+                    # Handle lark_oapi.event.customized.CustomizedEvent or generated event objects
                     body_dict = {}
                     if hasattr(data, "header"):
-                        header_obj = data.header
-                        body_dict["header"] = vars(header_obj) if hasattr(header_obj, "__dict__") else {
-                            "event_type": getattr(header_obj, "event_type", "im.message.receive_v1"),
-                            "event_id": getattr(header_obj, "event_id", ""),
-                            "create_time": getattr(header_obj, "create_time", "")
-                        }
+                        body_dict["header"] = self._convert_sdk_object_to_dict(data.header)
+                        # Ensure event_type is present as it's required downstream
                         if "event_type" not in body_dict["header"]:
-                            body_dict["header"]["event_type"] = getattr(header_obj, "event_type", "im.message.receive_v1")
+                            body_dict["header"]["event_type"] = getattr(data.header, "event_type", "im.message.receive_v1")
                     else:
                         body_dict["header"] = {"event_type": "im.message.receive_v1"}
 
                     if hasattr(data, "event"):
-                        body_dict["event"] = data.event
+                        # For strongly typed event objects from SDK codegen,
+                        # recursively convert all nested objects to dicts
+                        body_dict["event"] = self._convert_sdk_object_to_dict(data.event)
                     elif hasattr(data, "content") and isinstance(getattr(data, "content"), str):
                         import json
                         try:
@@ -215,6 +248,7 @@ class FeishuWSManager:
         app_id: str,
         app_secret: str,
         stop_existing: bool = True,
+        domain: str = "feishu",
     ):
         """Spawns a WebSocket client fully asynchronously inside FastAPI's loop."""
         if not _HAS_LARK:
@@ -239,7 +273,8 @@ class FeishuWSManager:
             logger.exception(f"[Feishu WS] Failed to create event handler for {agent_id}: {e}")
             return
 
-        # Instantiate Client
+        # Instantiate Client - for lark-oapi 1.5.x, domain is not a constructor parameter at this version
+        # Default domain is feishu (china), which is what we need
         client = ws.Client(
             app_id,
             app_secret,
@@ -316,10 +351,12 @@ class FeishuWSManager:
         for config in configs:
             extra = config.extra_config or {}
             mode = extra.get("connection_mode", "webhook")
+            domain = extra.get("domain", "feishu")
             if mode == "websocket":
                 if config.app_id and config.app_secret:
                     await self.start_client(
-                        config.agent_id, config.app_id, config.app_secret, stop_existing=False
+                        config.agent_id, config.app_id, config.app_secret, 
+                        stop_existing=True, domain=domain
                     )
                 else:
                     logger.warning(f"[Feishu WS] Skipping agent {config.agent_id}: missing credentials")
