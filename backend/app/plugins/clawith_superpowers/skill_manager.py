@@ -6,7 +6,8 @@ from typing import Optional, List
 from loguru import logger
 from sqlalchemy import select
 
-from app.models.skill import Skill, SkillFile
+from app.models.skill import Skill
+from app.core.database import get_db
 
 from .market_client import SuperpowersMarketClient
 from .adapter import to_clawith_skill
@@ -94,14 +95,9 @@ class SkillManager:
 
     def get_installed_skills(self) -> List[Skill]:
         """Get all installed Superpowers skills from database."""
-        from app.database import get_db
-
         db = next(get_db())
-        result = db.execute(select(Skill))
-        skills = list(result.scalars().all())
-        # For now, return all skills since we don't have a source field
-        # In the future, we could filter by a specific category or name prefix
-        return skills
+        skills = db.query(Skill).filter(Skill.source == "superpowers").all()
+        return list(skills)
 
     def get_skill_content(self, skill_name: str) -> Optional[str]:
         """Get the full content of a skill."""
@@ -109,11 +105,9 @@ class SkillManager:
 
     def uninstall_skill(self, skill_name: str) -> bool:
         """Uninstall a skill from database. Returns True on success."""
-        from app.database import get_db
-
         db = next(get_db())
         result = db.execute(
-            select(Skill).where(Skill.name == skill_name)
+            select(Skill).where(Skill.name == skill_name, Skill.source == "superpowers")
         )
         skill = result.scalar_one_or_none()
 
@@ -130,63 +124,28 @@ class SkillManager:
 
     def _upsert_skill(self, skill_data: dict) -> Optional[Skill]:
         """Upsert skill into database. Returns Skill on success."""
-        from app.database import get_db
-
         db = next(get_db())
-        # Find existing skill by name
-        result = db.execute(
-            select(Skill).where(Skill.name == skill_data["name"])
-        )
-        existing = result.scalar_one_or_none()
+
+        # Find existing skill by name and source
+        existing = db.query(Skill).filter(
+            Skill.name == skill_data["name"],
+            Skill.source == "superpowers"
+        ).first()
 
         if existing:
-            # Update existing - THIS IS THE CORRECT pattern from the plan:
+            # Update existing
             for key, value in skill_data.items():
-                if hasattr(existing, key):
-                    setattr(existing, key, value)
+                setattr(existing, key, value)
             db.commit()
             db.refresh(existing)
-
-            # Update skill file
-            file_result = db.execute(
-                select(SkillFile).where(SkillFile.skill_id == existing.id)
-            )
-            skill_file = file_result.scalar_one_or_none()
-            if skill_file:
-                skill_file.content = skill_data["content"]
-            else:
-                skill_file = SkillFile(
-                    skill_id=existing.id,
-                    path="SKILL.md",
-                    content=skill_data["content"]
-                )
-                db.add(skill_file)
-            db.commit()
-            db.refresh(existing)
-
             return existing
         else:
             # Create new
-            folder_name = skill_data["name"].lower().replace(" ", "_")
-            new_skill = Skill(
-                name=skill_data["name"],
-                description=skill_data["description"],
-                folder_name=folder_name,
-                is_builtin=False,
-                is_default=False
-            )
+            from backend.app.schemas.skill import SkillCreate
+            skill_create = SkillCreate(**skill_data)
+            new_skill = Skill(**skill_create.model_dump())
+            new_skill.source = "superpowers"
             db.add(new_skill)
             db.commit()
             db.refresh(new_skill)
-
-            # Create skill file
-            skill_file = SkillFile(
-                skill_id=new_skill.id,
-                path="SKILL.md",
-                content=skill_data["content"]
-            )
-            db.add(skill_file)
-            db.commit()
-            db.refresh(new_skill)
-
             return new_skill
