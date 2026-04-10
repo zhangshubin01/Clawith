@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="clawith-ide-acp-0.2.0">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/integrations/clawith-ide-acp/releases/clawith-ide-acp-0.2.0.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
