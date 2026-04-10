@@ -317,7 +317,14 @@ def _serialize_acp_prompt_for_cloud(prompt: list[Any]) -> tuple[list[dict[str, A
             wire.append({"type": "resource", "resource": d.get("resource")})
             plain_bits.append("[资源]")
         elif t == "audio":
-            logger.warning("ACP audio block omitted for cloud (not supported)")
+            # Forward audio content block to cloud for processing (e.g. speech-to-text)
+            logger.debug("ACP audio block forwarded to cloud")
+            wire.append({
+                "type": "audio",
+                "data": d.get("data"),
+                "mime_type": d.get("mime_type") or d.get("mimeType"),
+            })
+            plain_bits.append("[音频]")
         else:
             logger.debug("ACP block type %s skipped for cloud bridge", t)
     return wire, "".join(plain_bits)
@@ -614,6 +621,20 @@ class ClawithThinClientAgent(Agent):
         self._session_config.pop(session_id, None)     # N10
         self._sessions_titled.discard(session_id)     # N2
         self._session_mcp_servers.pop(session_id, None)  # A
+        
+        # Notify cloud to close the session
+        try:
+            async with websockets.connect(self.ws_endpoint, **_websocket_proxy_kw()) as ws:
+                await ws.send(json.dumps(
+                    _cloud_msg({
+                        "type": "close_session",
+                        "session_id": session_id,
+                    }), ensure_ascii=False
+                ))
+                logger.info("close_session: notified cloud to close session_id=%s", session_id)
+        except Exception as e:
+            logger.warning("close_session: failed to notify cloud: %s", e)
+        
         logger.info("close_session session_id=%s (session state cleared)", session_id)
         return CloseSessionResponse()
 
@@ -707,11 +728,46 @@ class ClawithThinClientAgent(Agent):
         return ResumeSessionResponse()
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        logger.debug("ext_method %s", method)
-        return {}
+        """Forward extension method call from IDE to Clawith cloud."""
+        logger.debug("ext_method %s: forwarding to cloud", method)
+        try:
+            async with websockets.connect(self.ws_endpoint, **_websocket_proxy_kw()) as ws:
+                await ws.send(json.dumps(
+                    _cloud_msg({
+                        "type": "ext_method",
+                        "method": method,
+                        "params": params,
+                    }), ensure_ascii=False
+                ))
+                raw = await ws.recv()
+                data = json.loads(raw)
+                _check_server_schema(data)
+                if data.get("type") == "ext_method_result":
+                    result = data.get("result", {})
+                    logger.debug("ext_method %s: received result from cloud", method)
+                    return result
+                else:
+                    logger.warning("Unexpected ext_method response type: %s", data.get("type"))
+                    return {}
+        except Exception as e:
+            logger.error("ext_method %s failed: %s", method, e)
+            return {}
 
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
-        logger.debug("ext_notification %s", method)
+        """Forward extension notification from IDE to Clawith cloud (no response)."""
+        logger.debug("ext_notification %s: forwarding to cloud", method)
+        try:
+            async with websockets.connect(self.ws_endpoint, **_websocket_proxy_kw()) as ws:
+                await ws.send(json.dumps(
+                    _cloud_msg({
+                        "type": "ext_notification",
+                        "method": method,
+                        "params": params,
+                    }), ensure_ascii=False
+                ))
+                logger.debug("ext_notification %s: sent to cloud", method)
+        except Exception as e:
+            logger.error("ext_notification %s failed: %s", method, e)
 
     async def _run_shell_command(self, user_command: str, session_id: str) -> str:
         """macOS/Linux: /bin/sh -c；Windows: cmd.exe /c。"""
@@ -1292,6 +1348,28 @@ class ClawithThinClientAgent(Agent):
                             _used_tok = int(data.get("used") or 0)
                             _size_tok = int(data.get("size") or 200000)
                             await _enqueue_ide(UsageUpdate(used=_used_tok, size=_size_tok, session_update="usage_update"), "usage_update")
+
+                        elif msg_type == "ext_method":
+                            # Cloud -> IDE: call extension method on IDE
+                            method = data.get("method")
+                            params = data.get("params", {})
+                            call_id = data.get("call_id")
+                            logger.debug("ext_method from cloud: method=%s", method)
+                            result = await self._conn.ext_method(method, params)
+                            await ws.send(json.dumps(
+                                _cloud_msg({
+                                    "type": "ext_method_result",
+                                    "call_id": call_id,
+                                    "result": result,
+                                }), ensure_ascii=False
+                            ))
+
+                        elif msg_type == "ext_notification":
+                            # Cloud -> IDE: send extension notification to IDE
+                            method = data.get("method")
+                            params = data.get("params", {})
+                            logger.debug("ext_notification from cloud: method=%s", method)
+                            await self._conn.ext_notification(method, params)
 
                         elif msg_type == "execute_tool":
                             await _trace_join("execute_tool")
