@@ -1,0 +1,4 @@
+# 瘦客户端直连依赖（固定主版本，与 requirements.lock.txt 一致）
+# 生产/内网装机请优先：pip install -r requirements.lock.txt
+agent-client-protocol==0.9.0
+websockets==15.0.1
