@@ -115,7 +115,7 @@ Content here
 
     assert "boolean_param" in properties
     assert properties["boolean_param"]["type"] == "boolean"
-    assert properties["boolean_param"]["default"] == True
+    assert properties["boolean_param"]["default"] is True
 
     assert "array_param" in properties
     assert properties["array_param"]["type"] == "array"
