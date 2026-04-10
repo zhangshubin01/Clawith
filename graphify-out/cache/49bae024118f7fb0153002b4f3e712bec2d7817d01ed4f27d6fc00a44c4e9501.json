@@ -1,0 +1,1 @@
+{"nodes": [{"id": "confirmmodal", "label": "ConfirmModal.tsx", "file_type": "code", "source_file": "frontend/src/components/ConfirmModal.tsx", "source_location": "L1"}], "edges": [{"source": "confirmmodal", "target": "react", "relation": "imports_from", "confidence": "EXTRACTED", "source_file": "frontend/src/components/ConfirmModal.tsx", "source_location": "L1", "weight": 1.0}]}
