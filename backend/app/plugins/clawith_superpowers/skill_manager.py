@@ -141,7 +141,7 @@ class SkillManager:
             return existing
         else:
             # Create new
-            from backend.app.schemas.skill import SkillCreate
+            from app.schemas.skill import SkillCreate
             skill_create = SkillCreate(**skill_data)
             new_skill = Skill(**skill_create.model_dump())
             new_skill.source = "superpowers"
