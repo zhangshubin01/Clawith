@@ -1733,9 +1733,13 @@ function BroadcastSection() {
 }
 
 
-// ─── Identity Providers Tab ──────────────────────────
+// ─── OKR Tab ──────────────────────────────────────────
 function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
     const qc = useQueryClient();
+    const { i18n } = useTranslation();
+    // Derive language from i18n — same pattern as OKR.tsx
+    const zh = i18n.language?.startsWith('zh');
+
     const { data: settings, isLoading } = useQuery({
         queryKey: ['okr-settings', tenantId],
         queryFn: () => fetchJson<any>('/okr/settings')
@@ -1745,9 +1749,9 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
         onSuccess: () => qc.invalidateQueries({ queryKey: ['okr-settings'] })
     });
 
-    // Fetch members-without-okr to get okr_agent_id (used for the Chat link)
+    // Fetch members-without-okr to get okr_agent_id and company_okr_exists for the guidance card
     const { data: membersData } = useQuery({
-        queryKey: ['okr-members-without-okr-settings'],
+        queryKey: ['okr-members-without-okr-settings', tenantId],
         queryFn: () => fetchJson<any>('/okr/members-without-okr'),
         enabled: !!settings?.enabled,
         retry: false,
@@ -1759,17 +1763,26 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
     const okrAgentId = membersData?.okr_agent_id ?? null;
     const companyOkrExists = membersData?.company_okr_exists ?? false;
 
+    // Weekday labels — full bilingual list
+    const weekdays = zh
+        ? ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+        : ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
     return (
         <div style={{ maxWidth: '800px' }}>
             <div className="card" style={{ marginBottom: '24px' }}>
+                {/* Toggle row */}
                 <div style={{ padding: '20px', borderBottom: '1px solid var(--border-subtle)' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>
                             <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)', marginBottom: '4px' }}>
-                                OKR 系统开关
+                                {zh ? 'OKR 系统开关' : 'OKR System'}
                             </div>
                             <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                                启用后，组织内成员和数字员工均可使用 OKR 功能管理目标。Agent 将主动跟进并报告进展。
+                                {zh
+                                    ? '启用后，组织内成员和数字员工均可使用 OKR 功能管理目标。Agent 将主动跟进并报告进展。'
+                                    : 'When enabled, all members and AI agents in the organization can use OKR to manage objectives. The OKR Agent will proactively track and report progress.'
+                                }
                             </div>
                         </div>
                         <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '24px' }}>
@@ -1791,7 +1804,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                         </label>
                     </div>
                 </div>
-                
+
                 {s.enabled && (
                     <div style={{ padding: '20px' }}>
                         {/* Phase 1 Onboarding Guidance Card */}
@@ -1799,9 +1812,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                             marginBottom: '24px',
                             padding: '16px 20px',
                             borderRadius: '10px',
-                            background: companyOkrExists
-                                ? 'rgba(34,197,94,0.06)'
-                                : 'rgba(99,102,241,0.06)',
+                            background: companyOkrExists ? 'rgba(34,197,94,0.06)' : 'rgba(99,102,241,0.06)',
                             border: `1px solid ${companyOkrExists ? 'rgba(34,197,94,0.2)' : 'rgba(99,102,241,0.2)'}`,
                         }}>
                             <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
@@ -1828,17 +1839,24 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                         color: companyOkrExists ? '#22c55e' : 'var(--text-primary)',
                                         marginBottom: '4px',
                                     }}>
-                                        {companyOkrExists ? '公司 OKR 已设定' : '第一步：设定公司 OKR'}
+                                        {companyOkrExists
+                                            ? (zh ? '公司 OKR 已设定' : 'Company OKR is set')
+                                            : (zh ? '第一步：设定公司 OKR' : 'Step 1: Set company OKR')
+                                        }
                                     </div>
                                     <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
                                         {companyOkrExists
-                                            ? '公司目标已记录到当前周期。你可以在 OKR 页面查看详情，或催促成员设定个人 OKR。'
-                                            : '开启 OKR 后的第一步是让 OKR Agent 帮你记录公司的目标。点击右侧按钮，跳转到 OKR Agent 的对话页面，告诉它本周期公司的目标，它会帮你创建。'
+                                            ? (zh
+                                                ? '公司目标已记录到当前周期。你可以在 OKR 页面查看详情，或催促成员设定个人 OKR。'
+                                                : 'Company objectives are recorded for the current period. Visit the OKR page to view details or nudge members to set their individual OKRs.')
+                                            : (zh
+                                                ? '开启 OKR 后的第一步是让 OKR Agent 帮你记录公司的目标。点击右侧按钮，跳转到 OKR Agent 的对话页面，告诉它本周期公司的目标，它会帮你创建。'
+                                                : 'The first step after enabling OKR is to let the OKR Agent record your company objectives. Click the button to open a chat with the OKR Agent and describe your goals for this period.')
                                         }
                                     </div>
                                 </div>
 
-                                {/* Action button */}
+                                {/* Action button — links to OKR Agent chat */}
                                 {okrAgentId ? (
                                     <a
                                         id="okr-chat-agent-btn"
@@ -1857,47 +1875,63 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
                                         </svg>
-                                        {companyOkrExists ? '继续和 OKR Agent 对话' : '前往 OKR Agent 对话'}
+                                        {companyOkrExists
+                                            ? (zh ? '继续和 OKR Agent 对话' : 'Chat with OKR Agent')
+                                            : (zh ? '前往 OKR Agent 对话' : 'Open OKR Agent Chat')
+                                        }
                                     </a>
                                 ) : (
                                     <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', flexShrink: 0 }}>
-                                        OKR Agent 未找到
+                                        {zh ? 'OKR Agent 未找到' : 'OKR Agent not found'}
                                     </span>
                                 )}
                             </div>
                         </div>
 
+                        {/* Period preference */}
                         <div style={{ marginBottom: '24px' }}>
-                            <div style={{ fontWeight: 500, marginBottom: '12px', fontSize: '13px' }}>周期偏好</div>
-                            <select 
-                                className="form-input" 
+                            <div style={{ fontWeight: 500, marginBottom: '12px', fontSize: '13px' }}>
+                                {zh ? '周期偏好' : 'Period Preference'}
+                            </div>
+                            <select
+                                className="form-input"
                                 value={s.period_frequency}
                                 onChange={(e) => updateSettings.mutate({ ...s, period_frequency: e.target.value })}
                                 style={{ maxWidth: '300px' }}
                             >
-                                <option value="quarterly">按季度 (Quarterly)</option>
-                                <option value="monthly">按月 (Monthly)</option>
+                                <option value="quarterly">{zh ? '按季度 (Quarterly)' : 'Quarterly'}</option>
+                                <option value="monthly">{zh ? '按月 (Monthly)' : 'Monthly'}</option>
                             </select>
                         </div>
 
+                        {/* Daily report */}
                         <div style={{ marginBottom: '24px' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-                                <input 
-                                    type="checkbox" 
+                                <input
+                                    type="checkbox"
                                     checked={s.daily_report_enabled}
                                     onChange={(e) => updateSettings.mutate({ ...s, daily_report_enabled: e.target.checked })}
                                 />
                                 <div>
-                                    <div style={{ fontWeight: 500, fontSize: '13px' }}>启用自动日报</div>
-                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>OKR Agent 每天定时收集并生成全员进展日报</div>
+                                    <div style={{ fontWeight: 500, fontSize: '13px' }}>
+                                        {zh ? '启用自动日报' : 'Enable Daily Report'}
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                        {zh
+                                            ? 'OKR Agent 每天定时收集并生成全员进展日报'
+                                            : 'OKR Agent collects updates and generates a daily progress report on schedule'
+                                        }
+                                    </div>
                                 </div>
                             </div>
                             {s.daily_report_enabled && (
                                 <div style={{ marginLeft: '28px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>日报发送时间:</div>
-                                    <input 
-                                        type="time" 
-                                        className="form-input" 
+                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                        {zh ? '日报发送时间:' : 'Report time:'}
+                                    </div>
+                                    <input
+                                        type="time"
+                                        className="form-input"
                                         value={s.daily_report_time}
                                         onChange={(e) => updateSettings.mutate({ ...s, daily_report_time: e.target.value })}
                                         style={{ width: '120px' }}
@@ -1906,21 +1940,28 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                             )}
                         </div>
 
+                        {/* Weekly report */}
                         <div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-                                <input 
-                                    type="checkbox" 
+                                <input
+                                    type="checkbox"
                                     checked={s.weekly_report_enabled}
                                     onChange={(e) => updateSettings.mutate({ ...s, weekly_report_enabled: e.target.checked })}
                                 />
                                 <div>
-                                    <div style={{ fontWeight: 500, fontSize: '13px' }}>启用自动周报</div>
-                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>OKR Agent 每周定时收集并生成全员进展周报</div>
+                                    <div style={{ fontWeight: 500, fontSize: '13px' }}>
+                                        {zh ? '启用自动周报' : 'Enable Weekly Report'}
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                        {zh
+                                            ? 'OKR Agent 每周定时收集并生成全员进展周报'
+                                            : 'OKR Agent collects updates and generates a weekly progress report on schedule'
+                                        }
+                                    </div>
                                 </div>
                             </div>
                             {s.weekly_report_enabled && (
                                 <div style={{ marginLeft: '28px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>周报发送日:</div>
                                     <select 
                                         className="form-input" 
                                         value={s.weekly_report_day}
@@ -1944,7 +1985,6 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
         </div>
     );
 }
-
 
 export default function EnterpriseSettings() {
     const { t } = useTranslation();
