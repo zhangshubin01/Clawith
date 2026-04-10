@@ -8,7 +8,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.models.skill import Skill
-from app.core.database import get_db
+from app.database import async_session
 
 from .market_client import SuperpowersMarketClient
 from .adapter import to_clawith_skill
@@ -96,11 +96,10 @@ class SkillManager:
 
     async def get_installed_skills(self) -> List[Skill]:
         """Get all installed Superpowers skills from database."""
-        db = next(get_db())
-        skills = await asyncio.to_thread(
-            lambda: db.query(Skill).filter(Skill.source == "superpowers").all()
-        )
-        return list(skills)
+        async with async_session() as session:
+            result = await session.execute(select(Skill).filter(Skill.source == "superpowers"))
+            skills = result.scalars().all()
+            return list(skills)
 
     def get_skill_content(self, skill_name: str) -> Optional[str]:
         """Get the full content of a skill."""
@@ -108,47 +107,49 @@ class SkillManager:
 
     async def uninstall_skill(self, skill_name: str) -> bool:
         """Uninstall a skill from database. Returns True on success."""
-        db = next(get_db())
-        result = await asyncio.to_thread(
-            lambda: db.execute(
+        async with async_session() as session:
+            result = await session.execute(
                 select(Skill).where(Skill.name == skill_name, Skill.source == "superpowers")
             )
-        )
-        skill = result.scalar_one_or_none()
+            skill = result.scalar_one_or_none()
 
-        if not skill:
-            return False
+            if not skill:
+                return False
 
-        await asyncio.to_thread(lambda: (db.delete(skill), db.commit()))
+            await session.delete(skill)
+            await session.commit()
 
-        if skill_name in self._cache:
-            del self._cache[skill_name]
+            if skill_name in self._cache:
+                del self._cache[skill_name]
 
-        return True
+            return True
 
     async def _upsert_skill(self, skill_data: dict) -> Optional[Skill]:
         """Upsert skill into database. Returns Skill on success."""
-        db = next(get_db())
+        async with async_session() as session:
+            # Find existing skill by name and source
+            result = await session.execute(
+                select(Skill).filter(
+                    Skill.name == skill_data["name"],
+                    Skill.source == "superpowers"
+                )
+            )
+            existing = result.scalar_one_or_none()
 
-        # Find existing skill by name and source
-        existing = await asyncio.to_thread(
-            lambda: db.query(Skill).filter(
-                Skill.name == skill_data["name"],
-                Skill.source == "superpowers"
-            ).first()
-        )
-
-        if existing:
-            # Update existing
-            for key, value in skill_data.items():
-                setattr(existing, key, value)
-            await asyncio.to_thread(lambda: (db.commit(), db.refresh(existing)))
-            return existing
-        else:
-            # Create new
-            from app.schemas.skill import SkillCreate
-            skill_create = SkillCreate(**skill_data)
-            new_skill = Skill(**skill_create.model_dump())
-            new_skill.source = "superpowers"
-            await asyncio.to_thread(lambda: (db.add(new_skill), db.commit(), db.refresh(new_skill)))
-            return new_skill
+            if existing:
+                # Update existing
+                for key, value in skill_data.items():
+                    setattr(existing, key, value)
+                await session.commit()
+                await session.refresh(existing)
+                return existing
+            else:
+                # Create new
+                from app.schemas.skill import SkillCreate
+                skill_create = SkillCreate(**skill_data)
+                new_skill = Skill(**skill_create.model_dump())
+                new_skill.source = "superpowers"
+                session.add(new_skill)
+                await session.commit()
+                await session.refresh(new_skill)
+                return new_skill

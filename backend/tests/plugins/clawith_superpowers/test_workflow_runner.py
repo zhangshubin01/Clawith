@@ -21,10 +21,10 @@ def test_artifact_operations():
         def __init__(self, workspace_path=None):
             self.id = 1
             self.name = "test-agent"
-            self._workspace_path = workspace_path
+            self._workspace_path = workspace_path or tempfile.mkdtemp()
 
         def workspace_path(self):
-            return self._workspace_path if self._workspace_path else tempfile.mkdtemp()
+            return self._workspace_path
 
     agent = MockAgent()
     runner = WorkflowRunner(agent=agent, skill_name="test-skill")

@@ -7,7 +7,7 @@ Design:
 """
 import os
 import pathlib
-from typing import Optional
+from typing import Optional, Dict
 from uuid import UUID
 from app.interfaces.filesystem import FileSystemService
 from .connection import AgentSideConnection

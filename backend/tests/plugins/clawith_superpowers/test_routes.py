@@ -2,12 +2,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 from app.main import app
+from app.core.security import get_current_admin
 from app.models.user import User
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 @pytest.fixture
@@ -18,16 +14,24 @@ def mock_admin_user():
 
 
 @pytest.fixture
+def client(mock_admin_user):
+    # Override the dependency for testing
+    app.dependency_overrides[get_current_admin] = lambda: mock_admin_user
+    test_client = TestClient(app)
+    yield test_client
+    # Clear overrides after test
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
 def mock_regular_user():
     user = MagicMock(spec=User)
     user.role = "member"
     return user
 
 
-@patch("app.plugins.clawith_superpowers.routes.get_current_admin")
 @patch("app.plugins.clawith_superpowers.routes.SkillManager")
-def test_list_available_skills(mock_manager_class, mock_get_current_admin, client, mock_admin_user):
-    mock_get_current_admin.return_value = mock_admin_user
+def test_list_available_skills(mock_manager_class, client):
     mock_manager = MagicMock()
     mock_manager.client.is_cloned.return_value = True
     mock_manager.client.list_available_skills.return_value = ["skill1", "skill2"]
@@ -39,10 +43,8 @@ def test_list_available_skills(mock_manager_class, mock_get_current_admin, clien
     assert response.json() == ["skill1", "skill2"]
 
 
-@patch("app.plugins.clawith_superpowers.routes.get_current_admin")
 @patch("app.plugins.clawith_superpowers.routes.SkillManager")
-def test_list_installed_skills(mock_manager_class, mock_get_current_admin, client, mock_admin_user):
-    mock_get_current_admin.return_value = mock_admin_user
+def test_list_installed_skills(mock_manager_class, client):
     mock_manager = MagicMock()
 
     mock_skill = MagicMock()
@@ -68,10 +70,8 @@ def test_list_installed_skills(mock_manager_class, mock_get_current_admin, clien
     assert data[0]["name"] == "test-skill"
 
 
-@patch("app.plugins.clawith_superpowers.routes.get_current_admin")
 @patch("app.plugins.clawith_superpowers.routes.SkillManager")
-def test_install_skill(mock_manager_class, mock_get_current_admin, client, mock_admin_user):
-    mock_get_current_admin.return_value = mock_admin_user
+def test_install_skill(mock_manager_class, client):
     mock_manager = MagicMock()
 
     mock_skill = MagicMock()
@@ -94,10 +94,8 @@ def test_install_skill(mock_manager_class, mock_get_current_admin, client, mock_
     mock_manager.install_skill.assert_called_once_with("test-skill")
 
 
-@patch("app.plugins.clawith_superpowers.routes.get_current_admin")
 @patch("app.plugins.clawith_superpowers.routes.SkillManager")
-def test_install_skill_not_found(mock_manager_class, mock_get_current_admin, client, mock_admin_user):
-    mock_get_current_admin.return_value = mock_admin_user
+def test_install_skill_not_found(mock_manager_class, client):
     mock_manager = MagicMock()
     mock_manager.install_skill.return_value = None
     mock_manager_class.return_value = mock_manager
@@ -107,10 +105,8 @@ def test_install_skill_not_found(mock_manager_class, mock_get_current_admin, cli
     assert response.status_code == 404
 
 
-@patch("app.plugins.clawith_superpowers.routes.get_current_admin")
 @patch("app.plugins.clawith_superpowers.routes.SkillManager")
-def test_update_all_skills(mock_manager_class, mock_get_current_admin, client, mock_admin_user):
-    mock_get_current_admin.return_value = mock_admin_user
+def test_update_all_skills(mock_manager_class, client):
     mock_manager = MagicMock()
     mock_manager.update_all.return_value = 5
     mock_manager_class.return_value = mock_manager
@@ -123,10 +119,8 @@ def test_update_all_skills(mock_manager_class, mock_get_current_admin, client, m
     assert data["updated_count"] == 5
 
 
-@patch("app.plugins.clawith_superpowers.routes.get_current_admin")
 @patch("app.plugins.clawith_superpowers.routes.SkillManager")
-def test_uninstall_skill(mock_manager_class, mock_get_current_admin, client, mock_admin_user):
-    mock_get_current_admin.return_value = mock_admin_user
+def test_uninstall_skill(mock_manager_class, client):
     mock_manager = MagicMock()
     mock_manager.uninstall_skill.return_value = True
     mock_manager_class.return_value = mock_manager
@@ -139,10 +133,8 @@ def test_uninstall_skill(mock_manager_class, mock_get_current_admin, client, moc
     mock_manager.uninstall_skill.assert_called_once_with("test-skill")
 
 
-@patch("app.plugins.clawith_superpowers.routes.get_current_admin")
 @patch("app.plugins.clawith_superpowers.routes.SkillManager")
-def test_uninstall_skill_not_found(mock_manager_class, mock_get_current_admin, client, mock_admin_user):
-    mock_get_current_admin.return_value = mock_admin_user
+def test_uninstall_skill_not_found(mock_manager_class, client):
     mock_manager = MagicMock()
     mock_manager.uninstall_skill.return_value = False
     mock_manager_class.return_value = mock_manager

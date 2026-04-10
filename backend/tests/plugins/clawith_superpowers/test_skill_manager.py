@@ -44,16 +44,19 @@ async def test_install_skill(mock_client_class):
 
     manager = SkillManager()
     with patch.object(manager, '_upsert_skill') as mock_upsert:
-        mock_upsert.return_value = MagicMock(name="test-skill")
+        mock_result = MagicMock()
+        mock_result.name = "test-skill"
+        mock_upsert.return_value = mock_result
         result = await manager.install_skill("test-skill")
         assert result is not None
         assert result.name == "test-skill"
         assert "test-skill" in manager._cache
 
 
+@patch("app.plugins.clawith_superpowers.skill_manager.async_session")
 @patch("app.plugins.clawith_superpowers.skill_manager.SuperpowersMarketClient")
 @pytest.mark.asyncio
-async def test_uninstall_skill(mock_client_class):
+async def test_uninstall_skill(mock_client_class, mock_async_session_class):
     # Create mock client
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
@@ -62,9 +65,22 @@ async def test_uninstall_skill(mock_client_class):
     # Add to cache first
     manager._cache["test-skill"] = MagicMock(name="test-skill")
 
-    with patch.object(manager, '_upsert_skill'):
-        result = await manager.uninstall_skill("test-skill")
-        assert result is False  # Should return False since we didn't actually add to DB
+    # Mock async_session context manager
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = None
+
+    mock_session = MagicMock()
+    # execute is async, so return an awaitable
+    async def mock_execute(*args, **kwargs):
+        return mock_result
+    mock_session.execute = mock_execute
+
+    mock_context = MagicMock()
+    mock_context.__aenter__.return_value = mock_session
+    mock_async_session_class.return_value = mock_context
+
+    result = await manager.uninstall_skill("test-skill")
+    assert result is False  # Should return False since skill not found in DB
 
 
 @patch("app.plugins.clawith_superpowers.skill_manager.SuperpowersMarketClient")

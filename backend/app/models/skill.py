@@ -22,6 +22,7 @@ class Skill(Base):
     category: Mapped[str] = mapped_column(String(50), default="general")
     icon: Mapped[str] = mapped_column(String(10), default="📋")
     folder_name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    source: Mapped[str] = mapped_column(String(50), nullable=False, default="custom")
     is_builtin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

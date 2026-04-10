@@ -72,7 +72,7 @@ class LoadSessionRequest(BaseModel):
     sessionId: UUID
 
 
-class LoadSessionResponse(Base):
+class LoadSessionResponse(BaseModel):
     success: bool
     message: Optional[str] = None
 
