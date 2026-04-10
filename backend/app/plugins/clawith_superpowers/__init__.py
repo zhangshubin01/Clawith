@@ -19,10 +19,6 @@ class ClawithSuperpowersPlugin(ClawithPlugin):
 
     def register(self, app: FastAPI) -> None:
         """Register the plugin with the FastAPI app."""
-        # Initialize skill manager and sync skills
-        manager = SkillManager()
-        manager.sync_skills()
-
         # Register API routes
         app.include_router(router, prefix="/api/plugins/clawith-superpowers", tags=["superpowers"])
 
