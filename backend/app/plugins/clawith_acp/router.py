@@ -559,18 +559,12 @@ async def _custom_execute_tool(
         if tool_name in _IDE_TOOLS_REQUIRING_PERMISSION:
             # Check if auto_approve_diff is enabled in session config
             # When enabled, IDE already shows the diff and no need for extra permission popup on web UI
-            # Default to True: auto-approve all IDE changes, user reviews all in IDE after generation
+            # Default to False: IDE will ask user for approval before applying each change
             config = current_acp_session_config.get()
             auto_approve = config.get("auto_approve_diff") or config.get("autoApproval")
-            # Default to True if not set: user already reviews in IDE, no need backend approval
-            if auto_approve is not False:
-                auto_approve = True
-                logger.info(
-                    "[ACP] ide_write_file auto-approved: session_id={} tool={} auto_approve_diff=true",
-                    session_id or "-",
-                    tool_name,
-                )
-            else:
+            # Only auto-approve if user explicitly sets it to True
+            if auto_approve is not True:
+                auto_approve = False
                 extra: dict[str, Any] | None = None
                 if tool_name == "ide_write_file":
                     file_path = args.get("path", "")

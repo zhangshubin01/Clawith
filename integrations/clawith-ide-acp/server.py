@@ -360,6 +360,10 @@ class ClawithThinClientAgent(Agent):
         self._fork_parents: dict[str, str] = {}
         # O5: per-session model override — session_id → model_id (from IDE model picker)
         self._session_models: dict[str, str] = {}
+        # Method B: deferred write approval — queue per session
+        # Each entry: {"path": str, "original_content": str|None, "new_content": str}
+        # Env: CLAWITH_ACP_WRITE_MODE=deferred (default) | immediate
+        self._pending_writes: dict[str, list[dict]] = {}
         # N9: per-session mode — session_id → mode_id (from IDE mode switcher)
         self._session_modes: dict[str, str] = {}
         # N10: per-session config options — session_id → (config_id → value)
@@ -621,6 +625,7 @@ class ClawithThinClientAgent(Agent):
         self._session_config.pop(session_id, None)     # N10
         self._sessions_titled.discard(session_id)     # N2
         self._session_mcp_servers.pop(session_id, None)  # A
+        self._pending_writes.pop(session_id, None)    # Method B
         
         # Notify cloud to close the session
         try:
@@ -813,6 +818,19 @@ class ClawithThinClientAgent(Agent):
             return False
         if mode in ("allow", "always", "yes", "1", "true"):
             return True
+
+        # Method B: deferred write approval — auto-grant ide_write_file immediately,
+        # queue the actual diff review to run as a batch after the agent task completes.
+        # Set CLAWITH_ACP_WRITE_MODE=immediate to restore the old per-write dialog.
+        _write_mode = (os.environ.get("CLAWITH_ACP_WRITE_MODE") or "deferred").strip().lower()
+        if tool_name == "ide_write_file" and _write_mode == "deferred" and mode == "ide":
+            logger.info(
+                "ACP thin: ide_write_file deferred mode — auto-granting permission "
+                "(diff review queued for end-of-task) session_id=%s",
+                session_id,
+            )
+            return True
+
         try:
             from acp.contrib.permissions import PermissionBroker, default_permission_options
             from acp.schema import AllowedOutcome, PermissionOption, ToolCallUpdate
@@ -1043,6 +1061,187 @@ class ClawithThinClientAgent(Agent):
         except Exception as e:
             logger.warning("ide_write_file approval dialog failed (%s); allowing write", e)
             return True  # 对话框失败时默认允许，避免阻塞 AI 流程
+
+    async def _request_deferred_review(
+        self,
+        path: str,
+        new_content: str,
+        old_content: str | None,
+        session_id: str,
+        index: int,
+        total: int,
+    ) -> bool:
+        """Method B: show diff for an already-written file; user keeps or reverts.
+
+        Unlike `_request_edit_approval` (which blocks BEFORE writing), this is called
+        AFTER the agent has written all files.  Approve = keep; Reject = rollback.
+        """
+        mode = (os.environ.get("CLAWITH_ACP_PERMISSION") or "ide").strip().lower()
+        if mode in ("deny", "reject", "0", "false", "no"):
+            return False
+        if mode in ("allow", "always", "yes", "1", "true"):
+            return True
+        try:
+            from acp.contrib.permissions import PermissionBroker, default_permission_options
+            from acp.schema import AllowedOutcome, ToolCallUpdate
+            from acp.schema import RequestPermissionRequest, RequestPermissionResponse
+
+            tid = uuid4().hex
+            filename = Path(path).name
+            tc = ToolCallUpdate(
+                tool_call_id=tid,
+                title=f"[{index}/{total}] {filename}",
+                kind="edit",
+                status="pending",
+            )
+            try:
+                tc.content = [tool_diff_content(path, new_content, old_content)]
+            except Exception:
+                pass
+            try:
+                tc.raw_input = {"path": path, "chars": len(new_content)}
+            except Exception:
+                pass
+
+            async def _requester(req: RequestPermissionRequest) -> RequestPermissionResponse:
+                return await self._conn.request_permission(
+                    options=req.options,
+                    session_id=req.session_id,
+                    tool_call=req.tool_call,
+                )
+
+            broker = PermissionBroker(session_id, _requester)
+            try:
+                resp = await asyncio.wait_for(
+                    broker.request_for(
+                        tid,
+                        description=f"[{index}/{total}] 保留对 {path} 的修改？拒绝将自动回滚此文件。",
+                        tool_call=tc,
+                        options=list(default_permission_options()),
+                    ),
+                    timeout=300.0,  # 5 min per file — user may need time to review
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "ACP thin: deferred review timed out for %s [%d/%d]; keeping file",
+                    path, index, total,
+                )
+                return True  # timeout → keep
+
+            out = resp.outcome
+            selected_id = getattr(out, "selected_id", None) or getattr(out, "option_id", None)
+            allowed = (
+                isinstance(out, AllowedOutcome)
+                or selected_id in ("approve", "approve_for_session", "allow_once")
+                or getattr(out, "outcome", None) == "selected"
+                or getattr(out, "kind", None) in ("allow_once", "allow_always")
+            )
+            logger.info(
+                "ACP thin: deferred review [%d/%d] path=%s keep=%s outcome_cls=%s selected_id=%r",
+                index, total, path, allowed, type(out).__name__, selected_id,
+            )
+            return allowed
+        except Exception as e:
+            logger.warning(
+                "ACP thin: deferred review dialog failed path=%s: %s — keeping file", path, e
+            )
+            return True  # dialog failure → keep
+
+    async def _do_deferred_review(self, session_id: str) -> None:
+        """Method B: after agent's `done`, batch-review all pending ide_write_file changes.
+
+        Shows each diff to the IDE user.  Approve → keep the written file.
+        Reject → revert: restore original (or delete if the file was new).
+        """
+        pending = self._pending_writes.pop(session_id, [])
+        if not pending:
+            return
+
+        total = len(pending)
+        logger.info(
+            "ACP thin: deferred review — %d pending write(s) session_id=%s",
+            total, session_id,
+        )
+        await self._ide_session_update(
+            session_id,
+            update_agent_message_text(
+                f"\n\n---\n📋 **代码审查** — AI 共修改了 {total} 个文件，请逐一审批：\n\n"
+            ),
+            "deferred_review_header",
+        )
+
+        approved_paths: list[str] = []
+        rejected_paths: list[str] = []
+
+        for i, pw in enumerate(pending, 1):
+            path = pw["path"]
+            orig = pw["original_content"]
+            new_content = pw["new_content"]
+            filename = Path(path).name
+
+            logger.info(
+                "ACP thin: deferred review [%d/%d] path=%s session_id=%s",
+                i, total, path, session_id,
+            )
+
+            keep = await self._request_deferred_review(
+                path, new_content, orig, session_id, i, total
+            )
+
+            if keep:
+                approved_paths.append(filename)
+                logger.info("ACP thin: deferred review approved path=%s", path)
+                # File already written — nothing to do
+            else:
+                rejected_paths.append(filename)
+                logger.info(
+                    "ACP thin: deferred review rejected — reverting path=%s", path
+                )
+                try:
+                    if orig is None:
+                        # New file → delete it
+                        Path(path).unlink(missing_ok=True)
+                        logger.info(
+                            "ACP thin: deferred revert — deleted new file path=%s", path
+                        )
+                    else:
+                        # Modified file → restore original on filesystem
+                        Path(path).write_text(orig, encoding="utf-8")
+                        logger.info(
+                            "ACP thin: deferred revert — restored original path=%s", path
+                        )
+                    # Ask IDE to reload the file so the editor reflects the rollback
+                    try:
+                        await asyncio.wait_for(
+                            self._conn.write_text_file(
+                                path=path,
+                                content=orig or "",
+                                session_id=session_id,
+                            ),
+                            timeout=10.0,
+                        )
+                    except Exception as _iw_e:
+                        logger.warning(
+                            "ACP thin: deferred revert — IDE reload failed path=%s: %s",
+                            path, _iw_e,
+                        )
+                except Exception as _rev_e:
+                    logger.error(
+                        "ACP thin: deferred revert failed path=%s: %s", path, _rev_e
+                    )
+
+        # Summary message
+        parts: list[str] = []
+        if approved_paths:
+            parts.append(f"✅ {len(approved_paths)} 个已接受")
+        if rejected_paths:
+            parts.append(f"↩️ {len(rejected_paths)} 个已回滚")
+        summary = "，".join(parts) if parts else "无变更"
+        await self._ide_session_update(
+            session_id,
+            update_agent_message_text(f"\n**审批完成**：{summary}\n\n---\n"),
+            "deferred_review_summary",
+        )
 
     async def prompt(
         self,
@@ -1459,6 +1658,27 @@ class ClawithThinClientAgent(Agent):
                                         abs_path,
                                         session_id,
                                     )
+
+                                    # Method B: capture original content before overwriting
+                                    _deferred_write_mode = (
+                                        os.environ.get("CLAWITH_ACP_WRITE_MODE") or "deferred"
+                                    ).strip().lower()
+                                    _write_original_deferred: str | None = None
+                                    if _deferred_write_mode == "deferred":
+                                        try:
+                                            _orig_p = Path(abs_path)
+                                            if _orig_p.exists():
+                                                _write_original_deferred = _orig_p.read_text(encoding="utf-8")
+                                                logger.debug(
+                                                    "ACP thin: deferred — saved original %d chars path=%s",
+                                                    len(_write_original_deferred), abs_path,
+                                                )
+                                        except Exception as _rde:
+                                            logger.debug(
+                                                "ACP thin: deferred — cannot read original (new file?) path=%s: %s",
+                                                abs_path, _rde,
+                                            )
+
                                     try:
                                         await asyncio.wait_for(
                                             self._conn.write_text_file(
@@ -1473,6 +1693,23 @@ class ClawithThinClientAgent(Agent):
                                             f"ide_write_file timed out after 90s (path: {abs_path})"
                                         )
                                     result = f"File {abs_path} successfully written."
+
+                                    # Method B: queue for batch deferred review
+                                    if _deferred_write_mode == "deferred":
+                                        if session_id not in self._pending_writes:
+                                            self._pending_writes[session_id] = []
+                                        self._pending_writes[session_id].append({
+                                            "path": abs_path,
+                                            "original_content": _write_original_deferred,
+                                            "new_content": args["content"],
+                                        })
+                                        logger.info(
+                                            "ACP thin: queued ide_write_file for deferred review "
+                                            "path=%s queue_len=%d session_id=%s",
+                                            abs_path,
+                                            len(self._pending_writes[session_id]),
+                                            session_id,
+                                        )
                                 elif tool_name == "ide_execute_command":
                                     result = await self._run_shell_command(
                                         args["command"], session_id
@@ -1814,6 +2051,8 @@ class ClawithThinClientAgent(Agent):
                                         SessionInfoUpdate(title=_title, updated_at=_now_iso, session_update="session_info_update"),
                                         "session_info",
                                     )
+                            # Method B: batch review of all pending ide_write_file changes
+                            await self._do_deferred_review(session_id)
                             break
 
                         elif msg_type == "cancelled":
