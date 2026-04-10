@@ -819,14 +819,17 @@ class ClawithThinClientAgent(Agent):
         if mode in ("allow", "always", "yes", "1", "true"):
             return True
 
-        # Method B: deferred write approval — auto-grant ide_write_file immediately,
+        # Method B: deferred write approval — auto-grant file-mutation tools immediately,
         # queue the actual diff review to run as a batch after the agent task completes.
+        # Covers: ide_write_file, ide_append (both mutate file content).
         # Set CLAWITH_ACP_WRITE_MODE=immediate to restore the old per-write dialog.
         _write_mode = (os.environ.get("CLAWITH_ACP_WRITE_MODE") or "deferred").strip().lower()
-        if tool_name == "ide_write_file" and _write_mode == "deferred" and mode == "ide":
+        _deferred_tools = {"ide_write_file", "ide_append"}
+        if tool_name in _deferred_tools and _write_mode == "deferred" and mode == "ide":
             logger.info(
-                "ACP thin: ide_write_file deferred mode — auto-granting permission "
+                "ACP thin: %s deferred mode — auto-granting permission "
                 "(diff review queued for end-of-task) session_id=%s",
+                tool_name,
                 session_id,
             )
             return True
@@ -1776,19 +1779,53 @@ class ClawithThinClientAgent(Agent):
                                         "ACP thin: ide_append append to path=%s content_len=%d session_id=%s",
                                         abs_path, len(content), session_id,
                                     )
+
+                                    # Method B: capture original content before appending
+                                    _append_deferred_mode = (
+                                        os.environ.get("CLAWITH_ACP_WRITE_MODE") or "deferred"
+                                    ).strip().lower()
+                                    _append_original: str | None = None
+                                    if _append_deferred_mode == "deferred":
+                                        try:
+                                            if path_obj.exists():
+                                                _append_original = path_obj.read_text(encoding="utf-8")
+                                        except Exception as _rae:
+                                            logger.debug(
+                                                "ACP thin: ide_append deferred — cannot read original path=%s: %s",
+                                                abs_path, _rae,
+                                            )
+
                                     try:
                                         if not path_obj.exists():
                                             # Create file if it doesn't exist
                                             path_obj.write_text(content, encoding="utf-8")
+                                            _appended_full = content
                                             result = f"File {abs_path} created with appended content (len={len(content)})."
                                         else:
                                             existing = path_obj.read_text(encoding="utf-8")
                                             # Ensure we have a newline before appending
                                             if existing and not existing.endswith("\n"):
                                                 existing += "\n"
-                                            existing += content
-                                            path_obj.write_text(existing, encoding="utf-8")
-                                            result = f"Content appended to {abs_path} (added {len(content)} chars, total {len(existing)} chars)."
+                                            _appended_full = existing + content
+                                            path_obj.write_text(_appended_full, encoding="utf-8")
+                                            result = f"Content appended to {abs_path} (added {len(content)} chars, total {len(_appended_full)} chars)."
+
+                                        # Method B: queue for batch deferred review
+                                        if _append_deferred_mode == "deferred":
+                                            if session_id not in self._pending_writes:
+                                                self._pending_writes[session_id] = []
+                                            self._pending_writes[session_id].append({
+                                                "path": abs_path,
+                                                "original_content": _append_original,
+                                                "new_content": _appended_full,
+                                            })
+                                            logger.info(
+                                                "ACP thin: queued ide_append for deferred review "
+                                                "path=%s queue_len=%d session_id=%s",
+                                                abs_path,
+                                                len(self._pending_writes[session_id]),
+                                                session_id,
+                                            )
                                     except Exception as e:
                                         result = f"Failed to append to {abs_path}: {e}"
                                 elif tool_name == "ide_create_terminal":
