@@ -1,0 +1,11 @@
+{
+  "name": "clawith-superpowers",
+  "version": "1.0.0",
+  "description": "Integrate Superpowers agentic skills framework into Clawith",
+  "author": "Clawith Contributors",
+  "entrypoint": "__init__.py",
+  "min_clawith_version": "1.0.0",
+  "routes": [
+    {"path": "/api/plugins/clawith-superpowers", "methods": ["GET", "POST"], "description": "Superpowers plugin API endpoints"}
+  ]
+}
