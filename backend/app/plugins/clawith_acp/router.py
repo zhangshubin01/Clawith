@@ -618,9 +618,35 @@ async def _custom_execute_tool(
             # Default to False: IDE will ask user for approval before applying each change
             config = current_acp_session_config.get()
             auto_approve = config.get("auto_approve_diff") or config.get("autoApproval")
+            # Check permission mode from session config
+            mode = config.get("mode")
+            if mode == "acceptEdits":
+                # Auto approve all edits - no need to ask user
+                allowed = True
+            elif mode == "dontAsk":
+                # Don't ask, auto reject all unapproved operations
+                allowed = False
+            elif mode == "bypassPermissions":
+                # Bypass all permission checks - always allow
+                allowed = True
+            else:
+                # For other modes, use normal permission flow
+                allowed = None
             # Only auto-approve if user explicitly sets it to True
             if auto_approve is not True:
                 auto_approve = False
+            # If mode already decided permission, use it directly
+            if allowed is not None:
+                if not allowed:
+                    logger.info(
+                        "ACP ide tool blocked by permission mode session_id=%s tool=%s mode=%s",
+                        session_id or "-",
+                        tool_name,
+                        mode,
+                    )
+                    return f"Permission denied for {tool_name} (mode={mode})."
+                # allowed is True, skip permission request
+            else:
                 extra: dict[str, Any] | None = None
                 if tool_name == "ide_write_file" or tool_name == "ide_append":
                     file_path = args.get("path", "")
@@ -713,7 +739,7 @@ async def _custom_execute_tool(
                 )
                 if not allowed:
                     logger.info(
-                        "ACP ide tool blocked by permission session_id={} tool={}",
+                        "ACP ide tool blocked by permission session_id=%s tool=%s",
                         session_id or "-",
                         tool_name,
                     )
