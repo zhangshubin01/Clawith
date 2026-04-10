@@ -153,7 +153,7 @@ class FeishuWSManager:
 
         dispatcher = (
             lark.EventDispatcherHandler.builder("", "")
-            .register_system_event("im.message.receive_v1", handle_message)
+            .register_event("im.message.receive_v1", handle_message)
             .build()
         )
         return dispatcher
