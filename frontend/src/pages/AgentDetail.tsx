@@ -4411,7 +4411,7 @@ function AgentDetailInner() {
                                     </>
                                 ) : (
                                     /* ── Live WebSocket chat (own session) ── */
-                                    <div {...chatDropProps} style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative' }}>
+                                    <div {...chatDropProps} style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', minHeight: 0, overflow: 'hidden' }}>
                                         {/* Drop overlay */}
                                         {isChatDragging && (
                                             <div className="drop-zone-overlay">
