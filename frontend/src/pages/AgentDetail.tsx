@@ -2164,6 +2164,20 @@ function AgentDetailInner() {
         const resolvedAvatarText = avatarText || (resolvedSenderLabel ? resolvedSenderLabel[0] : (isLeft ? 'A' : 'U'));
         const showSenderLabel = !!resolvedSenderLabel && (forceSenderLabel || !!msg.sender_name);
 
+        // Parse [image_data:data:image/...;base64,...] markers from user message content.
+        // The backend persists these markers in the DB to preserve multimodal context
+        // across turns. They must be stripped from the display text and rendered as
+        // image thumbnails instead, so users never see raw base64 strings.
+        const IMAGE_DATA_RE = /\[image_data:(data:image\/[^;]+;base64,[^\]]+)\]/g;
+        const inlineImages: string[] = [];
+        let displayContent = msg.content || '';
+        if (displayContent.includes('[image_data:')) {
+            displayContent = displayContent.replace(IMAGE_DATA_RE, (_: string, dataUrl: string) => {
+                inlineImages.push(dataUrl);
+                return '';
+            }).trim();
+        }
+
         const timestampHtml = msg.timestamp ? (() => {
             const d = new Date(msg.timestamp);
             const now = new Date();
@@ -2196,9 +2210,23 @@ function AgentDetailInner() {
                             <span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span>
                         </div>
                     ))}
+                    {/* Render images extracted from [image_data:] markers (multimodal context) */}
+                    {inlineImages.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: displayContent ? '6px' : '0' }}>
+                            {inlineImages.map((url, idx) => (
+                                <img
+                                    key={idx}
+                                    src={url}
+                                    alt="attached image"
+                                    style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)', objectFit: 'cover' }}
+                                    loading="lazy"
+                                />
+                            ))}
+                        </div>
+                    )}
                     {msg.thinking && (
                         <details style={{ marginBottom: '8px', fontSize: '12px', background: 'rgba(147, 130, 220, 0.08)', borderRadius: '6px', border: '1px solid rgba(147, 130, 220, 0.15)' }}>
-                            <summary style={{ padding: '6px 10px', cursor: 'pointer', color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500, userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}>💭 Thinking</summary>
+                            <summary style={{ padding: '6px 10px', cursor: 'pointer', color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500, userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}>Thinking</summary>
                             <div style={{ padding: '4px 10px 8px', fontSize: '12px', lineHeight: '1.6', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '300px', overflow: 'auto' }}>{msg.thinking}</div>
                         </details>
                     )}
@@ -2208,8 +2236,8 @@ function AgentDetailInner() {
                                 <div className="thinking-dots"><span /><span /><span /></div>
                                 <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
                             </div>
-                        ) : <MarkdownRenderer content={msg.content} />
-                    ) : <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>}
+                        ) : <MarkdownRenderer content={displayContent} />
+                    ) : <div style={{ whiteSpace: 'pre-wrap' }}>{displayContent}</div>}
                     {timestampHtml}
                 </div>
             </div>
