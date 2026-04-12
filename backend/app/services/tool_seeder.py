@@ -272,7 +272,7 @@ BUILTIN_TOOLS = [
     {
         "name": "send_message_to_agent",
         "display_name": "Agent Message",
-        "description": "Send a message to a digital employee colleague and receive a reply. Suitable for questions, delegation, or collaboration.",
+        "description": "Send a message to a digital employee colleague. Decision guide: target needs to DO WORK and return results? → task_delegate. Just FYI? → notify. Quick factual question? → consult. When unsure, prefer task_delegate.",
         "category": "communication",
         "icon": "🤖",
         "is_default": True,
@@ -281,9 +281,9 @@ BUILTIN_TOOLS = [
             "properties": {
                 "agent_name": {"type": "string", "description": "Target agent name"},
                 "message": {"type": "string", "description": "Message content"},
-                "msg_type": {"type": "string", "enum": ["notify", "consult", "task_delegate"], "description": "Message type: notify (notification), consult (ask a question), task_delegate (delegate a task)"},
+                "msg_type": {"type": "string", "enum": ["notify", "consult", "task_delegate"], "description": "(1) Target needs to DO WORK and return results? → task_delegate. (2) Just FYI? → notify. (3) Quick factual question? → consult. When unsure, prefer task_delegate."},
             },
-            "required": ["agent_name", "message"],
+            "required": ["agent_name", "message", "msg_type"],
         },
         "config": {},
         "config_schema": {},
