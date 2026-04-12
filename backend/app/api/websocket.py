@@ -678,11 +678,28 @@ async def websocket_chat(
             # Add user message to conversation (full LLM context)
             conversation.append({"role": "user", "content": content})
 
-            # Save user message — display_content for history display, content for LLM
-            # Prefix with [file:name] if there's a file attachment so history can show it
-            saved_content = display_content if display_content else content
-            if file_name:
-                saved_content = f"[file:{file_name}]\n{saved_content}"
+            # Save user message to DB.
+            #
+            # Strategy:
+            #   - If the LLM content contains [image_data:...] markers (i.e. the user
+            #     attached an image and the model supports vision), persist the FULL
+            #     content including the base64 marker.  This makes history self-contained
+            #     so subsequent turns can forward the image to the LLM without any
+            #     disk-based rehydration step.
+            #   - For all other messages (text, non-image files) use display_content for
+            #     cleaner history (avoids e.g. the raw file-text blob appearing in chat).
+            #
+            # The call_llm() path already strips [image_data:] for non-vision models
+            # (websocket.py ~line 210), so no extra handling is needed at read time.
+            HAS_IMAGE_MARKER = "[image_data:" in content
+            if HAS_IMAGE_MARKER:
+                # Preserve the full LLM content (includes base64) for multi-turn context.
+                # Prefix with [file:name] for the UI history parser if a file name exists.
+                saved_content = f"[file:{file_name}]\n{content}" if file_name else content
+            else:
+                saved_content = display_content if display_content else content
+                if file_name:
+                    saved_content = f"[file:{file_name}]\n{saved_content}"
             async with async_session() as db:
                 user_msg = ChatMessage(
                     agent_id=agent_id,
@@ -703,7 +720,7 @@ async def websocket_chat(
                 if _sess:
                     _sess.last_message_at = _now
                     if not history_messages and _sess.title.startswith("Session "):
-                        # Use display_content for title (avoids raw base64/markers)
+                        # Always use display_content for title (never expose raw base64)
                         title_src = display_content if display_content else content
                         # Clean up common prefixes from image/file messages
                         clean_title = title_src.replace("[图片] ", "📷 ").replace("[image_data:", "").strip()
@@ -712,6 +729,7 @@ async def websocket_chat(
                         _sess.title = clean_title[:40] if clean_title else content[:40]
                 await db.commit()
             logger.info("[WS] User message saved")
+
 
             # ── OpenClaw routing: insert into gateway_messages instead of LLM ──
             if agent_type == "openclaw":
