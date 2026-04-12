@@ -9,6 +9,7 @@
   CLAWITH_ACP_SESSION_UPDATE_SOURCE — 传给 `session_update(..., source=...)` 的标识（默认 clawith-acp-thin），与官方 echo_agent 一致
   CLAWITH_ACP_VERBOSE=1 — 等价于 DEBUG：打印每条云端 chunk 长度、每条 IDE session_update 成功（label/kind/耗时）
   CLAWITH_ACP_LOG_LEVEL — 可选 DEBUG/INFO/WARNING，覆盖默认 INFO（与 VERBOSE 二选一即可）
+  CLAWITH_ACP_WRITE_MODE=deferred（默认）| immediate — deferred 先写、回合结束再批量审阅 diff；immediate 在每次 ide_write_file/ide_append 前弹出 IDE 审批 diff
 
 与云端 WebSocket 的 JSON 信封字段 schemaVersion 须与 Clawith 插件
 `backend/app/plugins/clawith_acp/router.py` 中 ACP_WS_SCHEMA_VERSION 一致（当前 v3：`cancelled`、跨连接 cancel）。
@@ -42,7 +43,6 @@ from acp import (
     NewSessionResponse,
     PromptResponse,
     plan_entry,                  # N1
-    run_agent,
     start_edit_tool_call,
     start_read_tool_call,        # N6
     start_tool_call,
@@ -56,7 +56,11 @@ from acp import (
     update_plan,                 # N1
     update_tool_call,
 )
+from acp.agent.connection import AgentSideConnection
+from acp.connection import StreamDirection, StreamEvent
+from acp.core import DEFAULT_STDIO_BUFFER_LIMIT_BYTES
 from acp.interfaces import Client
+from acp.stdio import stdio_streams
 from acp.schema import (
     AgentCapabilities,
     AuthenticateResponse,
@@ -110,6 +114,95 @@ def _configure_thin_client_logging() -> None:
 
 
 _configure_thin_client_logging()
+
+_THIN_ACP_DEBUG_LOG = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+
+
+def _thin_stdio_debug_ndjson(
+    *,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+    run_id: str = "pre-fix",
+) -> None:
+    try:
+        rec = {
+            "sessionId": "0afa65",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        _THIN_ACP_DEBUG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _THIN_ACP_DEBUG_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def _thin_stdio_acp_observer(ev: StreamEvent) -> None:
+    """Log JSON-RPC traffic + errors to debug NDJSON (no secrets / no result bodies)."""
+    m = ev.message
+    if ev.direction == StreamDirection.INCOMING:
+        method = m.get("method")
+        if method is None:
+            return
+        has_id = "id" in m
+        params = m.get("params") if isinstance(m.get("params"), dict) else None
+        pv = params.get("protocolVersion") if params else None
+        # #region agent log
+        _thin_stdio_debug_ndjson(
+            hypothesis_id="H6",
+            location="clawith_acp/server.py:stdio_observer",
+            message="jsonrpc_incoming",
+            data={
+                "method": method,
+                "has_id": has_id,
+                "id": m.get("id") if has_id else None,
+                "params_keys": sorted(params.keys()) if params else None,
+                "protocolVersion_type": type(pv).__name__ if pv is not None else None,
+            },
+        )
+        # #endregion
+        return
+    if not isinstance(m, dict):
+        return
+    if m.get("error"):
+        err = m.get("error") or {}
+        edata = err.get("data") if isinstance(err.get("data"), dict) else {}
+        # #region agent log
+        _thin_stdio_debug_ndjson(
+            hypothesis_id="H2",
+            location="clawith_acp/server.py:stdio_observer",
+            message="jsonrpc_outgoing_error",
+            data={
+                "id": m.get("id"),
+                "code": err.get("code"),
+                "message": err.get("message"),
+                "validation_errors": edata.get("errors") if isinstance(edata, dict) else None,
+            },
+        )
+        # #endregion
+        return
+    if "result" in m and "id" in m:
+        res = m.get("result")
+        rk: Any
+        if isinstance(res, dict):
+            rk = sorted(res.keys())[:24]
+        else:
+            rk = type(res).__name__
+        # #region agent log
+        _thin_stdio_debug_ndjson(
+            hypothesis_id="H7",
+            location="clawith_acp/server.py:stdio_observer",
+            message="jsonrpc_outgoing_result",
+            data={"id": m.get("id"), "result_keys_or_type": rk},
+        )
+        # #endregion
+
 
 _IS_WINDOWS = platform.system().lower().startswith("win")
 
@@ -340,6 +433,63 @@ def _check_server_schema(data: dict[str, Any]) -> None:
         )
 
 
+def _default_mode_config_select_options() -> list[Any]:
+    from acp.schema import SessionConfigSelectOption
+
+    return [
+        SessionConfigSelectOption(
+            value="chat",
+            name="Chat",
+            description="General purpose chat conversation",
+        ),
+        SessionConfigSelectOption(
+            value="code-review",
+            name="Code Review",
+            description="Review code and provide feedback",
+        ),
+        SessionConfigSelectOption(
+            value="planning",
+            name="Planning",
+            description="Plan implementation before coding",
+        ),
+    ]
+
+
+def _build_config_options_for_acp_schema(session_cfg: dict[str, str | bool]) -> list[Any]:
+    """ACP requires SessionConfigOptionSelect models in responses, not {config_id, value} dicts."""
+    from acp.schema import SessionConfigOptionSelect, SessionConfigSelectOption
+
+    out: list[Any] = []
+    for cid, cval in session_cfg.items():
+        if cid == "mode" and isinstance(cval, str):
+            out.append(
+                SessionConfigOptionSelect(
+                    type="select",
+                    id="mode",
+                    name="Mode",
+                    category="mode",
+                    description="Session conversation mode",
+                    current_value=cval,
+                    options=_default_mode_config_select_options(),
+                )
+            )
+        elif cid == "model" and isinstance(cval, str):
+            out.append(
+                SessionConfigOptionSelect(
+                    type="select",
+                    id="model",
+                    name="Model",
+                    category="model",
+                    description="Select the LLM model to use for this session",
+                    current_value=cval,
+                    options=[
+                        SessionConfigSelectOption(value=cval, name=cval, description=""),
+                    ],
+                )
+            )
+    return out
+
+
 class ClawithThinClientAgent(Agent):
     _conn: Client
 
@@ -362,7 +512,7 @@ class ClawithThinClientAgent(Agent):
         self._session_models: dict[str, str] = {}
         # Method B: deferred write approval — queue per session
         # Each entry: {"path": str, "original_content": str|None, "new_content": str}
-        # Env: CLAWITH_ACP_WRITE_MODE=deferred (default) | immediate
+        # Env: CLAWITH_ACP_WRITE_MODE=immediate (default) | deferred
         self._pending_writes: dict[str, list[dict]] = {}
         # N9: per-session mode — session_id → mode_id (from IDE mode switcher)
         self._session_modes: dict[str, str] = {}
@@ -458,16 +608,32 @@ class ClawithThinClientAgent(Agent):
             "resume": SessionResumeCapabilities(),
         }
 
-        # Try to add mode capability if available
+        # Try to add mode capability (ACP schema expects SessionMode models, not bare strings).
+        _modes = [
+            ("chat", "Chat"),
+            ("code-review", "Code review"),
+            ("planning", "Planning"),
+        ]
         try:
-            from acp.schema import SessionModeCapabilities
+            from acp.schema import SessionMode, SessionModeCapabilities
+
             extended_kwargs["mode"] = SessionModeCapabilities(
-                available_modes=["chat", "code-review", "planning"]
+                available_modes=[SessionMode(id=i, name=n) for i, n in _modes],
             )
-            logger.debug("ACP thin: SessionModeCapabilities added with available modes %s", ", ".join(["chat", "code-review", "planning"]))
+            logger.debug(
+                "ACP thin: SessionModeCapabilities added with available modes chat, code-review, planning"
+            )
         except ImportError:
-            # If not available, leave as None (still works for JSON serialization)
-            pass
+            try:
+                from acp.schema import SessionMode, SessionModeState
+
+                extended_kwargs["mode"] = SessionModeState(
+                    current_mode_id="chat",
+                    available_modes=[SessionMode(id=i, name=n) for i, n in _modes],
+                )
+                logger.debug("ACP thin: SessionModeState used as mode capability fallback")
+            except ImportError:
+                pass
 
         # Try to add config capability if available
         try:
@@ -501,6 +667,17 @@ class ClawithThinClientAgent(Agent):
         # which is different from SessionModelState that is in session_capabilities.model
         available_models: list[ModelInfo] = []
 
+        # #region agent log
+        _thin_stdio_debug_ndjson(
+            hypothesis_id="H8",
+            location="clawith_acp/server.py:initialize",
+            message="initialize_building_response",
+            data={
+                "protocol_version": protocol_version,
+                "extended_session_cap_keys": sorted(extended_kwargs.keys()),
+            },
+        )
+        # #endregion
         return InitializeResponse(
             protocol_version=protocol_version,
             agent_info=AgentImplementation(
@@ -583,12 +760,18 @@ class ClawithThinClientAgent(Agent):
         model_state = None
         config_options = None
         try:
+            from acp.schema import SessionMode
             from acp.schema import SessionModeState
             from acp.schema import SessionConfigOptionSelect
             from acp.schema import SessionConfigSelectOption
+
             mode_state = SessionModeState(
                 current_mode_id="chat",
-                available_modes=["chat", "code-review", "planning"]
+                available_modes=[
+                    SessionMode(id="chat", name="Chat"),
+                    SessionMode(id="code-review", name="Code review"),
+                    SessionMode(id="planning", name="Planning"),
+                ],
             )
             logger.debug("ACP thin: SessionModeState added to NewSessionResponse")
 
@@ -611,12 +794,13 @@ class ClawithThinClientAgent(Agent):
                 ),
             ]
             mode_option = SessionConfigOptionSelect(
+                type="select",
                 id="mode",
                 name="Mode",
                 category="mode",
                 description="Session conversation mode",
                 current_value="chat",
-                options=mode_select_options
+                options=mode_select_options,
             )
             if config_options is None:
                 config_options = []
@@ -652,17 +836,31 @@ class ClawithThinClientAgent(Agent):
                 ]
                 if model_select_options:
                     model_config = SessionConfigOptionSelect(
+                        type="select",
                         id="model",
                         name="Model",
                         category="model",
                         description="Select the LLM model to use for this session",
                         current_value=model_state.current_model_id,
-                        options=model_select_options
+                        options=model_select_options,
                     )
                     config_options.append(model_config)
         except ImportError:
             pass
 
+        # #region agent log
+        _thin_stdio_debug_ndjson(
+            hypothesis_id="H9",
+            location="clawith_acp/server.py:new_session",
+            message="new_session_returning",
+            data={
+                "session_id_prefix": session_id[:8],
+                "has_modes": mode_state is not None,
+                "has_models": model_state is not None,
+                "config_options_n": len(config_options) if config_options else 0,
+            },
+        )
+        # #endregion
         return NewSessionResponse(
             session_id=session_id,
             modes=mode_state,
@@ -810,21 +1008,17 @@ class ClawithThinClientAgent(Agent):
             # When model is changed via config, call the dedicated set_session_model method
             await self.set_session_model(model_id=value, session_id=session_id)
 
-        # Convert to list of config options for response
-        config_options = [
-            {"config_id": cid, "value": cval}
-            for cid, cval in self._session_config[session_id].items()
-        ]
+        config_models = _build_config_options_for_acp_schema(self._session_config[session_id])
         # N10: echo current config state back to IDE so it reflects the acknowledged change
         await self._ide_session_update(
             session_id,
             ConfigOptionUpdate(
-                config_options=config_options,
-                session_update="config_option_update"
+                config_options=config_models,
+                session_update="config_option_update",
             ),
-            "config_option_update"
+            "config_option_update",
         )
-        return SetSessionConfigOptionResponse(config_options=config_options)
+        return SetSessionConfigOptionResponse(config_options=config_models)
 
     async def fork_session(
         self,
@@ -923,11 +1117,24 @@ class ClawithThinClientAgent(Agent):
     def _abs_path(self, p: str, session_id: str) -> str:
         """Resolve relative path against session cwd."""
         if not p:
+            logger.warning("ACP thin: empty path provided for session_id=%s", session_id)
             return p
         if Path(p).is_absolute():
             return p
-        cwd = self._session_cwds.get(session_id) or "/"
-        return str(Path(cwd) / p)
+        cwd = self._session_cwds.get(session_id)
+        if not cwd:
+            # Use current working directory instead of root to avoid permission issues
+            cwd = os.getcwd()
+            logger.warning(
+                "ACP thin: no cwd found for session_id=%s, using current dir: %s",
+                session_id, cwd,
+            )
+        result = str(Path(cwd) / p)
+        logger.debug(
+            "ACP thin: resolved path session_id=%s relative=%s absolute=%s",
+            session_id, p, result,
+        )
+        return result
 
     async def _resolve_cloud_permission(
         self,
@@ -943,13 +1150,44 @@ class ClawithThinClientAgent(Agent):
         if mode in ("allow", "always", "yes", "1", "true"):
             return True
 
-        # Method B: deferred write approval — auto-grant file-mutation tools immediately,
-        # queue the actual diff review to run as a batch after the agent task completes.
-        # Covers: ide_write_file, ide_append (both mutate file content).
-        # Set CLAWITH_ACP_WRITE_MODE=immediate to restore the old per-write dialog.
+        # Method B (default): CLAWITH_ACP_WRITE_MODE=deferred auto-grants cloud permission for
+        # ide_write_file / ide_append, writes immediately, then shows batch diff review at end
+        # of the turn. Set CLAWITH_ACP_WRITE_MODE=immediate to get PermissionBroker *before* each
+        # write (so IDE shows diff before writing; users get prompt every write).
         _write_mode = (os.environ.get("CLAWITH_ACP_WRITE_MODE") or "deferred").strip().lower()
         _deferred_tools = {"ide_write_file", "ide_append"}
-        if tool_name in _deferred_tools and _write_mode == "deferred" and mode == "ide":
+        _deferred_auto = (
+            tool_name in _deferred_tools and _write_mode == "deferred" and mode == "ide"
+        )
+        # #region agent log
+        try:
+            _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+            _dlp.parent.mkdir(parents=True, exist_ok=True)
+            with _dlp.open("a", encoding="utf-8") as _df:
+                _df.write(
+                    json.dumps(
+                        {
+                            "sessionId": "0afa65",
+                            "hypothesisId": "H7",
+                            "runId": "write-mode",
+                            "location": "server.py:_resolve_cloud_permission",
+                            "message": "permission_branch",
+                            "data": {
+                                "tool_name": tool_name,
+                                "write_mode": _write_mode,
+                                "perm_env_mode": mode,
+                                "deferred_auto_grant": _deferred_auto,
+                            },
+                            "timestamp": int(time.time() * 1000),
+                        },
+                        default=str,
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
+        if _deferred_auto:
             logger.info(
                 "ACP thin: %s deferred mode — auto-granting permission "
                 "(diff review queued for end-of-task) session_id=%s",
@@ -1280,8 +1518,63 @@ class ClawithThinClientAgent(Agent):
         Shows each diff to the IDE user.  Approve → keep the written file.
         Reject → revert: restore original (or delete if the file was new).
         """
+        # #region agent log
+        try:
+            _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+            _dlp.parent.mkdir(parents=True, exist_ok=True)
+            with _dlp.open("a", encoding="utf-8") as _df:
+                _df.write(
+                    json.dumps(
+                        {
+                            "sessionId": "0afa65",
+                            "hypothesisId": "H1",
+                            "runId": "deferred-loop",
+                            "location": "server.py:_do_deferred_review:entry",
+                            "message": "batch_review_start",
+                            "data": {
+                                "session_id": session_id,
+                                "n_pending": len(self._pending_writes.get(session_id, [])),
+                            },
+                            "timestamp": int(time.time() * 1000),
+                        },
+                        default=str,
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
         pending = self._pending_writes.pop(session_id, [])
+        logger.info(
+            "ACP thin: _do_deferred_review called session_id=%s pending_count=%d",
+            session_id, len(pending),
+        )
         if not pending:
+            logger.warning(
+                "ACP thin: _do_deferred_review - no pending writes for session_id=%s",
+                session_id,
+            )
+            # #region agent log
+            try:
+                _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+                with _dlp.open("a", encoding="utf-8") as _df:
+                    _df.write(
+                        json.dumps(
+                            {
+                                "sessionId": "0afa65",
+                                "hypothesisId": "H1",
+                                "runId": "deferred-loop",
+                                "location": "server.py:_do_deferred_review:empty",
+                                "message": "no_pending_exits",
+                                "timestamp": int(time.time() * 1000),
+                            },
+                            default=str,
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                pass
+            # #endregion
             return
 
         total = len(pending)
@@ -1311,9 +1604,57 @@ class ClawithThinClientAgent(Agent):
                 i, total, path, session_id,
             )
 
+            # #region agent log
+            try:
+                _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+                with _dlp.open("a", encoding="utf-8") as _df:
+                    _df.write(
+                        json.dumps(
+                            {
+                                "sessionId": "0afa65",
+                                "hypothesisId": "H2",
+                                "runId": "deferred-loop",
+                                "location": "server.py:_do_deferred_review:request_start",
+                                "message": "deferred_review_one_file",
+                                "data": {
+                                    "index": i,
+                                    "total": total,
+                                    "path": path,
+                                },
+                                "timestamp": int(time.time() * 1000),
+                            },
+                            default=str,
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                pass
+            # #endregion
             keep = await self._request_deferred_review(
                 path, new_content, orig, session_id, i, total
             )
+            # #region agent log
+            try:
+                _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+                with _dlp.open("a", encoding="utf-8") as _df:
+                    _df.write(
+                        json.dumps(
+                            {
+                                "sessionId": "0afa65",
+                                "hypothesisId": "H2",
+                                "runId": "deferred-loop",
+                                "location": "server.py:_do_deferred_review:request_return",
+                                "message": "deferred_review_one_done",
+                                "data": {"path": path, "keep": keep},
+                                "timestamp": int(time.time() * 1000),
+                            },
+                            default=str,
+                        )
+                        + "\n"
+                    )
+            except Exception:
+                pass
+            # #endregion
 
             if keep:
                 approved_paths.append(filename)
@@ -1369,6 +1710,31 @@ class ClawithThinClientAgent(Agent):
             update_agent_message_text(f"\n**审批完成**：{summary}\n\n---\n"),
             "deferred_review_summary",
         )
+        # #region agent log
+        try:
+            _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+            with _dlp.open("a", encoding="utf-8") as _df:
+                _df.write(
+                    json.dumps(
+                        {
+                            "sessionId": "0afa65",
+                            "hypothesisId": "H1",
+                            "runId": "deferred-loop",
+                            "location": "server.py:_do_deferred_review:complete",
+                            "message": "batch_review_finished",
+                            "data": {
+                                "session_id": session_id,
+                                "summary": summary,
+                            },
+                            "timestamp": int(time.time() * 1000),
+                        },
+                        default=str,
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
 
     async def prompt(
         self,
@@ -1564,7 +1930,7 @@ class ClawithThinClientAgent(Agent):
                                 update_agent_message_text(f"\n\n❌ 云端连接中断: {data.get('content', '')}\n\n"),
                                 "cloud_reader_error",
                             )
-                            final_stop = "error"
+                            final_stop = "refusal"
                             break
 
                         if msg_type == "permission_request":
@@ -1815,10 +2181,24 @@ class ClawithThinClientAgent(Agent):
                                             ),
                                             timeout=90.0,
                                         )
+                                        logger.info(
+                                            "ACP thin: ide_write_file write succeeded path=%s session_id=%s",
+                                            abs_path, session_id,
+                                        )
                                     except asyncio.TimeoutError:
+                                        logger.error(
+                                            "ACP thin: ide_write_file timed out path=%s session_id=%s",
+                                            abs_path, session_id,
+                                        )
                                         raise RuntimeError(
                                             f"ide_write_file timed out after 90s (path: {abs_path})"
                                         )
+                                    except Exception as e:
+                                        logger.error(
+                                            "ACP thin: ide_write_file failed path=%s session_id=%s error=%s",
+                                            abs_path, session_id, e,
+                                        )
+                                        raise
                                     result = f"File {abs_path} successfully written."
 
                                     # Method B: queue for batch deferred review
@@ -1924,6 +2304,10 @@ class ClawithThinClientAgent(Agent):
                                             # Create file if it doesn't exist
                                             path_obj.write_text(content, encoding="utf-8")
                                             _appended_full = content
+                                            logger.info(
+                                                "ACP thin: ide_append created new file path=%s session_id=%s",
+                                                abs_path, session_id,
+                                            )
                                             result = f"File {abs_path} created with appended content (len={len(content)})."
                                         else:
                                             existing = path_obj.read_text(encoding="utf-8")
@@ -1932,6 +2316,10 @@ class ClawithThinClientAgent(Agent):
                                                 existing += "\n"
                                             _appended_full = existing + content
                                             path_obj.write_text(_appended_full, encoding="utf-8")
+                                            logger.info(
+                                                "ACP thin: ide_append succeeded path=%s total_len=%d session_id=%s",
+                                                abs_path, len(_appended_full), session_id,
+                                            )
                                             result = f"Content appended to {abs_path} (added {len(content)} chars, total {len(_appended_full)} chars)."
 
                                         # Method B: queue for batch deferred review
@@ -1951,6 +2339,10 @@ class ClawithThinClientAgent(Agent):
                                                 session_id,
                                             )
                                     except Exception as e:
+                                        logger.error(
+                                            "ACP thin: ide_append failed path=%s session_id=%s error=%s",
+                                            abs_path, session_id, e,
+                                        )
                                         result = f"Failed to append to {abs_path}: {e}"
                                 elif tool_name == "ide_create_terminal":
                                     _ct_kw: dict[str, Any] = {
@@ -2238,13 +2630,21 @@ class ClawithThinClientAgent(Agent):
                                 update_agent_message_text(f"\n\n❌ 云端服务错误: {data.get('content')}"),
                                 "cloud_error",
                             )
-                            final_stop = "error"
+                            final_stop = "refusal"
                             break
                 finally:
                     logger.info(
                         "ACP thin: [trace] prompt ws cleanup session_id=%s",
                         session_id,
                     )
+                    # Ensure deferred review runs even if there was an error
+                    try:
+                        await self._do_deferred_review(session_id)
+                    except Exception as _dre:
+                        logger.error(
+                            "ACP thin: deferred review failed in cleanup session_id=%s: %s",
+                            session_id, _dre,
+                        )
                     with contextlib.suppress(Exception):
                         await ide_q.put(None)
                         await ide_worker
@@ -2265,7 +2665,7 @@ class ClawithThinClientAgent(Agent):
                 update_agent_message_text(f"\n\n❌ 网络连接失败，请检查 Clawith URL 或网络配置: {e}"),
                 "ws_connect_error",
             )
-            return PromptResponse(stop_reason="error")
+            return PromptResponse(stop_reason="refusal")
 
         logger.info(
             "ACP thin: [trace] prompt RETURN stop_reason=%s session_id=%s",
@@ -2287,7 +2687,16 @@ async def main():
         )
     agent = ClawithThinClientAgent(agent_id=agent_id, api_key=api_key, backend_url=backend_url)
     logger.info("Starting Clawith ACP Thin Client on stdio (unstable ACP routes enabled)...")
-    await run_agent(agent, use_unstable_protocol=True)
+    output_stream, input_stream = await stdio_streams(limit=DEFAULT_STDIO_BUFFER_LIMIT_BYTES)
+    conn = AgentSideConnection(
+        agent,
+        input_stream,
+        output_stream,
+        listening=False,
+        use_unstable_protocol=True,
+        observers=[_thin_stdio_acp_observer],
+    )
+    await conn.listen()
 
 
 if __name__ == "__main__":
