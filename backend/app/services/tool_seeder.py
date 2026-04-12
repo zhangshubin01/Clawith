@@ -310,10 +310,10 @@ BUILTIN_TOOLS = [
     {
         "name": "web_search",
         "display_name": "Web Search",
-        "description": "Search the internet using a configurable search engine. Supports DuckDuckGo (free), Tavily, Google, Bing, and Exa. Configure the search engine in the tool settings.",
+        "description": "[Deprecated] Unified search tool with engine selector. Use the dedicated tools (DuckDuckGo Search, Tavily Search, Google Search, Bing Search, Exa Search) instead for better control per engine.",
         "category": "search",
         "icon": "🔍",
-        "is_default": True,
+        "is_default": False,
         "parameters_schema": {
             "type": "object",
             "properties": {
@@ -1952,6 +1952,7 @@ async def seed_builtin_tools():
                     category=t["category"],
                     icon=t["icon"],
                     is_default=t["is_default"],
+                    parameters_schema=t.get("parameters_schema", {"type": "object", "properties": {}}),
                     config=t.get("config", {}),
                     config_schema=t.get("config_schema", {}),
                     source="builtin",
