@@ -2422,7 +2422,52 @@ export default function EnterpriseSettings() {
                         {/* ── 0.5. Company Timezone ── */}
                         <CompanyTimezoneEditor key={`tz-${selectedTenantId}`} />
 
-                        {/* ── 1. A2A Async Communication (Beta) ── */}
+                        {/* ── 2. Company Intro ── */}
+                        <h3 style={{ marginBottom: '8px' }}>{t('enterprise.companyIntro.title', 'Company Intro')}</h3>
+                        <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                            {t('enterprise.companyIntro.description', 'Describe your company\'s mission, products, and culture. This information is included in every agent conversation as context.')}
+                        </p>
+                        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+                            <textarea
+                                className="form-input"
+                                value={companyIntro}
+                                onChange={e => setCompanyIntro(e.target.value)}
+                                placeholder={`# Company Name\nClawith\n\n# About\nOpenClaw\uD83E\uDD9E For Teams\nOpen Source \u00B7 Multi-OpenClaw Collaboration\n\nOpenClaw empowers individuals.\nClawith scales it to frontier organizations.`}
+                                style={{
+                                    minHeight: '200px', resize: 'vertical',
+                                    fontFamily: 'var(--font-mono)', fontSize: '13px',
+                                    lineHeight: '1.6', whiteSpace: 'pre-wrap',
+                                }}
+                            />
+                            <div style={{ marginTop: '12px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                <button className="btn btn-primary" onClick={saveCompanyIntro} disabled={companyIntroSaving}>
+                                    {companyIntroSaving ? t('common.loading') : t('common.save', 'Save')}
+                                </button>
+                                {companyIntroSaved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅ {t('enterprise.config.saved', 'Saved')}</span>}
+                                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
+                                    💡 {t('enterprise.companyIntro.hint', 'This content appears in every agent\'s system prompt')}
+                                </span>
+                            </div>
+                        </div>
+
+                        {/* ── 2. Company Knowledge Base ── */}
+                        <h3 style={{ marginBottom: '8px' }}>{t('enterprise.kb.title')}</h3>
+                        <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                            {t('enterprise.kb.description', 'Shared files accessible to all agents via enterprise_info/ directory.')}
+                        </p>
+                        <div className="card" style={{ marginBottom: '24px', padding: '16px' }}>
+                            <EnterpriseKBBrowser onRefresh={() => setInfoRefresh((v: number) => v + 1)} refreshKey={infoRefresh} />
+                        </div>
+
+
+
+                        {/* ── Theme Color ── */}
+                        <ThemeColorPicker />
+
+                        {/* ── Broadcast ── */}
+                        <BroadcastSection />
+
+                        {/* ── A2A Async Communication (Beta) ── */}
                         <div style={{ marginTop: '24px', marginBottom: '24px' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
                                 <h3 style={{ margin: 0 }}>
@@ -2510,51 +2555,6 @@ export default function EnterpriseSettings() {
                                 </div>
                             </div>
                         </div>
-
-                        {/* ── 2. Company Intro ── */}
-                        <h3 style={{ marginBottom: '8px' }}>{t('enterprise.companyIntro.title', 'Company Intro')}</h3>
-                        <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                            {t('enterprise.companyIntro.description', 'Describe your company\'s mission, products, and culture. This information is included in every agent conversation as context.')}
-                        </p>
-                        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
-                            <textarea
-                                className="form-input"
-                                value={companyIntro}
-                                onChange={e => setCompanyIntro(e.target.value)}
-                                placeholder={`# Company Name\nClawith\n\n# About\nOpenClaw\uD83E\uDD9E For Teams\nOpen Source \u00B7 Multi-OpenClaw Collaboration\n\nOpenClaw empowers individuals.\nClawith scales it to frontier organizations.`}
-                                style={{
-                                    minHeight: '200px', resize: 'vertical',
-                                    fontFamily: 'var(--font-mono)', fontSize: '13px',
-                                    lineHeight: '1.6', whiteSpace: 'pre-wrap',
-                                }}
-                            />
-                            <div style={{ marginTop: '12px', display: 'flex', gap: '8px', alignItems: 'center' }}>
-                                <button className="btn btn-primary" onClick={saveCompanyIntro} disabled={companyIntroSaving}>
-                                    {companyIntroSaving ? t('common.loading') : t('common.save', 'Save')}
-                                </button>
-                                {companyIntroSaved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅ {t('enterprise.config.saved', 'Saved')}</span>}
-                                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
-                                    💡 {t('enterprise.companyIntro.hint', 'This content appears in every agent\'s system prompt')}
-                                </span>
-                            </div>
-                        </div>
-
-                        {/* ── 2. Company Knowledge Base ── */}
-                        <h3 style={{ marginBottom: '8px' }}>{t('enterprise.kb.title')}</h3>
-                        <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                            {t('enterprise.kb.description', 'Shared files accessible to all agents via enterprise_info/ directory.')}
-                        </p>
-                        <div className="card" style={{ marginBottom: '24px', padding: '16px' }}>
-                            <EnterpriseKBBrowser onRefresh={() => setInfoRefresh((v: number) => v + 1)} refreshKey={infoRefresh} />
-                        </div>
-
-
-
-                        {/* ── Theme Color ── */}
-                        <ThemeColorPicker />
-
-                        {/* ── Broadcast ── */}
-                        <BroadcastSection />
 
                         {/* ── Danger Zone: Delete Company ── */}
                         <div style={{ marginTop: '32px', padding: '16px', border: '1px solid var(--status-error, #e53e3e)', borderRadius: '8px' }}>
