@@ -1,4 +1,4 @@
-# v1.8.3-beta Release Notes
+# v1.8.3-beta — A2A Async Communication, Image Context & Search Tools
 
 ## What's New
 
