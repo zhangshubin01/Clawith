@@ -715,6 +715,18 @@ select:focus {
   transition: all var(--transition-default);
 }
 
+/* Chat page needs a fixed viewport height so the inner chat-messages
+   can scroll independently. Without this, .main-content grows with content
+   (min-height: 100vh) and overflow-y: auto on .chat-messages never fires. */
+.main-content.chat-page {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
 /* ─── Collapsed Sidebar Overrides ───────────────────── */
 .sidebar.collapsed {
   --sidebar-width: var(--sidebar-width-collapsed);
@@ -1178,6 +1190,14 @@ select:focus {
   justify-content: space-between;
   margin-bottom: var(--space-6);
 }
+
+/* When inside the chat page (main-content.chat-page removes outer padding),
+   give page-header its own padding to replicate the normal main-content spacing */
+.main-content.chat-page .page-header {
+  padding: var(--space-8) var(--space-8) 0;
+  flex-shrink: 0;
+}
+
 
 .page-title {
   font-size: var(--text-2xl);
@@ -1686,8 +1706,19 @@ select:focus {
 .chat-container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 100px);
+  /* Fill the chat-page main-content area (which is padding: 0, height: 100vh).
+     The page-header inside Chat is ~68px; flex: 1 + min-height: 0 lets
+     .chat-messages own the remaining space and scroll independently. */
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
+
+/* Restore horizontal padding that main-content normally provides */
+.main-content.chat-page .chat-container {
+  padding: 0 var(--space-8);
+}
+
 
 /* When live panel is active, switch to horizontal layout */
 .chat-container.chat-with-live-panel {
