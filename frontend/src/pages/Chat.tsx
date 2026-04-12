@@ -306,23 +306,52 @@ export default function Chat() {
 
     const parseMessage = (msg: Message): Message => {
         if (msg.role !== 'user') return msg;
+
+        let result = { ...msg };
+
+        // ── Step 1: strip prefix markers to extract fileName ─────────────────
         // Standard web chat format: [file:name.pdf]\ncontent
-        const newFmt = msg.content.match(/^\[file:([^\]]+)\]\n?/);
-        if (newFmt) return { ...msg, fileName: newFmt[1], content: msg.content.slice(newFmt[0].length).trim() };
-        // Feishu/Slack channel format: [\u6587\u4ef6\u5df2\u4e0a\u4f20: workspace/uploads/name]
-        const chanFmt = msg.content.match(/^\[\u6587\u4ef6\u5df2\u4e0a\u4f20: (?:workspace\/uploads\/)?([^\]\n]+)\]/);
-        if (chanFmt) {
-            const raw = chanFmt[1]; const fileName = raw.split('/').pop() || raw;
-            return { ...msg, fileName, content: msg.content.slice(chanFmt[0].length).trim() };
+        const newFmt = result.content.match(/^\[file:([^\]]+)\]\n?/);
+        if (newFmt) {
+            result = { ...result, fileName: newFmt[1], content: result.content.slice(newFmt[0].length).trim() };
+        } else {
+            // Feishu/Slack channel format: [\u6587\u4ef6\u5df2\u4e0a\u4f20: workspace/uploads/name]
+            const chanFmt = result.content.match(/^\[\u6587\u4ef6\u5df2\u4e0a\u4f20: (?:workspace\/uploads\/)?([^\]\n]+)\]/);
+            if (chanFmt) {
+                const raw = chanFmt[1]; const fileName = raw.split('/').pop() || raw;
+                result = { ...result, fileName, content: result.content.slice(chanFmt[0].length).trim() };
+            } else {
+                // Old format: [File: name.pdf]\nFile location:...\nQuestion: user_msg
+                const oldFmt = result.content.match(/^\[File: ([^\]]+)\]/);
+                if (oldFmt) {
+                    const fileName = oldFmt[1];
+                    const qMatch = result.content.match(/\nQuestion: ([\s\S]+)$/);
+                    result = { ...result, fileName, content: qMatch ? qMatch[1].trim() : '' };
+                }
+            }
         }
-        // Old format: [File: name.pdf]\nFile location:...\nQuestion: user_msg
-        const oldFmt = msg.content.match(/^\[File: ([^\]]+)\]/);
-        if (oldFmt) {
-            const fileName = oldFmt[1];
-            const qMatch = msg.content.match(/\nQuestion: ([\s\S]+)$/);
-            return { ...msg, fileName, content: qMatch ? qMatch[1].trim() : '' };
+
+        // ── Step 2: strip [image_data:...] markers ───────────────────────────
+        // When a history message was saved with an inline base64 image marker
+        // (e.g. [image_data:data:image/jpeg;base64,xxx]), we must:
+        //   a) extract the data URL and use it as imageUrl for the thumbnail
+        //   b) remove the raw marker from the displayed content so base64 is
+        //      never rendered as text (also prevents layout/scroll breakage)
+        const imgDataPattern = /\[image_data:(data:image\/[^;]+;base64,[A-Za-z0-9+/=]+)\]/;
+        const imgMatch = result.content.match(imgDataPattern);
+        if (imgMatch) {
+            result = {
+                ...result,
+                // Prefer existing imageUrl (set by the live upload flow); fall back
+                // to the extracted data URL so the thumbnail shows in history.
+                imageUrl: result.imageUrl || imgMatch[1],
+                content: result.content
+                    .replace(/\[image_data:data:image\/[^;]+;base64,[A-Za-z0-9+/=]+\]\n?/g, '')
+                    .trim(),
+            };
         }
-        return msg;
+
+        return result;
     };
 
     // Load chat history on mount
@@ -735,7 +764,7 @@ export default function Chat() {
     });
 
     return (
-        <div>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
             <div className="page-header">
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <div style={{ width: '36px', height: '36px', borderRadius: 'var(--radius-md)', background: 'var(--bg-tertiary)', border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)' }}>
