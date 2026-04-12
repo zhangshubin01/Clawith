@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 import MarkdownRenderer from '../components/MarkdownRenderer';
@@ -8,6 +8,7 @@ import { agentApi, enterpriseApi, uploadFileWithProgress } from '../services/api
 import { IconPaperclip, IconSend } from '@tabler/icons-react';
 import { formatFileSize } from '../utils/formatFileSize';
 import { useAuthStore } from '../stores';
+import { useDropZone } from '../hooks/useDropZone';
 
 /* ── Inline SVG Icons ── */
 const Icons = {
@@ -692,6 +693,47 @@ export default function Chat() {
 
     const hasLiveData = !!(liveState.desktop || liveState.browser || liveState.code);
 
+    // ── Drag-and-drop file upload ──
+    const handleDroppedFiles = useCallback(async (files: File[]) => {
+        const file = files[0]; // Chat supports single file
+        if (!file) return;
+
+        const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
+        setUploadProgress({ name: file.name, percent: 0, previewUrl, sizeBytes: file.size });
+
+        try {
+            const { promise } = uploadFileWithProgress(
+                '/chat/upload',
+                file,
+                (pct) => {
+                    setUploadProgress((prev) =>
+                        prev ? { ...prev, percent: pct >= 101 ? 100 : pct } : null,
+                    );
+                },
+                id ? { agent_id: id } : undefined,
+            );
+            const data = await promise;
+            setAttachedFile({
+                name: data.filename,
+                text: data.extracted_text,
+                path: data.workspace_path,
+                imageUrl: data.image_data_url || undefined,
+            });
+        } catch (err: any) {
+            if (err?.message !== 'Upload cancelled') {
+                alert(t('agent.upload.failed') + (err?.message ? `: ${err.message}` : ''));
+            }
+        } finally {
+            if (previewUrl) URL.revokeObjectURL(previewUrl);
+            setUploadProgress(null);
+        }
+    }, [id, t]);
+
+    const { isDragging: isChatDragging, dropZoneProps: chatDropProps } = useDropZone({
+        onDrop: handleDroppedFiles,
+        disabled: !connected || !!uploadProgress || isWaiting || streaming,
+    });
+
     return (
         <div>
             <div className="page-header">
@@ -709,7 +751,14 @@ export default function Chat() {
                 </div>
             </div>
 
-            <div className={`chat-container ${hasLiveData ? 'chat-with-live-panel' : ''}`}>
+            <div className={`chat-container ${hasLiveData ? 'chat-with-live-panel' : ''}`} {...chatDropProps} style={{ position: 'relative' }}>
+                {/* Drop overlay */}
+                {isChatDragging && (
+                    <div className="drop-zone-overlay">
+                        <div className="drop-zone-overlay__icon">📎</div>
+                        <div className="drop-zone-overlay__text">{t('agent.upload.dropToAttach', 'Drop file to attach')}</div>
+                    </div>
+                )}
                 {/* Wrap chat area in a column so it coexists with the live panel in flex-row */}
                 <div className="chat-main">
                 <div className="chat-messages">
