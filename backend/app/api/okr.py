@@ -849,23 +849,34 @@ async def members_without_okr(user=Depends(get_current_user)):
 
 @router.post("/trigger-member-outreach")
 async def trigger_member_outreach(user=Depends(get_current_user)):
-    """Admin-initiated trigger: instruct the OKR Agent to contact all members
-    who haven't set their OKRs yet.
+    """Admin-initiated trigger: instruct the OKR Agent to contact all tracked
+    members who haven't set their OKRs for the current period.
 
-    Fires an asynchronous task — returns immediately with a job-accepted response.
-    The OKR Agent's LLM loop runs in the background and uses its tools
-    (send_web_message, get_org_members, list_objectives, etc.) to reach out.
+    Data flow:
+      1. Backend queries tracked members (from AgentRelationship) who lack OKRs.
+      2. Backend injects up to 3 recent chat messages per member as context.
+      3. Builds a structured prompt and fires run_agent_oneshot as a background task.
+      4. The OKR Agent LLM loop sends personalised messages via the correct channel,
+         then reports success/failure back to the triggering admin.
+
+    Returns immediately with status=accepted.
     """
     import asyncio
-    from app.models.agent import Agent  # noqa: F401
+    from sqlalchemy import or_
+    from app.models.agent import Agent, AgentAgentRelationship
+    from app.models.org import AgentRelationship, OrgMember
+    from app.models.audit import ChatMessage
+    from app.models.chat_session import ChatSession
+    from app.models.user import User
 
     async with async_session() as db:
         settings = await _get_or_create_settings(db, user.tenant_id)
         if not settings.enabled:
             raise HTTPException(403, "OKR is not enabled for this tenant")
-        await db.commit()
 
-        # Find the OKR Agent
+        ps, pe = _compute_current_period(settings.period_frequency, settings.period_length_days)
+
+        # ── Find the OKR Agent ────────────────────────────────────────────────
         okr_agent_result = await db.execute(
             select(Agent).where(
                 Agent.tenant_id == user.tenant_id,
@@ -874,43 +885,227 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
             ).limit(1)
         )
         okr_agent = okr_agent_result.scalar_one_or_none()
+        if not okr_agent:
+            raise HTTPException(
+                404,
+                "OKR Agent not found. Please ensure OKR is enabled and the agent has been seeded.",
+            )
 
-    if not okr_agent:
-        raise HTTPException(404, "OKR Agent not found. Please ensure OKR is enabled and the agent has been seeded.")
-
-    # ── Fire the outreach task asynchronously ─────────────────────────────────
-    trigger_prompt = (
-        "[ADMIN TRIGGER — Member OKR Outreach]\n"
-        "The admin has initiated the member OKR outreach flow. "
-        "Please:\n"
-        "1. Use list_objectives to check which members already have OKRs for the current period.\n"
-        "2. Use get_org_members (or similar) to identify all members who need OKRs.\n"
-        "3. For each member WITHOUT an OKR:\n"
-        "   - If they are a platform user: send them a web notification via send_web_message "
-        "     inviting them to set their OKR (mention they can chat with you or use the OKR page).\n"
-        "   - If they are an Agent: send a one-shot structured message asking for their OKR.\n"
-        "   - If they use a channel (e.g. Feishu) but you lack that channel config: "
-        "     notify the admin via send_web_message about the missing channel config.\n"
-        "4. After completing outreach, summarize to the admin via send_web_message.\n"
-        "Proceed autonomously — do not wait for further input."
-    )
-
-    # Import the heartbeat execution pattern to reuse it for one-shot outreach
-    try:
-        from app.core.agent_runner import run_agent_oneshot  # may not exist yet
-        asyncio.create_task(
-            run_agent_oneshot(
-                agent_id=okr_agent.id,
-                prompt=trigger_prompt,
-                triggered_by_user_id=user.id,
+        # ── Collect owner_ids that already have OKRs this period ─────────────
+        existing_result = await db.execute(
+            select(OKRObjective.owner_id).where(
+                OKRObjective.tenant_id == user.tenant_id,
+                OKRObjective.owner_type.in_(["user", "agent"]),
+                OKRObjective.period_start >= ps,
+                OKRObjective.period_end <= pe,
+                OKRObjective.status != "archived",
+                OKRObjective.owner_id.isnot(None),
             )
         )
-    except ImportError:
-        # Fallback: best-effort fire without awaiting (will not block request)
-        pass
+        covered_ids: set[uuid.UUID] = {row[0] for row in existing_result.fetchall()}
+
+        # ── Fetch tracked human members from AgentRelationship ────────────────
+        rel_result = await db.execute(
+            select(AgentRelationship, OrgMember)
+            .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
+            .where(
+                AgentRelationship.agent_id == okr_agent.id,
+                OrgMember.status == "active",
+            )
+        )
+        rel_rows = rel_result.all()
+
+        # ── Fetch tracked agent members from AgentAgentRelationship ──────────
+        agent_rel_result = await db.execute(
+            select(Agent).join(
+                AgentAgentRelationship,
+                AgentAgentRelationship.target_agent_id == Agent.id,
+            ).where(
+                AgentAgentRelationship.agent_id == okr_agent.id,
+                Agent.is_system == False,  # noqa: E712
+                Agent.status.notin_(["stopped", "error"]),
+            )
+        )
+        tracked_agents = agent_rel_result.scalars().all()
+
+        # ── Resolve platform user for each OrgMember (for web fallback display)
+        member_user_ids: dict[uuid.UUID, uuid.UUID | None] = {}  # org_member.id → user.id
+        for _, org_member in rel_rows:
+            member_user_ids[org_member.id] = org_member.user_id
+
+            # Level 2: if OrgMember.user_id is null, try chat_sessions by external_conv_id
+            if not org_member.user_id:
+                patterns = []
+                if org_member.open_id:
+                    patterns.append(f"feishu_p2p_{org_member.open_id}")
+                if org_member.external_id:
+                    patterns.append(f"feishu_p2p_{org_member.external_id}")
+                    patterns.append(f"dingtalk_p2p_{org_member.external_id}")
+                if patterns:
+                    sess_result = await db.execute(
+                        select(ChatSession.user_id).where(
+                            ChatSession.agent_id == okr_agent.id,
+                            or_(*[ChatSession.external_conv_id == p for p in patterns]),
+                        ).limit(1)
+                    )
+                    found = sess_result.scalar_one_or_none()
+                    if found:
+                        member_user_ids[org_member.id] = found
+
+        # ── Fetch recent 3 messages per member (for context) ─────────────────
+        async def _recent_msgs(target_user_id: uuid.UUID | None) -> list[tuple]:
+            """Return up to 3 recent chat_messages between OKR Agent and user."""
+            if not target_user_id:
+                return []
+            msgs_result = await db.execute(
+                select(ChatMessage.role, ChatMessage.content, ChatMessage.created_at)
+                .where(
+                    ChatMessage.agent_id == okr_agent.id,
+                    ChatMessage.user_id == target_user_id,
+                )
+                .order_by(ChatMessage.created_at.desc())
+                .limit(3)
+            )
+            return list(reversed(msgs_result.all()))  # chronological order
+
+        # ── Build prompt context for each member without OKR ─────────────────
+        # Also resolve admin username for the final summary message
+        admin_result = await db.execute(
+            select(User.username, User.display_name).where(User.id == user.id)
+        )
+        admin_row = admin_result.first()
+        admin_username = (admin_row.username if admin_row else None) or str(user.id)
+
+        await db.commit()
+
+    # ── Assemble the list of members to contact ───────────────────────────────
+    # (DB session is closed — all data fetched above)
+    members_to_contact: list[str] = []
+    index = 1
+
+    for _, org_member in rel_rows:
+        # Skip if they already have an OKR this period
+        # (owner_id for human members is their platform user_id)
+        platform_uid = member_user_ids.get(org_member.id)
+        if platform_uid and platform_uid in covered_ids:
+            continue
+
+        msgs = await _recent_msgs(platform_uid) if platform_uid else []
+
+        # Determine channel hint
+        has_channel = bool(org_member.open_id or org_member.external_id)
+        if platform_uid:
+            channel_hint = (
+                'send_web_message(username="<their_username>", message=...)\n'
+                "  OR send_channel_message if they have a linked channel"
+            )
+        elif has_channel:
+            channel_hint = f'send_channel_message(member_name="{org_member.name}", message=...)'
+        else:
+            channel_hint = "No channel available — note this in your summary"
+
+        # Format history
+        if msgs:
+            history_lines = []
+            for role, content, created_at in msgs:
+                ts = created_at.strftime("%m-%d %H:%M") if created_at else ""
+                speaker = "You" if role == "assistant" else org_member.name
+                history_lines.append(f"  [{ts}] {speaker}: {content[:120]}")
+            history_str = "\n".join(history_lines)
+        else:
+            history_str = "  (No previous conversation — treat this as first contact)"
+
+        # Look up username for platform users
+        username_hint = ""
+        if platform_uid:
+            async with async_session() as db2:
+                u_res = await db2.execute(
+                    select(User.username, User.display_name).where(User.id == platform_uid)
+                )
+                u_row = u_res.first()
+            if u_row:
+                username_hint = (
+                    f'\n  Platform username: "{u_row.username or u_row.display_name}"'
+                    f"  (use this exact value in send_web_message)"
+                )
+
+        member_block = (
+            f"--- Member {index}: {org_member.name} ---\n"
+            f"  Type: Channel member{username_hint}\n"
+            f"  How to send: {channel_hint}\n"
+            f"  Recent chat history (last 3 messages):\n"
+            f"{history_str}"
+        )
+        members_to_contact.append(member_block)
+        index += 1
+
+    for agent_member in tracked_agents:
+        if agent_member.id in covered_ids:
+            continue
+        member_block = (
+            f"--- Member {index}: {agent_member.name} [Agent] ---\n"
+            f"  How to send: send_message_to_agent(agent_name=\"{agent_member.name}\", message=...)\n"
+            f"  Recent chat history: (Not available — agents communicate via direct message)"
+        )
+        members_to_contact.append(member_block)
+        index += 1
+
+    if not members_to_contact:
+        return {
+            "status": "no_action",
+            "message": "All tracked members already have OKRs set for this period. No outreach needed.",
+            "okr_agent_id": str(okr_agent.id),
+        }
+
+    # ── Compose the final task prompt ─────────────────────────────────────────
+    period_label = f"{ps.strftime('%Y-%m-%d')} to {pe.strftime('%Y-%m-%d')}"
+    members_block = "\n\n".join(members_to_contact)
+    task_prompt = f"""[ADMIN TRIGGER — OKR Member Outreach]
+
+Current OKR period: {period_label}
+Admin who triggered this: {admin_username}
+
+Your task: Contact the {len(members_to_contact)} member(s) listed below who have NOT yet \
+set their OKRs for this period. Send each one a warm, personalised reminder.
+
+━━━ INSTRUCTIONS ━━━
+1. For each member, review their recent chat history (provided below).
+2. Compose a natural, personalised message:
+   - If the history is OKR-related → reference the prior conversation naturally
+   - If history is unrelated or absent → simply ask them to set their OKRs directly
+   - Keep the tone warm and supportive, not demanding
+3. Send via the indicated channel (tool call shown for each member).
+4. If sending fails (e.g. channel not configured), log it and move on.
+5. After contacting ALL members, send a brief summary report to admin via:
+   send_web_message(username="{admin_username}", message="...")
+   Report format: "Nudge complete: X sent successfully, Y failed. [list any failures]"
+
+━━━ MEMBERS TO CONTACT ({len(members_to_contact)} total) ━━━
+
+{members_block}
+
+━━━ BEGIN OUTREACH NOW ━━━
+Proceed member by member. Do not wait for replies — humans will respond in their own time.
+"""
+
+    # ── Launch background task ────────────────────────────────────────────────
+    from app.services.heartbeat import run_agent_oneshot
+
+    asyncio.create_task(
+        run_agent_oneshot(
+            agent_id=okr_agent.id,
+            prompt=task_prompt,
+            triggered_by_user_id=user.id,
+            max_rounds=max(40, len(members_to_contact) * 4),  # generous headroom
+        )
+    )
 
     return {
         "status": "accepted",
-        "message": "OKR Agent outreach task has been triggered. The agent will contact members asynchronously.",
+        "message": (
+            f"OKR Agent outreach task triggered for {len(members_to_contact)} member(s). "
+            "The agent will contact them asynchronously and report back to you."
+        ),
         "okr_agent_id": str(okr_agent.id),
+        "members_count": len(members_to_contact),
     }
