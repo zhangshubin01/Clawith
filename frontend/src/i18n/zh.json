@@ -1060,12 +1060,21 @@
       "audit": "审计日志",
       "config": "平台配置",
       "kb": "公司知识库",
-      "approvals": "审批",
-      "skills": "技能管理",
+      "approvals": "审批流程",
+      "skills": "技能",
       "quotas": "配额",
-      "users": "用户",
+      "users": "用户管理",
       "invites": "邀请码",
       "identity": "OA管理"
+    },
+    "a2aAsync": {
+      "title": "数字员工间异步通信",
+      "description": "允许数字员工之间以三种模式通信：notify（单向通知，无需回复）、task_delegate（委派任务并等待结果返回）、consult（同步问答）。关闭后，所有数字员工间的消息将使用同步 consult 模式——即此功能上线前的原有行为。",
+      "enabled": "已开启",
+      "disabled": "已关闭",
+      "enabledHint": "数字员工可使用 notify、task_delegate 和 consult 三种通信模式。",
+      "disabledHint": "所有数字员工消息使用同步 consult 模式。",
+      "enableWarning": "⚠️ 您即将开启数字员工间异步通信功能（测试版）。\n\n此功能允许数字员工通过 notify 和 task_delegate 模式进行异步通信。\n\n已知可能的问题：\n• 数字员工的回复中可能包含内部技术术语（触发器名称、关注项等）\n• task_delegate 回调可能因速率限制而偶尔延迟或丢失\n• Token 消耗将增加，因为每条异步消息都会触发一个独立的数字员工会话\n• 如果触发器配置不当，可能出现数字员工循环调用\n\n如遇到任何问题，请返回此页面关闭开关，即可恢复稳定的同步通信行为。\n\n确定要开启此功能吗？"
     },
     "invites": {
       "pageTitle": "邀请码",

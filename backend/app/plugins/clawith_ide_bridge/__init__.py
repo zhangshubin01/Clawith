@@ -1,0 +1,1 @@
+# Clawith IDE Bridge Plugin

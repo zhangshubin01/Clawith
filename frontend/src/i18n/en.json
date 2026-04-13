@@ -911,6 +911,15 @@
       "invites": "Invitation Codes",
       "identity": "OA Management"
     },
+    "a2aAsync": {
+      "title": "Agent-to-Agent Async Communication",
+      "description": "Enable agents to communicate asynchronously with three modes: notify (one-way announcement), task_delegate (delegate work and get results back), and consult (synchronous question). When disabled, all agent-to-agent messages use synchronous consult mode — the same behavior as before this feature was introduced.",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "enabledHint": "Agents can use notify, task_delegate, and consult modes.",
+      "disabledHint": "All agent messages use synchronous consult mode.",
+      "enableWarning": "⚠️ You are about to enable the A2A Async Communication feature (Beta).\n\nThis feature allows agents to communicate asynchronously via notify and task_delegate modes.\n\nKnown potential issues:\n• Agent replies may contain internal technical terms (trigger names, focus items, etc.)\n• task_delegate callbacks may occasionally be delayed or dropped due to rate limiting\n• Token consumption will increase because each async message triggers a separate agent session\n• Agent loops may occur if triggers are not properly configured\n\nIf you encounter any issues, please return to this page and disable the toggle to restore stable synchronous behavior.\n\nAre you sure you want to enable this feature?"
+    },
     "invites": {
       "pageTitle": "Invitation Codes",
       "pageDesc": "Manage invitation codes for platform registration.",

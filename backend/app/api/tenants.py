@@ -37,6 +37,7 @@ class TenantOut(BaseModel):
     is_active: bool
     sso_enabled: bool = False
     sso_domain: str | None = None
+    a2a_async_enabled: bool = False
     created_at: datetime | None = None
 
     model_config = {"from_attributes": True}
@@ -49,6 +50,7 @@ class TenantUpdate(BaseModel):
     is_active: bool | None = None
     sso_enabled: bool | None = None
     sso_domain: str | None = None
+    a2a_async_enabled: bool | None = None
 
 
 # ─── Helpers ────────────────────────────────────────────

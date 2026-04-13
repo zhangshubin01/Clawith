@@ -103,9 +103,9 @@ class Settings(BaseSettings):
     # Jina AI (Reader + Search APIs)
     JINA_API_KEY: str = ""
 
-    # OpenAI-compatible HTTP (/v1/chat/completions): when the client omits `model`
-    # (e.g. Cursor only sends API key), use this Clawith agent name or UUID.
-    CLAWITH_OPENAI_COMPAT_DEFAULT_AGENT: str = ""
+    # Exa AI (Search API)
+    EXA_API_KEY: str = ""
+
 
     # Sandbox configuration
     SANDBOX_TYPE: SandboxType = SandboxType.SUBPROCESS

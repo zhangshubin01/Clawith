@@ -272,7 +272,7 @@ BUILTIN_TOOLS = [
     {
         "name": "send_message_to_agent",
         "display_name": "Agent Message",
-        "description": "Send a message to a digital employee colleague and receive a reply. Suitable for questions, delegation, or collaboration.",
+        "description": "Send a message to a digital employee colleague. Decision guide: target needs to DO WORK and return results? → task_delegate. Just FYI? → notify. Quick factual question? → consult. When unsure, prefer task_delegate.",
         "category": "communication",
         "icon": "🤖",
         "is_default": True,
@@ -281,9 +281,9 @@ BUILTIN_TOOLS = [
             "properties": {
                 "agent_name": {"type": "string", "description": "Target agent name"},
                 "message": {"type": "string", "description": "Message content"},
-                "msg_type": {"type": "string", "enum": ["notify", "consult", "task_delegate"], "description": "Message type: notify (notification), consult (ask a question), task_delegate (delegate a task)"},
+                "msg_type": {"type": "string", "enum": ["notify", "consult", "task_delegate"], "description": "(1) Target needs to DO WORK and return results? → task_delegate. (2) Just FYI? → notify. (3) Quick factual question? → consult. When unsure, prefer task_delegate."},
             },
-            "required": ["agent_name", "message"],
+            "required": ["agent_name", "message", "msg_type"],
         },
         "config": {},
         "config_schema": {},
@@ -310,10 +310,10 @@ BUILTIN_TOOLS = [
     {
         "name": "web_search",
         "display_name": "Web Search",
-        "description": "Search the internet using a configurable search engine. Supports DuckDuckGo (free), Tavily, Google, and Bing. Configure the search engine in the tool settings.",
+        "description": "[Deprecated] Unified search tool with engine selector. Use the dedicated tools (DuckDuckGo Search, Tavily Search, Google Search, Bing Search, Exa Search) instead for better control per engine.",
         "category": "search",
         "icon": "🔍",
-        "is_default": True,
+        "is_default": False,
         "parameters_schema": {
             "type": "object",
             "properties": {
@@ -339,6 +339,7 @@ BUILTIN_TOOLS = [
                         {"value": "tavily", "label": "Tavily (AI search, needs API key)"},
                         {"value": "google", "label": "Google Custom Search (needs API key)"},
                         {"value": "bing", "label": "Bing Search API (needs API key)"},
+                        {"value": "exa", "label": "Exa (AI-powered search, needs API key)"},
                     ],
                     "default": "duckduckgo",
                 },
@@ -348,7 +349,7 @@ BUILTIN_TOOLS = [
                     "type": "password",
                     "default": "",
                     "placeholder": "Required for engines that need an API key",
-                    "depends_on": {"search_engine": ["tavily", "google", "bing"]},
+                    "depends_on": {"search_engine": ["tavily", "google", "bing", "exa"]},
                 },
                 {
                     "key": "max_results",
@@ -424,6 +425,186 @@ BUILTIN_TOOLS = [
                     "type": "password",
                     "default": "",
                     "placeholder": "jina_xxxxxxxxxxxxxxxx (get one at jina.ai)",
+                },
+            ]
+        },
+    },
+    {
+        "name": "exa_search",
+        "display_name": "Exa Search",
+        "description": "AI-powered web search using Exa (exa.ai). Supports semantic search, category filtering, domain filtering, and multiple content modes (text, highlights, summary). Requires an Exa API key.",
+        "category": "search",
+        "icon": "🔎",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "max_results": {"type": "integer", "description": "Number of results (default 5, max 10)"},
+                "search_type": {
+                    "type": "string",
+                    "description": "Search type: auto (default), neural, or fast",
+                    "enum": ["auto", "neural", "fast"],
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Filter by category: company, research paper, news, personal site, financial report, or people",
+                },
+                "include_domains": {
+                    "type": "string",
+                    "description": "Comma-separated domains to restrict results to (e.g. 'arxiv.org, github.com')",
+                },
+                "exclude_domains": {
+                    "type": "string",
+                    "description": "Comma-separated domains to exclude from results",
+                },
+                "content_mode": {
+                    "type": "string",
+                    "description": "Content retrieval mode: text (default), highlights, or summary",
+                    "enum": ["text", "highlights", "summary"],
+                },
+            },
+            "required": ["query"],
+        },
+        "config": {},
+        "config_schema": {
+            "fields": [
+                {
+                    "key": "api_key",
+                    "label": "Exa API Key",
+                    "type": "password",
+                    "default": "",
+                    "placeholder": "Get your API key at exa.ai",
+                },
+            ]
+        },
+    },
+    # ── Standalone search engines (each engine as its own tool) ──────────────
+    # These complement web_search (which remains for backward compatibility).
+    # Each tool wraps a single engine so agents can pick the right one for the
+    # task without going through the unified engine-selector flow.
+    {
+        "name": "duckduckgo_search",
+        "display_name": "DuckDuckGo Search",
+        "description": "Search the internet using DuckDuckGo. Free, no API key required. Returns titles, URLs, and snippets.",
+        "category": "search",
+        "icon": "🦆",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search keywords"},
+                "max_results": {"type": "integer", "description": "Number of results to return (default 5, max 10)"},
+            },
+            "required": ["query"],
+        },
+        "config": {},
+        "config_schema": {"fields": []},
+    },
+    {
+        "name": "tavily_search",
+        "display_name": "Tavily Search",
+        "description": "AI-optimized web search using Tavily. Returns high-quality results with summaries. Requires a Tavily API key.",
+        "category": "search",
+        "icon": "🔍",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search keywords"},
+                "max_results": {"type": "integer", "description": "Number of results to return (default 5, max 10)"},
+            },
+            "required": ["query"],
+        },
+        "config": {},
+        "config_schema": {
+            "fields": [
+                {
+                    "key": "api_key",
+                    "label": "Tavily API Key",
+                    "type": "password",
+                    "default": "",
+                    "placeholder": "tvly-xxxxxxxxxxxxxxxx (get one at tavily.com)",
+                },
+            ]
+        },
+    },
+    {
+        "name": "google_search",
+        "display_name": "Google Search",
+        "description": "Search using Google Custom Search JSON API. Returns titles, URLs, and snippets. Requires a Google API key and Custom Search Engine ID (format: API_KEY:CX_ID).",
+        "category": "search",
+        "icon": "🔍",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search keywords"},
+                "max_results": {"type": "integer", "description": "Number of results to return (default 5, max 10)"},
+                "language": {"type": "string", "description": "Search language code (e.g. 'en', 'zh')"},
+            },
+            "required": ["query"],
+        },
+        "config": {"language": "en"},
+        "config_schema": {
+            "fields": [
+                {
+                    "key": "api_key",
+                    "label": "API Key & Search Engine ID",
+                    "type": "password",
+                    "default": "",
+                    "placeholder": "API_KEY:SEARCH_ENGINE_ID (get at console.cloud.google.com)",
+                },
+                {
+                    "key": "language",
+                    "label": "Search language",
+                    "type": "select",
+                    "options": [
+                        {"value": "en", "label": "English"},
+                        {"value": "zh-CN", "label": "Chinese"},
+                        {"value": "ja", "label": "Japanese"},
+                    ],
+                    "default": "en",
+                },
+            ]
+        },
+    },
+    {
+        "name": "bing_search",
+        "display_name": "Bing Search",
+        "description": "Search using Bing Web Search API. Returns titles, URLs, and snippets. Requires a Bing Search API key from Microsoft Azure.",
+        "category": "search",
+        "icon": "🔍",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search keywords"},
+                "max_results": {"type": "integer", "description": "Number of results to return (default 5, max 10)"},
+                "language": {"type": "string", "description": "Market language code (e.g. 'en-US', 'zh-CN')"},
+            },
+            "required": ["query"],
+        },
+        "config": {"language": "en-US"},
+        "config_schema": {
+            "fields": [
+                {
+                    "key": "api_key",
+                    "label": "Bing Search API Key",
+                    "type": "password",
+                    "default": "",
+                    "placeholder": "Get from Azure Cognitive Services (Bing Search v7)",
+                },
+                {
+                    "key": "language",
+                    "label": "Market language",
+                    "type": "select",
+                    "options": [
+                        {"value": "en-US", "label": "English (US)"},
+                        {"value": "zh-CN", "label": "Chinese (Simplified)"},
+                        {"value": "ja-JP", "label": "Japanese"},
+                    ],
+                    "default": "en-US",
                 },
             ]
         },
@@ -1901,6 +2082,7 @@ async def seed_builtin_tools():
                     category=t["category"],
                     icon=t["icon"],
                     is_default=t["is_default"],
+                    parameters_schema=t.get("parameters_schema", {"type": "object", "properties": {}}),
                     config=t.get("config", {}),
                     config_schema=t.get("config_schema", {}),
                     source="builtin",

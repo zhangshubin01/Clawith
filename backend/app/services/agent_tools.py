@@ -532,7 +532,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_message_to_agent",
-            "description": "Send a message to a digital employee colleague and receive a reply. The recipient is another AI agent, not a human. This triggers the recipient's LLM reasoning and returns their response. Suitable for asking questions, delegating tasks, or collaboration. Your relationships.md lists available digital employees under 'Digital Employee Colleagues'.",
+            "description": "Send a message to a digital employee colleague. The recipient is another AI agent, not a human. Your relationships.md lists available digital employees under 'Digital Employee Colleagues'.\n\nDECISION GUIDE for msg_type:\nAsk yourself: does the target agent need to DO WORK (analyze, research, summarize, write, compare, plan, etc.) and RETURN RESULTS to you or the user?\n\n- If YES, the target needs to do work → use task_delegate. Examples: 'summarize X', 'analyze Y', 'check Z', 'prepare a report', 'review and give feedback', 'find out X', 'confirm with X and report back'. The target works asynchronously and you will be woken when they finish.\n\n- If the target just needs to KNOW something → use notify. Examples: 'meeting cancelled', 'I updated the doc', 'heads up about X', 'FYI'. No reply expected.\n\n- If you need a quick factual answer right now → use consult. Examples: 'what is X?', 'do you know Y?'. Synchronous, blocks until reply.\n\nWhen in doubt between notify and task_delegate, prefer task_delegate — it is safer because it guarantees the user gets a result.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -547,10 +547,10 @@ AGENT_TOOLS = [
                     "msg_type": {
                         "type": "string",
                         "enum": ["notify", "consult", "task_delegate"],
-                        "description": "Message type: notify (notification), consult (ask a question), task_delegate (delegate a task). Defaults to notify.",
+                        "description": "Decision guide: (1) Will the target need to DO WORK and return results? → task_delegate. (2) Is this just a one-way FYI? → notify. (3) Quick factual question needing immediate answer? → consult. When unsure, prefer task_delegate.",
                     },
                 },
-                "required": ["agent_name", "message"],
+                "required": ["agent_name", "message", "msg_type"],
             },
         },
     },
@@ -1801,6 +1801,37 @@ async def _agent_has_any_channel(agent_id: uuid.UUID) -> bool:
 
 # ─── Dynamic Tool Loading from DB ──────────────────────────────
 
+
+def _strip_a2a_msg_type(tools: list[dict]) -> list[dict]:
+    """Remove the msg_type parameter from send_message_to_agent when async A2A is disabled.
+
+    This prevents the LLM from seeing and selecting notify/task_delegate modes
+    that would be silently overridden to consult anyway, which confuses users
+    who see the tool call arguments in the chat UI.
+    """
+    import copy
+    result = []
+    for t in tools:
+        fn = t.get("function", {})
+        if fn.get("name") == "send_message_to_agent":
+            t = copy.deepcopy(t)
+            fn = t["function"]
+            # Simplify description to only mention consult
+            fn["description"] = (
+                "Send a message to a digital employee colleague and receive their reply synchronously."
+            )
+            params = fn.get("parameters", {})
+            props = params.get("properties", {})
+            # Remove msg_type parameter entirely
+            props.pop("msg_type", None)
+            # Remove msg_type from required list
+            req = params.get("required", [])
+            if "msg_type" in req:
+                params["required"] = [r for r in req if r != "msg_type"]
+        result.append(t)
+    return result
+
+
 async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     """Load enabled tools for an agent from DB (OpenAI function-calling format).
 
@@ -1811,10 +1842,30 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
     Also patches agentbay_file_transfer description with OS-specific paths based on
     the agent's computer tool configuration (os_type: 'windows' | 'linux').
+
+    When the tenant's a2a_async_enabled flag is False, the msg_type parameter is
+    removed from the send_message_to_agent tool so the LLM only sees the
+    synchronous consult behaviour.
     """
     has_feishu = await _agent_has_feishu(agent_id)
     has_any_channel = await _agent_has_any_channel(agent_id)
     _always_tools = _always_core_tools + (_feishu_tools if has_feishu else []) + (_channel_tools if has_any_channel else [])
+
+    # Check tenant-level a2a_async_enabled flag
+    _a2a_async = False
+    try:
+        from app.models.tenant import Tenant
+        from app.models.agent import Agent as AgentModel
+        async with async_session() as _flag_db:
+            _ag_r = await _flag_db.execute(select(AgentModel.tenant_id).where(AgentModel.id == agent_id))
+            _tid = _ag_r.scalar_one_or_none()
+            if _tid:
+                _t_r = await _flag_db.execute(select(Tenant).where(Tenant.id == _tid))
+                _tenant = _t_r.scalar_one_or_none()
+                if _tenant:
+                    _a2a_async = getattr(_tenant, "a2a_async_enabled", False)
+    except Exception:
+        pass
 
     # Read os_type once; used to patch agentbay_file_transfer paths below
     computer_os_type = await _get_computer_os_type(agent_id)
@@ -1878,12 +1929,19 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     if t["function"]["name"] not in db_tool_names:
                         result.append(t)
                 # Inject OS-aware paths into computer-related tool descriptions
-                return _patch_computer_tool_descriptions(result, computer_os_type)
+                result = _patch_computer_tool_descriptions(result, computer_os_type)
+                # Strip msg_type from send_message_to_agent when async A2A is disabled
+                if not _a2a_async:
+                    result = _strip_a2a_msg_type(result)
+                return result
     except Exception as e:
         logger.error(f"[Tools] DB load failed, using fallback: {e}")
 
     # Fallback to hardcoded tools (still apply OS-aware path patching)
-    return _patch_computer_tool_descriptions(AGENT_TOOLS, computer_os_type)
+    fallback = _patch_computer_tool_descriptions(AGENT_TOOLS, computer_os_type)
+    if not _a2a_async:
+        fallback = _strip_a2a_msg_type(fallback)
+    return fallback
 
 
 # ─── Workspace initialization ──────────────────────────────────
@@ -2039,6 +2097,16 @@ async def _execute_tool_direct(
             return await _web_search(arguments, agent_id)
         elif tool_name == "jina_search":
             return await _jina_search(arguments)
+        elif tool_name == "exa_search":
+            return await _exa_search(arguments, agent_id)
+        elif tool_name == "duckduckgo_search":
+            return await _duckduckgo_search_tool(arguments)
+        elif tool_name == "tavily_search":
+            return await _tavily_search_tool(arguments, agent_id)
+        elif tool_name == "google_search":
+            return await _google_search_tool(arguments, agent_id)
+        elif tool_name == "bing_search":
+            return await _bing_search_tool(arguments, agent_id)
         elif tool_name == "send_feishu_message":
             return await _send_feishu_message(agent_id, arguments)
         elif tool_name == "send_message_to_agent":
@@ -2197,8 +2265,16 @@ async def execute_tool(
             result = await _web_search(arguments, agent_id)
         elif tool_name == "jina_search":
             result = await _jina_search(arguments)
+        elif tool_name == "exa_search":
+            result = await _exa_search(arguments, agent_id)
+        elif tool_name == "duckduckgo_search":
+            result = await _duckduckgo_search_tool(arguments)
+        elif tool_name == "tavily_search":
+            result = await _tavily_search_tool(arguments, agent_id)
+        elif tool_name == "google_search":
+            result = await _google_search_tool(arguments, agent_id)
         elif tool_name == "bing_search":
-            result = await _jina_search(arguments)  # redirect legacy to jina
+            result = await _bing_search_tool(arguments, agent_id)
         elif tool_name == "jina_read":
             result = await _jina_read(arguments)
         elif tool_name == "read_webpage":
@@ -2374,6 +2450,8 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
             return await _search_google(query, api_key, max_results, language)
         elif engine == "bing" and api_key:
             return await _search_bing(query, api_key, max_results, language)
+        elif engine == "exa" and api_key:
+            return await _search_exa(query, api_key, max_results)
         else:
             return await _search_duckduckgo(query, max_results)
     except Exception as e:
@@ -2594,6 +2672,190 @@ async def _search_bing(query: str, api_key: str, max_results: int, language: str
     if not results:
         return f'🔍 No results found for "{query}"'
     return f'🔍 Bing search for "{query}" ({len(results)} items):\n\n' + "\n\n---\n\n".join(results)
+
+
+async def _search_exa(query: str, api_key: str, max_results: int) -> str:
+    """Search via Exa AI API (exa.ai). Used by the web_search engine selector."""
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            "https://api.exa.ai/search",
+            json={
+                "query": query,
+                "type": "auto",
+                "numResults": max_results,
+                "contents": {"text": {"maxCharacters": 1000}},
+            },
+            headers={
+                "x-api-key": api_key,
+                "Content-Type": "application/json",
+                "x-exa-integration": "clawith",
+            },
+            timeout=15,
+        )
+        data = resp.json()
+
+    if resp.status_code != 200:
+        return f"❌ Exa search failed: {data.get('error', data.get('message', str(data)[:200]))}"
+
+    results = []
+    for r in data.get("results", [])[:max_results]:
+        title = r.get("title", "Untitled")
+        url = r.get("url", "")
+        text = (r.get("text") or "")[:300]
+        results.append(f"**{title}**\n{url}\n{text}")
+
+    if not results:
+        return f'🔍 No results found for "{query}"'
+    return f'🔍 Exa search for "{query}" ({len(results)} items):\n\n' + "\n\n---\n\n".join(results)
+
+
+async def _exa_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str:
+    """Full-featured Exa AI search with category filtering, domain filtering, and content modes."""
+    import httpx
+
+    query = arguments.get("query", "").strip()
+    if not query:
+        return "❌ Please provide search keywords"
+
+    config = await _get_tool_config(agent_id, "exa_search") or {}
+    api_key = config.get("api_key", "") or get_settings().EXA_API_KEY
+    if not api_key:
+        return "❌ Exa API key is required. Set it in tool settings or the EXA_API_KEY environment variable."
+
+    max_results = min(arguments.get("max_results", 5), 10)
+    search_type = arguments.get("search_type", "auto")
+    category = arguments.get("category") or None
+    content_mode = arguments.get("content_mode", "text")
+    include_domains = arguments.get("include_domains")
+    exclude_domains = arguments.get("exclude_domains")
+
+    body: dict = {
+        "query": query,
+        "type": search_type,
+        "numResults": max_results,
+        "contents": {},
+    }
+
+    if category:
+        body["category"] = category
+    if include_domains:
+        body["includeDomains"] = [d.strip() for d in include_domains.split(",") if d.strip()]
+    if exclude_domains:
+        body["excludeDomains"] = [d.strip() for d in exclude_domains.split(",") if d.strip()]
+
+    if content_mode == "highlights":
+        body["contents"]["highlights"] = {"numSentences": 3}
+    elif content_mode == "summary":
+        body["contents"]["summary"] = {}
+    else:
+        body["contents"]["text"] = {"maxCharacters": 1000}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.exa.ai/search",
+                json=body,
+                headers={
+                    "x-api-key": api_key,
+                    "Content-Type": "application/json",
+                    "x-exa-integration": "clawith",
+                },
+                timeout=15,
+            )
+            data = resp.json()
+
+        if resp.status_code != 200:
+            return f"❌ Exa search failed: {data.get('error', data.get('message', str(data)[:200]))}"
+
+        items = data.get("results", [])[:max_results]
+        if not items:
+            return f'🔍 No results found for "{query}"'
+
+        parts = []
+        for i, r in enumerate(items, 1):
+            title = r.get("title", "Untitled")
+            url = r.get("url", "")
+            content = ""
+            if content_mode == "highlights" and r.get("highlights"):
+                content = " ... ".join(r["highlights"])
+            elif content_mode == "summary" and r.get("summary"):
+                content = r["summary"]
+            elif r.get("text"):
+                content = r["text"][:500]
+            parts.append(f"**{i}. {title}**\n{url}\n{content}")
+
+        return f'🔍 Exa search for "{query}" ({len(items)} items):\n\n' + "\n\n---\n\n".join(parts)
+
+    except Exception as e:
+        return f"❌ Exa search error: {str(e)[:300]}"
+
+
+
+# ── Standalone search engine tool wrappers ───────────────────────────────────
+# Each function reads its own tool config (agent > company > defaults) and
+# delegates to the existing private search implementations above.
+
+
+async def _duckduckgo_search_tool(arguments: dict) -> str:
+    """Standalone DuckDuckGo search tool (no API key required)."""
+    query = arguments.get("query", "").strip()
+    if not query:
+        return "Please provide search keywords"
+    max_results = min(arguments.get("max_results", 5), 10)
+    return await _search_duckduckgo(query, max_results)
+
+
+async def _tavily_search_tool(arguments: dict, agent_id: uuid.UUID | None = None) -> str:
+    """Standalone Tavily search tool (API key read from per-tool config)."""
+    query = arguments.get("query", "").strip()
+    if not query:
+        return "Please provide search keywords"
+    config = await _get_tool_config(agent_id, "tavily_search") or {}
+    api_key = config.get("api_key", "").strip()
+    if not api_key:
+        return "Tavily API key is required. Set it in the tool settings."
+    max_results = min(arguments.get("max_results", 5), 10)
+    try:
+        return await _search_tavily(query, api_key, max_results)
+    except Exception as e:
+        return f"Tavily search error: {str(e)[:200]}"
+
+
+async def _google_search_tool(arguments: dict, agent_id: uuid.UUID | None = None) -> str:
+    """Standalone Google Custom Search tool (API key read from per-tool config)."""
+    query = arguments.get("query", "").strip()
+    if not query:
+        return "Please provide search keywords"
+    config = await _get_tool_config(agent_id, "google_search") or {}
+    api_key = config.get("api_key", "").strip()
+    if not api_key:
+        return "Google Search API key is required (format: API_KEY:SEARCH_ENGINE_ID). Set it in the tool settings."
+    # Allow per-call language override; fall back to tool config, then default
+    language = arguments.get("language") or config.get("language", "en")
+    max_results = min(arguments.get("max_results", 5), 10)
+    try:
+        return await _search_google(query, api_key, max_results, language)
+    except Exception as e:
+        return f"Google search error: {str(e)[:200]}"
+
+
+async def _bing_search_tool(arguments: dict, agent_id: uuid.UUID | None = None) -> str:
+    """Standalone Bing Web Search tool (API key read from per-tool config)."""
+    query = arguments.get("query", "").strip()
+    if not query:
+        return "Please provide search keywords"
+    config = await _get_tool_config(agent_id, "bing_search") or {}
+    api_key = config.get("api_key", "").strip()
+    if not api_key:
+        return "Bing Search API key is required. Set it in the tool settings."
+    language = arguments.get("language") or config.get("language", "en-US")
+    max_results = min(arguments.get("max_results", 5), 10)
+    try:
+        return await _search_bing(query, api_key, max_results, language)
+    except Exception as e:
+        return f"Bing search error: {str(e)[:200]}"
 
 
 async def _send_channel_file(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
@@ -4386,13 +4648,196 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
         return f"❌ Agent file send error: {str(e)[:200]}"
 
 
+async def _resolve_a2a_target(
+    db, from_agent_id: uuid.UUID, agent_name: str
+) -> tuple[AgentModel | None, str | None]:
+    """Resolve the target agent for A2A communication.
+
+    Returns (target_agent, error_message). If target is None, error_message
+    explains why.  Caller is responsible for relationship / expiry checks.
+    """
+    src_result = await db.execute(select(AgentModel).where(AgentModel.id == from_agent_id))
+    source_agent = src_result.scalar_one_or_none()
+    source_tenant_id = source_agent.tenant_id if source_agent else None
+
+    base_filter = [AgentModel.id != from_agent_id]
+    if source_tenant_id:
+        base_filter.append(AgentModel.tenant_id == source_tenant_id)
+
+    exact_result = await db.execute(
+        select(AgentModel).where(AgentModel.name == agent_name, *base_filter)
+    )
+    target = exact_result.scalars().first()
+    if not target:
+        safe_name = agent_name.replace("%", "").replace("_", r"\_")
+        fuzzy_result = await db.execute(
+            select(AgentModel).where(AgentModel.name.ilike(f"%{safe_name}%"), *base_filter)
+        )
+        target = fuzzy_result.scalars().first()
+    if not target:
+        rel_r = await db.execute(
+            select(AgentModel.name).join(
+                AgentAgentRelationship,
+                (AgentAgentRelationship.target_agent_id == AgentModel.id) & (AgentAgentRelationship.agent_id == from_agent_id)
+            )
+        )
+        rel_names = [n for (n,) in rel_r.all()]
+        return None, f"❌ No agent found matching '{agent_name}'. Your connected colleagues: {', '.join(rel_names) if rel_names else 'none — ask your administrator to set up relationships'}"
+
+    return target, None
+
+
+async def _ensure_a2a_session(
+    db, from_agent_id: uuid.UUID, target_id: uuid.UUID, source_name: str, owner_id: uuid.UUID
+) -> tuple[ChatSession, str]:
+    """Find or create the ChatSession for a pair of agents.
+
+    Returns (chat_session, session_id_str).
+    """
+    from app.models.participant import Participant
+
+    session_agent_id = min(from_agent_id, target_id, key=str)
+    session_peer_id = max(from_agent_id, target_id, key=str)
+    sess_r = await db.execute(
+        select(ChatSession).where(
+            ChatSession.agent_id == session_agent_id,
+            ChatSession.peer_agent_id == session_peer_id,
+            ChatSession.source_channel == "agent",
+        )
+    )
+    chat_session = sess_r.scalar_one_or_none()
+    if not chat_session:
+        src_part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == from_agent_id))
+        src_participant = src_part_r.scalar_one_or_none()
+        src_part_id = src_participant.id if src_participant else None
+        chat_session = ChatSession(
+            agent_id=session_agent_id,
+            user_id=owner_id,
+            title=f"{source_name} ↔ {(await db.execute(select(AgentModel.name).where(AgentModel.id == target_id))).scalar() or 'Unknown'}",
+            source_channel="agent",
+            participant_id=src_part_id,
+            peer_agent_id=session_peer_id,
+        )
+        db.add(chat_session)
+        await db.flush()
+    return chat_session, str(chat_session.id)
+
+
+async def _create_on_message_trigger(
+    agent_id: uuid.UUID,
+    trigger_name: str,
+    from_agent_name: str,
+    reason: str,
+    focus_ref: str | None = None,
+    notification_summary: str | None = None,
+) -> None:
+    """Programmatically create an on_message trigger for an agent."""
+    from app.models.trigger import AgentTrigger
+
+    config: dict = {"from_agent_name": from_agent_name}
+    if notification_summary:
+        config["_notification_summary"] = notification_summary
+
+    try:
+        from app.models.audit import ChatMessage as _CM
+        from app.models.chat_session import ChatSession as _CS
+        from sqlalchemy import cast as sa_cast, String as SaString
+        async with async_session() as _snap_db:
+            _snap_q = select(_CM.created_at).join(
+                _CS, _CM.conversation_id == sa_cast(_CS.id, SaString)
+            ).where(
+                _CS.agent_id == agent_id,
+                _CM.created_at.isnot(None),
+            ).order_by(_CM.created_at.desc()).limit(1)
+            _snap_r = await _snap_db.execute(_snap_q)
+            _latest_ts = _snap_r.scalar_one_or_none()
+            if _latest_ts:
+                config["_since_ts"] = _latest_ts.isoformat()
+    except Exception:
+        pass
+
+    async with async_session() as db:
+        result = await db.execute(
+            select(AgentTrigger).where(
+                AgentTrigger.agent_id == agent_id,
+                AgentTrigger.name == trigger_name,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            if existing.is_enabled:
+                existing.config = {**(existing.config or {}), **config}
+                existing.reason = reason
+                if focus_ref:
+                    existing.focus_ref = focus_ref
+                await db.commit()
+                return
+            else:
+                existing.type = "on_message"
+                existing.config = config
+                existing.reason = reason
+                existing.focus_ref = focus_ref or None
+                existing.is_enabled = True
+                await db.commit()
+                return
+
+        trigger = AgentTrigger(
+            agent_id=agent_id,
+            name=trigger_name,
+            type="on_message",
+            config=config,
+            reason=reason,
+            focus_ref=focus_ref or None,
+            max_fires=1,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+        db.add(trigger)
+        await db.commit()
+
+
+async def _append_focus_item(agent_id: uuid.UUID, identifier: str, description: str) -> None:
+    """Append a pending focus item to the agent's focus.md."""
+    focus_path = WORKSPACE_ROOT / str(agent_id) / "focus.md"
+    line = f"- [ ] {identifier}: {description}\n"
+    try:
+        if focus_path.exists():
+            content = focus_path.read_text(encoding="utf-8")
+            if identifier in content:
+                return
+            if not content.endswith("\n"):
+                content += "\n"
+            content += line
+        else:
+            content = f"# Focus\n\n{line}"
+        focus_path.parent.mkdir(parents=True, exist_ok=True)
+        focus_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[A2A] Failed to update focus.md for agent {agent_id}: {e}")
+
+
+async def _wake_agent_async(agent_id: uuid.UUID, reason_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False, a2a_session_id: str | None = None) -> None:
+    """Wake an agent asynchronously via the trigger invocation path.
+
+    Delegates to the public wake_agent_with_context API in trigger_daemon.
+    """
+    from app.services.trigger_daemon import wake_agent_with_context
+    await wake_agent_with_context(agent_id, reason_context, from_agent_id=from_agent_id, skip_dedup=skip_dedup, a2a_session_id=a2a_session_id)
+
+
 async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
-    """Send a message to another digital employee. Uses a single request-response pattern:
-    the source agent sends a message, the target agent replies once, and the result is returned.
-    If the source agent needs to continue the conversation, it can call this tool again.
+    """Send a message to another digital employee.
+
+    Behaviour depends on ``msg_type``:
+    - notify:   fire-and-forget — message is saved, target is woken asynchronously.
+                Returns immediately.
+    - task_delegate: async with callback — message is saved, source agent sets up
+                a focus item + on_message trigger so it is notified when the
+                target completes the task.  Returns immediately.
+    - consult:  synchronous request-response (original behaviour).
     """
     agent_name = args.get("agent_name", "").strip()
     message_text = args.get("message", "").strip()
+    msg_type = args.get("msg_type", "notify").strip().lower()
 
     if not agent_name or not message_text:
         return "❌ Please provide target agent name and message content"
@@ -4523,6 +4968,121 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 status_hint = "online" if online else "offline (message will be delivered on next heartbeat)"
                 return f"✅ Message sent to {target.name} (OpenClaw agent, currently {status_hint}). The message has been queued and will be delivered when the agent polls for updates."
 
+            # ── Native target: branch by msg_type ──
+
+            # Save source message (common to all paths)
+            db.add(ChatMessage(
+                agent_id=session_agent_id,
+                user_id=owner_id,
+                role="user",
+                content=message_text,
+                conversation_id=session_id,
+                participant_id=src_participant.id if src_participant else None,
+            ))
+            chat_session.last_message_at = datetime.now(timezone.utc)
+            await db.commit()
+
+            # ── Feature flag: async A2A (tenant-level) ──
+            _a2a_async = False
+            if source_agent.tenant_id:
+                try:
+                    from app.models.tenant import Tenant
+                    _t_r = await db.execute(select(Tenant).where(Tenant.id == source_agent.tenant_id))
+                    _tenant = _t_r.scalar_one_or_none()
+                    if _tenant:
+                        _a2a_async = getattr(_tenant, "a2a_async_enabled", False)
+                except Exception:
+                    pass
+            if not _a2a_async:
+                if msg_type in ("notify", "task_delegate"):
+                    msg_type = "consult"
+
+            # ── notify: fire-and-forget ──
+            if msg_type == "notify":
+                try:
+                    from app.services.activity_logger import log_activity
+                    await log_activity(
+                        from_agent_id, "agent_msg_sent",
+                        f"Sent notification to {target.name}",
+                        detail={"partner": target.name, "message": message_text[:200], "msg_type": "notify"},
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    await _wake_agent_async(
+                        target.id,
+                        f"[From {source_name}] {message_text}",
+                        from_agent_id=from_agent_id,
+                        skip_dedup=True,
+                        a2a_session_id=session_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"[A2A] Failed to wake {target.name} for notify: {e}")
+
+                return f"✅ Notification sent to {target.name}. They will process it asynchronously."
+
+            # ── task_delegate: async with callback ──
+            if msg_type == "task_delegate":
+                focus_id = f"wait_{target.name.lower().replace(' ', '_')}_task"
+                focus_desc = f"Waiting for {target.name} to complete delegated task: {message_text[:100]}"
+
+                try:
+                    await _append_focus_item(from_agent_id, focus_id, focus_desc)
+                except Exception as e:
+                    logger.warning(f"[A2A] Failed to write focus for delegate: {e}")
+
+                trigger_name = f"a2a_wait_{target.name.lower().replace(' ', '_')}"
+                trigger_reason = (
+                    f"{target.name} has replied with the result of a delegated task. "
+                    f"Original task: {message_text[:200]}. "
+                    f"Steps: 1) Process {target.name}'s reply. "
+                    f"2) Mark focus item '{focus_id}' as completed. "
+                    f"3) Cancel this trigger. "
+                    f"USER-FACING OUTPUT RULES: Your reply goes directly to the user's chat. "
+                    f"Write in natural, conversational language as if talking to a colleague. "
+                    f"NEVER use technical terms like: trigger name, focus item, a2a_wait, "
+                    f"task_delegate, focus_ref, or any internal identifier. "
+                    f"NEVER mention your internal operations (canceling triggers, updating focus, "
+                    f"marking items complete, trigger status, etc.). "
+                    f"Just summarize the task result in plain language."
+                )
+                try:
+                    await _create_on_message_trigger(
+                        agent_id=from_agent_id,
+                        trigger_name=trigger_name,
+                        from_agent_name=target.name,
+                        reason=trigger_reason,
+                        focus_ref=focus_id,
+                        notification_summary=f"等待{target.name}完成任务并回复",
+                    )
+                except Exception as e:
+                    logger.warning(f"[A2A] Failed to create trigger for delegate: {e}")
+
+                try:
+                    from app.services.activity_logger import log_activity
+                    await log_activity(
+                        from_agent_id, "agent_msg_sent",
+                        f"Delegated task to {target.name}",
+                        detail={"partner": target.name, "message": message_text[:200], "msg_type": "task_delegate"},
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    await _wake_agent_async(
+                        target.id,
+                        f"[From {source_name}] {message_text}",
+                        from_agent_id=from_agent_id,
+                        skip_dedup=True,
+                        a2a_session_id=session_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"[A2A] Failed to wake {target.name} for delegate: {e}")
+
+                return f"✅ Task delegated to {target.name}. You will be notified when they complete it."
+
+            # ── consult (default): synchronous request-response ──
             # Prepare target LLM
             from app.services.agent_context import build_agent_context
             from app.models.llm import LLMModel
@@ -4574,30 +5134,15 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                     role = "assistant"
                 conversation_messages.append({"role": role, "content": m.content})
 
-            # Add the new message from source
             conversation_messages.append({"role": "user", "content": f"[From {source_name}] {message_text}"})
 
-            # Save source message
-            owner_id = source_agent.creator_id if source_agent else from_agent_id
-            db.add(ChatMessage(
-                agent_id=session_agent_id,
-                user_id=owner_id,
-                role="user",
-                content=message_text,
-                conversation_id=session_id,
-                participant_id=src_participant.id if src_participant else None,
-            ))
-            chat_session.last_message_at = datetime.now(timezone.utc)
-            await db.commit()
-
-            # Call target LLM with tool support (multi-round)
-            import asyncio
             import random
             import httpx
             from app.services.llm_utils import (
                 get_provider_base_url,
                 create_llm_client,
                 LLMMessage,
+                get_model_api_key,
             )
             from app.services.llm_client import LLMError
             from app.services.agent_tools import get_agent_tools_for_llm, execute_tool
@@ -4620,7 +5165,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
 
             llm_client = create_llm_client(
                 provider=target_model.provider,
-                api_key=target_model.api_key_encrypted,
+                api_key=get_model_api_key(target_model),
                 model=target_model.model,
                 base_url=base_url,
                 timeout=float(getattr(target_model, 'request_timeout', None) or 120.0),
