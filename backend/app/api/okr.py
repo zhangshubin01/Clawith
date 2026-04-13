@@ -902,6 +902,8 @@ async def members_without_okr(user=Depends(get_current_user)):
         "company_okr_exists": company_okr_exists,
         "okr_agent_id": okr_agent_id,
         "members_without_okr": missing_members,
+        # Backward-compat alias for older frontend builds still referencing data.members
+        "members": missing_members,
         "total": len(missing_members),
     }
 
