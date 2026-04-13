@@ -548,8 +548,40 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
 
             await db.commit()
 
-        # Push trigger result to user's active WebSocket connections
+        # Compute final reply text once
         final_reply = reply or "".join(collected_content)
+
+        # ── Save reply to A2A session if this was an agent-to-agent wake ──
+        # This makes the target agent's reply visible in the A2A chat history
+        for t in triggers:
+            a2a_sid = (t.config or {}).get("_a2a_session_id")
+            if a2a_sid and final_reply:
+                try:
+                    async with async_session() as db:
+                        from app.models.participant import Participant as _P
+                        _p_r = await db.execute(select(_P).where(_P.type == "agent", _P.ref_id == agent_id))
+                        _p = _p_r.scalar_one_or_none()
+                        db.add(ChatMessage(
+                            agent_id=agent_id,
+                            conversation_id=a2a_sid,
+                            role="assistant",
+                            content=final_reply,
+                            user_id=agent.creator_id,
+                            participant_id=_p.id if _p else None,
+                        ))
+                        # Update session timestamp
+                        from app.models.chat_session import ChatSession as _CS
+                        _cs_r = await db.execute(select(_CS).where(_CS.id == uuid.UUID(a2a_sid)))
+                        _cs = _cs_r.scalar_one_or_none()
+                        if _cs:
+                            _cs.last_message_at = datetime.now(timezone.utc)
+                        await db.commit()
+                        logger.info(f"[A2A] Saved reply to A2A session {a2a_sid}")
+                except Exception as e:
+                    logger.warning(f"[A2A] Failed to save reply to A2A session {a2a_sid}: {e}")
+                break  # Only save once
+
+        # Push trigger result to user's active WebSocket connections
 
         is_a2a_internal = all(t.name == "a2a_wake" for t in triggers)
 
@@ -751,20 +783,21 @@ async def _tick():
         asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers))
 
 
-async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False) -> None:
+async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False, a2a_session_id: str | None = None) -> None:
     """Public API: wake an agent asynchronously with a message context.
 
     Creates a synthetic trigger invocation so the agent processes the
     message in a Reflection Session via the standard trigger path.
+    If a2a_session_id is provided, the agent's reply will also be saved
+    to the A2A chat session for visibility in the admin chat history.
     Safe to call from any async context.
 
     Args:
         agent_id: The agent to wake.
         message_context: The message to deliver.
         from_agent_id: The agent that initiated this wake (for chain depth tracking).
-        skip_dedup: If True, bypass the dedup window check. Use this for
-                    genuine message deliveries (e.g. a task_delegate callback)
-                    where skipping the wake would lose a real message.
+        skip_dedup: If True, bypass the dedup window check.
+        a2a_session_id: Optional A2A chat session ID to mirror the reply into.
     """
     import time as _time
 
@@ -802,7 +835,7 @@ async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, 
         agent_id=agent_id,
         name="a2a_wake",
         type="on_message",
-        config={"from_agent_name": "", "_matched_message": message_context[:2000], "_matched_from": "agent"},
+        config={"from_agent_name": "", "_matched_message": message_context[:2000], "_matched_from": "agent", "_a2a_session_id": a2a_session_id},
         reason=(
             "You received a notification from another agent. "
             "Read the message content above, update your focus and memory if needed, "
