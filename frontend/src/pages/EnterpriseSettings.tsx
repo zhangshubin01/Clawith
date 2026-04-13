@@ -1744,9 +1744,23 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
         queryKey: ['okr-settings', tenantId],
         queryFn: () => fetchJson<any>('/okr/settings')
     });
+    const [seeding, setSeeding] = React.useState(false);
+
     const updateSettings = useMutation({
         mutationFn: (data: any) => fetchJson('/okr/settings', { method: 'PUT', body: JSON.stringify(data) }),
-        onSuccess: () => qc.invalidateQueries({ queryKey: ['okr-settings'] })
+        onSuccess: (_, variables) => {
+            qc.invalidateQueries({ queryKey: ['okr-settings'] });
+            // If OKR was just enabled, the backend seeds the OKR Agent asynchronously.
+            // Wait ~2 s then re-fetch the members data so the Agent chat button appears
+            // without requiring a manual page refresh.
+            if (variables?.enabled && !settings?.enabled) {
+                setSeeding(true);
+                setTimeout(() => {
+                    qc.invalidateQueries({ queryKey: ['okr-members-without-okr-settings'] });
+                    setSeeding(false);
+                }, 2500);
+            }
+        },
     });
 
     // Fetch members-without-okr to get okr_agent_id and company_okr_exists for the guidance card
@@ -1785,7 +1799,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 }
                             </div>
                         </div>
-                        <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '24px' }}>
+                        <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '24px', flexShrink: 0 }}>
                             <input
                                 type="checkbox"
                                 checked={s.enabled}
@@ -1880,6 +1894,13 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                             : (zh ? '前往 OKR Agent 对话' : 'Open OKR Agent Chat')
                                         }
                                     </a>
+                                ) : seeding ? (
+                                    <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
+                                            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+                                        </svg>
+                                        {zh ? '正在创建 OKR Agent…' : 'Creating OKR Agent…'}
+                                    </span>
                                 ) : (
                                     <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', flexShrink: 0 }}>
                                         {zh ? 'OKR Agent 未找到' : 'OKR Agent not found'}
