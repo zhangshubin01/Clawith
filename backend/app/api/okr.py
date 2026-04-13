@@ -217,7 +217,11 @@ async def get_okr_settings(user=Depends(get_current_user)):
 
 @router.put("/settings", response_model=OKRSettingsOut)
 async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_user)):
-    """Update OKR configuration. Org admins only."""
+    """Update OKR configuration. Org admins only.
+
+    When `enabled` transitions False → True, automatically seeds an OKR Agent
+    for this tenant (idempotent — safe to call if one already exists).
+    """
     # Allow org admins and platform admins to modify OKR settings.
     # user.role is the canonical authority; is_admin is not a real field.
     if getattr(user, "role", None) not in ("org_admin", "platform_admin"):
@@ -225,6 +229,9 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
 
     async with async_session() as db:
         settings = await _get_or_create_settings(db, user.tenant_id)
+
+        # Detect False → True transition before overwriting
+        was_disabled = not settings.enabled
 
         if body.enabled is not None:
             settings.enabled = body.enabled
@@ -242,6 +249,18 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
             settings.period_length_days = body.period_length_days
 
         await db.commit()
+
+        # If OKR was just enabled, create the OKR Agent for this tenant in the background
+        if was_disabled and body.enabled:
+            import asyncio
+            from app.services.agent_seeder import seed_okr_agent_for_tenant
+            asyncio.create_task(
+                seed_okr_agent_for_tenant(
+                    tenant_id=user.tenant_id,
+                    creator_id=user.id,
+                )
+            )
+
         return OKRSettingsOut(
             enabled=settings.enabled,
             daily_report_enabled=settings.daily_report_enabled,
