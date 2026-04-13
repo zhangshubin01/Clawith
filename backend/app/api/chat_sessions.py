@@ -311,11 +311,19 @@ async def get_session_messages(
         raise HTTPException(status_code=403, detail="Not authorized to view this session")
 
     # Query messages by conversation_id only (agent-to-agent uses session_agent_id)
+    # Query the latest 500 messages (subquery in DESC, then reverse for display order)
+    from sqlalchemy import desc
+    latest_subq = (
+        select(ChatMessage.id)
+        .where(ChatMessage.conversation_id == str(session_id))
+        .order_by(desc(ChatMessage.created_at))
+        .limit(500)
+        .subquery()
+    )
     msgs_result = await db.execute(
         select(ChatMessage)
-        .where(ChatMessage.conversation_id == str(session_id))
+        .where(ChatMessage.id.in_(select(latest_subq.c.id)))
         .order_by(ChatMessage.created_at.asc())
-        .limit(500)
     )
     messages = msgs_result.scalars().all()
 
