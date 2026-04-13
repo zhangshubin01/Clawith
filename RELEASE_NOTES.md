@@ -1,4 +1,4 @@
-# v1.8.3-beta — A2A Async Communication, Image Context & Search Tools
+# v1.8.3-beta.2 — A2A Async Communication, Image Context & Search Tools
 
 ## What's New
 
@@ -10,7 +10,7 @@
 - **Feature flag**: controlled at the tenant level via Company Settings → Company Info → A2A Async toggle (default: **OFF**)
 - When disabled, the `msg_type` parameter is **hidden from the LLM** so agents only see synchronous consult mode
 - Security: chain depth protection (max 3 hops), regex filtering of internal terms, SQL injection prevention
-- Performance: async wake sessions limited to 2 tool rounds
+- Performance: async wake sessions use the agent's own `max_tool_rounds` setting (default 50)
 
 ### Multimodal Image Context
 - Base64 image markers are now persisted to the database at write time
@@ -34,6 +34,13 @@
 - Docker access port corrected to 3008
 
 ---
+
+## v1.8.3-beta.2 — Bug Fixes
+
+### A2A Chat History Fixes
+- **A2A session now shows both sides of the conversation**: when a target agent is woken via `notify` or `task_delegate`, its reply is now mirrored into the shared A2A chat session so the full conversation is visible in the admin **Other Users** tab
+- **Removed hardcoded 2-round tool call limit** for A2A wake invocations: agents were hitting the limit before completing basic tasks; they now use their own configurable `max_tool_rounds` setting (default 50)
+- **Fixed message loading order**: sessions with many messages (e.g. long-running A2A threads) were only showing the oldest 500 messages; now correctly loads the most recent 500
 
 ## Upgrade Guide
 
