@@ -486,3 +486,139 @@ async def assign_user_to_tenant(
     user.role = role
     await db.flush()
     return {"status": "ok", "user_id": str(user_id), "tenant_id": str(tenant_id), "role": role}
+
+
+# ─── Authenticated: Delete Company ─────────────────────
+
+@router.delete("/{tenant_id}")
+async def delete_tenant(
+    tenant_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently delete a company and ALL its data.
+
+    Only the org_admin of the specified tenant (or a platform_admin) may call
+    this endpoint.  After deletion the caller receives a `fallback_tenant_id`
+    pointing to another company the user's identity belongs to, or `None` if
+    the user has no other company.
+
+    Deletion is performed in proper FK order to avoid constraint violations:
+    agent-level data → agents → OKR/org data → users → tenant.
+    """
+    from sqlalchemy import text
+
+    # ── Auth check ──────────────────────────────────────────────────────────
+    is_platform_admin = getattr(current_user, "role", None) == "platform_admin"
+    is_own_org_admin = (
+        getattr(current_user, "role", None) == "org_admin"
+        and str(current_user.tenant_id) == str(tenant_id)
+    )
+    if not is_platform_admin and not is_own_org_admin:
+        raise HTTPException(status_code=403, detail="Only the org admin of this company (or a platform admin) can delete it")
+
+    # ── Verify tenant exists ─────────────────────────────────────────────────
+    t_result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    tenant = t_result.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    tid = str(tenant_id)
+
+    # ── Find identity_id of the caller for the fallback lookup ───────────────
+    identity_id = current_user.identity_id
+
+    # ── Cascade deletions in safe order ──────────────────────────────────────
+    # 1. Bi-directional agent-to-agent relationships (no implicit cascade)
+    await db.execute(text(
+        "DELETE FROM agent_agent_relationships "
+        "WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid) "
+        "   OR target_agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+    ), {"tid": tid})
+
+    # 2. Agent-to-human relationships
+    await db.execute(text(
+        "DELETE FROM agent_relationships "
+        "WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+    ), {"tid": tid})
+
+    # 3. Task logs → tasks (cascade if set, otherwise explicit)
+    await db.execute(text(
+        "DELETE FROM task_logs "
+        "WHERE task_id IN (SELECT id FROM tasks WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid))"
+    ), {"tid": tid})
+    await db.execute(text(
+        "DELETE FROM tasks WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+    ), {"tid": tid})
+
+    # 4. Chat messages → sessions
+    await db.execute(text(
+        "DELETE FROM messages "
+        "WHERE session_id IN (SELECT id FROM chat_sessions WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid))"
+    ), {"tid": tid})
+    await db.execute(text(
+        "DELETE FROM chat_sessions "
+        "WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+    ), {"tid": tid})
+
+    # 5. Triggers
+    await db.execute(text(
+        "DELETE FROM triggers WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+    ), {"tid": tid})
+
+    # 6. Channel configs
+    await db.execute(text(
+        "DELETE FROM channel_configs WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+    ), {"tid": tid})
+
+    # 7. Agent permissions, credentials
+    await db.execute(text(
+        "DELETE FROM agent_permissions WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+    ), {"tid": tid})
+    await db.execute(text(
+        "DELETE FROM agent_credentials WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+    ), {"tid": tid})
+
+    # 8. Agents themselves
+    await db.execute(text("DELETE FROM agents WHERE tenant_id = :tid"), {"tid": tid})
+
+    # 9. OKR data
+    await db.execute(text("DELETE FROM okr_settings WHERE tenant_id = :tid"), {"tid": tid})
+    await db.execute(text("DELETE FROM work_reports WHERE tenant_id = :tid"), {"tid": tid})
+    # okr_objectives cascade to key_results, alignments, progress_logs via FK
+    await db.execute(text("DELETE FROM okr_objectives WHERE tenant_id = :tid"), {"tid": tid})
+
+    # 10. Org structure
+    await db.execute(text("DELETE FROM org_members WHERE tenant_id = :tid"), {"tid": tid})
+    await db.execute(text("DELETE FROM org_departments WHERE tenant_id = :tid"), {"tid": tid})
+
+    # 11. Invitation codes, notifications, approvals for this tenant
+    await db.execute(text("DELETE FROM invitation_codes WHERE tenant_id = :tid"), {"tid": tid})
+    await db.execute(text(
+        "DELETE FROM notifications "
+        "WHERE user_id IN (SELECT id FROM users WHERE tenant_id = :tid)"
+    ), {"tid": tid})
+    await db.execute(text(
+        "DELETE FROM approvals WHERE tenant_id = :tid"
+    ).execution_options(synchronize_session=False), {"tid": tid})
+
+    # 12. Users of this tenant
+    await db.execute(text("DELETE FROM users WHERE tenant_id = :tid"), {"tid": tid})
+
+    # 13. Delete the tenant itself
+    await db.execute(text("DELETE FROM tenants WHERE id = :tid"), {"tid": tid})
+
+    await db.commit()
+
+    # ── Find fallback tenant for the caller ──────────────────────────────────
+    fallback_result = await db.execute(
+        select(User.tenant_id).where(
+            User.identity_id == identity_id,
+            User.tenant_id != tenant_id,
+        ).limit(1)
+    )
+    fallback_row = fallback_result.first()
+    fallback_tenant_id = str(fallback_row[0]) if fallback_row else None
+
+    return {"status": "deleted", "fallback_tenant_id": fallback_tenant_id}
+

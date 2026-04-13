@@ -1878,7 +1878,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 {okrAgentId ? (
                                     <a
                                         id="okr-chat-agent-btn"
-                                        href={`/agents/${okrAgentId}`}
+                                        href={`/agents/${okrAgentId}#chat`}
                                         style={{
                                             display: 'inline-flex', alignItems: 'center', gap: '6px',
                                             padding: '7px 14px', borderRadius: '6px',
@@ -1930,15 +1930,10 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                     id="okr-sync-relationships-btn"
                                     onClick={async () => {
                                         try {
-                                            const res = await fetch('/api/okr/sync-relationships', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
-                                            if (res.ok) {
-                                                alert(zh ? '关系网络同步成功！' : 'Relationships synced successfully!');
-                                            } else {
-                                                const err = await res.json().catch(() => ({}));
-                                                alert(`Error: ${err.detail || res.status}`);
-                                            }
-                                        } catch (e) {
-                                            alert(zh ? '同步失败，请重试' : 'Sync failed, please retry');
+                                            await fetchJson<any>('/okr/sync-relationships', { method: 'POST' });
+                                            alert(zh ? '关系网络同步成功！' : 'Relationships synced successfully!');
+                                        } catch (e: any) {
+                                            alert(e.message || (zh ? '同步失败，请重试' : 'Sync failed, please retry'));
                                         }
                                     }}
                                     style={{
@@ -2054,7 +2049,34 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
 export default function EnterpriseSettings() {
     const { t } = useTranslation();
     const qc = useQueryClient();
-    const [activeTab, setActiveTab] = useState<'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr'>('info');
+
+    // Map URL hash → internal tab name for deep-linking (e.g. /enterprise#okr)
+    const HASH_TO_TAB: Record<string, 'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr'> = {
+        '#info': 'info', '#company-info': 'info',
+        '#models': 'llm', '#model': 'llm', '#llm': 'llm',
+        '#tools': 'tools', '#tool': 'tools',
+        '#skills': 'skills', '#skill': 'skills',
+        '#okr': 'okr',
+        '#invites': 'invites', '#invitation-codes': 'invites',
+        '#quotas': 'quotas',
+        '#users': 'users',
+        '#org': 'org', '#org-structure': 'org',
+        '#approvals': 'approvals',
+        '#audit': 'audit', '#audit-log': 'audit',
+    };
+    const TAB_TO_HASH: Record<string, string> = {
+        info: '#info', llm: '#models', tools: '#tools', skills: '#skills',
+        okr: '#okr', invites: '#invites', quotas: '#quotas', users: '#users',
+        org: '#org-structure', approvals: '#approvals', audit: '#audit',
+    };
+    const initialTab = HASH_TO_TAB[window.location.hash] ?? 'info';
+    const [activeTab, setActiveTab] = useState<'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr'>(initialTab);
+
+    // Keep URL hash in sync with active tab
+    const switchTab = (tab: typeof activeTab) => {
+        setActiveTab(tab);
+        window.history.replaceState(null, '', TAB_TO_HASH[tab] || '#info');
+    };
 
     // Track selected tenant as state so page refreshes on company switch
     const [selectedTenantId, setSelectedTenantId] = useState(localStorage.getItem('current_tenant_id') || '');
@@ -2339,7 +2361,7 @@ export default function EnterpriseSettings() {
 
                 <div className="tabs">
                     {(['info', 'llm', 'tools', 'skills', 'okr', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'] as const).map(tab => (
-                        <div key={tab} className={`tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
+                        <div key={tab} className={`tab ${activeTab === tab ? 'active' : ''}`} onClick={() => switchTab(tab)}>
                             {tab === 'quotas' ? t('enterprise.tabs.quotas', 'Quotas') : tab === 'users' ? t('enterprise.tabs.users', 'Users') : tab === 'invites' ? t('enterprise.tabs.invites', 'Invitations') : tab === 'okr' ? t('nav.okr', 'OKR') : t(`enterprise.tabs.${tab}`)}
                         </div>
                     ))}

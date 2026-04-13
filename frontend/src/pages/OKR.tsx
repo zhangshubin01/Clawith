@@ -1206,7 +1206,7 @@ export default function OKR() {
                     <button
                         id="okr-enable-btn"
                         className="btn btn-primary"
-                        onClick={() => navigate('/enterprise?tab=okr')}
+                        onClick={() => navigate('/enterprise#okr')}
                         style={{ padding: '8px 20px', fontSize: '13px' }}
                     >
                         {isChinese ? '前往公司设置开启 OKR' : 'Enable OKR in Company Settings'}
