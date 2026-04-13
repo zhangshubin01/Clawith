@@ -1806,8 +1806,8 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                             onClick={() => updateSettings.mutate({ ...s, enabled: !s.enabled })}
                             title={s.enabled ? (zh ? '点击关闭 OKR' : 'Click to disable OKR') : (zh ? '点击开启 OKR' : 'Click to enable OKR')}
                             style={{
-                                position: 'relative', width: '40px', height: '24px',
-                                borderRadius: '12px', border: 'none', cursor: 'pointer',
+                                position: 'relative', width: '36px', height: '20px',
+                                borderRadius: '10px', border: 'none', cursor: 'pointer',
                                 background: s.enabled ? 'var(--accent-primary)' : 'var(--border-subtle)',
                                 transition: 'background 0.2s', padding: 0, flexShrink: 0,
                             }}
@@ -1815,7 +1815,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                             <span style={{
                                 position: 'absolute',
                                 left: s.enabled ? '18px' : '2px', top: '2px',
-                                width: '20px', height: '20px',
+                                width: '16px', height: '16px',
                                 borderRadius: '50%', background: '#fff',
                                 transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
                             }} />
