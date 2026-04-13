@@ -892,7 +892,7 @@ function MembersWithoutOKRPanel({
                                 fontSize: '11px', fontWeight: 600,
                                 color: member.type === 'agent' ? '#6366f1' : '#10b981',
                             }}>
-                                {member.name.charAt(0).toUpperCase()}
+                                {(member.display_name || '?').charAt(0).toUpperCase()}
                             </div>
 
                             {/* Name + type badge */}
