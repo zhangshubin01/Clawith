@@ -92,11 +92,11 @@ async def list_sessions(
         )
         sessions = result.scalars().all()
         out = []
-        
-        # --- BULK FETCH ---
+
+        # --- BULK FETCH: message counts, user names, agent names in 3 queries total ---
         session_ids = [str(s.id) for s in sessions]
-        
-        message_counts = {}
+
+        message_counts: dict[str, int] = {}
         if session_ids:
             count_res = await db.execute(
                 select(ChatMessage.conversation_id, func.count(ChatMessage.id))
@@ -106,11 +106,11 @@ async def list_sessions(
             for row in count_res.all():
                 message_counts[row[0]] = row[1]
 
-        # Resolution caches
+        # Collect IDs to resolve in bulk
         from app.models.user import Identity
-        
-        user_ids = list({s.user_id for s in sessions if not s.is_group and s.source_channel != "agent" and s.user_id})
-        user_names = {}
+        user_ids = list({s.user_id for s in sessions
+                         if not s.is_group and s.source_channel != "agent" and s.user_id})
+        user_names: dict[str, str] = {}
         if user_ids:
             user_r = await db.execute(
                 select(User.id, func.coalesce(User.display_name, Identity.username))
@@ -120,14 +120,16 @@ async def list_sessions(
             for row in user_r.all():
                 user_names[str(row[0])] = row[1] or "Unknown"
 
-        agent_ids = set()
+        agent_ids_to_fetch: set = set()
         for s in sessions:
             if s.source_channel == "agent" and s.peer_agent_id:
-                agent_ids.add(s.agent_id)
-                agent_ids.add(s.peer_agent_id)
-        agent_names = {}
-        if agent_ids:
-            agent_r = await db.execute(select(Agent.id, Agent.name).where(Agent.id.in_(list(agent_ids))))
+                agent_ids_to_fetch.add(s.agent_id)
+                agent_ids_to_fetch.add(s.peer_agent_id)
+        agent_names: dict[str, str] = {}
+        if agent_ids_to_fetch:
+            agent_r = await db.execute(
+                select(Agent.id, Agent.name).where(Agent.id.in_(list(agent_ids_to_fetch)))
+            )
             for row in agent_r.all():
                 agent_names[str(row[0])] = row[1] or "Agent"
 
@@ -136,14 +138,12 @@ async def list_sessions(
             if count == 0:
                 continue  # hide empty sessions
 
-            # Determine display name based on session type
             display = None
             peer_agent_id = None
             peer_agent_name = None
             participant_type = "user"
 
             if session.source_channel == "agent" and session.peer_agent_id:
-                # Agent-to-agent session
                 participant_type = "agent"
                 peer_agent_id = str(session.peer_agent_id)
                 a1_name = agent_names.get(str(session.agent_id), "Agent")
@@ -151,10 +151,8 @@ async def list_sessions(
                 peer_agent_name = a2_name
                 display = f"Agent {a1_name} - {a2_name}"
             elif session.is_group:
-                # Group chat session — display group name instead of username
                 display = session.group_name or session.title or "Group Chat"
             else:
-                # Human session — resolve username
                 display = user_names.get(str(session.user_id), "Unknown")
 
             out.append(SessionOut(
@@ -188,13 +186,13 @@ async def list_sessions(
         )
         sessions = result.scalars().all()
         out = []
-        
-        # --- BULK FETCH ---
+
+        # --- BULK FETCH: count user messages and total messages in one query ---
         from sqlalchemy import case
         session_ids = [str(s.id) for s in sessions]
-        
-        user_msg_counts = {}
-        total_counts = {}
+
+        user_msg_counts: dict[str, int] = {}
+        total_counts: dict[str, int] = {}
         if session_ids:
             counts_res = await db.execute(
                 select(
@@ -211,14 +209,10 @@ async def list_sessions(
                 total_counts[row[0]] = int(row[2] or 0)
 
         for session in sessions:
-            # Count only — skip sessions with no user messages (orphan assistant-only records)
             user_msg_count = user_msg_counts.get(str(session.id), 0)
             if user_msg_count == 0:
                 continue  # hide empty or orphan sessions
-            
-            # Total message count for display
             count = total_counts.get(str(session.id), 0)
-            
             out.append(SessionOut(
                 id=str(session.id),
                 agent_id=str(session.agent_id),
@@ -346,19 +340,11 @@ async def get_session_messages(
         raise HTTPException(status_code=403, detail="Not authorized to view this session")
 
     # Query messages by conversation_id only (agent-to-agent uses session_agent_id)
-    # Query the latest 500 messages (subquery in DESC, then reverse for display order)
-    from sqlalchemy import desc
-    latest_subq = (
-        select(ChatMessage.id)
-        .where(ChatMessage.conversation_id == str(session_id))
-        .order_by(desc(ChatMessage.created_at))
-        .limit(500)
-        .subquery()
-    )
     msgs_result = await db.execute(
         select(ChatMessage)
-        .where(ChatMessage.id.in_(select(latest_subq.c.id)))
+        .where(ChatMessage.conversation_id == str(session_id))
         .order_by(ChatMessage.created_at.asc())
+        .limit(500)
     )
     messages = msgs_result.scalars().all()
 
