@@ -35,12 +35,85 @@ from app.models.okr import (
     WorkReport,
 )
 from app.models.user import User
-from app.models.agent import Agent
+from app.models.agent import Agent, AgentPermission
+from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
 
 router = APIRouter(prefix="/api/okr", tags=["okr"])
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
+
+
+async def _sync_okr_agent_relationships(db, tenant_id: uuid.UUID, okr_agent_id: uuid.UUID) -> None:
+    """Auto-connect the OKR Agent to all org members and company-visible agents.
+
+    Called whenever OKR is enabled so the OKR Agent can reach every team member
+    via the relationships context that is injected into its system prompt.
+
+    Rules:
+    - Human relationships: every OrgMember in this tenant (synced from Feishu etc.)
+    - Agent relationships: every Agent in this tenant that is NOT exclusively
+      self-visible (has at least one AgentPermission with scope_type='company'
+      or 'department', or has no permissions at all). Excludes the OKR Agent itself
+      and stopped/error agents.
+    """
+    from app.api.relationships import _regenerate_relationships_file
+    from sqlalchemy import delete as sa_delete
+
+    # 1. Clear existing relationships so we get a clean, idempotent sync
+    await db.execute(sa_delete(AgentRelationship).where(AgentRelationship.agent_id == okr_agent_id))
+    await db.execute(sa_delete(AgentAgentRelationship).where(AgentAgentRelationship.agent_id == okr_agent_id))
+
+    # 2. Add all org members as team_member relationships
+    member_result = await db.execute(
+        select(OrgMember.id).where(
+            OrgMember.tenant_id == tenant_id,
+            OrgMember.status == "active",
+        )
+    )
+    for (member_id,) in member_result.fetchall():
+        db.add(AgentRelationship(
+            agent_id=okr_agent_id,
+            member_id=member_id,
+            relation="team_member",
+            description="OKR tracking — auto-linked when OKR system was enabled",
+        ))
+
+    # 3. Add all company-visible agents as collaborator relationships
+    # "Company-visible" = has at least one company/department-scope permission,
+    # OR has no permission entries at all (default open access).
+    # Exclude the OKR Agent itself and stopped/error agents.
+    from sqlalchemy import exists, and_, or_
+
+    # Sub-query: agents with at least one company/dept-scope permission
+    has_company_perm = exists().where(
+        and_(
+            AgentPermission.agent_id == Agent.id,
+            AgentPermission.scope_type.in_(["company", "department"]),
+        )
+    )
+    # Sub-query: agents with no permissions at all (default visible)
+    has_no_perm = ~exists().where(AgentPermission.agent_id == Agent.id)
+
+    agent_result = await db.execute(
+        select(Agent.id).where(
+            Agent.tenant_id == tenant_id,
+            Agent.id != okr_agent_id,
+            Agent.status.notin_(["stopped", "error"]),
+            or_(has_company_perm, has_no_perm),
+        )
+    )
+    for (agent_id,) in agent_result.fetchall():
+        db.add(AgentAgentRelationship(
+            agent_id=okr_agent_id,
+            target_agent_id=agent_id,
+            relation="collaborator",
+            description="Auto-linked when OKR system was enabled",
+        ))
+
+    await db.flush()
+    # Regenerate the relationships.md file in the agent's workspace
+    await _regenerate_relationships_file(db, okr_agent_id)
 
 
 async def _get_or_create_settings(db, tenant_id: uuid.UUID) -> OKRSettings:
@@ -253,16 +326,27 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
 
         await db.commit()
 
-        # If OKR was just enabled, create the OKR Agent for this tenant in the background
+        # If OKR was just enabled, create the OKR Agent AND sync relationships
         if was_disabled and body.enabled:
             import asyncio
             from app.services.agent_seeder import seed_okr_agent_for_tenant
-            asyncio.create_task(
-                seed_okr_agent_for_tenant(
-                    tenant_id=user.tenant_id,
-                    creator_id=user.id,
+
+            async def _enable_okr_pipeline(tenant_id, creator_id):
+                """Seed OKR Agent then sync its relationship network."""
+                seeded_agent_id = await seed_okr_agent_for_tenant(
+                    tenant_id=tenant_id,
+                    creator_id=creator_id,
                 )
-            )
+                # Sync relationships after agent is ready
+                if seeded_agent_id:
+                    async with async_session() as db2:
+                        await _sync_okr_agent_relationships(db2, tenant_id, seeded_agent_id)
+                        await db2.commit()
+
+            asyncio.create_task(_enable_okr_pipeline(
+                tenant_id=user.tenant_id,
+                creator_id=user.id,
+            ))
 
         return OKRSettingsOut(
             enabled=settings.enabled,
@@ -275,7 +359,43 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
         )
 
 
+# ─── Relationship Sync ────────────────────────────────────────────────────────
+
+
+@router.post("/sync-relationships")
+async def sync_okr_relationships(user=Depends(get_current_user)):
+    """Manually re-sync the OKR Agent's relationship network.
+
+    Connects the OKR Agent to all active org members (org-structure-synced
+    humans) and all company-visible agents in this tenant.  Idempotent —
+    safe to call multiple times; existing relationships are replaced.
+
+    Org admins and platform admins only.
+    """
+    if getattr(user, "role", None) not in ("org_admin", "platform_admin"):
+        raise HTTPException(403, "Only org admins can sync OKR relationships")
+
+    async with async_session() as db:
+        # Locate the OKR Agent for this tenant
+        result = await db.execute(
+            select(Agent.id).where(
+                Agent.tenant_id == user.tenant_id,
+                Agent.name.ilike("%OKR%"),
+            ).limit(1)
+        )
+        row = result.first()
+        if not row:
+            raise HTTPException(404, "OKR Agent not found for this tenant")
+        okr_agent_id = row[0]
+
+        await _sync_okr_agent_relationships(db, user.tenant_id, okr_agent_id)
+        await db.commit()
+
+    return {"status": "ok", "okr_agent_id": str(okr_agent_id)}
+
+
 # ─── Periods ──────────────────────────────────────────────────────────────────
+
 
 
 @router.get("/periods", response_model=list[PeriodOut])
