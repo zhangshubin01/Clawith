@@ -34,6 +34,8 @@ from app.models.okr import (
     OKRSettings,
     WorkReport,
 )
+from app.models.user import User
+from app.models.agent import Agent
 
 router = APIRouter(prefix="/api/okr", tags=["okr"])
 
@@ -132,6 +134,7 @@ class ObjectiveOut(BaseModel):
     description: str | None = None
     owner_type: str
     owner_id: str | None = None
+    owner_display_name: str | None = None  # display name of user/agent owner
     period_start: str
     period_end: str
     status: str
@@ -373,13 +376,18 @@ def _kr_to_out(kr: OKRKeyResult) -> KeyResultOut:
     )
 
 
-def _obj_to_out(obj: OKRObjective, krs: list[OKRKeyResult] | None = None) -> ObjectiveOut:
+def _obj_to_out(
+    obj: OKRObjective,
+    krs: list[OKRKeyResult] | None = None,
+    owner_display_name: str | None = None,
+) -> ObjectiveOut:
     return ObjectiveOut(
         id=str(obj.id),
         title=obj.title,
         description=obj.description,
         owner_type=obj.owner_type,
         owner_id=str(obj.owner_id) if obj.owner_id else None,
+        owner_display_name=owner_display_name,
         period_start=obj.period_start.isoformat(),
         period_end=obj.period_end.isoformat(),
         status=obj.status,
@@ -436,7 +444,36 @@ async def list_objectives(
         for kr in all_krs:
             krs_by_obj.setdefault(kr.objective_id, []).append(kr)
 
-        return [_obj_to_out(o, krs_by_obj.get(o.id, [])) for o in objectives]
+        # ── Look up owner display names for user/agent objectives ──────────────
+        # Bulk-fetch to avoid N+1 queries.
+        user_owner_ids = [o.owner_id for o in objectives if o.owner_type == 'user' and o.owner_id]
+        agent_owner_ids = [o.owner_id for o in objectives if o.owner_type == 'agent' and o.owner_id]
+
+        user_names: dict[uuid.UUID, str] = {}
+        if user_owner_ids:
+            u_result = await db.execute(
+                select(User.id, User.display_name).where(User.id.in_(user_owner_ids))
+            )
+            user_names = {row.id: (row.display_name or '') for row in u_result.fetchall()}
+
+        agent_names: dict[uuid.UUID, str] = {}
+        if agent_owner_ids:
+            a_result = await db.execute(
+                select(Agent.id, Agent.name).where(Agent.id.in_(agent_owner_ids))
+            )
+            agent_names = {row.id: (row.name or '') for row in a_result.fetchall()}
+
+        def _resolve_owner_name(obj: OKRObjective) -> str | None:
+            if obj.owner_type == 'user' and obj.owner_id:
+                return user_names.get(obj.owner_id)
+            if obj.owner_type == 'agent' and obj.owner_id:
+                return agent_names.get(obj.owner_id)
+            return None
+
+        return [
+            _obj_to_out(o, krs_by_obj.get(o.id, []), _resolve_owner_name(o))
+            for o in objectives
+        ]
 
 
 @router.post("/objectives", response_model=ObjectiveOut)
@@ -817,8 +854,10 @@ async def members_without_okr(user=Depends(get_current_user)):
         agents_all = agent_result.fetchall()
 
         # ── Fetch all users in this tenant ────────────────────────────────────
+        # Use only real DB columns (display_name). email / full_name are
+        # association proxies on User that cannot be used in a SELECT statement.
         user_result = await db.execute(
-            select(User.id, User.full_name, User.email, User.avatar_url).where(
+            select(User.id, User.display_name, User.avatar_url).where(
                 User.tenant_id == user.tenant_id,
             )
         )
@@ -853,7 +892,7 @@ async def members_without_okr(user=Depends(get_current_user)):
             missing_members.append({
                 "id": str(user_row.id),
                 "type": "user",
-                "display_name": user_row.full_name or user_row.email or "",
+                "display_name": user_row.display_name or "",
                 "avatar_url": user_row.avatar_url or "",
             })
 
