@@ -512,8 +512,6 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             except Exception as e:
                 logger.warning(f"Failed to persist tool call for trigger session: {e}")
 
-        _is_a2a_wake = all(t.name == "a2a_wake" for t in triggers)
-
         reply = await call_llm(
             model=model,
             messages=messages,
@@ -523,7 +521,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             user_id=agent.creator_id,
             on_chunk=on_chunk,
             on_tool_call=on_tool_call,
-            max_tool_rounds_override=2 if _is_a2a_wake else None,
+            # A2A wake uses the agent's own max_tool_rounds setting (no override)
         )
 
         # Save assistant reply to Reflection session
