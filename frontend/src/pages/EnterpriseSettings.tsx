@@ -1888,6 +1888,55 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                             </div>
                         </div>
 
+                        {/* Sync Relationship Network */}
+                        <div style={{
+                            marginBottom: '24px',
+                            padding: '14px 18px',
+                            borderRadius: '8px',
+                            background: 'var(--bg-secondary)',
+                            border: '1px solid var(--border-subtle)',
+                            display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap',
+                        }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '2px' }}>
+                                    {zh ? '同步关系网络' : 'Sync Relationship Network'}
+                                </div>
+                                <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                    {zh
+                                        ? '将组织架构中的成员和公司可见的 Agent 自动关联到 OKR Agent'
+                                        : 'Auto-link all org members and company-visible agents to OKR Agent'}
+                                </div>
+                            </div>
+                            <button
+                                id="okr-sync-relationships-btn"
+                                onClick={async () => {
+                                    try {
+                                        const token = localStorage.getItem('token');
+                                        const res = await fetch('/api/okr/sync-relationships', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                        });
+                                        if (res.ok) {
+                                            alert(zh ? '关系网络同步成功！' : 'Relationships synced successfully!');
+                                            qc.invalidateQueries({ queryKey: ['okr-members-without-okr-settings'] });
+                                        } else {
+                                            const err = await res.json().catch(() => ({}));
+                                            alert(`Error: ${err.detail || res.status}`);
+                                        }
+                                    } catch (e) {
+                                        alert(zh ? '同步失败，请重试' : 'Sync failed, please retry');
+                                    }
+                                }}
+                                style={{
+                                    padding: '6px 14px', borderRadius: '6px', fontSize: '12px', fontWeight: 500,
+                                    background: 'var(--accent-primary)', color: '#fff', border: 'none', cursor: 'pointer',
+                                    whiteSpace: 'nowrap', flexShrink: 0,
+                                }}
+                            >
+                                {zh ? '立即同步' : 'Sync Now'}
+                            </button>
+                        </div>
+
                         {/* Period preference */}
                         <div style={{ marginBottom: '24px' }}>
                             <div style={{ fontWeight: 500, marginBottom: '12px', fontSize: '13px' }}>
