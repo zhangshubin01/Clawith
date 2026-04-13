@@ -565,11 +565,11 @@ async def delete_tenant(
         f"DELETE FROM tasks WHERE agent_id IN ({agent_sub})"
     ), {"tid": tid})
 
-    # 6. Chat messages → sessions  (table: chat_messages, NOT messages)
+    # 6. chat_messages has no session_id — delete directly via agent_id
     await db.execute(text(
-        f"DELETE FROM chat_messages "
-        f"WHERE session_id IN (SELECT id FROM chat_sessions WHERE agent_id IN ({agent_sub}))"
+        f"DELETE FROM chat_messages WHERE agent_id IN ({agent_sub})"
     ), {"tid": tid})
+    # 6b. Chat sessions
     await db.execute(text(
         f"DELETE FROM chat_sessions WHERE agent_id IN ({agent_sub})"
     ), {"tid": tid})
