@@ -1011,38 +1011,9 @@ function AnalysisCard({
 
 
 
-function RelationshipEditor({ agentId, readOnly = false, isSystem = false }: { agentId: string; readOnly?: boolean; isSystem?: boolean }) {
+function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; readOnly?: boolean }) {
     const { t, i18n } = useTranslation();
     const isChinese = i18n.language?.startsWith('zh');
-
-    // System agents (e.g. OKR Agent) auto-manage their connections.
-    // Show an informational notice instead of the editable relationship list.
-    if (isSystem) {
-        return (
-            <div className="card" style={{ padding: '24px', textAlign: 'center' }}>
-                <div style={{
-                    width: '40px', height: '40px', borderRadius: '50%',
-                    background: 'var(--bg-tertiary)', border: '1px solid var(--border-subtle)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    margin: '0 auto 16px',
-                    color: 'var(--accent-primary)',
-                }}>
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                        <circle cx="12" cy="12" r="10" />
-                        <path d="M12 16v-4M12 8h.01" />
-                    </svg>
-                </div>
-                <div style={{ fontWeight: 500, fontSize: '14px', marginBottom: '8px', color: 'var(--text-primary)' }}>
-                    {isChinese ? '自动连接模式' : 'Auto-Connect Mode'}
-                </div>
-                <div style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.6', maxWidth: '380px', margin: '0 auto' }}>
-                    {isChinese
-                        ? '此 Agent 会自动与所有组织成员及非私有 Agent 建立连接，无需手动管理关系列表。'
-                        : 'This agent automatically maintains connections with all organization members and non-private agents. No manual relationship management is needed.'}
-                </div>
-            </div>
-        );
-    }
 
     const [search, setSearch] = useState('');
     const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -4072,7 +4043,7 @@ function AgentDetailInner() {
                 {/* ── Relationships Tab ── */}
                 {
                     activeTab === 'relationships' && (
-                        <RelationshipEditor agentId={id!} readOnly={(agent as any)?.access_level === 'use'} isSystem={!!(agent as any)?.is_system} />
+                        <RelationshipEditor agentId={id!} readOnly={(agent as any)?.access_level === 'use'} />
                     )
                 }
 

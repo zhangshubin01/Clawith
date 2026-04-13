@@ -326,27 +326,17 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
 
         await db.commit()
 
-        # If OKR was just enabled, create the OKR Agent AND sync relationships
+        # If OKR was just enabled, seed the OKR Agent for this tenant.
+        # Relationship management is done explicitly via POST /api/okr/sync-relationships.
         if was_disabled and body.enabled:
             import asyncio
             from app.services.agent_seeder import seed_okr_agent_for_tenant
-
-            async def _enable_okr_pipeline(tenant_id, creator_id):
-                """Seed OKR Agent then sync its relationship network."""
-                seeded_agent_id = await seed_okr_agent_for_tenant(
-                    tenant_id=tenant_id,
-                    creator_id=creator_id,
+            asyncio.create_task(
+                seed_okr_agent_for_tenant(
+                    tenant_id=user.tenant_id,
+                    creator_id=user.id,
                 )
-                # Sync relationships after agent is ready
-                if seeded_agent_id:
-                    async with async_session() as db2:
-                        await _sync_okr_agent_relationships(db2, tenant_id, seeded_agent_id)
-                        await db2.commit()
-
-            asyncio.create_task(_enable_okr_pipeline(
-                tenant_id=user.tenant_id,
-                creator_id=user.id,
-            ))
+            )
 
         return OKRSettingsOut(
             enabled=settings.enabled,

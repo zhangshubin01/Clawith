@@ -525,82 +525,85 @@ async def delete_tenant(
 
     tid = str(tenant_id)
 
-    # ── Find identity_id of the caller for the fallback lookup ───────────────
+    # ── Find identity_id BEFORE any deletions (for the fallback lookup later) ─
     identity_id = current_user.identity_id
 
-    # ── Cascade deletions in safe order ──────────────────────────────────────
-    # 1. Bi-directional agent-to-agent relationships (no implicit cascade)
+    # ── Cascade deletions in safe FK order ───────────────────────────────────
+    # Helper shorthand
+    agent_sub = "SELECT id FROM agents WHERE tenant_id = :tid"
+
+    # 1. Approval requests (has agent_id FK to agents — must delete before agents)
     await db.execute(text(
-        "DELETE FROM agent_agent_relationships "
-        "WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid) "
-        "   OR target_agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+        f"DELETE FROM approval_requests WHERE agent_id IN ({agent_sub})"
     ), {"tid": tid})
 
-    # 2. Agent-to-human relationships
+    # 2. Notifications (has both user_id + agent_id FKs — must delete before both)
     await db.execute(text(
-        "DELETE FROM agent_relationships "
-        "WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+        f"DELETE FROM notifications WHERE agent_id IN ({agent_sub})"
+    ), {"tid": tid})
+    await db.execute(text(
+        "DELETE FROM notifications WHERE user_id IN (SELECT id FROM users WHERE tenant_id = :tid)"
     ), {"tid": tid})
 
-    # 3. Task logs → tasks (cascade if set, otherwise explicit)
+    # 3. Bi-directional agent-to-agent relationships
     await db.execute(text(
-        "DELETE FROM task_logs "
-        "WHERE task_id IN (SELECT id FROM tasks WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid))"
-    ), {"tid": tid})
-    await db.execute(text(
-        "DELETE FROM tasks WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+        f"DELETE FROM agent_agent_relationships "
+        f"WHERE agent_id IN ({agent_sub}) OR target_agent_id IN ({agent_sub})"
     ), {"tid": tid})
 
-    # 4. Chat messages → sessions
+    # 4. Agent-to-human relationships
     await db.execute(text(
-        "DELETE FROM messages "
-        "WHERE session_id IN (SELECT id FROM chat_sessions WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid))"
-    ), {"tid": tid})
-    await db.execute(text(
-        "DELETE FROM chat_sessions "
-        "WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+        f"DELETE FROM agent_relationships WHERE agent_id IN ({agent_sub})"
     ), {"tid": tid})
 
-    # 5. Triggers
+    # 5. Task logs → tasks
     await db.execute(text(
-        "DELETE FROM triggers WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+        f"DELETE FROM task_logs "
+        f"WHERE task_id IN (SELECT id FROM tasks WHERE agent_id IN ({agent_sub}))"
+    ), {"tid": tid})
+    await db.execute(text(
+        f"DELETE FROM tasks WHERE agent_id IN ({agent_sub})"
     ), {"tid": tid})
 
-    # 6. Channel configs
+    # 6. Chat messages → sessions  (table: chat_messages, NOT messages)
     await db.execute(text(
-        "DELETE FROM channel_configs WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+        f"DELETE FROM chat_messages "
+        f"WHERE session_id IN (SELECT id FROM chat_sessions WHERE agent_id IN ({agent_sub}))"
+    ), {"tid": tid})
+    await db.execute(text(
+        f"DELETE FROM chat_sessions WHERE agent_id IN ({agent_sub})"
     ), {"tid": tid})
 
-    # 7. Agent permissions, credentials
+    # 7. Agent triggers  (table: agent_triggers, NOT triggers)
     await db.execute(text(
-        "DELETE FROM agent_permissions WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
-    ), {"tid": tid})
-    await db.execute(text(
-        "DELETE FROM agent_credentials WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = :tid)"
+        f"DELETE FROM agent_triggers WHERE agent_id IN ({agent_sub})"
     ), {"tid": tid})
 
-    # 8. Agents themselves
+    # 8. Channel configs, permissions, credentials
+    await db.execute(text(
+        f"DELETE FROM channel_configs WHERE agent_id IN ({agent_sub})"
+    ), {"tid": tid})
+    await db.execute(text(
+        f"DELETE FROM agent_permissions WHERE agent_id IN ({agent_sub})"
+    ), {"tid": tid})
+    await db.execute(text(
+        f"DELETE FROM agent_credentials WHERE agent_id IN ({agent_sub})"
+    ), {"tid": tid})
+
+    # 9. Agents
     await db.execute(text("DELETE FROM agents WHERE tenant_id = :tid"), {"tid": tid})
 
-    # 9. OKR data
+    # 10. OKR data (okr_key_results, okr_alignments, okr_progress_logs cascade from okr_objectives FK)
     await db.execute(text("DELETE FROM okr_settings WHERE tenant_id = :tid"), {"tid": tid})
     await db.execute(text("DELETE FROM work_reports WHERE tenant_id = :tid"), {"tid": tid})
-    # okr_objectives cascade to key_results, alignments, progress_logs via FK
     await db.execute(text("DELETE FROM okr_objectives WHERE tenant_id = :tid"), {"tid": tid})
 
-    # 10. Org structure
+    # 11. Org structure
     await db.execute(text("DELETE FROM org_members WHERE tenant_id = :tid"), {"tid": tid})
     await db.execute(text("DELETE FROM org_departments WHERE tenant_id = :tid"), {"tid": tid})
 
-    # 11. Invitation codes, notifications, approvals for this tenant
+    # 12. Invitation codes
     await db.execute(text("DELETE FROM invitation_codes WHERE tenant_id = :tid"), {"tid": tid})
-    await db.execute(text(
-        "DELETE FROM notifications "
-        "WHERE user_id IN (SELECT id FROM users WHERE tenant_id = :tid)"
-    ), {"tid": tid})
-    await db.execute(text(
-        "DELETE FROM approvals WHERE tenant_id = :tid"
-    ).execution_options(synchronize_session=False), {"tid": tid})
 
     # 12. Users of this tenant
     await db.execute(text("DELETE FROM users WHERE tenant_id = :tid"), {"tid": tid})
