@@ -824,11 +824,12 @@ async def members_without_okr(user=Depends(get_current_user)):
         )
         users_all = user_result.fetchall()
 
-        # ── Find the OKR Agent id (is_system=True, name contains 'OKR') ──────
+        # ── Find the OKR Agent id (name contains 'OKR', scoped to this tenant) ─
+        # NOTE: do NOT filter by is_system here — it may be NULL for dynamically
+        # created agents on new tenants. tenant_id + name is unambiguous enough.
         okr_agent_result = await db.execute(
             select(Agent.id).where(
                 Agent.tenant_id == user.tenant_id,
-                Agent.is_system == True,  # noqa: E712
                 Agent.name.ilike("%OKR%"),
             ).limit(1)
         )
@@ -884,11 +885,10 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
             raise HTTPException(403, "OKR is not enabled for this tenant")
         await db.commit()
 
-        # Find the OKR Agent
+        # Find the OKR Agent (scoped to this tenant)
         okr_agent_result = await db.execute(
             select(Agent).where(
                 Agent.tenant_id == user.tenant_id,
-                Agent.is_system == True,  # noqa: E712
                 Agent.name.ilike("%OKR%"),
             ).limit(1)
         )
