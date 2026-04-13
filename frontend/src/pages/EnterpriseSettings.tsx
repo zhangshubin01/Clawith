@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { enterpriseApi, skillApi } from '../services/api';
@@ -1744,26 +1744,9 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
         queryKey: ['okr-settings', tenantId],
         queryFn: () => fetchJson<any>('/okr/settings')
     });
-    const [seeding, setSeeding] = useState(false);
-
     const updateSettings = useMutation({
         mutationFn: (data: any) => fetchJson('/okr/settings', { method: 'PUT', body: JSON.stringify(data) }),
-        onSuccess: (_, variables) => {
-            qc.invalidateQueries({ queryKey: ['okr-settings'] });
-            // If OKR was just enabled, the backend seeds the OKR Agent asynchronously.
-            // Wait ~2 s then re-fetch the members data so the Agent chat button appears
-            // without requiring a manual page refresh.
-            if (variables?.enabled && !settings?.enabled) {
-                setSeeding(true);
-                setTimeout(() => {
-                    // Re-fetch OKR Agent info
-                    qc.invalidateQueries({ queryKey: ['okr-members-without-okr-settings'] });
-                    // Also update the sidebar agent list so the OKR Agent appears
-                    qc.invalidateQueries({ queryKey: ['agents'] });
-                    setSeeding(false);
-                }, 3000);
-            }
-        },
+        onSuccess: () => qc.invalidateQueries({ queryKey: ['okr-settings'] })
     });
 
     // Fetch members-without-okr to get okr_agent_id and company_okr_exists for the guidance card
@@ -1802,24 +1785,23 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 }
                             </div>
                         </div>
-                        <button
-                            onClick={() => updateSettings.mutate({ ...s, enabled: !s.enabled })}
-                            title={s.enabled ? (zh ? '点击关闭 OKR' : 'Click to disable OKR') : (zh ? '点击开启 OKR' : 'Click to enable OKR')}
-                            style={{
-                                position: 'relative', width: '36px', height: '20px',
-                                borderRadius: '10px', border: 'none', cursor: 'pointer',
-                                background: s.enabled ? 'var(--accent-primary)' : 'var(--border-subtle)',
-                                transition: 'background 0.2s', padding: 0, flexShrink: 0,
-                            }}
-                        >
+                        <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '24px' }}>
+                            <input
+                                type="checkbox"
+                                checked={s.enabled}
+                                onChange={(e) => updateSettings.mutate({ ...s, enabled: e.target.checked })}
+                                style={{ opacity: 0, width: 0, height: 0 }}
+                            />
                             <span style={{
-                                position: 'absolute',
-                                left: s.enabled ? '18px' : '2px', top: '2px',
-                                width: '16px', height: '16px',
-                                borderRadius: '50%', background: '#fff',
-                                transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-                            }} />
-                        </button>
+                                position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '24px', cursor: 'pointer',
+                                background: s.enabled ? 'var(--accent-primary)' : 'var(--border-subtle)', transition: '0.2s'
+                            }}>
+                                <span style={{
+                                    position: 'absolute', left: s.enabled ? '18px' : '2px', top: '2px', width: '20px', height: '20px',
+                                    borderRadius: '50%', background: '#fff', transition: '0.2s', boxShadow: '0 1px 2px rgba(0,0,0,0.1)'
+                                }} />
+                            </span>
+                        </label>
                     </div>
                 </div>
 
@@ -1878,7 +1860,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 {okrAgentId ? (
                                     <a
                                         id="okr-chat-agent-btn"
-                                        href={`/agents/${okrAgentId}#chat`}
+                                        href={`/chat/${okrAgentId}`}
                                         style={{
                                             display: 'inline-flex', alignItems: 'center', gap: '6px',
                                             padding: '7px 14px', borderRadius: '6px',
@@ -1898,13 +1880,6 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                             : (zh ? '前往 OKR Agent 对话' : 'Open OKR Agent Chat')
                                         }
                                     </a>
-                                ) : seeding ? (
-                                    <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ animation: 'spin 1s linear infinite' }}>
-                                            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-                                        </svg>
-                                        {zh ? '正在创建 OKR Agent…' : 'Creating OKR Agent…'}
-                                    </span>
                                 ) : (
                                     <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', flexShrink: 0 }}>
                                         {zh ? 'OKR Agent 未找到' : 'OKR Agent not found'}
@@ -1913,42 +1888,56 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                             </div>
                         </div>
 
-                        {/* Sync OKR Agent Relationships */}
-                        {okrAgentId && (
-                            <div style={{ marginBottom: '20px', padding: '12px 16px', background: 'var(--bg-secondary)', borderRadius: '8px', border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-                                <div>
-                                    <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '2px' }}>
-                                        {zh ? '同步关系网络' : 'Sync Relationship Network'}
-                                    </div>
-                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
-                                        {zh
-                                            ? '将组织架构中的成员和公司可见的 Agent 自动关联到 OKR Agent'
-                                            : 'Auto-link all org members and company-visible agents to OKR Agent'}
-                                    </div>
+                        {/* Sync Relationship Network */}
+                        <div style={{
+                            marginBottom: '24px',
+                            padding: '14px 18px',
+                            borderRadius: '8px',
+                            background: 'var(--bg-secondary)',
+                            border: '1px solid var(--border-subtle)',
+                            display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap',
+                        }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '2px' }}>
+                                    {zh ? '同步关系网络' : 'Sync Relationship Network'}
                                 </div>
-                                <button
-                                    id="okr-sync-relationships-btn"
-                                    onClick={async () => {
-                                        try {
-                                            await fetchJson<any>('/okr/sync-relationships', { method: 'POST' });
-                                            alert(zh ? '关系网络同步成功！' : 'Relationships synced successfully!');
-                                        } catch (e: any) {
-                                            alert(e.message || (zh ? '同步失败，请重试' : 'Sync failed, please retry'));
-                                        }
-                                    }}
-                                    style={{
-                                        padding: '6px 14px', borderRadius: '6px', fontSize: '12px', fontWeight: 500,
-                                        background: 'var(--accent-primary)', color: '#fff', border: 'none', cursor: 'pointer',
-                                        whiteSpace: 'nowrap', flexShrink: 0,
-                                    }}
-                                >
-                                    {zh ? '立即同步' : 'Sync Now'}
-                                </button>
+                                <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                    {zh
+                                        ? '将组织架构中的成员和公司可见的 Agent 自动关联到 OKR Agent'
+                                        : 'Auto-link all org members and company-visible agents to OKR Agent'}
+                                </div>
                             </div>
-                        )}
+                            <button
+                                id="okr-sync-relationships-btn"
+                                onClick={async () => {
+                                    try {
+                                        const token = localStorage.getItem('token');
+                                        const res = await fetch('/api/okr/sync-relationships', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                                        });
+                                        if (res.ok) {
+                                            alert(zh ? '关系网络同步成功！' : 'Relationships synced successfully!');
+                                            qc.invalidateQueries({ queryKey: ['okr-members-without-okr-settings'] });
+                                        } else {
+                                            const err = await res.json().catch(() => ({}));
+                                            alert(`Error: ${err.detail || res.status}`);
+                                        }
+                                    } catch (e) {
+                                        alert(zh ? '同步失败，请重试' : 'Sync failed, please retry');
+                                    }
+                                }}
+                                style={{
+                                    padding: '6px 14px', borderRadius: '6px', fontSize: '12px', fontWeight: 500,
+                                    background: 'var(--accent-primary)', color: '#fff', border: 'none', cursor: 'pointer',
+                                    whiteSpace: 'nowrap', flexShrink: 0,
+                                }}
+                            >
+                                {zh ? '立即同步' : 'Sync Now'}
+                            </button>
+                        </div>
 
                         {/* Period preference */}
-
                         <div style={{ marginBottom: '24px' }}>
                             <div style={{ fontWeight: 500, marginBottom: '12px', fontSize: '13px' }}>
                                 {zh ? '周期偏好' : 'Period Preference'}
@@ -2049,34 +2038,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
 export default function EnterpriseSettings() {
     const { t } = useTranslation();
     const qc = useQueryClient();
-
-    // Map URL hash → internal tab name for deep-linking (e.g. /enterprise#okr)
-    const HASH_TO_TAB: Record<string, 'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr'> = {
-        '#info': 'info', '#company-info': 'info',
-        '#models': 'llm', '#model': 'llm', '#llm': 'llm',
-        '#tools': 'tools', '#tool': 'tools',
-        '#skills': 'skills', '#skill': 'skills',
-        '#okr': 'okr',
-        '#invites': 'invites', '#invitation-codes': 'invites',
-        '#quotas': 'quotas',
-        '#users': 'users',
-        '#org': 'org', '#org-structure': 'org',
-        '#approvals': 'approvals',
-        '#audit': 'audit', '#audit-log': 'audit',
-    };
-    const TAB_TO_HASH: Record<string, string> = {
-        info: '#info', llm: '#models', tools: '#tools', skills: '#skills',
-        okr: '#okr', invites: '#invites', quotas: '#quotas', users: '#users',
-        org: '#org-structure', approvals: '#approvals', audit: '#audit',
-    };
-    const initialTab = HASH_TO_TAB[window.location.hash] ?? 'info';
-    const [activeTab, setActiveTab] = useState<'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr'>(initialTab);
-
-    // Keep URL hash in sync with active tab
-    const switchTab = (tab: typeof activeTab) => {
-        setActiveTab(tab);
-        window.history.replaceState(null, '', TAB_TO_HASH[tab] || '#info');
-    };
+    const [activeTab, setActiveTab] = useState<'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr'>('info');
 
     // Track selected tenant as state so page refreshes on company switch
     const [selectedTenantId, setSelectedTenantId] = useState(localStorage.getItem('current_tenant_id') || '');
@@ -2361,7 +2323,7 @@ export default function EnterpriseSettings() {
 
                 <div className="tabs">
                     {(['info', 'llm', 'tools', 'skills', 'okr', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'] as const).map(tab => (
-                        <div key={tab} className={`tab ${activeTab === tab ? 'active' : ''}`} onClick={() => switchTab(tab)}>
+                        <div key={tab} className={`tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
                             {tab === 'quotas' ? t('enterprise.tabs.quotas', 'Quotas') : tab === 'users' ? t('enterprise.tabs.users', 'Users') : tab === 'invites' ? t('enterprise.tabs.invites', 'Invitations') : tab === 'okr' ? t('nav.okr', 'OKR') : t(`enterprise.tabs.${tab}`)}
                         </div>
                     ))}
@@ -2806,95 +2768,6 @@ export default function EnterpriseSettings() {
 
                         {/* ── Broadcast ── */}
                         <BroadcastSection />
-
-                        {/* ── A2A Async Communication (Beta) ── */}
-                        <div style={{ marginTop: '24px', marginBottom: '24px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-                                <h3 style={{ margin: 0 }}>
-                                    {t('enterprise.a2aAsync.title', 'Agent-to-Agent Async Communication')}
-                                </h3>
-                                <span style={{
-                                    fontSize: '11px', padding: '2px 8px', borderRadius: '10px',
-                                    background: 'var(--warning-bg, #fef3cd)', color: 'var(--warning-text, #856404)',
-                                    fontWeight: 500, letterSpacing: '0.3px',
-                                }}>
-                                    BETA
-                                </span>
-                            </div>
-                            <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px', lineHeight: 1.6 }}>
-                                {t('enterprise.a2aAsync.description',
-                                    'Enable agents to communicate asynchronously with three modes: notify (one-way announcement), task_delegate (delegate work and get results back), and consult (synchronous question). When disabled, all agent-to-agent messages use synchronous consult mode — the same behavior as before this feature was introduced.'
-                                )}
-                            </p>
-                            <div className="card" style={{ padding: '16px', display: 'flex', alignItems: 'center', gap: '16px' }}>
-                                <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }}>
-                                    <input type="checkbox"
-                                        checked={!!currentTenant?.a2a_async_enabled}
-                                        onChange={async (e) => {
-                                            const wantEnable = e.target.checked;
-                                            if (wantEnable) {
-                                                const confirmed = window.confirm(
-                                                    t('enterprise.a2aAsync.enableWarning',
-                                                        [
-                                                            '⚠️ You are about to enable the A2A Async Communication feature (Beta).',
-                                                            '',
-                                                            'This feature allows agents to communicate asynchronously via notify and task_delegate modes.',
-                                                            '',
-                                                            'Known potential issues:',
-                                                            '• Agent replies may contain internal technical terms (trigger names, focus items, etc.)',
-                                                            '• task_delegate callbacks may occasionally be delayed or dropped due to rate limiting',
-                                                            '• Token consumption will increase because each async message triggers a separate agent session',
-                                                            '• Agent loops may occur if triggers are not properly configured',
-                                                            '',
-                                                            'If you encounter any issues, please return to this page and disable the toggle to restore stable synchronous behavior.',
-                                                            '',
-                                                            'Are you sure you want to enable this feature?'
-                                                        ].join('\n')
-                                                    )
-                                                );
-                                                if (!confirmed) return;
-                                            }
-                                            try {
-                                                await fetchJson(`/tenants/${selectedTenantId}`, {
-                                                    method: 'PUT',
-                                                    body: JSON.stringify({ a2a_async_enabled: wantEnable }),
-                                                });
-                                                qc.invalidateQueries({ queryKey: ['tenant', selectedTenantId] });
-                                            } catch (err: any) {
-                                                alert(err.message || 'Update failed');
-                                            }
-                                        }}
-                                        style={{ opacity: 0, width: 0, height: 0 }}
-                                    />
-                                    <span style={{
-                                        position: 'absolute', inset: 0,
-                                        background: currentTenant?.a2a_async_enabled ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
-                                        borderRadius: '11px', transition: 'background 0.2s',
-                                    }}>
-                                        <span style={{
-                                            position: 'absolute',
-                                            left: currentTenant?.a2a_async_enabled ? '20px' : '2px',
-                                            top: '2px', width: '18px', height: '18px',
-                                            background: '#fff', borderRadius: '50%', transition: 'left 0.2s',
-                                        }} />
-                                    </span>
-                                </label>
-                                <div>
-                                    <span style={{ fontSize: '13px', fontWeight: 500 }}>
-                                        {currentTenant?.a2a_async_enabled
-                                            ? t('enterprise.a2aAsync.enabled', 'Enabled')
-                                            : t('enterprise.a2aAsync.disabled', 'Disabled')
-                                        }
-                                    </span>
-                                    <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', margin: '2px 0 0 0' }}>
-                                        {currentTenant?.a2a_async_enabled
-                                            ? t('enterprise.a2aAsync.enabledHint', 'Agents can use notify, task_delegate, and consult modes.')
-                                            : t('enterprise.a2aAsync.disabledHint', 'All agent messages use synchronous consult mode.')
-                                        }
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
 
                         {/* ── Danger Zone: Delete Company ── */}
                         <div style={{ marginTop: '32px', padding: '16px', border: '1px solid var(--status-error, #e53e3e)', borderRadius: '8px' }}>
