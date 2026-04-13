@@ -11,7 +11,7 @@
  *   - Disabled state: guide panel directing to OKR settings
  */
 
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -71,6 +71,26 @@ interface WorkReport {
     period_label: string;
     content: string;
     created_at: string;
+}
+
+interface MemberWithoutOKR {
+    id: string;
+    type: 'user' | 'agent';
+    display_name: string;
+    avatar_url: string;
+    channel: string | null;
+    channel_user_id: string | null;
+}
+
+interface MembersWithoutOKRData {
+    period_start: string;
+    period_end: string;
+    company_okr_exists: boolean;
+    okr_agent_id: string | null;
+    members_without_okr: MemberWithoutOKR[];
+    tracked_user_ids: string[];
+    tracked_agent_ids: string[];
+    total: number;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1049,6 +1069,14 @@ export default function OKR() {
                             </div>
                         </section>
                     )}
+                    {/* Members Without OKR / Nudge panel (admin-only) */}
+                    {isAdmin && selectedPeriod && (
+                        <MembersWithoutOKRPanel
+                            isChinese={isChinese}
+                            periodStart={selectedPeriod.start}
+                            periodEnd={selectedPeriod.end}
+                        />
+                    )}
                 </>
             )}
 
@@ -1059,6 +1087,171 @@ export default function OKR() {
     );
 }
 
+// ─── Members Without OKR Panel (admin-only) ────────────────────────────────────────────
+// Shows admin a list of members who haven’t set OKRs yet, with a nudge button.
+function MembersWithoutOKRPanel({
+    isChinese,
+    periodStart,
+    periodEnd,
+}: {
+    isChinese: boolean;
+    periodStart: string;
+    periodEnd: string;
+}) {
+    const queryClient = useQueryClient();
+    const [nudging, setNudging] = React.useState(false);
+    const [nudgeResult, setNudgeResult] = React.useState<string | null>(null);
+
+    const { data, isLoading } = useQuery<MembersWithoutOKRData>({
+        queryKey: ['okr-members-without-okr', periodStart, periodEnd],
+        queryFn: () => fetchJson<MembersWithoutOKRData>('/okr/members-without-okr'),
+        staleTime: 60_000,
+    });
+
+    // Don't render when loading or no incomplete members
+    if (isLoading || !data || !data.members_without_okr?.length) {
+        return null;
+    }
+
+    async function handleNudge() {
+        setNudging(true);
+        setNudgeResult(null);
+        try {
+            const result = await fetchJson<{ status: string; message: string; members_count: number }>(
+                '/okr/trigger-member-outreach',
+                { method: 'POST' }
+            );
+            setNudgeResult(result.message);
+            queryClient.invalidateQueries({ queryKey: ['okr-members-without-okr'] });
+        } catch (e: any) {
+            setNudgeResult(e.message ?? (isChinese ? '催促失败，请重试' : 'Failed to trigger outreach'));
+        } finally {
+            setNudging(false);
+        }
+    }
+
+    const { members_without_okr: members, company_okr_exists } = data;
+
+    return (
+        <section style={{ marginTop: '32px' }}>
+            {/* Section header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
+                    {isChinese ? '未设定 OKR 的成员' : 'Members Without OKR'}
+                </span>
+                <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
+                <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{members.length}</span>
+            </div>
+
+            <div style={{
+                border: '1px solid var(--border-subtle)',
+                borderRadius: '10px',
+                overflow: 'hidden',
+                background: 'var(--bg-primary)',
+            }}>
+                {/* Member list */}
+                <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {members.map((member) => (
+                        <div key={member.id} style={{
+                            display: 'flex', alignItems: 'center', gap: '10px',
+                            padding: '8px 10px',
+                            background: 'var(--bg-secondary)',
+                            borderRadius: '6px',
+                            border: '1px solid var(--border-subtle)',
+                        }}>
+                            <div style={{
+                                width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+                                background: member.type === 'agent' ? 'rgba(99,102,241,0.15)' : 'rgba(16,185,129,0.15)',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                fontSize: '11px', fontWeight: 600,
+                                color: member.type === 'agent' ? '#6366f1' : '#10b981',
+                            }}>
+                                {(member.display_name || '?').charAt(0).toUpperCase()}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>
+                                    {member.display_name}
+                                </div>
+                                <div style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>
+                                    {member.type === 'agent'
+                                        ? 'AI Agent'
+                                        : (isChinese ? '平台成员' : 'Platform member')}
+                                </div>
+                            </div>
+                            <span style={{
+                                fontSize: '10px', color: 'var(--text-tertiary)',
+                                border: '1px dashed var(--border-subtle)',
+                                borderRadius: '4px', padding: '1px 6px',
+                            }}>
+                                {isChinese ? '未设定 OKR' : 'No OKR'}
+                            </span>
+                        </div>
+                    ))}
+                </div>
+
+                {/* Footer: guidance + nudge button */}
+                <div style={{
+                    padding: '12px 16px',
+                    borderTop: '1px solid var(--border-subtle)',
+                    background: 'var(--bg-secondary)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap',
+                }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', flex: 1 }}>
+                        {company_okr_exists
+                            ? (isChinese
+                                ? 'OKR Agent 将向以上成员发送消息，邀请他们设定个人 OKR。'
+                                : 'OKR Agent will message each member above and invite them to set their OKRs.')
+                            : (isChinese
+                                ? '请先与 OKR Agent 确认公司 OKR，再催促成员。'
+                                : 'Please set company OKRs with the OKR Agent before nudging members.')
+                        }
+                    </div>
+                    <button
+                        id="okr-nudge-btn"
+                        onClick={handleNudge}
+                        disabled={nudging || !company_okr_exists}
+                        style={{
+                            display: 'flex', alignItems: 'center', gap: '6px',
+                            padding: '7px 14px', borderRadius: '6px',
+                            border: 'none',
+                            background: company_okr_exists ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
+                            color: company_okr_exists ? '#fff' : 'var(--text-quaternary)',
+                            fontSize: '12px', fontWeight: 500,
+                            cursor: nudging || !company_okr_exists ? 'not-allowed' : 'pointer',
+                            opacity: nudging ? 0.7 : 1,
+                            transition: 'opacity 0.15s, background 0.15s',
+                            whiteSpace: 'nowrap',
+                        }}
+                    >
+                        {nudging ? (
+                            <>{isChinese ? 'OKR Agent 正在发消息...' : 'OKR Agent is messaging...'}</>
+                        ) : (
+                            <>
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/>
+                                </svg>
+                                {isChinese ? '催促设定 OKR' : 'Nudge Members'}
+                            </>
+                        )}
+                    </button>
+                </div>
+
+                {/* Result message */}
+                {nudgeResult && (
+                    <div style={{
+                        padding: '10px 16px',
+                        fontSize: '12px',
+                        color: 'var(--text-secondary)',
+                        background: 'var(--bg-tertiary)',
+                        borderTop: '1px solid var(--border-subtle)',
+                    }}>
+                        {nudgeResult}
+                    </div>
+                )}
+            </div>
+        </section>
+    );
+}
 function ReportsTab({ isChinese }: { isChinese: boolean }) {
     const { data: reports = [], isLoading } = useQuery<WorkReport[]>({
         queryKey: ['okr-reports'],
