@@ -795,9 +795,9 @@ function ObjectiveCard({
 // ── P4: Members Without OKR Panel ──
 // Shows admin a list of members who haven't set OKRs yet, with a nudge button.
 interface MemberWithoutOKR {
-    type: 'user' | 'agent';
     id: string;
-    name: string;
+    type: 'user' | 'agent';
+    display_name: string;  // backend returns 'display_name', not 'name'
     avatar_url: string;
     channel: string | null;
     channel_user_id: string | null;
@@ -808,7 +808,8 @@ interface MembersWithoutOKRData {
     period_end: string;
     company_okr_exists: boolean;
     okr_agent_id: string | null;
-    members: MemberWithoutOKR[];
+    members_without_okr: MemberWithoutOKR[];  // backend returns 'members_without_okr'
+    total: number;
 }
 
 function MembersWithoutOKRPanel({
@@ -832,7 +833,7 @@ function MembersWithoutOKRPanel({
     });
 
     // Don't render when loading or no incomplete members
-    if (isLoading || !data || data.members.length === 0) {
+    if (isLoading || !data || !data.members_without_okr?.length) {
         return null;
     }
 
@@ -854,7 +855,7 @@ function MembersWithoutOKRPanel({
         }
     }
 
-    const { members, company_okr_exists, okr_agent_id } = data;
+    const { members_without_okr: members, company_okr_exists, okr_agent_id } = data;
 
     return (
         <section style={{ marginTop: '8px' }}>
@@ -897,7 +898,7 @@ function MembersWithoutOKRPanel({
                             {/* Name + type badge */}
                             <div style={{ flex: 1, minWidth: 0 }}>
                                 <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>
-                                    {member.name}
+                                    {member.display_name}
                                 </div>
                                 <div style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>
                                     {member.type === 'agent'
