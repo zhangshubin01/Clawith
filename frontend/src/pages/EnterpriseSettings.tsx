@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { enterpriseApi, skillApi } from '../services/api';
@@ -1744,7 +1744,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
         queryKey: ['okr-settings', tenantId],
         queryFn: () => fetchJson<any>('/okr/settings')
     });
-    const [seeding, setSeeding] = React.useState(false);
+    const [seeding, setSeeding] = useState(false);
 
     const updateSettings = useMutation({
         mutationFn: (data: any) => fetchJson('/okr/settings', { method: 'PUT', body: JSON.stringify(data) }),
