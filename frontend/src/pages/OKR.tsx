@@ -1125,10 +1125,14 @@ export default function OKR() {
     const [creating, setCreating] = useState(false);
     const [activeTab, setActiveTab] = useState<'dashboards' | 'reports'>('dashboards');
 
-    // Fetch OKR settings
+    // Fetch OKR settings — include user tenant in key so the query is NOT shared
+    // across company switches. Also force a fresh fetch on every page mount so that
+    // enabling OKR in Company Settings is reflected immediately without a full reload.
     const { data: settings, isLoading: settingsLoading } = useQuery<OKRSettings>({
-        queryKey: ['okr-settings'],
+        queryKey: ['okr-settings', user?.id],
         queryFn: () => fetchJson<OKRSettings>('/okr/settings'),
+        staleTime: 0,           // always refetch on mount
+        refetchOnMount: true,
     });
 
     // Fetch periods (only when enabled)
