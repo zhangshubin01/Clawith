@@ -1760,7 +1760,9 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
     if (isLoading) return <div style={{ padding: '20px' }}>{t('common.loading', 'Loading...')}</div>;
     const s = settings || { enabled: false, daily_report_enabled: false, daily_report_time: '18:00', weekly_report_enabled: false, weekly_report_day: 4, period_frequency: 'quarterly', period_length_days: null };
 
-    const okrAgentId = membersData?.okr_agent_id ?? null;
+    // Primary source: /settings now embeds okr_agent_id directly.
+    // Fallback to members-without-okr response for backward compat.
+    const okrAgentId: string | null = settings?.okr_agent_id ?? membersData?.okr_agent_id ?? null;
     const companyOkrExists = membersData?.company_okr_exists ?? false;
 
     // Weekday labels — full bilingual list
@@ -1856,11 +1858,11 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                     </div>
                                 </div>
 
-                                {/* Action button — links to OKR Agent chat */}
+                                {/* Action button — links to OKR Agent chat (agent detail page at /agents/{id}) */}
                                 {okrAgentId ? (
                                     <a
                                         id="okr-chat-agent-btn"
-                                        href={`/chat/${okrAgentId}`}
+                                        href={`/agents/${okrAgentId}`}
                                         style={{
                                             display: 'inline-flex', alignItems: 'center', gap: '6px',
                                             padding: '7px 14px', borderRadius: '6px',

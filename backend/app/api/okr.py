@@ -50,8 +50,8 @@ async def _sync_okr_agent_relationships(db, tenant_id: uuid.UUID, okr_agent_id: 
       - Agent relationships : every non-system, non-stopped agent in this tenant
                               (excludes the OKR Agent itself)
     """
-    from app.models.agent import Agent, AgentRelationship, AgentAgentRelationship
-    from app.models.org import OrgMember
+    from app.models.agent import Agent
+    from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
     from sqlalchemy import delete as sa_delete
 
     # 1. Clear existing relationships (clean-slate re-sync)
@@ -155,6 +155,8 @@ class OKRSettingsOut(BaseModel):
     weekly_report_day: int
     period_frequency: str
     period_length_days: int | None = None
+    # OKR Agent UUID for the chat-link button in the UI
+    okr_agent_id: str | None = None
 
 
 class OKRSettingsUpdate(BaseModel):
@@ -257,8 +259,21 @@ class WorkReportOut(BaseModel):
 @router.get("/settings", response_model=OKRSettingsOut)
 async def get_okr_settings(user=Depends(get_current_user)):
     """Return OKR configuration for the current tenant."""
+    from app.models.agent import Agent
+
     async with async_session() as db:
         settings = await _get_or_create_settings(db, user.tenant_id)
+
+        # Also resolve the OKR Agent ID so the UI can show the chat button
+        okr_agent_result = await db.execute(
+            select(Agent.id).where(
+                Agent.tenant_id == user.tenant_id,
+                Agent.name.ilike("%OKR%"),
+            ).order_by(Agent.is_system.desc()).limit(1)
+        )
+        okr_agent_row = okr_agent_result.first()
+        okr_agent_id_str = str(okr_agent_row[0]) if okr_agent_row else None
+
         await db.commit()
         return OKRSettingsOut(
             enabled=settings.enabled,
@@ -268,6 +283,7 @@ async def get_okr_settings(user=Depends(get_current_user)):
             weekly_report_day=settings.weekly_report_day,
             period_frequency=settings.period_frequency,
             period_length_days=settings.period_length_days,
+            okr_agent_id=okr_agent_id_str,
         )
 
 
@@ -838,8 +854,8 @@ async def members_without_okr(user=Depends(get_current_user)):
     - tracked_user_ids    : UUIDs of all tracked platform users (for UI filtering)
     - tracked_agent_ids   : UUIDs of all tracked agents (for UI filtering)
     """
-    from app.models.agent import Agent, AgentRelationship, AgentAgentRelationship
-    from app.models.org import OrgMember
+    from app.models.agent import Agent
+    from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
     from app.models.user import User
 
     async with async_session() as db:
@@ -938,8 +954,10 @@ async def members_without_okr(user=Depends(get_current_user)):
                         "channel": None,
                         "channel_user_id": None,
                     })
-        else:
-            # Fallback: no OKR Agent seeded yet — show all non-system agents + users
+
+        # Fallback: OKR Agent not seeded, OR no relationships yet (sync not done)
+        # In either case show ALL members so the panel is useful before first sync.
+        if not okr_agent_id_val or (not tracked_user_ids and not tracked_agent_ids):
             agent_result = await db.execute(
                 select(Agent.id, Agent.name, Agent.avatar_url).where(
                     Agent.tenant_id == user.tenant_id,
