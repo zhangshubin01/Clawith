@@ -548,27 +548,36 @@ async def list_objectives(
             if o.owner_type == "agent" and o.owner_id
         ]
 
-        user_names: dict[uuid.UUID, str] = {}
+        # Normalize UUID keys to str to avoid type mismatch between uuid.UUID
+        # (from ORM) and str (from asyncpg raw row access).
+        user_names: dict[str, str | None] = {}
         if user_owner_ids:
             u_result = await db.execute(
                 select(User.id, User.display_name).where(User.id.in_(user_owner_ids))
             )
-            user_names = {row.id: (row.display_name or "") for row in u_result.fetchall()}
+            user_names = {
+                str(row[0]): (row[1] if row[1] else None)
+                for row in u_result.fetchall()
+            }
 
-        agent_names: dict[uuid.UUID, str] = {}
+        agent_names: dict[str, str | None] = {}
         if agent_owner_ids:
             a_result = await db.execute(
                 select(Agent.id, Agent.name).where(Agent.id.in_(agent_owner_ids))
             )
-            agent_names = {row.id: (row.name or "") for row in a_result.fetchall()}
+            agent_names = {
+                str(row[0]): (row[1] if row[1] else None)
+                for row in a_result.fetchall()
+            }
 
         def _resolve_name(obj: OKRObjective) -> str | None:
             if not obj.owner_id:
                 return None
+            key = str(obj.owner_id)
             if obj.owner_type == "user":
-                return user_names.get(obj.owner_id)
+                return user_names.get(key)
             if obj.owner_type == "agent":
-                return agent_names.get(obj.owner_id)
+                return agent_names.get(key)
             return None
 
         return [
