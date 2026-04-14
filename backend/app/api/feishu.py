@@ -337,7 +337,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
         chat_type = message.get("chat_type", "p2p")  # p2p or group
         chat_id = message.get("chat_id", "")
 
-        logger.info(f"[Feishu] Received {msg_type} message, chat_type={chat_type}, from={sender_open_id}")
+        logger.info(f"[Feishu] Received {msg_type} message, chat_type={chat_type}, open_id={sender_open_id!r}, user_id_from_event={sender_user_id_from_event!r}")
 
         # ── Normalize post (rich text) → extract text + schedule image downloads ──
         if msg_type == "post":
