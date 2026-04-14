@@ -538,59 +538,38 @@ async def list_objectives(
         for kr in all_krs:
             krs_by_obj.setdefault(kr.objective_id, []).append(kr)
 
-        # Batch-resolve owner names: collect distinct owner IDs across all types
-        all_owner_ids = [str(o.owner_id) for o in objectives if o.owner_id]
-        user_owner_ids = [o.owner_id for o in objectives if o.owner_type == "user" and o.owner_id]
-        agent_owner_ids = [o.owner_id for o in objectives if o.owner_type == "agent" and o.owner_id]
+        # Batch-resolve owner names: collect distinct user/agent IDs
+        user_owner_ids = [
+            o.owner_id for o in objectives
+            if o.owner_type == "user" and o.owner_id
+        ]
+        agent_owner_ids = [
+            o.owner_id for o in objectives
+            if o.owner_type == "agent" and o.owner_id
+        ]
 
-        # Normalize UUID keys to str to avoid type mismatch between uuid.UUID
-        # (from ORM) and str (from asyncpg raw row access).
-        user_names: dict[str, str | None] = {}
+        user_names: dict[uuid.UUID, str] = {}
         if user_owner_ids:
             u_result = await db.execute(
                 select(User.id, User.display_name).where(User.id.in_(user_owner_ids))
             )
-            user_names = {
-                str(row[0]): (row[1] if row[1] else None)
-                for row in u_result.fetchall()
-            }
+            user_names = {row.id: (row.display_name or "") for row in u_result.fetchall()}
 
-        agent_names: dict[str, str | None] = {}
+        agent_names: dict[uuid.UUID, str] = {}
         if agent_owner_ids:
             a_result = await db.execute(
                 select(Agent.id, Agent.name).where(Agent.id.in_(agent_owner_ids))
             )
-            agent_names = {
-                str(row[0]): (row[1] if row[1] else None)
-                for row in a_result.fetchall()
-            }
-
-        # OrgMember fallback: Feishu/channel users whose owner_id is OrgMember.id
-        # rather than User.id (unlinked channel-only members).
-        from app.models.org import OrgMember
-        org_member_names: dict[str, str | None] = {}
-        if all_owner_ids:
-            om_result = await db.execute(
-                select(OrgMember.id, OrgMember.name)
-                .where(OrgMember.id.in_([uuid.UUID(k) for k in all_owner_ids]))
-            )
-            org_member_names = {
-                str(row[0]): (row[1] if row[1] else None)
-                for row in om_result.fetchall()
-            }
+            agent_names = {row.id: (row.name or "") for row in a_result.fetchall()}
 
         def _resolve_name(obj: OKRObjective) -> str | None:
             if not obj.owner_id:
                 return None
-            key = str(obj.owner_id)
             if obj.owner_type == "user":
-                # Try User table first; fall back to OrgMember (Feishu-only member)
-                return user_names.get(key) or org_member_names.get(key)
+                return user_names.get(obj.owner_id)
             if obj.owner_type == "agent":
-                # Try Agent table; defensive fallback to user/org member in case
-                # owner_type was miscategorised at creation time
-                return agent_names.get(key) or user_names.get(key) or org_member_names.get(key)
-            return user_names.get(key) or agent_names.get(key) or org_member_names.get(key)
+                return agent_names.get(obj.owner_id)
+            return None
 
         return [
             _obj_to_out(o, krs_by_obj.get(o.id, []), owner_name=_resolve_name(o))
@@ -1128,6 +1107,18 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         )
         covered_ids: set[uuid.UUID] = {row[0] for row in existing_result.fetchall()}
 
+        # ── Fetch company OKRs for this period to share as context ────────────
+        company_okr_result = await db.execute(
+            select(OKRObjective).where(
+                OKRObjective.tenant_id == user.tenant_id,
+                OKRObjective.owner_type == "company",
+                OKRObjective.period_start >= ps,
+                OKRObjective.period_end <= pe,
+                OKRObjective.status != "archived",
+            ).order_by(OKRObjective.created_at)
+        )
+        company_okrs = company_okr_result.scalars().all()
+
         # ── Fetch tracked human members from AgentRelationship ────────────────
         rel_result = await db.execute(
             select(AgentRelationship, OrgMember)
@@ -1217,16 +1208,14 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         msgs = await _recent_msgs(platform_uid) if platform_uid else []
 
         # Determine channel hint
-        # Priority: any external channel (Feishu / DingTalk / WeChat Work / etc.)
-        # takes precedence over the in-platform web notification, so members
-        # receive a message in the tool they actually use day-to-day.
         has_channel = bool(org_member.open_id or org_member.external_id)
-        if has_channel:
-            channel_hint = f'send_channel_message(member_name="{org_member.name}", message=...)'
-        elif platform_uid:
+        if platform_uid:
             channel_hint = (
-                'send_web_message(username="<their_username>", message=...)'
+                'send_web_message(username="<their_username>", message=...)\n'
+                "  OR send_channel_message if they have a linked channel"
             )
+        elif has_channel:
+            channel_hint = f'send_channel_message(member_name="{org_member.name}", message=...)'
         else:
             channel_hint = "No channel available — note this in your summary"
 
@@ -1272,16 +1261,17 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         # cannot accidentally substitute a placeholder or nil UUID.
         member_block = (
             f"--- Member {index}: {agent_member.name} [Agent] ---\n"
-            f"  STEP 1 → send_message_to_agent(agent_name=\"{agent_member.name}\", "
-            f"message=\"[OKR Agent] 请描述您在本周期的主要目标（Objective）和关键结果（Key Results）。\")\n"
+            f"  STEP 1 → send_message_to_agent(agent_name=\"{agent_member.name}\",\n"
+            f"             message=\"[OKR Agent] 请根据公司 OKR，描述您在本周期（{ps.isoformat()} ~ {pe.isoformat()}）"
+            f"的主要目标（Objective）和关键结果（Key Results）。\")\n"
             f"  STEP 2 → Read the reply carefully from the tool result.\n"
-            f"  STEP 3 → Call this EXACTLY (use the UUID below verbatim):\n"
-            f"    create_objective(title=\"<their objective>\", owner_type=\"agent\", "
-            f"owner_id=\"{agent_member.id}\", "
-            f"period_start=\"{ps.isoformat()}\", period_end=\"{pe.isoformat()}\")\n"
-            f"  STEP 4 → For each KR they mentioned:\n"
-            f"    create_key_result(objective_id=\"<id from STEP 3 result>\", "
-            f"title=\"<KR title>\", target_value=<number>, unit=\"<unit if stated>\")"
+            f"  STEP 3 → Call this EXACTLY (use the UUID below verbatim, do NOT invent one):\n"
+            f"    create_objective(title=\"<their objective>\", owner_type=\"agent\",\n"
+            f"                    owner_id=\"{agent_member.id}\",\n"
+            f"                    period_start=\"{ps.isoformat()}\", period_end=\"{pe.isoformat()}\")\n"
+            f"  STEP 4 → For EACH Key Result they mentioned:\n"
+            f"    create_key_result(objective_id=\"<id from STEP 3 result>\",\n"
+            f"                     title=\"<KR title>\", target_value=<number>, unit=\"<unit if stated>\")"
         )
         members_to_contact.append(member_block)
         index += 1
@@ -1293,58 +1283,66 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
             "okr_agent_id": str(okr_agent.id),
         }
 
-    # ── Compose the final task prompt ────────────────────────────────────────────────────
+    # ── Compose the final task prompt ─────────────────────────────────────────
     period_label = f"{ps.strftime('%Y-%m-%d')} to {pe.strftime('%Y-%m-%d')}"
     members_block = "\n\n".join(members_to_contact)
+
+    # Build company OKR context summary
+    if company_okrs:
+        company_okr_lines = []
+        for i, co in enumerate(company_okrs, 1):
+            company_okr_lines.append(f"  {i}. {co.title}")
+            if co.description:
+                company_okr_lines.append(f"     说明: {co.description[:120]}")
+        company_okrs_block = "\n".join(company_okr_lines)
+    else:
+        company_okrs_block = "  (No company OKRs set yet for this period)"
+
+    # Count agent vs human members for adaptive max_rounds
+    n_agents = sum(1 for m in members_to_contact if "[Agent]" in m)
+    n_humans = len(members_to_contact) - n_agents
+    # human: 2 rounds (compose + send); agent: 6 rounds (send + reply + objective + 3 KRs)
+    safe_max_rounds = n_humans * 2 + n_agents * 6 + 3
+
     task_prompt = f"""[ADMIN TRIGGER — OKR Member Outreach — ONE-SHOT TASK]
 
 Current OKR period: {period_label}
-  period_start = "{ps.isoformat()}"  (use this exact value in create_objective)
-  period_end   = "{pe.isoformat()}"  (use this exact value in create_objective)
 Admin who triggered this: {admin_username}
 
-Your task: Contact the {len(members_to_contact)} member(s) below who have NOT set their OKRs \
-for this period. For Agent members, also RECORD their OKR after they reply.
+━━━ COMPANY OBJECTIVES (share this context with each member) ━━━
+{company_okrs_block}
+
+━━━ YOUR TASK ━━━
+Contact the {len(members_to_contact)} member(s) below who have NOT set their OKRs for this period.
+• For [Agent] members: collect their OKR and record it immediately (see STEP 1-4 per member).
+• For human members: send a warm reminder that includes the company OKR context above.
 
 ━━━ TOOL RULES (MANDATORY — DO NOT DEVIATE) ━━━
 • For members tagged [Agent]:
-  → Step 1: Send an OKR request:
-      send_message_to_agent(agent_name="<name>", message="[OKR Agent] 请描述您在 {period_label} 期间的主要目标（Objective）和关键结果（Key Results）。")
-  → Step 2: Their reply is returned as the tool result. READ it carefully.
-  → Step 3: Extract their main Objective. Call:
-      create_objective(title="<extracted objective title>", owner_type="agent",
-                       owner_id="<UUID from member block>",
-                       period_start="{ps.isoformat()}", period_end="{pe.isoformat()}")
-  → Step 4: For each Key Result they mentioned, call:
-      create_key_result(objective_id="<id returned in step 3>", title="<KR title>",
-                        target_value=<number>, unit="<unit if stated>")
-  → Move to the next member. Do NOT continue conversing.
-
+  → Follow the STEP 1-4 sequence in their block exactly.
+  → Use ONLY send_message_to_agent — never channel tools for agents.
 • For human members:
-  → If they have a channel (Feishu/DingTalk) shown: send_channel_message(member_name="<name>", message="...")
-  → If they have a Platform account only: send_web_message(username="<their display_name>", message="...")
+  → If Platform account shown: send_web_message(username="<display_name>", message="...")
+  → If Feishu/DingTalk channel: send_channel_message(member_name="<name>", message="...")
   → If neither: skip and note in summary.
-  → Human messages are fire-and-forget: their OKR will be captured at a later time.
-  → Do NOT wait for or respond to human replies during this task.
+  → Humans are fire-and-forget — do NOT wait for their reply.
 
 ━━━ STEP-BY-STEP ━━━
-1. For each member in sequence:
-   • [Agent] → send_message_to_agent → read the returned reply → create_objective → create_key_result(s)
-   • [Human] → send_channel_message or send_web_message (fire-and-forget, do not wait for reply)
-2. If any step fails: log the failure and continue to the next member.
-3. After ALL members are processed:
-   send_web_message(username="{admin_username}", message="Outreach complete. Contacted X member(s), recorded Y agent OKR(s). Failures: [list or 'none'].")
-4. STOP. Your job is done.
+1. Process each member in order, following per-member instructions.
+2. If a send or create fails: log the failure and continue.
+3. After ALL members: report to admin via
+   send_web_message(username="{admin_username}", message="Nudge complete: X sent, Y failed. [details]")
+4. STOP completely — do not respond to any further messages.
+
+━━━ MEMBERS TO CONTACT ({len(members_to_contact)} total) ━━━
+
+{members_block}
+
+━━━ BEGIN NOW ━━━
 """
 
     # ── Launch background task ────────────────────────────────────────────────
     from app.services.heartbeat import run_agent_oneshot
-
-    # Rounds per member:
-    #   Agent: 1 (A2A send/receive) + 1 (create_objective) + up to 3 (create_key_results) = ~5
-    #   Human: 1 (channel/web send)
-    # Plus 3 for summary + admin message + buffer.
-    safe_max_rounds = len(members_to_contact) * 5 + 3
 
     asyncio.create_task(
         run_agent_oneshot(
