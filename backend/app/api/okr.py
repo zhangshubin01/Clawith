@@ -1018,8 +1018,8 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
     """
     import asyncio
     from sqlalchemy import or_
-    from app.models.agent import Agent, AgentAgentRelationship
-    from app.models.org import AgentRelationship, OrgMember
+    from app.models.agent import Agent
+    from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
     from app.models.audit import ChatMessage
     from app.models.chat_session import ChatSession
     from app.models.user import User
@@ -1031,13 +1031,12 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
 
         ps, pe = _compute_current_period(settings.period_frequency, settings.period_length_days)
 
-        # ── Find the OKR Agent ────────────────────────────────────────────────
+        # ── Find the OKR Agent (lenient — no is_system requirement) ──────────
         okr_agent_result = await db.execute(
             select(Agent).where(
                 Agent.tenant_id == user.tenant_id,
-                Agent.is_system == True,  # noqa: E712
                 Agent.name.ilike("%OKR%"),
-            ).limit(1)
+            ).order_by(Agent.is_system.desc()).limit(1)
         )
         okr_agent = okr_agent_result.scalar_one_or_none()
         if not okr_agent:
