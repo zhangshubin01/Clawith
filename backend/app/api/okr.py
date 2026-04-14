@@ -1107,6 +1107,18 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         )
         covered_ids: set[uuid.UUID] = {row[0] for row in existing_result.fetchall()}
 
+        # ── Fetch company OKRs for this period to share as context ────────────
+        company_okr_result = await db.execute(
+            select(OKRObjective).where(
+                OKRObjective.tenant_id == user.tenant_id,
+                OKRObjective.owner_type == "company",
+                OKRObjective.period_start >= ps,
+                OKRObjective.period_end <= pe,
+                OKRObjective.status != "archived",
+            ).order_by(OKRObjective.created_at)
+        )
+        company_okrs = company_okr_result.scalars().all()
+
         # ── Fetch tracked human members from AgentRelationship ────────────────
         rel_result = await db.execute(
             select(AgentRelationship, OrgMember)
@@ -1245,10 +1257,21 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
     for agent_member in tracked_agents:
         if agent_member.id in covered_ids:
             continue
+        # Embed the actual create_objective call template with the real UUID so the LLM
+        # cannot accidentally substitute a placeholder or nil UUID.
         member_block = (
             f"--- Member {index}: {agent_member.name} [Agent] ---\n"
-            f"  How to send: send_message_to_agent(agent_name=\"{agent_member.name}\", message=...)\n"
-            f"  Recent chat history: (Not available — agents communicate via direct message)"
+            f"  STEP 1 → send_message_to_agent(agent_name=\"{agent_member.name}\",\n"
+            f"             message=\"[OKR Agent] 请根据公司 OKR，描述您在本周期（{ps.isoformat()} ~ {pe.isoformat()}）"
+            f"的主要目标（Objective）和关键结果（Key Results）。\")\n"
+            f"  STEP 2 → Read the reply carefully from the tool result.\n"
+            f"  STEP 3 → Call this EXACTLY (use the UUID below verbatim, do NOT invent one):\n"
+            f"    create_objective(title=\"<their objective>\", owner_type=\"agent\",\n"
+            f"                    owner_id=\"{agent_member.id}\",\n"
+            f"                    period_start=\"{ps.isoformat()}\", period_end=\"{pe.isoformat()}\")\n"
+            f"  STEP 4 → For EACH Key Result they mentioned:\n"
+            f"    create_key_result(objective_id=\"<id from STEP 3 result>\",\n"
+            f"                     title=\"<KR title>\", target_value=<number>, unit=\"<unit if stated>\")"
         )
         members_to_contact.append(member_block)
         index += 1
@@ -1263,49 +1286,63 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
     # ── Compose the final task prompt ─────────────────────────────────────────
     period_label = f"{ps.strftime('%Y-%m-%d')} to {pe.strftime('%Y-%m-%d')}"
     members_block = "\n\n".join(members_to_contact)
+
+    # Build company OKR context summary
+    if company_okrs:
+        company_okr_lines = []
+        for i, co in enumerate(company_okrs, 1):
+            company_okr_lines.append(f"  {i}. {co.title}")
+            if co.description:
+                company_okr_lines.append(f"     说明: {co.description[:120]}")
+        company_okrs_block = "\n".join(company_okr_lines)
+    else:
+        company_okrs_block = "  (No company OKRs set yet for this period)"
+
+    # Count agent vs human members for adaptive max_rounds
+    n_agents = sum(1 for m in members_to_contact if "[Agent]" in m)
+    n_humans = len(members_to_contact) - n_agents
+    # human: 2 rounds (compose + send); agent: 6 rounds (send + reply + objective + 3 KRs)
+    safe_max_rounds = n_humans * 2 + n_agents * 6 + 3
+
     task_prompt = f"""[ADMIN TRIGGER — OKR Member Outreach — ONE-SHOT TASK]
 
 Current OKR period: {period_label}
 Admin who triggered this: {admin_username}
 
-Your task: Contact the {len(members_to_contact)} member(s) below who have NOT set their OKRs \
-for this period. Send each one a warm, personalised reminder, then stop.
+━━━ COMPANY OBJECTIVES (share this context with each member) ━━━
+{company_okrs_block}
+
+━━━ YOUR TASK ━━━
+Contact the {len(members_to_contact)} member(s) below who have NOT set their OKRs for this period.
+• For [Agent] members: collect their OKR and record it immediately (see STEP 1-4 per member).
+• For human members: send a warm reminder that includes the company OKR context above.
 
 ━━━ TOOL RULES (MANDATORY — DO NOT DEVIATE) ━━━
 • For members tagged [Agent]:
-  → Use ONLY: send_message_to_agent(agent_name="<name>", message="...")
-  → NEVER use send_feishu_message or any channel tool for agents — they have no Feishu account.
+  → Follow the STEP 1-4 sequence in their block exactly.
+  → Use ONLY send_message_to_agent — never channel tools for agents.
 • For human members:
-  → If they have a Platform account shown: send_web_message(username="<display_name>", message="...")
-  → If they have a channel (Feishu/DingTalk): send_channel_message(member_name="<name>", message="...")
+  → If Platform account shown: send_web_message(username="<display_name>", message="...")
+  → If Feishu/DingTalk channel: send_channel_message(member_name="<name>", message="...")
   → If neither: skip and note in summary.
-
-━━━ CRITICAL: THIS IS A FIRE-AND-FORGET TASK ━━━
-• Send your message to each member and IMMEDIATELY move on to the next.
-• Do NOT wait for, or respond to, replies from anyone during this task.
-• Replying back-and-forth is NOT part of this task and will waste time.
-• Once you have contacted all members and sent the summary report, STOP completely.
+  → Humans are fire-and-forget — do NOT wait for their reply.
 
 ━━━ STEP-BY-STEP ━━━
-1. For each member: review their history → compose a short, warm OKR reminder → send it.
-2. If a send fails: log the failure and continue to the next member.
-3. After contacting ALL members: report to admin via
-   send_web_message(username="{admin_username}", message="Nudge complete: X sent, Y failed. [list failures]")
-4. STOP. Your job is done. Do not take any further action.
+1. Process each member in order, following per-member instructions.
+2. If a send or create fails: log the failure and continue.
+3. After ALL members: report to admin via
+   send_web_message(username="{admin_username}", message="Nudge complete: X sent, Y failed. [details]")
+4. STOP completely — do not respond to any further messages.
 
 ━━━ MEMBERS TO CONTACT ({len(members_to_contact)} total) ━━━
 
 {members_block}
 
-━━━ BEGIN NOW — FIRE AND FORGET ━━━
+━━━ BEGIN NOW ━━━
 """
 
     # ── Launch background task ────────────────────────────────────────────────
     from app.services.heartbeat import run_agent_oneshot
-
-    # max_rounds: 2 per member (compose + send) + 3 (summary + admin msg + buffer)
-    # Keep it tight to prevent the "infinite reply loop" anti-pattern.
-    safe_max_rounds = len(members_to_contact) * 2 + 3
 
     asyncio.create_task(
         run_agent_oneshot(
