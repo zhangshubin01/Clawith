@@ -10191,7 +10191,31 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
             p_end = date.fromisoformat(period_end)
 
             owner_id_str = arguments.get("owner_id")
-            owner_id = uuid.UUID(owner_id_str) if owner_id_str else None
+            owner_name = arguments.get("owner_name")
+            owner_id = None
+            
+            if owner_type != "company":
+                if owner_id_str:
+                    try:
+                        owner_id = uuid.UUID(owner_id_str)
+                    except ValueError:
+                        # Fallback for when the agent provides a Feishu identifier instead of a UUID
+                        owner_id = None
+                
+                # If we don't have a valid UUID but we have a name, look it up
+                if not owner_id and owner_name:
+                    if owner_type == "agent":
+                        sub_res = await db.execute(select(AgentModel.id).where(AgentModel.tenant_id == ag.tenant_id, AgentModel.name == owner_name))
+                        owner_id = sub_res.scalar_one_or_none()
+                    elif owner_type == "user":
+                        from app.models.org import OrgMember
+                        from app.models.user import User
+                        # Look up human in OrgMember -> User
+                        sub_res = await db.execute(select(OrgMember.user_id).join(User).where(OrgMember.tenant_id == ag.tenant_id, User.display_name == owner_name))
+                        owner_id = sub_res.scalar_one_or_none()
+                        
+                if not owner_id:
+                    return f"Failed: Could not resolve a valid system UUID for the {owner_type}. Use the exact 'owner_name' if 'owner_id' is unknown."
 
             obj = OKRObjective(
                 tenant_id=ag.tenant_id,
