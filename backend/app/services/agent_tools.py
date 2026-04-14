@@ -10222,6 +10222,8 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
     try:
         from app.models.agent import Agent as AgentModel
         from app.models.okr import OKRObjective
+        from app.models.user import User as UserModel
+        from app.models.org import OrgMember
         async with async_session() as db:
             ag_res = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             ag = ag_res.scalar_one_or_none()
@@ -10240,17 +10242,16 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
             p_end = date.fromisoformat(period_end)
 
             owner_id_str = arguments.get("owner_id")
+            owner_name_hint = arguments.get("owner_name")  # optional name-based fallback
             owner_id: uuid.UUID | None = None
+
             if owner_id_str:
+                # ── Path 1: UUID provided — validate it actually exists ───────
                 try:
                     owner_id = uuid.UUID(owner_id_str)
                 except ValueError:
                     return f"Invalid owner_id format: '{owner_id_str}'. Must be a valid UUID."
 
-                # Validate that owner_id actually exists in the database so we never
-                # create an OKR with a hallucinated/phantom UUID.
-                from app.models.user import User as UserModel
-                from app.models.org import OrgMember
                 owner_exists = False
                 if owner_type == "agent":
                     res = await db.execute(select(AgentModel.id).where(AgentModel.id == owner_id))
@@ -10259,15 +10260,60 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
                     res = await db.execute(select(UserModel.id).where(UserModel.id == owner_id))
                     owner_exists = res.scalar_one_or_none() is not None
                     if not owner_exists:
-                        # Feishu/channel-only members live in OrgMember, not User
                         res = await db.execute(select(OrgMember.id).where(OrgMember.id == owner_id))
                         owner_exists = res.scalar_one_or_none() is not None
 
                 if not owner_exists:
-                    return (
-                        f"owner_id '{owner_id_str}' was not found in the database for owner_type='{owner_type}'. "
-                        "Please use the exact UUID provided in the task prompt, or omit owner_id to leave the objective unattributed."
+                    # UUID did not resolve — fall through to name-based lookup if available
+                    owner_id = None
+                    if not owner_name_hint:
+                        return (
+                            f"owner_id '{owner_id_str}' was not found for owner_type='{owner_type}'. "
+                            "Provide a valid UUID from the task prompt, or pass owner_name instead."
+                        )
+
+            if not owner_id and owner_name_hint:
+                # ── Path 2: Resolve owner_id from display name ───────────────
+                # Useful for Feishu/channel users who have no platform UUID in context.
+                if owner_type == "agent":
+                    res = await db.execute(
+                        select(AgentModel.id).where(
+                            AgentModel.name == owner_name_hint,
+                            AgentModel.tenant_id == ag.tenant_id,
+                        )
                     )
+                    found = res.scalar_one_or_none()
+                    if found:
+                        owner_id = found
+                    else:
+                        return f"Agent named '{owner_name_hint}' not found. Check the name in the task prompt."
+                elif owner_type == "user":
+                    # Try platform User.display_name first
+                    res = await db.execute(
+                        select(UserModel.id).where(
+                            UserModel.display_name == owner_name_hint,
+                            UserModel.tenant_id == ag.tenant_id,
+                        )
+                    )
+                    found = res.scalar_one_or_none()
+                    if found:
+                        owner_id = found
+                    else:
+                        # Fall back to OrgMember.name (Feishu/channel-only users)
+                        res = await db.execute(
+                            select(OrgMember.id).where(
+                                OrgMember.name == owner_name_hint,
+                                OrgMember.tenant_id == ag.tenant_id,
+                            )
+                        )
+                        found = res.scalar_one_or_none()
+                        if found:
+                            owner_id = found
+                        else:
+                            return (
+                                f"User named '{owner_name_hint}' not found in User or OrgMember tables. "
+                                "Please double-check the member's display name."
+                            )
 
             obj = OKRObjective(
                 tenant_id=ag.tenant_id,
@@ -10281,7 +10327,8 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
             )
             db.add(obj)
             await db.commit()
-            return f"Successfully created Objective '{obj.title}' (ID: {obj.id})"
+            owner_info = f"owner={owner_name_hint or owner_id_str or 'unattributed'}"
+            return f"Successfully created Objective '{obj.title}' (ID: {obj.id}, {owner_info})"
     except Exception as e:
         logger.exception(f"[OKR] create_objective failed")
         return f"Failed to create objective: {str(e)[:200]}"
