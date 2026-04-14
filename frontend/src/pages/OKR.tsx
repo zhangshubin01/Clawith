@@ -535,9 +535,10 @@ function ObjectiveCard({
                 </svg>
 
                 <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
                         {ownerLabel && (
                             <span style={{
+                                marginTop: '2px',
                                 fontSize: '11px', 
                                 color: obj.owner_type === 'agent' ? '#6366f1' : 'var(--text-tertiary)',
                                 background: obj.owner_type === 'agent' ? 'rgba(99, 102, 241, 0.1)' : 'transparent',
@@ -551,7 +552,7 @@ function ObjectiveCard({
                                 {ownerLabel}
                             </span>
                         )}
-                        <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                        <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', lineHeight: 1.4, wordBreak: 'break-word' }}>
                             {obj.title}
                         </span>
                     </div>
