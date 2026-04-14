@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, Component, ErrorInfo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, Component, ErrorInfo } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
@@ -18,6 +18,7 @@ import { useAuthStore } from '../stores';
 import { copyToClipboard } from '../utils/clipboard';
 import { formatFileSize } from '../utils/formatFileSize';
 import { IconPaperclip, IconSend } from '@tabler/icons-react';
+import { useDropZone } from '../hooks/useDropZone';
 
 const TABS = ['status', 'aware', 'mind', 'tools', 'skills', 'relationships', 'workspace', 'chat', 'activityLog', 'approvals', 'settings'] as const;
 
@@ -1514,10 +1515,14 @@ function AgentDetailInner() {
 
     const isViewingOtherUsersSessions = canViewAllAgentChatSessions && chatScope === 'all';
 
-    /** Sessions in scope=all that are not the current viewer's own P2P rows (for admin「其他用户」tab). */
+    /** Sessions in scope=all that are not the current viewer's own P2P rows (for admin「其他用户」tab).
+     *  Agent-to-agent sessions (source_channel === 'agent') store the creator's user_id, so we must
+     *  exempt them from the user_id check — otherwise they'd always be hidden. */
     const otherUsersSessions = useMemo(() => {
         const vu = viewerUserIdStr();
         return allSessions.filter((s: any) => {
+            // Always show agent-to-agent sessions in the "Other users" tab
+            if (String(s.source_channel || '').toLowerCase() === 'agent') return true;
             const su = sessionUserIdStr(s);
             if (vu && su === vu) return false;
             return true;
@@ -2162,6 +2167,24 @@ function AgentDetailInner() {
         const resolvedAvatarText = avatarText || (resolvedSenderLabel ? resolvedSenderLabel[0] : (isLeft ? 'A' : 'U'));
         const showSenderLabel = !!resolvedSenderLabel && (forceSenderLabel || !!msg.sender_name);
 
+        // Parse [image_data:data:image/...;base64,...] markers from user message content.
+        // The backend persists these markers in the DB to preserve multimodal context
+        // across turns. They must ALWAYS be stripped from displayContent so users never
+        // see raw base64 strings in the chat bubble.
+        // Guard: only collect extracted images for thumbnail rendering when msg.imageUrl
+        // is NOT already set — otherwise the image is already shown via the isImage path
+        // and rendering again from the marker would display it twice.
+        const IMAGE_DATA_RE = /\[image_data:(data:image\/[^;]+;base64,[^\]]+)\]/g;
+        const inlineImages: string[] = [];
+        let displayContent = msg.content || '';
+        if (displayContent.includes('[image_data:')) {
+            displayContent = displayContent.replace(IMAGE_DATA_RE, (_: string, dataUrl: string) => {
+                // Only collect for thumbnail rendering if not already shown via imageUrl
+                if (!msg.imageUrl) inlineImages.push(dataUrl);
+                return ''; // always strip the marker from displayed text
+            }).trim();
+        }
+
         const timestampHtml = msg.timestamp ? (() => {
             const d = new Date(msg.timestamp);
             const now = new Date();
@@ -2194,9 +2217,23 @@ function AgentDetailInner() {
                             <span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span>
                         </div>
                     ))}
+                    {/* Render images extracted from [image_data:] markers (multimodal context) */}
+                    {inlineImages.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: displayContent ? '6px' : '0' }}>
+                            {inlineImages.map((url, idx) => (
+                                <img
+                                    key={idx}
+                                    src={url}
+                                    alt="attached image"
+                                    style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)', objectFit: 'cover' }}
+                                    loading="lazy"
+                                />
+                            ))}
+                        </div>
+                    )}
                     {msg.thinking && (
                         <details style={{ marginBottom: '8px', fontSize: '12px', background: 'rgba(147, 130, 220, 0.08)', borderRadius: '6px', border: '1px solid rgba(147, 130, 220, 0.15)' }}>
-                            <summary style={{ padding: '6px 10px', cursor: 'pointer', color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500, userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}>💭 Thinking</summary>
+                            <summary style={{ padding: '6px 10px', cursor: 'pointer', color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500, userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}>Thinking</summary>
                             <div style={{ padding: '4px 10px 8px', fontSize: '12px', lineHeight: '1.6', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '300px', overflow: 'auto' }}>{msg.thinking}</div>
                         </details>
                     )}
@@ -2206,8 +2243,8 @@ function AgentDetailInner() {
                                 <div className="thinking-dots"><span /><span /><span /></div>
                                 <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
                             </div>
-                        ) : <MarkdownRenderer content={msg.content} />
-                    ) : <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>}
+                        ) : <MarkdownRenderer content={displayContent} />
+                    ) : <div style={{ whiteSpace: 'pre-wrap' }}>{displayContent}</div>}
                     {timestampHtml}
                 </div>
             </div>
@@ -2442,6 +2479,44 @@ function AgentDetailInner() {
 
         await Promise.all(allowedFiles.map((file, i) => runOne(file, newDrafts[i])));
     };
+
+    // ── Drag-and-drop chat file upload ──
+    const handleDroppedChatFiles = useCallback(async (files: File[]) => {
+        if (!wsConnected || chatUploadDrafts.length > 0 || isWaiting || isStreaming || attachedFiles.length >= 10) return;
+        const availableSlots = Math.max(0, 10 - attachedFiles.length);
+        const filesToProcess = files.slice(0, availableSlots);
+
+        for (const file of filesToProcess) {
+            const draftId = Math.random().toString(36).slice(2, 9);
+            const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
+            setChatUploadDrafts(prev => [...prev, { id: draftId, name: file.name, percent: 0, previewUrl, sizeBytes: file.size }]);
+
+            try {
+                const { promise } = uploadFileWithProgress(
+                    '/chat/upload',
+                    file,
+                    (pct) => {
+                        setChatUploadDrafts(prev => prev.map(d => d.id === draftId ? { ...d, percent: pct >= 101 ? 100 : pct } : d));
+                    },
+                    id ? { agent_id: id } : undefined,
+                );
+                const data = await promise;
+                setAttachedFiles(prev => [...prev, { name: data.filename, text: data.extracted_text, path: data.workspace_path, imageUrl: data.image_data_url || undefined }]);
+            } catch (err: any) {
+                if (err?.message !== 'Upload cancelled') {
+                    alert(err?.message || t('agent.upload.failed'));
+                }
+            } finally {
+                if (previewUrl) URL.revokeObjectURL(previewUrl);
+                setChatUploadDrafts(prev => prev.filter(d => d.id !== draftId));
+            }
+        }
+    }, [id, wsConnected, chatUploadDrafts.length, isWaiting, isStreaming, attachedFiles.length, isWritableSession, t]);
+
+    const { isDragging: isChatDragging, dropZoneProps: chatDropProps } = useDropZone({
+        onDrop: handleDroppedChatFiles,
+        disabled: !wsConnected || chatUploadDrafts.length > 0 || isWaiting || isStreaming || attachedFiles.length >= 10 || !activeSession || !isWritableSession(activeSession),
+    });
 
     // Expandable activity log
     const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
@@ -4051,55 +4126,29 @@ function AgentDetailInner() {
                                         )}
                                     </div>
                                     {!canViewAllAgentChatSessions && (
-                                        <div style={{ padding: '0 12px 10px' }}>
+                                        <div style={{ padding: '0 12px 8px' }}>
                                             <button
                                                 type="button"
                                                 onClick={createNewSession}
-                                                style={{
-                                                    width: '100%',
-                                                    height: '28px',
-                                                    padding: '0 10px',
-                                                    background: 'none',
-                                                    border: '1px solid var(--border-subtle)',
-                                                    borderRadius: '6px',
-                                                    cursor: 'pointer',
-                                                    fontSize: '12px',
-                                                    color: 'var(--text-secondary)',
-                                                    textAlign: 'left',
-                                                    display: 'flex',
-                                                    alignItems: 'center',
-                                                    gap: '6px',
-                                                    transition: 'all 0.15s ease',
-                                                    boxSizing: 'border-box',
-                                                }}
-                                                onMouseEnter={(e) => {
-                                                    e.currentTarget.style.background = 'var(--bg-secondary)';
-                                                    e.currentTarget.style.color = 'var(--text-primary)';
-                                                    e.currentTarget.style.borderColor = 'var(--accent-primary)';
-                                                }}
-                                                onMouseLeave={(e) => {
-                                                    e.currentTarget.style.background = 'none';
-                                                    e.currentTarget.style.color = 'var(--text-secondary)';
-                                                    e.currentTarget.style.borderColor = 'var(--border-subtle)';
-                                                }}
+                                                className="new-session-btn"
                                             >
-                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ display: 'block', flexShrink: 0 }}>
                                                     <line x1="12" y1="5" x2="12" y2="19" />
                                                     <line x1="5" y1="12" x2="19" y2="12" />
                                                 </svg>
-                                                {t('agent.chat.newSession')}
+                                                <span>{t('agent.chat.newSession')}</span>
                                             </button>
                                         </div>
                                     )}
                                 </div>
 
                                 {canViewAllAgentChatSessions && (
-                                    <div className="tabs session-sidebar-session-tabs" role="tablist">
+                                    <div className="session-sidebar-segment-control" role="tablist">
                                         <div
                                             role="tab"
                                             tabIndex={0}
                                             aria-selected={chatScope === 'mine'}
-                                            className={`tab ${chatScope === 'mine' ? 'active' : ''}`}
+                                            className={`segment-item ${chatScope === 'mine' ? 'active' : ''}`}
                                             onClick={onAdminTabMine}
                                             onKeyDown={(e) => {
                                                 if (e.key === 'Enter' || e.key === ' ') {
@@ -4114,7 +4163,7 @@ function AgentDetailInner() {
                                             role="tab"
                                             tabIndex={0}
                                             aria-selected={chatScope === 'all'}
-                                            className={`tab ${chatScope === 'all' ? 'active' : ''}`}
+                                            className={`segment-item ${chatScope === 'all' ? 'active' : ''}`}
                                             onClick={onAdminTabOthers}
                                             onKeyDown={(e) => {
                                                 if (e.key === 'Enter' || e.key === ' ') {
@@ -4136,40 +4185,13 @@ function AgentDetailInner() {
                                                     <button
                                                         type="button"
                                                         onClick={createNewSession}
-                                                        style={{
-                                                            width: '100%',
-                                                            height: '28px',
-                                                            padding: '0 10px',
-                                                            background: 'none',
-                                                            border: '1px solid var(--border-subtle)',
-                                                            borderRadius: '6px',
-                                                            cursor: 'pointer',
-                                                            fontSize: '12px',
-                                                            color: 'var(--text-secondary)',
-                                                            textAlign: 'center',
-                                                            display: 'flex',
-                                                            alignItems: 'center',
-                                                            justifyContent: 'center',
-                                                            gap: '6px',
-                                                            transition: 'all 0.15s ease',
-                                                            boxSizing: 'border-box',
-                                                        }}
-                                                        onMouseEnter={(e) => {
-                                                            e.currentTarget.style.background = 'var(--bg-secondary)';
-                                                            e.currentTarget.style.color = 'var(--text-primary)';
-                                                            e.currentTarget.style.borderColor = 'var(--accent-primary)';
-                                                        }}
-                                                        onMouseLeave={(e) => {
-                                                            e.currentTarget.style.background = 'none';
-                                                            e.currentTarget.style.color = 'var(--text-secondary)';
-                                                            e.currentTarget.style.borderColor = 'var(--border-subtle)';
-                                                        }}
+                                                        className="new-session-btn"
                                                     >
-                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ display: 'block', flexShrink: 0 }}>
                                                             <line x1="12" y1="5" x2="12" y2="19" />
                                                             <line x1="5" y1="12" x2="19" y2="12" />
                                                         </svg>
-                                                        {t('agent.chat.newSession')}
+                                                        <span>{t('agent.chat.newSession')}</span>
                                                     </button>
                                                 </div>
                                             )}
@@ -4191,24 +4213,25 @@ function AgentDetailInner() {
                                                     return (
                                                         <div key={s.id} onClick={() => { setChatScope('mine'); selectSession(s, 'mine'); }}
                                                             className="session-item"
-                                                            style={{ padding: '8px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent', marginBottom: '1px', position: 'relative' }}
-                                                            onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; const btn = e.currentTarget.querySelector('.del-btn') as HTMLElement; if (btn) btn.style.opacity = '0.5'; }}
-                                                            onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; const btn = e.currentTarget.querySelector('.del-btn') as HTMLElement; if (btn) btn.style.opacity = '0'; }}>
-                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' }}>
-                                                                <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.title}</div>
-                                                                {chLabel && <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>{chLabel}</span>}
+                                                            style={{ padding: '8px 12px', cursor: 'pointer', borderLeft: isActive ? '2px solid var(--accent-primary)' : '2px solid transparent', background: isActive ? 'var(--bg-secondary)' : 'transparent', marginBottom: '1px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                                                            onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = 'var(--bg-secondary)'; }}
+                                                            onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
+                                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' }}>
+                                                                    <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>{s.title}</div>
+                                                                    {chLabel && <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>{chLabel}</span>}
+                                                                </div>
+                                                                <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                    {s.last_message_at
+                                                                        ? new Date(s.last_message_at).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                                                        : new Date(s.created_at).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { month: 'short', day: 'numeric' })}
+                                                                    {s.message_count > 0 && <span className="session-msg-count" style={{ marginLeft: 'auto' }}>{s.message_count}</span>}
+                                                                </div>
                                                             </div>
-                                                            <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                {s.last_message_at
-                                                                    ? new Date(s.last_message_at).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-                                                                    : new Date(s.created_at).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { month: 'short', day: 'numeric' })}
-                                                                {s.message_count > 0 && <span style={{ marginLeft: 'auto' }}>{s.message_count}</span>}
-                                                            </div>
-                                                            <button className="del-btn" onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
-                                                                style={{ position: 'absolute', top: '4px', right: '4px', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', opacity: 0, fontSize: '14px', color: 'var(--text-tertiary)', lineHeight: 1, transition: 'opacity 0.15s' }}
-                                                                onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = 'var(--status-error)'; }}
-                                                                onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; e.currentTarget.style.color = 'var(--text-tertiary)'; }}
-                                                                title={t('chat.deleteSession', 'Delete session')}>×</button>
+                                                            <button className="session-del-btn" onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                                                                title={t('chat.deleteSession', 'Delete session')}>
+                                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
+                                                            </button>
                                                         </div>
                                                     );
                                                 })}
@@ -4220,7 +4243,7 @@ function AgentDetailInner() {
                                                 <select
                                                     value={allUserFilter}
                                                     onChange={(e) => setAllUserFilter(e.target.value)}
-                                                    style={{ width: '100%', height: '28px', padding: '0 8px', fontSize: '12px', background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', color: 'var(--text-primary)', cursor: 'pointer' }}
+                                                    style={{ width: '100%', height: '28px', fontSize: '12px', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', color: 'var(--text-primary)' }}
                                                 >
                                                     <option value="">{t('agent.chat.allUsers')}</option>
                                                     {otherUserPickerOptions.map(([uid, label]) => (
@@ -4393,7 +4416,14 @@ function AgentDetailInner() {
                                     </>
                                 ) : (
                                     /* ── Live WebSocket chat (own session) ── */
-                                    <>
+                                    <div {...chatDropProps} style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', minHeight: 0, overflow: 'hidden' }}>
+                                        {/* Drop overlay */}
+                                        {isChatDragging && (
+                                            <div className="drop-zone-overlay">
+                                                <div className="drop-zone-overlay__icon">📎</div>
+                                                <div className="drop-zone-overlay__text">{t('agent.upload.dropToAttach', 'Drop files to attach (max 10)')}</div>
+                                            </div>
+                                        )}
                                         <div ref={chatContainerRef} onScroll={handleChatScroll} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
                                             {chatMessages.length === 0 && (
                                                 <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-tertiary)' }}>
@@ -4691,7 +4721,7 @@ function AgentDetailInner() {
                                             </div>
                                         </div>
                                         </div>
-                                    </>
+                                    </div>
                                 )}
                                 </div>
                                 {/* Live Panel */}

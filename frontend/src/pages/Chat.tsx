@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 import MarkdownRenderer from '../components/MarkdownRenderer';
@@ -8,6 +8,7 @@ import { agentApi, enterpriseApi, uploadFileWithProgress } from '../services/api
 import { IconPaperclip, IconSend } from '@tabler/icons-react';
 import { formatFileSize } from '../utils/formatFileSize';
 import { useAuthStore } from '../stores';
+import { useDropZone } from '../hooks/useDropZone';
 
 /* ── Inline SVG Icons ── */
 const Icons = {
@@ -305,23 +306,52 @@ export default function Chat() {
 
     const parseMessage = (msg: Message): Message => {
         if (msg.role !== 'user') return msg;
+
+        let result = { ...msg };
+
+        // ── Step 1: strip prefix markers to extract fileName ─────────────────
         // Standard web chat format: [file:name.pdf]\ncontent
-        const newFmt = msg.content.match(/^\[file:([^\]]+)\]\n?/);
-        if (newFmt) return { ...msg, fileName: newFmt[1], content: msg.content.slice(newFmt[0].length).trim() };
-        // Feishu/Slack channel format: [\u6587\u4ef6\u5df2\u4e0a\u4f20: workspace/uploads/name]
-        const chanFmt = msg.content.match(/^\[\u6587\u4ef6\u5df2\u4e0a\u4f20: (?:workspace\/uploads\/)?([^\]\n]+)\]/);
-        if (chanFmt) {
-            const raw = chanFmt[1]; const fileName = raw.split('/').pop() || raw;
-            return { ...msg, fileName, content: msg.content.slice(chanFmt[0].length).trim() };
+        const newFmt = result.content.match(/^\[file:([^\]]+)\]\n?/);
+        if (newFmt) {
+            result = { ...result, fileName: newFmt[1], content: result.content.slice(newFmt[0].length).trim() };
+        } else {
+            // Feishu/Slack channel format: [\u6587\u4ef6\u5df2\u4e0a\u4f20: workspace/uploads/name]
+            const chanFmt = result.content.match(/^\[\u6587\u4ef6\u5df2\u4e0a\u4f20: (?:workspace\/uploads\/)?([^\]\n]+)\]/);
+            if (chanFmt) {
+                const raw = chanFmt[1]; const fileName = raw.split('/').pop() || raw;
+                result = { ...result, fileName, content: result.content.slice(chanFmt[0].length).trim() };
+            } else {
+                // Old format: [File: name.pdf]\nFile location:...\nQuestion: user_msg
+                const oldFmt = result.content.match(/^\[File: ([^\]]+)\]/);
+                if (oldFmt) {
+                    const fileName = oldFmt[1];
+                    const qMatch = result.content.match(/\nQuestion: ([\s\S]+)$/);
+                    result = { ...result, fileName, content: qMatch ? qMatch[1].trim() : '' };
+                }
+            }
         }
-        // Old format: [File: name.pdf]\nFile location:...\nQuestion: user_msg
-        const oldFmt = msg.content.match(/^\[File: ([^\]]+)\]/);
-        if (oldFmt) {
-            const fileName = oldFmt[1];
-            const qMatch = msg.content.match(/\nQuestion: ([\s\S]+)$/);
-            return { ...msg, fileName, content: qMatch ? qMatch[1].trim() : '' };
+
+        // ── Step 2: strip [image_data:...] markers ───────────────────────────
+        // When a history message was saved with an inline base64 image marker
+        // (e.g. [image_data:data:image/jpeg;base64,xxx]), we must:
+        //   a) extract the data URL and use it as imageUrl for the thumbnail
+        //   b) remove the raw marker from the displayed content so base64 is
+        //      never rendered as text (also prevents layout/scroll breakage)
+        const imgDataPattern = /\[image_data:(data:image\/[^;]+;base64,[A-Za-z0-9+/=]+)\]/;
+        const imgMatch = result.content.match(imgDataPattern);
+        if (imgMatch) {
+            result = {
+                ...result,
+                // Prefer existing imageUrl (set by the live upload flow); fall back
+                // to the extracted data URL so the thumbnail shows in history.
+                imageUrl: result.imageUrl || imgMatch[1],
+                content: result.content
+                    .replace(/\[image_data:data:image\/[^;]+;base64,[A-Za-z0-9+/=]+\]\n?/g, '')
+                    .trim(),
+            };
         }
-        return msg;
+
+        return result;
     };
 
     // Load chat history on mount
@@ -692,8 +722,49 @@ export default function Chat() {
 
     const hasLiveData = !!(liveState.desktop || liveState.browser || liveState.code);
 
+    // ── Drag-and-drop file upload ──
+    const handleDroppedFiles = useCallback(async (files: File[]) => {
+        const file = files[0]; // Chat supports single file
+        if (!file) return;
+
+        const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
+        setUploadProgress({ name: file.name, percent: 0, previewUrl, sizeBytes: file.size });
+
+        try {
+            const { promise } = uploadFileWithProgress(
+                '/chat/upload',
+                file,
+                (pct) => {
+                    setUploadProgress((prev) =>
+                        prev ? { ...prev, percent: pct >= 101 ? 100 : pct } : null,
+                    );
+                },
+                id ? { agent_id: id } : undefined,
+            );
+            const data = await promise;
+            setAttachedFile({
+                name: data.filename,
+                text: data.extracted_text,
+                path: data.workspace_path,
+                imageUrl: data.image_data_url || undefined,
+            });
+        } catch (err: any) {
+            if (err?.message !== 'Upload cancelled') {
+                alert(t('agent.upload.failed') + (err?.message ? `: ${err.message}` : ''));
+            }
+        } finally {
+            if (previewUrl) URL.revokeObjectURL(previewUrl);
+            setUploadProgress(null);
+        }
+    }, [id, t]);
+
+    const { isDragging: isChatDragging, dropZoneProps: chatDropProps } = useDropZone({
+        onDrop: handleDroppedFiles,
+        disabled: !connected || !!uploadProgress || isWaiting || streaming,
+    });
+
     return (
-        <div>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
             <div className="page-header">
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <div style={{ width: '36px', height: '36px', borderRadius: 'var(--radius-md)', background: 'var(--bg-tertiary)', border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)' }}>
@@ -709,7 +780,14 @@ export default function Chat() {
                 </div>
             </div>
 
-            <div className={`chat-container ${hasLiveData ? 'chat-with-live-panel' : ''}`}>
+            <div className={`chat-container ${hasLiveData ? 'chat-with-live-panel' : ''}`} {...chatDropProps} style={{ position: 'relative' }}>
+                {/* Drop overlay */}
+                {isChatDragging && (
+                    <div className="drop-zone-overlay">
+                        <div className="drop-zone-overlay__icon">📎</div>
+                        <div className="drop-zone-overlay__text">{t('agent.upload.dropToAttach', 'Drop file to attach')}</div>
+                    </div>
+                )}
                 {/* Wrap chat area in a column so it coexists with the live panel in flex-row */}
                 <div className="chat-main">
                 <div className="chat-messages">
