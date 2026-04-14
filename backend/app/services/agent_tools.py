@@ -10246,74 +10246,51 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
             owner_id: uuid.UUID | None = None
 
             if owner_id_str:
-                # ── Path 1: UUID provided — validate it actually exists ───────
                 try:
                     owner_id = uuid.UUID(owner_id_str)
                 except ValueError:
-                    return f"Invalid owner_id format: '{owner_id_str}'. Must be a valid UUID."
-
-                owner_exists = False
-                if owner_type == "agent":
-                    res = await db.execute(select(AgentModel.id).where(AgentModel.id == owner_id))
-                    owner_exists = res.scalar_one_or_none() is not None
-                elif owner_type == "user":
-                    res = await db.execute(select(UserModel.id).where(UserModel.id == owner_id))
-                    owner_exists = res.scalar_one_or_none() is not None
-                    if not owner_exists:
-                        res = await db.execute(select(OrgMember.id).where(OrgMember.id == owner_id))
-                        owner_exists = res.scalar_one_or_none() is not None
-
-                if not owner_exists:
-                    # UUID did not resolve — fall through to name-based lookup if available
                     owner_id = None
-                    if not owner_name_hint:
-                        return (
-                            f"owner_id '{owner_id_str}' was not found for owner_type='{owner_type}'. "
-                            "Provide a valid UUID from the task prompt, or pass owner_name instead."
-                        )
 
-            if not owner_id and owner_name_hint:
-                # ── Path 2: Resolve owner_id from display name ───────────────
-                # Useful for Feishu/channel users who have no platform UUID in context.
+                if owner_id:
+                    owner_exists = False
+                    if owner_type == "agent":
+                        res = await db.execute(select(AgentModel.id).where(AgentModel.id == owner_id))
+                        owner_exists = res.scalar_one_or_none() is not None
+                    elif owner_type == "user":
+                        from app.models.user import User as UserModel
+                        from app.models.org import OrgMember
+                        res = await db.execute(select(UserModel.id).where(UserModel.id == owner_id))
+                        owner_exists = res.scalar_one_or_none() is not None
+                        if not owner_exists:
+                            res = await db.execute(select(OrgMember.id).where(OrgMember.id == owner_id))
+                            owner_exists = res.scalar_one_or_none() is not None
+
+                    if not owner_exists:
+                        owner_id = None
+                        if not owner_name_hint:
+                            return f"owner_id '{owner_id_str}' was not found. Provide a valid UUID, or pass owner_name instead."
+
+            if owner_type != "company" and not owner_id and owner_name_hint:
+                # If we don't have a valid UUID but we have a name, look it up
                 if owner_type == "agent":
-                    res = await db.execute(
-                        select(AgentModel.id).where(
-                            AgentModel.name == owner_name_hint,
-                            AgentModel.tenant_id == ag.tenant_id,
-                        )
-                    )
-                    found = res.scalar_one_or_none()
-                    if found:
-                        owner_id = found
-                    else:
-                        return f"Agent named '{owner_name_hint}' not found. Check the name in the task prompt."
+                    res = await db.execute(select(AgentModel.id).where(AgentModel.tenant_id == ag.tenant_id, AgentModel.name == owner_name_hint))
+                    owner_id = res.scalar_one_or_none()
                 elif owner_type == "user":
+                    from app.models.org import OrgMember
+                    from app.models.user import User as UserModel
                     # Try platform User.display_name first
-                    res = await db.execute(
-                        select(UserModel.id).where(
-                            UserModel.display_name == owner_name_hint,
-                            UserModel.tenant_id == ag.tenant_id,
-                        )
-                    )
-                    found = res.scalar_one_or_none()
-                    if found:
-                        owner_id = found
-                    else:
+                    res = await db.execute(select(UserModel.id).where(UserModel.display_name == owner_name_hint, UserModel.tenant_id == ag.tenant_id))
+                    owner_id = res.scalar_one_or_none()
+                    if not owner_id:
                         # Fall back to OrgMember.name (Feishu/channel-only users)
-                        res = await db.execute(
-                            select(OrgMember.id).where(
-                                OrgMember.name == owner_name_hint,
-                                OrgMember.tenant_id == ag.tenant_id,
-                            )
-                        )
-                        found = res.scalar_one_or_none()
-                        if found:
-                            owner_id = found
-                        else:
-                            return (
-                                f"User named '{owner_name_hint}' not found in User or OrgMember tables. "
-                                "Please double-check the member's display name."
-                            )
+                        res = await db.execute(select(OrgMember.id).where(OrgMember.name == owner_name_hint, OrgMember.tenant_id == ag.tenant_id))
+                        owner_id = res.scalar_one_or_none()
+
+                if not owner_id:
+                    return f"Failed: Could not resolve a valid system UUID for the {owner_type} named '{owner_name_hint}'."
+
+            if owner_type != "company" and not owner_id:
+               return f"Failed: owner_id or owner_name is required for {owner_type} OKRs."
 
             obj = OKRObjective(
                 tenant_id=ag.tenant_id,
