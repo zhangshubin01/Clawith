@@ -298,8 +298,30 @@ class ChannelUserService:
         else:
             username = f"{channel_type}_{external_user_id[:12]}"
 
-        # Ensure unique username within tenant
+        # Before creating a brand-new user, check whether an existing user with an
+        # identity username that starts with this base username already exists.
+        # This prevents duplicate accounts when the username-collision suffix logic
+        # would generate a new variant (e.g. feishu_b4994ca3_60fc5a) for the same
+        # real person who was first registered as feishu_b4994ca3.
         from app.models.user import User, Identity
+        base_username_prefix = username  # e.g. "feishu_b4994ca3"
+        existing_query = (
+            select(User)
+            .join(User.identity)
+            .where(Identity.username.like(f"{base_username_prefix}%"))
+        )
+        if tenant_id:
+            existing_query = existing_query.where(User.tenant_id == tenant_id)
+        existing_result = await db.execute(existing_query.limit(1))
+        existing_user = existing_result.scalar_one_or_none()
+        if existing_user:
+            logger.info(
+                f"[{channel_type}] Found existing user by username prefix '{base_username_prefix}': "
+                f"{existing_user.id} — skipping new user creation"
+            )
+            return existing_user
+
+        # Ensure unique username within tenant (fallback dedup)
         query = (
             select(User)
             .join(User.identity)
