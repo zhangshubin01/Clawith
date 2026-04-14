@@ -946,6 +946,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                     llm_user_text,
                     history=history,
                     user_id=platform_user_id,
+                    session_id=conv_id,
                     on_chunk=_ws_on_chunk,
                     on_thinking=_ws_on_thinking,
                     on_tool_call=_ws_on_tool_call,
@@ -1347,7 +1348,7 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
             try:
                 reply_text = await _call_agent_llm(
                     _db_img, agent_id, user_msg_content, history=_history,
-                    user_id=platform_user_id, on_chunk=_img_on_chunk,
+                    user_id=platform_user_id, session_id=session_conv_id, on_chunk=_img_on_chunk,
                 )
             finally:
                 _img_llm_done = True
@@ -1447,6 +1448,7 @@ async def _call_agent_llm(
     user_text: str,
     history: list[dict] | None = None,
     user_id=None,
+    session_id: str = "",
     on_chunk=None,
     on_thinking=None,
     on_tool_call=None,
@@ -1458,7 +1460,7 @@ async def _call_agent_llm(
     """
     from app.models.agent import Agent
     from app.models.llm import LLMModel
-    from app.api.websocket import call_llm
+    from app.services.llm import call_llm
 
     # Load agent and model
     agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
@@ -1519,6 +1521,7 @@ async def _call_agent_llm(
                 agent.role_description or "",
                 agent_id=agent_id,
                 user_id=effective_user_id,
+                session_id=session_id,
                 supports_vision=getattr(model, 'supports_vision', False),
                 on_chunk=on_chunk,
                 on_thinking=on_thinking,
@@ -1545,6 +1548,7 @@ async def _call_agent_llm(
                         agent.role_description or "",
                         agent_id=agent_id,
                         user_id=effective_user_id,
+                        session_id=session_id,
                         supports_vision=getattr(fallback_model, 'supports_vision', False),
                         on_chunk=on_chunk,
                         on_thinking=on_thinking,
@@ -1582,6 +1586,7 @@ async def _call_agent_llm(
                         agent.role_description or "",
                         agent_id=agent_id,
                         user_id=effective_user_id,
+                        session_id=session_id,
                         supports_vision=getattr(fallback_model, 'supports_vision', False),
                         on_chunk=on_chunk,
                         on_thinking=on_thinking,
