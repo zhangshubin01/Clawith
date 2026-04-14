@@ -1349,7 +1349,11 @@ BUILTIN_TOOLS = [
                 },
                 "owner_id": {
                     "type": "string",
-                    "description": "UUID of the owner (user or agent). Omit for company-level objectives.",
+                    "description": "UUID of the owner. Try to use this if available in context.",
+                },
+                "owner_name": {
+                    "type": "string",
+                    "description": "Optional fallback: the exact display name of the human/agent. Use this ONLY if you don't have their UUID.",
                 },
                 "period_start": {
                     "type": "string",
