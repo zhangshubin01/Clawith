@@ -1149,7 +1149,7 @@ function MembersWithoutOKRPanel({
         }
     }
 
-    const { members_without_okr: members, company_okr_exists } = data;
+    const { members_without_okr: members, company_okr_exists, okr_agent_id } = data;
 
     return (
         <section style={{ marginTop: '32px' }}>
@@ -1175,16 +1175,24 @@ function MembersWithoutOKRPanel({
                     <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
                         {company_okr_exists
                             ? (isChinese
-                                ? 'OKR Agent 将向以上成员发送消息，邀请他们设定个人 OKR。'
-                                : 'OKR Agent will message each member above and invite them to set their OKRs.')
+                                ? 'OKR Agent 将向以上成员发送消息，邀请他们设定个人 OKR。发送后可在 OKR Agent 的会话列表里查看具体对话记录。'
+                                : 'OKR Agent will message each member above. You can review the conversations in the OKR Agent\'s chat history.')
                             : (isChinese
                                 ? '请先与 OKR Agent 确认公司 OKR，再催促成员。'
                                 : 'Please set company OKRs with the OKR Agent before nudging members.')
                         }
                     </div>
                     {nudgeResult && (
-                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                            {nudgeResult}
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span>{nudgeResult}</span>
+                            {okr_agent_id && (
+                                <a
+                                    href={`/agents/${okr_agent_id}`}
+                                    style={{ fontSize: '11px', color: 'var(--accent-primary)', textDecoration: 'none', whiteSpace: 'nowrap' }}
+                                >
+                                    {isChinese ? '查看会话 →' : 'View chat →'}
+                                </a>
+                            )}
                         </div>
                     )}
                 </div>

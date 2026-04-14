@@ -1107,7 +1107,7 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         )
         covered_ids: set[uuid.UUID] = {row[0] for row in existing_result.fetchall()}
 
-        # ── Fetch company OKRs for this period to share as context ────────────
+        # ── Fetch company OKRs + KRs for this period to share as context ─────
         company_okr_result = await db.execute(
             select(OKRObjective).where(
                 OKRObjective.tenant_id == user.tenant_id,
@@ -1118,6 +1118,16 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
             ).order_by(OKRObjective.created_at)
         )
         company_okrs = company_okr_result.scalars().all()
+
+        # Fetch KRs for each company OKR
+        company_okr_krs: dict[uuid.UUID, list] = {}
+        for co in company_okrs:
+            kr_result = await db.execute(
+                select(OKRKeyResult)
+                .where(OKRKeyResult.objective_id == co.id)
+                .order_by(OKRKeyResult.created_at)
+            )
+            company_okr_krs[co.id] = kr_result.scalars().all()
 
         # ── Fetch tracked human members from AgentRelationship ────────────────
         rel_result = await db.execute(
@@ -1287,13 +1297,17 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
     period_label = f"{ps.strftime('%Y-%m-%d')} to {pe.strftime('%Y-%m-%d')}"
     members_block = "\n\n".join(members_to_contact)
 
-    # Build company OKR context summary
+    # Build company OKR + KR context summary
     if company_okrs:
         company_okr_lines = []
         for i, co in enumerate(company_okrs, 1):
-            company_okr_lines.append(f"  {i}. {co.title}")
+            company_okr_lines.append(f"  {i}. **{co.title}**")
             if co.description:
                 company_okr_lines.append(f"     说明: {co.description[:120]}")
+            krs = company_okr_krs.get(co.id, [])
+            for j, kr in enumerate(krs, 1):
+                target_str = f"（目标值: {kr.target_value} {kr.unit or ''}）" if kr.target_value else ""
+                company_okr_lines.append(f"     KR{j}: {kr.title}{target_str}")
         company_okrs_block = "\n".join(company_okr_lines)
     else:
         company_okrs_block = "  (No company OKRs set yet for this period)"
@@ -1330,9 +1344,7 @@ Contact the {len(members_to_contact)} member(s) below who have NOT set their OKR
 ━━━ STEP-BY-STEP ━━━
 1. Process each member in order, following per-member instructions.
 2. If a send or create fails: log the failure and continue.
-3. After ALL members: report to admin via
-   send_web_message(username="{admin_username}", message="Nudge complete: X sent, Y failed. [details]")
-4. STOP completely — do not respond to any further messages.
+3. STOP completely after processing all members — do not respond further.
 
 ━━━ MEMBERS TO CONTACT ({len(members_to_contact)} total) ━━━
 
@@ -1357,7 +1369,7 @@ Contact the {len(members_to_contact)} member(s) below who have NOT set their OKR
         "status": "accepted",
         "message": (
             f"OKR Agent outreach task triggered for {len(members_to_contact)} member(s). "
-            "The agent will contact them asynchronously and report back to you."
+            "You can check the conversation details in the OKR Agent's chat history."
         ),
         "okr_agent_id": str(okr_agent.id),
         "members_count": len(members_to_contact),
