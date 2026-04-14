@@ -10227,7 +10227,7 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
             ag = ag_res.scalar_one_or_none()
             if not ag:
                 return "Agent not found."
-            
+
             title = arguments.get("title")
             owner_type = arguments.get("owner_type")
             period_start = arguments.get("period_start")
@@ -10240,7 +10240,34 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
             p_end = date.fromisoformat(period_end)
 
             owner_id_str = arguments.get("owner_id")
-            owner_id = uuid.UUID(owner_id_str) if owner_id_str else None
+            owner_id: uuid.UUID | None = None
+            if owner_id_str:
+                try:
+                    owner_id = uuid.UUID(owner_id_str)
+                except ValueError:
+                    return f"Invalid owner_id format: '{owner_id_str}'. Must be a valid UUID."
+
+                # Validate that owner_id actually exists in the database so we never
+                # create an OKR with a hallucinated/phantom UUID.
+                from app.models.user import User as UserModel
+                from app.models.org import OrgMember
+                owner_exists = False
+                if owner_type == "agent":
+                    res = await db.execute(select(AgentModel.id).where(AgentModel.id == owner_id))
+                    owner_exists = res.scalar_one_or_none() is not None
+                elif owner_type == "user":
+                    res = await db.execute(select(UserModel.id).where(UserModel.id == owner_id))
+                    owner_exists = res.scalar_one_or_none() is not None
+                    if not owner_exists:
+                        # Feishu/channel-only members live in OrgMember, not User
+                        res = await db.execute(select(OrgMember.id).where(OrgMember.id == owner_id))
+                        owner_exists = res.scalar_one_or_none() is not None
+
+                if not owner_exists:
+                    return (
+                        f"owner_id '{owner_id_str}' was not found in the database for owner_type='{owner_type}'. "
+                        "Please use the exact UUID provided in the task prompt, or omit owner_id to leave the objective unattributed."
+                    )
 
             obj = OKRObjective(
                 tenant_id=ag.tenant_id,

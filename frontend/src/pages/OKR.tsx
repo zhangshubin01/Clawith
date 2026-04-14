@@ -879,9 +879,12 @@ export default function OKR() {
     for (const obj of memberObjs) {
         const key = `${obj.owner_type}:${obj.owner_id ?? ''}`;
         if (!memberGroups[key]) {
-            // Prefer resolved name; fall back to owner_id short form
-            const label = obj.owner_name
-                || (obj.owner_id ? obj.owner_id.slice(0, 8) : obj.owner_type);
+            // Prefer resolved name; fall back to a friendly type label rather
+            // than a raw UUID fragment (which happens when owner_id is phantom/unlinked).
+            const typeFallback = obj.owner_type === 'agent'
+                ? (isChinese ? '数字员工' : 'AI Agent')
+                : (isChinese ? '用户' : 'User');
+            const label = obj.owner_name || typeFallback;
             memberGroups[key] = { label, objs: [] };
         }
         memberGroups[key].objs.push(obj);
