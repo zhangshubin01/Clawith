@@ -190,6 +190,9 @@ class ObjectiveOut(BaseModel):
     description: str | None = None
     owner_type: str
     owner_id: str | None = None
+    # Resolved human-readable name of the owner (user display_name / agent name).
+    # None for company-level objectives.
+    owner_name: str | None = None
     period_start: str
     period_end: str
     status: str
@@ -463,13 +466,18 @@ def _kr_to_out(kr: OKRKeyResult) -> KeyResultOut:
     )
 
 
-def _obj_to_out(obj: OKRObjective, krs: list[OKRKeyResult] | None = None) -> ObjectiveOut:
+def _obj_to_out(
+    obj: OKRObjective,
+    krs: list[OKRKeyResult] | None = None,
+    owner_name: str | None = None,
+) -> ObjectiveOut:
     return ObjectiveOut(
         id=str(obj.id),
         title=obj.title,
         description=obj.description,
         owner_type=obj.owner_type,
         owner_id=str(obj.owner_id) if obj.owner_id else None,
+        owner_name=owner_name,
         period_start=obj.period_start.isoformat(),
         period_end=obj.period_end.isoformat(),
         status=obj.status,
@@ -488,7 +496,11 @@ async def list_objectives(
 
     If period_start / period_end are not supplied, defaults to the current
     OKR period computed from the tenant's OKR settings.
+    Includes owner_name resolved from User.display_name or Agent.name.
     """
+    from app.models.agent import Agent
+    from app.models.user import User
+
     async with async_session() as db:
         if not period_start or not period_end:
             settings = await _get_or_create_settings(db, user.tenant_id)
@@ -526,7 +538,44 @@ async def list_objectives(
         for kr in all_krs:
             krs_by_obj.setdefault(kr.objective_id, []).append(kr)
 
-        return [_obj_to_out(o, krs_by_obj.get(o.id, [])) for o in objectives]
+        # Batch-resolve owner names: collect distinct user/agent IDs
+        user_owner_ids = [
+            o.owner_id for o in objectives
+            if o.owner_type == "user" and o.owner_id
+        ]
+        agent_owner_ids = [
+            o.owner_id for o in objectives
+            if o.owner_type == "agent" and o.owner_id
+        ]
+
+        user_names: dict[uuid.UUID, str] = {}
+        if user_owner_ids:
+            u_result = await db.execute(
+                select(User.id, User.display_name).where(User.id.in_(user_owner_ids))
+            )
+            user_names = {row.id: (row.display_name or "") for row in u_result.fetchall()}
+
+        agent_names: dict[uuid.UUID, str] = {}
+        if agent_owner_ids:
+            a_result = await db.execute(
+                select(Agent.id, Agent.name).where(Agent.id.in_(agent_owner_ids))
+            )
+            agent_names = {row.id: (row.name or "") for row in a_result.fetchall()}
+
+        def _resolve_name(obj: OKRObjective) -> str | None:
+            if not obj.owner_id:
+                return None
+            if obj.owner_type == "user":
+                return user_names.get(obj.owner_id)
+            if obj.owner_type == "agent":
+                return agent_names.get(obj.owner_id)
+            return None
+
+        return [
+            _obj_to_out(o, krs_by_obj.get(o.id, []), owner_name=_resolve_name(o))
+            for o in objectives
+        ]
+
 
 
 @router.post("/objectives", response_model=ObjectiveOut)

@@ -139,14 +139,31 @@ async def list_agents(
     db: AsyncSession = Depends(get_db),
 ):
     """List all agents the current user has access to."""
-    # platform_admin & org_admin see all agents (optionally filtered by tenant)
-    if current_user.role in ("platform_admin", "org_admin"):
+    # Platform admins can inspect every tenant. Org admins are scoped to their
+    # own company unless an explicit same-tenant filter is supplied.
+    if current_user.role == "platform_admin":
         stmt = select(Agent)
         if tenant_id:
             stmt = stmt.where(Agent.tenant_id == tenant_id)
         result = await db.execute(stmt.order_by(Agent.created_at.desc()))
         agents = result.scalars().all()
         # Lazy reset token counters
+        needs_flush = False
+        for a in agents:
+            if await _lazy_reset_token_counters(a, db):
+                needs_flush = True
+        if needs_flush:
+            await db.commit()
+        return [AgentOut.model_validate(a) for a in agents]
+
+    if current_user.role == "org_admin":
+        effective_tenant_id = tenant_id or current_user.tenant_id
+        if effective_tenant_id != current_user.tenant_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Can only list agents in your own company")
+        result = await db.execute(
+            select(Agent).where(Agent.tenant_id == effective_tenant_id).order_by(Agent.created_at.desc())
+        )
+        agents = result.scalars().all()
         needs_flush = False
         for a in agents:
             if await _lazy_reset_token_counters(a, db):

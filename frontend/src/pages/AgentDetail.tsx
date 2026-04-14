@@ -1043,11 +1043,10 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
         queryKey: ['agent-relationships', agentId],
         queryFn: () => fetchAuth<any[]>(`/agents/${agentId}/relationships/agents`),
     });
-    const { data: allAgents = [] } = useQuery({
-        queryKey: ['agents-for-rel'],
-        queryFn: () => fetchAuth<any[]>(`/agents/`),
+    const { data: availableAgents = [] } = useQuery({
+        queryKey: ['agent-relationship-candidates', agentId],
+        queryFn: () => fetchAuth<any[]>(`/agents/${agentId}/relationships/agents/candidates`),
     });
-    const availableAgents = allAgents.filter((a: any) => a.id !== agentId);
 
     useEffect(() => {
         if (!search || search.length < 1) { setSearchResults([]); return; }

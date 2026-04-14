@@ -49,6 +49,7 @@ interface Objective {
     description?: string;
     owner_type: string; // company | user | agent
     owner_id?: string;
+    owner_name?: string; // resolved display name (agent name or user display_name)
     period_start: string;
     period_end: string;
     status: string;
@@ -873,12 +874,15 @@ export default function OKR() {
     const companyObjs = objectives.filter(o => o.owner_type === 'company');
     const memberObjs = objectives.filter(o => o.owner_type !== 'company');
 
-    // Group member objectives by owner
+    // Group member objectives by owner — use owner_name as the display label
     const memberGroups: Record<string, { label: string; objs: Objective[] }> = {};
     for (const obj of memberObjs) {
         const key = `${obj.owner_type}:${obj.owner_id ?? ''}`;
         if (!memberGroups[key]) {
-            memberGroups[key] = { label: obj.owner_type, objs: [] };
+            // Prefer resolved name; fall back to owner_id short form
+            const label = obj.owner_name
+                || (obj.owner_id ? obj.owner_id.slice(0, 8) : obj.owner_type);
+            memberGroups[key] = { label, objs: [] };
         }
         memberGroups[key].objs.push(obj);
     }
@@ -1134,13 +1138,44 @@ function MembersWithoutOKRPanel({
 
     return (
         <section style={{ marginTop: '32px' }}>
-            {/* Section header */}
+            {/* Section header with count + Nudge button inline */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
                 <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
                     {isChinese ? '未设定 OKR 的成员' : 'Members Without OKR'}
                 </span>
                 <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
                 <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{members.length}</span>
+
+                {/* Nudge button — now at top so it's always visible */}
+                <button
+                    id="okr-nudge-btn"
+                    onClick={handleNudge}
+                    disabled={nudging || !company_okr_exists}
+                    title={company_okr_exists ? undefined : (isChinese ? '请先设定公司 OKR' : 'Set company OKRs first')}
+                    style={{
+                        display: 'flex', alignItems: 'center', gap: '6px',
+                        padding: '5px 12px', borderRadius: '6px',
+                        border: 'none',
+                        background: company_okr_exists ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
+                        color: company_okr_exists ? '#fff' : 'var(--text-quaternary)',
+                        fontSize: '12px', fontWeight: 500,
+                        cursor: nudging || !company_okr_exists ? 'not-allowed' : 'pointer',
+                        opacity: nudging ? 0.7 : 1,
+                        transition: 'opacity 0.15s, background 0.15s',
+                        whiteSpace: 'nowrap',
+                    }}
+                >
+                    {nudging ? (
+                        <>{isChinese ? '发送中...' : 'Sending...'}</>
+                    ) : (
+                        <>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/>
+                            </svg>
+                            {isChinese ? '催促设定 OKR' : 'Nudge Members'}
+                        </>
+                    )}
+                </button>
             </div>
 
             <div style={{
@@ -1189,14 +1224,13 @@ function MembersWithoutOKRPanel({
                     ))}
                 </div>
 
-                {/* Footer: guidance + nudge button */}
+                {/* Footer: guidance text only (button moved to header) */}
                 <div style={{
-                    padding: '12px 16px',
+                    padding: '10px 16px',
                     borderTop: '1px solid var(--border-subtle)',
                     background: 'var(--bg-secondary)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap',
                 }}>
-                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', flex: 1 }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
                         {company_okr_exists
                             ? (isChinese
                                 ? 'OKR Agent 将向以上成员发送消息，邀请他们设定个人 OKR。'
@@ -1206,37 +1240,9 @@ function MembersWithoutOKRPanel({
                                 : 'Please set company OKRs with the OKR Agent before nudging members.')
                         }
                     </div>
-                    <button
-                        id="okr-nudge-btn"
-                        onClick={handleNudge}
-                        disabled={nudging || !company_okr_exists}
-                        style={{
-                            display: 'flex', alignItems: 'center', gap: '6px',
-                            padding: '7px 14px', borderRadius: '6px',
-                            border: 'none',
-                            background: company_okr_exists ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
-                            color: company_okr_exists ? '#fff' : 'var(--text-quaternary)',
-                            fontSize: '12px', fontWeight: 500,
-                            cursor: nudging || !company_okr_exists ? 'not-allowed' : 'pointer',
-                            opacity: nudging ? 0.7 : 1,
-                            transition: 'opacity 0.15s, background 0.15s',
-                            whiteSpace: 'nowrap',
-                        }}
-                    >
-                        {nudging ? (
-                            <>{isChinese ? 'OKR Agent 正在发消息...' : 'OKR Agent is messaging...'}</>
-                        ) : (
-                            <>
-                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                    <path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/>
-                                </svg>
-                                {isChinese ? '催促设定 OKR' : 'Nudge Members'}
-                            </>
-                        )}
-                    </button>
                 </div>
 
-                {/* Result message */}
+                {/* Nudge result message */}
                 {nudgeResult && (
                     <div style={{
                         padding: '10px 16px',

@@ -2031,13 +2031,16 @@ async def _sync_tasks_to_file(agent_id: uuid.UUID, ws: Path):
 
 # ─── Tool Executors ─────────────────────────────────────────────
 
-# Mapping from tool_name to autonomy action_type
+# Mapping from tool_name to autonomy action_type used for policy lookup and notifications.
+# Each tool name maps to the action_type key in the agent's autonomy_policy dict.
+# Using the tool's own name avoids misleading notification titles (e.g. showing
+# "send_feishu_message" when the agent actually called send_message_to_agent).
 _TOOL_AUTONOMY_MAP = {
     "write_file": "write_workspace_files",
     "delete_file": "delete_files",
     "send_feishu_message": "send_feishu_message",
-    "send_message_to_agent": "send_feishu_message",
-    "send_file_to_agent": "send_feishu_message",
+    "send_message_to_agent": "send_message_to_agent",  # A2A messaging — distinct from feishu
+    "send_file_to_agent": "send_file_to_agent",          # A2A file transfer
     "web_search": "web_search",
     "execute_code": "execute_code",
     "execute_code_e2b": "execute_code",
