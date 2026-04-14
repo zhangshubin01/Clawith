@@ -1125,10 +1125,10 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         # ── Build prompt context for each member without OKR ─────────────────
         # Also resolve admin username for the final summary message
         admin_result = await db.execute(
-            select(User.username, User.display_name).where(User.id == user.id)
+            select(User.email, User.full_name).where(User.id == user.id)
         )
         admin_row = admin_result.first()
-        admin_username = (admin_row.username if admin_row else None) or str(user.id)
+        admin_username = (admin_row.full_name if admin_row else None) or (admin_row.email if admin_row else None) or str(user.id)
 
         await db.commit()
 
@@ -1174,13 +1174,13 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         if platform_uid:
             async with async_session() as db2:
                 u_res = await db2.execute(
-                    select(User.username, User.display_name).where(User.id == platform_uid)
+                    select(User.email, User.full_name).where(User.id == platform_uid)
                 )
                 u_row = u_res.first()
             if u_row:
                 username_hint = (
-                    f'\n  Platform username: "{u_row.username or u_row.display_name}"'
-                    f"  (use this exact value in send_web_message)"
+                    f'\n  Platform account: "{u_row.full_name or u_row.email}"'
+                    f"  (use this as the recipient identifier in send_web_message)"
                 )
 
         member_block = (
