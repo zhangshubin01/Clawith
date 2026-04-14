@@ -4,7 +4,7 @@ import json
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,7 @@ from app.core.security import get_current_user
 from app.core.permissions import check_agent_access
 from app.database import get_db
 from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
+from app.models.agent import Agent, AgentPermission
 from app.models.user import User
 
 settings = get_settings()
@@ -185,6 +186,46 @@ async def get_agent_relationships(
     ]
 
 
+@router.get("/agents/candidates")
+async def get_agent_relationship_candidates(
+    agent_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List agents that can be added as relationships for this agent.
+
+    Agent-to-agent relationships are intentionally limited to public,
+    company-visible agents in the same tenant. The endpoint avoids using the
+    generic /agents list because admins may be able to see broader platform
+    data that should not become relationship candidates.
+    """
+    source_agent, _ = await check_agent_access(db, current_user, agent_id)
+    if not source_agent.tenant_id:
+        return []
+
+    result = await db.execute(
+        select(Agent)
+        .join(AgentPermission, AgentPermission.agent_id == Agent.id)
+        .where(
+            Agent.tenant_id == source_agent.tenant_id,
+            Agent.id != agent_id,
+            AgentPermission.scope_type == "company",
+        )
+        .distinct()
+        .order_by(Agent.created_at.desc())
+    )
+    agents = result.scalars().all()
+    return [
+        {
+            "id": str(agent.id),
+            "name": agent.name,
+            "role_description": agent.role_description or "",
+            "avatar_url": agent.avatar_url or "",
+        }
+        for agent in agents
+    ]
+
+
 @router.put("/agents")
 async def save_agent_relationships(
     agent_id: uuid.UUID,
@@ -193,7 +234,7 @@ async def save_agent_relationships(
     db: AsyncSession = Depends(get_db),
 ):
     """Replace all agent-to-agent relationships."""
-    await check_agent_access(db, current_user, agent_id)
+    source_agent, _ = await check_agent_access(db, current_user, agent_id)
 
     await db.execute(
         delete(AgentAgentRelationship).where(AgentAgentRelationship.agent_id == agent_id)
@@ -203,6 +244,23 @@ async def save_agent_relationships(
         target_id = uuid.UUID(r.target_agent_id)
         if target_id == agent_id:
             continue  # skip self-reference
+
+        target_result = await db.execute(
+            select(Agent.id)
+            .join(AgentPermission, AgentPermission.agent_id == Agent.id)
+            .where(
+                Agent.id == target_id,
+                Agent.tenant_id == source_agent.tenant_id,
+                AgentPermission.scope_type == "company",
+            )
+            .limit(1)
+        )
+        if not target_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=400,
+                detail="Target agent must be a company-visible agent in the same tenant",
+            )
+
         db.add(AgentAgentRelationship(
             agent_id=agent_id,
             target_agent_id=target_id,
