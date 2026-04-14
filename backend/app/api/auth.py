@@ -714,7 +714,8 @@ async def update_me(
 
     for field, value in update_data.items():
         setattr(current_user, field, value)
-    await db.flush()
+    await db.commit()
+    await db.refresh(current_user)
 
     # Sync email/phone to OrgMember if changed
     if "email" in update_data or "primary_mobile" in update_data:
