@@ -594,6 +594,14 @@ async def delete_agent(
     if not is_agent_creator(current_user, agent) and current_user.role not in ("super_admin", "org_admin", "platform_admin"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only creator or admin can delete agent")
 
+    # System agents (OKR Agent, etc.) cannot be deleted — they are seeded by the
+    # platform and required for core features. Disable them via settings instead.
+    if agent.is_system:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System agents cannot be deleted. Disable the related feature (e.g. OKR) in Company Settings instead.",
+        )
+
     # Stop container and archive files (best effort)
     from app.services.agent_manager import agent_manager
     archive_dir: Path | None = None

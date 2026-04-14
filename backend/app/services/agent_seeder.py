@@ -416,8 +416,18 @@ async def seed_okr_agent():
             return
 
     async with async_session() as db:
-        # Abort if OKR Agent already exists by name (belt-and-suspenders check)
-        existing = await db.execute(select(Agent).where(Agent.name == "OKR Agent").limit(1))
+        # Abort if a non-stopped OKR Agent already exists in the DB.
+        # We check is_system=True specifically so a user-created agent named
+        # "OKR Agent" does not trigger this guard and block the real seeder.
+        existing = await db.execute(
+            select(Agent)
+            .where(
+                Agent.name == "OKR Agent",
+                Agent.is_system == True,  # noqa: E712
+                Agent.status != "stopped",
+            )
+            .limit(1)
+        )
         if existing.scalar_one_or_none():
             logger.info("[AgentSeeder] OKR Agent already exists in DB, skipping")
             # Update marker so we don't check again next startup
@@ -661,9 +671,39 @@ async def patch_existing_okr_agent() -> None:
       - Setting is_system=True on existing OKR Agent
       - Creating missing system cron triggers
       - Assigning any newly-added OKR tools
+      - De-duplicating extra OKR Agents (stops all but the newest active one)
     """
     async with async_session() as db:
-        result = await db.execute(select(Agent).where(Agent.name == "OKR Agent").limit(1))
+        # ── Dedup: if multiple OKR Agents exist, keep only the newest active one ──
+        # This corrects the historical bug where restarts created extra agents.
+        all_okr_result = await db.execute(
+            select(Agent)
+            .where(Agent.name == "OKR Agent", Agent.is_system == True)  # noqa: E712
+            .order_by(Agent.created_at.desc())
+        )
+        all_okr_agents = all_okr_result.scalars().all()
+        active_okr_agents = [a for a in all_okr_agents if a.status != "stopped"]
+
+        if len(active_okr_agents) > 1:
+            # Keep the newest (index 0 after DESC sort), stop the rest
+            for extra in active_okr_agents[1:]:
+                extra.status = "stopped"
+                logger.warning(
+                    f"[AgentSeeder] Dedup: stopped extra OKR Agent {extra.id} "
+                    f"(created {extra.created_at})"
+                )
+            await db.commit()
+            logger.info(
+                f"[AgentSeeder] Dedup complete: {len(active_okr_agents) - 1} extra agent(s) stopped, "
+                f"keeping {active_okr_agents[0].id}"
+            )
+
+        result = await db.execute(
+            select(Agent)
+            .where(Agent.name == "OKR Agent", Agent.is_system == True, Agent.status != "stopped")  # noqa: E712
+            .order_by(Agent.created_at.desc())
+            .limit(1)
+        )
         agent = result.scalar_one_or_none()
         if not agent:
             return  # OKR Agent not seeded yet, nothing to patch
