@@ -976,7 +976,7 @@ async def members_without_okr(user=Depends(get_current_user)):
                     })
 
             user_result = await db.execute(
-                select(User.id, User.full_name, User.email, User.avatar_url).where(
+                select(User.id, User.display_name, User.avatar_url).where(
                     User.tenant_id == user.tenant_id,
                 )
             )
@@ -985,7 +985,7 @@ async def members_without_okr(user=Depends(get_current_user)):
                 if row.id not in covered_ids:
                     members_without_okr.append({
                         "id": str(row.id), "type": "user",
-                        "display_name": row.full_name or row.email or "",
+                        "display_name": row.display_name or "",
                         "avatar_url": row.avatar_url or "",
                         "channel": None, "channel_user_id": None,
                     })
@@ -1125,10 +1125,10 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         # ── Build prompt context for each member without OKR ─────────────────
         # Also resolve admin username for the final summary message
         admin_result = await db.execute(
-            select(User.email, User.full_name).where(User.id == user.id)
+            select(User.display_name).where(User.id == user.id)
         )
         admin_row = admin_result.first()
-        admin_username = (admin_row.full_name if admin_row else None) or (admin_row.email if admin_row else None) or str(user.id)
+        admin_username = (admin_row.display_name if admin_row else None) or str(user.id)
 
         await db.commit()
 
@@ -1174,12 +1174,12 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         if platform_uid:
             async with async_session() as db2:
                 u_res = await db2.execute(
-                    select(User.email, User.full_name).where(User.id == platform_uid)
+                    select(User.display_name).where(User.id == platform_uid)
                 )
                 u_row = u_res.first()
-            if u_row:
+            if u_row and u_row.display_name:
                 username_hint = (
-                    f'\n  Platform account: "{u_row.full_name or u_row.email}"'
+                    f'\n  Platform account: "{u_row.display_name}"'
                     f"  (use this as the recipient identifier in send_web_message)"
                 )
 
