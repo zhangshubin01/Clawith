@@ -1196,14 +1196,16 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         msgs = await _recent_msgs(platform_uid) if platform_uid else []
 
         # Determine channel hint
+        # Priority: any external channel (Feishu / DingTalk / WeChat Work / etc.)
+        # takes precedence over the in-platform web notification, so members
+        # receive a message in the tool they actually use day-to-day.
         has_channel = bool(org_member.open_id or org_member.external_id)
-        if platform_uid:
-            channel_hint = (
-                'send_web_message(username="<their_username>", message=...)\n'
-                "  OR send_channel_message if they have a linked channel"
-            )
-        elif has_channel:
+        if has_channel:
             channel_hint = f'send_channel_message(member_name="{org_member.name}", message=...)'
+        elif platform_uid:
+            channel_hint = (
+                'send_web_message(username="<their_username>", message=...)'
+            )
         else:
             channel_hint = "No channel available — note this in your summary"
 
@@ -1247,8 +1249,9 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
             continue
         member_block = (
             f"--- Member {index}: {agent_member.name} [Agent] ---\n"
-            f"  How to send: send_message_to_agent(agent_name=\"{agent_member.name}\", message=...)\n"
-            f"  Recent chat history: (Not available — agents communicate via direct message)"
+            f"  Agent UUID (owner_id for create_objective): {agent_member.id}\n"
+            f"  How to contact: send_message_to_agent(agent_name=\"{agent_member.name}\", message=...)\n"
+            f"  After receiving their reply: call create_objective then create_key_result(s) as below"
         )
         members_to_contact.append(member_block)
         index += 1
@@ -1260,52 +1263,58 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
             "okr_agent_id": str(okr_agent.id),
         }
 
-    # ── Compose the final task prompt ─────────────────────────────────────────
+    # ── Compose the final task prompt ────────────────────────────────────────────────────
     period_label = f"{ps.strftime('%Y-%m-%d')} to {pe.strftime('%Y-%m-%d')}"
     members_block = "\n\n".join(members_to_contact)
     task_prompt = f"""[ADMIN TRIGGER — OKR Member Outreach — ONE-SHOT TASK]
 
 Current OKR period: {period_label}
+  period_start = "{ps.isoformat()}"  (use this exact value in create_objective)
+  period_end   = "{pe.isoformat()}"  (use this exact value in create_objective)
 Admin who triggered this: {admin_username}
 
 Your task: Contact the {len(members_to_contact)} member(s) below who have NOT set their OKRs \
-for this period. Send each one a warm, personalised reminder, then stop.
+for this period. For Agent members, also RECORD their OKR after they reply.
 
 ━━━ TOOL RULES (MANDATORY — DO NOT DEVIATE) ━━━
 • For members tagged [Agent]:
-  → Use ONLY: send_message_to_agent(agent_name="<name>", message="...")
-  → NEVER use send_feishu_message or any channel tool for agents — they have no Feishu account.
-• For human members:
-  → If they have a Platform account shown: send_web_message(username="<display_name>", message="...")
-  → If they have a channel (Feishu/DingTalk): send_channel_message(member_name="<name>", message="...")
-  → If neither: skip and note in summary.
+  → Step 1: Send an OKR request:
+      send_message_to_agent(agent_name="<name>", message="[OKR Agent] 请描述您在 {period_label} 期间的主要目标（Objective）和关键结果（Key Results）。")
+  → Step 2: Their reply is returned as the tool result. READ it carefully.
+  → Step 3: Extract their main Objective. Call:
+      create_objective(title="<extracted objective title>", owner_type="agent",
+                       owner_id="<UUID from member block>",
+                       period_start="{ps.isoformat()}", period_end="{pe.isoformat()}")
+  → Step 4: For each Key Result they mentioned, call:
+      create_key_result(objective_id="<id returned in step 3>", title="<KR title>",
+                        target_value=<number>, unit="<unit if stated>")
+  → Move to the next member. Do NOT continue conversing.
 
-━━━ CRITICAL: THIS IS A FIRE-AND-FORGET TASK ━━━
-• Send your message to each member and IMMEDIATELY move on to the next.
-• Do NOT wait for, or respond to, replies from anyone during this task.
-• Replying back-and-forth is NOT part of this task and will waste time.
-• Once you have contacted all members and sent the summary report, STOP completely.
+• For human members:
+  → If they have a channel (Feishu/DingTalk) shown: send_channel_message(member_name="<name>", message="...")
+  → If they have a Platform account only: send_web_message(username="<their display_name>", message="...")
+  → If neither: skip and note in summary.
+  → Human messages are fire-and-forget: their OKR will be captured at a later time.
+  → Do NOT wait for or respond to human replies during this task.
 
 ━━━ STEP-BY-STEP ━━━
-1. For each member: review their history → compose a short, warm OKR reminder → send it.
-2. If a send fails: log the failure and continue to the next member.
-3. After contacting ALL members: report to admin via
-   send_web_message(username="{admin_username}", message="Nudge complete: X sent, Y failed. [list failures]")
-4. STOP. Your job is done. Do not take any further action.
-
-━━━ MEMBERS TO CONTACT ({len(members_to_contact)} total) ━━━
-
-{members_block}
-
-━━━ BEGIN NOW — FIRE AND FORGET ━━━
+1. For each member in sequence:
+   • [Agent] → send_message_to_agent → read the returned reply → create_objective → create_key_result(s)
+   • [Human] → send_channel_message or send_web_message (fire-and-forget, do not wait for reply)
+2. If any step fails: log the failure and continue to the next member.
+3. After ALL members are processed:
+   send_web_message(username="{admin_username}", message="Outreach complete. Contacted X member(s), recorded Y agent OKR(s). Failures: [list or 'none'].")
+4. STOP. Your job is done.
 """
 
     # ── Launch background task ────────────────────────────────────────────────
     from app.services.heartbeat import run_agent_oneshot
 
-    # max_rounds: 2 per member (compose + send) + 3 (summary + admin msg + buffer)
-    # Keep it tight to prevent the "infinite reply loop" anti-pattern.
-    safe_max_rounds = len(members_to_contact) * 2 + 3
+    # Rounds per member:
+    #   Agent: 1 (A2A send/receive) + 1 (create_objective) + up to 3 (create_key_results) = ~5
+    #   Human: 1 (channel/web send)
+    # Plus 3 for summary + admin message + buffer.
+    safe_max_rounds = len(members_to_contact) * 5 + 3
 
     asyncio.create_task(
         run_agent_oneshot(
