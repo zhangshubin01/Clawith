@@ -1214,43 +1214,56 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
     # ── Compose the final task prompt ─────────────────────────────────────────
     period_label = f"{ps.strftime('%Y-%m-%d')} to {pe.strftime('%Y-%m-%d')}"
     members_block = "\n\n".join(members_to_contact)
-    task_prompt = f"""[ADMIN TRIGGER — OKR Member Outreach]
+    task_prompt = f"""[ADMIN TRIGGER — OKR Member Outreach — ONE-SHOT TASK]
 
 Current OKR period: {period_label}
 Admin who triggered this: {admin_username}
 
-Your task: Contact the {len(members_to_contact)} member(s) listed below who have NOT yet \
-set their OKRs for this period. Send each one a warm, personalised reminder.
+Your task: Contact the {len(members_to_contact)} member(s) below who have NOT set their OKRs \
+for this period. Send each one a warm, personalised reminder, then stop.
 
-━━━ INSTRUCTIONS ━━━
-1. For each member, review their recent chat history (provided below).
-2. Compose a natural, personalised message:
-   - If the history is OKR-related → reference the prior conversation naturally
-   - If history is unrelated or absent → simply ask them to set their OKRs directly
-   - Keep the tone warm and supportive, not demanding
-3. Send via the indicated channel (tool call shown for each member).
-4. If sending fails (e.g. channel not configured), log it and move on.
-5. After contacting ALL members, send a brief summary report to admin via:
-   send_web_message(username="{admin_username}", message="...")
-   Report format: "Nudge complete: X sent successfully, Y failed. [list any failures]"
+━━━ TOOL RULES (MANDATORY — DO NOT DEVIATE) ━━━
+• For members tagged [Agent]:
+  → Use ONLY: send_message_to_agent(agent_name="<name>", message="...")
+  → NEVER use send_feishu_message or any channel tool for agents — they have no Feishu account.
+• For human members:
+  → If they have a Platform account shown: send_web_message(username="<display_name>", message="...")
+  → If they have a channel (Feishu/DingTalk): send_channel_message(member_name="<name>", message="...")
+  → If neither: skip and note in summary.
+
+━━━ CRITICAL: THIS IS A FIRE-AND-FORGET TASK ━━━
+• Send your message to each member and IMMEDIATELY move on to the next.
+• Do NOT wait for, or respond to, replies from anyone during this task.
+• Replying back-and-forth is NOT part of this task and will waste time.
+• Once you have contacted all members and sent the summary report, STOP completely.
+
+━━━ STEP-BY-STEP ━━━
+1. For each member: review their history → compose a short, warm OKR reminder → send it.
+2. If a send fails: log the failure and continue to the next member.
+3. After contacting ALL members: report to admin via
+   send_web_message(username="{admin_username}", message="Nudge complete: X sent, Y failed. [list failures]")
+4. STOP. Your job is done. Do not take any further action.
 
 ━━━ MEMBERS TO CONTACT ({len(members_to_contact)} total) ━━━
 
 {members_block}
 
-━━━ BEGIN OUTREACH NOW ━━━
-Proceed member by member. Do not wait for replies — humans will respond in their own time.
+━━━ BEGIN NOW — FIRE AND FORGET ━━━
 """
 
     # ── Launch background task ────────────────────────────────────────────────
     from app.services.heartbeat import run_agent_oneshot
+
+    # max_rounds: 2 per member (compose + send) + 3 (summary + admin msg + buffer)
+    # Keep it tight to prevent the "infinite reply loop" anti-pattern.
+    safe_max_rounds = len(members_to_contact) * 2 + 3
 
     asyncio.create_task(
         run_agent_oneshot(
             agent_id=okr_agent.id,
             prompt=task_prompt,
             triggered_by_user_id=user.id,
-            max_rounds=max(40, len(members_to_contact) * 4),  # generous headroom
+            max_rounds=safe_max_rounds,
         )
     )
 
