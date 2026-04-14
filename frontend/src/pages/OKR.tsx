@@ -564,6 +564,7 @@ function ObjectiveCard({
                     {obj.description && (
                         <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{obj.description}</div>
                     )}
+                    </div>
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
