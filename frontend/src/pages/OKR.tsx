@@ -1156,15 +1156,41 @@ function MembersWithoutOKRPanel({
 
     return (
         <section style={{ marginTop: '32px' }}>
-            {/* Section header with count + Nudge button inline */}
+            {/* Section header: title + count + divider only */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
                 <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.8px' }}>
                     {isChinese ? '未设定 OKR 的成员' : 'Members Without OKR'}
                 </span>
                 <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
                 <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{members.length}</span>
+            </div>
 
-                {/* Nudge button — now at top so it's always visible */}
+            {/* Nudge button + description — below title, above member list */}
+            <div style={{
+                display: 'flex', alignItems: 'center', gap: '16px',
+                marginBottom: '12px',
+                padding: '10px 14px',
+                background: 'var(--bg-secondary)',
+                borderRadius: '8px',
+                border: '1px solid var(--border-subtle)',
+            }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.6 }}>
+                        {company_okr_exists
+                            ? (isChinese
+                                ? 'OKR Agent 将向以上成员发送消息，邀请他们设定个人 OKR。'
+                                : 'OKR Agent will message each member above and invite them to set their OKRs.')
+                            : (isChinese
+                                ? '请先与 OKR Agent 确认公司 OKR，再催促成员。'
+                                : 'Please set company OKRs with the OKR Agent before nudging members.')
+                        }
+                    </div>
+                    {nudgeResult && (
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                            {nudgeResult}
+                        </div>
+                    )}
+                </div>
                 <button
                     id="okr-nudge-btn"
                     onClick={handleNudge}
@@ -1173,7 +1199,7 @@ function MembersWithoutOKRPanel({
                     style={{
                         display: 'flex', alignItems: 'center', gap: '6px',
                         padding: '5px 12px', borderRadius: '6px',
-                        border: 'none',
+                        border: 'none', flexShrink: 0,
                         background: company_okr_exists ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
                         color: company_okr_exists ? '#fff' : 'var(--text-quaternary)',
                         fontSize: '12px', fontWeight: 500,
@@ -1241,37 +1267,6 @@ function MembersWithoutOKRPanel({
                         </div>
                     ))}
                 </div>
-
-                {/* Footer: guidance text only (button moved to header) */}
-                <div style={{
-                    padding: '10px 16px',
-                    borderTop: '1px solid var(--border-subtle)',
-                    background: 'var(--bg-secondary)',
-                }}>
-                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
-                        {company_okr_exists
-                            ? (isChinese
-                                ? 'OKR Agent 将向以上成员发送消息，邀请他们设定个人 OKR。'
-                                : 'OKR Agent will message each member above and invite them to set their OKRs.')
-                            : (isChinese
-                                ? '请先与 OKR Agent 确认公司 OKR，再催促成员。'
-                                : 'Please set company OKRs with the OKR Agent before nudging members.')
-                        }
-                    </div>
-                </div>
-
-                {/* Nudge result message */}
-                {nudgeResult && (
-                    <div style={{
-                        padding: '10px 16px',
-                        fontSize: '12px',
-                        color: 'var(--text-secondary)',
-                        background: 'var(--bg-tertiary)',
-                        borderTop: '1px solid var(--border-subtle)',
-                    }}>
-                        {nudgeResult}
-                    </div>
-                )}
             </div>
         </section>
     );
