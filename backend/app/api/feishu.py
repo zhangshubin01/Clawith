@@ -552,11 +552,16 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
             # Resolve channel user via unified service (uses OrgMember + SSO patterns)
             from app.services.channel_user_service import channel_user_service
+            
+            # Prefer the tenant-stable user_id (sender_user_id_feishu) over app-scoped open_id
+            # to match records created by OrgSync.
+            stable_user_id = sender_user_id_feishu or sender_open_id
+            
             platform_user = await channel_user_service.resolve_channel_user(
                 db=db,
                 agent=agent_obj,
                 channel_type="feishu",
-                external_user_id=sender_open_id,
+                external_user_id=stable_user_id,
                 extra_info=extra_info,
             )
             platform_user_id = platform_user.id
@@ -1193,11 +1198,14 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
 
         # Resolve channel user via unified service (uses OrgMember + SSO patterns)
         from app.services.channel_user_service import channel_user_service
+        
+        stable_user_id = sender_user_id_feishu or sender_open_id
+        
         platform_user = await channel_user_service.resolve_channel_user(
             db=db,
             agent=agent_obj,
             channel_type="feishu",
-            external_user_id=sender_open_id,
+            external_user_id=stable_user_id,
             extra_info=extra_info,
         )
         platform_user_id = platform_user.id
