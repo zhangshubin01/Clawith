@@ -21,6 +21,7 @@ import uuid
 from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select, delete
 
@@ -568,13 +569,50 @@ async def list_objectives(
 @router.post("/objectives", response_model=ObjectiveOut)
 async def create_objective(body: ObjectiveCreate, user=Depends(get_current_user)):
     """Create a new Objective."""
+    from app.models.org import OrgMember
+
     async with async_session() as db:
+        resolved_owner_id: uuid.UUID | None = None
+
+        if body.owner_id:
+            candidate = uuid.UUID(body.owner_id)
+
+            if body.owner_type == "user":
+                # Verify the UUID is a real User.id — if not, check if it's an
+                # OrgMember.id and transparently resolve to the linked user_id.
+                # This guards against OKR Agent accidentally passing OrgMember.id.
+                user_check = await db.execute(select(User.id).where(User.id == candidate))
+                if user_check.scalar_one_or_none():
+                    resolved_owner_id = candidate
+                else:
+                    # Fallback: maybe agent sent OrgMember.id — resolve to user_id
+                    member_check = await db.execute(
+                        select(OrgMember.user_id).where(
+                            OrgMember.id == candidate,
+                            OrgMember.user_id.isnot(None),
+                        )
+                    )
+                    user_id_from_member = member_check.scalar_one_or_none()
+                    if user_id_from_member:
+                        resolved_owner_id = user_id_from_member
+                        logger.info(
+                            f"[create_objective] Resolved OrgMember.id {candidate} "
+                            f"→ user_id {resolved_owner_id}"
+                        )
+                    else:
+                        raise HTTPException(
+                            422,
+                            f"owner_id '{body.owner_id}' does not match any User or OrgMember in this tenant",
+                        )
+            else:
+                resolved_owner_id = candidate
+
         obj = OKRObjective(
             tenant_id=user.tenant_id,
             title=body.title,
             description=body.description,
             owner_type=body.owner_type,
-            owner_id=uuid.UUID(body.owner_id) if body.owner_id else None,
+            owner_id=resolved_owner_id,
             period_start=date.fromisoformat(body.period_start),
             period_end=date.fromisoformat(body.period_end),
         )
