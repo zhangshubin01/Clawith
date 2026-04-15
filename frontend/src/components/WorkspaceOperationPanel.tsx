@@ -289,12 +289,14 @@ export default function WorkspaceOperationPanel({
         };
     }, [agentId, activePath, draft, content, editing, sessionId]);
 
-    const csvRows = useMemo(() => {
-        if (preview?.type === 'csv') return parseCsv(editing ? draft : content).slice(0, 200);
-        return [];
-    }, [preview?.type, content, draft, editing]);
+    const previewType = preview?.type || preview?.kind;
 
-    const xlsxRows = preview?.type === 'xlsx' ? (preview.sheets?.[0]?.rows || []) : [];
+    const csvRows = useMemo(() => {
+        if (previewType === 'csv') return parseCsv(editing ? draft : content).slice(0, 200);
+        return [];
+    }, [previewType, content, draft, editing]);
+
+    const xlsxRows = previewType === 'xlsx' ? (preview.sheets?.[0]?.rows || []) : [];
 
     const finishEditing = async () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -380,10 +382,10 @@ export default function WorkspaceOperationPanel({
                 />
             );
         }
-        if (preview.type === 'md' || preview.type === 'markdown') {
+        if (previewType === 'md' || previewType === 'markdown') {
             return <MarkdownRenderer content={content || ''} />;
         }
-        if (preview.type === 'csv') {
+        if (previewType === 'csv') {
             return (
                 <div className="workspace-op-table-wrap">
                     <table className="workspace-op-table">
@@ -396,7 +398,7 @@ export default function WorkspaceOperationPanel({
                 </div>
             );
         }
-        if (preview.type === 'xlsx') {
+        if (previewType === 'xlsx') {
             return (
                 <div className="workspace-op-table-wrap">
                     <table className="workspace-op-table">
@@ -412,14 +414,14 @@ export default function WorkspaceOperationPanel({
         if (isHtml) {
             return <HtmlPreviewFrame content={content || ''} title={fileName(activePath)} />;
         }
-        if (preview.type === 'pdf') {
+        if (previewType === 'pdf') {
             const token = localStorage.getItem('token');
             return <iframe className="workspace-op-pdf" src={`${preview.url}&token=${token}`} title={fileName(activePath)} />;
         }
-        if (preview.type === 'docx') {
-            return <pre className="workspace-op-text-preview">{preview.content}</pre>;
+        if (previewType === 'docx') {
+            return <pre className="workspace-op-text-preview">{preview.content || preview.text}</pre>;
         }
-        if (preview.type === 'pptx') {
+        if (previewType === 'pptx') {
             return (
                 <div className="workspace-op-ppt-preview">
                     {(preview.slides || []).map((slide: any) => (
