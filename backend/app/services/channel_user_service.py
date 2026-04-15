@@ -20,6 +20,10 @@ from app.models.user import Identity, User
 from app.services.sso_service import sso_service
 
 
+class ChannelUserResolutionError(ValueError):
+    """Raised when a channel message cannot be safely attributed to a user."""
+
+
 class ChannelUserService:
     """Service for resolving channel users via OrgMember and SSO patterns."""
 
@@ -148,6 +152,16 @@ class ChannelUserService:
             await db.flush()
             return user
 
+        unionid, open_id, external_id = self._get_channel_ids(
+            channel_type, external_user_id, extra_info
+        )
+
+        if channel_type == "feishu" and not org_member and not (unionid or external_id):
+            raise ChannelUserResolutionError(
+                "Feishu sender could not be resolved to a stable user_id/union_id; "
+                "refusing to lazily create a duplicate user from open_id only."
+            )
+
         # Step 5: Create new User (lazy registration)
         user = await self._create_channel_user(
             db, channel_type, external_user_id, extra_info, tenant_id
@@ -230,6 +244,8 @@ class ChannelUserService:
                     lookup_conditions.append(OrgMember.unionid == unionid)
                 if external_id:
                     lookup_conditions.append(OrgMember.external_id == external_id)
+                if open_id:
+                    lookup_conditions.append(OrgMember.open_id == open_id)
                 if not lookup_conditions:
                     return None
                 conditions.append(lookup_conditions[0])
@@ -237,10 +253,16 @@ class ChannelUserService:
                     conditions[-1] = conditions[-1] | cond
             elif channel_type == "dingtalk":
                 # DingTalk: unionid is stable across apps, then external_id
-                conditions.append(
-                    (OrgMember.unionid == unionid) |
-                    (OrgMember.external_id == external_id)
-                )
+                lookup_conditions = []
+                if unionid:
+                    lookup_conditions.append(OrgMember.unionid == unionid)
+                if external_id:
+                    lookup_conditions.append(OrgMember.external_id == external_id)
+                if not lookup_conditions:
+                    return None
+                conditions.append(lookup_conditions[0])
+                for cond in lookup_conditions[1:]:
+                    conditions[-1] = conditions[-1] | cond
             elif channel_type == "wecom":
                 # WeCom: external_id (userid) is the primary identifier
                 if not external_id:
