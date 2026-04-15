@@ -495,10 +495,6 @@ export default function WorkspaceOperationPanel({
                 </div>
                 <div className="workspace-op-actions">
                     {saveState !== 'idle' && <span className={`workspace-op-save ${saveState}`}>{saveState}</span>}
-                    <button className={`workspace-op-icon-btn ${treeOpen && !activityOpen ? 'active' : ''}`} onClick={() => {
-                        setActivityOpen(false);
-                        setTreeOpen((open) => !open);
-                    }} title="Files">▤</button>
                     <button className={`workspace-op-icon-btn ${activityOpen ? 'active' : ''}`} onClick={() => setActivityOpen((open) => !open)} title="Version history">◷</button>
                     {activePath && canEdit && !editing && <button className="workspace-op-icon-btn" onClick={() => setEditing(true)} title="Edit">✎</button>}
                     {editing && <button className="workspace-op-icon-btn active" onClick={finishEditing} title="Done">✓</button>}
@@ -511,7 +507,15 @@ export default function WorkspaceOperationPanel({
             </div>
 
             <div className={`workspace-op-body ${activityOpen ? 'activity-open' : ''} ${treeOpen ? '' : 'tree-closed'}`}>
-                <div className="workspace-op-main">{renderPreview()}</div>
+                <div className="workspace-op-main">
+                    <button className={`workspace-op-tree-float ${treeOpen && !activityOpen ? 'active' : ''}`} onClick={() => {
+                        setActivityOpen(false);
+                        setTreeOpen((open) => !open);
+                    }} title={treeOpen && !activityOpen ? 'Hide files' : 'Show files'} aria-label={treeOpen && !activityOpen ? 'Hide files' : 'Show files'}>
+                        <span>{treeOpen && !activityOpen ? '›' : '‹'}</span>
+                    </button>
+                    {renderPreview()}
+                </div>
                 {activityOpen ? (
                     <aside className="workspace-op-side">
                         <div className="workspace-op-side-title">Version history</div>

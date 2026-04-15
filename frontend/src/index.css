@@ -2186,11 +2186,41 @@ select:focus {
 }
 
 .workspace-op-main {
+  position: relative;
   min-width: 0;
   min-height: 0;
   overflow: auto;
   padding: 16px;
   background: var(--bg-primary);
+}
+
+.workspace-op-tree-float {
+  position: sticky;
+  top: 0;
+  left: 100%;
+  z-index: 5;
+  width: 24px;
+  height: 24px;
+  margin: 0 0 -24px auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(8px);
+}
+
+.workspace-op-tree-float:hover,
+.workspace-op-tree-float.active {
+  background: var(--bg-tertiary);
+  border-color: var(--border-default);
+  color: var(--text-primary);
 }
 
 .workspace-op-main .markdown-content {
