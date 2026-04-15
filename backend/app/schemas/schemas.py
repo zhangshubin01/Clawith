@@ -262,6 +262,7 @@ class AgentOut(BaseModel):
     timezone: str | None = None
     expires_at: datetime | None = None
     is_expired: bool = False
+    is_system: bool = False
     llm_calls_today: int = 0
     max_llm_calls_per_day: int = 100
     agent_type: str = "native"

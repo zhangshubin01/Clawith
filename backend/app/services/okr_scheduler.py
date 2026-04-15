@@ -509,3 +509,171 @@ async def get_okr_settings_for_agent(tenant_id: uuid.UUID) -> dict:
             "period_frequency": s.period_frequency,
             "period_length_days": s.period_length_days,
         }
+
+
+# ─── Monthly Report (P3) ──────────────────────────────────────────────────────
+
+
+async def generate_monthly_report(
+    tenant_id: uuid.UUID,
+    okr_agent_id: uuid.UUID,
+) -> str:
+    """Generate and store a monthly OKR progress report.
+
+    Triggered on the 1st of every month at 08:00 by the monthly_okr_report
+    system cron trigger. The report covers:
+      - Overall health summary (on_track / at_risk / behind counts)
+      - Company objectives with KR progress bars
+      - Member objectives with aggregated progress
+      - Next-month guidance note (for OKR Agent to personalise)
+
+    Stores a WorkReport row with report_type="monthly" and also writes the
+    file to workspace/reports/monthly_YYYY-MM.md.
+    Returns the Markdown content so the calling OKR Agent tool can send it
+    to admins via send_web_message.
+    """
+    async with async_session() as db:
+        settings_result = await db.execute(
+            select(OKRSettings).where(OKRSettings.tenant_id == tenant_id)
+        )
+        okr_settings = settings_result.scalar_one_or_none()
+
+        if not okr_settings or not okr_settings.enabled:
+            return "OKR is not enabled for this tenant."
+
+        objectives, krs_by_obj, ps, pe = await _build_okr_snapshot(
+            tenant_id, db, okr_settings.period_frequency, okr_settings.period_length_days
+        )
+
+        content = _format_monthly_report_body(objectives, krs_by_obj, ps, pe)
+
+        today = date.today()
+        # period_date = first of this month
+        month_start = today.replace(day=1)
+        await _store_report(tenant_id, okr_agent_id, "monthly", month_start, content, db)
+
+    # Write file to OKR Agent workspace
+    agent_dir = WORKSPACE_ROOT / str(okr_agent_id)
+    month_label = month_start.strftime("%Y-%m")
+    _safe_write_report(agent_dir, f"monthly_{month_label}.md", content)
+
+    logger.info(f"[OKRScheduler] Monthly report generated for tenant {tenant_id}")
+    return content
+
+
+def _format_monthly_report_body(
+    objectives: list,
+    krs_by_obj: dict,
+    period_start: date,
+    period_end: date,
+) -> str:
+    """Build a monthly OKR report in structured Markdown.
+
+    Monthly reports are richer than daily/weekly ones:
+      - Explicit month title and period range
+      - Aggregated health percentages with trend emoji
+      - Completed KRs highlighted
+      - Items still behind listed for follow-up
+      - A closing note prompting OKR Agent to set next-month agenda
+    """
+    from datetime import date as _date
+    today = _date.today()
+    month_label = today.strftime("%B %Y")
+
+    header = (
+        f"# Monthly OKR Report — {month_label}\n"
+        f"**Generated**: {today.isoformat()}  "
+        f"| **Period**: {period_start.isoformat()} – {period_end.isoformat()}\n\n"
+    )
+
+    if not objectives:
+        return header + "_No active OKRs found for this period._\n"
+
+    # Collect all KRs
+    all_krs: list = []
+    for krs in krs_by_obj.values():
+        all_krs.extend(krs)
+
+    total_krs = len(all_krs)
+    completed = sum(1 for kr in all_krs if kr.status == "completed")
+    on_track  = sum(1 for kr in all_krs if kr.status == "on_track")
+    at_risk   = sum(1 for kr in all_krs if kr.status == "at_risk")
+    behind    = sum(1 for kr in all_krs if kr.status == "behind")
+
+    lines = [header]
+
+    # ── Health summary ────────────────────────────────────────────────
+    lines.append("## Monthly Health Summary\n")
+    if total_krs:
+        lines.append(f"| Status | Count | Ratio |")
+        lines.append(f"|---|---|---|")
+        lines.append(f"| Completed   | {completed} | {completed*100//total_krs}% |")
+        lines.append(f"| On Track    | {on_track}  | {on_track*100//total_krs}% |")
+        lines.append(f"| At Risk     | {at_risk}   | {at_risk*100//total_krs}% |")
+        lines.append(f"| Behind      | {behind}    | {behind*100//total_krs}% |")
+    else:
+        lines.append("_No Key Results tracked this month._")
+    lines.append("")
+
+    # ── Company objectives ────────────────────────────────────────────
+    company_objs = [o for o in objectives if o.owner_type == "company"]
+    if company_objs:
+        lines.append("## Company Objectives\n")
+        for o in company_objs:
+            krs = krs_by_obj.get(str(o.id), [])
+            pct = 0
+            if krs:
+                pct = int(
+                    sum(min(k.current_value / k.target_value, 1) for k in krs if k.target_value)
+                    / len(krs) * 100
+                )
+            lines.append(f"### {o.title}  —  {pct}% overall\n")
+            for kr in krs:
+                kr_pct = int(kr.current_value / kr.target_value * 100) if kr.target_value else 0
+                bar = "█" * (kr_pct // 10) + "░" * (10 - kr_pct // 10)
+                status_badge = {
+                    "completed": "DONE",
+                    "on_track": "OK",
+                    "at_risk": "RISK",
+                    "behind": "BEHIND",
+                }.get(kr.status, kr.status.upper())
+                lines.append(f"- [{status_badge}] {bar} {kr.title}")
+                lines.append(
+                    f"  {kr.current_value} / {kr.target_value} {kr.unit or ''} ({kr_pct}%)"
+                )
+            lines.append("")
+
+    # ── Member objectives ─────────────────────────────────────────────
+    member_objs = [o for o in objectives if o.owner_type != "company"]
+    if member_objs:
+        lines.append("## Member Objectives\n")
+        for o in member_objs:
+            krs = krs_by_obj.get(str(o.id), [])
+            lines.append(f"### {o.owner_type}: {o.title}\n")
+            for kr in krs:
+                kr_pct = int(kr.current_value / kr.target_value * 100) if kr.target_value else 0
+                lines.append(
+                    f"- {kr.title}: {kr.current_value}/{kr.target_value} "
+                    f"{kr.unit or ''} ({kr_pct}%) — _{kr.status}_"
+                )
+            lines.append("")
+
+    # ── Items that need follow-up ────────────────────────────────────
+    attention_krs = [kr for kr in all_krs if kr.status in ("at_risk", "behind")]
+    if attention_krs:
+        lines.append("## Action Required\n")
+        lines.append("The following Key Results need attention heading into next month:\n")
+        for kr in attention_krs:
+            kr_pct = int(kr.current_value / kr.target_value * 100) if kr.target_value else 0
+            lines.append(f"- **{kr.status.upper()}** — {kr.title} ({kr_pct}%)")
+        lines.append("")
+
+    # ── Closing note ─────────────────────────────────────────────────
+    lines.append("---")
+    lines.append(
+        "_This report was auto-generated by the OKR Agent. "
+        "Please review the items needing attention and align with team members "
+        "before the next check-in._"
+    )
+
+    return "\n".join(lines)

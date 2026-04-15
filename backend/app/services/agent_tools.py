@@ -2501,6 +2501,9 @@ async def execute_tool(
             result = await _update_objective(agent_id, arguments)
         elif tool_name == "update_any_kr_progress":
             result = await _update_any_kr_progress(agent_id, arguments)
+        # generate_monthly_okr_report: produce the monthly summary report
+        elif tool_name == "generate_monthly_okr_report":
+            result = await _generate_monthly_okr_report(agent_id)
         else:
 
             # Try MCP tool execution
@@ -4912,13 +4915,13 @@ async def _append_focus_item(agent_id: uuid.UUID, identifier: str, description: 
         logger.warning(f"[A2A] Failed to update focus.md for agent {agent_id}: {e}")
 
 
-async def _wake_agent_async(agent_id: uuid.UUID, reason_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False) -> None:
+async def _wake_agent_async(agent_id: uuid.UUID, reason_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False, a2a_session_id: str | None = None) -> None:
     """Wake an agent asynchronously via the trigger invocation path.
 
     Delegates to the public wake_agent_with_context API in trigger_daemon.
     """
     from app.services.trigger_daemon import wake_agent_with_context
-    await wake_agent_with_context(agent_id, reason_context, from_agent_id=from_agent_id, skip_dedup=skip_dedup)
+    await wake_agent_with_context(agent_id, reason_context, from_agent_id=from_agent_id, skip_dedup=skip_dedup, a2a_session_id=a2a_session_id)
 
 
 async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
@@ -5112,6 +5115,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                         f"[From {source_name}] {message_text}",
                         from_agent_id=from_agent_id,
                         skip_dedup=True,
+                        a2a_session_id=session_id,
                     )
                 except Exception as e:
                     logger.warning(f"[A2A] Failed to wake {target.name} for notify: {e}")
@@ -5171,6 +5175,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                         f"[From {source_name}] {message_text}",
                         from_agent_id=from_agent_id,
                         skip_dedup=True,
+                        a2a_session_id=session_id,
                     )
                 except Exception as e:
                     logger.warning(f"[A2A] Failed to wake {target.name} for delegate: {e}")
@@ -5233,12 +5238,13 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
 
             import random
             import httpx
-            from app.services.llm_utils import (
+            from app.services.llm import (
                 get_provider_base_url,
                 create_llm_client,
                 LLMMessage,
+                get_model_api_key,
+                LLMError,
             )
-            from app.services.llm_client import LLMError
             from app.services.agent_tools import get_agent_tools_for_llm, execute_tool
             base_url = get_provider_base_url(target_model.provider, target_model.base_url)
             if not base_url:
@@ -5259,7 +5265,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
 
             llm_client = create_llm_client(
                 provider=target_model.provider,
-                api_key=target_model.api_key_encrypted,
+                api_key=get_model_api_key(target_model),
                 model=target_model.model,
                 base_url=base_url,
                 timeout=float(getattr(target_model, 'request_timeout', None) or 120.0),
@@ -5490,7 +5496,12 @@ async def _plaza_get_new_posts(agent_id: uuid.UUID, arguments: dict) -> str:
 
 
 async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
-    """Create a new post in the Agent Plaza."""
+    """Create a new post in the Agent Plaza.
+
+    System agents (is_system=True) are intentionally excluded from Plaza to
+    keep the social feed clean — the OKR Agent communicates through Chat and
+    reports, not through Plaza posts.
+    """
     from app.models.plaza import PlazaPost
     from app.models.agent import Agent as AgentModel
 
@@ -5502,11 +5513,18 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
 
     try:
         async with async_session() as db:
-            # Get agent name
+            # Get agent and check is_system
             ar = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             agent = ar.scalar_one_or_none()
             if not agent:
                 return "Error: Agent not found."
+
+            # System agents (e.g. OKR Agent) must not post to Plaza
+            if agent.is_system:
+                return (
+                    "System agents are not allowed to post to Plaza. "
+                    "Use send_web_message to communicate with users directly."
+                )
 
             post = PlazaPost(
                 author_id=agent_id,
@@ -10221,6 +10239,38 @@ async def _generate_okr_report(agent_id: uuid.UUID | None, arguments: dict) -> s
         return f"Failed to generate OKR report: {str(e)[:200]}"
 
 
+async def _generate_monthly_okr_report(agent_id: uuid.UUID | None) -> str:
+    """Generate the monthly OKR summary report for the agent's tenant.
+
+    Writes a WorkReport (report_type='monthly') and returns the Markdown
+    content. The OKR Agent should forward this to admins via send_web_message.
+    Also triggered automatically by the monthly_okr_report system cron trigger.
+    """
+    if not agent_id:
+        return "OKR tools require agent context."
+
+    try:
+        from app.models.agent import Agent as AgentModel
+        from app.services.okr_scheduler import generate_monthly_report
+
+        async with async_session() as db:
+            agent_result = await db.execute(
+                select(AgentModel).where(AgentModel.id == agent_id)
+            )
+            agent = agent_result.scalar_one_or_none()
+            if not agent:
+                return "Agent not found."
+
+        return await generate_monthly_report(
+            tenant_id=agent.tenant_id,
+            okr_agent_id=agent_id,
+        )
+
+    except Exception as e:
+        logger.exception(f"[OKR] generate_monthly_okr_report failed for agent {agent_id}")
+        return f"Failed to generate monthly OKR report: {str(e)[:200]}"
+
+
 async def _get_okr_settings_tool(agent_id: uuid.UUID | None) -> str:
     """Return OKR settings for the agent's tenant as a formatted string.
 
@@ -10257,12 +10307,14 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
     try:
         from app.models.agent import Agent as AgentModel
         from app.models.okr import OKRObjective
+        from app.models.user import User as UserModel
+        from app.models.org import OrgMember
         async with async_session() as db:
             ag_res = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             ag = ag_res.scalar_one_or_none()
             if not ag:
                 return "Agent not found."
-            
+
             title = arguments.get("title")
             owner_type = arguments.get("owner_type")
             period_start = arguments.get("period_start")
@@ -10275,31 +10327,55 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
             p_end = date.fromisoformat(period_end)
 
             owner_id_str = arguments.get("owner_id")
-            owner_name = arguments.get("owner_name")
-            owner_id = None
-            
-            if owner_type != "company":
-                if owner_id_str:
-                    try:
-                        owner_id = uuid.UUID(owner_id_str)
-                    except ValueError:
-                        # Fallback for when the agent provides a Feishu identifier instead of a UUID
-                        owner_id = None
-                
-                # If we don't have a valid UUID but we have a name, look it up
-                if not owner_id and owner_name:
+            owner_name_hint = arguments.get("owner_name")  # optional name-based fallback
+            owner_id: uuid.UUID | None = None
+
+            if owner_id_str:
+                try:
+                    owner_id = uuid.UUID(owner_id_str)
+                except ValueError:
+                    owner_id = None
+
+                if owner_id:
+                    owner_exists = False
                     if owner_type == "agent":
-                        sub_res = await db.execute(select(AgentModel.id).where(AgentModel.tenant_id == ag.tenant_id, AgentModel.name == owner_name))
-                        owner_id = sub_res.scalar_one_or_none()
+                        res = await db.execute(select(AgentModel.id).where(AgentModel.id == owner_id))
+                        owner_exists = res.scalar_one_or_none() is not None
                     elif owner_type == "user":
+                        from app.models.user import User as UserModel
                         from app.models.org import OrgMember
-                        from app.models.user import User
-                        # Look up human in OrgMember -> User
-                        sub_res = await db.execute(select(OrgMember.user_id).join(User).where(OrgMember.tenant_id == ag.tenant_id, User.display_name == owner_name))
-                        owner_id = sub_res.scalar_one_or_none()
-                        
+                        res = await db.execute(select(UserModel.id).where(UserModel.id == owner_id))
+                        owner_exists = res.scalar_one_or_none() is not None
+                        if not owner_exists:
+                            res = await db.execute(select(OrgMember.id).where(OrgMember.id == owner_id))
+                            owner_exists = res.scalar_one_or_none() is not None
+
+                    if not owner_exists:
+                        owner_id = None
+                        if not owner_name_hint:
+                            return f"owner_id '{owner_id_str}' was not found. Provide a valid UUID, or pass owner_name instead."
+
+            if owner_type != "company" and not owner_id and owner_name_hint:
+                # If we don't have a valid UUID but we have a name, look it up
+                if owner_type == "agent":
+                    res = await db.execute(select(AgentModel.id).where(AgentModel.tenant_id == ag.tenant_id, AgentModel.name == owner_name_hint))
+                    owner_id = res.scalar_one_or_none()
+                elif owner_type == "user":
+                    from app.models.org import OrgMember
+                    from app.models.user import User as UserModel
+                    # Try platform User.display_name first
+                    res = await db.execute(select(UserModel.id).where(UserModel.display_name == owner_name_hint, UserModel.tenant_id == ag.tenant_id))
+                    owner_id = res.scalar_one_or_none()
+                    if not owner_id:
+                        # Fall back to OrgMember.name (Feishu/channel-only users)
+                        res = await db.execute(select(OrgMember.id).where(OrgMember.name == owner_name_hint, OrgMember.tenant_id == ag.tenant_id))
+                        owner_id = res.scalar_one_or_none()
+
                 if not owner_id:
-                    return f"Failed: Could not resolve a valid system UUID for the {owner_type}. Use the exact 'owner_name' if 'owner_id' is unknown."
+                    return f"Failed: Could not resolve a valid system UUID for the {owner_type} named '{owner_name_hint}'."
+
+            if owner_type != "company" and not owner_id:
+               return f"Failed: owner_id or owner_name is required for {owner_type} OKRs."
 
             obj = OKRObjective(
                 tenant_id=ag.tenant_id,
@@ -10313,7 +10389,8 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
             )
             db.add(obj)
             await db.commit()
-            return f"Successfully created Objective '{obj.title}' (ID: {obj.id})"
+            owner_info = f"owner={owner_name_hint or owner_id_str or 'unattributed'}"
+            return f"Successfully created Objective '{obj.title}' (ID: {obj.id}, {owner_info})"
     except Exception as e:
         logger.exception(f"[OKR] create_objective failed")
         return f"Failed to create objective: {str(e)[:200]}"
@@ -10355,9 +10432,16 @@ async def _create_key_result(agent_id: uuid.UUID | None, arguments: dict) -> str
 
 
 async def _update_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
+    """Update Objective metadata.
+
+    Permission rules:
+    - Regular agents: can only modify Objectives they own (owner_type='agent', owner_id=agent_id).
+    - System agents (OKR Agent, is_system=True): can modify any Objective.
+    """
     if not agent_id:
         return "OKR tools require agent context."
     try:
+        from app.models.agent import Agent as AgentModel
         from app.models.okr import OKRObjective
         async with async_session() as db:
             obj_id_str = arguments.get("objective_id")
@@ -10372,6 +10456,17 @@ async def _update_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
             obj = obj_res.scalar_one_or_none()
             if not obj:
                 return f"Objective {obj_id} not found."
+
+            # Permission check: non-system agents can only update their own O.
+            ag_res = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            ag = ag_res.scalar_one_or_none()
+            is_system = bool(ag and ag.is_system)
+            if not is_system:
+                if not (obj.owner_type == "agent" and obj.owner_id == agent_id):
+                    return (
+                        "Permission denied: you can only update your own Objectives. "
+                        "Use get_my_okr to retrieve your own objective IDs."
+                    )
 
             updates = []
             if "title" in arguments:

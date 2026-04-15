@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { enterpriseApi, skillApi } from '../services/api';
+import { useAuthStore } from '../stores';
 import PromptModal from '../components/PromptModal';
 import FileBrowser from '../components/FileBrowser';
 import type { FileBrowserApi } from '../components/FileBrowser';
@@ -1587,29 +1588,34 @@ const COMMON_TIMEZONES = [
 
 function CompanyTimezoneEditor() {
     const { t } = useTranslation();
-    const tenantId = localStorage.getItem('current_tenant_id') || '';
+    const user = useAuthStore((s) => s.user);
+    const tenantId = user?.tenant_id || localStorage.getItem('current_tenant_id') || '';
     const [timezone, setTimezone] = useState('UTC');
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
+    const [error, setError] = useState('');
 
     useEffect(() => {
         if (!tenantId) return;
         fetchJson<any>(`/tenants/${tenantId}`)
             .then(d => { if (d?.timezone) setTimezone(d.timezone); })
-            .catch(() => { });
+            .catch((e: any) => setError(e.message || 'Failed to load timezone'));
     }, [tenantId]);
 
     const handleSave = async (tz: string) => {
         if (!tenantId) return;
         setTimezone(tz);
         setSaving(true);
+        setError('');
         try {
             await fetchJson(`/tenants/${tenantId}`, {
                 method: 'PUT', body: JSON.stringify({ timezone: tz }),
             });
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
-        } catch (e) { }
+        } catch (e: any) {
+            setError(e.message || 'Failed to save timezone');
+        }
         setSaving(false);
     };
 
@@ -1621,13 +1627,23 @@ function CompanyTimezoneEditor() {
                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
                         {t('enterprise.timezone.description', 'Default timezone for all agents. Agents can override individually.')}
                     </div>
+                    {error && (
+                        <div style={{ fontSize: '11px', color: 'var(--error)', marginTop: '4px' }}>
+                            ⚠ {error}
+                        </div>
+                    )}
+                    {!tenantId && (
+                        <div style={{ fontSize: '11px', color: 'var(--error)', marginTop: '4px' }}>
+                            ⚠ {t('enterprise.timezone.noTenant', 'No company selected. Please refresh the page or contact support.')}
+                        </div>
+                    )}
                 </div>
                 <select
                     className="form-input"
                     value={timezone}
                     onChange={e => handleSave(e.target.value)}
                     style={{ width: '220px', fontSize: '13px' }}
-                    disabled={saving}
+                    disabled={saving || !tenantId}
                 >
                     {COMMON_TIMEZONES.map(tz => (
                         <option key={tz} value={tz}>{tz}</option>
@@ -2770,95 +2786,6 @@ export default function EnterpriseSettings() {
 
                         {/* ── Broadcast ── */}
                         <BroadcastSection />
-
-                        {/* ── A2A Async Communication (Beta) ── */}
-                        <div style={{ marginTop: '24px', marginBottom: '24px' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-                                <h3 style={{ margin: 0 }}>
-                                    {t('enterprise.a2aAsync.title', 'Agent-to-Agent Async Communication')}
-                                </h3>
-                                <span style={{
-                                    fontSize: '11px', padding: '2px 8px', borderRadius: '10px',
-                                    background: 'var(--warning-bg, #fef3cd)', color: 'var(--warning-text, #856404)',
-                                    fontWeight: 500, letterSpacing: '0.3px',
-                                }}>
-                                    BETA
-                                </span>
-                            </div>
-                            <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px', lineHeight: 1.6 }}>
-                                {t('enterprise.a2aAsync.description',
-                                    'Enable agents to communicate asynchronously with three modes: notify (one-way announcement), task_delegate (delegate work and get results back), and consult (synchronous question). When disabled, all agent-to-agent messages use synchronous consult mode — the same behavior as before this feature was introduced.'
-                                )}
-                            </p>
-                            <div className="card" style={{ padding: '16px', display: 'flex', alignItems: 'center', gap: '16px' }}>
-                                <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }}>
-                                    <input type="checkbox"
-                                        checked={!!currentTenant?.a2a_async_enabled}
-                                        onChange={async (e) => {
-                                            const wantEnable = e.target.checked;
-                                            if (wantEnable) {
-                                                const confirmed = window.confirm(
-                                                    t('enterprise.a2aAsync.enableWarning',
-                                                        [
-                                                            '⚠️ You are about to enable the A2A Async Communication feature (Beta).',
-                                                            '',
-                                                            'This feature allows agents to communicate asynchronously via notify and task_delegate modes.',
-                                                            '',
-                                                            'Known potential issues:',
-                                                            '• Agent replies may contain internal technical terms (trigger names, focus items, etc.)',
-                                                            '• task_delegate callbacks may occasionally be delayed or dropped due to rate limiting',
-                                                            '• Token consumption will increase because each async message triggers a separate agent session',
-                                                            '• Agent loops may occur if triggers are not properly configured',
-                                                            '',
-                                                            'If you encounter any issues, please return to this page and disable the toggle to restore stable synchronous behavior.',
-                                                            '',
-                                                            'Are you sure you want to enable this feature?'
-                                                        ].join('\n')
-                                                    )
-                                                );
-                                                if (!confirmed) return;
-                                            }
-                                            try {
-                                                await fetchJson(`/tenants/${selectedTenantId}`, {
-                                                    method: 'PUT',
-                                                    body: JSON.stringify({ a2a_async_enabled: wantEnable }),
-                                                });
-                                                qc.invalidateQueries({ queryKey: ['tenant', selectedTenantId] });
-                                            } catch (err: any) {
-                                                alert(err.message || 'Update failed');
-                                            }
-                                        }}
-                                        style={{ opacity: 0, width: 0, height: 0 }}
-                                    />
-                                    <span style={{
-                                        position: 'absolute', inset: 0,
-                                        background: currentTenant?.a2a_async_enabled ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
-                                        borderRadius: '11px', transition: 'background 0.2s',
-                                    }}>
-                                        <span style={{
-                                            position: 'absolute',
-                                            left: currentTenant?.a2a_async_enabled ? '20px' : '2px',
-                                            top: '2px', width: '18px', height: '18px',
-                                            background: '#fff', borderRadius: '50%', transition: 'left 0.2s',
-                                        }} />
-                                    </span>
-                                </label>
-                                <div>
-                                    <span style={{ fontSize: '13px', fontWeight: 500 }}>
-                                        {currentTenant?.a2a_async_enabled
-                                            ? t('enterprise.a2aAsync.enabled', 'Enabled')
-                                            : t('enterprise.a2aAsync.disabled', 'Disabled')
-                                        }
-                                    </span>
-                                    <p style={{ fontSize: '11px', color: 'var(--text-tertiary)', margin: '2px 0 0 0' }}>
-                                        {currentTenant?.a2a_async_enabled
-                                            ? t('enterprise.a2aAsync.enabledHint', 'Agents can use notify, task_delegate, and consult modes.')
-                                            : t('enterprise.a2aAsync.disabledHint', 'All agent messages use synchronous consult mode.')
-                                        }
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
 
                         {/* ── Danger Zone: Delete Company ── */}
                         <div style={{ marginTop: '32px', padding: '16px', border: '1px solid var(--status-error, #e53e3e)', borderRadius: '8px' }}>

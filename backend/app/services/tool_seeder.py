@@ -1262,7 +1262,7 @@ BUILTIN_TOOLS = [
             "properties": {},
             "required": [],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1292,7 +1292,7 @@ BUILTIN_TOOLS = [
             },
             "required": ["report_type"],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1313,7 +1313,7 @@ BUILTIN_TOOLS = [
             "properties": {},
             "required": [],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1366,7 +1366,7 @@ BUILTIN_TOOLS = [
             },
             "required": ["title", "owner_type", "period_start", "period_end"],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
@@ -1408,17 +1408,19 @@ BUILTIN_TOOLS = [
             },
             "required": ["objective_id", "title", "target_value"],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
     {
-        # update_objective — OKR Agent modifies an O's metadata, status, or period.
+        # update_objective — available to ALL agents, but with ownership enforcement:
+        # regular agents can only modify their own O; OKR Agent can modify any O.
         "name": "update_objective",
         "display_name": "Update Objective",
         "description": (
-            "Modify an existing Objective's title, description, status, or period dates. "
-            "Use this when a team member wants to adjust their O, or to archive a completed one. "
-            "Get the objective_id from get_okr. Only provide the fields you want to change."
+            "Modify an Objective's title, description, status, or period dates. "
+            "Regular agents can only update their own Objectives — call get_my_okr first "
+            "to get your objective_id. The OKR Agent can update any member's Objective. "
+            "Only provide the fields you want to change."
         ),
         "category": "okr",
         "icon": "✏️",
@@ -1428,7 +1430,7 @@ BUILTIN_TOOLS = [
             "properties": {
                 "objective_id": {
                     "type": "string",
-                    "description": "UUID of the Objective to update.",
+                    "description": "UUID of the Objective to update. Get from get_my_okr (own) or get_okr (any).",
                 },
                 "title": {
                     "type": "string",
@@ -1496,10 +1498,31 @@ BUILTIN_TOOLS = [
             },
             "required": ["kr_id", "value"],
         },
-        "config": {},
+        "config": {"okr_agent_only": True},
         "config_schema": {},
     },
-
+    {
+        # generate_monthly_okr_report — OKR Agent exclusive: produce the monthly summary report.
+        # Called automatically by the monthly_okr_report system cron trigger, or on-demand.
+        "name": "generate_monthly_okr_report",
+        "display_name": "Generate Monthly OKR Report",
+        "description": (
+            "Generate the monthly OKR progress summary report. Covers all Objectives and Key "
+            "Results for the current period, highlights completed and at-risk items, and provides "
+            "a closing action note. Saved to WorkReport (report_type='monthly') and "
+            "workspace/reports/. Returns the full Markdown so you can send it to admins."
+        ),
+        "category": "okr",
+        "icon": "📅",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "config": {"okr_agent_only": True},
+        "config_schema": {},
+    },
     # --- Feishu Integration Tools ---
     # These tools require a configured Feishu channel to function.
     # They are NOT enabled by default — agents with Feishu channels should enable them.
@@ -2565,6 +2588,14 @@ async def seed_builtin_tools():
                 if not existing.config and t.get("config"):
                     existing.config = t["config"]
                     updated_fields.append("config")
+                elif t.get("config") and existing.config != t["config"]:
+                    # Merge new config keys into existing config so that flags like
+                    # okr_agent_only are propagated to already-created tool records.
+                    # Existing keys take precedence (agent-specific overrides are preserved).
+                    merged = {**t["config"], **(existing.config or {})}
+                    if merged != existing.config:
+                        existing.config = merged
+                        updated_fields.append("config")
                 if existing.parameters_schema != t["parameters_schema"]:
                     existing.parameters_schema = t["parameters_schema"]
                     updated_fields.append("parameters_schema")

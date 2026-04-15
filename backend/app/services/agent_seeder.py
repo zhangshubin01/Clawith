@@ -86,37 +86,76 @@ I am the OKR Agent, the organizational intelligence coordinator for this team.
 
 ## Role
 I exist to help the team stay aligned on Objectives and Key Results. My job is to:
-- Monitor progress across all company and individual OKRs
-- Proactively collect progress updates from team members
-- Generate clear, insightful daily and weekly reports
+- Help establish company and individual OKRs at the start of each period
+- Monitor progress across all OKRs and generate regular reports
 - Identify risks early — KRs that are falling behind or at risk
-- Help team members set meaningful, measurable Key Results
+- Proactively reach out when team members need to set or update their OKRs
+- Reach out to members who haven't updated KRs when reports show they are behind
 
 ## Core Traits
 - **Data-Driven**: I base everything on actual progress numbers and concrete evidence
-- **Proactive**: I reach out to team members to gather updates before reports are due
+- **Proactive**: I reach out to team members to gather updates and nudge action
 - **Clear Communicator**: I present OKR data in a clean, scannable format — no fluff
 - **Supportive**: My goal is to help the team succeed, not to judge or police performance
 - **Systematic**: I follow a consistent cadence — daily check-ins, weekly summaries
 
+## How OKRs Get Created
+
+### Company OKR
+The first step after OKR is enabled is for the admin to open a chat with me and describe
+the company’s objectives for the period. I use `create_objective` and `create_key_result`
+to record everything they tell me. I ask clarifying questions to ensure KRs are measurable.
+
+### Individual OKRs (Agent Colleagues)
+When I am triggered to reach out to Agent colleagues:
+- I send them a single comprehensive message that includes: (a) the full company OKR context,
+  (b) a request to think deeply about their role’s contribution and reply in ONE message
+  with their proposed Objective and Key Results.
+- I wait for their reply, then parse it and call `create_objective` + `create_key_result`
+  to record their OKR on their behalf.
+- I confirm back to them once their OKRs are created.
+
+### Individual OKRs (Human Members)
+For human platform users, I send a `send_web_message` notification inviting them to either:
+- Chat with me directly to discuss their OKRs (I will create them from the conversation), or
+- Add their OKRs manually on the OKR page.
+
+## Channel Users
+If the organization has channel-synced members (e.g. Feishu) but I have not been configured
+with the corresponding channel bot, I immediately notify the admin via `send_web_message`
+listing the unreachable users and asking them to configure the channel for me.
+
 ## Work Style
 - I use `get_okr` to get the full OKR board at the start of each report cycle
-- I use `send_message_to_agent` to ask Agent colleagues about their KR progress
-- I use `send_channel_message` or `send_web_message` to gather updates from human team members
+- I use `send_message_to_agent` to communicate with Agent colleagues
+- I use `send_web_message` to notify human platform members
 - I write structured reports in `workspace/reports/` and share them via Plaza
-- I use `update_kr_progress` to record verified progress values with notes
+- I use `update_any_kr_progress` to record progress values gathered during check-ins
 
-## Focus File Protocol
-When I onboard a team member (human or agent) into the OKR system, I ask them to maintain
-a `focus.md` file in their workspace that tracks their current KR commitments. I read these
-files during my heartbeat cycles to extract progress without requiring manual check-ins.
+## During Report Generation (Cron Triggers)
+When a daily or weekly report is triggered:
+1. Call `get_okr_settings` to read config
+2. Call `get_okr` to get current OKR board
+3. Identify KRs with `behind` or `at_risk` status
+4. For stale or at-risk KRs, send targeted reminders to the responsible person
+   (agent → `send_message_to_agent`; user → `send_web_message`)
+5. Generate and post the report via `generate_okr_report` + `plaza_create_post`
 
 ## Communication Style
 - Professional and concise
 - Data-first: lead with numbers, then context
 - I respond in whatever language my team uses (Chinese or English)
 - I use structured markdown for all reports
+- Tone: supportive invitation, never accusatory demand
 """
+
+# OKR_AGENT_HEARTBEAT is intentionally removed.
+# OKR Agent's heartbeat is DISABLED (heartbeat_enabled=False).
+# All scheduled activity is handled by the 4 cron triggers:
+#   daily_okr_report    → daily report generation
+#   weekly_okr_report   → weekly report generation
+#   biweekly_okr_checkin → bi-weekly check-in
+#   monthly_okr_report  → monthly summary
 
 # ── Skill assignments (by folder_name) ──────────────────────────
 
@@ -133,85 +172,6 @@ MEESEEKS_SKILLS = [
     "meeting-notes",
     # defaults (auto-included): skill-creator
 ]
-
-# OKR Agent heartbeat instruction (written into HEARTBEAT.md so it overrides default)
-OKR_AGENT_HEARTBEAT = """# OKR Agent Heartbeat Protocol
-
-As the OKR Agent, your periodic heartbeat has the following responsibilities.
-Execute each phase in order. If a step fails, log the error and continue.
-
-## Phase 1: Load Configuration
-
-1. Call `get_okr_settings` to read the current OKR configuration.
-   - Note `daily_report_enabled`, `daily_report_time`, `weekly_report_enabled`, `weekly_report_day`
-   - Note `period_frequency` to understand the current cycle
-2. Determine the current date and day of week.
-
-## Phase 2: Sync OKR Board
-
-1. Call `get_okr` to fetch the full OKR board for the current period.
-2. Review all Key Results, paying attention to:
-   - KRs with `behind` or `at_risk` status
-   - KRs that haven't been updated recently (check `last_updated_at`)
-3. Write a brief status snapshot to `workspace/reports/last_sync.md` using `write_file`.
-
-## Phase 3: Collect Focus File Updates
-
-1. Call `collect_okr_progress` to batch-read all team members' focus.md files.
-   - This tool automatically reads each Agent's workspace/focus.md,
-     extracts KR progress values, and writes them to the database.
-   - Review the returned summary to see what changed.
-2. If any Agent does not have a focus.md yet, use `send_message_to_agent` to
-   ask them to create one. Provide the focus.md template format.
-3. For human team members needing updates, send a check-in via `send_web_message`.
-
-## Phase 4: Generate Reports (if scheduled)
-
-Check the settings from Phase 1 to decide if a report is due:
-
-**Daily Report** (if `daily_report_enabled` is true):
-1. Call `generate_okr_report` with `report_type: "daily"`
-2. Review the returned report markdown
-3. Post a summary to Plaza using `plaza_create_post`
-
-**Weekly Report** (if `weekly_report_enabled` is true AND today matches `weekly_report_day`):
-1. Call `generate_okr_report` with `report_type: "weekly"`
-2. Review the returned report markdown
-3. Post a detailed summary to Plaza using `plaza_create_post`
-
-## Phase 5: Proactive Team Outreach (optional)
-
-If you notice high-risk items (behind/at_risk KRs with no recent updates):
-1. Use `send_message_to_agent` to reach the responsible Agent
-2. Use `send_web_message` to notify the responsible human team member
-Message tone: supportive, not accusatory. Focus on "how can I help?"
-
-## Focus File Format
-
-The standard format for a team member's focus.md is:
-
-```markdown
-# Focus — [Period Label]
-
-## KR: [KR Title]
-- **KR ID**: [kr_uuid]
-- **Current Progress**: [value] / [target] [unit]
-- **Last Updated**: [YYYY-MM-DD]
-- **This Week**: [brief note on what you did]
-- **Next Steps**: [what you plan to do next]
-```
-
-## Key Principles
-
-- DO NOT spam team members — check in at most once per day per person
-- DO keep reports concise — executives scan, they don't read novels
-- DO flag risks early — better to raise concerns than to stay quiet
-- DO update progress values from verified reports, not estimates
-- Call `collect_okr_progress` BEFORE `generate_okr_report` to get fresh data
-- NEVER share individual performance details on Plaza without appropriate context
-  (overall health trends are OK; individual underperformance is internal only)
-"""
-
 
 
 async def seed_default_agents():
@@ -463,10 +423,9 @@ async def seed_okr_agent():
             status="idle",
             # System agent: protected from user deletion
             is_system=True,
-            # Enable heartbeat so OKR Agent runs its collection cycle automatically
-            heartbeat_enabled=True,
-            heartbeat_interval_minutes=240,  # Check every 4 hours
-            heartbeat_active_hours="08:00-22:00",
+            # OKR Agent does NOT use heartbeat — all scheduled activity is driven by
+            # the 4 cron triggers (daily/weekly/biweekly/monthly reports).
+            heartbeat_enabled=False,
         )
         
         try:
@@ -531,8 +490,8 @@ async def seed_okr_agent():
                 encoding="utf-8",
             )
 
-        # Write custom HEARTBEAT.md (overrides default heartbeat with OKR-specific protocol)
-        (agent_dir / "HEARTBEAT.md").write_text(OKR_AGENT_HEARTBEAT.strip() + "\n", encoding="utf-8")
+        # OKR Agent does NOT use HEARTBEAT.md — heartbeat is disabled for this agent.
+        # All scheduled activity is driven by cron triggers (daily/weekly/biweekly/monthly reports).
 
         # Create workspace/reports directory
         reports_dir = agent_dir / "workspace" / "reports"
@@ -624,9 +583,11 @@ def _append_seed_marker(marker_path: Path, line: str):
 async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
     """Create system cron triggers for the OKR Agent.
 
-    Two triggers:
-      - daily_okr_report:  fires at 18:00 every day  (0 18 * * *)
-      - weekly_okr_report: fires at 09:00 every Monday (0 9 * * 1)
+    Four triggers (all is_system=True, cannot be deleted by users):
+      - daily_okr_report:     fires at 18:00 every day     (0 18 * * *)
+      - weekly_okr_report:    fires at 09:00 every Monday  (0 9 * * 1)
+      - biweekly_okr_checkin: fires at 10:00 on 1st & 15th (0 10 1,15 * *)
+      - monthly_okr_report:   fires at 08:00 on the 1st    (0 8 1 * *)
 
     These supplement the 4-hour heartbeat with precise scheduled firing.
     is_system=True prevents users from deleting them.
@@ -650,6 +611,30 @@ async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
             "reason": (
                 "System trigger: fires OKR Agent at 09:00 every Monday to generate "
                 "the weekly report if weekly_report_enabled is true."
+            ),
+            "cooldown_seconds": 3600,
+            "is_system": True,
+        },
+        {
+            "name": "biweekly_okr_checkin",
+            "type": "cron",
+            "config": {"expr": "0 10 1,15 * *"},
+            "reason": (
+                "System trigger: fires on the 1st and 15th of every month at 10:00 "
+                "to perform the mandatory bi-weekly OKR check-in. This trigger is always "
+                "enabled and cannot be disabled — OKR check-in is a core non-optional feature."
+            ),
+            "cooldown_seconds": 3600,
+            "is_system": True,
+        },
+        {
+            "name": "monthly_okr_report",
+            "type": "cron",
+            "config": {"expr": "0 8 1 * *"},
+            "reason": (
+                "System trigger: fires on the 1st of every month at 08:00 to auto-generate "
+                "and deliver the monthly OKR progress report to Admin. Fires before "
+                "biweekly_okr_checkin (which fires at 10:00) to avoid session conflicts."
             ),
             "cooldown_seconds": 3600,
             "is_system": True,
@@ -739,6 +724,7 @@ async def patch_existing_okr_agent() -> None:
             "get_okr", "get_my_okr", "update_kr_progress",
             "collect_okr_progress", "generate_okr_report", "get_okr_settings",
             "create_objective", "create_key_result", "update_objective", "update_any_kr_progress",
+            "generate_monthly_okr_report",  # P3: monthly report tool added
         ]
         for tool_name in all_okr_tools:
             tool_res = await db.execute(select(Tool).where(Tool.name == tool_name))
@@ -759,3 +745,139 @@ async def patch_existing_okr_agent() -> None:
         if changed:
             await db.commit()
             logger.info("[AgentSeeder] OKR Agent patch complete")
+
+
+async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID) -> None:
+    """Create an OKR Agent for a specific tenant when OKR is first enabled.
+
+    Unlike the startup-level seed_okr_agent() (which is global), this function
+    is called on-demand from the 'enable OKR' API endpoint. It uses DB-only
+    idempotency (no file marker) so it is safe to call multiple times.
+
+    Args:
+        tenant_id:  The tenant to create the OKR Agent for.
+        creator_id: The user (org admin) who enabled OKR — becomes the agent creator.
+    """
+    async with async_session() as db:
+        # ── Idempotency check: abort if OKR Agent already exists for this tenant ──
+        existing = await db.execute(
+            select(Agent).where(
+                Agent.tenant_id == tenant_id,
+                Agent.name == "OKR Agent",
+                Agent.is_system == True,  # noqa: E712
+            ).limit(1)
+        )
+        if existing.scalar_one_or_none():
+            logger.info(
+                f"[AgentSeeder] OKR Agent already exists for tenant {tenant_id}, skipping"
+            )
+            return
+
+        # ── Create OKR Agent ──
+        okr_agent = Agent(
+            name="OKR Agent",
+            role_description=(
+                "OKR system coordinator — monitors team Objectives and Key Results, "
+                "collects progress updates, and generates daily/weekly reports"
+            ),
+            bio=(
+                "I am the OKR Agent. I help this team stay aligned on goals by tracking "
+                "Objectives and Key Results, collecting progress from team members, and "
+                "generating clear reports. My job is to surface insights and flag risks early."
+            ),
+            avatar_url="",
+            creator_id=creator_id,
+            tenant_id=tenant_id,
+            status="idle",
+            is_system=True,
+            heartbeat_enabled=False,
+        )
+        db.add(okr_agent)
+        await db.flush()
+
+        # ── Participant identity record ──
+        from app.models.participant import Participant  # noqa: F401
+        db.add(Participant(
+            type="agent",
+            ref_id=okr_agent.id,
+            display_name=okr_agent.name,
+            avatar_url=okr_agent.avatar_url,
+        ))
+        await db.flush()
+
+        # ── Permission: company-wide 'use' access ──
+        db.add(AgentPermission(
+            agent_id=okr_agent.id,
+            scope_type="company",
+            access_level="use",
+        ))
+
+        # ── Workspace setup ──
+        template_dir = Path(settings.AGENT_TEMPLATE_DIR)
+        agent_dir = Path(settings.AGENT_DATA_DIR) / str(okr_agent.id)
+
+        if template_dir.exists():
+            shutil.copytree(str(template_dir), str(agent_dir))
+        else:
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            for sub in ("skills", "workspace", "workspace/reports", "memory"):
+                (agent_dir / sub).mkdir(parents=True, exist_ok=True)
+
+        (agent_dir / "soul.md").write_text(OKR_AGENT_SOUL.strip() + "\n", encoding="utf-8")
+
+        mem_path = agent_dir / "memory" / "memory.md"
+        if not mem_path.exists():
+            mem_path.write_text(
+                "# Memory\n\n"
+                "## OKR System State\n"
+                "- Last report generated: (none)\n"
+                "- Last progress collection: (none)\n"
+                "- Team members tracked: (pending)\n",
+                encoding="utf-8",
+            )
+
+        (agent_dir / "relationships.md").write_text(
+            "# Relationships\n\n"
+            "## Team Members (OKR tracking)\n\n"
+            "_Team members will be added here as they are onboarded into the OKR system._\n",
+            encoding="utf-8",
+        )
+
+        # ── Assign default tools ──
+        default_tools_result = await db.execute(
+            select(Tool).where(Tool.is_default == True)  # noqa: E712
+        )
+        for tool in default_tools_result.scalars().all():
+            db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
+
+        # ── Assign OKR-specific tools ──
+        okr_tool_names = [
+            "get_okr", "get_my_okr", "update_kr_progress",
+            "collect_okr_progress", "generate_okr_report", "get_okr_settings",
+            "create_objective", "create_key_result", "update_objective",
+            "update_any_kr_progress", "generate_monthly_okr_report",
+        ]
+        for tool_name in okr_tool_names:
+            tool_res = await db.execute(select(Tool).where(Tool.name == tool_name))
+            tool = tool_res.scalar_one_or_none()
+            if tool:
+                existing_at = await db.execute(
+                    select(AgentTool).where(
+                        AgentTool.agent_id == okr_agent.id,
+                        AgentTool.tool_id == tool.id,
+                    )
+                )
+                if not existing_at.scalar_one_or_none():
+                    db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
+            else:
+                logger.warning(
+                    f"[AgentSeeder] OKR tool '{tool_name}' not found — run tool seeder first"
+                )
+
+        await db.commit()
+        logger.info(f"[AgentSeeder] Created OKR Agent for tenant {tenant_id} ({okr_agent.id})")
+
+        # ── Create system cron triggers ──
+        await _seed_okr_triggers(db, okr_agent.id)
+        await db.commit()
+        logger.info(f"[AgentSeeder] OKR triggers created for tenant {tenant_id}")
