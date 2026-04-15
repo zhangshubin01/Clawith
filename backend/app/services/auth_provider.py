@@ -24,8 +24,8 @@ class ExternalUserInfo:
     """Standardized user info from external identity providers."""
 
     provider_type: str
-    provider_user_id: str
     provider_union_id: str | None = None
+    provider_user_id: str | None = None
     name: str = ""
     email: str = ""
     avatar_url: str = ""
@@ -102,27 +102,19 @@ class BaseAuthProvider(ABC):
             tenant_id: Optional tenant ID for association
         """
         from app.services.sso_service import sso_service
-        from sqlalchemy.orm import selectinload
 
         # Ensure provider exists
         await self._ensure_provider(db, tenant_id)
 
         # 1. Try lookup via sso_service (which now uses OrgMember)
-        provider_user_id = user_info.provider_union_id or user_info.provider_user_id
+        provider_user_id = user_info.provider_user_id
         user = await sso_service.resolve_user_identity(
-            db, provider_user_id, self.provider_type, tenant_id=tenant_id
+            db,
+            provider_user_id,
+            self.provider_type,
+            tenant_id=tenant_id,
+            identity_data=user_info.raw_data,
         )
-        
-        # Feishu: fallback to open_id if union_id lookup misses
-        if (
-            not user
-            and self.provider_type == "feishu"
-            and user_info.provider_union_id
-            and user_info.provider_user_id
-        ):
-            user = await sso_service.resolve_user_identity(
-                db, user_info.provider_user_id, self.provider_type, tenant_id=tenant_id
-            )
 
         is_new = False
         if not user:
@@ -328,11 +320,11 @@ class FeishuAuthProvider(BaseAuthProvider):
 
             return ExternalUserInfo(
                 provider_type=self.provider_type,
-                provider_user_id=info_data.get("open_id", ""),
                 provider_union_id=info_data.get("union_id"),
                 name=info_data.get("name", ""),
                 email=info_data.get("email", ""),
                 avatar_url=info_data.get("avatar_url", ""),
+                mobile=info_data.get("mobile", ""),
                 raw_data=info_data,
             )
 
@@ -425,7 +417,6 @@ class DingTalkAuthProvider(BaseAuthProvider):
             logger.info(f"DingTalk user info: {info_data}")
             return ExternalUserInfo(
                 provider_type=self.provider_type,
-                provider_user_id=info_data.get("openId", ""),
                 provider_union_id=info_data.get("unionId"),
                 name=info_data.get("nick", ""),
                 email=info_data.get("email", ""),
