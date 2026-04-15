@@ -38,6 +38,8 @@ interface Props {
 const WORKSPACE_ROOT = 'workspace';
 const EDITABLE_EXTS = new Set(['.md', '.markdown', '.csv']);
 const PREVIEW_EXTS = new Set(['.md', '.markdown', '.csv', '.html', '.htm', '.pdf', '.xlsx', '.docx', '.pptx', '.txt']);
+const MIN_SAVING_VISIBLE_MS = 650;
+const SAVED_VISIBLE_MS = 1600;
 
 function extOf(path: string): string {
     const idx = path.lastIndexOf('.');
@@ -196,6 +198,7 @@ export default function WorkspaceOperationPanel({
     const [treeOpen, setTreeOpen] = useState(true);
     const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set([WORKSPACE_ROOT]));
     const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const saveStateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lockTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const ext = activePath ? extOf(activePath) : '';
@@ -270,39 +273,63 @@ export default function WorkspaceOperationPanel({
         };
     }, [agentId, activePath, editing, sessionId]);
 
+    const clearSaveStateTimer = () => {
+        if (saveStateTimer.current) {
+            clearTimeout(saveStateTimer.current);
+            saveStateTimer.current = null;
+        }
+    };
+
+    const runAutosaveWithFeedback = async (nextContent: string) => {
+        if (!activePath) return;
+        clearSaveStateTimer();
+        const startedAt = Date.now();
+        setSaveState('saving');
+        try {
+            await fileApi.autosave(agentId, activePath, nextContent, sessionId);
+            const remainingSavingMs = Math.max(0, MIN_SAVING_VISIBLE_MS - (Date.now() - startedAt));
+            await new Promise((resolve) => setTimeout(resolve, remainingSavingMs));
+            setContent(nextContent);
+            setSaveState('saved');
+            setRevisions(await fileApi.revisions(agentId, activePath).catch(() => []));
+            clearSaveStateTimer();
+            saveStateTimer.current = setTimeout(() => {
+                setSaveState('idle');
+                saveStateTimer.current = null;
+            }, SAVED_VISIBLE_MS);
+        } catch {
+            setSaveState('error');
+        }
+    };
+
+    useEffect(() => {
+        return () => clearSaveStateTimer();
+    }, []);
+
     useEffect(() => {
         if (!editing || !activePath || draft === content) return;
         if (saveTimer.current) clearTimeout(saveTimer.current);
         saveTimer.current = setTimeout(async () => {
-            try {
-                setSaveState('saving');
-                await fileApi.autosave(agentId, activePath, draft, sessionId);
-                setContent(draft);
-                setSaveState('saved');
-                setRevisions(await fileApi.revisions(agentId, activePath).catch(() => []));
-            } catch {
-                setSaveState('error');
-            }
+            await runAutosaveWithFeedback(draft);
         }, 900);
         return () => {
             if (saveTimer.current) clearTimeout(saveTimer.current);
         };
     }, [agentId, activePath, draft, content, editing, sessionId]);
 
-    const csvRows = useMemo(() => {
-        if (preview?.type === 'csv') return parseCsv(editing ? draft : content).slice(0, 200);
-        return [];
-    }, [preview?.type, content, draft, editing]);
+    const previewType = preview?.type || preview?.kind;
 
-    const xlsxRows = preview?.type === 'xlsx' ? (preview.sheets?.[0]?.rows || []) : [];
+    const csvRows = useMemo(() => {
+        if (previewType === 'csv') return parseCsv(editing ? draft : content).slice(0, 200);
+        return [];
+    }, [previewType, content, draft, editing]);
+
+    const xlsxRows = previewType === 'xlsx' ? (preview.sheets?.[0]?.rows || []) : [];
 
     const finishEditing = async () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
         if (activePath && draft !== content) {
-            setSaveState('saving');
-            await fileApi.autosave(agentId, activePath, draft, sessionId);
-            setContent(draft);
-            setSaveState('saved');
+            await runAutosaveWithFeedback(draft);
         }
         setEditing(false);
         onEditingChange?.(false);
@@ -380,10 +407,10 @@ export default function WorkspaceOperationPanel({
                 />
             );
         }
-        if (preview.type === 'md' || preview.type === 'markdown') {
+        if (previewType === 'md' || previewType === 'markdown') {
             return <MarkdownRenderer content={content || ''} />;
         }
-        if (preview.type === 'csv') {
+        if (previewType === 'csv') {
             return (
                 <div className="workspace-op-table-wrap">
                     <table className="workspace-op-table">
@@ -396,7 +423,7 @@ export default function WorkspaceOperationPanel({
                 </div>
             );
         }
-        if (preview.type === 'xlsx') {
+        if (previewType === 'xlsx') {
             return (
                 <div className="workspace-op-table-wrap">
                     <table className="workspace-op-table">
@@ -412,14 +439,13 @@ export default function WorkspaceOperationPanel({
         if (isHtml) {
             return <HtmlPreviewFrame content={content || ''} title={fileName(activePath)} />;
         }
-        if (preview.type === 'pdf') {
-            const token = localStorage.getItem('token');
-            return <iframe className="workspace-op-pdf" src={`${preview.url}&token=${token}`} title={fileName(activePath)} />;
+        if (previewType === 'pdf') {
+            return <iframe className="workspace-op-pdf" src={fileApi.downloadUrl(agentId, activePath, { inline: true })} title={fileName(activePath)} />;
         }
-        if (preview.type === 'docx') {
-            return <pre className="workspace-op-text-preview">{preview.content}</pre>;
+        if (previewType === 'docx') {
+            return <pre className="workspace-op-text-preview">{preview.content || preview.text}</pre>;
         }
-        if (preview.type === 'pptx') {
+        if (previewType === 'pptx') {
             return (
                 <div className="workspace-op-ppt-preview">
                     {(preview.slides || []).map((slide: any) => (
@@ -499,44 +525,61 @@ export default function WorkspaceOperationPanel({
                     {editing && <button className="workspace-op-icon-btn active" onClick={finishEditing} title="Done">✓</button>}
                     {activePath && (
                         <a href={fileApi.downloadUrl(agentId, activePath)} download>
-                            <button className="workspace-op-icon-btn" title="Download">↓</button>
+                            <button className="workspace-op-icon-btn" title="Download" aria-label="Download">
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                    <path d="M12 3v10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                    <path d="M8 10l4 4 4-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                    <path d="M5 17v2h14v-2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                            </button>
                         </a>
                     )}
                 </div>
             </div>
 
             <div className={`workspace-op-body ${activityOpen ? 'activity-open' : ''} ${treeOpen ? '' : 'tree-closed'}`}>
-                {treeOpen ? (
+                <button className={`workspace-op-tree-edge-toggle ${treeOpen && !activityOpen ? 'active' : ''}`} onClick={() => {
+                    setActivityOpen(false);
+                    setTreeOpen((open) => !open);
+                }} title={treeOpen && !activityOpen ? 'Hide files' : 'Show files'} aria-label={treeOpen && !activityOpen ? 'Hide files' : 'Show files'}>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.9" />
+                        <path d="M14 5v14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                        <path
+                            d={treeOpen && !activityOpen ? 'M10 9l-3 3 3 3' : 'M8 9l3 3-3 3'}
+                            stroke="currentColor"
+                            strokeWidth="1.9"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
+                    </svg>
+                </button>
+                <div className="workspace-op-main">
+                    {renderPreview()}
+                </div>
+                {activityOpen ? (
+                    <aside className="workspace-op-side">
+                        <div className="workspace-op-side-title">Version history</div>
+                        {!activePath && <div className="workspace-op-side-empty">Open a file to view its history.</div>}
+                        {activePath && revisions.length === 0 && <div className="workspace-op-side-empty">No versions recorded yet.</div>}
+                        {activePath && revisions.slice(0, 10).map((rev) => (
+                            <div className="workspace-op-revision" key={rev.id}>
+                                <div>
+                                    <strong>{rev.operation}</strong>
+                                    <span>{rev.actor_type}</span>
+                                </div>
+                                <pre>{rev.diff || 'No text diff'}</pre>
+                                {rev.after_content != null && <button className="btn btn-secondary" onClick={() => restore(rev.id)}>Restore</button>}
+                            </div>
+                        ))}
+                    </aside>
+                ) : treeOpen ? (
                     <aside className="workspace-op-tree">
-                        <div className="workspace-op-tree-title">
-                            <span>Files</span>
-                            <button className="workspace-op-tree-toggle" onClick={() => setTreeOpen(false)} title="Collapse files">‹</button>
-                        </div>
                         <div className="workspace-op-tree-list">
                             {fileTree.length ? renderFileTreeNodes(fileTree, 0) : <div className="workspace-op-tree-empty">No files yet.</div>}
                         </div>
                     </aside>
-                ) : (
-                    <button className="workspace-op-tree-rail" onClick={() => setTreeOpen(true)} title="Open files">
-                        <span>▤</span>
-                    </button>
-                )}
-                <div className="workspace-op-main">{renderPreview()}</div>
-                {activityOpen && <aside className="workspace-op-side">
-                    <div className="workspace-op-side-title">Version history</div>
-                    {!activePath && <div className="workspace-op-side-empty">Open a file to view its history.</div>}
-                    {activePath && revisions.length === 0 && <div className="workspace-op-side-empty">No versions recorded yet.</div>}
-                    {activePath && revisions.slice(0, 10).map((rev) => (
-                        <div className="workspace-op-revision" key={rev.id}>
-                            <div>
-                                <strong>{rev.operation}</strong>
-                                <span>{rev.actor_type}</span>
-                            </div>
-                            <pre>{rev.diff || 'No text diff'}</pre>
-                            {rev.after_content != null && <button className="btn btn-secondary" onClick={() => restore(rev.id)}>Restore</button>}
-                        </div>
-                    ))}
-                </aside>}
+                ) : null}
             </div>
         </div>
     );

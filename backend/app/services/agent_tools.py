@@ -8683,13 +8683,13 @@ async def _publish_page(agent_id: uuid.UUID, user_id: uuid.UUID, ws: Path, argum
     except Exception as e:
         return f"Failed to publish: {e}"
 
-    # Build public URL.
-    # _publish_page is called from a tool handler — there is no HTTP request
-    # object available, so platform_service.get_public_base_url() would fall
-    # back to the hardcoded 'https://try.clawith.ai' when PUBLIC_BASE_URL is
-    # not set. Instead, read the env var directly and surface a clear error
-    # when it is missing, so source-code deployers know exactly what to fix.
-    public_base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+    # Build public URL from the same settings loader used by the app. Reading
+    # os.environ directly misses values that come from the local .env file.
+    try:
+        from app.config import get_settings as _get_publish_settings
+        public_base = (_get_publish_settings().PUBLIC_BASE_URL or os.environ.get("PUBLIC_BASE_URL", "")).rstrip("/")
+    except Exception:
+        public_base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
     if not public_base:
         # Relative path works inside the same deployment; include a note so
         # the user can configure PUBLIC_BASE_URL for a fully-qualified link.
@@ -8716,6 +8716,11 @@ async def _publish_page(agent_id: uuid.UUID, user_id: uuid.UUID, ws: Path, argum
 async def _list_published_pages(agent_id: uuid.UUID) -> str:
     """List all published pages for this agent."""
     from app.models.published_page import PublishedPage
+    try:
+        from app.config import get_settings as _get_publish_settings
+        public_base = (_get_publish_settings().PUBLIC_BASE_URL or os.environ.get("PUBLIC_BASE_URL", "")).rstrip("/")
+    except Exception:
+        public_base = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
     try:
         async with async_session() as db:
@@ -8731,8 +8736,9 @@ async def _list_published_pages(agent_id: uuid.UUID) -> str:
 
         lines = [f"Published pages ({len(pages)} total):\n"]
         for p in pages:
+            url = f"{public_base}/p/{p.short_id}" if public_base else f"/p/{p.short_id}"
             lines.append(f"- {p.title or 'Untitled'}")
-            lines.append(f"  URL: /p/{p.short_id}")
+            lines.append(f"  URL: {url}")
             lines.append(f"  Source: {p.source_path}")
             lines.append(f"  Views: {p.view_count}")
             lines.append("")
