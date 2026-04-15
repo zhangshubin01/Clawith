@@ -525,20 +525,36 @@ export default function WorkspaceOperationPanel({
                     {editing && <button className="workspace-op-icon-btn active" onClick={finishEditing} title="Done">✓</button>}
                     {activePath && (
                         <a href={fileApi.downloadUrl(agentId, activePath)} download>
-                            <button className="workspace-op-icon-btn" title="Download">↓</button>
+                            <button className="workspace-op-icon-btn" title="Download" aria-label="Download">
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                    <path d="M12 3v10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                    <path d="M8 10l4 4 4-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                    <path d="M5 17v2h14v-2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                            </button>
                         </a>
                     )}
                 </div>
             </div>
 
             <div className={`workspace-op-body ${activityOpen ? 'activity-open' : ''} ${treeOpen ? '' : 'tree-closed'}`}>
+                <button className={`workspace-op-tree-edge-toggle ${treeOpen && !activityOpen ? 'active' : ''}`} onClick={() => {
+                    setActivityOpen(false);
+                    setTreeOpen((open) => !open);
+                }} title={treeOpen && !activityOpen ? 'Hide files' : 'Show files'} aria-label={treeOpen && !activityOpen ? 'Hide files' : 'Show files'}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.7" />
+                        <path d="M14 5v14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                        <path
+                            d={treeOpen && !activityOpen ? 'M10 9l-3 3 3 3' : 'M8 9l3 3-3 3'}
+                            stroke="currentColor"
+                            strokeWidth="1.7"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
+                    </svg>
+                </button>
                 <div className="workspace-op-main">
-                    <button className={`workspace-op-tree-float ${treeOpen && !activityOpen ? 'active' : ''}`} onClick={() => {
-                        setActivityOpen(false);
-                        setTreeOpen((open) => !open);
-                    }} title={treeOpen && !activityOpen ? 'Hide files' : 'Show files'} aria-label={treeOpen && !activityOpen ? 'Hide files' : 'Show files'}>
-                        <span>{treeOpen && !activityOpen ? '›' : '‹'}</span>
-                    </button>
                     {renderPreview()}
                 </div>
                 {activityOpen ? (

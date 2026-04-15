@@ -2048,6 +2048,8 @@ select:focus {
 }
 
 .workspace-op-body {
+  --workspace-side-width: 230px;
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -2058,10 +2060,12 @@ select:focus {
 }
 
 .workspace-op-body.activity-open {
+  --workspace-side-width: 260px;
   grid-template-columns: minmax(0, 1fr) 260px;
 }
 
 .workspace-op-body.tree-closed {
+  --workspace-side-width: 0px;
   grid-template-columns: minmax(0, 1fr);
 }
 
@@ -2181,35 +2185,38 @@ select:focus {
   background: var(--bg-primary);
 }
 
-.workspace-op-tree-float {
-  position: sticky;
-  top: 10px;
-  left: 100%;
-  z-index: 5;
-  width: 16px;
+.workspace-op-tree-edge-toggle {
+  position: absolute;
+  top: 12px;
+  right: calc(var(--workspace-side-width) - 11px);
+  z-index: 8;
+  width: 22px;
   height: 30px;
-  margin: 0 -8px -30px auto;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bg-primary) 80%, transparent);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-primary) 72%, transparent);
   color: var(--text-tertiary);
   cursor: pointer;
-  font-size: 12px;
   line-height: 1;
-  opacity: 0.55;
+  opacity: 0.34;
   backdrop-filter: blur(6px);
-  transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+  transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
-.workspace-op-tree-float:hover,
-.workspace-op-tree-float.active {
-  opacity: 0.9;
+.workspace-op-body.tree-closed .workspace-op-tree-edge-toggle {
+  right: 10px;
+}
+
+.workspace-op-tree-edge-toggle:hover,
+.workspace-op-tree-edge-toggle.active:hover {
+  opacity: 0.92;
   background: var(--bg-elevated);
   border-color: var(--border-subtle);
   color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
 }
 
 .workspace-op-main .markdown-content {
