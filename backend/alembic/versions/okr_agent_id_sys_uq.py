@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import UUID
 
 
 # revision identifiers
-revision: str = "add_okr_agent_id_and_system_agent_uq"
+revision: str = "okr_agent_id_sys_uq"
 down_revision: Union[str, tuple] = ("f1a2b3c4d5e6", "add_agent_is_system")
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
