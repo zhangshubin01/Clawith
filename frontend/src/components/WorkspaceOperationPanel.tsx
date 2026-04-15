@@ -532,17 +532,13 @@ export default function WorkspaceOperationPanel({
                     <aside className="workspace-op-tree">
                         <div className="workspace-op-tree-title">
                             <span>Files</span>
-                            <button className="workspace-op-tree-toggle" onClick={() => setTreeOpen(false)} title="Collapse files">‹</button>
+                            <button className="workspace-op-tree-toggle" onClick={() => setTreeOpen(false)} title="Collapse files">›</button>
                         </div>
                         <div className="workspace-op-tree-list">
                             {fileTree.length ? renderFileTreeNodes(fileTree, 0) : <div className="workspace-op-tree-empty">No files yet.</div>}
                         </div>
                     </aside>
-                ) : (
-                    <button className="workspace-op-tree-rail" onClick={() => setTreeOpen(true)} title="Open files">
-                        <span>▤</span>
-                    </button>
-                )}
+                ) : null}
             </div>
         </div>
     );
