@@ -16,7 +16,7 @@ from app.core.security import hash_password
 from app.models.agent import Agent
 from app.models.identity import IdentityProvider
 from app.models.org import OrgMember
-from app.models.user import User
+from app.models.user import Identity, User
 from app.services.sso_service import sso_service
 
 
@@ -333,8 +333,6 @@ class ChannelUserService:
         This ensures compatibility with the Phase 2 user model where username,
         email, and password_hash live on the Identity table.
         """
-        from app.models.user import Identity
-
         # Generate username and email
         email = extra_info.get("email")
         identity_seed = (
@@ -350,7 +348,6 @@ class ChannelUserService:
             username = f"{channel_type}_{identity_seed[:12]}"
 
         # Ensure unique username within tenant
-        from app.models.user import User, Identity
         query = (
             select(User)
             .join(User.identity)
@@ -452,7 +449,6 @@ async def get_platform_user_by_org_member(
         username = f"{channel_type}_{org_member.id.hex[:12]}"
 
     # Ensure unique username within tenant
-    from app.models.user import User, Identity
     query = (
         select(User)
         .join(User.identity)
