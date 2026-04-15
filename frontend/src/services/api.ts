@@ -294,9 +294,38 @@ export const fileApi = {
             body: JSON.stringify({ content }),
         }),
 
+    autosave: (agentId: string, path: string, content: string, sessionId?: string | null) =>
+        request<{ status: string; path: string; revision_id?: string }>(`/agents/${agentId}/files/content?path=${encodeURIComponent(path)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ content, autosave: true, session_id: sessionId || undefined }),
+        }),
+
     delete: (agentId: string, path: string) =>
         request(`/agents/${agentId}/files/content?path=${encodeURIComponent(path)}`, {
             method: 'DELETE',
+        }),
+
+    preview: (agentId: string, path: string) =>
+        request<any>(`/agents/${agentId}/files/preview?path=${encodeURIComponent(path)}`),
+
+    lock: (agentId: string, path: string, sessionId?: string | null) =>
+        request<any>(`/agents/${agentId}/files/locks`, {
+            method: 'POST',
+            body: JSON.stringify({ path, session_id: sessionId || undefined }),
+        }),
+
+    unlock: (agentId: string, path: string) =>
+        request<any>(`/agents/${agentId}/files/locks?path=${encodeURIComponent(path)}`, {
+            method: 'DELETE',
+        }),
+
+    revisions: (agentId: string, path: string) =>
+        request<any[]>(`/agents/${agentId}/files/revisions?path=${encodeURIComponent(path)}`),
+
+    restoreRevision: (agentId: string, revisionId: string) =>
+        request<any>(`/agents/${agentId}/files/restore`, {
+            method: 'POST',
+            body: JSON.stringify({ revision_id: revisionId }),
         }),
 
     upload: (agentId: string, file: File, path: string = 'workspace/knowledge_base', onProgress?: (pct: number) => void) =>
@@ -507,4 +536,3 @@ export const controlApi = {
     unlock: (agentId: string, data: { session_id: string; export_cookies?: boolean; platform_hint?: string }) =>
         request<any>(`/agents/${agentId}/control/unlock`, { method: 'POST', body: JSON.stringify(data) }),
 };
-
