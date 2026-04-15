@@ -102,13 +102,12 @@ class BaseAuthProvider(ABC):
             tenant_id: Optional tenant ID for association
         """
         from app.services.sso_service import sso_service
-        from sqlalchemy.orm import selectinload
 
         # Ensure provider exists
         await self._ensure_provider(db, tenant_id)
 
         # 1. Try lookup via sso_service (which now uses OrgMember)
-        provider_user_id = user_info.provider_union_id or user_info.provider_user_id
+        provider_user_id = user_info.provider_user_id
         user = await sso_service.resolve_user_identity(
             db,
             provider_user_id,
@@ -317,41 +316,10 @@ class FeishuAuthProvider(BaseAuthProvider):
                 self.FEISHU_USER_INFO_URL, headers={"Authorization": f"Bearer {access_token}"}
             )
             info_data = info_resp.json().get("data", {})
-            open_id = info_data.get("open_id", "")
-            provider_user_id = ""
-
-            if open_id:
-                try:
-                    app_token = await self.get_app_access_token()
-                    if app_token:
-                        contact_resp = await client.get(
-                            f"https://open.feishu.cn/open-apis/contact/v3/users/{open_id}",
-                            params={"user_id_type": "open_id"},
-                            headers={"Authorization": f"Bearer {app_token}"},
-                        )
-                        contact_data = contact_resp.json()
-                        if contact_data.get("code") == 0:
-                            contact_user = contact_data.get("data", {}).get("user", {})
-                            provider_user_id = contact_user.get("user_id", "")
-                            if provider_user_id:
-                                info_data["user_id"] = provider_user_id
-                            if not info_data.get("email"):
-                                info_data["email"] = (
-                                    contact_user.get("email")
-                                    or contact_user.get("enterprise_email")
-                                    or ""
-                                )
-                            if not info_data.get("mobile"):
-                                info_data["mobile"] = contact_user.get("mobile", "")
-                except Exception as e:
-                    logger.warning(f"Feishu contact lookup failed during SSO user info fetch: {e}")
-
-            provider_user_id = provider_user_id or info_data.get("user_id", "") or open_id
             logger.info(f"Feishu user info: {info_data}")
 
             return ExternalUserInfo(
                 provider_type=self.provider_type,
-                provider_user_id=provider_user_id,
                 provider_union_id=info_data.get("union_id"),
                 name=info_data.get("name", ""),
                 email=info_data.get("email", ""),
@@ -449,7 +417,6 @@ class DingTalkAuthProvider(BaseAuthProvider):
             logger.info(f"DingTalk user info: {info_data}")
             return ExternalUserInfo(
                 provider_type=self.provider_type,
-                provider_user_id=info_data.get("openId", ""),
                 provider_union_id=info_data.get("unionId"),
                 name=info_data.get("nick", ""),
                 email=info_data.get("email", ""),

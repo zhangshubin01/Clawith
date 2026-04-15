@@ -244,8 +244,6 @@ class ChannelUserService:
                     lookup_conditions.append(OrgMember.unionid == unionid)
                 if external_id:
                     lookup_conditions.append(OrgMember.external_id == external_id)
-                if open_id:
-                    lookup_conditions.append(OrgMember.open_id == open_id)
                 if not lookup_conditions:
                     return None
                 conditions.append(lookup_conditions[0])
