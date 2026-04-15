@@ -500,6 +500,38 @@ async def websocket_chat(
                             except Exception as _lp_err:
                                 logger.warning(f"[WS][LivePreview] Embed failed: {_lp_err}")
 
+                            # Attach workspace_activity so the frontend WorkspaceOperationPanel
+                            # auto-opens when the agent writes, edits, or converts a file.
+                            # PR #419 added the frontend logic but the backend never emitted
+                            # this event — this is the missing piece.
+                            _WORKSPACE_TOOL_ACTIONS: dict[str, str] = {
+                                "write_file": "write",
+                                "edit_file": "edit",
+                                "delete_file": "delete",
+                                "convert_markdown_to_docx": "convert",
+                                "convert_csv_to_xlsx": "convert",
+                                "convert_markdown_to_pdf": "convert",
+                                "convert_html_to_pdf": "convert",
+                                "convert_html_to_pptx": "convert",
+                            }
+                            _done_tool_name = data.get("name", "")
+                            if _done_tool_name in _WORKSPACE_TOOL_ACTIONS:
+                                _ws_args = data.get("args") or {}
+                                if isinstance(_ws_args, str):
+                                    try:
+                                        import json as _json_wsa
+                                        _ws_args = _json_wsa.loads(_ws_args)
+                                    except Exception:
+                                        _ws_args = {}
+                                _ws_path = _ws_args.get("output_path") or _ws_args.get("path", "")
+                                data["workspace_activity"] = {
+                                    "action": _WORKSPACE_TOOL_ACTIONS[_done_tool_name],
+                                    "path": _ws_path,
+                                    "tool": _done_tool_name,
+                                    "ok": True,
+                                }
+                                logger.info(f"[WS][Workspace] activity: {_done_tool_name} → {_ws_path}")
+
                         await websocket.send_json({"type": "tool_call", **data})
                         # Save completed tool calls to DB so they persist in chat history
                         if data.get("status") == "done":
