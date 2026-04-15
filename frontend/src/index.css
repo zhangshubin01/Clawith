@@ -2176,30 +2176,32 @@ select:focus {
 
 .workspace-op-tree-float {
   position: sticky;
-  top: 8px;
+  top: 10px;
   left: 100%;
   z-index: 5;
-  width: 22px;
-  height: 34px;
-  margin: 0 -11px -34px auto;
+  width: 16px;
+  height: 30px;
+  margin: 0 -8px -30px auto;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-subtle) 72%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-primary) 80%, transparent);
   color: var(--text-tertiary);
   cursor: pointer;
-  font-size: 14px;
+  font-size: 12px;
   line-height: 1;
-  box-shadow: var(--shadow-sm);
-  backdrop-filter: blur(8px);
+  opacity: 0.55;
+  backdrop-filter: blur(6px);
+  transition: opacity var(--transition-fast), background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 }
 
 .workspace-op-tree-float:hover,
 .workspace-op-tree-float.active {
-  background: var(--bg-tertiary);
-  border-color: var(--border-default);
+  opacity: 0.9;
+  background: var(--bg-elevated);
+  border-color: var(--border-subtle);
   color: var(--text-primary);
 }
 
