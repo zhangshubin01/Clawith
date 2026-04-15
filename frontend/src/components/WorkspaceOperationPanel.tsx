@@ -542,13 +542,13 @@ export default function WorkspaceOperationPanel({
                     setActivityOpen(false);
                     setTreeOpen((open) => !open);
                 }} title={treeOpen && !activityOpen ? 'Hide files' : 'Show files'} aria-label={treeOpen && !activityOpen ? 'Hide files' : 'Show files'}>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.7" />
-                        <path d="M14 5v14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.9" />
+                        <path d="M14 5v14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
                         <path
                             d={treeOpen && !activityOpen ? 'M10 9l-3 3 3 3' : 'M8 9l3 3-3 3'}
                             stroke="currentColor"
-                            strokeWidth="1.7"
+                            strokeWidth="1.9"
                             strokeLinecap="round"
                             strokeLinejoin="round"
                         />
