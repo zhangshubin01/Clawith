@@ -24,8 +24,8 @@ class ExternalUserInfo:
     """Standardized user info from external identity providers."""
 
     provider_type: str
-    provider_user_id: str
     provider_union_id: str | None = None
+    provider_user_id: str | None = None
     name: str = ""
     email: str = ""
     avatar_url: str = ""
