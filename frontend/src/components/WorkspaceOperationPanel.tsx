@@ -495,6 +495,10 @@ export default function WorkspaceOperationPanel({
                 </div>
                 <div className="workspace-op-actions">
                     {saveState !== 'idle' && <span className={`workspace-op-save ${saveState}`}>{saveState}</span>}
+                    <button className={`workspace-op-icon-btn ${treeOpen && !activityOpen ? 'active' : ''}`} onClick={() => {
+                        setActivityOpen(false);
+                        setTreeOpen((open) => !open);
+                    }} title="Files">▤</button>
                     <button className={`workspace-op-icon-btn ${activityOpen ? 'active' : ''}`} onClick={() => setActivityOpen((open) => !open)} title="Version history">◷</button>
                     {activePath && canEdit && !editing && <button className="workspace-op-icon-btn" onClick={() => setEditing(true)} title="Edit">✎</button>}
                     {editing && <button className="workspace-op-icon-btn active" onClick={finishEditing} title="Done">✓</button>}
@@ -507,7 +511,24 @@ export default function WorkspaceOperationPanel({
             </div>
 
             <div className={`workspace-op-body ${activityOpen ? 'activity-open' : ''} ${treeOpen ? '' : 'tree-closed'}`}>
-                {treeOpen ? (
+                <div className="workspace-op-main">{renderPreview()}</div>
+                {activityOpen ? (
+                    <aside className="workspace-op-side">
+                        <div className="workspace-op-side-title">Version history</div>
+                        {!activePath && <div className="workspace-op-side-empty">Open a file to view its history.</div>}
+                        {activePath && revisions.length === 0 && <div className="workspace-op-side-empty">No versions recorded yet.</div>}
+                        {activePath && revisions.slice(0, 10).map((rev) => (
+                            <div className="workspace-op-revision" key={rev.id}>
+                                <div>
+                                    <strong>{rev.operation}</strong>
+                                    <span>{rev.actor_type}</span>
+                                </div>
+                                <pre>{rev.diff || 'No text diff'}</pre>
+                                {rev.after_content != null && <button className="btn btn-secondary" onClick={() => restore(rev.id)}>Restore</button>}
+                            </div>
+                        ))}
+                    </aside>
+                ) : treeOpen ? (
                     <aside className="workspace-op-tree">
                         <div className="workspace-op-tree-title">
                             <span>Files</span>
@@ -522,22 +543,6 @@ export default function WorkspaceOperationPanel({
                         <span>▤</span>
                     </button>
                 )}
-                <div className="workspace-op-main">{renderPreview()}</div>
-                {activityOpen && <aside className="workspace-op-side">
-                    <div className="workspace-op-side-title">Version history</div>
-                    {!activePath && <div className="workspace-op-side-empty">Open a file to view its history.</div>}
-                    {activePath && revisions.length === 0 && <div className="workspace-op-side-empty">No versions recorded yet.</div>}
-                    {activePath && revisions.slice(0, 10).map((rev) => (
-                        <div className="workspace-op-revision" key={rev.id}>
-                            <div>
-                                <strong>{rev.operation}</strong>
-                                <span>{rev.actor_type}</span>
-                            </div>
-                            <pre>{rev.diff || 'No text diff'}</pre>
-                            {rev.after_content != null && <button className="btn btn-secondary" onClick={() => restore(rev.id)}>Restore</button>}
-                        </div>
-                    ))}
-                </aside>}
             </div>
         </div>
     );

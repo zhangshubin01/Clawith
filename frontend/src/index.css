@@ -2045,21 +2045,21 @@ select:focus {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: 230px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 230px;
   background: var(--bg-primary);
   overflow: hidden;
 }
 
 .workspace-op-body.activity-open {
-  grid-template-columns: 230px minmax(0, 1fr) 260px;
+  grid-template-columns: minmax(0, 1fr) 260px;
 }
 
 .workspace-op-body.tree-closed {
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 34px;
 }
 
 .workspace-op-body.tree-closed.activity-open {
-  grid-template-columns: 34px minmax(0, 1fr) 260px;
+  grid-template-columns: minmax(0, 1fr) 260px;
 }
 
 .workspace-op-tree,
@@ -2073,7 +2073,7 @@ select:focus {
 }
 
 .workspace-op-tree {
-  border-right: 1px solid var(--border-subtle);
+  border-left: 1px solid var(--border-subtle);
 }
 
 .workspace-op-side {
@@ -2193,7 +2193,7 @@ select:focus {
   align-items: center;
   justify-content: center;
   border: none;
-  border-right: 1px solid var(--border-subtle);
+  border-left: 1px solid var(--border-subtle);
   background: var(--bg-secondary);
   color: var(--text-tertiary);
   cursor: pointer;
