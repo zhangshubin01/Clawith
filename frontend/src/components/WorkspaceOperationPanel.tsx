@@ -534,10 +534,6 @@ export default function WorkspaceOperationPanel({
                     </aside>
                 ) : treeOpen ? (
                     <aside className="workspace-op-tree">
-                        <div className="workspace-op-tree-title">
-                            <span>Files</span>
-                            <button className="workspace-op-tree-toggle" onClick={() => setTreeOpen(false)} title="Collapse files">›</button>
-                        </div>
                         <div className="workspace-op-tree-list">
                             {fileTree.length ? renderFileTreeNodes(fileTree, 0) : <div className="workspace-op-tree-empty">No files yet.</div>}
                         </div>
