@@ -979,22 +979,82 @@ async def members_without_okr(user=Depends(get_current_user)):
         members_without_okr: list[dict] = []
 
         if okr_agent_id_val:
-            # Human members via AgentRelationship → OrgMember
-            # Pass 1: user_id-linked members — these can have OKRs
-            human_rel_result = await db.execute(
-                select(OrgMember.id, OrgMember.name, OrgMember.user_id, OrgMember.avatar_url)
+            # ── Human members ─────────────────────────────────────────────────
+            # Fetch ALL OrgMembers in OKR Agent's relationships, regardless of
+            # whether they have a platform account (user_id) or not.
+            # This includes members from any channel (Feishu, Slack, etc.) and
+            # members who haven't joined the platform yet (user_id=NULL).
+            all_member_rows = (await db.execute(
+                select(
+                    OrgMember.id,
+                    OrgMember.name,
+                    OrgMember.user_id,
+                    OrgMember.external_id,
+                    OrgMember.avatar_url,
+                )
                 .join(AgentRelationship, AgentRelationship.member_id == OrgMember.id)
                 .where(
                     AgentRelationship.agent_id == okr_agent_id_val,
                     OrgMember.status == "active",
-                    OrgMember.user_id.isnot(None),
                 )
-            )
-            linked_external_user_ids: set[uuid.UUID] = set()
-            for row in human_rel_result.fetchall():
-                tracked_user_ids.append(str(row.user_id))
-                linked_external_user_ids.add(row.user_id)
-                if row.user_id not in covered_ids:
+            )).fetchall()
+
+            # ── Canonicalize: one record per logical person ───────────────────
+            # A "logical person" may have multiple OrgMember rows:
+            #   a) Multiple channels (Feishu + Slack) — both may have user_id set
+            #   b) Historical duplicates from channel ID changes
+            #   c) A shell record (user_id=NULL) + a linked record (user_id!=NULL)
+            #      with the same external_id
+            #
+            # Resolution rules (applied in order):
+            #   1. Group by external_id → prefer user_id-linked over shell
+            #      (handles case b/c: stale shell rows from the same channel identity)
+            #   2. Group by user_id → keep one row per platform account
+            #      (handles case a: same person has accounts on different channels)
+
+            # Rule 1 — best OrgMember per external_id (prefer user_id != NULL)
+            best_by_ext: dict[str, object] = {}
+            unkeyed: list[object] = []  # rows with no external_id
+            for row in all_member_rows:
+                if not row.external_id:
+                    unkeyed.append(row)
+                    continue
+                existing = best_by_ext.get(row.external_id)
+                if existing is None:
+                    best_by_ext[row.external_id] = row
+                elif existing.user_id is None and row.user_id is not None:
+                    # Upgrade shell to linked
+                    best_by_ext[row.external_id] = row
+
+            candidates = list(best_by_ext.values()) + unkeyed
+
+            # Rule 2 — deduplicate by user_id (one entry per platform account)
+            seen_user_ids: set[uuid.UUID] = set()
+            canonical_members: list[object] = []
+            for row in candidates:
+                if row.user_id is not None:
+                    if row.user_id in seen_user_ids:
+                        continue  # already represented via another channel
+                    seen_user_ids.add(row.user_id)
+                canonical_members.append(row)
+
+            # ── Classify canonical members ─────────────────────────────────────
+            for row in canonical_members:
+                if row.user_id is not None:
+                    tracked_user_ids.append(str(row.user_id))
+                    if row.user_id not in covered_ids:
+                        members_without_okr.append({
+                            "id": str(row.id),
+                            "type": "user",
+                            "display_name": row.name or "",
+                            "avatar_url": row.avatar_url or "",
+                            "channel": None,
+                            "channel_user_id": None,
+                        })
+                else:
+                    # Channel-only member: hasn't joined the platform yet.
+                    # They cannot own OKRs, but must be shown so admins can
+                    # onboard them (invite to platform) or nudge via channel.
                     members_without_okr.append({
                         "id": str(row.id),
                         "type": "user",
@@ -1004,48 +1064,7 @@ async def members_without_okr(user=Depends(get_current_user)):
                         "channel_user_id": None,
                     })
 
-            # Pass 2: shell OrgMembers (user_id=NULL) — Feishu members who haven't
-            # joined the platform yet. Include them as No OKR ONLY if their
-            # external_id has no user_id-linked version in org_members (i.e. they're
-            # genuinely new, not a historical shadow duplicate of an existing user).
-            shell_rel_result = await db.execute(
-                select(OrgMember.id, OrgMember.name, OrgMember.external_id, OrgMember.avatar_url)
-                .join(AgentRelationship, AgentRelationship.member_id == OrgMember.id)
-                .where(
-                    AgentRelationship.agent_id == okr_agent_id_val,
-                    OrgMember.status == "active",
-                    OrgMember.user_id.is_(None),
-                )
-            )
-            shell_rows = shell_rel_result.fetchall()
-            if shell_rows:
-                # Find which external_ids already have a user-linked OrgMember in the tenant
-                shell_ext_ids = [r.external_id for r in shell_rows if r.external_id]
-                covered_ext_ids: set[str] = set()
-                if shell_ext_ids:
-                    ext_check = await db.execute(
-                        select(OrgMember.external_id).where(
-                            OrgMember.external_id.in_(shell_ext_ids),
-                            OrgMember.user_id.isnot(None),
-                        )
-                    )
-                    covered_ext_ids = {r[0] for r in ext_check.fetchall()}
-
-                for row in shell_rows:
-                    # Skip shadow duplicates — same external_id has a real user account
-                    if row.external_id and row.external_id in covered_ext_ids:
-                        continue
-                    # Genuine new member: show as No OKR (they can't have OKRs yet)
-                    members_without_okr.append({
-                        "id": str(row.id),
-                        "type": "user",
-                        "display_name": row.name or "",
-                        "avatar_url": row.avatar_url or "",
-                        "channel": None,
-                        "channel_user_id": None,
-                    })
-
-            # Agent members via AgentAgentRelationship
+            # ── Agent members via AgentAgentRelationship ───────────────────────
             agent_rel_result = await db.execute(
                 select(Agent.id, Agent.name, Agent.avatar_url)
                 .join(AgentAgentRelationship, AgentAgentRelationship.target_agent_id == Agent.id)
