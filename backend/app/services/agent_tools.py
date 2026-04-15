@@ -2237,6 +2237,16 @@ async def execute_tool(
                 await _wdb.commit()
             result = f"✅ Deleted {delete_result.path}" if delete_result.ok else f"❌ {delete_result.message}"
         # --- Enhanced file management tools ---
+        elif tool_name == "convert_csv_to_xlsx":
+            result = await _convert_csv_to_xlsx(agent_id, ws, arguments)
+        elif tool_name == "convert_html_to_pdf":
+            result = await _convert_html_to_pdf(agent_id, ws, arguments)
+        elif tool_name == "convert_html_to_pptx":
+            result = await _convert_html_to_pptx(agent_id, ws, arguments)
+        elif tool_name == "convert_markdown_to_docx":
+            result = await _convert_markdown_to_docx(agent_id, ws, arguments)
+        elif tool_name == "convert_markdown_to_pdf":
+            result = await _convert_markdown_to_pdf(agent_id, ws, arguments)
         elif tool_name == "edit_file":
             path = arguments.get("path")
             old_string = arguments.get("old_string")
@@ -3694,6 +3704,188 @@ async def _read_document(ws: Path, rel_path: str, max_chars: int = 8000, tenant_
         return f"Missing dependency: {e}. Install: pip install pdfplumber python-docx openpyxl python-pptx"
     except Exception as e:
         return f"Document read failed: {str(e)[:200]}"
+
+
+# ─── Format Conversion Tools ────────────────────────────────────
+
+async def _convert_csv_to_xlsx(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
+    source_path = arguments.get("source_path")
+    target_path = arguments.get("target_path")
+    if not source_path or not target_path:
+        return "❌ Missing 'source_path' or 'target_path'."
+        
+    src_file = (ws / source_path).resolve()
+    tgt_file = (ws / target_path).resolve()
+    
+    if not str(src_file).startswith(str(ws.resolve())): return "❌ Access denied to source_path."
+    if not str(tgt_file).startswith(str(ws.resolve())): return "❌ Access denied to target_path."
+    
+    if not src_file.exists(): return f"❌ Source file not found: {source_path}"
+    
+    try:
+        import csv
+        from openpyxl import Workbook
+        
+        wb = Workbook()
+        ws_sheet = wb.active
+        with src_file.open("r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                ws_sheet.append(row)
+        
+        tgt_file.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(str(tgt_file))
+        return f"✅ Successfully converted CSV to Excel: {target_path}"
+    except Exception as e:
+        logger.exception(f"Convert CSV to XLSX failed: {e}")
+        return f"❌ Conversion failed: {e}"
+
+async def _convert_html_to_pdf(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
+    source_path = arguments.get("source_path")
+    target_path = arguments.get("target_path")
+    if not source_path or not target_path:
+        return "❌ Missing 'source_path' or 'target_path'."
+        
+    src_file = (ws / source_path).resolve()
+    tgt_file = (ws / target_path).resolve()
+    
+    if not str(src_file).startswith(str(ws.resolve())): return "❌ Access denied."
+    if not str(tgt_file).startswith(str(ws.resolve())): return "❌ Access denied."
+    
+    if not src_file.exists(): return f"❌ Source file not found: {source_path}"
+    
+    try:
+        from weasyprint import HTML
+        tgt_file.parent.mkdir(parents=True, exist_ok=True)
+        HTML(filename=str(src_file)).write_pdf(str(tgt_file))
+        return f"✅ Successfully converted HTML to PDF: {target_path}"
+    except Exception as e:
+        logger.exception(f"Convert HTML to PDF failed: {e}")
+        return f"❌ Conversion failed: {e}"
+
+async def _convert_html_to_pptx(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
+    source_path = arguments.get("source_path")
+    target_path = arguments.get("target_path")
+    if not source_path or not target_path: return "❌ Missing paths."
+    
+    src_file = (ws / source_path).resolve()
+    tgt_file = (ws / target_path).resolve()
+    
+    if not str(src_file).startswith(str(ws.resolve())) or not str(tgt_file).startswith(str(ws.resolve())):
+        return "❌ Access denied."
+    if not src_file.exists(): return "❌ Source file not found."
+    
+    try:
+        from bs4 import BeautifulSoup
+        from pptx import Presentation
+        
+        html_content = src_file.read_text(encoding="utf-8")
+        soup = BeautifulSoup(html_content, "html.parser")
+        
+        prs = Presentation()
+        title_slide_layout = prs.slide_layouts[0]
+        bullet_slide_layout = prs.slide_layouts[1]
+        
+        sections = soup.find_all(['h1', 'h2'])
+        if not sections:
+            slide = prs.slides.add_slide(title_slide_layout)
+            slide.shapes.title.text = "Presentation"
+        else:
+            for header in sections:
+                slide = prs.slides.add_slide(bullet_slide_layout)
+                slide.shapes.title.text = header.get_text(strip=True)
+                tf = slide.shapes.placeholders[1].text_frame
+                
+                curr = header.find_next_sibling()
+                while curr and curr.name not in ['h1', 'h2']:
+                    if curr.name in ['p', 'li']:
+                        text = curr.get_text(strip=True)
+                        if text:
+                            p = tf.add_paragraph()
+                            p.text = text
+                            p.level = 0
+                    curr = curr.find_next_sibling()
+                    
+        tgt_file.parent.mkdir(parents=True, exist_ok=True)
+        prs.save(str(tgt_file))
+        return f"✅ Successfully converted HTML to PPTX: {target_path}"
+    except Exception as e:
+        logger.exception(f"Convert HTML to PPTX failed: {e}")
+        return f"❌ Conversion failed: {e}"
+
+async def _convert_markdown_to_docx(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
+    source_path = arguments.get("source_path")
+    target_path = arguments.get("target_path")
+    if not source_path or not target_path: return "❌ Missing paths."
+    
+    src_file = (ws / source_path).resolve()
+    tgt_file = (ws / target_path).resolve()
+    
+    if not str(src_file).startswith(str(ws.resolve())) or not str(tgt_file).startswith(str(ws.resolve())):
+        return "❌ Access denied."
+    if not src_file.exists(): return "❌ Source file not found."
+    
+    try:
+        from bs4 import BeautifulSoup
+        import markdown
+        from docx import Document
+        
+        md_text = src_file.read_text(encoding="utf-8")
+        html_text = markdown.markdown(md_text, extensions=['tables'])
+        soup = BeautifulSoup(html_text, "html.parser")
+        
+        doc = Document()
+        for element in soup.children:
+            if element.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                level = int(element.name[1])
+                doc.add_heading(element.get_text(strip=True), level=level)
+            elif element.name == 'p':
+                # Skip paragraphs that contains nothing
+                text = element.get_text(strip=True)
+                if text:
+                    doc.add_paragraph(text)
+            elif element.name in ['ul', 'ol']:
+                for li in element.find_all("li"):
+                    doc.add_paragraph(li.get_text(strip=True), style='List Bullet')
+            elif element.name == 'table':
+                doc.add_paragraph("[Table Content: " + element.get_text(separator=" | ", strip=True) + "]")
+                
+        tgt_file.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(str(tgt_file))
+        return f"✅ Successfully converted Markdown to Word: {target_path}"
+    except Exception as e:
+        logger.exception(f"Convert MD to Docx failed: {e}")
+        return f"❌ Conversion failed: {e}"
+
+async def _convert_markdown_to_pdf(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
+    source_path = arguments.get("source_path")
+    target_path = arguments.get("target_path")
+    if not source_path or not target_path: return "❌ Missing paths."
+    
+    src_file = (ws / source_path).resolve()
+    tgt_file = (ws / target_path).resolve()
+    
+    if not str(src_file).startswith(str(ws.resolve())) or not str(tgt_file).startswith(str(ws.resolve())):
+        return "❌ Access denied."
+    if not src_file.exists(): return "❌ Source file not found."
+    
+    try:
+        import markdown
+        from weasyprint import HTML
+        
+        md_text = src_file.read_text(encoding="utf-8")
+        html_text = markdown.markdown(md_text, extensions=['extra', 'codehilite'])
+        
+        # We need relative paths for local images to be resolved. WeasyPrint supports base_url.
+        # But for now, we just pass string and rely on absolute refs or no images.
+        full_html = f"<html><head><meta charset='utf-8'><style>body{{font-family: sans-serif; line-height: 1.6; padding: 2em;}}</style></head><body>{html_text}</body></html>"
+        
+        tgt_file.parent.mkdir(parents=True, exist_ok=True)
+        HTML(string=full_html, base_url=str(ws.resolve())).write_pdf(str(tgt_file))
+        return f"✅ Successfully converted Markdown to PDF: {target_path}"
+    except Exception as e:
+        logger.exception(f"Convert MD to PDF failed: {e}")
+        return f"❌ Conversion failed: {e}"
 
 
 def _write_file(ws: Path, rel_path: str, content: str, tenant_id: str | None = None) -> str:
