@@ -980,20 +980,62 @@ async def members_without_okr(user=Depends(get_current_user)):
 
         if okr_agent_id_val:
             # Human members via AgentRelationship → OrgMember
+            # Pass 1: user_id-linked members — these can have OKRs
             human_rel_result = await db.execute(
                 select(OrgMember.id, OrgMember.name, OrgMember.user_id, OrgMember.avatar_url)
                 .join(AgentRelationship, AgentRelationship.member_id == OrgMember.id)
                 .where(
                     AgentRelationship.agent_id == okr_agent_id_val,
                     OrgMember.status == "active",
-                    # Only include members that are linked to a real platform User;
-                    # shell OrgMembers with user_id=NULL have no OKR owner to check.
                     OrgMember.user_id.isnot(None),
                 )
             )
+            linked_external_user_ids: set[uuid.UUID] = set()
             for row in human_rel_result.fetchall():
                 tracked_user_ids.append(str(row.user_id))
+                linked_external_user_ids.add(row.user_id)
                 if row.user_id not in covered_ids:
+                    members_without_okr.append({
+                        "id": str(row.id),
+                        "type": "user",
+                        "display_name": row.name or "",
+                        "avatar_url": row.avatar_url or "",
+                        "channel": None,
+                        "channel_user_id": None,
+                    })
+
+            # Pass 2: shell OrgMembers (user_id=NULL) — Feishu members who haven't
+            # joined the platform yet. Include them as No OKR ONLY if their
+            # external_id has no user_id-linked version in org_members (i.e. they're
+            # genuinely new, not a historical shadow duplicate of an existing user).
+            shell_rel_result = await db.execute(
+                select(OrgMember.id, OrgMember.name, OrgMember.external_id, OrgMember.avatar_url)
+                .join(AgentRelationship, AgentRelationship.member_id == OrgMember.id)
+                .where(
+                    AgentRelationship.agent_id == okr_agent_id_val,
+                    OrgMember.status == "active",
+                    OrgMember.user_id.is_(None),
+                )
+            )
+            shell_rows = shell_rel_result.fetchall()
+            if shell_rows:
+                # Find which external_ids already have a user-linked OrgMember in the tenant
+                shell_ext_ids = [r.external_id for r in shell_rows if r.external_id]
+                covered_ext_ids: set[str] = set()
+                if shell_ext_ids:
+                    ext_check = await db.execute(
+                        select(OrgMember.external_id).where(
+                            OrgMember.external_id.in_(shell_ext_ids),
+                            OrgMember.user_id.isnot(None),
+                        )
+                    )
+                    covered_ext_ids = {r[0] for r in ext_check.fetchall()}
+
+                for row in shell_rows:
+                    # Skip shadow duplicates — same external_id has a real user account
+                    if row.external_id and row.external_id in covered_ext_ids:
+                        continue
+                    # Genuine new member: show as No OKR (they can't have OKRs yet)
                     members_without_okr.append({
                         "id": str(row.id),
                         "type": "user",
