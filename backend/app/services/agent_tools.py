@@ -36,6 +36,11 @@ from app.models.user import User as UserModel
 from app.services.auth_registry import auth_provider_registry
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import get_platform_user_by_org_member
+from app.services.workspace_collaboration import (
+    delete_workspace_file,
+    read_text_if_exists,
+    write_workspace_file,
+)
 from app.config import get_settings
 
 
@@ -2194,9 +2199,43 @@ async def execute_tool(
                 return "❌ Missing required argument 'path' for write_file. Please provide a file path like 'skills/my-skill/SKILL.md'"
             if content is None:
                 return "❌ Missing required argument 'content' for write_file"
-            result = _write_file(ws, path, content, tenant_id=_agent_tenant_id)
+            if path.startswith("enterprise_info"):
+                result = _write_file(ws, path, content, tenant_id=_agent_tenant_id)
+            else:
+                async with async_session() as _wdb:
+                    write_result = await write_workspace_file(
+                        _wdb,
+                        agent_id=agent_id,
+                        base_dir=ws,
+                        path=path,
+                        content=content,
+                        actor_type="agent",
+                        actor_id=agent_id,
+                        operation="write",
+                        session_id=session_id,
+                        enforce_human_lock=True,
+                    )
+                    await _wdb.commit()
+                result = (
+                    f"✅ Written to {write_result.path} ({len(content)} chars)"
+                    if write_result.ok
+                    else f"❌ {write_result.message}"
+                )
         elif tool_name == "delete_file":
-            result = _delete_file(ws, arguments.get("path", ""))
+            path = arguments.get("path", "")
+            async with async_session() as _wdb:
+                delete_result = await delete_workspace_file(
+                    _wdb,
+                    agent_id=agent_id,
+                    base_dir=ws,
+                    path=path,
+                    actor_type="agent",
+                    actor_id=agent_id,
+                    session_id=session_id,
+                    enforce_human_lock=True,
+                )
+                await _wdb.commit()
+            result = f"✅ Deleted {delete_result.path}" if delete_result.ok else f"❌ {delete_result.message}"
         # --- Enhanced file management tools ---
         elif tool_name == "edit_file":
             path = arguments.get("path")
@@ -2209,7 +2248,46 @@ async def execute_tool(
             if new_string is None:
                 return "❌ Missing required argument 'new_string' for edit_file"
             replace_all = arguments.get("replace_all", False)
-            result = _edit_file(ws, path, old_string, new_string, replace_all=replace_all, tenant_id=_agent_tenant_id)
+            if path.startswith("enterprise_info"):
+                result = _edit_file(ws, path, old_string, new_string, replace_all=replace_all, tenant_id=_agent_tenant_id)
+            else:
+                file_path = (ws / path).resolve()
+                if not str(file_path).startswith(str(ws.resolve())):
+                    result = "Access denied for this path"
+                elif not file_path.exists():
+                    result = f"File not found: {path}"
+                elif not file_path.is_file():
+                    result = f"Not a file: {path}"
+                else:
+                    content = await read_text_if_exists(file_path) or ""
+                    if old_string not in content:
+                        result = f"❌ 'old_string' not found in {path}. Please check the exact text including whitespace and newlines."
+                    else:
+                        count = content.count(old_string)
+                        if count > 1 and not replace_all:
+                            result = f"❌ 'old_string' appears {count} times in {path}. Use replace_all=true or provide more context to make the match unique."
+                        else:
+                            new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
+                            async with async_session() as _wdb:
+                                write_result = await write_workspace_file(
+                                    _wdb,
+                                    agent_id=agent_id,
+                                    base_dir=ws,
+                                    path=path,
+                                    content=new_content,
+                                    actor_type="agent",
+                                    actor_id=agent_id,
+                                    operation="edit",
+                                    session_id=session_id,
+                                    enforce_human_lock=True,
+                                )
+                                await _wdb.commit()
+                            replaced = count if replace_all else 1
+                            result = (
+                                f"✅ Replaced {replaced} occurrence(s) in {write_result.path}"
+                                if write_result.ok
+                                else f"❌ {write_result.message}"
+                            )
         elif tool_name == "search_files":
             pattern = arguments.get("pattern")
             if not pattern:

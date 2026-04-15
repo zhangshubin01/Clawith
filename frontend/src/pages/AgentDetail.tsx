@@ -10,7 +10,9 @@ import ChannelConfig from '../components/ChannelConfig';
 import MarkdownRenderer from '../components/MarkdownRenderer';
 import PromptModal from '../components/PromptModal';
 import OpenClawSettings from './OpenClawSettings';
-import AgentBayLivePanel, { LivePreviewState } from '../components/AgentBayLivePanel';
+import type { LivePreviewState } from '../components/AgentBayLivePanel';
+import AgentSidePanel, { SidePanelTab } from '../components/AgentSidePanel';
+import type { WorkspaceActivity, WorkspaceLiveDraft } from '../components/WorkspaceOperationPanel';
 import AgentCredentials from '../components/AgentCredentials';
 import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, scheduleApi, skillApi, taskApi, triggerApi, uploadFileWithProgress } from '../services/api';
 import { useAppStore } from '../stores';
@@ -21,6 +23,82 @@ import { IconPaperclip, IconSend } from '@tabler/icons-react';
 import { useDropZone } from '../hooks/useDropZone';
 
 const TABS = ['status', 'aware', 'mind', 'tools', 'skills', 'relationships', 'workspace', 'chat', 'activityLog', 'approvals', 'settings'] as const;
+
+const WORKSPACE_TOOLS = new Set([
+    'write_file',
+    'edit_file',
+    'delete_file',
+    'convert_markdown_to_docx',
+    'convert_csv_to_xlsx',
+    'convert_markdown_to_pdf',
+    'convert_html_to_pdf',
+    'convert_html_to_pptx',
+]);
+
+function workspaceActionForTool(tool: string): WorkspaceLiveDraft['action'] {
+    if (tool === 'edit_file') return 'edit';
+    if (tool === 'delete_file') return 'delete';
+    if (tool.startsWith('convert_')) return 'convert';
+    return 'write';
+}
+
+function decodeJsonStringFragment(value: string): string {
+    try {
+        return JSON.parse(`"${value.replace(/"/g, '\\"')}"`);
+    } catch {
+        return value.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    }
+}
+
+function readPartialJsonString(raw: string, key: string): string | undefined {
+    const marker = `"${key}"`;
+    const markerIdx = raw.indexOf(marker);
+    if (markerIdx < 0) return undefined;
+    const colonIdx = raw.indexOf(':', markerIdx + marker.length);
+    if (colonIdx < 0) return undefined;
+    const firstQuote = raw.indexOf('"', colonIdx + 1);
+    if (firstQuote < 0) return undefined;
+    let escaped = false;
+    let value = '';
+    for (let i = firstQuote + 1; i < raw.length; i += 1) {
+        const ch = raw[i];
+        if (escaped) {
+            value += `\\${ch}`;
+            escaped = false;
+            continue;
+        }
+        if (ch === '\\') {
+            escaped = true;
+            continue;
+        }
+        if (ch === '"') break;
+        value += ch;
+    }
+    return decodeJsonStringFragment(value);
+}
+
+function parseWorkspaceDraftArgs(tool: string, raw: string): Pick<WorkspaceLiveDraft, 'path' | 'content'> {
+    let parsed: any = null;
+    try {
+        parsed = JSON.parse(raw || '{}');
+    } catch {
+        parsed = null;
+    }
+    const getString = (key: string) => {
+        const parsedValue = parsed?.[key];
+        if (typeof parsedValue === 'string') return parsedValue;
+        return readPartialJsonString(raw || '', key);
+    };
+    const sourcePath = getString('source_path');
+    const path = getString('path') || getString('target_path') || sourcePath;
+    let content = getString('content');
+    if (tool === 'edit_file') content = getString('new_string') || content;
+    return { path, content };
+}
+
+function workspaceFileName(path: string): string {
+    return path.split('/').pop() || path;
+}
 
 // Format large token numbers with K/M suffixes
 const formatTokens = (n: number) => {
@@ -1769,6 +1847,11 @@ function AgentDetailInner() {
     };
     const [liveState, setLiveState] = useState<LivePreviewState>({});
     const [livePanelVisible, setLivePanelVisible] = useState(false);
+    const [sidePanelTab, setSidePanelTab] = useState<SidePanelTab>('workspace');
+    const [workspaceActivePath, setWorkspaceActivePath] = useState<string | null>(null);
+    const [workspaceActivities, setWorkspaceActivities] = useState<WorkspaceActivity[]>([]);
+    const [workspaceLiveDraft, setWorkspaceLiveDraft] = useState<WorkspaceLiveDraft | null>(null);
+    const workspaceEditingRef = useRef(false);
     const [wsSessionId, setWsSessionId] = useState<string>('');
     const [sessionListCollapsed, setSessionListCollapsed] = useState(false);
     const [chatInput, setChatInput] = useState('');
@@ -1777,7 +1860,9 @@ function AgentDetailInner() {
     const [isStreaming, setIsStreaming] = useState(false);
     const [chatUploadDrafts, setChatUploadDrafts] = useState<{ id: string; name: string; percent: number; previewUrl?: string; sizeBytes: number }[]>([]);
     const chatUploadAbortRef = useRef<Map<string, () => void>>(new Map());
-    const [attachedFiles, setAttachedFiles] = useState<{ name: string; text: string; path?: string; imageUrl?: string }[]>([]);
+    type AttachedFileRef = { name: string; text: string; path?: string; imageUrl?: string; source?: 'upload' | 'workspace_auto' };
+    const [attachedFiles, setAttachedFiles] = useState<AttachedFileRef[]>([]);
+    const dismissedWorkspaceRefPath = useRef<string | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -2029,7 +2114,45 @@ function AgentDetailInner() {
                     }
                     return [...prev, { role: 'assistant', content: '', thinking: d.content, _streaming: true } as any];
                 });
+            } else if (d.type === 'workspace_draft') {
+                if (WORKSPACE_TOOLS.has(d.name)) {
+                    const parsedDraft = parseWorkspaceDraftArgs(d.name, d.arguments || '');
+                    const draft: WorkspaceLiveDraft = {
+                        id: d.id || `${d.name}-${d.index || 0}`,
+                        tool: d.name,
+                        action: workspaceActionForTool(d.name),
+                        status: 'drafting',
+                        ...parsedDraft,
+                    };
+                    setWorkspaceLiveDraft(draft);
+                    if (draft.path && !workspaceEditingRef.current) setWorkspaceActivePath(draft.path);
+                    setSidePanelTab('workspace');
+                    setLivePanelVisible(true);
+                    setSessionListCollapsed(true);
+                    useAppStore.setState({ sidebarCollapsed: true });
+                }
             } else if (d.type === 'tool_call') {
+                if (WORKSPACE_TOOLS.has(d.name)) {
+                    if (d.status === 'running') {
+                        const rawArgs = typeof d.args === 'string' ? d.args : JSON.stringify(d.args || {});
+                        const parsedDraft = parseWorkspaceDraftArgs(d.name, rawArgs);
+                        const draft: WorkspaceLiveDraft = {
+                            id: d.id || `${d.name}-running`,
+                            tool: d.name,
+                            action: workspaceActionForTool(d.name),
+                            status: 'running',
+                            ...parsedDraft,
+                        };
+                        setWorkspaceLiveDraft(draft);
+                        if (draft.path && !workspaceEditingRef.current) setWorkspaceActivePath(draft.path);
+                        setSidePanelTab('workspace');
+                        setLivePanelVisible(true);
+                        setSessionListCollapsed(true);
+                        useAppStore.setState({ sidebarCollapsed: true });
+                    } else if (d.status === 'done') {
+                        setWorkspaceLiveDraft(null);
+                    }
+                }
                 if (d.live_preview) {
                     const lp = d.live_preview;
                     setLiveState(prev => {
@@ -2037,15 +2160,30 @@ function AgentDetailInner() {
                         if ((lp.env === 'desktop' || lp.env === 'browser') && lp.screenshot_url) {
                             if (lp.env === 'desktop') next.desktop = { screenshotUrl: lp.screenshot_url };
                             else next.browser = { screenshotUrl: lp.screenshot_url };
+                            setSidePanelTab(lp.env === 'desktop' ? 'desktop' : 'browser');
                         } else if (lp.env === 'code' && lp.output) {
                             const existing = prev.code?.output || '';
                             next.code = { output: existing + (existing ? '\n---\n' : '') + lp.output };
+                            setSidePanelTab('code');
                         }
                         return next;
                     });
                     setLivePanelVisible(true);
                     setSessionListCollapsed(true);
                     useAppStore.setState({ sidebarCollapsed: true });
+                }
+                if (d.workspace_activity) {
+                    const activity = d.workspace_activity as WorkspaceActivity;
+                    setWorkspaceLiveDraft(null);
+                    setWorkspaceActivities(prev => [activity, ...prev.filter(item => item.path !== activity.path)].slice(0, 20));
+                    if (activity.action !== 'delete' && activity.ok !== false && !workspaceEditingRef.current) {
+                        setWorkspaceActivePath(activity.path);
+                        setSidePanelTab('workspace');
+                    }
+                    setLivePanelVisible(true);
+                    setSessionListCollapsed(true);
+                    useAppStore.setState({ sidebarCollapsed: true });
+                    queryClient.invalidateQueries({ queryKey: ['files', id, workspacePath] });
                 }
                 setChatMessages(prev => {
                     const toolMsg: ChatMsg = { role: 'tool_call', content: '', toolName: d.name, toolArgs: d.args, toolStatus: d.status, toolResult: d.result };
@@ -2104,6 +2242,24 @@ function AgentDetailInner() {
         ensureSessionSocket(activeSession, id, token);
         syncActiveSocketState(activeSession, id);
     }, [id, token, activeTab, activeSession?.id, chatScope, canViewAllAgentChatSessions]);
+
+    useEffect(() => {
+        const shouldAutoReference = livePanelVisible && sidePanelTab === 'workspace' && !!workspaceActivePath;
+        if (!shouldAutoReference) {
+            dismissedWorkspaceRefPath.current = null;
+            setAttachedFiles((prev) => prev.filter((file) => file.source !== 'workspace_auto'));
+            return;
+        }
+        const path = workspaceActivePath!;
+        if (dismissedWorkspaceRefPath.current === path) return;
+        setAttachedFiles((prev) => {
+            const withoutAuto = prev.filter((file) => file.source !== 'workspace_auto');
+            return [
+                ...withoutAuto,
+                { name: workspaceFileName(path), text: '', path, source: 'workspace_auto' },
+            ];
+        });
+    }, [livePanelVisible, sidePanelTab, workspaceActivePath]);
 
     useEffect(() => {
         return () => {
@@ -2315,7 +2471,11 @@ function AgentDetailInner() {
                     const wsPath = file.path || '';
                     const codePath = wsPath.replace(/^workspace\//, '');
                     const fileLoc = wsPath ? `\nFile location: ${wsPath} (for read_file/read_document tools)\nIn execute_code, use relative path: "${codePath}" (working directory is workspace/)\n` : '';
-                    filesPrompt += `[File: ${file.name}]${fileLoc}\n${file.text}\n\n`;
+                    if (file.source === 'workspace_auto') {
+                        filesPrompt += `[Workspace reference: ${file.name}]${fileLoc}\nUse read_file or read_document if you need the file contents.\n\n`;
+                    } else {
+                        filesPrompt += `[File: ${file.name}]${fileLoc}\n${file.text}\n\n`;
+                    }
                 }
             });
 
@@ -2350,7 +2510,8 @@ function AgentDetailInner() {
         if (chatInputRef.current) {
             chatInputRef.current.style.height = 'auto';
         }
-        setAttachedFiles([]);
+        dismissedWorkspaceRefPath.current = null;
+        setAttachedFiles((prev) => prev.filter((file) => file.source === 'workspace_auto'));
     };
 
     const handleChatFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -4299,7 +4460,7 @@ function AgentDetailInner() {
                             </div>
 
                             {/* ── Right: chat/message area ── */}
-                            <div className={`agent-chat-area ${ !!(liveState.desktop || liveState.browser || liveState.code) ? 'has-live-panel' : ''}`} style={{ flex: 1, display: 'flex', flexDirection: 'row', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
+                            <div className={`agent-chat-area ${livePanelVisible ? 'has-live-panel' : ''}`} style={{ flex: 1, display: 'flex', flexDirection: 'row', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
                                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
                                     {sessionListCollapsed && (
                                         <button onClick={() => setSessionListCollapsed(false)} style={{ position: 'absolute', top: '12px', left: '12px', zIndex: 10, width: '28px', height: '28px', borderRadius: '6px', background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', cursor: 'pointer' }} title="Show chat sessions" onMouseEnter={e => e.currentTarget.style.background='var(--bg-secondary)'} onMouseLeave={e => e.currentTarget.style.background='var(--bg-elevated)'}>
@@ -4639,10 +4800,14 @@ function AgentDetailInner() {
                                                                     </span>
                                                                 )}
                                                                 <span className="chat-file-pill__name">{file.name}</span>
+                                                                {file.source === 'workspace_auto' && <span className="chat-file-pill__source">Workspace</span>}
                                                                 <button
                                                                     type="button"
                                                                     className="chat-file-pill__remove"
-                                                                    onClick={() => setAttachedFiles((prev) => prev.filter((_, i) => i !== idx))}
+                                                                    onClick={() => {
+                                                                        if (file.source === 'workspace_auto' && file.path) dismissedWorkspaceRefPath.current = file.path;
+                                                                        setAttachedFiles((prev) => prev.filter((_, i) => i !== idx));
+                                                                    }}
                                                                     title="Remove file"
                                                                 >
                                                                     ×
@@ -4724,25 +4889,38 @@ function AgentDetailInner() {
                                     </div>
                                 )}
                                 </div>
-                                {/* Live Panel */}
-                                {!!(liveState.desktop || liveState.browser || liveState.code) && (
-                                    <AgentBayLivePanel
-                                        liveState={liveState}
-                                        visible={livePanelVisible}
-                                        onToggle={() => setLivePanelVisible(v => !v)}
-                                        agentId={id}
-                                        sessionId={wsSessionId}
-                                        onLiveUpdate={(env, screenshotDataUri) => {
-                                            // Refresh the live preview with the final screenshot
-                                            // captured by TakeControlPanel on close, so the panel
-                                            // reflects the state the user left the browser in.
-                                            setLiveState(prev => ({
-                                                ...prev,
-                                                [env]: { screenshotUrl: screenshotDataUri },
-                                            }));
-                                        }}
-                                    />
-                                )}
+                                <AgentSidePanel
+                                    liveState={liveState}
+                                    workspaceActivePath={workspaceActivePath}
+                                    workspaceActivities={workspaceActivities}
+                                    workspaceLiveDraft={workspaceLiveDraft}
+                                    visible={livePanelVisible}
+                                    onToggle={() => {
+                                        if (!livePanelVisible) {
+                                            setSidePanelTab('workspace');
+                                            setLivePanelVisible(true);
+                                        } else {
+                                            setLivePanelVisible(false);
+                                        }
+                                    }}
+                                    activeTab={sidePanelTab}
+                                    onTabChange={setSidePanelTab}
+                                    onWorkspaceSelectPath={setWorkspaceActivePath}
+                                    onWorkspaceEditingChange={(editing) => {
+                                        workspaceEditingRef.current = editing;
+                                    }}
+                                    agentId={id}
+                                    sessionId={wsSessionId}
+                                    onLiveUpdate={(env, screenshotDataUri) => {
+                                        // Refresh the live preview with the final screenshot
+                                        // captured by TakeControlPanel on close, so the panel
+                                        // reflects the state the user left the browser in.
+                                        setLiveState(prev => ({
+                                            ...prev,
+                                            [env]: { screenshotUrl: screenshotDataUri },
+                                        }));
+                                    }}
+                                />
                             </div>
                         </div>
                     )
