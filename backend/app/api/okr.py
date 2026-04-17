@@ -387,8 +387,6 @@ async def list_periods(user=Depends(get_current_user)):
     freq = settings.period_frequency
     length = settings.period_length_days
 
-    cur_start, cur_end = _compute_current_period(freq, length)
-
     def _period_label(start: date, freq: str) -> str:
         if freq == "monthly":
             return start.strftime("%b %Y")
@@ -396,61 +394,86 @@ async def list_periods(user=Depends(get_current_user)):
             q = (start.month - 1) // 3 + 1
             return f"Q{q} {start.year}"
         else:
-            return f"{start.isoformat()} – {(start + timedelta(days=(length or 90) - 1)).isoformat()}"
+            end = start + timedelta(days=(length or 90) - 1)
+            return f"{start.isoformat()} – {end.isoformat()}"
 
-    def _prev_start(start: date) -> date:
-        if freq == "quarterly":
-            return (start - timedelta(days=1)).replace(
-                day=1, month=((start.month - 4) % 12) + 1
-            )
-        elif freq == "monthly":
-            m = start.month - 1 or 12
-            y = start.year if start.month > 1 else start.year - 1
-            return start.replace(year=y, month=m, day=1)
+    def _quarter_start_end(year: int, quarter: int) -> tuple[date, date]:
+        """Return (start, end) for a given year and quarter (1-4)."""
+        start = date(year, (quarter - 1) * 3 + 1, 1)
+        if quarter == 4:
+            end = date(year, 12, 31)
         else:
-            return start - timedelta(days=length or 90)
+            end = date(year, quarter * 3 + 1, 1) - timedelta(days=1)
+        return start, end
 
-    def _next_start(end: date) -> date:
-        return end + timedelta(days=1)
+    def _month_start_end(year: int, month: int) -> tuple[date, date]:
+        """Return (start, end) for a given year and month."""
+        start = date(year, month, 1)
+        if month == 12:
+            end = date(year, 12, 31)
+        else:
+            end = date(year, month + 1, 1) - timedelta(days=1)
+        return start, end
 
-    periods = []
-    # Previous 2 periods
-    s = cur_start
-    for _ in range(2):
-        s = _prev_start(s)
-    for _ in range(2):
-        ps, pe = _compute_current_period(freq, length) if s == cur_start else (s, _compute_current_period(freq, length)[1])
-        ns = _next_start(s)
-        _, pe = _compute_current_period(freq, length) if s == cur_start else (None, None)
-        if pe is None:
-            # For non-quarterly/monthly we approximate end
-            pe = s + timedelta(days=(length or 90) - 1)
-        periods.append(PeriodOut(
+    # Generate 4 consecutive periods: [prev2, prev1, current, next1]
+    # by stepping forward from a known anchor 2 periods before current.
+    today = date.today()
+    all_periods: list[tuple[date, date]] = []
+
+    if freq == "quarterly":
+        cur_q = (today.month - 1) // 3 + 1
+        cur_y = today.year
+        # Walk back 2 quarters, then generate 4
+        q, y = cur_q, cur_y
+        for _ in range(2):
+            q -= 1
+            if q < 1:
+                q = 4
+                y -= 1
+        for _ in range(4):
+            all_periods.append(_quarter_start_end(y, q))
+            q += 1
+            if q > 4:
+                q = 1
+                y += 1
+
+    elif freq == "monthly":
+        cur_m, cur_y = today.month, today.year
+        m, y = cur_m, cur_y
+        for _ in range(2):
+            m -= 1
+            if m < 1:
+                m = 12
+                y -= 1
+        for _ in range(4):
+            all_periods.append(_month_start_end(y, m))
+            m += 1
+            if m > 12:
+                m = 1
+                y += 1
+
+    else:
+        # Custom period length — anchor to epoch
+        epoch = date(1970, 1, 1)
+        days = length or 90
+        days_since = (today - epoch).days
+        cur_idx = days_since // days
+        for i in range(cur_idx - 2, cur_idx + 2):
+            s = epoch + timedelta(days=i * days)
+            e = s + timedelta(days=days - 1)
+            all_periods.append((s, e))
+
+    cur_start, cur_end = _compute_current_period(freq, length)
+
+    return [
+        PeriodOut(
             start=s.isoformat(),
-            end=pe.isoformat(),
+            end=e.isoformat(),
             label=_period_label(s, freq),
             is_current=(s == cur_start),
-        ))
-        s = _next_start(pe)
-
-    # Current period
-    periods.append(PeriodOut(
-        start=cur_start.isoformat(),
-        end=cur_end.isoformat(),
-        label=_period_label(cur_start, freq),
-        is_current=True,
-    ))
-    # Next period
-    next_start = _next_start(cur_end)
-    next_end = next_start + timedelta(days=(length or 90) - 1)
-    periods.append(PeriodOut(
-        start=next_start.isoformat(),
-        end=next_end.isoformat(),
-        label=_period_label(next_start, freq),
-        is_current=False,
-    ))
-
-    return sorted(periods, key=lambda p: p.start)
+        )
+        for s, e in all_periods
+    ]
 
 
 # ─── Objectives ───────────────────────────────────────────────────────────────
