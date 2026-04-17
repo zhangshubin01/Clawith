@@ -256,29 +256,33 @@ class FeishuWSManager:
             else None
         )
 
-        # Direct Async runner bypassing the faulty client.start()
+        # Reconnect loop — lark-oapi _connect() may exit on network errors;
+        # without this, the task stays alive but the WS is permanently dead.
         async def _run_async_client():
-            try:
-                # Wrap _connect() in the scoped proxy bypass so macOS system proxy
-                # settings cannot interfere with the WebSocket handshake.
-                if _no_proxy_ctx:
-                    async with _no_proxy_ctx():
+            attempt = 0
+            while True:
+                try:
+                    attempt += 1
+                    logger.info(f"[Feishu WS] Connecting for agent {agent_id} (attempt #{attempt})")
+                    if _no_proxy_ctx:
+                        async with _no_proxy_ctx():
+                            await client._connect()
+                    else:
                         await client._connect()
-                else:
-                    await client._connect()
-                # Start ping loop natively after connection is established
-                ping_task = asyncio.create_task(client._ping_loop())
-                
-                # Keep this task alive so it doesn't get canceled, and handle reconnections
-                while True:
-                    await asyncio.sleep(3600)  # Keep-alive
-            except asyncio.CancelledError:
-                logger.info(f"[Feishu WS] Async client task cancelled for {agent_id}")
-                await client._disconnect()
-            except Exception as e:
-                logger.exception(f"[Feishu WS] Async client exception for {agent_id}: {e}")
-                await client._disconnect()
-                self._clients.pop(agent_id, None)
+                    # _connect() returned normally == server-side close; reconnect
+                    logger.warning(f"[Feishu WS] Connection closed for agent {agent_id}, reconnecting in 5s...")
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    logger.info(f"[Feishu WS] Async client task cancelled for agent {agent_id}")
+                    try:
+                        await client._disconnect()
+                    except Exception:
+                        pass
+                    return
+                except Exception as e:
+                    logger.exception(f"[Feishu WS] Connection error for agent {agent_id}: {e}")
+                    logger.warning(f"[Feishu WS] Reconnecting in 10s...")
+                    await asyncio.sleep(10)
 
         task = asyncio.create_task(_run_async_client(), name=f"feishu-ws-async-{str(agent_id)[:8]}")
         self._tasks[agent_id] = task
