@@ -10539,8 +10539,21 @@ async def _create_objective(agent_id: uuid.UUID | None, arguments: dict) -> str:
                         res = await db.execute(select(UserModel.id).where(UserModel.id == owner_id))
                         owner_exists = res.scalar_one_or_none() is not None
                         if not owner_exists:
-                            res = await db.execute(select(OrgMember.id).where(OrgMember.id == owner_id))
-                            owner_exists = res.scalar_one_or_none() is not None
+                            # Maybe agent passed OrgMember.id — resolve to linked User.id when available
+                            res = await db.execute(
+                                select(OrgMember.id, OrgMember.user_id).where(OrgMember.id == owner_id)
+                            )
+                            member_row = res.first()
+                            if member_row:
+                                owner_exists = True
+                                if member_row.user_id:
+                                    # Resolve OrgMember.id → User.id so name lookup in list_objectives works
+                                    owner_id = member_row.user_id
+                                    logger.info(
+                                        f"[OKR] _create_objective: resolved OrgMember.id {owner_id_str} "
+                                        f"→ user_id {owner_id}"
+                                    )
+                                # else: channel-only member, keep OrgMember.id as owner_id
 
                     if not owner_exists:
                         owner_id = None
