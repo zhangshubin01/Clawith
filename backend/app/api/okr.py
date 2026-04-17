@@ -587,18 +587,28 @@ async def create_objective(body: ObjectiveCreate, user=Depends(get_current_user)
                 else:
                     # Fallback: maybe agent sent OrgMember.id — resolve to user_id
                     member_check = await db.execute(
-                        select(OrgMember.user_id).where(
+                        select(OrgMember.id, OrgMember.user_id).where(
                             OrgMember.id == candidate,
-                            OrgMember.user_id.isnot(None),
                         )
                     )
-                    user_id_from_member = member_check.scalar_one_or_none()
-                    if user_id_from_member:
-                        resolved_owner_id = user_id_from_member
-                        logger.info(
-                            f"[create_objective] Resolved OrgMember.id {candidate} "
-                            f"→ user_id {resolved_owner_id}"
-                        )
+                    member_row = member_check.first()
+                    if member_row:
+                        if member_row.user_id:
+                            # Linked member: use the platform user_id
+                            resolved_owner_id = member_row.user_id
+                            logger.info(
+                                f"[create_objective] Resolved OrgMember.id {candidate} "
+                                f"→ user_id {resolved_owner_id}"
+                            )
+                        else:
+                            # Channel-only member with no platform account yet.
+                            # Store OrgMember.id directly as owner_id so the OKR
+                            # can be matched back in members_without_okr checks.
+                            resolved_owner_id = candidate
+                            logger.info(
+                                f"[create_objective] Channel-only OrgMember {candidate} "
+                                f"has no user_id — storing OrgMember.id as owner_id"
+                            )
                     else:
                         raise HTTPException(
                             422,
@@ -1052,17 +1062,18 @@ async def members_without_okr(user=Depends(get_current_user)):
                             "channel_user_id": None,
                         })
                 else:
-                    # Channel-only member: hasn't joined the platform yet.
-                    # They cannot own OKRs, but must be shown so admins can
-                    # onboard them (invite to platform) or nudge via channel.
-                    members_without_okr.append({
-                        "id": str(row.id),
-                        "type": "user",
-                        "display_name": row.name or "",
-                        "avatar_url": row.avatar_url or "",
-                        "channel": None,
-                        "channel_user_id": None,
-                    })
+                    # Channel-only member (no platform account yet).
+                    # Check if an OKR was created with OrgMember.id as owner_id
+                    # (e.g. OKR Agent used OrgMember.id when no User.id was available).
+                    if row.id not in covered_ids:
+                        members_without_okr.append({
+                            "id": str(row.id),
+                            "type": "user",
+                            "display_name": row.name or "",
+                            "avatar_url": row.avatar_url or "",
+                            "channel": None,
+                            "channel_user_id": None,
+                        })
 
             # ── Agent members via AgentAgentRelationship ───────────────────────
             agent_rel_result = await db.execute(
