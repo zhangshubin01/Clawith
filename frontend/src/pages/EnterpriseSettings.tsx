@@ -1803,7 +1803,8 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 }
                             </div>
                         </div>
-                        <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '24px' }}>
+                        {/* Wider toggle so the knob has comfortable room */}
+                        <label style={{ position: 'relative', display: 'inline-block', width: '52px', height: '28px', flexShrink: 0 }}>
                             <input
                                 type="checkbox"
                                 checked={s.enabled}
@@ -1811,12 +1812,12 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 style={{ opacity: 0, width: 0, height: 0 }}
                             />
                             <span style={{
-                                position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '24px', cursor: 'pointer',
+                                position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: '28px', cursor: 'pointer',
                                 background: s.enabled ? 'var(--accent-primary)' : 'var(--border-subtle)', transition: '0.2s'
                             }}>
                                 <span style={{
-                                    position: 'absolute', left: s.enabled ? '18px' : '2px', top: '2px', width: '20px', height: '20px',
-                                    borderRadius: '50%', background: '#fff', transition: '0.2s', boxShadow: '0 1px 2px rgba(0,0,0,0.1)'
+                                    position: 'absolute', left: s.enabled ? '26px' : '2px', top: '2px', width: '24px', height: '24px',
+                                    borderRadius: '50%', background: '#fff', transition: '0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.15)'
                                 }} />
                             </span>
                         </label>
@@ -1878,7 +1879,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 {okrAgentId ? (
                                     <a
                                         id="okr-chat-agent-btn"
-                                        href={`/agents/${okrAgentId}`}
+                                        href={`/agents/${okrAgentId}#Chat`}
                                         style={{
                                             display: 'inline-flex', alignItems: 'center', gap: '6px',
                                             padding: '7px 14px', borderRadius: '6px',
@@ -2056,7 +2057,20 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
 export default function EnterpriseSettings() {
     const { t } = useTranslation();
     const qc = useQueryClient();
-    const [activeTab, setActiveTab] = useState<'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr'>('info');
+    type TabKey = 'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr';
+    const VALID_TABS: TabKey[] = ['info', 'llm', 'tools', 'skills', 'okr', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'];
+    const getTabFromHash = (): TabKey => {
+        const hash = window.location.hash.replace('#', '') as TabKey;
+        return VALID_TABS.includes(hash) ? hash : 'info';
+    };
+    const [activeTab, setActiveTab] = useState<TabKey>(getTabFromHash);
+
+    // Sync hash ↔ activeTab: hashchange navigation (back/forward) updates state
+    useEffect(() => {
+        const handler = () => setActiveTab(getTabFromHash());
+        window.addEventListener('hashchange', handler);
+        return () => window.removeEventListener('hashchange', handler);
+    }, []);
 
     // Track selected tenant as state so page refreshes on company switch
     const [selectedTenantId, setSelectedTenantId] = useState(localStorage.getItem('current_tenant_id') || '');
@@ -2341,7 +2355,15 @@ export default function EnterpriseSettings() {
 
                 <div className="tabs">
                     {(['info', 'llm', 'tools', 'skills', 'okr', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'] as const).map(tab => (
-                        <div key={tab} className={`tab ${activeTab === tab ? 'active' : ''}`} onClick={() => setActiveTab(tab)}>
+                        <div
+                            key={tab}
+                            className={`tab ${activeTab === tab ? 'active' : ''}`}
+                            onClick={() => {
+                                // Update URL hash so each tab has a bookmarkable address
+                                window.location.hash = tab;
+                                setActiveTab(tab);
+                            }}
+                        >
                             {tab === 'quotas' ? t('enterprise.tabs.quotas', 'Quotas') : tab === 'users' ? t('enterprise.tabs.users', 'Users') : tab === 'invites' ? t('enterprise.tabs.invites', 'Invitations') : tab === 'okr' ? t('nav.okr', 'OKR') : t(`enterprise.tabs.${tab}`)}
                         </div>
                     ))}
