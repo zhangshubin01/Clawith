@@ -311,6 +311,22 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
             settings.period_length_days = body.period_length_days
 
         await db.commit()
+
+        # ── Auto-create OKR Agent when first enabled ──────────────────────────
+        # If OKR was just turned on and no agent exists yet for this tenant,
+        # seed one so the user doesn't see "OKR Agent not found".
+        okr_agent_id_str: str | None = str(settings.okr_agent_id) if settings.okr_agent_id else None
+
+        if body.enabled and not settings.okr_agent_id:
+            from app.services.agent_seeder import seed_okr_agent_for_tenant
+            logger.info(f"[OKR] OKR enabled for tenant {user.tenant_id} — auto-seeding OKR Agent")
+            await seed_okr_agent_for_tenant(user.tenant_id, user.id)
+
+            # Re-read settings to pick up the newly written okr_agent_id
+            async with async_session() as db2:
+                refreshed = await _get_or_create_settings(db2, user.tenant_id)
+                okr_agent_id_str = str(refreshed.okr_agent_id) if refreshed.okr_agent_id else None
+
         return OKRSettingsOut(
             enabled=settings.enabled,
             daily_report_enabled=settings.daily_report_enabled,
@@ -319,6 +335,7 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
             weekly_report_day=settings.weekly_report_day,
             period_frequency=settings.period_frequency,
             period_length_days=settings.period_length_days,
+            okr_agent_id=okr_agent_id_str,
         )
 
 

@@ -1879,7 +1879,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 {okrAgentId ? (
                                     <a
                                         id="okr-chat-agent-btn"
-                                        href={`/agents/${okrAgentId}#Chat`}
+                                        href={`/agents/${okrAgentId}#chat`}
                                         style={{
                                             display: 'inline-flex', alignItems: 'center', gap: '6px',
                                             padding: '7px 14px', borderRadius: '6px',

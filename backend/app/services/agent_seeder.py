@@ -812,6 +812,17 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
             access_level="use",
         ))
 
+        # ── Link OKR Agent ID to OKRSettings ──
+        settings_res = await db.execute(
+            select(OKRSettings).where(OKRSettings.tenant_id == tenant_id)
+        )
+        okr_settings = settings_res.scalar_one_or_none()
+        if not okr_settings:
+            okr_settings = OKRSettings(tenant_id=tenant_id)
+            db.add(okr_settings)
+        okr_settings.okr_agent_id = okr_agent.id
+        await db.flush()
+
         # ── Workspace setup ──
         template_dir = Path(settings.AGENT_TEMPLATE_DIR)
         agent_dir = Path(settings.AGENT_DATA_DIR) / str(okr_agent.id)
