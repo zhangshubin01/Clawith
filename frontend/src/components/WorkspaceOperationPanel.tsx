@@ -499,16 +499,37 @@ export default function WorkspaceOperationPanel({
             );
         }
         return (
-            <button
+            <div
                 key={node.path}
                 className={`workspace-op-tree-file ${selected ? 'active' : ''}`}
-                onClick={() => !editing && onSelectPath(node.path)}
-                disabled={editing}
-                title={node.path}
                 style={{ paddingLeft: `${18 + depth * 12}px` }}
+                onClick={() => !editing && onSelectPath(node.path)}
+                title={node.path}
             >
-                {node.name}
-            </button>
+                <div className="workspace-op-tree-file-name">{node.name}</div>
+                {!editing && (
+                    <button
+                        className="workspace-op-tree-file-delete"
+                        title="Delete file"
+                        onClick={async (e) => {
+                            e.stopPropagation();
+                            if (confirm(`Are you sure you want to delete ${node.name}?`)) {
+                                try {
+                                    await fileApi.delete(agentId, node.path);
+                                    if (selected) onSelectPath('');
+                                    loadFileTree();
+                                } catch (err: any) {
+                                    alert(`Failed to delete: ${err.message}`);
+                                }
+                            }
+                        }}
+                    >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2M10 11v6M14 11v6"/>
+                        </svg>
+                    </button>
+                )}
+            </div>
         );
     });
 

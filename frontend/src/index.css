@@ -3127,3 +3127,33 @@ select:focus {
     background: rgba(99, 102, 241, 0.06);
     border-color: rgba(99, 102, 241, 0.35);
 }
+
+/* Workspace Panel file actions */
+.workspace-op-tree-file-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-op-tree-file-delete {
+  flex-shrink: 0;
+  display: none;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  align-items: center;
+  justify-content: center;
+}
+
+.workspace-op-tree-file-delete:hover {
+  color: var(--system-danger);
+  background: var(--bg-black-10);
+}
+
+.workspace-op-tree-file:hover .workspace-op-tree-file-delete {
+  display: flex;
+}
