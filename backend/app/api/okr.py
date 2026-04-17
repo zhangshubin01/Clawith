@@ -543,6 +543,19 @@ async def list_objectives(
             )
             user_names = {row.id: (row.display_name or "") for row in u_result.fetchall()}
 
+            # Fallback: owner_id might be an OrgMember.id (e.g. OKR Agent passed
+            # OrgMember.id instead of User.id). Look them up in org_members table.
+            from app.models.org import OrgMember
+            unresolved_ids = [oid for oid in user_owner_ids if oid not in user_names]
+            if unresolved_ids:
+                m_result = await db.execute(
+                    select(OrgMember.id, OrgMember.name).where(
+                        OrgMember.id.in_(unresolved_ids)
+                    )
+                )
+                for row in m_result.fetchall():
+                    user_names[row.id] = row.name or ""
+
         agent_names: dict[uuid.UUID, str] = {}
         if agent_owner_ids:
             a_result = await db.execute(
@@ -1052,7 +1065,9 @@ async def members_without_okr(user=Depends(get_current_user)):
             for row in canonical_members:
                 if row.user_id is not None:
                     tracked_user_ids.append(str(row.user_id))
-                    if row.user_id not in covered_ids:
+                    # Check both User.id and OrgMember.id — OKR Agent may store
+                    # OrgMember.id as owner_id instead of the linked User.id.
+                    if row.user_id not in covered_ids and row.id not in covered_ids:
                         members_without_okr.append({
                             "id": str(row.id),
                             "type": "user",
