@@ -11,7 +11,7 @@
  *   - Disabled state: guide panel directing to OKR settings
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -799,6 +799,8 @@ export default function OKR() {
     const [selectedPeriod, setSelectedPeriod] = useState<Period | null>(null);
     const [creating, setCreating] = useState(false);
     const [activeTab, setActiveTab] = useState<'dashboards' | 'reports'>('dashboards');
+    const [periodMenuOpen, setPeriodMenuOpen] = useState(false);
+    const periodMenuRef = useRef<HTMLDivElement | null>(null);
 
     // Fetch OKR settings — always fresh on mount so toggling the switch is reflected immediately
     const { data: settings, isLoading: settingsLoading } = useQuery<OKRSettings>({
@@ -829,6 +831,17 @@ export default function OKR() {
             setSelectedPeriod(selectedStillExists);
         }
     }, [periods, selectedPeriod]);
+
+    useEffect(() => {
+        if (!periodMenuOpen) return;
+        function handlePointerDown(event: MouseEvent) {
+            if (periodMenuRef.current && !periodMenuRef.current.contains(event.target as Node)) {
+                setPeriodMenuOpen(false);
+            }
+        }
+        document.addEventListener('mousedown', handlePointerDown);
+        return () => document.removeEventListener('mousedown', handlePointerDown);
+    }, [periodMenuOpen]);
 
     // Fetch objectives for selected period — fresh on mount/focus so OKR Agent creation is visible
     const { data: objectives = [], isLoading: objLoading } = useQuery<Objective[]>({
@@ -963,27 +976,61 @@ export default function OKR() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
                     {/* Period Selector */}
                     {periods.length > 0 && (
-                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <div ref={periodMenuRef} style={{ display: 'flex', alignItems: 'center', gap: '8px', position: 'relative' }}>
                             <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>
                                 {isChinese ? '周期' : 'Period'}
                             </span>
-                            <select
-                                className="form-input"
-                                value={selectedPeriod ? `${selectedPeriod.start}|${selectedPeriod.end}` : ''}
-                                onChange={(e) => {
-                                    const [start, end] = e.target.value.split('|');
-                                    const next = periods.find(p => p.start === start && p.end === end);
-                                    if (next) setSelectedPeriod(next);
+                            <button
+                                type="button"
+                                onClick={() => setPeriodMenuOpen(v => !v)}
+                                style={{
+                                    minWidth: 170, height: 34, padding: '5px 10px', borderRadius: '6px',
+                                    border: '1px solid var(--border-subtle)', background: 'var(--bg-secondary)',
+                                    color: 'var(--text-secondary)', fontSize: '12px', display: 'flex',
+                                    alignItems: 'center', justifyContent: 'space-between', gap: '10px', cursor: 'pointer',
                                 }}
-                                style={{ minWidth: 170, height: 34, padding: '5px 28px 5px 10px', fontSize: '12px' }}
                             >
-                                {periodOptions.map(p => (
-                                    <option key={p.start} value={`${p.start}|${p.end}`}>
-                                        {p.label}{p.is_current ? (isChinese ? '（当前）' : ' (now)') : ''}
-                                    </option>
-                                ))}
-                            </select>
-                        </label>
+                                <span>
+                                    {selectedPeriod?.label}
+                                    {selectedPeriod?.is_current ? (isChinese ? '（当前）' : ' (now)') : ''}
+                                </span>
+                                <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>▾</span>
+                            </button>
+                            {periodMenuOpen && (
+                                <div
+                                    style={{
+                                        position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 50,
+                                        minWidth: 210, maxHeight: 280, overflowY: 'auto', padding: '6px',
+                                        borderRadius: '8px', border: '1px solid var(--border-subtle)',
+                                        background: 'var(--bg-primary)', boxShadow: '0 12px 32px rgba(0,0,0,0.16)',
+                                    }}
+                                >
+                                    {periodOptions.map(p => {
+                                        const active = selectedPeriod?.start === p.start && selectedPeriod?.end === p.end;
+                                        return (
+                                            <button
+                                                key={p.start}
+                                                type="button"
+                                                onClick={() => {
+                                                    setSelectedPeriod(p);
+                                                    setPeriodMenuOpen(false);
+                                                }}
+                                                style={{
+                                                    width: '100%', padding: '8px 10px', borderRadius: '6px', border: 'none',
+                                                    background: active ? 'var(--accent-primary)' : 'transparent',
+                                                    color: active ? '#fff' : 'var(--text-secondary)', fontSize: '12px',
+                                                    textAlign: 'left', cursor: 'pointer', display: 'flex',
+                                                    justifyContent: 'space-between', alignItems: 'center', gap: '12px',
+                                                }}
+                                            >
+                                                <span>{p.label}{p.is_current ? (isChinese ? '（当前）' : ' (now)') : ''}</span>
+                                                {active && <span>✓</span>}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
                     )}
 
                     {/* Create Objective button */}

@@ -1965,12 +1965,26 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                             <div style={{ fontWeight: 500, marginBottom: '12px', fontSize: '13px' }}>
                                 {zh ? '周期偏好' : 'Period Preference'}
                             </div>
+                            {!periodFrequencyLocked && (
+                                <div style={{ marginBottom: '10px', fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.5, maxWidth: '520px' }}>
+                                    {zh
+                                        ? '请在首次启用 OKR 前选择周期。首次启用后，周期频率将被锁定，避免历史 OKR 和报表口径混乱。'
+                                        : 'Choose the cadence before enabling OKR for the first time. After first enablement, it will be locked to keep OKR history and reports consistent.'}
+                                </div>
+                            )}
                             <select
                                 className="form-input"
                                 value={s.period_frequency}
                                 disabled={periodFrequencyLocked}
+                                title={periodFrequencyLocked
+                                    ? (zh ? 'OKR 周期已锁定，不能修改' : 'OKR cadence is locked and cannot be changed')
+                                    : undefined}
                                 onChange={(e) => updateSettings.mutate({ ...s, period_frequency: e.target.value })}
-                                style={{ maxWidth: '300px', opacity: periodFrequencyLocked ? 0.65 : 1 }}
+                                style={{
+                                    maxWidth: '300px',
+                                    opacity: periodFrequencyLocked ? 0.65 : 1,
+                                    cursor: periodFrequencyLocked ? 'not-allowed' : 'pointer',
+                                }}
                             >
                                 <option value="quarterly">{zh ? '按季度 (Quarterly)' : 'Quarterly'}</option>
                                 <option value="monthly">{zh ? '按月 (Monthly)' : 'Monthly'}</option>
