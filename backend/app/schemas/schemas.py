@@ -267,6 +267,7 @@ class AgentOut(BaseModel):
     max_llm_calls_per_day: int = 100
     agent_type: str = "native"
     openclaw_last_seen: datetime | None = None
+    unread_count: int = 0
     has_api_key: bool = False
     api_key_hash: str | None = None
     created_at: datetime

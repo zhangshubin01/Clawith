@@ -8,13 +8,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import cast, func, select, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent, AgentPermission
+from app.models.audit import ChatMessage
+from app.models.chat_session import ChatSession
 from app.models.user import User
 from app.schemas.schemas import AgentCreate, AgentOut, AgentUpdate
 
@@ -105,6 +107,46 @@ async def _lazy_reset_token_counters(agent: Agent, db: AsyncSession) -> bool:
     return changed
 
 
+async def _build_unread_count_by_agent(
+    db: AsyncSession,
+    agents: list[Agent],
+    current_user: User,
+) -> dict[str, int]:
+    """Return unread assistant/system/tool message counts for the current user per agent.
+
+    The sidebar only needs user-facing unread state, so we scope strictly to sessions owned by
+    the current platform user and ignore agent-to-agent / trigger-only threads.
+    """
+
+    if not agents:
+        return {}
+
+    agent_ids = [agent.id for agent in agents]
+    result = await db.execute(
+        select(ChatSession.agent_id, func.count(ChatMessage.id))
+        .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
+        .where(
+            ChatSession.agent_id.in_(agent_ids),
+            ChatSession.user_id == current_user.id,
+            ChatSession.is_group == False,
+            ChatSession.source_channel.notin_(["agent", "trigger"]),
+            ChatMessage.role.in_(["assistant", "system", "tool_call"]),
+            ChatMessage.created_at > func.coalesce(
+                ChatSession.last_read_at_by_user,
+                datetime(1970, 1, 1, tzinfo=timezone.utc),
+            ),
+        )
+        .group_by(ChatSession.agent_id)
+    )
+    return {str(row[0]): int(row[1] or 0) for row in result.all()}
+
+
+def _serialize_agent_out(agent: Agent, unread_count: int = 0) -> AgentOut:
+    payload = AgentOut.model_validate(agent).model_dump()
+    payload["unread_count"] = unread_count
+    return AgentOut.model_validate(payload)
+
+
 @router.get("/templates")
 async def list_templates(
     current_user: User = Depends(get_current_user),
@@ -154,7 +196,8 @@ async def list_agents(
                 needs_flush = True
         if needs_flush:
             await db.commit()
-        return [AgentOut.model_validate(a) for a in agents]
+        unread_by_agent = await _build_unread_count_by_agent(db, agents, current_user)
+        return [_serialize_agent_out(a, unread_by_agent.get(str(a.id), 0)) for a in agents]
 
     if current_user.role == "org_admin":
         effective_tenant_id = tenant_id or current_user.tenant_id
@@ -170,7 +213,8 @@ async def list_agents(
                 needs_flush = True
         if needs_flush:
             await db.commit()
-        return [AgentOut.model_validate(a) for a in agents]
+        unread_by_agent = await _build_unread_count_by_agent(db, agents, current_user)
+        return [_serialize_agent_out(a, unread_by_agent.get(str(a.id), 0)) for a in agents]
 
     # agent_admin sees their own created agents + permitted
     # member sees only permitted
@@ -205,7 +249,8 @@ async def list_agents(
             needs_flush = True
     if needs_flush:
         await db.commit()
-    return [AgentOut.model_validate(a) for a in agents]
+    unread_by_agent = await _build_unread_count_by_agent(db, agents, current_user)
+    return [_serialize_agent_out(a, unread_by_agent.get(str(a.id), 0)) for a in agents]
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)

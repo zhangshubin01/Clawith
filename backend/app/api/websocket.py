@@ -17,6 +17,7 @@ from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.llm import LLMModel
 from app.models.user import User
+from app.services.chat_session_service import ensure_primary_platform_session
 from app.services.llm import call_llm, call_llm_with_failover
 
 router = APIRouter(tags=["websocket"])
@@ -26,24 +27,24 @@ class ConnectionManager:
     """Manage WebSocket connections per agent."""
 
     def __init__(self):
-        # agent_id_str -> list of (WebSocket, session_id_str | None)
+        # agent_id_str -> list of (WebSocket, session_id_str | None, user_id_str | None)
         self.active_connections: dict[str, list[tuple]] = {}
 
-    async def connect(self, agent_id: str, websocket: WebSocket, session_id: str = None):
+    async def connect(self, agent_id: str, websocket: WebSocket, session_id: str = None, user_id: str | None = None):
         await websocket.accept()
         if agent_id not in self.active_connections:
             self.active_connections[agent_id] = []
-        self.active_connections[agent_id].append((websocket, session_id))
+        self.active_connections[agent_id].append((websocket, session_id, user_id))
 
     def disconnect(self, agent_id: str, websocket: WebSocket):
         if agent_id in self.active_connections:
             self.active_connections[agent_id] = [
-                (ws, sid) for ws, sid in self.active_connections[agent_id] if ws != websocket
+                (ws, sid, uid) for ws, sid, uid in self.active_connections[agent_id] if ws != websocket
             ]
 
     async def send_message(self, agent_id: str, message: dict):
         if agent_id in self.active_connections:
-            for ws, _sid in self.active_connections[agent_id]:
+            for ws, _sid, _uid in self.active_connections[agent_id]:
                 try:
                     await ws.send_json(message)
                 except Exception:
@@ -52,8 +53,18 @@ class ConnectionManager:
     async def send_to_session(self, agent_id: str, session_id: str, message: dict):
         """Send message only to WebSocket connections matching the given session_id."""
         if agent_id in self.active_connections:
-            for ws, sid in self.active_connections[agent_id]:
+            for ws, sid, _uid in self.active_connections[agent_id]:
                 if sid == session_id:
+                    try:
+                        await ws.send_json(message)
+                    except Exception:
+                        pass
+
+    async def send_to_user(self, agent_id: str, user_id: str, message: dict):
+        """Send message to all live WebSocket sessions of a given platform user for an agent."""
+        if agent_id in self.active_connections:
+            for ws, _sid, uid in self.active_connections[agent_id]:
+                if uid == user_id:
                     try:
                         await ws.send_json(message)
                     except Exception:
@@ -63,7 +74,7 @@ class ConnectionManager:
         """Return distinct session IDs for all active WS connections of an agent."""
         if agent_id not in self.active_connections:
             return []
-        return list(set(sid for _ws, sid in self.active_connections[agent_id] if sid))
+        return list(set(sid for _ws, sid, _uid in self.active_connections[agent_id] if sid))
 
 
 manager = ConnectionManager()
@@ -232,10 +243,18 @@ async def websocket_chat(
                         await websocket.close(code=4003)
                         return
             if not conv_id:
-                # Find most recent session for this user+agent
+                # Prefer the user's designated primary platform session. This keeps agent-initiated
+                # conversations and ongoing long-form context anchored in one stable thread, while
+                # user-created side sessions remain temporary.
                 _sr = await db.execute(
                     _sel(ChatSession)
-                    .where(ChatSession.agent_id == agent_id, ChatSession.user_id == user_id)
+                    .where(
+                        ChatSession.agent_id == agent_id,
+                        ChatSession.user_id == user_id,
+                        ChatSession.source_channel == "web",
+                        ChatSession.is_group == False,
+                        ChatSession.is_primary == True,
+                    )
                     .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
                     .limit(1)
                 )
@@ -243,19 +262,12 @@ async def websocket_chat(
                 if _latest:
                     conv_id = str(_latest.id)
                 else:
-                    # Create a default session
-                    now = _dt.now(_tz.utc)
-                    _new_session = ChatSession(
-                        agent_id=agent_id, user_id=user_id,
-                        title=f"Session {now.strftime('%m-%d %H:%M')}",
-                        source_channel="web",
-                        created_at=now,
-                    )
-                    db.add(_new_session)
+                    # Lazily elect or create the primary session only when it is actually needed.
+                    _new_session = await ensure_primary_platform_session(db, agent_id, user_id)
                     await db.commit()
                     await db.refresh(_new_session)
                     conv_id = str(_new_session.id)
-                    logger.info(f"[WS] Created default session {conv_id}")
+                    logger.info(f"[WS] Selected primary session {conv_id}")
 
             try:
                 history_result = await db.execute(
@@ -279,7 +291,7 @@ async def websocket_chat(
     agent_id_str = str(agent_id)
     if agent_id_str not in manager.active_connections:
         manager.active_connections[agent_id_str] = []
-    manager.active_connections[agent_id_str].append((websocket, conv_id))
+    manager.active_connections[agent_id_str].append((websocket, conv_id, str(user_id)))
     logger.info(f"[WS] Ready! Agent={agent_name}")
 
     # Send session_id to frontend so Take Control can reference the correct session.

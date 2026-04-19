@@ -618,6 +618,7 @@ export default function Layout() {
                         const renderAgent = (agent: any) => {
                             const badge = getAgentBadgeStatus(agent);
                             const avatarChar = ((Array.from(agent.name || '?')[0] as string) || '?').toUpperCase();
+                            const unreadCount = Number(agent.unread_count || 0);
                             return (
                             <div key={agent.id} style={{ position: 'relative' }} className={`sidebar-agent-item${agent.creator_id === user?.id ? ' owned' : ''}`}>
                                 <NavLink
@@ -633,6 +634,28 @@ export default function Layout() {
                                             </span>
                                         )}
                                         {badge && <span className={`agent-avatar-badge ${badge}`} />}
+                                        {unreadCount > 0 && (
+                                            <span style={{
+                                                position: 'absolute',
+                                                right: '-7px',
+                                                top: '-6px',
+                                                minWidth: unreadCount > 9 ? '18px' : '14px',
+                                                height: unreadCount > 9 ? '18px' : '14px',
+                                                padding: unreadCount > 9 ? '0 4px' : '0',
+                                                borderRadius: '999px',
+                                                background: 'var(--text-primary)',
+                                                color: 'var(--bg-primary)',
+                                                fontSize: '10px',
+                                                fontWeight: 600,
+                                                lineHeight: 1,
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                boxShadow: '0 0 0 2px var(--bg-primary)',
+                                            }}>
+                                                {unreadCount > 99 ? '99+' : unreadCount}
+                                            </span>
+                                        )}
                                     </span>
                                     <span className="sidebar-item-text">{agent.name}</span>
                                 </NavLink>

@@ -89,6 +89,8 @@ Primary models:
   - Important fields include `agent_type`, `primary_model_id`, `fallback_model_id`, `status`, heartbeat settings, autonomy policy, tenant ownership, and system-agent flags.
 - `Participant`: universal sender/receiver identity used to normalize humans and agents in messaging.
 - `ChatSession`: conversation container for web chat, channel conversations, trigger reflection sessions, A2A sessions, and group sessions.
+  - Platform sessions now distinguish a long-lived primary thread (`is_primary=true`) from temporary side-topic threads.
+  - Platform-user unread state is tracked per session via `last_read_at_by_user`.
 - `ChatMessage` (stored in `audit.py`): the durable event log for user messages, assistant replies, tool calls, and runtime outputs.
 - `AgentCredential`: encrypted per-agent credential storage used by integrations such as AgentBay Take Control cookie export.
 
@@ -132,6 +134,8 @@ When the frontend opens an agent chat:
 5. It starts a realtime streaming loop back to the client.
 
 This path is used for ordinary web chat, but the same underlying `call_llm()` machinery is also reused by triggers and some background execution paths.
+
+For first-party platform chat, the bootstrap now prefers the user's primary session for that agent. This keeps agent-initiated reminders and ongoing context in one durable thread, while user-created ad-hoc sessions remain temporary.
 
 ### 3.2 Prompt Assembly and Runtime Context
 
@@ -177,6 +181,11 @@ The same native engine supports more than one conversation shape:
 - A2A sessions
 - trigger-created reflection sessions
 - session resume/history browsing via `chat_sessions.py`
+
+Two first-party session rules are now important:
+
+- agent-initiated platform messages reuse the primary session instead of opening a fresh thread each time
+- unread badges are derived from assistant/system/tool messages created after `ChatSession.last_read_at_by_user`
 
 This is why session and participant handling are more complex than a typical one-user/one-bot design.
 
@@ -489,3 +498,11 @@ Clawith should be understood as a coordinated system of tenant-scoped agents, pe
 - Is it a tool, a skill, a trigger, a published artifact, or a control-plane setting?
 
 Answering those four questions correctly is usually enough to place new code in the right part of the system.
+
+---
+
+## Changelog
+
+| Date | Summary |
+| --- | --- |
+| 2026-04-20 | Added primary first-party chat sessions, per-session unread tracking, and agent sidebar unread counts so proactive agent messages reuse one durable platform thread. |

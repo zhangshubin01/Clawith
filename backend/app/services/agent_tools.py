@@ -4711,27 +4711,12 @@ async def _send_web_message(agent_id: uuid.UUID, args: dict) -> str:
                 names = [f"{r.display_name or r.username}" for r in all_r.all()]
                 return f"❌ No user named '{username}' found in your organization. Available users: {', '.join(names) if names else 'none'}"
 
-            # Find or create a web session between the agent and this user
-            sess_r = await db.execute(
-                select(ChatSession).where(
-                    ChatSession.agent_id == agent_id,
-                    ChatSession.user_id == target_user.id,
-                    ChatSession.source_channel == "web",
-                ).order_by(ChatSession.created_at.desc()).limit(1)
-            )
-            session = sess_r.scalar_one_or_none()
+            # Agent-initiated platform messages should always go to the long-lived primary session
+            # for this agent+user pair, so trigger-driven outreach does not fragment into dozens of
+            # tiny one-off web sessions.
+            from app.services.chat_session_service import ensure_primary_platform_session
 
-            if not session:
-                # Create a new session for this user
-                session = ChatSession(
-                    agent_id=agent_id,
-                    user_id=target_user.id,
-                    title=f"[Agent Message] {_dt.now(_tz.utc).strftime('%m-%d %H:%M')}",
-                    source_channel="web",
-                    created_at=_dt.now(_tz.utc),
-                )
-                db.add(session)
-                await db.flush()
+            session = await ensure_primary_platform_session(db, agent_id, target_user.id)
 
             # Save the message
             db.add(ChatMessage(
@@ -4747,17 +4732,15 @@ async def _send_web_message(agent_id: uuid.UUID, args: dict) -> str:
             # Push via WebSocket if user has an active connection
             try:
                 from app.api.websocket import manager as ws_manager
-                agent_id_str = str(agent_id)
-                if agent_id_str in ws_manager.active_connections:
-                    for ws, sid in list(ws_manager.active_connections[agent_id_str]):
-                        try:
-                            await ws.send_json({
-                                "type": "trigger_notification",
-                                "content": message_text,
-                                "triggers": ["web_message"],
-                            })
-                        except Exception:
-                            pass
+                await ws_manager.send_to_user(
+                    str(agent_id),
+                    str(target_user.id),
+                    {
+                        "type": "trigger_notification",
+                        "content": message_text,
+                        "triggers": ["web_message"],
+                    },
+                )
             except Exception:
                 pass
 

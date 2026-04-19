@@ -1567,6 +1567,8 @@ function AgentDetailInner() {
             id: String(sess.id),
             agent_id: sess.agent_id != null ? String(sess.agent_id) : sess.agent_id,
             user_id: rawUid,
+            unread_count: Number(sess.unread_count || 0),
+            is_primary: Boolean(sess.is_primary),
             source_channel:
                 typeof sess.source_channel === 'string' && sess.source_channel.trim()
                     ? sess.source_channel
@@ -1747,6 +1749,12 @@ function AgentDetailInner() {
             } else {
                 setHistoryMsgs(preParsed);
             }
+            // The backend marks the session as read when the current user opens it. Mirror that
+            // immediately in local state so unread badges clear without waiting for the next poll.
+            setSessions(prev => prev.map((item: any) => String(item.id) === String(sess.id) ? { ...item, unread_count: 0 } : item));
+            setAllSessions(prev => prev.map((item: any) => String(item.id) === String(sess.id) ? { ...item, unread_count: 0 } : item));
+            setActiveSession((prev: any) => prev && String(prev.id) === String(sess.id) ? { ...prev, unread_count: 0 } : prev);
+            queryClient.invalidateQueries({ queryKey: ['agents'] });
         } catch (err: any) {
             if (err?.name === 'AbortError') return;
             console.error('Failed to load session messages:', err);
@@ -2105,6 +2113,7 @@ function AgentDetailInner() {
             if (!isActiveRuntime) {
                 if (['done', 'error', 'quota_exceeded', 'trigger_notification'].includes(d.type)) {
                     fetchMySessions(true, agentId);
+                    queryClient.invalidateQueries({ queryKey: ['agents'] });
                 }
                 if (['done', 'error', 'quota_exceeded'].includes(d.type)) {
                     closeSessionSocket(key, true);
@@ -2226,6 +2235,7 @@ function AgentDetailInner() {
                     return [...prev, parseChatMsg({ role: d.role, content: d.content, timestamp: new Date().toISOString() })];
                 });
                 fetchMySessions(true, agentId);
+                queryClient.invalidateQueries({ queryKey: ['agents'] });
             } else if (d.type === 'error' || d.type === 'quota_exceeded') {
                 const msg = d.content || d.detail || d.message || 'Request denied';
                 setChatMessages(prev => {
@@ -2240,6 +2250,7 @@ function AgentDetailInner() {
             } else if (d.type === 'trigger_notification') {
                 setChatMessages(prev => [...prev, parseChatMsg({ role: 'assistant', content: d.content })]);
                 fetchMySessions(true, agentId);
+                queryClient.invalidateQueries({ queryKey: ['agents'] });
             } else if (d.type === 'info') {
                 // Subtle transient banner for system events (e.g. fallback model switch)
                 setChatInfoMsg(d.content || '');
@@ -4458,6 +4469,24 @@ function AgentDetailInner() {
                                                             <div style={{ flex: 1, minWidth: 0 }}>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' }}>
                                                                     <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>{s.title}</div>
+                                                                    {s.unread_count > 0 && (
+                                                                        <span style={{
+                                                                            minWidth: s.unread_count > 9 ? '18px' : '14px',
+                                                                            height: s.unread_count > 9 ? '18px' : '14px',
+                                                                            padding: s.unread_count > 9 ? '0 4px' : '0',
+                                                                            borderRadius: '999px',
+                                                                            background: 'var(--text-primary)',
+                                                                            color: 'var(--bg-primary)',
+                                                                            fontSize: '10px',
+                                                                            fontWeight: 600,
+                                                                            display: 'flex',
+                                                                            alignItems: 'center',
+                                                                            justifyContent: 'center',
+                                                                            flexShrink: 0,
+                                                                        }}>
+                                                                            {s.unread_count > 99 ? '99+' : s.unread_count}
+                                                                        </span>
+                                                                    )}
                                                                     {chLabel && <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>{chLabel}</span>}
                                                                 </div>
                                                                 <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -4521,6 +4550,24 @@ function AgentDetailInner() {
                                                                 onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '1px' }}>
                                                                     <div style={{ fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)', flex: 1 }}>{s.title}</div>
+                                                                    {s.unread_count > 0 && (
+                                                                        <span style={{
+                                                                            minWidth: s.unread_count > 9 ? '18px' : '14px',
+                                                                            height: s.unread_count > 9 ? '18px' : '14px',
+                                                                            padding: s.unread_count > 9 ? '0 4px' : '0',
+                                                                            borderRadius: '999px',
+                                                                            background: 'var(--text-primary)',
+                                                                            color: 'var(--bg-primary)',
+                                                                            fontSize: '10px',
+                                                                            fontWeight: 600,
+                                                                            display: 'flex',
+                                                                            alignItems: 'center',
+                                                                            justifyContent: 'center',
+                                                                            flexShrink: 0,
+                                                                        }}>
+                                                                            {s.unread_count > 99 ? '99+' : s.unread_count}
+                                                                        </span>
+                                                                    )}
                                                                     {chLabel && <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>{chLabel}</span>}
                                                                 </div>
                                                                 <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', gap: '4px' }}>

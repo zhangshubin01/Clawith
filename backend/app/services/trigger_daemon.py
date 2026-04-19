@@ -860,7 +860,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
 
                 # Push to all active WebSocket connections for this agent
                 if agent_id_str in ws_manager.active_connections:
-                    for ws, _sid in list(ws_manager.active_connections[agent_id_str]):
+                    for ws, _sid, _uid in list(ws_manager.active_connections[agent_id_str]):
                         try:
                             await ws.send_json({
                                 "type": "trigger_notification",
