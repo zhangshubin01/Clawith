@@ -165,10 +165,18 @@ async def _sync_okr_report_triggers(db, settings: OKRSettings) -> None:
     biweekly = triggers.get("biweekly_okr_checkin")
     if biweekly:
         biweekly.is_enabled = bool(settings.enabled)
+        biweekly.reason = (
+            "System trigger: fires on the 1st and 15th of every month at 10:00 "
+            "to perform the mandatory bi-weekly OKR check-in."
+        )
 
     monthly = triggers.get("monthly_okr_report")
     if monthly:
         monthly.is_enabled = bool(settings.enabled)
+        monthly.reason = (
+            "System trigger: fires on the 1st of every month at 08:00 to auto-generate "
+            "and deliver the previous month's OKR progress report to Admin."
+        )
 
 
 def _compute_current_period(

@@ -633,7 +633,7 @@ async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
             "config": {"expr": "0 8 1 * *"},
             "reason": (
                 "System trigger: fires on the 1st of every month at 08:00 to auto-generate "
-                "and deliver the monthly OKR progress report to Admin. Fires before "
+                "and deliver the previous month's OKR progress report to Admin. Fires before "
                 "biweekly_okr_checkin (which fires at 10:00) to avoid session conflicts."
             ),
             "cooldown_seconds": 3600,
@@ -708,9 +708,17 @@ async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OK
         },
         "biweekly_okr_checkin": {
             "is_enabled": bool(settings.enabled),
+            "reason": (
+                "System trigger: fires on the 1st and 15th of every month at 10:00 "
+                "to perform the mandatory bi-weekly OKR check-in."
+            ),
         },
         "monthly_okr_report": {
             "is_enabled": bool(settings.enabled),
+            "reason": (
+                "System trigger: fires on the 1st of every month at 08:00 to auto-generate "
+                "and deliver the previous month's OKR progress report to Admin."
+            ),
         },
     }
 
@@ -723,6 +731,9 @@ async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OK
             changed = True
         if trigger.is_enabled != values["is_enabled"]:
             trigger.is_enabled = values["is_enabled"]
+            changed = True
+        if "reason" in values and trigger.reason != values["reason"]:
+            trigger.reason = values["reason"]
             changed = True
 
     if changed:

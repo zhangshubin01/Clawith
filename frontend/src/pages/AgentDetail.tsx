@@ -3260,40 +3260,69 @@ function AgentDetailInner() {
 
                     // Helper: convert trigger config to natural language
                     const triggerToHuman = (trig: any): string => {
+                        const isZh = i18n.language?.startsWith('zh');
                         if (trig.type === 'cron' && trig.config?.expr) {
                             const expr = trig.config.expr;
                             const parts = expr.split(' ');
                             if (parts.length >= 5) {
-                                const [min, hour, , , dow] = parts;
+                                const [min, hour, dom, , dow] = parts;
                                 const timeStr = `${hour.padStart(2, '0')}:${min.padStart(2, '0')}`;
-                                if (dow === '*' && min !== '*' && hour !== '*') return `Every day at ${timeStr}`;
-                                if (dow === '1-5' && min !== '*' && hour !== '*') return `Weekdays at ${timeStr}`;
-                                if (dow === '0' || dow === '7') return `Sundays at ${timeStr}`;
-                                if (hour === '*' && min === '0') {
-                                    if (dow === '1-5') return 'Every hour on weekdays';
-                                    return 'Every hour';
+                                const dayNames = isZh
+                                    ? ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+                                    : ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                                if (dom !== '*' && dow === '*' && min !== '*' && hour !== '*') {
+                                    const days = dom.split(',').join(isZh ? '、' : ', ');
+                                    return isZh ? `每月 ${days} 日 ${timeStr}` : `Every month on day ${days} at ${timeStr}`;
                                 }
-                                if (hour === '*' && min !== '*') return `Every hour at :${min.padStart(2, '0')}`;
+                                if (dow === '*' && min !== '*' && hour !== '*') return isZh ? `每天 ${timeStr}` : `Every day at ${timeStr}`;
+                                if (dow === '1-5' && min !== '*' && hour !== '*') return isZh ? `工作日 ${timeStr}` : `Weekdays at ${timeStr}`;
+                                if ((dow === '0' || dow === '7') && min !== '*' && hour !== '*') return isZh ? `每周日 ${timeStr}` : `Sundays at ${timeStr}`;
+                                if (/^[1-6]$/.test(dow) && min !== '*' && hour !== '*') return isZh ? `每${dayNames[Number(dow)]} ${timeStr}` : `${dayNames[Number(dow)]}s at ${timeStr}`;
+                                if (hour === '*' && min === '0') {
+                                    if (dow === '1-5') return isZh ? '工作日每小时' : 'Every hour on weekdays';
+                                    return isZh ? '每小时' : 'Every hour';
+                                }
+                                if (hour === '*' && min !== '*') return isZh ? `每小时第 ${min.padStart(2, '0')} 分钟` : `Every hour at :${min.padStart(2, '0')}`;
                             }
-                            return `Cron: ${expr}`;
+                            return isZh ? `Cron：${expr}` : `Cron: ${expr}`;
                         }
                         if (trig.type === 'once' && trig.config?.at) {
                             try {
-                                return `Once at ${new Date(trig.config.at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
-                            } catch { return `Once at ${trig.config.at}`; }
+                                return isZh
+                                    ? `一次性：${new Date(trig.config.at).toLocaleString()}`
+                                    : `Once at ${new Date(trig.config.at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+                            } catch { return isZh ? `一次性：${trig.config.at}` : `Once at ${trig.config.at}`; }
                         }
                         if (trig.type === 'interval' && trig.config?.minutes) {
                             const m = trig.config.minutes;
-                            return m >= 60 ? `Every ${m / 60}h` : `Every ${m} min`;
+                            return isZh ? `每 ${m >= 60 ? `${m / 60} 小时` : `${m} 分钟`}` : (m >= 60 ? `Every ${m / 60}h` : `Every ${m} min`);
                         }
-                        if (trig.type === 'poll') return `Poll: ${trig.config?.url?.substring(0, 40) || 'URL'}`;
+                        if (trig.type === 'poll') return `${isZh ? '轮询' : 'Poll'}: ${trig.config?.url?.substring(0, 40) || 'URL'}`;
                         if (trig.type === 'on_message') {
-                            return `On message from ${trig.config?.from_agent_name || trig.config?.from_user_name || 'unknown'}`;
+                            const sender = trig.config?.from_agent_name || trig.config?.from_user_name || (isZh ? '未知对象' : 'unknown');
+                            return isZh ? `收到 ${sender} 的消息时` : `On message from ${sender}`;
                         }
                         if (trig.type === 'webhook') {
                             return `Webhook${trig.config?.token ? ` (${trig.config.token.substring(0, 6)}...)` : ''}`;
                         }
                         return trig.type;
+                    };
+
+                    const triggerReasonText = (trig: any): string | null => {
+                        if (!i18n.language?.startsWith('zh')) return trig.reason || null;
+                        if (trig.name === 'daily_okr_report') {
+                            return '系统触发器：如果启用了日报，收集成员进展、更新滞后的 KR，并生成日报。';
+                        }
+                        if (trig.name === 'weekly_okr_report') {
+                            return '系统触发器：如果启用了周报，收集成员进展、更新滞后的 KR，并生成周报。';
+                        }
+                        if (trig.name === 'biweekly_okr_checkin') {
+                            return '系统触发器：每月 1 日和 15 日进行 OKR 例行检查。';
+                        }
+                        if (trig.name === 'monthly_okr_report') {
+                            return '系统触发器：每月 1 日生成 OKR 月度进展汇报。';
+                        }
+                        return trig.reason || null;
                     };
 
                     // Group triggers by focus_ref
@@ -3400,7 +3429,9 @@ function AgentDetailInner() {
                                             background: 'var(--bg-secondary)',
                                             whiteSpace: 'nowrap',
                                         }}>
-                                            {itemTriggers.length} trigger{itemTriggers.length > 1 ? 's' : ''}
+                                            {i18n.language?.startsWith('zh')
+                                                ? `${itemTriggers.length} 个触发器`
+                                                : `${itemTriggers.length} trigger${itemTriggers.length > 1 ? 's' : ''}`}
                                         </span>
                                     )}
                                     {/* Expand arrow */}
@@ -3429,7 +3460,7 @@ function AgentDetailInner() {
                                                             <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text-primary)' }}>
                                                                 {triggerToHuman(trig)}
                                                             </div>
-                                                            {trig.reason && <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{trig.reason}</div>}
+                                                            {triggerReasonText(trig) && <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{triggerReasonText(trig)}</div>}
                                                             <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '2px', fontFamily: 'monospace' }}>
                                                                 {trig.type === 'cron' ? trig.config?.expr : ''}{' '}
                                                             </div>
@@ -3518,7 +3549,9 @@ function AgentDetailInner() {
                                     </div>
                                     {hasFocusItems && (
                                         <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                            {activeFocusItems.length} active{completedFocusItems.length > 0 ? ` · ${completedFocusItems.length} done` : ''}
+                                            {i18n.language?.startsWith('zh')
+                                                ? `${activeFocusItems.length} 个进行中${completedFocusItems.length > 0 ? ` · ${completedFocusItems.length} 个已完成` : ''}`
+                                                : `${activeFocusItems.length} active${completedFocusItems.length > 0 ? ` · ${completedFocusItems.length} done` : ''}`}
                                         </span>
                                     )}
                                 </div>
@@ -3586,7 +3619,9 @@ function AgentDetailInner() {
                                             <h4 style={{ margin: 0, fontSize: '14px', fontWeight: 600 }}>{t('agent.aware.standaloneTriggers')}</h4>
                                         </div>
                                         <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                            {standaloneTriggers.length} trigger{standaloneTriggers.length > 1 ? 's' : ''}
+                                            {i18n.language?.startsWith('zh')
+                                                ? `${standaloneTriggers.length} 个触发器`
+                                                : `${standaloneTriggers.length} trigger${standaloneTriggers.length > 1 ? 's' : ''}`}
                                         </span>
                                     </div>
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -3600,7 +3635,7 @@ function AgentDetailInner() {
                                             }}>
                                                 <div style={{ flex: 1 }}>
                                                     <div style={{ fontSize: '13px', fontWeight: 500 }}>{triggerToHuman(trig)}</div>
-                                                    {trig.reason && <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{trig.reason}</div>}
+                                                    {triggerReasonText(trig) && <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{triggerReasonText(trig)}</div>}
                                                     <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', fontFamily: 'monospace', marginTop: '2px' }}>
                                                         {trig.name}{trig.type === 'cron' ? ` · ${trig.config?.expr}` : ''}
                                                     </div>

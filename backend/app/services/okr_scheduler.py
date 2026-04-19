@@ -234,9 +234,13 @@ async def collect_all_focus_updates(
 # ─── Report Generation ────────────────────────────────────────────────────────
 
 
-def _compute_period(frequency: str, length_days: Optional[int]) -> tuple[date, date]:
-    """Compute current OKR period start/end dates. Mirrors okr.py logic."""
-    today = date.today()
+def _compute_period(
+    frequency: str,
+    length_days: Optional[int],
+    target_date: Optional[date] = None,
+) -> tuple[date, date]:
+    """Compute OKR period start/end dates for a target date. Mirrors okr.py logic."""
+    today = target_date or date.today()
     if frequency == "monthly":
         start = today.replace(day=1)
         if today.month == 12:
@@ -261,12 +265,13 @@ async def _build_okr_snapshot(
     db: AsyncSession,
     frequency: str,
     length_days: Optional[int],
+    target_date: Optional[date] = None,
 ) -> tuple[list, dict, date, date]:
-    """Fetch current period objectives and KRs for report building.
+    """Fetch period objectives and KRs for report building.
 
     Returns (objectives, krs_by_obj, period_start, period_end).
     """
-    ps, pe = _compute_period(frequency, length_days)
+    ps, pe = _compute_period(frequency, length_days, target_date)
 
     obj_result = await db.execute(
         select(OKRObjective).where(
@@ -464,8 +469,13 @@ async def generate_weekly_report(
         if not okr_settings or not okr_settings.enabled:
             return "OKR is not enabled for this tenant."
 
+        previous_month_ref = date.today().replace(day=1) - timedelta(days=1)
         objectives, krs_by_obj, ps, pe = await _build_okr_snapshot(
-            tenant_id, db, okr_settings.period_frequency, okr_settings.period_length_days
+            tenant_id,
+            db,
+            okr_settings.period_frequency,
+            okr_settings.period_length_days,
+            target_date=previous_month_ref,
         )
 
         content = _format_report_body(objectives, krs_by_obj, ps, pe, "weekly")
@@ -527,6 +537,9 @@ async def generate_monthly_report(
       - Member objectives with aggregated progress
       - Next-month guidance note (for OKR Agent to personalise)
 
+    It summarizes the OKR period containing the last day of the previous month,
+    so monthly OKR cadence reports the cycle that just ended.
+
     Stores a WorkReport row with report_type="monthly" and also writes the
     file to workspace/reports/monthly_YYYY-MM.md.
     Returns the Markdown content so the calling OKR Agent tool can send it
@@ -547,9 +560,7 @@ async def generate_monthly_report(
 
         content = _format_monthly_report_body(objectives, krs_by_obj, ps, pe)
 
-        today = date.today()
-        # period_date = first of this month
-        month_start = today.replace(day=1)
+        month_start = ps
         await _store_report(tenant_id, okr_agent_id, "monthly", month_start, content, db)
 
     # Write file to OKR Agent workspace
@@ -578,7 +589,7 @@ def _format_monthly_report_body(
     """
     from datetime import date as _date
     today = _date.today()
-    month_label = today.strftime("%B %Y")
+    month_label = period_start.strftime("%B %Y")
 
     header = (
         f"# Monthly OKR Report — {month_label}\n"

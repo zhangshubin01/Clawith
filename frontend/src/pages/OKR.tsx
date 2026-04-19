@@ -935,7 +935,13 @@ export default function OKR() {
     return (
         <div style={{ padding: '24px', maxWidth: 960, margin: '0 auto' }}>
             {/* Page Header */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px', flexWrap: 'wrap', gap: '12px' }}>
+            <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'minmax(0, 1fr) auto minmax(0, 1fr)',
+                alignItems: 'center',
+                marginBottom: '24px',
+                gap: '12px',
+            }}>
                 <div>
                     <h1 style={{ margin: 0, fontSize: '20px', fontWeight: 700, color: 'var(--text-primary)' }}>
                         {t('okr.title', 'OKR')}
@@ -945,7 +951,7 @@ export default function OKR() {
                     </div>
                 </div>
 
-                <div style={{ display: 'flex', background: 'var(--bg-secondary)', padding: '2px', borderRadius: '8px' }}>
+                <div style={{ display: 'flex', background: 'var(--bg-secondary)', padding: '2px', borderRadius: '8px', justifySelf: 'center' }}>
                     <button
                         onClick={() => setActiveTab('dashboards')}
                         style={{
@@ -956,7 +962,7 @@ export default function OKR() {
                             border: 'none', cursor: 'pointer', transition: 'all 0.15s',
                         }}
                     >
-                        {isChinese ? '概览 (Dashboard)' : 'Dashboard'}
+                        {isChinese ? '概览' : 'Dashboard'}
                     </button>
                     <button
                         onClick={() => setActiveTab('reports')}
@@ -968,12 +974,13 @@ export default function OKR() {
                             border: 'none', cursor: 'pointer', transition: 'all 0.15s',
                         }}
                     >
-                        {isChinese ? '工作汇报 (Reports)' : 'Reports'}
+                        {isChinese ? '工作汇报' : 'Reports'}
                     </button>
                 </div>
 
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '12px', flexWrap: 'wrap' }}>
                 {activeTab === 'dashboards' && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                    <>
                     {/* Period Selector */}
                     {periods.length > 0 && (
                         <div ref={periodMenuRef} style={{ display: 'flex', alignItems: 'center', gap: '8px', position: 'relative' }}>
@@ -1052,8 +1059,9 @@ export default function OKR() {
                             {isChinese ? '新建目标' : 'New Objective'}
                         </button>
                     )}
-                </div>
+                    </>
                 )}
+                </div>
             </div>
 
             {activeTab === 'dashboards' && (
