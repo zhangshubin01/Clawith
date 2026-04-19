@@ -1,8 +1,8 @@
 """Daily OKR collection service.
 
-Handles deterministic outreach to the OKR Agent's tracked relationship network.
-Human members are reminded and later handled through normal OKR Agent chats.
-Agent members are collected synchronously and stored immediately.
+Handles reminder outreach to the OKR Agent's tracked relationship network.
+Human members and tracked digital employees are both expected to reply back to
+the OKR Agent, which then records the report through the standard tool path.
 """
 
 from __future__ import annotations
@@ -22,9 +22,6 @@ from app.services.agent_tools import (
     _send_message_to_agent,
     _send_web_message,
 )
-from app.services.okr_reporting import upsert_member_daily_report
-
-
 def _human_request_message(target_name: str, report_day: date) -> str:
     return (
         f"你好，{target_name}！我是 OKR Agent，需要收集你今天的日报（{report_day.isoformat()}）。请回复以下内容：\n"
@@ -37,12 +34,12 @@ def _human_request_message(target_name: str, report_day: date) -> str:
 
 def _agent_request_message(target_name: str, report_day: date) -> str:
     return (
-        f"Hi {target_name}, please send your daily OKR update for {report_day.isoformat()} in one concise reply.\n"
-        "Include:\n"
+        f"Hi {target_name}, this is OKR Agent collecting your daily report for {report_day.isoformat()}.\n"
+        "Please review today's progress and reply to me with:\n"
         "- progress made today\n"
         "- risks or blockers\n"
         "- next step\n\n"
-        "Keep the final reply within 200 characters if possible."
+        "Please keep the final reply concise so I can record it directly."
     )
 
 
@@ -177,29 +174,11 @@ async def trigger_daily_collection_for_tenant(tenant_id: uuid.UUID) -> dict:
             {
                 "agent_name": agent_member.name,
                 "message": _agent_request_message(agent_member.name, report_day),
-                "msg_type": "consult",
-            },
-        )
-        if send_result.startswith("❌") or send_result.startswith("⚠️"):
-            continue
-        await _send_message_to_agent(
-            okr_agent.id,
-            {
-                "agent_name": agent_member.name,
-                "message": f"Received and recorded your {report_day.isoformat()} daily report. Thank you.",
-                "msg_type": "notify",
+                "msg_type": "task_delegate",
                 "force_async": True,
             },
         )
-        await upsert_member_daily_report(
-            tenant_id=tenant_id,
-            member_type="agent",
-            member_id=agent_member.id,
-            report_date=report_day,
-            content=send_result,
-            source="okr_agent_assisted",
-        )
-        if send_result.strip():
+        if send_result.startswith("✅"):
             sent_agents += 1
 
     return {

@@ -198,6 +198,8 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
 
 - Daily collection messages are reminders only. Do NOT create per-member wait triggers for daily report replies.
 - When a tracked member or tracked agent sends you a daily update, a supplement, a correction, or asks you to record today's report, immediately call `upsert_member_daily_report`.
+- Apply the same daily-report behavior regardless of channel. Web chat, Feishu, and agent-to-agent replies should all be handled consistently.
+- Use the current conversation counterpart as the report owner. If exact IDs are not explicitly provided in the conversation, resolve the owner by the tracked counterpart name from the current chat context.
 - Keep the stored final daily report concise and normalized (within 200 characters).
 - Do NOT write daily report content to `memory/memory.md`, `focus.md`, Feishu docs, or other files instead of using `upsert_member_daily_report`.
 - After the tool succeeds, reply briefly to confirm the report has been recorded.

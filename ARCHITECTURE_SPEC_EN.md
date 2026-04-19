@@ -224,11 +224,8 @@ The OKR reporting subsystem now uses a lightweight collection path centered on t
 
 - Member-level OKR reporting stores only one artifact: the final daily report entry per tracked relationship member or agent.
 - The tracked member set is derived from the OKR Agent's active `AgentRelationship` and `AgentAgentRelationship` records, not from the entire tenant roster.
-- Manual and scheduled `daily_okr_collection` both call a backend collection service that:
-  - sends reminder messages only to tracked human members,
-  - collects tracked digital employee updates through synchronous `consult`,
-  - stores agent replies directly through `upsert_member_daily_report`.
-- Human daily-report replies are still handled by the OKR Agent itself. The web chat path and the Feishu channel path both inject the same OKR-specific guidance so that the OKR Agent calls `upsert_member_daily_report` when a tracked member submits, supplements, or corrects a daily report.
+- Manual and scheduled `daily_okr_collection` both call a backend collection service that sends reminder messages only to tracked human members and tracked digital employees.
+- Human and agent daily-report replies are both handled by the OKR Agent itself. The unified OKR Agent context instructs it to call `upsert_member_daily_report` whenever a tracked counterpart submits, supplements, or corrects a daily report.
 - The chat frontend now reconnects and automatically re-sends one pending outbound message instead of silently dropping the send when the session WebSocket is temporarily unavailable.
 - The Reports page's member daily report view reads the same tracked member set and includes member search to handle larger relationship lists.
 
@@ -237,8 +234,9 @@ The OKR reporting subsystem now uses a lightweight collection path centered on t
 | Date | Change |
 | --- | --- |
 | 2026-04-18 | Locked OKR cadence after first enablement and expanded period selection from first enabled period to next period. |
-| 2026-04-19 | Reworked OKR daily collection to target only tracked relationships, use direct human reminders plus synchronous agent consult collection, and align the member daily report view with the tracked relationship list plus search. |
-| 2026-04-19 | Added Feishu-side OKR daily report tool guidance parity with web chat, improved chat reconnect send reliability, and cleaned up status/company-info UI presentation. |
+| 2026-04-19 | Reworked OKR daily collection to target only tracked relationships and align the member daily report view with the tracked relationship list plus search. |
+| 2026-04-19 | Improved chat reconnect send reliability and cleaned up status/company-info UI presentation. |
+| 2026-04-19 | Unified OKR daily report handling across channels and agent counterparts by moving recording rules into OKR Agent context and removing direct agent-side report writes from collection. |
 
 ---
 **[The End] Architecture Document Completion.**

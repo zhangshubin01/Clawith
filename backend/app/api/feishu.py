@@ -49,53 +49,6 @@ def _get_llm_timeout(model) -> float:
     return _LLM_TIMEOUT_SECONDS_DEFAULT
 
 
-async def _build_okr_daily_report_hint_for_user(
-    db: AsyncSession,
-    agent_id: uuid.UUID,
-    user_id: uuid.UUID | None,
-) -> str | None:
-    """Build OKR daily-report tool guidance for tracked human members on Feishu."""
-    if not user_id:
-        return None
-
-    from app.models.okr import OKRSettings
-    from app.models.org import AgentRelationship, OrgMember
-    from app.services.timezone_utils import now_in_timezone, get_agent_timezone
-
-    settings = (
-        await db.execute(select(OKRSettings).where(OKRSettings.okr_agent_id == agent_id))
-    ).scalar_one_or_none()
-    if not settings or not settings.enabled:
-        return None
-
-    org_member = (
-        await db.execute(
-            select(OrgMember)
-            .join(AgentRelationship, AgentRelationship.member_id == OrgMember.id)
-            .where(
-                AgentRelationship.agent_id == agent_id,
-                OrgMember.user_id == user_id,
-                OrgMember.status == "active",
-            )
-        )
-    ).scalar_one_or_none()
-    if not org_member:
-        return None
-
-    local_today = now_in_timezone(await get_agent_timezone(agent_id)).date().isoformat()
-    return (
-        "OKR DAILY REPORT CONTEXT:\n"
-        "- This conversation counterpart is a tracked OKR member.\n"
-        "- member_type=user\n"
-        f"- member_id={user_id}\n"
-        f"- member_name={org_member.name}\n"
-        f"- default_report_date={local_today}\n"
-        "If this message contains a daily update, a supplement, a correction, or a request to record today's daily report, "
-        "you must call upsert_member_daily_report immediately using the exact member_type and member_id above. "
-        "Keep the stored final report within 200 characters, then send a short confirmation."
-    )
-
-
 class _SerialPatchQueue:
     """Serialize patch requests for one Feishu message to prevent out-of-order overwrite."""
 
@@ -1627,14 +1580,6 @@ async def _call_agent_llm(
 
     # Use actual user_id so the system prompt knows who it's chatting with
     effective_user_id = user_id or agent_id
-
-    okr_hint = await _build_okr_daily_report_hint_for_user(db, agent_id, user_id)
-    if okr_hint:
-        messages = [
-            *messages[:-1],
-            {"role": "system", "content": okr_hint},
-            messages[-1],
-        ]
 
     # Determine effective timeout: prefer model-level setting, else use module default.
     _timeout = _get_llm_timeout(model)

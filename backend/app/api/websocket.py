@@ -69,79 +69,6 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def _build_okr_daily_report_hint(agent_id: uuid.UUID, conversation_id: str) -> str | None:
-    """Return session-specific OKR daily-report instructions for tracked counterparts."""
-    from app.models.okr import OKRSettings
-    from app.models.org import AgentAgentRelationship, AgentRelationship, OrgMember
-    from app.services.timezone_utils import now_in_timezone, get_agent_timezone
-
-    async with async_session() as db:
-        settings = (
-            await db.execute(select(OKRSettings).where(OKRSettings.okr_agent_id == agent_id))
-        ).scalar_one_or_none()
-        if not settings or not settings.enabled:
-            return None
-
-        session = (
-            await db.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(conversation_id)))
-        ).scalar_one_or_none()
-        if not session:
-            return None
-
-        if session.source_channel == "agent":
-            counterpart_agent_id = session.peer_agent_id if session.agent_id == agent_id else session.agent_id
-            if not counterpart_agent_id:
-                return None
-            counterpart = (
-                await db.execute(
-                    select(Agent).join(
-                        AgentAgentRelationship,
-                        AgentAgentRelationship.target_agent_id == Agent.id,
-                    ).where(
-                        AgentAgentRelationship.agent_id == agent_id,
-                        Agent.id == counterpart_agent_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if not counterpart:
-                return None
-            member_type = "agent"
-            member_id = str(counterpart.id)
-            member_name = counterpart.name
-        else:
-            if not session.user_id:
-                return None
-            org_member = (
-                await db.execute(
-                    select(OrgMember)
-                    .join(AgentRelationship, AgentRelationship.member_id == OrgMember.id)
-                    .where(
-                        AgentRelationship.agent_id == agent_id,
-                        OrgMember.user_id == session.user_id,
-                        OrgMember.status == "active",
-                    )
-                )
-            ).scalar_one_or_none()
-            if not org_member:
-                return None
-            member_type = "user"
-            member_id = str(session.user_id)
-            member_name = org_member.name
-
-    local_today = now_in_timezone(await get_agent_timezone(agent_id)).date().isoformat()
-    return (
-        "OKR DAILY REPORT CONTEXT:\n"
-        f"- This conversation counterpart is a tracked OKR member.\n"
-        f"- member_type={member_type}\n"
-        f"- member_id={member_id}\n"
-        f"- member_name={member_name}\n"
-        f"- default_report_date={local_today}\n"
-        "If this message contains a daily update, a supplement, a correction, or a request to record today's daily report, "
-        "you must call upsert_member_daily_report immediately using the exact member_type and member_id above. "
-        "Keep the stored final report within 200 characters, then send a short confirmation."
-    )
-
-
 from fastapi import Depends
 from app.core.security import get_current_user
 from app.database import get_db
@@ -645,19 +572,10 @@ async def websocket_chat(
                         async def _on_failover(reason: str):
                             await websocket.send_json({"type": "info", "content": f"Primary model error, {reason}"})
 
-                        llm_messages = conversation[-ctx_size:]
-                        okr_hint = await _build_okr_daily_report_hint(agent_id, conv_id)
-                        if okr_hint:
-                            llm_messages = [
-                                *conversation[-ctx_size:-1],
-                                {"role": "system", "content": okr_hint},
-                                conversation[-1],
-                            ]
-
                         return await call_llm_with_failover(
                             primary_model=llm_model,
                             fallback_model=fallback_llm_model,
-                            messages=llm_messages,
+                            messages=conversation[-ctx_size:],
                             agent_name=agent_name,
                             role_description=role_description,
                             agent_id=agent_id,
