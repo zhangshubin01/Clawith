@@ -757,83 +757,84 @@ async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OK
 
 
 async def patch_existing_okr_agent() -> None:
-    """Patch an already-seeded OKR Agent with new fields added in later versions.
+    """Patch already-seeded OKR Agents with fields added in later versions.
 
-    Called at startup after seed_okr_agent(). Safe to run on every startup —
-    all operations are idempotent. Handles:
-      - Setting is_system=True on existing OKR Agent
-      - Creating missing system cron triggers
-      - Assigning any newly-added OKR tools
-      - Writing its ID to okr_settings.okr_agent_id
+    Called at startup after seed_okr_agent(). Safe to run on every startup.
+    The patch must cover *all* active OKR Agents because each tenant owns its
+    own system OKR Agent. Earlier logic only patched the latest one globally,
+    which left older tenant-specific OKR Agents missing newly added tools.
     """
     async with async_session() as db:
         result = await db.execute(
             select(Agent)
             .where(Agent.name == "OKR Agent", Agent.is_system == True, Agent.status != "stopped")  # noqa: E712
             .order_by(Agent.created_at.desc())
-            .limit(1)
         )
-        agent = result.scalar_one_or_none()
-        if not agent:
+        agents = result.scalars().all()
+        if not agents:
             # Fallback for deployments that don't have is_system=True yet (before the migration)
             result = await db.execute(
                 select(Agent)
                 .where(Agent.name == "OKR Agent", Agent.status != "stopped")
                 .order_by(Agent.created_at.desc())
-                .limit(1)
             )
-            agent = result.scalar_one_or_none()
-            if not agent:
+            agents = result.scalars().all()
+            if not agents:
                 return  # OKR Agent not seeded yet, nothing to patch
 
-        changed = False
-
-        # Ensure OKRSettings has this agent's ID
-        if agent.tenant_id:
-            settings_res = await db.execute(select(OKRSettings).where(OKRSettings.tenant_id == agent.tenant_id))
-            okr_settings = settings_res.scalar_one_or_none()
-            if not okr_settings:
-                okr_settings = OKRSettings(tenant_id=agent.tenant_id)
-                db.add(okr_settings)
-            if okr_settings.okr_agent_id != agent.id:
-                okr_settings.okr_agent_id = agent.id
-                changed = True
-                logger.info(f"[AgentSeeder] Patched OKR Agent: set okr_agent_id in settings to {agent.id}")
-
-        # Ensure is_system=True
-        if not agent.is_system:
-            agent.is_system = True
-            changed = True
-            logger.info("[AgentSeeder] Patched OKR Agent: set is_system=True")
-
-        await db.flush()
-
-        # Ensure all OKR tool assignments exist
         all_okr_tools = [
             "get_okr", "get_my_okr", "update_kr_progress",
             "collect_okr_progress", "generate_okr_report", "get_okr_settings",
             "create_objective", "create_key_result", "update_objective", "update_any_kr_progress",
             "upsert_member_daily_report",
-            "generate_monthly_okr_report",  # P3: monthly report tool added
+            "generate_monthly_okr_report",
         ]
-        for tool_name in all_okr_tools:
-            tool_res = await db.execute(select(Tool).where(Tool.name == tool_name))
-            tool = tool_res.scalar_one_or_none()
-            if not tool:
-                continue
-            at_res = await db.execute(
-                select(AgentTool).where(AgentTool.agent_id == agent.id, AgentTool.tool_id == tool.id)
-            )
-            if not at_res.scalar_one_or_none():
-                db.add(AgentTool(agent_id=agent.id, tool_id=tool.id, enabled=True))
+        tool_rows = await db.execute(select(Tool).where(Tool.name.in_(all_okr_tools)))
+        tools_by_name = {tool.name: tool for tool in tool_rows.scalars().all()}
+
+        changed_any = False
+        for agent in agents:
+            changed = False
+
+            okr_settings = None
+            if agent.tenant_id:
+                settings_res = await db.execute(select(OKRSettings).where(OKRSettings.tenant_id == agent.tenant_id))
+                okr_settings = settings_res.scalar_one_or_none()
+                if not okr_settings:
+                    okr_settings = OKRSettings(tenant_id=agent.tenant_id)
+                    db.add(okr_settings)
+                if okr_settings.okr_agent_id != agent.id:
+                    okr_settings.okr_agent_id = agent.id
+                    changed = True
+                    logger.info(f"[AgentSeeder] Patched OKR Agent {agent.id}: set okr_agent_id in settings")
+
+            if not agent.is_system:
+                agent.is_system = True
                 changed = True
-                logger.info(f"[AgentSeeder] Patched OKR Agent: assigned tool '{tool_name}'")
+                logger.info(f"[AgentSeeder] Patched OKR Agent {agent.id}: set is_system=True")
 
-        # Ensure system cron triggers exist
-        await _seed_okr_triggers(db, agent.id)
-        changed = await _sync_okr_triggers_with_settings(db, agent.id, okr_settings) or changed
+            await db.flush()
 
-        if changed:
+            for tool_name in all_okr_tools:
+                tool = tools_by_name.get(tool_name)
+                if not tool:
+                    logger.warning(f"[AgentSeeder] OKR tool '{tool_name}' not found — run tool seeder first")
+                    continue
+                at_res = await db.execute(
+                    select(AgentTool).where(AgentTool.agent_id == agent.id, AgentTool.tool_id == tool.id)
+                )
+                if not at_res.scalar_one_or_none():
+                    db.add(AgentTool(agent_id=agent.id, tool_id=tool.id, enabled=True))
+                    changed = True
+                    logger.info(f"[AgentSeeder] Patched OKR Agent {agent.id}: assigned tool '{tool_name}'")
+
+            await _seed_okr_triggers(db, agent.id)
+            changed = await _sync_okr_triggers_with_settings(db, agent.id, okr_settings) or changed
+
+            if changed:
+                changed_any = True
+
+        if changed_any:
             await db.commit()
             logger.info("[AgentSeeder] OKR Agent patch complete")
 

@@ -226,6 +226,7 @@ The OKR reporting subsystem now uses a lightweight collection path centered on t
 - The tracked member set is derived from the OKR Agent's active `AgentRelationship` and `AgentAgentRelationship` records, not from the entire tenant roster.
 - Manual and scheduled `daily_okr_collection` both call a backend collection service that sends reminder messages only to tracked human members and tracked digital employees.
 - Human and agent daily-report replies are both handled by the OKR Agent itself. The unified OKR Agent context instructs it to call `upsert_member_daily_report` whenever a tracked counterpart submits, supplements, or corrects a daily report.
+- OKR Agent startup patching is tenant-wide: every active tenant-specific OKR Agent is retroactively patched with newly added OKR tools and system trigger updates, rather than only the most recently created OKR Agent in the whole deployment.
 - The chat frontend now reconnects and automatically re-sends one pending outbound message instead of silently dropping the send when the session WebSocket is temporarily unavailable.
 - The Reports page's member daily report view reads the same tracked member set and includes member search to handle larger relationship lists.
 
@@ -237,6 +238,7 @@ The OKR reporting subsystem now uses a lightweight collection path centered on t
 | 2026-04-19 | Reworked OKR daily collection to target only tracked relationships and align the member daily report view with the tracked relationship list plus search. |
 | 2026-04-19 | Improved chat reconnect send reliability and cleaned up status/company-info UI presentation. |
 | 2026-04-19 | Unified OKR daily report handling across channels and agent counterparts by moving recording rules into OKR Agent context and removing direct agent-side report writes from collection. |
+| 2026-04-19 | Fixed OKR Agent startup patching so newly added OKR tools are backfilled to every active tenant OKR Agent, not only the latest one globally. |
 
 ---
 **[The End] Architecture Document Completion.**
