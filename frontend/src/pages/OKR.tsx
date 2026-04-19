@@ -1401,7 +1401,7 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
     const [view, setView] = useState<'company' | 'member'>('company');
     const [reportType, setReportType] = useState<'daily' | 'weekly' | 'monthly'>('daily');
     const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
-    const [selectedCompanyReportId, setSelectedCompanyReportId] = useState<string | null>(null);
+    const [expandedCompanyReportId, setExpandedCompanyReportId] = useState<string | null>(null);
     const [selectedMemberReportId, setSelectedMemberReportId] = useState<string | null>(null);
     const [memberSearch, setMemberSearch] = useState('');
     const isAdmin = currentUser?.role === 'org_admin' || currentUser?.role === 'platform_admin';
@@ -1431,13 +1431,13 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
 
     useEffect(() => {
         if (!companyReports.length) {
-            setSelectedCompanyReportId(null);
+            setExpandedCompanyReportId(null);
             return;
         }
-        if (!selectedCompanyReportId || !companyReports.some(report => report.id === selectedCompanyReportId)) {
-            setSelectedCompanyReportId(companyReports[0].id);
+        if (!expandedCompanyReportId || !companyReports.some(report => report.id === expandedCompanyReportId)) {
+            setExpandedCompanyReportId(companyReports[0].id);
         }
-    }, [companyReports, selectedCompanyReportId]);
+    }, [companyReports, expandedCompanyReportId]);
 
     const filteredMemberReports = useMemo(() => {
         const keyword = memberSearch.trim().toLowerCase();
@@ -1458,7 +1458,6 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
         }
     }, [filteredMemberReports, selectedMemberReportId]);
 
-    const selectedCompanyReport = companyReports.find(report => report.id === selectedCompanyReportId) || companyReports[0] || null;
     const selectedMemberReport = filteredMemberReports.find(report => report.id === selectedMemberReportId) || filteredMemberReports[0] || null;
 
     return (
@@ -1527,21 +1526,6 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
                                 </button>
                             ))}
                         </div>
-                        {selectedCompanyReport && isAdmin && (
-                            <button
-                                onClick={() => regenerateMutation.mutate({
-                                    report_type: selectedCompanyReport.report_type,
-                                    period_start: selectedCompanyReport.period_start,
-                                })}
-                                disabled={regenerateMutation.isPending}
-                                className="btn btn-secondary"
-                                style={{ fontSize: '12px' }}
-                            >
-                                {regenerateMutation.isPending
-                                    ? (isChinese ? '重新汇总中...' : 'Regenerating...')
-                                    : (isChinese ? '重新汇总' : 'Regenerate')}
-                            </button>
-                        )}
                     </div>
                 ) : (
                     <input
@@ -1559,97 +1543,122 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
                     <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
                         {isChinese ? '加载中...' : 'Loading...'}
                     </div>
-                ) : selectedCompanyReport ? (
+                ) : companyReports.length ? (
                     <div style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'minmax(0, 1fr)',
+                        display: 'flex',
+                        flexDirection: 'column',
                         gap: '16px',
                     }}>
-                        <div style={{
-                            padding: '20px',
-                            background: 'var(--bg-primary)',
-                            border: '1px solid var(--border-subtle)',
-                            borderRadius: '12px',
-                        }}>
-                            <div style={{
-                                display: 'flex',
-                                justifyContent: 'space-between',
-                                alignItems: 'flex-start',
-                                gap: '16px',
-                                marginBottom: '16px',
-                                paddingBottom: '12px',
-                                borderBottom: '1px solid var(--border-subtle)',
-                                flexWrap: 'wrap',
-                            }}>
-                                <div>
-                                    <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '4px' }}>
-                                        {selectedCompanyReport.period_label}
-                                    </div>
-                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
-                                        {selectedCompanyReport.period_start} - {selectedCompanyReport.period_end}
-                                    </div>
-                                </div>
-                                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                                        {isChinese ? `已提交 ${selectedCompanyReport.submitted_count}` : `Submitted ${selectedCompanyReport.submitted_count}`}
-                                    </span>
-                                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                                        {isChinese ? `缺交 ${selectedCompanyReport.missing_count}` : `Missing ${selectedCompanyReport.missing_count}`}
-                                    </span>
-                                    {selectedCompanyReport.needs_refresh && (
-                                        <span style={{
-                                            fontSize: '11px',
-                                            fontWeight: 600,
-                                            color: '#b45309',
-                                            background: 'rgba(245,158,11,0.12)',
-                                            border: '1px solid rgba(245,158,11,0.25)',
-                                            padding: '2px 8px',
-                                            borderRadius: '999px',
-                                        }}>
-                                            {isChinese ? '待重算' : 'Needs refresh'}
-                                        </span>
-                                    )}
-                                </div>
-                            </div>
-
-                            <pre style={{
-                                margin: 0,
-                                whiteSpace: 'pre-wrap',
-                                wordBreak: 'break-word',
-                                fontSize: '13px',
-                                lineHeight: '1.7',
-                                color: 'var(--text-secondary)',
-                                fontFamily: 'inherit',
-                            }}>
-                                {selectedCompanyReport.content}
-                            </pre>
-                        </div>
-
-                        {companyReports.length > 1 && (
-                            <div style={{
-                                display: 'flex',
-                                flexDirection: 'column',
-                                gap: '8px',
-                            }}>
-                                {companyReports.slice(1).map(report => (
+                        {companyReports.map(report => {
+                            const expanded = expandedCompanyReportId === report.id;
+                            const showMissing = report.missing_count > 0;
+                            const showRefresh = report.needs_refresh && isAdmin;
+                            return (
+                                <div
+                                    key={report.id}
+                                    style={{
+                                        background: 'var(--bg-primary)',
+                                        border: `1px solid ${expanded ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                        borderRadius: '12px',
+                                        overflow: 'hidden',
+                                    }}
+                                >
                                     <button
-                                        key={report.id}
-                                        onClick={() => setSelectedCompanyReportId(report.id)}
+                                        onClick={() => setExpandedCompanyReportId(expanded ? null : report.id)}
                                         style={{
+                                            width: '100%',
                                             textAlign: 'left',
-                                            padding: '12px 14px',
-                                            background: selectedCompanyReport?.id === report.id ? 'rgba(99,102,241,0.08)' : 'var(--bg-secondary)',
-                                            border: `1px solid ${selectedCompanyReport?.id === report.id ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                                            borderRadius: '8px',
+                                            background: 'transparent',
+                                            border: 'none',
+                                            padding: '16px 18px',
                                             cursor: 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            gap: '16px',
                                         }}
                                     >
-                                        <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>{report.period_label}</div>
-                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{report.updated_at}</div>
+                                        <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)' }}>
+                                            {report.period_label}
+                                        </div>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                            {showMissing && (
+                                                <span style={{
+                                                    fontSize: '11px',
+                                                    fontWeight: 600,
+                                                    color: '#b45309',
+                                                    background: 'rgba(245,158,11,0.12)',
+                                                    border: '1px solid rgba(245,158,11,0.25)',
+                                                    padding: '2px 8px',
+                                                    borderRadius: '999px',
+                                                }}>
+                                                    {isChinese ? `${report.missing_count} 人缺交` : `${report.missing_count} missing`}
+                                                </span>
+                                            )}
+                                            {report.needs_refresh && (
+                                                <span style={{
+                                                    fontSize: '11px',
+                                                    fontWeight: 600,
+                                                    color: '#a16207',
+                                                    background: 'rgba(245,158,11,0.10)',
+                                                    border: '1px solid rgba(245,158,11,0.22)',
+                                                    padding: '2px 8px',
+                                                    borderRadius: '999px',
+                                                }}>
+                                                    {isChinese ? '有补交更新' : 'Updated submissions'}
+                                                </span>
+                                            )}
+                                            <span style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                                {expanded ? '−' : '+'}
+                                            </span>
+                                        </div>
                                     </button>
-                                ))}
-                            </div>
-                        )}
+
+                                    {expanded && (
+                                        <div style={{
+                                            padding: '0 18px 18px',
+                                            borderTop: '1px solid var(--border-subtle)',
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            gap: '12px',
+                                        }}>
+                                            {showRefresh && (
+                                                <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: '12px' }}>
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            regenerateMutation.mutate({
+                                                                report_type: report.report_type,
+                                                                period_start: report.period_start,
+                                                            });
+                                                        }}
+                                                        disabled={regenerateMutation.isPending}
+                                                        className="btn btn-secondary"
+                                                        style={{ fontSize: '12px' }}
+                                                    >
+                                                        {regenerateMutation.isPending
+                                                            ? (isChinese ? '重新汇总中...' : 'Regenerating...')
+                                                            : (isChinese ? '重新汇总' : 'Regenerate')}
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            <pre style={{
+                                                margin: 0,
+                                                whiteSpace: 'pre-wrap',
+                                                wordBreak: 'break-word',
+                                                fontSize: '13px',
+                                                lineHeight: '1.7',
+                                                color: 'var(--text-secondary)',
+                                                fontFamily: 'inherit',
+                                            }}>
+                                                {report.content}
+                                            </pre>
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })}
                     </div>
                 ) : (
                     <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px', background: 'var(--bg-secondary)', borderRadius: '12px' }}>

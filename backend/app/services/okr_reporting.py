@@ -361,6 +361,33 @@ def _extract_section_lines(content: str, section: str) -> list[str]:
     return collected
 
 
+def _is_placeholder_rollup_line(line: str) -> bool:
+    """Return True when a line is just a generated placeholder/noise line."""
+    normalized = line.strip().lower()
+    placeholder_prefixes = (
+        "no major progress updates were submitted.",
+        "no major updates were recorded in this period.",
+        "no major risks were highlighted.",
+        "no sustained risks were identified.",
+        "all members submitted their reports.",
+        "missing reports:",
+    )
+    return any(normalized.startswith(prefix) for prefix in placeholder_prefixes)
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    """Remove duplicate lines while preserving the first-seen order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
 def _build_company_rollup_content(
     title: str,
     period_start: date,
@@ -375,10 +402,6 @@ def _build_company_rollup_content(
         f"# {title}",
         f"Period: {period_start.isoformat()} to {period_end.isoformat()}",
         "",
-        "## Coverage",
-        f"- Submitted: {submitted_count}",
-        f"- Missing: {missing_count}",
-        "",
     ]
 
     aggregated_updates: list[str] = []
@@ -389,6 +412,16 @@ def _build_company_rollup_content(
         aggregated_updates.extend(_extract_section_lines(report.content, "Key Updates"))
         aggregated_risks.extend(_extract_section_lines(report.content, "Key Risks"))
         aggregated_followups.extend(_extract_section_lines(report.content, "Follow-up"))
+
+    aggregated_updates = _dedupe_preserve_order(
+        [item for item in aggregated_updates if not _is_placeholder_rollup_line(item)]
+    )
+    aggregated_risks = _dedupe_preserve_order(
+        [item for item in aggregated_risks if not _is_placeholder_rollup_line(item)]
+    )
+    aggregated_followups = _dedupe_preserve_order(
+        [item for item in aggregated_followups if not _is_placeholder_rollup_line(item)]
+    )
 
     lines.append("## Key Updates")
     if aggregated_updates:
@@ -408,7 +441,7 @@ def _build_company_rollup_content(
     if aggregated_followups:
         lines.extend(f"- {item}" for item in aggregated_followups[:6])
     else:
-        lines.append("- No follow-up items were carried over.")
+        lines.append("- No period-level follow-up items were carried over.")
 
     return "\n".join(lines)
 

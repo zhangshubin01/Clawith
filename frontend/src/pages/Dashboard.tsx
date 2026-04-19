@@ -150,7 +150,7 @@ function OKRSummaryCard() {
     const total = allKRs.length;
 
     // Donut chart data
-    const COLORS = { on_track: '#22c55e', at_risk: '#f59e0b', behind: '#ef4444', completed: '#6366f1' };
+    const COLORS = { on_track: '#64748b', at_risk: '#a16207', behind: '#991b1b', completed: '#52525b' };
     const LABELS_ZH = { on_track: '按计划', at_risk: '有风险', behind: '落后', completed: '已完成' };
     const LABELS_EN = { on_track: 'On Track', at_risk: 'At Risk', behind: 'Behind', completed: 'Completed' };
     const labels = isChinese ? LABELS_ZH : LABELS_EN;
@@ -203,7 +203,7 @@ function OKRSummaryCard() {
                                 strokeDasharray={`${arc.dash} ${arc.gap}`}
                                 strokeDashoffset={0}
                                 transform={`rotate(${arc.rotate - 90} ${CX} ${CY})`}
-                                opacity={0.85}
+                                opacity={0.9}
                             />
                         ) : null
                     )
