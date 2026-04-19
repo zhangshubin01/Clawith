@@ -25,6 +25,7 @@ interface OKRSettings {
     first_enabled_at?: string | null;
     daily_report_enabled: boolean;
     daily_report_time: string;
+    daily_report_skip_non_workdays?: boolean;
     weekly_report_enabled: boolean;
     weekly_report_day: number;
     period_frequency: string;
@@ -66,7 +67,7 @@ interface Period {
     is_current: boolean;
 }
 
-interface WorkReport {
+interface LegacyWorkReport {
     id: string;
     tenant_id: string;
     okr_agent_id: string;
@@ -74,6 +75,34 @@ interface WorkReport {
     period_label: string;
     content: string;
     created_at: string;
+}
+
+interface CompanyReport {
+    id: string;
+    report_type: 'daily' | 'weekly' | 'monthly';
+    period_start: string;
+    period_end: string;
+    period_label: string;
+    content: string;
+    submitted_count: number;
+    missing_count: number;
+    needs_refresh: boolean;
+    generated_at: string;
+    updated_at: string;
+}
+
+interface MemberDailyReportItem {
+    id: string;
+    member_type: 'user' | 'agent';
+    member_id: string;
+    display_name: string;
+    avatar_url?: string | null;
+    group_label: string;
+    report_date: string;
+    content: string;
+    status: string;
+    submitted_at?: string | null;
+    updated_at?: string | null;
 }
 
 interface MemberWithoutOKR {
@@ -1367,60 +1396,355 @@ function MembersWithoutOKRPanel({
     );
 }
 function ReportsTab({ isChinese }: { isChinese: boolean }) {
-    const { data: reports = [], isLoading } = useQuery<WorkReport[]>({
-        queryKey: ['okr-reports'],
-        queryFn: () => fetchJson<WorkReport[]>('/okr/reports'),
+    const qc = useQueryClient();
+    const currentUser = useAuthStore((s) => s.user);
+    const [view, setView] = useState<'company' | 'member'>('company');
+    const [reportType, setReportType] = useState<'daily' | 'weekly' | 'monthly'>('daily');
+    const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
+    const [selectedCompanyReportId, setSelectedCompanyReportId] = useState<string | null>(null);
+    const [selectedMemberReportId, setSelectedMemberReportId] = useState<string | null>(null);
+    const isAdmin = currentUser?.role === 'org_admin' || currentUser?.role === 'platform_admin';
+
+    const { data: companyReports = [], isLoading: companyLoading } = useQuery<CompanyReport[]>({
+        queryKey: ['company-reports', reportType],
+        queryFn: () => fetchJson<CompanyReport[]>(`/okr/company-reports?report_type=${reportType}`),
+        enabled: view === 'company',
     });
 
-    if (isLoading) {
-        return <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>{isChinese ? '加载中...' : 'Loading...'}</div>;
-    }
+    const { data: memberReports = [], isLoading: memberLoading } = useQuery<MemberDailyReportItem[]>({
+        queryKey: ['member-daily-reports', selectedDate],
+        queryFn: () => fetchJson<MemberDailyReportItem[]>(`/okr/member-daily-reports?report_date=${selectedDate}`),
+        enabled: view === 'member',
+    });
 
-    if (reports.length === 0) {
-        return (
-            <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px', background: 'var(--bg-secondary)', borderRadius: '12px' }}>
-                {isChinese ? '暂无 OKR 工作汇报。请确保 OKR Agent 在运行中并设定了周期。' : 'No OKR reports yet. Make sure OKR Agent is running.'}
-            </div>
-        );
-    }
+    const regenerateMutation = useMutation({
+        mutationFn: (payload: { report_type: string; period_start: string }) =>
+            fetchJson<CompanyReport>('/okr/company-reports/regenerate', {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            }),
+        onSuccess: () => {
+            qc.invalidateQueries({ queryKey: ['company-reports'] });
+        },
+    });
+
+    useEffect(() => {
+        if (!companyReports.length) {
+            setSelectedCompanyReportId(null);
+            return;
+        }
+        if (!selectedCompanyReportId || !companyReports.some(report => report.id === selectedCompanyReportId)) {
+            setSelectedCompanyReportId(companyReports[0].id);
+        }
+    }, [companyReports, selectedCompanyReportId]);
+
+    useEffect(() => {
+        if (!memberReports.length) {
+            setSelectedMemberReportId(null);
+            return;
+        }
+        if (!selectedMemberReportId || !memberReports.some(report => report.id === selectedMemberReportId)) {
+            setSelectedMemberReportId(memberReports[0].id);
+        }
+    }, [memberReports, selectedMemberReportId]);
+
+    const selectedCompanyReport = companyReports.find(report => report.id === selectedCompanyReportId) || companyReports[0] || null;
+    const selectedMemberReport = memberReports.find(report => report.id === selectedMemberReportId) || memberReports[0] || null;
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            {reports.map((report) => (
-                <div key={report.id} style={{
-                    padding: '20px',
-                    background: 'var(--bg-primary)',
+            <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '16px',
+                flexWrap: 'wrap',
+            }}>
+                <div style={{
+                    display: 'inline-flex',
+                    padding: '4px',
+                    borderRadius: '10px',
+                    background: 'var(--bg-secondary)',
+                    border: '1px solid var(--border-subtle)',
+                }}>
+                    {[
+                        { key: 'company', zh: '公司汇总', en: 'Company Reports' },
+                        { key: 'member', zh: '成员日报', en: 'Member Daily Reports' },
+                    ].map(item => (
+                        <button
+                            key={item.key}
+                            onClick={() => setView(item.key as 'company' | 'member')}
+                            style={{
+                                border: 'none',
+                                borderRadius: '8px',
+                                padding: '8px 14px',
+                                background: view === item.key ? 'var(--bg-primary)' : 'transparent',
+                                color: view === item.key ? 'var(--text-primary)' : 'var(--text-secondary)',
+                                fontSize: '13px',
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                                boxShadow: view === item.key ? '0 1px 4px rgba(0,0,0,0.06)' : 'none',
+                            }}
+                        >
+                            {isChinese ? item.zh : item.en}
+                        </button>
+                    ))}
+                </div>
+
+                {view === 'company' ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                        <div style={{ display: 'inline-flex', gap: '6px' }}>
+                            {[
+                                { key: 'daily', zh: '日报', en: 'Daily' },
+                                { key: 'weekly', zh: '周报', en: 'Weekly' },
+                                { key: 'monthly', zh: '月报', en: 'Monthly' },
+                            ].map(item => (
+                                <button
+                                    key={item.key}
+                                    onClick={() => setReportType(item.key as 'daily' | 'weekly' | 'monthly')}
+                                    style={{
+                                        border: `1px solid ${reportType === item.key ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                        borderRadius: '8px',
+                                        padding: '7px 12px',
+                                        background: reportType === item.key ? 'rgba(99,102,241,0.08)' : 'var(--bg-primary)',
+                                        color: reportType === item.key ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                                        fontSize: '12px',
+                                        fontWeight: 600,
+                                        cursor: 'pointer',
+                                    }}
+                                >
+                                    {isChinese ? item.zh : item.en}
+                                </button>
+                            ))}
+                        </div>
+                        {selectedCompanyReport && isAdmin && (
+                            <button
+                                onClick={() => regenerateMutation.mutate({
+                                    report_type: selectedCompanyReport.report_type,
+                                    period_start: selectedCompanyReport.period_start,
+                                })}
+                                disabled={regenerateMutation.isPending}
+                                className="btn btn-secondary"
+                                style={{ fontSize: '12px' }}
+                            >
+                                {regenerateMutation.isPending
+                                    ? (isChinese ? '重新汇总中...' : 'Regenerating...')
+                                    : (isChinese ? '重新汇总' : 'Regenerate')}
+                            </button>
+                        )}
+                    </div>
+                ) : (
+                    <input
+                        type="date"
+                        className="form-input"
+                        value={selectedDate}
+                        onChange={e => setSelectedDate(e.target.value)}
+                        style={{ width: '180px' }}
+                    />
+                )}
+            </div>
+
+            {view === 'company' ? (
+                companyLoading ? (
+                    <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
+                        {isChinese ? '加载中...' : 'Loading...'}
+                    </div>
+                ) : selectedCompanyReport ? (
+                    <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'minmax(0, 1fr)',
+                        gap: '16px',
+                    }}>
+                        <div style={{
+                            padding: '20px',
+                            background: 'var(--bg-primary)',
+                            border: '1px solid var(--border-subtle)',
+                            borderRadius: '12px',
+                        }}>
+                            <div style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'flex-start',
+                                gap: '16px',
+                                marginBottom: '16px',
+                                paddingBottom: '12px',
+                                borderBottom: '1px solid var(--border-subtle)',
+                                flexWrap: 'wrap',
+                            }}>
+                                <div>
+                                    <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '4px' }}>
+                                        {selectedCompanyReport.period_label}
+                                    </div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                        {selectedCompanyReport.period_start} - {selectedCompanyReport.period_end}
+                                    </div>
+                                </div>
+                                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                        {isChinese ? `已提交 ${selectedCompanyReport.submitted_count}` : `Submitted ${selectedCompanyReport.submitted_count}`}
+                                    </span>
+                                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                        {isChinese ? `缺交 ${selectedCompanyReport.missing_count}` : `Missing ${selectedCompanyReport.missing_count}`}
+                                    </span>
+                                    {selectedCompanyReport.needs_refresh && (
+                                        <span style={{
+                                            fontSize: '11px',
+                                            fontWeight: 600,
+                                            color: '#b45309',
+                                            background: 'rgba(245,158,11,0.12)',
+                                            border: '1px solid rgba(245,158,11,0.25)',
+                                            padding: '2px 8px',
+                                            borderRadius: '999px',
+                                        }}>
+                                            {isChinese ? '待重算' : 'Needs refresh'}
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+
+                            <pre style={{
+                                margin: 0,
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-word',
+                                fontSize: '13px',
+                                lineHeight: '1.7',
+                                color: 'var(--text-secondary)',
+                                fontFamily: 'inherit',
+                            }}>
+                                {selectedCompanyReport.content}
+                            </pre>
+                        </div>
+
+                        {companyReports.length > 1 && (
+                            <div style={{
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '8px',
+                            }}>
+                                {companyReports.slice(1).map(report => (
+                                    <button
+                                        key={report.id}
+                                        onClick={() => setSelectedCompanyReportId(report.id)}
+                                        style={{
+                                            textAlign: 'left',
+                                            padding: '12px 14px',
+                                            background: selectedCompanyReport?.id === report.id ? 'rgba(99,102,241,0.08)' : 'var(--bg-secondary)',
+                                            border: `1px solid ${selectedCompanyReport?.id === report.id ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                            borderRadius: '8px',
+                                            cursor: 'pointer',
+                                        }}
+                                    >
+                                        <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>{report.period_label}</div>
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{report.updated_at}</div>
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                ) : (
+                    <div style={{ padding: '40px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px', background: 'var(--bg-secondary)', borderRadius: '12px' }}>
+                        {isChinese ? '暂无公司级汇总报告。' : 'No company reports yet.'}
+                    </div>
+                )
+            ) : memberLoading ? (
+                <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
+                    {isChinese ? '加载中...' : 'Loading...'}
+                </div>
+            ) : (
+                <div style={{
                     border: '1px solid var(--border-subtle)',
                     borderRadius: '12px',
-                    boxShadow: '0 2px 8px rgba(0,0,0,0.02)'
+                    overflow: 'hidden',
+                    background: 'var(--bg-primary)',
                 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '12px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span style={{
-                                padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600,
-                                background: report.report_type === 'weekly' ? '#6366f115' : '#14b8a615',
-                                color: report.report_type === 'weekly' ? '#6366f1' : '#14b8a6',
-                            }}>
-                                {report.report_type.toUpperCase()}
-                            </span>
-                            <span style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                                {report.period_label}
-                            </span>
+                    <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: '220px minmax(0, 1fr)',
+                        minHeight: '480px',
+                    }}>
+                        <div style={{
+                            borderRight: '1px solid var(--border-subtle)',
+                            background: 'var(--bg-secondary)',
+                            padding: '12px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '8px',
+                        }}>
+                            {memberReports.map(item => (
+                                <div
+                                    key={item.id}
+                                    onClick={() => setSelectedMemberReportId(item.id)}
+                                    style={{
+                                        padding: '10px 12px',
+                                        borderRadius: '8px',
+                                        border: `1px solid ${selectedMemberReport?.id === item.id ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
+                                        background: selectedMemberReport?.id === item.id ? 'rgba(99,102,241,0.06)' : 'var(--bg-primary)',
+                                        cursor: 'pointer',
+                                    }}
+                                >
+                                    <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                        {item.display_name}
+                                    </div>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
+                                        {item.group_label}
+                                    </div>
+                                    <div style={{ marginTop: '6px' }}>
+                                        <span style={{
+                                            fontSize: '10px',
+                                            fontWeight: 600,
+                                            color: item.status === 'missing' ? '#b45309' : 'var(--accent-primary)',
+                                            background: item.status === 'missing' ? 'rgba(245,158,11,0.12)' : 'rgba(99,102,241,0.08)',
+                                            borderRadius: '999px',
+                                            padding: '2px 6px',
+                                        }}>
+                                            {item.status === 'missing'
+                                                ? (isChinese ? '缺交' : 'Missing')
+                                                : item.status === 'late'
+                                                    ? (isChinese ? '补交' : 'Late')
+                                                    : item.status === 'revised'
+                                                        ? (isChinese ? '已修改' : 'Revised')
+                                                        : (isChinese ? '已提交' : 'Submitted')}
+                                        </span>
+                                    </div>
+                                </div>
+                            ))}
                         </div>
-                        <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
-                            {new Date(report.created_at).toLocaleString()}
+
+                        <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                            {selectedMemberReport ? (
+                                <div
+                                    key={`content-${selectedMemberReport.id}`}
+                                    style={{
+                                        padding: '14px 16px',
+                                        border: '1px solid var(--border-subtle)',
+                                        borderRadius: '10px',
+                                        background: 'var(--bg-secondary)',
+                                    }}
+                                >
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                                        <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                                            {selectedMemberReport.display_name}
+                                        </div>
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                            {selectedMemberReport.updated_at ? new Date(selectedMemberReport.updated_at).toLocaleString() : ''}
+                                        </div>
+                                    </div>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
+                                        {selectedMemberReport.group_label}
+                                    </div>
+                                    <div style={{ fontSize: '13px', lineHeight: '1.7', color: selectedMemberReport.content ? 'var(--text-secondary)' : 'var(--text-tertiary)' }}>
+                                        {selectedMemberReport.content || (isChinese ? '当天暂无日报提交。' : 'No daily report submitted for this day.')}
+                                    </div>
+                                </div>
+                            ) : (
+                                <div style={{ fontSize: '13px', color: 'var(--text-tertiary)' }}>
+                                    {isChinese ? '当天暂无成员日报。' : 'No member daily reports for this day.'}
+                                </div>
+                            )}
                         </div>
                     </div>
-                    {/* Render markdown content simply or parse it. Since we don't have a markdown parser available directly in this file without imports, we use pre/code block */}
-                    <pre style={{
-                        margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                        fontSize: '13px', lineHeight: '1.6', color: 'var(--text-secondary)',
-                        fontFamily: 'inherit',
-                    }}>
-                        {report.content}
-                    </pre>
                 </div>
-            ))}
+            )}
         </div>
     );
 }

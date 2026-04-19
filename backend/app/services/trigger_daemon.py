@@ -46,7 +46,7 @@ def _cleanup_stale_invoke_cache():
 
 async def _should_skip_non_workday(trigger: AgentTrigger, local_now: datetime) -> bool:
     """Skip OKR daily report triggers on company non-workdays when configured."""
-    if trigger.name != "daily_okr_report":
+    if trigger.name != "daily_okr_collection":
         return False
 
     from app.models.okr import OKRSettings
@@ -89,6 +89,71 @@ async def _mark_trigger_skipped(trigger_id: uuid.UUID, now: datetime) -> None:
                 await db.commit()
     except Exception as e:
         logger.warning(f"Failed to mark skipped trigger {trigger_id}: {e}")
+
+
+async def _mark_trigger_fired(trigger_id: uuid.UUID, now: datetime) -> None:
+    """Persist fire metadata for a trigger that was already handled."""
+    try:
+        async with async_session() as db:
+            result = await db.execute(select(AgentTrigger).where(AgentTrigger.id == trigger_id))
+            trigger = result.scalar_one_or_none()
+            if trigger:
+                trigger.last_fired_at = now
+                trigger.fire_count += 1
+                if trigger.type == "once":
+                    trigger.is_enabled = False
+                if trigger.max_fires and trigger.fire_count >= trigger.max_fires:
+                    trigger.is_enabled = False
+                await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to mark fired trigger {trigger_id}: {e}")
+
+
+async def _handle_okr_report_trigger(trigger: AgentTrigger, now: datetime) -> bool:
+    """Handle company-level OKR report generation without waking the agent."""
+    if trigger.name not in {"daily_okr_report", "weekly_okr_report", "monthly_okr_report"}:
+        return False
+
+    from zoneinfo import ZoneInfo
+    from app.models.okr import OKRSettings
+    from app.services.okr_reporting import (
+        generate_company_daily_report,
+        generate_company_monthly_report,
+        generate_company_weekly_report,
+    )
+    from app.services.timezone_utils import get_agent_timezone
+
+    async with async_session() as db:
+        agent_result = await db.execute(select(Agent.tenant_id).where(Agent.id == trigger.agent_id))
+        tenant_id = agent_result.scalar_one_or_none()
+        if not tenant_id:
+            return True
+
+        settings_result = await db.execute(select(OKRSettings).where(OKRSettings.tenant_id == tenant_id))
+        settings = settings_result.scalar_one_or_none()
+        if not settings or not settings.enabled:
+            return True
+
+    tz_name = await get_agent_timezone(trigger.agent_id)
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    local_today = now.astimezone(tz).date()
+
+    if trigger.name == "daily_okr_report":
+        await generate_company_daily_report(tenant_id, local_today - timedelta(days=1))
+    elif trigger.name == "weekly_okr_report":
+        previous_week_anchor = local_today - timedelta(days=7)
+        week_start = previous_week_anchor - timedelta(days=previous_week_anchor.weekday())
+        await generate_company_weekly_report(tenant_id, week_start)
+    elif trigger.name == "monthly_okr_report":
+        previous_month_end = local_today.replace(day=1) - timedelta(days=1)
+        await generate_company_monthly_report(tenant_id, previous_month_end)
+
+    await _mark_trigger_fired(trigger.id, now)
+    logger.info(f"[Trigger] Auto-generated OKR report for trigger {trigger.name}")
+    return True
 
 # Webhook rate limiter: token -> list of timestamps
 _webhook_hits: dict[str, list[float]] = {}
@@ -473,11 +538,16 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             trigger_names = []
             for t in triggers:
                 part = f"触发器：{t.name} ({t.type})\n原因：{t.reason}"
-                if t.name in ("daily_okr_report", "weekly_okr_report"):
+                if t.name == "daily_okr_collection":
                     part += (
-                        "\n执行要求：先调用 get_okr_settings 确认对应日报/周报开关是否开启。"
-                        "如果开启，主动联系相关成员收集本周期进展，再调用 generate_okr_report 生成报告；"
+                        "\n执行要求：先调用 get_okr_settings 确认日报收集是否开启。"
+                        "如果开启，主动联系相关成员收集今天的最终日报，并整理成不超过 200 字的正式日报；"
                         "如果未开启，则说明本次无需执行并停止。"
+                    )
+                elif t.name in ("daily_okr_report", "weekly_okr_report", "monthly_okr_report"):
+                    part += (
+                        "\n执行要求：本次公司级报表由系统自动汇总生成。"
+                        "如果你被唤醒，仅补充必要说明，不要再次向成员发起收集。"
                     )
                 elif t.name == "biweekly_okr_checkin":
                     part += (
@@ -809,7 +879,9 @@ async def _tick():
 
         try:
             if await _evaluate_trigger(trigger, now):
-                fired_by_agent.setdefault(trigger.agent_id, []).append(trigger)
+                handled = await _handle_okr_report_trigger(trigger, now)
+                if not handled:
+                    fired_by_agent.setdefault(trigger.agent_id, []).append(trigger)
         except Exception as e:
             logger.warning(f"Error evaluating trigger {trigger.name}: {e}")
 

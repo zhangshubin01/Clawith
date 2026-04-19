@@ -1817,18 +1817,13 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
     });
 
     if (isLoading) return <div style={{ padding: '20px' }}>{t('common.loading', 'Loading...')}</div>;
-    const s = settings || { enabled: false, first_enabled_at: null, daily_report_enabled: false, daily_report_time: '18:00', daily_report_skip_non_workdays: true, weekly_report_enabled: false, weekly_report_day: 4, period_frequency: 'quarterly', period_length_days: null, period_frequency_locked: false };
+    const s = settings || { enabled: false, first_enabled_at: null, daily_report_enabled: false, daily_report_time: '18:00', daily_report_skip_non_workdays: true, weekly_report_enabled: false, weekly_report_day: 0, period_frequency: 'quarterly', period_length_days: null, period_frequency_locked: false };
     const periodFrequencyLocked = !!s.period_frequency_locked || !!s.first_enabled_at;
 
     // Primary source: /settings now embeds okr_agent_id directly.
     // Fallback to members-without-okr response for backward compat.
     const okrAgentId: string | null = settings?.okr_agent_id ?? membersData?.okr_agent_id ?? null;
     const companyOkrExists = membersData?.company_okr_exists ?? false;
-
-    // Weekday labels — full bilingual list
-    const weekdays = zh
-        ? ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
-        : ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
     return (
         <div style={{ maxWidth: '800px' }}>
@@ -2062,12 +2057,12 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 />
                                 <div>
                                     <div style={{ fontWeight: 500, fontSize: '13px' }}>
-                                        {zh ? '启用自动日报' : 'Enable Daily Report'}
+                                        {zh ? '启用成员日报收集' : 'Enable Member Daily Collection'}
                                     </div>
                                     <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
                                         {zh
-                                            ? 'OKR Agent 每天定时收集并生成全员进展日报'
-                                            : 'OKR Agent collects updates and generates a daily progress report on schedule'
+                                            ? '成员只提交日报。公司日报会在次日 09:00 自动生成，周报和月报也会自动汇总。'
+                                            : 'Members only submit daily reports. The company daily report is generated at 09:00 the next day, and weekly/monthly summaries are generated automatically.'
                                         }
                                     </div>
                                 </div>
@@ -2084,7 +2079,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                     </label>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                                     <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                                        {zh ? '日报发送时间:' : 'Report time:'}
+                                        {zh ? '开始收集时间:' : 'Collection time:'}
                                     </div>
                                     <input
                                         type="time"
@@ -2094,46 +2089,11 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                         style={{ width: '120px' }}
                                     />
                                     </div>
-                                </div>
-                            )}
-                        </div>
-
-                        {/* Weekly report */}
-                        <div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-                                <input
-                                    type="checkbox"
-                                    checked={s.weekly_report_enabled}
-                                    onChange={(e) => updateSettings.mutate({ ...s, weekly_report_enabled: e.target.checked })}
-                                />
-                                <div>
-                                    <div style={{ fontWeight: 500, fontSize: '13px' }}>
-                                        {zh ? '启用自动周报' : 'Enable Weekly Report'}
-                                    </div>
-                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.6, maxWidth: '560px' }}>
                                         {zh
-                                            ? 'OKR Agent 每周定时收集并生成全员进展周报'
-                                            : 'OKR Agent collects updates and generates a weekly progress report on schedule'
-                                        }
+                                            ? '每天到这个时间后，OKR Agent 会开始向成员收集当天日报。公司日报固定在次日 09:00 生成；公司周报固定在周一 09:00 生成；公司月报固定在每月 1 日 09:00 生成。'
+                                            : 'At this time each day, the OKR Agent starts collecting member daily reports. The company daily report is generated at 09:00 the next day, the weekly report at 09:00 every Monday, and the monthly report at 09:00 on the 1st of each month.'}
                                     </div>
-                                </div>
-                            </div>
-                            {s.weekly_report_enabled && (
-                                <div style={{ marginLeft: '28px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                    <select 
-                                        className="form-input" 
-                                        value={s.weekly_report_day}
-                                        onChange={(e) => updateSettings.mutate({ ...s, weekly_report_day: parseInt(e.target.value) })}
-                                        style={{ width: '120px' }}
-                                    >
-                                        <option value={0}>周一</option>
-                                        <option value={1}>周二</option>
-                                        <option value={2}>周三</option>
-                                        <option value={3}>周四</option>
-                                        <option value={4}>周五</option>
-                                        <option value={5}>周六</option>
-                                        <option value={6}>周日</option>
-                                    </select>
                                 </div>
                             )}
                         </div>

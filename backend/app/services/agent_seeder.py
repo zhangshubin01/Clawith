@@ -583,23 +583,35 @@ def _append_seed_marker(marker_path: Path, line: str):
 async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
     """Create system cron triggers for the OKR Agent.
 
-    Four triggers (all is_system=True, cannot be deleted by users):
-      - daily_okr_report:     fires at 18:00 every day     (0 18 * * *)
+    Five triggers (all is_system=True, cannot be deleted by users):
+      - daily_okr_collection: fires at 18:00 every day     (0 18 * * *)
+      - daily_okr_report:     fires at 09:00 every day     (0 9 * * *)
       - weekly_okr_report:    fires at 09:00 every Monday  (0 9 * * 1)
       - biweekly_okr_checkin: fires at 10:00 on 1st & 15th (0 10 1,15 * *)
-      - monthly_okr_report:   fires at 08:00 on the 1st    (0 8 1 * *)
+      - monthly_okr_report:   fires at 09:00 on the 1st    (0 9 1 * *)
 
     These supplement the 4-hour heartbeat with precise scheduled firing.
     is_system=True prevents users from deleting them.
     """
     triggers_to_create = [
         {
-            "name": "daily_okr_report",
+            "name": "daily_okr_collection",
             "type": "cron",
             "config": {"expr": "0 18 * * *"},
             "reason": (
-                "System trigger: fires OKR Agent at 18:00 daily to collect progress "
-                "and generate the daily report if daily_report_enabled is true."
+                "System trigger: fires OKR Agent at the configured time to collect "
+                "today's member daily reports."
+            ),
+            "cooldown_seconds": 3600,
+            "is_system": True,
+        },
+        {
+            "name": "daily_okr_report",
+            "type": "cron",
+            "config": {"expr": "0 9 * * *"},
+            "reason": (
+                "System trigger: fires at 09:00 daily to generate the previous day's "
+                "company daily OKR report."
             ),
             "cooldown_seconds": 3600,  # 1 hour minimum between fires
             "is_system": True,
@@ -609,8 +621,8 @@ async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
             "type": "cron",
             "config": {"expr": "0 9 * * 1"},
             "reason": (
-                "System trigger: fires OKR Agent at 09:00 every Monday to generate "
-                "the weekly report if weekly_report_enabled is true."
+                "System trigger: fires at 09:00 every Monday to generate the previous "
+                "week's company OKR report."
             ),
             "cooldown_seconds": 3600,
             "is_system": True,
@@ -630,11 +642,10 @@ async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
         {
             "name": "monthly_okr_report",
             "type": "cron",
-            "config": {"expr": "0 8 1 * *"},
+            "config": {"expr": "0 9 1 * *"},
             "reason": (
-                "System trigger: fires on the 1st of every month at 08:00 to auto-generate "
-                "and deliver the previous month's OKR progress report to Admin. Fires before "
-                "biweekly_okr_checkin (which fires at 10:00) to avoid session conflicts."
+                "System trigger: fires at 09:00 on the 1st of every month to generate "
+                "the previous month's company OKR report."
             ),
             "cooldown_seconds": 3600,
             "is_system": True,
@@ -681,13 +692,11 @@ async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OK
     except Exception:
         logger.warning(f"[AgentSeeder] Invalid OKR daily_report_time {settings.daily_report_time}; using 18:00")
 
-    weekly_day = settings.weekly_report_day
-    cron_weekday = 0 if weekly_day == 6 else weekly_day + 1
-
     result = await db.execute(
         select(AgentTrigger).where(
             AgentTrigger.agent_id == agent_id,
             AgentTrigger.name.in_([
+                "daily_okr_collection",
                 "daily_okr_report",
                 "weekly_okr_report",
                 "biweekly_okr_checkin",
@@ -698,13 +707,17 @@ async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OK
     triggers = {t.name: t for t in result.scalars().all()}
 
     desired = {
-        "daily_okr_report": {
+        "daily_okr_collection": {
             "config": {"expr": f"{daily_minute} {daily_hour} * * *"},
             "is_enabled": bool(settings.enabled and settings.daily_report_enabled),
         },
+        "daily_okr_report": {
+            "config": {"expr": "0 9 * * *"},
+            "is_enabled": bool(settings.enabled),
+        },
         "weekly_okr_report": {
-            "config": {"expr": f"0 9 * * {cron_weekday}"},
-            "is_enabled": bool(settings.enabled and settings.weekly_report_enabled),
+            "config": {"expr": "0 9 * * 1"},
+            "is_enabled": bool(settings.enabled),
         },
         "biweekly_okr_checkin": {
             "is_enabled": bool(settings.enabled),
@@ -714,10 +727,11 @@ async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OK
             ),
         },
         "monthly_okr_report": {
+            "config": {"expr": "0 9 1 * *"},
             "is_enabled": bool(settings.enabled),
             "reason": (
-                "System trigger: fires on the 1st of every month at 08:00 to auto-generate "
-                "and deliver the previous month's OKR progress report to Admin."
+                "System trigger: fires at 09:00 on the 1st of every month to generate "
+                "the previous month's company OKR report."
             ),
         },
     }

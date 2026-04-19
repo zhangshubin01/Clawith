@@ -1,12 +1,14 @@
 """OKR system models.
 
-Six tables powering the OKR feature:
-  - OKRObjective      : Company / user / agent level Objectives
-  - OKRKeyResult      : Key Results hanging under an Objective
-  - OKRAlignment      : Many-to-many alignment relationships between O/KRs
-  - OKRProgressLog    : Full history of KR progress changes
-  - WorkReport        : Daily / weekly work reports collected by the OKR Agent
-  - OKRSettings       : Per-tenant OKR feature configuration (single row)
+Core tables powering the OKR feature:
+  - OKRObjective        : Company / user / agent level Objectives
+  - OKRKeyResult        : Key Results hanging under an Objective
+  - OKRAlignment        : Many-to-many alignment relationships between O/KRs
+  - OKRProgressLog      : Full history of KR progress changes
+  - WorkReport          : Legacy daily / weekly work reports
+  - MemberDailyReport   : Member-level final daily submissions
+  - CompanyReport       : Company-level daily / weekly / monthly summaries
+  - OKRSettings         : Per-tenant OKR feature configuration (single row)
 """
 
 import uuid
@@ -231,6 +233,100 @@ class WorkReport(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class MemberDailyReport(Base):
+    """The final normalized daily report for a single member on a specific day.
+
+    The stored content is the OKR Agent's final distilled version, not the
+    member's raw chat transcript. Raw discussions remain in chat history.
+    """
+
+    __tablename__ = "member_daily_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    member_type: Mapped[str] = mapped_column(
+        String(20), nullable=False
+    )  # "user" | "agent"
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    report_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    content: Mapped[str] = mapped_column(
+        Text, nullable=False, default=""
+    )  # final concise report, target length <= 200 chars
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="submitted"
+    )  # submitted | late | revised | incomplete
+    source: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="okr_agent_assisted"
+    )  # okr_agent_assisted | manual
+    submitted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "member_type", "member_id", "report_date",
+            name="uq_member_daily_report",
+        ),
+    )
+
+
+class CompanyReport(Base):
+    """A company-level derived OKR report.
+
+    Reports are generated from lower-level data:
+      - daily   <- member_daily_reports
+      - weekly  <- company daily reports
+      - monthly <- company weekly reports
+    """
+
+    __tablename__ = "company_reports"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    report_type: Mapped[str] = mapped_column(
+        String(10), nullable=False
+    )  # daily | weekly | monthly
+    period_start: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    period_label: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    submitted_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    missing_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    needs_refresh: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "report_type", "period_start", "period_end",
+            name="uq_company_report_period",
+        ),
     )
 
 

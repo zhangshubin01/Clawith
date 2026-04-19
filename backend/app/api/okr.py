@@ -28,6 +28,8 @@ from sqlalchemy import select, delete
 from app.api.auth import get_current_user
 from app.database import async_session
 from app.models.okr import (
+    CompanyReport,
+    MemberDailyReport,
     OKRAlignment,
     OKRKeyResult,
     OKRObjective,
@@ -126,14 +128,12 @@ async def _sync_okr_report_triggers(db, settings: OKRSettings) -> None:
     except Exception:
         logger.warning(f"[OKR] Invalid daily_report_time {settings.daily_report_time}; using 18:00")
 
-    weekly_day = settings.weekly_report_day
-    cron_weekday = 0 if weekly_day == 6 else weekly_day + 1
-
     trigger_result = await db.execute(
         select(AgentTrigger).where(
             AgentTrigger.agent_id == settings.okr_agent_id,
             AgentTrigger.name.in_(
                 [
+                    "daily_okr_collection",
                     "daily_okr_report",
                     "weekly_okr_report",
                     "biweekly_okr_checkin",
@@ -144,23 +144,55 @@ async def _sync_okr_report_triggers(db, settings: OKRSettings) -> None:
     )
     triggers = {trigger.name: trigger for trigger in trigger_result.scalars().all()}
 
-    daily = triggers.get("daily_okr_report")
-    if daily:
-        daily.config = {"expr": f"{daily_minute} {daily_hour} * * *"}
-        daily.is_enabled = bool(settings.enabled and settings.daily_report_enabled)
-        daily.reason = (
-            "System trigger: daily OKR cycle. If daily reports are enabled, collect "
-            "progress from tracked members, update stale KRs, and generate the daily report."
-        )
+    def _ensure_trigger(name: str, *, config: dict, reason: str, is_enabled: bool) -> AgentTrigger:
+        trigger = triggers.get(name)
+        if trigger is None:
+            trigger = AgentTrigger(
+                agent_id=settings.okr_agent_id,
+                name=name,
+                type="cron",
+                config=config,
+                reason=reason,
+                cooldown_seconds=3600,
+                is_system=True,
+                is_enabled=is_enabled,
+            )
+            db.add(trigger)
+            triggers[name] = trigger
+            return trigger
+        trigger.config = config
+        trigger.reason = reason
+        trigger.is_enabled = is_enabled
+        return trigger
 
-    weekly = triggers.get("weekly_okr_report")
-    if weekly:
-        weekly.config = {"expr": f"0 9 * * {cron_weekday}"}
-        weekly.is_enabled = bool(settings.enabled and settings.weekly_report_enabled)
-        weekly.reason = (
-            "System trigger: weekly OKR cycle. If weekly reports are enabled, collect "
-            "progress from tracked members, update stale KRs, and generate the weekly report."
-        )
+    _ensure_trigger(
+        "daily_okr_collection",
+        config={"expr": f"{daily_minute} {daily_hour} * * *"},
+        is_enabled=bool(settings.enabled and settings.daily_report_enabled),
+        reason=(
+            "System trigger: daily OKR collection. When daily reporting is enabled, "
+            "the OKR Agent should collect each member's final daily update for today."
+        ),
+    )
+
+    _ensure_trigger(
+        "daily_okr_report",
+        config={"expr": "0 9 * * *"},
+        is_enabled=bool(settings.enabled),
+        reason=(
+            "System trigger: generate the company daily report at 09:00 for the previous day."
+        ),
+    )
+
+    _ensure_trigger(
+        "weekly_okr_report",
+        config={"expr": "0 9 * * 1"},
+        is_enabled=bool(settings.enabled),
+        reason=(
+            "System trigger: generate the company weekly report at 09:00 every Monday "
+            "for the previous week."
+        ),
+    )
 
     biweekly = triggers.get("biweekly_okr_checkin")
     if biweekly:
@@ -170,13 +202,15 @@ async def _sync_okr_report_triggers(db, settings: OKRSettings) -> None:
             "to perform the mandatory bi-weekly OKR check-in."
         )
 
-    monthly = triggers.get("monthly_okr_report")
-    if monthly:
-        monthly.is_enabled = bool(settings.enabled)
-        monthly.reason = (
-            "System trigger: fires on the 1st of every month at 08:00 to auto-generate "
-            "and deliver the previous month's OKR progress report to Admin."
-        )
+    _ensure_trigger(
+        "monthly_okr_report",
+        config={"expr": "0 9 1 * *"},
+        is_enabled=bool(settings.enabled),
+        reason=(
+            "System trigger: generate the company monthly report at 09:00 on the 1st "
+            "for the previous month."
+        ),
+    )
 
 
 def _compute_current_period(
@@ -374,14 +408,53 @@ class WorkReportOut(BaseModel):
     created_at: str
 
 
+class MemberDailyReportOut(BaseModel):
+    id: str
+    member_type: str
+    member_id: str
+    display_name: str
+    avatar_url: str | None = None
+    group_label: str
+    report_date: str
+    content: str
+    status: str
+    submitted_at: str | None = None
+    updated_at: str | None = None
+
+
+class MemberDailyReportUpsert(BaseModel):
+    report_date: str
+    content: str
+    member_type: str | None = None
+    member_id: str | None = None
+    source: str = "manual"
+
+
+class CompanyReportOut(BaseModel):
+    id: str
+    report_type: str
+    period_start: str
+    period_end: str
+    period_label: str
+    content: str
+    submitted_count: int
+    missing_count: int
+    needs_refresh: bool
+    generated_at: str
+    updated_at: str
+
+
+class CompanyReportRegenerate(BaseModel):
+    report_type: str
+    period_start: str
+
+
 # ─── Settings ─────────────────────────────────────────────────────────────────
 
 
 @router.get("/settings", response_model=OKRSettingsOut)
 async def get_okr_settings(user=Depends(get_current_user)):
     """Return OKR configuration for the current tenant."""
-    from app.models.agent import Agent
-
     async with async_session() as db:
         settings = await _get_or_create_settings(db, user.tenant_id)
 
@@ -395,8 +468,8 @@ async def get_okr_settings(user=Depends(get_current_user)):
             daily_report_enabled=settings.daily_report_enabled,
             daily_report_time=settings.daily_report_time,
             daily_report_skip_non_workdays=settings.daily_report_skip_non_workdays,
-            weekly_report_enabled=settings.weekly_report_enabled,
-            weekly_report_day=settings.weekly_report_day,
+            weekly_report_enabled=False,
+            weekly_report_day=0,
             period_frequency=settings.period_frequency,
             period_length_days=settings.period_length_days,
             period_frequency_locked=settings.first_enabled_at is not None,
@@ -436,14 +509,14 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
             settings.daily_report_time = body.daily_report_time
         if body.daily_report_skip_non_workdays is not None:
             settings.daily_report_skip_non_workdays = body.daily_report_skip_non_workdays
-        if body.weekly_report_enabled is not None:
-            settings.weekly_report_enabled = body.weekly_report_enabled
-        if body.weekly_report_day is not None:
-            settings.weekly_report_day = body.weekly_report_day
         if body.period_frequency is not None:
             settings.period_frequency = body.period_frequency
         if body.period_length_days is not None:
             settings.period_length_days = body.period_length_days
+
+        # Member reporting is daily-only in the redesigned OKR workflow.
+        settings.weekly_report_enabled = False
+        settings.weekly_report_day = 0
 
         if body.enabled is True and settings.first_enabled_at is None:
             settings.first_enabled_at = datetime.now(timezone.utc)
@@ -474,8 +547,8 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
             daily_report_enabled=settings.daily_report_enabled,
             daily_report_time=settings.daily_report_time,
             daily_report_skip_non_workdays=settings.daily_report_skip_non_workdays,
-            weekly_report_enabled=settings.weekly_report_enabled,
-            weekly_report_day=settings.weekly_report_day,
+            weekly_report_enabled=False,
+            weekly_report_day=0,
             period_frequency=settings.period_frequency,
             period_length_days=settings.period_length_days,
             period_frequency_locked=settings.first_enabled_at is not None,
@@ -1051,6 +1124,142 @@ async def delete_key_result(
 
 
 # ─── Reports ──────────────────────────────────────────────────────────────────
+
+
+def _serialize_company_report(report: CompanyReport) -> CompanyReportOut:
+    return CompanyReportOut(
+        id=str(report.id),
+        report_type=report.report_type,
+        period_start=report.period_start.isoformat(),
+        period_end=report.period_end.isoformat(),
+        period_label=report.period_label,
+        content=report.content,
+        submitted_count=report.submitted_count,
+        missing_count=report.missing_count,
+        needs_refresh=report.needs_refresh,
+        generated_at=report.generated_at.isoformat() if report.generated_at else "",
+        updated_at=report.updated_at.isoformat() if report.updated_at else "",
+    )
+
+
+@router.get("/member-daily-reports", response_model=list[MemberDailyReportOut])
+async def list_member_daily_reports(
+    report_date: str | None = None,
+    user=Depends(get_current_user),
+):
+    """List all member daily reports for a specific date plus missing members."""
+    from app.services.okr_reporting import list_member_daily_reports_for_date
+
+    target_day = date.fromisoformat(report_date) if report_date else date.today()
+    items = await list_member_daily_reports_for_date(user.tenant_id, target_day)
+    return [
+        MemberDailyReportOut(
+            id=f"{item['member_type']}:{item['member_id']}:{target_day.isoformat()}",
+            member_type=item["member_type"],
+            member_id=item["member_id"],
+            display_name=item["display_name"],
+            avatar_url=item["avatar_url"],
+            group_label=item["group_label"],
+            report_date=target_day.isoformat(),
+            content=item["content"],
+            status=item["status"],
+            submitted_at=item["submitted_at"],
+            updated_at=item["updated_at"],
+        )
+        for item in items
+    ]
+
+
+@router.post("/member-daily-reports", response_model=MemberDailyReportOut)
+async def upsert_member_daily_report(
+    body: MemberDailyReportUpsert,
+    user=Depends(get_current_user),
+):
+    """Create or update a member daily report.
+
+    Regular members can only edit their own user report.
+    Org admins and platform admins may specify a tenant member explicitly.
+    """
+    from app.services.okr_reporting import list_company_members, upsert_member_daily_report as _upsert
+
+    target_member_type = body.member_type or "user"
+    if body.member_id:
+        target_member_id = uuid.UUID(body.member_id)
+    else:
+        target_member_id = user.id
+
+    if getattr(user, "role", None) not in ("org_admin", "platform_admin"):
+        if target_member_type != "user" or target_member_id != user.id:
+            raise HTTPException(403, "You can only submit your own daily report")
+
+    report_date = date.fromisoformat(body.report_date)
+    report = await _upsert(
+        tenant_id=user.tenant_id,
+        member_type=target_member_type,
+        member_id=target_member_id,
+        report_date=report_date,
+        content=body.content,
+        source=body.source,
+    )
+    member_map = {
+        (member.member_type, str(member.member_id)): member
+        for member in await list_company_members(user.tenant_id)
+    }
+    member_meta = member_map.get((report.member_type, str(report.member_id)))
+    return MemberDailyReportOut(
+        id=str(report.id),
+        member_type=report.member_type,
+        member_id=str(report.member_id),
+        display_name=member_meta.display_name if member_meta else str(report.member_id),
+        avatar_url=member_meta.avatar_url if member_meta else None,
+        group_label=member_meta.group_label if member_meta else "Members",
+        report_date=report.report_date.isoformat(),
+        content=report.content,
+        status=report.status,
+        submitted_at=report.submitted_at.isoformat() if report.submitted_at else None,
+        updated_at=report.updated_at.isoformat() if report.updated_at else None,
+    )
+
+
+@router.get("/company-reports", response_model=list[CompanyReportOut])
+async def list_company_reports_api(
+    report_type: str | None = None,
+    limit: int = 50,
+    user=Depends(get_current_user),
+):
+    """List company-level reports from the new reporting pipeline."""
+    from app.services.okr_reporting import list_company_reports
+
+    reports = await list_company_reports(user.tenant_id, report_type=report_type, limit=limit)
+    return [_serialize_company_report(report) for report in reports]
+
+
+@router.post("/company-reports/regenerate", response_model=CompanyReportOut)
+async def regenerate_company_report(
+    body: CompanyReportRegenerate,
+    user=Depends(get_current_user),
+):
+    """Rebuild a single company report for a target period."""
+    if getattr(user, "role", None) not in ("org_admin", "platform_admin"):
+        raise HTTPException(403, "Only org admins can regenerate company reports")
+
+    from app.services.okr_reporting import (
+        generate_company_daily_report,
+        generate_company_monthly_report,
+        generate_company_weekly_report,
+    )
+
+    period_start = date.fromisoformat(body.period_start)
+    if body.report_type == "daily":
+        report = await generate_company_daily_report(user.tenant_id, period_start)
+    elif body.report_type == "weekly":
+        report = await generate_company_weekly_report(user.tenant_id, period_start)
+    elif body.report_type == "monthly":
+        report = await generate_company_monthly_report(user.tenant_id, period_start)
+    else:
+        raise HTTPException(400, "Invalid report_type")
+
+    return _serialize_company_report(report)
 
 
 @router.get("/reports", response_model=list[WorkReportOut])
