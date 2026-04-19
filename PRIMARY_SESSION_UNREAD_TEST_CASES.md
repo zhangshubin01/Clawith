@@ -1,324 +1,326 @@
-# Agent Primary Session & Unread Test Cases
+# 主会话与未读消息测试用例
 
-This document covers the first-phase behavior for:
+本文档用于验证以下第一阶段能力：
 
-- primary platform sessions (`is_primary`)
-- proactive agent-to-user platform messaging
-- agent list unread badges
-- session list unread badges
-- temporary user-created sessions
-- migration and upgrade safety
+- 主平台会话（`is_primary`）
+- Agent 主动给网页用户发消息
+- Agent 列表未读红点
+- 会话列表未读红点
+- 用户手动新建的临时会话
+- 升级迁移与兼容性
 
-Environment assumptions:
+环境假设：
 
-- backend branch: `release`
-- tenant: any tenant with at least one web user and one agent
-- current platform channel name remains `web`
+- 分支：`release`
+- 租户中至少有一个网页用户和一个 Agent
+- 当前平台内一方会话的 `source_channel` 仍为 `web`
 
-## 1. Migration and Backfill
+## 一、迁移与回填
 
-### TC-01: Existing platform sessions elect one primary session
+### TC-01：已有平台会话会自动选出一条主会话
 
-Preconditions:
+前置条件：
 
-- One user already has multiple `web` chat sessions with the same agent.
-- At least one session contains user-authored messages.
+- 同一个用户和同一个 Agent 之间已经存在多条 `web` 会话
+- 其中至少一条会话包含用户自己发过的消息
 
-Steps:
+步骤：
 
-1. Upgrade database with the new migration.
-2. Inspect `chat_sessions` for that `agent_id + user_id + source_channel='web'`.
+1. 执行数据库迁移
+2. 检查该 `agent_id + user_id + source_channel='web'` 下的 `chat_sessions`
 
-Expected:
+预期结果：
 
-- Exactly one row has `is_primary = true`.
-- The elected row prefers a session that already contains user messages.
-- Other sessions remain `is_primary = false`.
+- 只有一条记录满足 `is_primary = true`
+- 被选中的主会话优先是“真正有用户参与过”的那条会话
+- 其他会话保持 `is_primary = false`
 
-### TC-02: Existing sessions do not become unread after upgrade
+### TC-02：升级后老会话不会全部变成未读
 
-Preconditions:
+前置条件：
 
-- Database contains old sessions created before this feature.
+- 数据库里已经有升级前创建的老会话
 
-Steps:
+步骤：
 
-1. Run migration.
-2. Open agent list and session list as the session owner.
+1. 执行迁移
+2. 用会话所属用户打开 Agent 列表和会话列表
 
-Expected:
+预期结果：
 
-- Existing sessions do not all suddenly show unread badges.
-- `last_read_at_by_user` is backfilled so old messages are treated as already read.
+- 不会出现所有历史会话突然都显示未读
+- `last_read_at_by_user` 已回填，旧消息默认视为已读
 
-## 2. Primary Session Routing
+## 二、主会话路由
 
-### TC-03: Agent proactive platform message reuses primary session
+### TC-03：Agent 主动发平台消息时复用主会话
 
-Preconditions:
+前置条件：
 
-- A user already has a primary `web` session with an agent.
+- 用户与某个 Agent 已经存在一条主平台会话
 
-Steps:
+步骤：
 
-1. Trigger a proactive platform message from the agent to that user.
-2. Inspect created `chat_messages`.
-3. Refresh the agent detail chat session list.
+1. 触发该 Agent 主动给该用户发一条平台内消息
+2. 检查新生成的 `chat_messages`
+3. 刷新 Agent 详情页中的会话列表
 
-Expected:
+预期结果：
 
-- No new `web` session is created.
-- The new assistant message is appended to the primary session.
-- The primary session appears in `My Sessions`.
+- 不会新建一条新的 `web` 会话
+- 新消息会落到已有主会话中
+- 这条主会话出现在 `My Sessions`
 
-### TC-04: Agent proactive platform message lazily creates primary session
+### TC-04：Agent 第一次主动联系用户时懒创建主会话
 
-Preconditions:
+前置条件：
 
-- A user has never talked to the agent on-platform.
+- 该用户此前从未和该 Agent 在平台内对话过
 
-Steps:
+步骤：
 
-1. Trigger a proactive platform message from the agent to that user.
-2. Inspect `chat_sessions`.
+1. 触发 Agent 主动给该用户发第一条平台内消息
+2. 检查 `chat_sessions`
 
-Expected:
+预期结果：
 
-- A new `web` session is created.
-- The session has `is_primary = true`.
-- The proactive message lands in that session.
+- 新建一条 `web` 会话
+- 这条会话满足 `is_primary = true`
+- 主动消息落到该会话中
 
-### TC-05: User-created temporary session is not marked primary
+### TC-05：用户手动新建的会话不会被设成主会话
 
-Preconditions:
+前置条件：
 
-- User can access an agent chat page.
+- 用户可以进入某个 Agent 的聊天页
 
-Steps:
+步骤：
 
-1. Click "New Session".
-2. Inspect the newly created session.
+1. 点击“新会话”
+2. 检查新建出来的 session
 
-Expected:
+预期结果：
 
-- The new session has `is_primary = false`.
-- It is treated as a temporary side-topic session.
+- 新会话的 `is_primary = false`
+- 它被视为临时短话题会话
 
-## 3. WebSocket Session Resolution
+## 三、WebSocket 会话解析
 
-### TC-06: Opening chat without session_id lands in primary session
+### TC-06：不带 `session_id` 打开聊天页时，默认进入主会话
 
-Preconditions:
+前置条件：
 
-- User already has a primary platform session with an agent.
+- 用户与该 Agent 已存在一条主平台会话
 
-Steps:
+步骤：
 
-1. Open the agent chat page without manually selecting a session.
-2. Watch the websocket `connected` payload.
+1. 直接打开该 Agent 的聊天页面，不手动选某个会话
+2. 观察 websocket 返回的 `connected.session_id`
 
-Expected:
+预期结果：
 
-- The returned `session_id` is the primary platform session.
+- 返回的是这条主平台会话的 `session_id`
 
-### TC-07: Opening chat with explicit session_id still respects chosen temporary session
+### TC-07：显式切换到临时会话后，仍然可以正常使用临时会话
 
-Preconditions:
+前置条件：
 
-- User has one primary session and one temporary session.
+- 用户同时有一条主会话和一条临时会话
 
-Steps:
+步骤：
 
-1. Click the temporary session in the session list.
-2. Confirm the frontend reconnects to that session.
+1. 在会话列表中点击临时会话
+2. 确认前端切换并重新加载历史消息
 
-Expected:
+预期结果：
 
-- Chat history loads from the chosen temporary session.
-- The system does not forcibly switch back to the primary session.
+- 当前聊天上下文切换到用户选中的临时会话
+- 系统不会强行跳回主会话
 
-## 4. Unread Badges
+## 四、未读消息
 
-### TC-08: Proactive agent message creates unread badge in agent list
+### TC-08：Agent 主动发消息后，Agent 列表出现未读红点
 
-Preconditions:
+前置条件：
 
-- User is logged in and has access to an agent.
-- No unread items currently exist for that agent.
+- 用户已登录
+- 当前该 Agent 没有未读
 
-Steps:
+步骤：
 
-1. Agent sends a proactive platform message to the user.
-2. Do not open the session yet.
-3. Observe the left sidebar agent list.
+1. 让 Agent 主动给该用户发一条平台消息
+2. 暂时不要打开该会话
+3. 观察左侧 Agent 列表
 
-Expected:
+预期结果：
 
-- The corresponding agent shows an unread badge.
-- Badge count increases from zero.
+- 对应 Agent 出现未读红点/数字
+- 未读数从 0 增加
 
-### TC-09: Proactive agent message creates unread badge in session list
+### TC-09：Agent 主动发消息后，会话列表出现未读红点
 
-Preconditions:
+前置条件：
 
-- Same as TC-08.
+- 同 TC-08
 
-Steps:
+步骤：
 
-1. Navigate to the agent detail page.
-2. Open `My Sessions`.
+1. 打开该 Agent 的详情页
+2. 查看 `My Sessions`
 
-Expected:
+预期结果：
 
-- The target session shows an unread badge.
-- Assistant-only sessions are visible even if the user has not replied yet.
+- 对应会话显示未读红点/数字
+- 即使用户还没有回复，这条只有 Agent 消息的会话也应该可见
 
-### TC-10: Opening the session clears unread badges
+### TC-10：打开会话后，未读红点立即清除
 
-Preconditions:
+前置条件：
 
-- An unread session exists for the current user.
+- 当前用户存在一条未读会话
 
-Steps:
+步骤：
 
-1. Click the unread session.
-2. Wait for messages to load.
-3. Observe session list and agent list.
+1. 点击这条未读会话
+2. 等待消息加载完成
+3. 观察会话列表与 Agent 列表
 
-Expected:
+预期结果：
 
-- The session unread badge becomes zero immediately.
-- The agent sidebar unread badge also clears or decreases accordingly.
-- Backend updates `last_read_at_by_user`.
+- 该会话的未读红点立刻归零
+- Agent 列表中的未读也同步减少或消失
+- 后端会更新 `last_read_at_by_user`
 
-### TC-11: Reading one session does not clear unread in another session
+### TC-11：只打开一条会话，不会误清除另一条会话的未读
 
-Preconditions:
+前置条件：
 
-- Two sessions under the same agent both contain unread assistant messages.
+- 同一 Agent 下有两条不同会话都包含未读消息
 
-Steps:
+步骤：
 
-1. Open only one of the sessions.
-2. Re-check the list.
+1. 只打开其中一条会话
+2. 再查看列表
 
-Expected:
+预期结果：
 
-- The opened session clears.
-- The other session still shows unread.
-- Agent-level unread count reflects the remaining unread messages.
+- 被打开的会话未读清除
+- 另一条会话仍然保持未读
+- Agent 级未读数反映剩余未读总量
 
-## 5. My Sessions vs Other Users
+## 五、My Sessions / Other users
 
-### TC-12: Agent-initiated session with only assistant messages appears in My Sessions
+### TC-12：只有 Agent 主动消息、用户还没回复的会话，也会出现在 My Sessions
 
-Preconditions:
+前置条件：
 
-- Agent has proactively contacted the current user on-platform.
-- The user has not replied yet.
+- Agent 已主动联系当前用户
+- 用户还没有回复
 
-Steps:
+步骤：
 
-1. Open the agent detail page.
-2. Inspect `My Sessions`.
+1. 打开 Agent 详情页
+2. 查看 `My Sessions`
 
-Expected:
+预期结果：
 
-- The proactive session is listed in `My Sessions`.
-- It does not disappear just because `user_msg_count == 0`.
+- 这条主动会话会出现在 `My Sessions`
+- 不会因为 `user_msg_count == 0` 被隐藏
 
-### TC-13: Sessions belonging to other humans still stay under Other users
+### TC-13：真正属于别人的会话仍然留在 Other users
 
-Preconditions:
+前置条件：
 
-- Current viewer is an admin who can inspect all sessions.
+- 当前查看者是管理员，可查看该 Agent 的所有会话
 
-Steps:
+步骤：
 
-1. Open `Other users`.
-2. Compare with `My Sessions`.
+1. 打开 `Other users`
+2. 与 `My Sessions` 对照查看
 
-Expected:
+预期结果：
 
-- Sessions owned by the current user stay in `My Sessions`.
-- Sessions owned by different users stay in `Other users`.
+- 当前登录用户自己的会话仍在 `My Sessions`
+- 其他人的会话仍在 `Other users`
 
-## 6. Multi-Account Behavior
+## 六、多账户场景
 
-### TC-14: Channel sessions already attributed to current user remain separate but count as mine
+### TC-14：已归属于当前用户的渠道会话，仍然独立，但应算作“我的会话”
 
-Preconditions:
+前置条件：
 
-- Current user has a platform account and a linked channel identity.
-- There is at least one channel session already tied to the same `user_id`.
+- 当前用户同时有平台账号和已绑定的渠道身份
+- 已存在至少一条绑定到该 `user_id` 的渠道会话
 
-Steps:
+步骤：
 
-1. Open the agent detail page.
-2. Inspect `My Sessions` and `Other users`.
+1. 打开 Agent 详情页
+2. 同时观察 `My Sessions` 和 `Other users`
 
-Expected:
+预期结果：
 
-- The channel session is shown in `My Sessions`.
-- It is not physically merged with the platform session.
-- It does not appear in `Other users`.
+- 这条渠道会话出现在 `My Sessions`
+- 它不会和平台会话物理合并
+- 它不应再出现在 `Other users`
 
-## 7. Upgrade Safety
+## 七、升级安全性
 
-### TC-15: Unique primary constraint prevents duplicate primary sessions
+### TC-15：主会话唯一约束生效，不允许出现两条主平台会话
 
-Preconditions:
+前置条件：
 
-- Database upgraded with the new migration.
+- 数据库已经完成迁移
 
-Steps:
+步骤：
 
-1. Attempt to mark two `web` sessions for the same `agent_id + user_id` as `is_primary=true`.
+1. 人工尝试把同一个 `agent_id + user_id` 下两条 `web` 会话都改成 `is_primary=true`
 
-Expected:
+预期结果：
 
-- Database rejects the second conflicting write.
-- At most one primary platform session exists per `agent + user`.
+- 数据库拒绝第二次冲突写入
+- 任意时刻同一个 `agent + user` 最多只有一条主平台会话
 
-### TC-16: Non-web sessions are unaffected by primary constraint
+### TC-16：非 web 会话不受主会话唯一约束影响
 
-Preconditions:
+前置条件：
 
-- Same agent/user pair also has channel sessions (for example `feishu`).
+- 同一 `agent + user` 还存在渠道会话，例如 `feishu`
 
-Steps:
+步骤：
 
-1. Inspect non-web sessions after migration.
+1. 检查这些非 web 会话在迁移后的状态
 
-Expected:
+预期结果：
 
-- Non-web sessions remain valid.
-- The primary uniqueness rule only affects `source_channel='web' AND is_group=false`.
+- 非 web 会话继续正常存在
+- 主会话唯一约束只约束：
+  - `source_channel='web'`
+  - `is_group=false`
 
-## 8. Manual Regression Checks
+## 八、手工回归
 
-### TC-17: Existing features still work
+### TC-17：原有会话能力不回归
 
-Steps:
+步骤：
 
-1. Create a new manual session.
-2. Rename a session.
-3. Delete a session.
-4. Send a normal chat message through websocket.
+1. 新建一条临时会话
+2. 重命名某条会话
+3. 删除某条会话
+4. 通过 websocket 正常发一条聊天消息
 
-Expected:
+预期结果：
 
-- Existing session management behavior still works.
-- No regression in normal chat send/receive flow.
+- 原有的会话管理能力仍然可用
+- 正常聊天收发流程没有被破坏
 
-### TC-18: Trigger notifications still reach the correct live user
+### TC-18：主动通知只推送给正确的在线用户
 
-Steps:
+步骤：
 
-1. Trigger an agent-side proactive message while the target user is online.
-2. Confirm a websocket notification appears only for that user's live sessions.
+1. 在目标用户在线时，触发 Agent 主动发平台消息
+2. 同时确认其他用户也可能正连接着同一个 Agent
 
-Expected:
+预期结果：
 
-- Only the intended user's connections receive the proactive notification.
-- Other users connected to the same agent do not receive it.
+- 只有目标用户自己的 websocket 连接收到这条通知
+- 其他连接到同一 Agent 的用户不会误收到
