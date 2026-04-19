@@ -541,7 +541,8 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 if t.name == "daily_okr_collection":
                     part += (
                         "\n执行要求：先调用 get_okr_settings 确认日报收集是否开启。"
-                        "如果开启，主动联系相关成员收集今天的最终日报，并整理成不超过 200 字的正式日报；"
+                        "如果开启，只能联系你关系网络中的成员和数字员工来收集今天的最终日报，"
+                        "并整理成不超过 200 字的正式日报；"
                         "如果未开启，则说明本次无需执行并停止。"
                     )
                 elif t.name in ("daily_okr_report", "weekly_okr_report", "monthly_okr_report"):
