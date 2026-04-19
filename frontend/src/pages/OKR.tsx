@@ -951,7 +951,17 @@ export default function OKR() {
                     </div>
                 </div>
 
-                <div style={{ display: 'flex', background: 'var(--bg-secondary)', padding: '2px', borderRadius: '8px', justifySelf: 'center' }}>
+                <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    height: 38,
+                    background: 'var(--bg-secondary)',
+                    padding: '2px',
+                    borderRadius: '8px',
+                    justifySelf: 'center',
+                    alignSelf: 'start',
+                    marginTop: '2px',
+                }}>
                     <button
                         onClick={() => setActiveTab('dashboards')}
                         style={{
@@ -978,7 +988,15 @@ export default function OKR() {
                     </button>
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '12px', flexWrap: 'wrap' }}>
+                <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'flex-end',
+                    gap: '12px',
+                    flexWrap: 'wrap',
+                    minHeight: 38,
+                    alignSelf: 'start',
+                }}>
                 {activeTab === 'dashboards' && (
                     <>
                     {/* Period Selector */}
