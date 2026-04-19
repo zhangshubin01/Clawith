@@ -1564,7 +1564,7 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
                                     }}
                                 >
                                     <button
-                                        onClick={() => setExpandedCompanyReportId(expanded ? null : report.id)}
+                                        onClick={() => setExpandedCompanyReportId(report.id)}
                                         style={{
                                             width: '100%',
                                             textAlign: 'left',
