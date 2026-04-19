@@ -1613,6 +1613,52 @@ BUILTIN_TOOLS = [
         "config": {"okr_agent_only": True},
         "config_schema": {},
     },
+    {
+        # upsert_member_daily_report — OKR Agent exclusive: create or revise a member daily report.
+        "name": "upsert_member_daily_report",
+        "display_name": "Upsert Member Daily Report",
+        "description": (
+            "Create or update the final normalized daily report for any member in the company. "
+            "Use this after discussing progress with the member and distilling their update into "
+            "one concise final report. The stored content should stay within 200 characters."
+        ),
+        "category": "okr",
+        "icon": "📝",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "report_date": {
+                    "type": "string",
+                    "description": "Report date in YYYY-MM-DD format.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Final concise daily report content. Keep it within 200 characters.",
+                },
+                "member_type": {
+                    "type": "string",
+                    "enum": ["user", "agent"],
+                    "description": "Member type. Defaults to user if omitted.",
+                },
+                "member_id": {
+                    "type": "string",
+                    "description": "UUID of the member. Preferred when available.",
+                },
+                "member_name": {
+                    "type": "string",
+                    "description": "Member display name. Use when you do not have the UUID.",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Optional source tag such as okr_agent_assisted or manual.",
+                },
+            },
+            "required": ["report_date", "content"],
+        },
+        "config": {"okr_agent_only": True},
+        "config_schema": {},
+    },
     # --- Feishu Integration Tools ---
     # These tools require a configured Feishu channel to function.
     # They are NOT enabled by default — agents with Feishu channels should enable them.

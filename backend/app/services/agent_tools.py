@@ -2514,6 +2514,8 @@ async def execute_tool(
         # generate_monthly_okr_report: produce the monthly summary report
         elif tool_name == "generate_monthly_okr_report":
             result = await _generate_monthly_okr_report(agent_id)
+        elif tool_name == "upsert_member_daily_report":
+            result = await _upsert_member_daily_report(agent_id, arguments)
         else:
 
             # Try MCP tool execution
@@ -10786,3 +10788,108 @@ async def _update_any_kr_progress(agent_id: uuid.UUID | None, arguments: dict) -
     except Exception as e:
         logger.exception(f"[OKR] update_any_kr_progress failed")
         return f"Failed to update kr progress: {str(e)[:200]}"
+
+
+async def _upsert_member_daily_report(agent_id: uuid.UUID | None, arguments: dict) -> str:
+    """OKR Agent exclusive tool for creating or revising a member daily report."""
+    if not agent_id:
+        return "OKR tools require agent context."
+
+    try:
+        from datetime import date as date_cls
+        from app.models.agent import Agent as AgentModel
+        from app.models.okr import MemberDailyReport
+        from app.services.okr_reporting import list_company_members, upsert_member_daily_report as _upsert
+
+        report_date_raw = arguments.get("report_date")
+        content = (arguments.get("content") or "").strip()
+        member_type = arguments.get("member_type") or "user"
+        member_id_raw = arguments.get("member_id")
+        member_name = (arguments.get("member_name") or "").strip()
+        source = (arguments.get("source") or "okr_agent_assisted").strip() or "okr_agent_assisted"
+
+        if not report_date_raw or not content:
+            return "Missing report_date or content"
+
+        try:
+            report_date = date_cls.fromisoformat(report_date_raw)
+        except ValueError:
+            return "Invalid report_date format. Use YYYY-MM-DD."
+
+        async with async_session() as db:
+            ag_res = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            ag = ag_res.scalar_one_or_none()
+            if not ag:
+                return "Agent not found."
+            if not ag.is_system:
+                return "Permission denied: only the OKR Agent can upsert member daily reports."
+
+            target_member_id: uuid.UUID | None = None
+            if member_id_raw:
+                try:
+                    target_member_id = uuid.UUID(member_id_raw)
+                except ValueError:
+                    return "Invalid member_id format. Use a UUID."
+
+            if not target_member_id:
+                if not member_name:
+                    return "Provide either member_id or member_name."
+                members = await list_company_members(ag.tenant_id)
+                lowered = member_name.casefold()
+                exact_matches = [
+                    member for member in members
+                    if member.member_type == member_type and member.display_name.casefold() == lowered
+                ]
+                if len(exact_matches) == 1:
+                    target_member_id = exact_matches[0].member_id
+                    member_name = exact_matches[0].display_name
+                elif len(exact_matches) > 1:
+                    return f"Multiple {member_type} members matched '{member_name}'. Please provide member_id."
+                else:
+                    fuzzy_matches = [
+                        member for member in members
+                        if member.member_type == member_type and lowered in member.display_name.casefold()
+                    ]
+                    if len(fuzzy_matches) == 1:
+                        target_member_id = fuzzy_matches[0].member_id
+                        member_name = fuzzy_matches[0].display_name
+                    elif len(fuzzy_matches) > 1:
+                        options = ", ".join(member.display_name for member in fuzzy_matches[:5])
+                        return f"Multiple {member_type} members matched '{member_name}': {options}. Please provide member_id."
+                    else:
+                        return f"No {member_type} member matched '{member_name}'."
+
+            existing_res = await db.execute(
+                select(MemberDailyReport).where(
+                    MemberDailyReport.tenant_id == ag.tenant_id,
+                    MemberDailyReport.member_type == member_type,
+                    MemberDailyReport.member_id == target_member_id,
+                    MemberDailyReport.report_date == report_date,
+                )
+            )
+            existing = existing_res.scalar_one_or_none()
+            previous_content = existing.content if existing else ""
+
+        report = await _upsert(
+            tenant_id=ag.tenant_id,
+            member_type=member_type,
+            member_id=target_member_id,
+            report_date=report_date,
+            content=content,
+            source=source,
+        )
+
+        resolved_name = member_name or str(target_member_id)
+        action = "Updated" if previous_content else "Created"
+        details = [
+            f"{action} daily report for {resolved_name} on {report.report_date.isoformat()}.",
+            f"Stored length: {len(report.content)} characters.",
+            f"Status: {report.status}.",
+        ]
+        if previous_content:
+            details.append(f"Previous content: {previous_content}")
+        details.append(f"Current content: {report.content}")
+        return " ".join(details)
+    except Exception as e:
+        logger.exception("[OKR] upsert_member_daily_report failed")
+        return f"Failed to upsert member daily report: {str(e)[:200]}"

@@ -539,6 +539,7 @@ async def seed_okr_agent():
             "create_key_result",
             "update_objective",
             "update_any_kr_progress",
+            "upsert_member_daily_report",
         ]
         for tool_name in okr_tool_names:
             tool_result = await db.execute(select(Tool).where(Tool.name == tool_name))
@@ -812,6 +813,7 @@ async def patch_existing_okr_agent() -> None:
             "get_okr", "get_my_okr", "update_kr_progress",
             "collect_okr_progress", "generate_okr_report", "get_okr_settings",
             "create_objective", "create_key_result", "update_objective", "update_any_kr_progress",
+            "upsert_member_daily_report",
             "generate_monthly_okr_report",  # P3: monthly report tool added
         ]
         for tool_name in all_okr_tools:
@@ -955,7 +957,7 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
             "get_okr", "get_my_okr", "update_kr_progress",
             "collect_okr_progress", "generate_okr_report", "get_okr_settings",
             "create_objective", "create_key_result", "update_objective",
-            "update_any_kr_progress", "generate_monthly_okr_report",
+            "update_any_kr_progress", "upsert_member_daily_report", "generate_monthly_okr_report",
         ]
         for tool_name in okr_tool_names:
             tool_res = await db.execute(select(Tool).where(Tool.name == tool_name))
