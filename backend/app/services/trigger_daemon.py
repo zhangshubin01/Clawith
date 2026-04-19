@@ -155,6 +155,31 @@ async def _handle_okr_report_trigger(trigger: AgentTrigger, now: datetime) -> bo
     logger.info(f"[Trigger] Auto-generated OKR report for trigger {trigger.name}")
     return True
 
+
+async def _handle_okr_collection_trigger(trigger: AgentTrigger, now: datetime) -> bool:
+    """Handle deterministic OKR daily collection without relying on a free-form LLM plan."""
+    if trigger.name != "daily_okr_collection":
+        return False
+
+    from app.models.okr import OKRSettings
+    from app.services.okr_daily_collection import trigger_daily_collection_for_tenant
+
+    async with async_session() as db:
+        agent_result = await db.execute(select(Agent.tenant_id).where(Agent.id == trigger.agent_id))
+        tenant_id = agent_result.scalar_one_or_none()
+        if not tenant_id:
+            return True
+
+        settings_result = await db.execute(select(OKRSettings).where(OKRSettings.tenant_id == tenant_id))
+        settings = settings_result.scalar_one_or_none()
+        if not settings or not settings.enabled or not settings.daily_report_enabled:
+            return True
+
+    await trigger_daily_collection_for_tenant(tenant_id)
+    await _mark_trigger_fired(trigger.id, now)
+    logger.info(f"[Trigger] Deterministic OKR collection sent for trigger {trigger.name}")
+    return True
+
 # Webhook rate limiter: token -> list of timestamps
 _webhook_hits: dict[str, list[float]] = {}
 WEBHOOK_RATE_LIMIT = 5   # max hits per minute per token
@@ -467,21 +492,25 @@ async def _check_new_agent_messages(trigger: AgentTrigger) -> bool:
                         ).where(
                             ChatSession.agent_id == trigger.agent_id,
                             ChatSession.user_id == target_user.id,
-                            ChatSession.source_channel.in_(["feishu", "slack", "discord"]),
+                            ChatSession.source_channel.in_(["feishu", "slack", "discord", "web"]),
                             ChatMessage.role == "user",
                             ChatMessage.created_at > since,
                         ).order_by(ChatMessage.created_at.desc()).limit(1)
                     )
                 else:
-                    # Fallback: search by message content or session title containing the name
+                    # Fallback: search by session title or message content containing the target name
                     result = await db.execute(
                         select(ChatMessage).join(
                             ChatSession, ChatMessage.conversation_id == sa_cast(ChatSession.id, SaString)
                         ).where(
                             ChatSession.agent_id == trigger.agent_id,
-                            ChatSession.source_channel.in_(["feishu", "slack", "discord"]),
+                            ChatSession.source_channel.in_(["feishu", "slack", "discord", "web"]),
                             ChatMessage.role == "user",
                             ChatMessage.created_at > since,
+                            or_(
+                                ChatSession.title.ilike(f"%{safe_user_name}%"),
+                                ChatMessage.content.ilike(f"%{safe_user_name}%"),
+                            ),
                         ).order_by(ChatMessage.created_at.desc()).limit(1)
                     )
 
@@ -568,6 +597,16 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 cfg = t.config or {}
                 if t.type == "on_message" and cfg.get("_matched_message"):
                     part += f"\n收到来自 {cfg.get('_matched_from', '?')} 的消息：\n\"{cfg['_matched_message'][:500]}\""
+                if t.type == "on_message" and cfg.get("okr_member_id") and cfg.get("okr_report_date"):
+                    part += (
+                        "\n执行要求：这是一次日报回复入库事件。"
+                        f"\n1. 将对方回复整理成一段不超过 200 字的最终日报。"
+                        f"\n2. 立即调用 upsert_member_daily_report(report_date=\"{cfg['okr_report_date']}\", "
+                        f"member_type=\"{cfg.get('okr_member_type', 'user')}\", "
+                        f"member_id=\"{cfg['okr_member_id']}\", content=\"<整理后的日报>\")。"
+                        "\n3. 工具调用成功后，再发送一句简短确认，明确你已收到并已记录。"
+                        "\n4. 不要只回复确认而不调用工具，也不要把原始长对话原样存入日报。"
+                    )
                 # Include webhook payload
                 if t.type == "webhook" and cfg.get("_webhook_payload"):
                     payload_str = cfg["_webhook_payload"]
@@ -881,6 +920,8 @@ async def _tick():
         try:
             if await _evaluate_trigger(trigger, now):
                 handled = await _handle_okr_report_trigger(trigger, now)
+                if not handled:
+                    handled = await _handle_okr_collection_trigger(trigger, now)
                 if not handled:
                     fired_by_agent.setdefault(trigger.agent_id, []).append(trigger)
         except Exception as e:

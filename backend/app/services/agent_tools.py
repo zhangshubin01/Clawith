@@ -10799,7 +10799,10 @@ async def _upsert_member_daily_report(agent_id: uuid.UUID | None, arguments: dic
         from datetime import date as date_cls
         from app.models.agent import Agent as AgentModel
         from app.models.okr import MemberDailyReport
-        from app.services.okr_reporting import list_company_members, upsert_member_daily_report as _upsert
+        from app.services.okr_reporting import (
+            list_tracked_okr_members,
+            upsert_member_daily_report as _upsert,
+        )
 
         report_date_raw = arguments.get("report_date")
         content = (arguments.get("content") or "").strip()
@@ -10834,7 +10837,7 @@ async def _upsert_member_daily_report(agent_id: uuid.UUID | None, arguments: dic
             if not target_member_id:
                 if not member_name:
                     return "Provide either member_id or member_name."
-                members = await list_company_members(ag.tenant_id)
+                members = await list_tracked_okr_members(ag.tenant_id)
                 lowered = member_name.casefold()
                 exact_matches = [
                     member for member in members

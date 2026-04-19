@@ -11,7 +11,7 @@
  *   - Disabled state: guide panel directing to OKR settings
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -1403,6 +1403,7 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
     const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
     const [selectedCompanyReportId, setSelectedCompanyReportId] = useState<string | null>(null);
     const [selectedMemberReportId, setSelectedMemberReportId] = useState<string | null>(null);
+    const [memberSearch, setMemberSearch] = useState('');
     const isAdmin = currentUser?.role === 'org_admin' || currentUser?.role === 'platform_admin';
 
     const { data: companyReports = [], isLoading: companyLoading } = useQuery<CompanyReport[]>({
@@ -1438,18 +1439,27 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
         }
     }, [companyReports, selectedCompanyReportId]);
 
+    const filteredMemberReports = useMemo(() => {
+        const keyword = memberSearch.trim().toLowerCase();
+        if (!keyword) return memberReports;
+        return memberReports.filter(report =>
+            report.display_name.toLowerCase().includes(keyword)
+            || report.group_label.toLowerCase().includes(keyword)
+        );
+    }, [memberReports, memberSearch]);
+
     useEffect(() => {
-        if (!memberReports.length) {
+        if (!filteredMemberReports.length) {
             setSelectedMemberReportId(null);
             return;
         }
-        if (!selectedMemberReportId || !memberReports.some(report => report.id === selectedMemberReportId)) {
-            setSelectedMemberReportId(memberReports[0].id);
+        if (!selectedMemberReportId || !filteredMemberReports.some(report => report.id === selectedMemberReportId)) {
+            setSelectedMemberReportId(filteredMemberReports[0].id);
         }
-    }, [memberReports, selectedMemberReportId]);
+    }, [filteredMemberReports, selectedMemberReportId]);
 
     const selectedCompanyReport = companyReports.find(report => report.id === selectedCompanyReportId) || companyReports[0] || null;
-    const selectedMemberReport = memberReports.find(report => report.id === selectedMemberReportId) || memberReports[0] || null;
+    const selectedMemberReport = filteredMemberReports.find(report => report.id === selectedMemberReportId) || filteredMemberReports[0] || null;
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -1670,7 +1680,15 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
                             flexDirection: 'column',
                             gap: '8px',
                         }}>
-                            {memberReports.map(item => (
+                            <input
+                                type="text"
+                                className="form-input"
+                                value={memberSearch}
+                                onChange={e => setMemberSearch(e.target.value)}
+                                placeholder={isChinese ? '搜索成员...' : 'Search members...'}
+                                style={{ width: '100%' }}
+                            />
+                            {filteredMemberReports.length ? filteredMemberReports.map(item => (
                                 <div
                                     key={item.id}
                                     onClick={() => setSelectedMemberReportId(item.id)}
@@ -1707,7 +1725,11 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
                                         </span>
                                     </div>
                                 </div>
-                            ))}
+                            )) : (
+                                <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', padding: '8px 4px' }}>
+                                    {isChinese ? '没有匹配的成员。' : 'No matching members.'}
+                                </div>
+                            )}
                         </div>
 
                         <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>

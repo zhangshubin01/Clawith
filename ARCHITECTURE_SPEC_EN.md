@@ -218,11 +218,25 @@ The OKR module stores objectives with explicit `period_start` and `period_end` d
 - The OKR dashboard renders periods as a dropdown because historical period count grows over time.
 - Agent-side OKR tools must compute their default current period from the locked tenant cadence, not from a hard-coded quarterly assumption.
 
+## Module 10: OKR Daily Reporting Flow
+
+The OKR reporting subsystem now uses a deterministic collection-and-storage path instead of relying on a free-form agent plan.
+
+- Member-level OKR reporting stores only one artifact: the final daily report entry per tracked relationship member or agent.
+- The tracked member set is derived from the OKR Agent's active `AgentRelationship` and `AgentAgentRelationship` records, not from the entire tenant roster.
+- Manual and scheduled `daily_okr_collection` both call a backend collection service that:
+  - sends outreach messages only to tracked human members and tracked digital employees,
+  - creates one-shot `on_message` reply triggers per target,
+  - passes reply metadata so the OKR Agent can distill the response and call `upsert_member_daily_report`.
+- Human reply triggers now watch `web`, `feishu`, `slack`, and `discord` sessions, so both in-product replies and external channel replies can be captured.
+- The Reports page's member daily report view reads the same tracked member set and includes member search to handle larger relationship lists.
+
 ### Changelog
 
 | Date | Change |
 | --- | --- |
 | 2026-04-18 | Locked OKR cadence after first enablement and expanded period selection from first enabled period to next period. |
+| 2026-04-19 | Reworked OKR daily collection to target only tracked relationships, store replies through deterministic reply triggers, and align the member daily report view with the tracked relationship list plus search. |
 
 ---
 **[The End] Architecture Document Completion.**

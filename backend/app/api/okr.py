@@ -1181,7 +1181,10 @@ async def upsert_member_daily_report(
     Regular members can only edit their own user report.
     Org admins and platform admins may specify a tenant member explicitly.
     """
-    from app.services.okr_reporting import list_company_members, upsert_member_daily_report as _upsert
+    from app.services.okr_reporting import (
+        list_tracked_okr_members,
+        upsert_member_daily_report as _upsert,
+    )
 
     target_member_type = body.member_type or "user"
     if body.member_id:
@@ -1204,7 +1207,7 @@ async def upsert_member_daily_report(
     )
     member_map = {
         (member.member_type, str(member.member_id)): member
-        for member in await list_company_members(user.tenant_id)
+        for member in await list_tracked_okr_members(user.tenant_id)
     }
     member_meta = member_map.get((report.member_type, str(report.member_id)))
     return MemberDailyReportOut(
@@ -1846,174 +1849,29 @@ Contact the {len(members_to_contact)} member(s) below who have NOT set their OKR
 @router.post("/trigger-daily-collection")
 async def trigger_daily_collection(user=Depends(get_current_user)):
     """Admin-triggered daily collection for tracked OKR relationships only."""
-    import asyncio
-    from sqlalchemy import or_
-    from app.models.agent import Agent
-    from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
-    from app.models.chat_session import ChatSession
-    from app.models.user import User
-    from app.services.heartbeat import run_agent_oneshot
-
     if getattr(user, "role", None) not in ("org_admin", "platform_admin"):
         raise HTTPException(403, "Only org admins can trigger daily collection")
+    from app.services.okr_daily_collection import trigger_daily_collection_for_tenant
 
-    async with async_session() as db:
-        settings = await _get_or_create_settings(db, user.tenant_id)
-        if not settings.enabled:
-            raise HTTPException(403, "OKR is not enabled for this tenant")
-        if not settings.daily_report_enabled:
-            raise HTTPException(403, "Daily report collection is not enabled for this tenant")
-        if not settings.okr_agent_id:
-            raise HTTPException(404, "OKR Agent not found for this tenant")
+    try:
+        result = await trigger_daily_collection_for_tenant(user.tenant_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
-        okr_agent_result = await db.execute(select(Agent).where(Agent.id == settings.okr_agent_id))
-        okr_agent = okr_agent_result.scalar_one_or_none()
-        if not okr_agent:
-            raise HTTPException(404, "OKR Agent not found for this tenant")
-
-        rel_result = await db.execute(
-            select(AgentRelationship, OrgMember)
-            .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
-            .where(
-                AgentRelationship.agent_id == okr_agent.id,
-                OrgMember.status == "active",
-            )
-        )
-        rel_rows = rel_result.all()
-
-        agent_rel_result = await db.execute(
-            select(Agent)
-            .join(
-                AgentAgentRelationship,
-                AgentAgentRelationship.target_agent_id == Agent.id,
-            )
-            .where(
-                AgentAgentRelationship.agent_id == okr_agent.id,
-                Agent.is_system == False,  # noqa: E712
-                Agent.status.notin_(["stopped", "error"]),
-            )
-        )
-        tracked_agents = agent_rel_result.scalars().all()
-
-        member_user_ids: dict[uuid.UUID, uuid.UUID | None] = {}
-        member_user_display_names: dict[uuid.UUID, str] = {}
-        for _, org_member in rel_rows:
-            member_user_ids[org_member.id] = org_member.user_id
-            if org_member.user_id:
-                user_result = await db.execute(
-                    select(User.display_name).where(User.id == org_member.user_id)
-                )
-                user_display_name = user_result.scalar_one_or_none()
-                if user_display_name:
-                    member_user_display_names[org_member.id] = user_display_name
-
-            if not org_member.user_id:
-                patterns = []
-                if org_member.open_id:
-                    patterns.append(f"feishu_p2p_{org_member.open_id}")
-                if org_member.external_id:
-                    patterns.append(f"feishu_p2p_{org_member.external_id}")
-                    patterns.append(f"dingtalk_p2p_{org_member.external_id}")
-                if patterns:
-                    sess_result = await db.execute(
-                        select(ChatSession.user_id).where(
-                            ChatSession.agent_id == okr_agent.id,
-                            or_(*[ChatSession.external_conv_id == p for p in patterns]),
-                        ).limit(1)
-                    )
-                    found = sess_result.scalar_one_or_none()
-                    if found:
-                        member_user_ids[org_member.id] = found
-                        user_result = await db.execute(
-                            select(User.display_name).where(User.id == found)
-                        )
-                        user_display_name = user_result.scalar_one_or_none()
-                        if user_display_name:
-                            member_user_display_names[org_member.id] = user_display_name
-
-        human_targets: list[str] = []
-        for _, org_member in rel_rows:
-            platform_uid = member_user_ids.get(org_member.id)
-            platform_name = member_user_display_names.get(org_member.id)
-            has_channel = bool(org_member.open_id or org_member.external_id)
-            if platform_name:
-                contact_hint = (
-                    f'send_web_message(username="{platform_name}", message="...")'
-                    + (f' or send_channel_message(member_name="{org_member.name}", message="...")' if has_channel else "")
-                )
-            elif has_channel:
-                contact_hint = f'send_channel_message(member_name="{org_member.name}", message="...")'
-            else:
-                contact_hint = "No reachable channel available"
-
-            human_targets.append(
-                f"- {org_member.name}\n"
-                f"  member_type=user\n"
-                f"  member_id={platform_uid or '(unresolved)'}\n"
-                f"  reachable_via={contact_hint}"
-            )
-
-        agent_targets = [
-            (
-                f"- {agent_member.name}\n"
-                f"  member_type=agent\n"
-                f"  member_id={agent_member.id}\n"
-                f"  reachable_via=send_message_to_agent(agent_name=\"{agent_member.name}\", ...)"
-            )
-            for agent_member in tracked_agents
-        ]
-
-        target_blocks = [*human_targets, *agent_targets]
-        await db.commit()
-
-    if not target_blocks:
+    if result["total_targets"] == 0:
         return {
             "status": "no_action",
             "message": "OKR Agent has no tracked relationships to collect from.",
-            "okr_agent_id": str(okr_agent.id),
+            "okr_agent_id": result["okr_agent_id"],
             "member_count": 0,
         }
-
-    today_str = date.today().isoformat()
-    task_prompt = f"""[ADMIN TRIGGER — Daily OKR Collection — ONE-SHOT TASK]
-
-Today: {today_str}
-
-You must collect daily reports ONLY from the members and digital employees listed below.
-Do not contact anyone outside this relationship list.
-
-Rules:
-1. Only use the listed contact paths for each target.
-2. For human members, send a short request for today's update and ask them to reply with:
-   - progress made today
-   - risks or blockers
-   - next step
-3. For agent members, use send_message_to_agent to ask for today's update.
-4. If an agent member replies with enough detail, immediately call:
-   upsert_member_daily_report(report_date="{today_str}", member_type="agent", member_id="<their id>", content="<final report>")
-5. For human members, this run is outreach-first. Do not invent their report content.
-6. Stop after all listed targets have been contacted once.
-
-Tracked relationship targets ({len(target_blocks)} total):
-
-{chr(10).join(target_blocks)}
-"""
-
-    asyncio.create_task(
-        run_agent_oneshot(
-            agent_id=okr_agent.id,
-            prompt=task_prompt,
-            triggered_by_user_id=user.id,
-            max_rounds=max(8, len(target_blocks) * 2 + len(agent_targets) * 2),
-        )
-    )
 
     return {
         "status": "accepted",
         "message": (
-            f"Daily OKR collection triggered for {len(target_blocks)} tracked relationship target(s). "
-            "You can check the OKR Agent chat history for details."
+            f"Daily OKR collection sent to {result['sent_humans']} human target(s) and "
+            f"{result['sent_agents']} agent target(s). Reply triggers are now active."
         ),
-        "okr_agent_id": str(okr_agent.id),
-        "member_count": len(target_blocks),
+        "okr_agent_id": result["okr_agent_id"],
+        "member_count": result["total_targets"],
     }

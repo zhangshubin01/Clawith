@@ -21,7 +21,8 @@ from sqlalchemy import and_, or_, select
 
 from app.database import async_session
 from app.models.agent import Agent
-from app.models.okr import CompanyReport, MemberDailyReport
+from app.models.okr import CompanyReport, MemberDailyReport, OKRSettings
+from app.models.org import AgentAgentRelationship, AgentRelationship, OrgMember
 from app.models.user import User
 
 
@@ -125,6 +126,62 @@ async def list_company_members(tenant_id: uuid.UUID) -> list[CompanyMember]:
         return members
 
 
+async def list_tracked_okr_members(tenant_id: uuid.UUID) -> list[CompanyMember]:
+    """Return only members currently tracked in the OKR Agent relationship network."""
+    async with async_session() as db:
+        settings_result = await db.execute(
+            select(OKRSettings).where(OKRSettings.tenant_id == tenant_id)
+        )
+        settings = settings_result.scalar_one_or_none()
+        if not settings or not settings.okr_agent_id:
+            return []
+
+        human_result = await db.execute(
+            select(AgentRelationship, OrgMember)
+            .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
+            .where(
+                AgentRelationship.agent_id == settings.okr_agent_id,
+                OrgMember.status == "active",
+            )
+        )
+        agent_result = await db.execute(
+            select(Agent)
+            .join(
+                AgentAgentRelationship,
+                AgentAgentRelationship.target_agent_id == Agent.id,
+            )
+            .where(
+                AgentAgentRelationship.agent_id == settings.okr_agent_id,
+                Agent.is_system == False,  # noqa: E712
+                Agent.status.notin_(["stopped", "error"]),
+            )
+        )
+
+        members: list[CompanyMember] = []
+        for _, org_member in human_result.all():
+            members.append(
+                CompanyMember(
+                    member_type="user",
+                    member_id=org_member.user_id or org_member.id,
+                    display_name=org_member.name,
+                    avatar_url=org_member.avatar_url,
+                    group_label=org_member.title or "Members",
+                )
+            )
+        for agent in agent_result.scalars().all():
+            members.append(
+                CompanyMember(
+                    member_type="agent",
+                    member_id=agent.id,
+                    display_name=agent.name,
+                    avatar_url=agent.avatar_url,
+                    group_label="Digital Employees",
+                )
+            )
+        members.sort(key=lambda item: (item.group_label, item.display_name.lower()))
+        return members
+
+
 async def upsert_member_daily_report(
     tenant_id: uuid.UUID,
     member_type: str,
@@ -151,8 +208,9 @@ async def upsert_member_daily_report(
         )
         existing = result.scalar_one_or_none()
         if existing:
+            previous_content = existing.content
             existing.content = normalized
-            existing.status = "revised" if existing.content != normalized else existing.status
+            existing.status = "revised" if previous_content != normalized else existing.status
             existing.source = source
             existing.updated_at = datetime.now(timezone.utc)
             report = existing
@@ -179,7 +237,7 @@ async def list_member_daily_reports_for_date(
     report_date: date,
 ) -> list[dict]:
     """Return all tenant members with report status for a specific date."""
-    members = await list_company_members(tenant_id)
+    members = await list_tracked_okr_members(tenant_id)
     async with async_session() as db:
         result = await db.execute(
             select(MemberDailyReport).where(
@@ -406,7 +464,7 @@ async def _upsert_company_report(
 
 async def generate_company_daily_report(tenant_id: uuid.UUID, period_day: date) -> CompanyReport:
     """Generate the company daily report for a specific day."""
-    members = await list_company_members(tenant_id)
+    members = await list_tracked_okr_members(tenant_id)
     async with async_session() as db:
         result = await db.execute(
             select(MemberDailyReport).where(
@@ -571,4 +629,3 @@ async def _mark_dependent_company_reports_for_refresh(db, tenant_id: uuid.UUID, 
     for report in result.scalars().all():
         report.needs_refresh = True
         report.updated_at = datetime.now(timezone.utc)
-
