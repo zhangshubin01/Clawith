@@ -34,6 +34,7 @@ class TenantOut(BaseModel):
     slug: str
     im_provider: str
     timezone: str = "UTC"
+    country_region: str = "001"
     is_active: bool
     sso_enabled: bool = False
     sso_domain: str | None = None
@@ -47,6 +48,7 @@ class TenantUpdate(BaseModel):
     name: str | None = None
     im_provider: str | None = None
     timezone: str | None = None
+    country_region: str | None = None
     is_active: bool | None = None
     sso_enabled: bool | None = None
     sso_domain: str | None = None
@@ -630,4 +632,3 @@ async def delete_tenant(
     fallback_tenant_id = str(fallback_row[0]) if fallback_row else None
 
     return {"status": "deleted", "fallback_tenant_id": fallback_tenant_id}
-

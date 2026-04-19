@@ -266,6 +266,7 @@ class OKRSettingsOut(BaseModel):
     first_enabled_at: str | None = None
     daily_report_enabled: bool
     daily_report_time: str
+    daily_report_skip_non_workdays: bool = True
     weekly_report_enabled: bool
     weekly_report_day: int
     period_frequency: str
@@ -279,6 +280,7 @@ class OKRSettingsUpdate(BaseModel):
     enabled: bool | None = None
     daily_report_enabled: bool | None = None
     daily_report_time: str | None = None
+    daily_report_skip_non_workdays: bool | None = None
     weekly_report_enabled: bool | None = None
     weekly_report_day: int | None = None
     period_frequency: str | None = None
@@ -392,6 +394,7 @@ async def get_okr_settings(user=Depends(get_current_user)):
             first_enabled_at=settings.first_enabled_at.isoformat() if settings.first_enabled_at else None,
             daily_report_enabled=settings.daily_report_enabled,
             daily_report_time=settings.daily_report_time,
+            daily_report_skip_non_workdays=settings.daily_report_skip_non_workdays,
             weekly_report_enabled=settings.weekly_report_enabled,
             weekly_report_day=settings.weekly_report_day,
             period_frequency=settings.period_frequency,
@@ -431,6 +434,8 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
             settings.daily_report_enabled = body.daily_report_enabled
         if body.daily_report_time is not None:
             settings.daily_report_time = body.daily_report_time
+        if body.daily_report_skip_non_workdays is not None:
+            settings.daily_report_skip_non_workdays = body.daily_report_skip_non_workdays
         if body.weekly_report_enabled is not None:
             settings.weekly_report_enabled = body.weekly_report_enabled
         if body.weekly_report_day is not None:
@@ -468,6 +473,7 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
             first_enabled_at=settings.first_enabled_at.isoformat() if settings.first_enabled_at else None,
             daily_report_enabled=settings.daily_report_enabled,
             daily_report_time=settings.daily_report_time,
+            daily_report_skip_non_workdays=settings.daily_report_skip_non_workdays,
             weekly_report_enabled=settings.weekly_report_enabled,
             weekly_report_day=settings.weekly_report_day,
             period_frequency=settings.period_frequency,

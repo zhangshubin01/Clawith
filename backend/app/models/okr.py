@@ -262,6 +262,9 @@ class OKRSettings(Base):
     daily_report_time: Mapped[str] = mapped_column(
         String(5), nullable=False, default="18:00"
     )
+    daily_report_skip_non_workdays: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
 
     # Weekly report collection
     weekly_report_enabled: Mapped[bool] = mapped_column(

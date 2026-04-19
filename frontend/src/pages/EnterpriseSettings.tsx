@@ -1564,52 +1564,76 @@ function CompanyNameEditor() {
 }
 
 
-// ─── Company Timezone Editor ───────────────────────
-const COMMON_TIMEZONES = [
-    'UTC',
-    'Asia/Shanghai',
-    'Asia/Tokyo',
-    'Asia/Seoul',
-    'Asia/Singapore',
-    'Asia/Kolkata',
-    'Asia/Dubai',
-    'Europe/London',
-    'Europe/Paris',
-    'Europe/Berlin',
-    'Europe/Moscow',
-    'America/New_York',
-    'America/Chicago',
-    'America/Denver',
-    'America/Los_Angeles',
-    'America/Sao_Paulo',
-    'Australia/Sydney',
-    'Pacific/Auckland',
+// ─── Company Region Editor ───────────────────────
+const COMPANY_REGIONS = [
+    { code: '001', zh: '全球 / UTC', en: 'Global / UTC', timezone: 'UTC' },
+    { code: 'CN', zh: '中国', en: 'China', timezone: 'Asia/Shanghai' },
+    { code: 'HK', zh: '中国香港', en: 'Hong Kong, China', timezone: 'Asia/Hong_Kong' },
+    { code: 'MO', zh: '中国澳门', en: 'Macao, China', timezone: 'Asia/Macau' },
+    { code: 'TW', zh: '中国台湾', en: 'Taiwan, China', timezone: 'Asia/Taipei' },
+    { code: 'JP', zh: '日本', en: 'Japan', timezone: 'Asia/Tokyo' },
+    { code: 'KR', zh: '大韩民国', en: 'Republic of Korea', timezone: 'Asia/Seoul' },
+    { code: 'SG', zh: '新加坡', en: 'Singapore', timezone: 'Asia/Singapore' },
+    { code: 'IN', zh: '印度', en: 'India', timezone: 'Asia/Kolkata' },
+    { code: 'AE', zh: '阿拉伯联合酋长国', en: 'United Arab Emirates', timezone: 'Asia/Dubai' },
+    { code: 'GB', zh: '大不列颠及北爱尔兰联合王国', en: 'United Kingdom of Great Britain and Northern Ireland', timezone: 'Europe/London' },
+    { code: 'FR', zh: '法国', en: 'France', timezone: 'Europe/Paris' },
+    { code: 'DE', zh: '德国', en: 'Germany', timezone: 'Europe/Berlin' },
+    { code: 'IT', zh: '意大利', en: 'Italy', timezone: 'Europe/Rome' },
+    { code: 'ES', zh: '西班牙', en: 'Spain', timezone: 'Europe/Madrid' },
+    { code: 'NL', zh: '荷兰', en: 'Netherlands', timezone: 'Europe/Amsterdam' },
+    { code: 'CH', zh: '瑞士', en: 'Switzerland', timezone: 'Europe/Zurich' },
+    { code: 'SE', zh: '瑞典', en: 'Sweden', timezone: 'Europe/Stockholm' },
+    { code: 'US', zh: '美利坚合众国', en: 'United States of America', timezone: 'America/New_York' },
+    { code: 'CA', zh: '加拿大', en: 'Canada', timezone: 'America/Toronto' },
+    { code: 'MX', zh: '墨西哥', en: 'Mexico', timezone: 'America/Mexico_City' },
+    { code: 'BR', zh: '巴西', en: 'Brazil', timezone: 'America/Sao_Paulo' },
+    { code: 'AU', zh: '澳大利亚', en: 'Australia', timezone: 'Australia/Sydney' },
+    { code: 'NZ', zh: '新西兰', en: 'New Zealand', timezone: 'Pacific/Auckland' },
 ];
 
 function CompanyTimezoneEditor() {
-    const { t } = useTranslation();
+    const { t, i18n } = useTranslation();
     const user = useAuthStore((s) => s.user);
     const tenantId = user?.tenant_id || localStorage.getItem('current_tenant_id') || '';
     const [timezone, setTimezone] = useState('UTC');
+    const [countryRegion, setCountryRegion] = useState('001');
+    const [regionInput, setRegionInput] = useState('');
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState('');
+    const zh = i18n.language?.startsWith('zh');
+    const regionLabel = (r: typeof COMPANY_REGIONS[number]) => zh ? r.zh : r.en;
+
+    useEffect(() => {
+        const selected = COMPANY_REGIONS.find(r => r.code === countryRegion) || COMPANY_REGIONS[0];
+        setRegionInput(regionLabel(selected));
+    }, [countryRegion, zh]);
 
     useEffect(() => {
         if (!tenantId) return;
         fetchJson<any>(`/tenants/${tenantId}`)
-            .then(d => { if (d?.timezone) setTimezone(d.timezone); })
+            .then(d => {
+                if (d?.timezone) setTimezone(d.timezone);
+                if (d?.country_region) setCountryRegion(d.country_region);
+            })
             .catch((e: any) => setError(e.message || 'Failed to load timezone'));
     }, [tenantId]);
 
-    const handleSave = async (tz: string) => {
+    const handleSave = async (regionCode: string) => {
         if (!tenantId) return;
-        setTimezone(tz);
+        const region = COMPANY_REGIONS.find(r => r.code === regionCode) || COMPANY_REGIONS[0];
+        setCountryRegion(region.code);
+        setTimezone(region.timezone);
         setSaving(true);
         setError('');
         try {
             await fetchJson(`/tenants/${tenantId}`, {
-                method: 'PUT', body: JSON.stringify({ timezone: tz }),
+                method: 'PUT',
+                body: JSON.stringify({
+                    country_region: region.code,
+                    timezone: region.timezone,
+                }),
             });
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
@@ -1623,9 +1647,13 @@ function CompanyTimezoneEditor() {
         <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
             <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
                 <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 500, fontSize: '13px', marginBottom: '4px' }}>🌐 {t('enterprise.timezone.title', 'Company Timezone')}</div>
+                    <div style={{ fontWeight: 500, fontSize: '13px', marginBottom: '4px' }}>
+                        🌐 {zh ? '公司所在国家或地区' : 'Company Country or Region'}
+                    </div>
                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                        {t('enterprise.timezone.description', 'Default timezone for all agents. Agents can override individually.')}
+                        {zh
+                            ? `用于自动设置公司默认时区和 OKR 休息日规则。当前时区：${timezone}`
+                            : `Used to set the company timezone and OKR non-workday rules. Current timezone: ${timezone}`}
                     </div>
                     {error && (
                         <div style={{ fontSize: '11px', color: 'var(--error)', marginTop: '4px' }}>
@@ -1638,17 +1666,29 @@ function CompanyTimezoneEditor() {
                         </div>
                     )}
                 </div>
-                <select
+                <input
                     className="form-input"
-                    value={timezone}
-                    onChange={e => handleSave(e.target.value)}
-                    style={{ width: '220px', fontSize: '13px' }}
+                    list="company-region-options"
+                    value={regionInput}
+                    onChange={e => {
+                        const value = e.target.value;
+                        setRegionInput(value);
+                        const matched = COMPANY_REGIONS.find(r => regionLabel(r) === value || r.code === value);
+                        if (matched) handleSave(matched.code);
+                    }}
+                    onBlur={() => {
+                        const selected = COMPANY_REGIONS.find(r => r.code === countryRegion) || COMPANY_REGIONS[0];
+                        setRegionInput(regionLabel(selected));
+                    }}
+                    placeholder={zh ? '搜索国家或地区' : 'Search country or region'}
+                    style={{ width: '360px', fontSize: '13px' }}
                     disabled={saving || !tenantId}
-                >
-                    {COMMON_TIMEZONES.map(tz => (
-                        <option key={tz} value={tz}>{tz}</option>
+                />
+                <datalist id="company-region-options">
+                    {COMPANY_REGIONS.map(region => (
+                        <option key={region.code} value={regionLabel(region)} label={`${region.code} · ${region.timezone}`} />
                     ))}
-                </select>
+                </datalist>
                 {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅</span>}
             </div>
         </div>
@@ -1777,7 +1817,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
     });
 
     if (isLoading) return <div style={{ padding: '20px' }}>{t('common.loading', 'Loading...')}</div>;
-    const s = settings || { enabled: false, first_enabled_at: null, daily_report_enabled: false, daily_report_time: '18:00', weekly_report_enabled: false, weekly_report_day: 4, period_frequency: 'quarterly', period_length_days: null, period_frequency_locked: false };
+    const s = settings || { enabled: false, first_enabled_at: null, daily_report_enabled: false, daily_report_time: '18:00', daily_report_skip_non_workdays: true, weekly_report_enabled: false, weekly_report_day: 4, period_frequency: 'quarterly', period_length_days: null, period_frequency_locked: false };
     const periodFrequencyLocked = !!s.period_frequency_locked || !!s.first_enabled_at;
 
     // Primary source: /settings now embeds okr_agent_id directly.
@@ -1842,8 +1882,8 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 onChange={(e) => updateSettings.mutate({ ...s, period_frequency: e.target.value })}
                                 style={{ maxWidth: '300px', cursor: 'pointer' }}
                             >
-                                <option value="quarterly">{zh ? '按季度 (Quarterly)' : 'Quarterly'}</option>
-                                <option value="monthly">{zh ? '按月 (Monthly)' : 'Monthly'}</option>
+                                <option value="quarterly">{zh ? '按季度' : 'Quarterly'}</option>
+                                <option value="monthly">{zh ? '按月' : 'Monthly'}</option>
                             </select>
                         </div>
                     )}
@@ -2000,8 +2040,8 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                     cursor: periodFrequencyLocked ? 'not-allowed' : 'pointer',
                                 }}
                             >
-                                <option value="quarterly">{zh ? '按季度 (Quarterly)' : 'Quarterly'}</option>
-                                <option value="monthly">{zh ? '按月 (Monthly)' : 'Monthly'}</option>
+                                <option value="quarterly">{zh ? '按季度' : 'Quarterly'}</option>
+                                <option value="monthly">{zh ? '按月' : 'Monthly'}</option>
                             </select>
                             {periodFrequencyLocked && (
                                 <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.5 }}>
@@ -2033,7 +2073,16 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                 </div>
                             </div>
                             {s.daily_report_enabled && (
-                                <div style={{ marginLeft: '28px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <div style={{ marginLeft: '28px', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={s.daily_report_skip_non_workdays ?? true}
+                                            onChange={(e) => updateSettings.mutate({ ...s, daily_report_skip_non_workdays: e.target.checked })}
+                                        />
+                                        {zh ? '自动跳过休息日' : 'Skip non-workdays automatically'}
+                                    </label>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                                     <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
                                         {zh ? '日报发送时间:' : 'Report time:'}
                                     </div>
@@ -2044,6 +2093,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                         onChange={(e) => updateSettings.mutate({ ...s, daily_report_time: e.target.value })}
                                         style={{ width: '120px' }}
                                     />
+                                    </div>
                                 </div>
                             )}
                         </div>

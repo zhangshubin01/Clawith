@@ -514,6 +514,7 @@ async def get_okr_settings_for_agent(tenant_id: uuid.UUID) -> dict:
             "enabled": s.enabled,
             "daily_report_enabled": s.daily_report_enabled,
             "daily_report_time": s.daily_report_time,
+            "daily_report_skip_non_workdays": s.daily_report_skip_non_workdays,
             "weekly_report_enabled": s.weekly_report_enabled,
             "weekly_report_day": s.weekly_report_day,
             "period_frequency": s.period_frequency,

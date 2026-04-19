@@ -43,6 +43,53 @@ def _cleanup_stale_invoke_cache():
     for k in stale:
         del _last_invoke[k]
 
+
+async def _should_skip_non_workday(trigger: AgentTrigger, local_now: datetime) -> bool:
+    """Skip OKR daily report triggers on company non-workdays when configured."""
+    if trigger.name != "daily_okr_report":
+        return False
+
+    from app.models.okr import OKRSettings
+    from app.models.tenant import Tenant
+    from app.services.business_calendar import is_non_workday
+
+    async with async_session() as db:
+        result = await db.execute(
+            select(Agent.tenant_id)
+            .where(Agent.id == trigger.agent_id)
+        )
+        tenant_id = result.scalar_one_or_none()
+        if not tenant_id:
+            return False
+
+        settings_result = await db.execute(
+            select(OKRSettings.daily_report_skip_non_workdays)
+            .where(OKRSettings.tenant_id == tenant_id)
+        )
+        skip_enabled = settings_result.scalar_one_or_none()
+        if skip_enabled is False:
+            return False
+
+        tenant_result = await db.execute(
+            select(Tenant.country_region).where(Tenant.id == tenant_id)
+        )
+        country_region = tenant_result.scalar_one_or_none()
+
+    return is_non_workday(local_now.date(), country_region)
+
+
+async def _mark_trigger_skipped(trigger_id: uuid.UUID, now: datetime) -> None:
+    """Advance a cron trigger without invoking the agent."""
+    try:
+        async with async_session() as db:
+            result = await db.execute(select(AgentTrigger).where(AgentTrigger.id == trigger_id))
+            trigger = result.scalar_one_or_none()
+            if trigger:
+                trigger.last_fired_at = now
+                await db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to mark skipped trigger {trigger_id}: {e}")
+
 # Webhook rate limiter: token -> list of timestamps
 _webhook_hits: dict[str, list[float]] = {}
 WEBHOOK_RATE_LIMIT = 5   # max hits per minute per token
@@ -118,7 +165,13 @@ async def _evaluate_trigger(trigger: AgentTrigger, now: datetime) -> bool:
             local_base = base.astimezone(tz) if base.tzinfo else base.replace(tzinfo=tz)
             cron = croniter(expr, local_base)
             next_run = cron.get_next(datetime)
-            return local_now >= next_run
+            if local_now >= next_run:
+                if await _should_skip_non_workday(trigger, local_now):
+                    await _mark_trigger_skipped(trigger.id, now)
+                    logger.info(f"[Trigger] Skipped {trigger.name} on non-workday {local_now.date()}")
+                    return False
+                return True
+            return False
         except Exception as e:
             logger.warning(f"Invalid cron expr '{expr}' for trigger {trigger.name}: {e}")
             return False
