@@ -420,6 +420,12 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             trigger_names = []
             for t in triggers:
                 part = f"触发器：{t.name} ({t.type})\n原因：{t.reason}"
+                if t.name in ("daily_okr_report", "weekly_okr_report"):
+                    part += (
+                        "\n执行要求：先调用 get_okr_settings 确认对应日报/周报开关是否开启。"
+                        "如果开启，主动联系相关成员收集本周期进展，再调用 generate_okr_report 生成报告；"
+                        "如果未开启，则说明本次无需执行并停止。"
+                    )
                 if t.focus_ref:
                     part += f"\n关联 Focus：{t.focus_ref}"
                 # Include matched message for on_message triggers

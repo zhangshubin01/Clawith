@@ -930,7 +930,7 @@ export default function OKR() {
         }
         memberGroups[key].objs.push(obj);
     }
-    const periodOptions = [...periods].reverse();
+    const periodOptions = periods;
 
     return (
         <div style={{ padding: '24px', maxWidth: 960, margin: '0 auto' }}>

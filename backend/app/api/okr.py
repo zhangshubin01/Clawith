@@ -111,6 +111,66 @@ async def _get_or_create_settings(db, tenant_id: uuid.UUID) -> OKRSettings:
     return settings
 
 
+async def _sync_okr_report_triggers(db, settings: OKRSettings) -> None:
+    """Keep OKR Agent system triggers aligned with tenant report settings."""
+    if not settings.okr_agent_id:
+        return
+
+    from app.models.trigger import AgentTrigger
+
+    daily_hour, daily_minute = 18, 0
+    try:
+        daily_hour_str, daily_minute_str = settings.daily_report_time.split(":", 1)
+        daily_hour = max(0, min(23, int(daily_hour_str)))
+        daily_minute = max(0, min(59, int(daily_minute_str)))
+    except Exception:
+        logger.warning(f"[OKR] Invalid daily_report_time {settings.daily_report_time}; using 18:00")
+
+    weekly_day = settings.weekly_report_day
+    cron_weekday = 0 if weekly_day == 6 else weekly_day + 1
+
+    trigger_result = await db.execute(
+        select(AgentTrigger).where(
+            AgentTrigger.agent_id == settings.okr_agent_id,
+            AgentTrigger.name.in_(
+                [
+                    "daily_okr_report",
+                    "weekly_okr_report",
+                    "biweekly_okr_checkin",
+                    "monthly_okr_report",
+                ]
+            ),
+        )
+    )
+    triggers = {trigger.name: trigger for trigger in trigger_result.scalars().all()}
+
+    daily = triggers.get("daily_okr_report")
+    if daily:
+        daily.config = {"expr": f"{daily_minute} {daily_hour} * * *"}
+        daily.is_enabled = bool(settings.enabled and settings.daily_report_enabled)
+        daily.reason = (
+            "System trigger: daily OKR cycle. If daily reports are enabled, collect "
+            "progress from tracked members, update stale KRs, and generate the daily report."
+        )
+
+    weekly = triggers.get("weekly_okr_report")
+    if weekly:
+        weekly.config = {"expr": f"0 9 * * {cron_weekday}"}
+        weekly.is_enabled = bool(settings.enabled and settings.weekly_report_enabled)
+        weekly.reason = (
+            "System trigger: weekly OKR cycle. If weekly reports are enabled, collect "
+            "progress from tracked members, update stale KRs, and generate the weekly report."
+        )
+
+    biweekly = triggers.get("biweekly_okr_checkin")
+    if biweekly:
+        biweekly.is_enabled = bool(settings.enabled)
+
+    monthly = triggers.get("monthly_okr_report")
+    if monthly:
+        monthly.is_enabled = bool(settings.enabled)
+
+
 def _compute_current_period(
     frequency: str, length_days: int | None
 ) -> tuple[date, date]:
@@ -375,6 +435,7 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
         if body.enabled is True and settings.first_enabled_at is None:
             settings.first_enabled_at = datetime.now(timezone.utc)
 
+        await _sync_okr_report_triggers(db, settings)
         await db.commit()
 
         # ── Auto-create OKR Agent when first enabled ──────────────────────────
@@ -390,6 +451,8 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
             # Re-read settings to pick up the newly written okr_agent_id
             async with async_session() as db2:
                 refreshed = await _get_or_create_settings(db2, user.tenant_id)
+                await _sync_okr_report_triggers(db2, refreshed)
+                await db2.commit()
                 okr_agent_id_str = str(refreshed.okr_agent_id) if refreshed.okr_agent_id else None
 
         return OKRSettingsOut(

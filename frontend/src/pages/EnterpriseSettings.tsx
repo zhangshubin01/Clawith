@@ -1794,7 +1794,7 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
         <div style={{ maxWidth: '800px' }}>
             <div className="card" style={{ marginBottom: '24px' }}>
                 {/* Toggle row */}
-                <div style={{ padding: '20px', borderBottom: '1px solid var(--border-subtle)' }}>
+                <div style={{ padding: '20px', borderBottom: s.enabled ? '1px solid var(--border-subtle)' : 'none' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>
                             <div style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)', marginBottom: '4px' }}>
@@ -1826,6 +1826,27 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                             </span>
                         </label>
                     </div>
+                    {!s.enabled && !periodFrequencyLocked && (
+                        <div style={{ marginTop: '20px' }}>
+                            <div style={{ fontWeight: 500, marginBottom: '8px', fontSize: '13px' }}>
+                                {zh ? '首次启用前选择 OKR 周期' : 'Choose OKR cadence before first enablement'}
+                            </div>
+                            <div style={{ marginBottom: '10px', fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.5, maxWidth: '560px' }}>
+                                {zh
+                                    ? '请选择季度或月度。首次启用 OKR 后，周期频率将被锁定，避免历史 OKR 和报表口径混乱。'
+                                    : 'Choose quarterly or monthly. After OKR is enabled for the first time, this cadence will be locked to keep history and reports consistent.'}
+                            </div>
+                            <select
+                                className="form-input"
+                                value={s.period_frequency}
+                                onChange={(e) => updateSettings.mutate({ ...s, period_frequency: e.target.value })}
+                                style={{ maxWidth: '300px', cursor: 'pointer' }}
+                            >
+                                <option value="quarterly">{zh ? '按季度 (Quarterly)' : 'Quarterly'}</option>
+                                <option value="monthly">{zh ? '按月 (Monthly)' : 'Monthly'}</option>
+                            </select>
+                        </div>
+                    )}
                 </div>
 
                 {s.enabled && (
@@ -1965,13 +1986,6 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                             <div style={{ fontWeight: 500, marginBottom: '12px', fontSize: '13px' }}>
                                 {zh ? '周期偏好' : 'Period Preference'}
                             </div>
-                            {!periodFrequencyLocked && (
-                                <div style={{ marginBottom: '10px', fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.5, maxWidth: '520px' }}>
-                                    {zh
-                                        ? '请在首次启用 OKR 前选择周期。首次启用后，周期频率将被锁定，避免历史 OKR 和报表口径混乱。'
-                                        : 'Choose the cadence before enabling OKR for the first time. After first enablement, it will be locked to keep OKR history and reports consistent.'}
-                                </div>
-                            )}
                             <select
                                 className="form-input"
                                 value={s.period_frequency}

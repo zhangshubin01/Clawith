@@ -667,6 +667,69 @@ async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
         logger.info(f"[AgentSeeder] Created system trigger '{t['name']}' for OKR Agent")
 
 
+async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OKRSettings | None) -> bool:
+    """Align existing OKR system triggers with tenant report settings."""
+    if not settings:
+        return False
+
+    changed = False
+    daily_hour, daily_minute = 18, 0
+    try:
+        hour_str, minute_str = settings.daily_report_time.split(":", 1)
+        daily_hour = max(0, min(23, int(hour_str)))
+        daily_minute = max(0, min(59, int(minute_str)))
+    except Exception:
+        logger.warning(f"[AgentSeeder] Invalid OKR daily_report_time {settings.daily_report_time}; using 18:00")
+
+    weekly_day = settings.weekly_report_day
+    cron_weekday = 0 if weekly_day == 6 else weekly_day + 1
+
+    result = await db.execute(
+        select(AgentTrigger).where(
+            AgentTrigger.agent_id == agent_id,
+            AgentTrigger.name.in_([
+                "daily_okr_report",
+                "weekly_okr_report",
+                "biweekly_okr_checkin",
+                "monthly_okr_report",
+            ]),
+        )
+    )
+    triggers = {t.name: t for t in result.scalars().all()}
+
+    desired = {
+        "daily_okr_report": {
+            "config": {"expr": f"{daily_minute} {daily_hour} * * *"},
+            "is_enabled": bool(settings.enabled and settings.daily_report_enabled),
+        },
+        "weekly_okr_report": {
+            "config": {"expr": f"0 9 * * {cron_weekday}"},
+            "is_enabled": bool(settings.enabled and settings.weekly_report_enabled),
+        },
+        "biweekly_okr_checkin": {
+            "is_enabled": bool(settings.enabled),
+        },
+        "monthly_okr_report": {
+            "is_enabled": bool(settings.enabled),
+        },
+    }
+
+    for name, values in desired.items():
+        trigger = triggers.get(name)
+        if not trigger:
+            continue
+        if "config" in values and trigger.config != values["config"]:
+            trigger.config = values["config"]
+            changed = True
+        if trigger.is_enabled != values["is_enabled"]:
+            trigger.is_enabled = values["is_enabled"]
+            changed = True
+
+    if changed:
+        logger.info("[AgentSeeder] Synced OKR system triggers with settings")
+    return changed
+
+
 async def patch_existing_okr_agent() -> None:
     """Patch an already-seeded OKR Agent with new fields added in later versions.
 
@@ -741,6 +804,7 @@ async def patch_existing_okr_agent() -> None:
 
         # Ensure system cron triggers exist
         await _seed_okr_triggers(db, agent.id)
+        changed = await _sync_okr_triggers_with_settings(db, agent.id, okr_settings) or changed
 
         if changed:
             await db.commit()
@@ -890,5 +954,6 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
 
         # ── Create system cron triggers ──
         await _seed_okr_triggers(db, okr_agent.id)
+        await _sync_okr_triggers_with_settings(db, okr_agent.id, okr_settings)
         await db.commit()
         logger.info(f"[AgentSeeder] OKR triggers created for tenant {tenant_id}")
