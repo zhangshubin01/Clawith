@@ -14,14 +14,15 @@ from sqlalchemy import or_, select
 
 from app.database import async_session
 from app.models.agent import Agent
+from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.okr import OKRSettings
 from app.models.org import AgentAgentRelationship, AgentRelationship, OrgMember
+from app.models.participant import Participant
 from app.models.trigger import AgentTrigger
 from app.models.user import User
 from app.services.agent_tools import (
     _send_channel_message,
-    _send_message_to_agent,
     _send_web_message,
 )
 
@@ -92,6 +93,72 @@ async def _upsert_reply_trigger(
                 )
             )
         await db.commit()
+
+
+async def _send_agent_collection_message(
+    *,
+    source_agent: Agent,
+    target_agent: Agent,
+    message_text: str,
+) -> str:
+    """Send a deterministic A2A collection request without relying on generic tool routing."""
+    from app.services.trigger_daemon import wake_agent_with_context
+
+    async with async_session() as db:
+        src_participant = (
+            await db.execute(
+                select(Participant).where(
+                    Participant.type == "agent",
+                    Participant.ref_id == source_agent.id,
+                )
+            )
+        ).scalar_one_or_none()
+        session_agent_id = min(source_agent.id, target_agent.id, key=str)
+        session_peer_id = max(source_agent.id, target_agent.id, key=str)
+        chat_session = (
+            await db.execute(
+                select(ChatSession).where(
+                    ChatSession.agent_id == session_agent_id,
+                    ChatSession.peer_agent_id == session_peer_id,
+                    ChatSession.source_channel == "agent",
+                )
+            )
+        ).scalar_one_or_none()
+
+        if not chat_session:
+            chat_session = ChatSession(
+                agent_id=session_agent_id,
+                user_id=source_agent.creator_id,
+                title=f"{source_agent.name} ↔ {target_agent.name}",
+                source_channel="agent",
+                participant_id=src_participant.id if src_participant else None,
+                peer_agent_id=session_peer_id,
+            )
+            db.add(chat_session)
+            await db.flush()
+
+        db.add(
+            ChatMessage(
+                agent_id=session_agent_id,
+                user_id=source_agent.creator_id,
+                role="user",
+                content=message_text,
+                conversation_id=str(chat_session.id),
+                participant_id=src_participant.id if src_participant else None,
+            )
+        )
+        chat_session.last_message_at = datetime.now(timezone.utc)
+        session_id = str(chat_session.id)
+        await db.commit()
+
+    await wake_agent_with_context(
+        target_agent.id,
+        f"[From {source_agent.name}] {message_text}",
+        from_agent_id=source_agent.id,
+        skip_dedup=True,
+        a2a_session_id=session_id,
+    )
+    return f"✅ Notification sent to {target_agent.name}. They will process it asynchronously."
 
 
 async def trigger_daily_collection_for_tenant(tenant_id: uuid.UUID) -> dict:
@@ -218,14 +285,10 @@ async def trigger_daily_collection_for_tenant(tenant_id: uuid.UUID) -> dict:
             )
 
     for agent_member in tracked_agents:
-        send_result = await _send_message_to_agent(
-            okr_agent.id,
-            {
-                "agent_name": agent_member.name,
-                "message": _agent_request_message(agent_member.name, report_day),
-                "msg_type": "notify",
-                "force_async": True,
-            },
+        send_result = await _send_agent_collection_message(
+            source_agent=okr_agent,
+            target_agent=agent_member,
+            message_text=_agent_request_message(agent_member.name, report_day),
         )
         if send_result.startswith("✅"):
             sent_agents += 1
