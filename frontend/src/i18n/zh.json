@@ -195,12 +195,12 @@
       "creating": "创建中",
       "error": "异常",
       "disconnected": "已断开",
-      "24hActions": "⏰ 24h 活动",
+      "24hActions": "24h 活动",
       "24hActionsTooltip": "过去 24 小时内该 Agent 的所有操作记录，包括对话、工具调用、任务执行等",
-      "llmCallsToday": "🤖 今日 LLM 调用",
+      "llmCallsToday": "今日 LLM 调用",
       "max": "上限",
-      "totalToken": "📊 总 Token",
-      "pending": "⏳ 待处理"
+      "totalToken": "总 Token",
+      "pending": "待处理"
     },
     "tabs": {
       "status": "状态",
@@ -218,26 +218,26 @@
     },
     "fields": {
       "name": "名称",
-      "role": "👤 角色",
+      "role": "角色",
       "avatar": "头像",
       "personality": "人格设定",
       "boundaries": "行为边界",
       "lastActive": "最后活跃",
       "tasksInProgress": "进行中",
       "supervisions": "督办",
-      "createdBy": "👨‍💼 创建者"
+      "createdBy": "创建者"
     },
     "profile": {
-      "title": "📋 Agent 档案",
-      "created": "📅 创建时间",
-      "lastActive": "⏰ 最后活跃",
-      "timezone": "🌐 时区"
+      "title": "Agent 档案",
+      "created": "创建时间",
+      "lastActive": "最后活跃",
+      "timezone": "时区"
     },
     "modelConfig": {
-      "title": "🤖 模型配置",
-      "model": "🧠 模型",
-      "provider": "🏢 提供商",
-      "contextRounds": "🔄 上下文窗口"
+      "title": "模型配置",
+      "model": "模型",
+      "provider": "提供商",
+      "contextRounds": "上下文窗口"
     },
     "actions": {
       "start": "启动",

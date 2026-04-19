@@ -188,12 +188,12 @@
       "creating": "Creating",
       "error": "Error",
       "disconnected": "Disconnected",
-      "24hActions": "⏰ 24h Actions",
+      "24hActions": "24h Actions",
       "24hActionsTooltip": "Total recorded operations in the past 24 hours, including chats, tool calls, task executions, etc.",
-      "llmCallsToday": "🤖 LLM Calls Today",
+      "llmCallsToday": "LLM Calls Today",
       "max": "Max",
-      "totalToken": "📊 Total Token",
-      "pending": "⏳ Pending"
+      "totalToken": "Total Token",
+      "pending": "Pending"
     },
     "tabs": {
       "status": "Status",
@@ -211,26 +211,26 @@
     },
     "fields": {
       "name": "Name",
-      "role": "👤 Role",
+      "role": "Role",
       "avatar": "Avatar",
       "personality": "Personality",
       "boundaries": "Boundaries",
       "lastActive": "Last Active",
       "tasksInProgress": "In Progress",
       "supervisions": "Supervisions",
-      "createdBy": "👨‍💼 Created by"
+      "createdBy": "Created by"
     },
     "profile": {
-      "title": "📋 Agent Profile",
-      "created": "📅 Created",
-      "lastActive": "⏰ Last Active",
-      "timezone": "🌐 Timezone"
+      "title": "Agent Profile",
+      "created": "Created",
+      "lastActive": "Last Active",
+      "timezone": "Timezone"
     },
     "modelConfig": {
-      "title": "🤖 Model Config",
-      "model": "🧠 Model",
-      "provider": "🏢 Provider",
-      "contextRounds": "🔄 Context Window"
+      "title": "Model Config",
+      "model": "Model",
+      "provider": "Provider",
+      "contextRounds": "Context Window"
     },
     "actions": {
       "start": "Start",

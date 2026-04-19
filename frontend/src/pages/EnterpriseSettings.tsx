@@ -1658,19 +1658,7 @@ function CompanyTimezoneEditor() {
                     ? `用于自动设置公司默认时区和 OKR 休息日规则。当前时区：${timezone}`
                     : `Used to set the company timezone and OKR non-workday rules. Current timezone: ${timezone}`}
             </div>
-            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                    {error && (
-                        <div style={{ fontSize: '11px', color: 'var(--error)', marginTop: '4px' }}>
-                            ⚠ {error}
-                        </div>
-                    )}
-                    {!tenantId && (
-                        <div style={{ fontSize: '11px', color: 'var(--error)', marginTop: '4px' }}>
-                            ⚠ {t('enterprise.timezone.noTenant', 'No company selected. Please refresh the page or contact support.')}
-                        </div>
-                    )}
-                </div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '10px', width: '100%' }}>
                 <input
                     className="form-input"
                     list="company-region-options"
@@ -1686,7 +1674,7 @@ function CompanyTimezoneEditor() {
                         setRegionInput(regionLabel(selected));
                     }}
                     placeholder={zh ? '搜索国家或地区' : 'Search country or region'}
-                    style={{ width: '360px', fontSize: '13px' }}
+                    style={{ width: 'min(420px, 100%)', fontSize: '13px' }}
                     disabled={saving || !tenantId}
                 />
                 <datalist id="company-region-options">
@@ -1694,7 +1682,21 @@ function CompanyTimezoneEditor() {
                         <option key={region.code} value={regionLabel(region)} label={`${region.code} · ${region.timezone}`} />
                     ))}
                 </datalist>
-                {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅</span>}
+                {(saved || error || !tenantId) && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minHeight: '16px', flexWrap: 'wrap' }}>
+                        {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>已保存</span>}
+                        {error && (
+                            <div style={{ fontSize: '11px', color: 'var(--error)' }}>
+                                {error}
+                            </div>
+                        )}
+                        {!tenantId && (
+                            <div style={{ fontSize: '11px', color: 'var(--error)' }}>
+                                {t('enterprise.timezone.noTenant', 'No company selected. Please refresh the page or contact support.')}
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
         </div>
     );
@@ -1746,44 +1748,49 @@ function A2AAsyncToggle() {
                     ? '开启后，数字员工之间可使用 notify / task_delegate 等异步协作模式。关闭后，Agent 间消息统一走同步 consult。'
                     : 'When enabled, agents can use async notify and task_delegate modes. When disabled, agent-to-agent messaging falls back to synchronous consult.'}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px' }}>
-                <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}>
+                <div style={{ width: '100%' }}>
                     {error && (
                         <div style={{ fontSize: '11px', color: 'var(--error)' }}>
                             {error}
                         </div>
                     )}
                 </div>
-                <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', flexShrink: 0, opacity: saving ? 0.6 : 1 }}>
-                    <input
-                        type="checkbox"
-                        checked={enabled}
-                        onChange={handleToggle}
-                        disabled={saving || !tenantId}
-                        style={{ opacity: 0, width: 0, height: 0 }}
-                    />
-                    <span style={{
-                        position: 'absolute', inset: 0,
-                        borderRadius: '999px',
-                        cursor: saving ? 'not-allowed' : 'pointer',
-                        background: enabled ? 'var(--accent-primary)' : 'var(--border-subtle)',
-                        transition: '0.2s',
-                    }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', flexShrink: 0, opacity: saving ? 0.6 : 1 }}>
+                        <input
+                            type="checkbox"
+                            checked={enabled}
+                            onChange={handleToggle}
+                            disabled={saving || !tenantId}
+                            style={{ opacity: 0, width: 0, height: 0 }}
+                        />
                         <span style={{
-                            position: 'absolute',
-                            top: '2px',
-                            left: enabled ? '20px' : '2px',
-                            width: '18px',
-                            height: '18px',
-                            borderRadius: '50%',
-                            background: '#fff',
+                            position: 'absolute', inset: 0,
+                            borderRadius: '999px',
+                            cursor: saving ? 'not-allowed' : 'pointer',
+                            background: enabled ? 'var(--accent-primary)' : 'var(--border-subtle)',
                             transition: '0.2s',
-                            boxShadow: '0 1px 2px rgba(0,0,0,0.12)',
-                        }} />
+                        }}>
+                            <span style={{
+                                position: 'absolute',
+                                top: '2px',
+                                left: enabled ? '20px' : '2px',
+                                width: '18px',
+                                height: '18px',
+                                borderRadius: '50%',
+                                background: '#fff',
+                                transition: '0.2s',
+                                boxShadow: '0 1px 2px rgba(0,0,0,0.12)',
+                            }} />
+                        </span>
+                    </label>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                        {enabled ? (zh ? '已开启' : 'Enabled') : (zh ? '已关闭' : 'Disabled')}
                     </span>
-                </label>
+                </div>
             </div>
-            <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+            <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-tertiary)', maxWidth: '640px' }}>
                 {zh
                     ? '说明：OKR 日报收集本身会优先使用更稳的同步方式，不依赖这里的异步开关。'
                     : 'Note: OKR daily collection itself uses the more reliable synchronous path and does not depend on this toggle.'}

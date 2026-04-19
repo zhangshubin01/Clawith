@@ -1865,8 +1865,16 @@ function AgentDetailInner() {
     const [chatUploadDrafts, setChatUploadDrafts] = useState<{ id: string; name: string; percent: number; previewUrl?: string; sizeBytes: number }[]>([]);
     const chatUploadAbortRef = useRef<Map<string, () => void>>(new Map());
     type AttachedFileRef = { name: string; text: string; path?: string; imageUrl?: string; source?: 'upload' | 'workspace_auto' };
+    type PendingChatMessage = {
+        runtimeKey: SessionRuntimeKey;
+        contentForLLM: string;
+        userMsg: string;
+        fileName: string;
+        imageUrl?: string;
+    };
     const [attachedFiles, setAttachedFiles] = useState<AttachedFileRef[]>([]);
     const dismissedWorkspaceRefPath = useRef<string | null>(null);
+    const pendingChatSendRef = useRef<PendingChatMessage | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -2052,6 +2060,12 @@ function AgentDetailInner() {
                 wsRef.current = ws;
                 setWsConnected(true);
             }
+            if (pendingChatSendRef.current?.runtimeKey === key) {
+                const pending = pendingChatSendRef.current;
+                pendingChatSendRef.current = null;
+                setChatInfoMsg(null);
+                dispatchChatMessage(ws, key, pending);
+            }
         };
         ws.onclose = (e) => {
             if (wsMapRef.current[key] === ws) delete wsMapRef.current[key];
@@ -2235,6 +2249,24 @@ function AgentDetailInner() {
                 setChatMessages(prev => [...prev, parseChatMsg({ role: d.role, content: d.content })]);
             }
         };
+    };
+
+    const dispatchChatMessage = (socket: WebSocket, runtimeKey: SessionRuntimeKey, payload: PendingChatMessage) => {
+        setIsWaiting(true);
+        setIsStreaming(false);
+        setSessionUiState(runtimeKey, { isWaiting: true, isStreaming: false });
+        setChatMessages(prev => [...prev, parseChatMsg({
+            role: 'user',
+            content: payload.userMsg,
+            fileName: payload.fileName,
+            imageUrl: payload.imageUrl,
+            timestamp: new Date().toISOString()
+        })]);
+        socket.send(JSON.stringify({
+            content: payload.contentForLLM,
+            display_content: payload.userMsg,
+            file_name: payload.fileName
+        }));
     };
 
     useEffect(() => {
@@ -2459,7 +2491,6 @@ function AgentDetailInner() {
         if (!id || !activeSession?.id) return;
         const activeRuntimeKey = buildSessionRuntimeKey(id, String(activeSession.id));
         const activeSocket = wsMapRef.current[activeRuntimeKey];
-        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) return;
         if (!chatInput.trim() && attachedFiles.length === 0) return;
 
         let userMsg = chatInput.trim();
@@ -2498,21 +2529,13 @@ function AgentDetailInner() {
             userMsg = userMsg ? `${displayFiles}\n${userMsg}` : displayFiles;
         }
 
-        setIsWaiting(true);
-        setIsStreaming(false);
-        setSessionUiState(activeRuntimeKey, { isWaiting: true, isStreaming: false });
-        setChatMessages(prev => [...prev, parseChatMsg({
-            role: 'user',
-            content: userMsg,
+        const payload: PendingChatMessage = {
+            runtimeKey: activeRuntimeKey,
+            contentForLLM,
+            userMsg,
             fileName: attachedFiles.map(f => f.name).join(', '),
             imageUrl: attachedFiles.length === 1 ? attachedFiles[0].imageUrl : undefined,
-            timestamp: new Date().toISOString()
-        })]);
-        activeSocket.send(JSON.stringify({
-            content: contentForLLM,
-            display_content: userMsg,
-            file_name: attachedFiles.map(f => f.name).join(', ')
-        }));
+        };
 
         setChatInput('');
         // Reset textarea height after clearing content
@@ -2521,6 +2544,17 @@ function AgentDetailInner() {
         }
         dismissedWorkspaceRefPath.current = null;
         setAttachedFiles((prev) => prev.filter((file) => file.source === 'workspace_auto'));
+
+        if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) {
+            pendingChatSendRef.current = payload;
+            if (token) ensureSessionSocket(activeSession, id, token);
+            setChatInfoMsg('Connection is reconnecting. Your message will be sent automatically.');
+            if (chatInfoTimerRef.current) clearTimeout(chatInfoTimerRef.current);
+            chatInfoTimerRef.current = setTimeout(() => setChatInfoMsg(null), 4000);
+            return;
+        }
+
+        dispatchChatMessage(activeSocket, activeRuntimeKey, payload);
     };
 
     const handleChatFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -3052,19 +3086,19 @@ function AgentDetailInner() {
                             {/* Metric cards */}
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', marginBottom: '24px' }}>
                                 <div className="card">
-                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>📋 {t('agent.tabs.status')}</div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>{t('agent.tabs.status')}</div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                         <span className={`status-dot ${statusKey}`} />
                                         <span style={{ fontSize: '16px', fontWeight: 500 }}>{t(`agent.status.${statusKey}`)}</span>
                                     </div>
                                 </div>
                                 <div className="card">
-                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>🗓️ {t('agent.settings.today')} Token</div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>{t('agent.settings.today')} Token</div>
                                     <div style={{ fontSize: '22px', fontWeight: 600 }}>{formatTokens(agent.tokens_used_today)}</div>
                                     {agent.max_tokens_per_day && <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{t('agent.settings.noLimit')} {formatTokens(agent.max_tokens_per_day)}</div>}
                                 </div>
                                 <div className="card">
-                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>📅 {t('agent.settings.month')} Token</div>
+                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>{t('agent.settings.month')} Token</div>
                                     <div style={{ fontSize: '22px', fontWeight: 600 }}>{formatTokens(agent.tokens_used_month)}</div>
                                     {agent.max_tokens_per_month && <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{t('agent.settings.noLimit')} {formatTokens(agent.max_tokens_per_month)}</div>}
                                 </div>
@@ -3082,7 +3116,7 @@ function AgentDetailInner() {
                                     {metrics && (
                                         <>
                                             <div className="card">
-                                                <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>✅ {t('agent.tasks.done')}</div>
+                                                <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '6px' }}>{t('agent.tasks.done')}</div>
                                                 <div style={{ fontSize: '22px', fontWeight: 600 }}>{metrics.tasks?.done || 0}/{metrics.tasks?.total || 0}</div>
                                                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}> {metrics.tasks?.completion_rate || 0}%</div>
                                             </div>
@@ -3199,7 +3233,7 @@ function AgentDetailInner() {
                             {activityLogs && activityLogs.length > 0 && (
                                 <div className="card">
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                                        <h3 style={{ fontSize: '14px', fontWeight: 600 }}>📊 Recent Activity</h3>
+                                        <h3 style={{ fontSize: '14px', fontWeight: 600 }}>{t('agent.activity.recent', 'Recent Activity')}</h3>
                                         <button className="btn btn-ghost" style={{ fontSize: '12px' }} onClick={() => setActiveTab('activityLog')}>View All →</button>
                                     </div>
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
