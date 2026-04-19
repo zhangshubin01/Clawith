@@ -181,17 +181,18 @@ async def trigger_daily_collection_for_tenant(tenant_id: uuid.UUID) -> dict:
         platform_uid = member_user_ids.get(org_member.id)
         platform_name = member_user_display_names.get(org_member.id)
         message_text = _human_request_message(org_member.name, report_day)
+        has_external_channel = bool(org_member.open_id or org_member.external_id)
 
         send_result = ""
-        if platform_name:
-            send_result = await _send_web_message(
-                okr_agent.id,
-                {"username": platform_name, "message": message_text},
-            )
-        elif org_member.open_id or org_member.external_id:
+        if has_external_channel:
             send_result = await _send_channel_message(
                 okr_agent.id,
                 {"member_name": org_member.name, "message": message_text},
+            )
+        elif platform_name:
+            send_result = await _send_web_message(
+                okr_agent.id,
+                {"username": platform_name, "message": message_text},
             )
 
         if send_result.startswith("✅"):
@@ -200,7 +201,7 @@ async def trigger_daily_collection_for_tenant(tenant_id: uuid.UUID) -> dict:
                 okr_agent_id=okr_agent.id,
                 trigger_name=f"daily_reply_user_{report_day.isoformat()}_{org_member.id.hex[:8]}",
                 config={
-                    "from_user_name": platform_name or org_member.name,
+                    "from_user_name": org_member.name if has_external_channel else (platform_name or org_member.name),
                     "okr_member_type": "user",
                     "okr_member_id": str(platform_uid or org_member.id),
                     "okr_member_name": org_member.name,
@@ -223,6 +224,7 @@ async def trigger_daily_collection_for_tenant(tenant_id: uuid.UUID) -> dict:
                 "agent_name": agent_member.name,
                 "message": _agent_request_message(agent_member.name, report_day),
                 "msg_type": "notify",
+                "force_async": True,
             },
         )
         if send_result.startswith("✅"):

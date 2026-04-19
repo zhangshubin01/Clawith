@@ -5132,6 +5132,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
     agent_name = args.get("agent_name", "").strip()
     message_text = args.get("message", "").strip()
     msg_type = args.get("msg_type", "notify").strip().lower()
+    force_async = bool(args.get("force_async"))
 
     if not agent_name or not message_text:
         return "❌ Please provide target agent name and message content"
@@ -5287,7 +5288,7 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                         _a2a_async = getattr(_tenant, "a2a_async_enabled", False)
                 except Exception:
                     pass
-            if not _a2a_async:
+            if not _a2a_async and not force_async:
                 if msg_type in ("notify", "task_delegate"):
                     msg_type = "consult"
 
