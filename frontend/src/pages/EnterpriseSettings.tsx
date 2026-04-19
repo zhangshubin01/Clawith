@@ -1696,6 +1696,98 @@ function CompanyTimezoneEditor() {
 }
 
 
+function A2AAsyncToggle() {
+    const { t, i18n } = useTranslation();
+    const user = useAuthStore((s) => s.user);
+    const tenantId = user?.tenant_id || localStorage.getItem('current_tenant_id') || '';
+    const [enabled, setEnabled] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState('');
+    const zh = i18n.language?.startsWith('zh');
+
+    useEffect(() => {
+        if (!tenantId) return;
+        fetchJson<any>(`/tenants/${tenantId}`)
+            .then(d => setEnabled(!!d?.a2a_async_enabled))
+            .catch((e: any) => setError(e.message || 'Failed to load A2A setting'));
+    }, [tenantId]);
+
+    const handleToggle = async () => {
+        if (!tenantId || saving) return;
+        const next = !enabled;
+        setEnabled(next);
+        setSaving(true);
+        setError('');
+        try {
+            await fetchJson(`/tenants/${tenantId}`, {
+                method: 'PUT',
+                body: JSON.stringify({ a2a_async_enabled: next }),
+            });
+        } catch (e: any) {
+            setEnabled(!next);
+            setError(e.message || 'Failed to save A2A setting');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px' }}>
+                <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 500, fontSize: '13px', marginBottom: '4px' }}>
+                        {zh ? 'Agent 异步协作（Beta）' : 'Agent Async Collaboration (Beta)'}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                        {zh
+                            ? '开启后，数字员工之间可使用 notify / task_delegate 等异步协作模式。关闭后，Agent 间消息统一走同步 consult。'
+                            : 'When enabled, agents can use async notify and task_delegate modes. When disabled, agent-to-agent messaging falls back to synchronous consult.'}
+                    </div>
+                    {error && (
+                        <div style={{ fontSize: '11px', color: 'var(--error)', marginTop: '4px' }}>
+                            {error}
+                        </div>
+                    )}
+                </div>
+                <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', flexShrink: 0, opacity: saving ? 0.6 : 1 }}>
+                    <input
+                        type="checkbox"
+                        checked={enabled}
+                        onChange={handleToggle}
+                        disabled={saving || !tenantId}
+                        style={{ opacity: 0, width: 0, height: 0 }}
+                    />
+                    <span style={{
+                        position: 'absolute', inset: 0,
+                        borderRadius: '999px',
+                        cursor: saving ? 'not-allowed' : 'pointer',
+                        background: enabled ? 'var(--accent-primary)' : 'var(--border-subtle)',
+                        transition: '0.2s',
+                    }}>
+                        <span style={{
+                            position: 'absolute',
+                            top: '2px',
+                            left: enabled ? '20px' : '2px',
+                            width: '18px',
+                            height: '18px',
+                            borderRadius: '50%',
+                            background: '#fff',
+                            transition: '0.2s',
+                            boxShadow: '0 1px 2px rgba(0,0,0,0.12)',
+                        }} />
+                    </span>
+                </label>
+            </div>
+            <div style={{ marginTop: '10px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                {zh
+                    ? '说明：OKR 日报收集本身会优先使用更稳的同步方式，不依赖这里的异步开关。'
+                    : 'Note: OKR daily collection itself uses the more reliable synchronous path and does not depend on this toggle.'}
+            </div>
+        </div>
+    );
+}
+
+
 // ── Broadcast Section ──────────────────────────
 function BroadcastSection() {
     const { t } = useTranslation();
@@ -2813,6 +2905,9 @@ export default function EnterpriseSettings() {
 
                         {/* ── 0.5. Company Timezone ── */}
                         <CompanyTimezoneEditor key={`tz-${selectedTenantId}`} />
+
+                        {/* ── 0.75. Agent Async Collaboration ── */}
+                        <A2AAsyncToggle key={`a2a-${selectedTenantId}`} />
 
                         {/* ── 2. Company Intro ── */}
                         <h3 style={{ marginBottom: '8px' }}>{t('enterprise.companyIntro.title', 'Company Intro')}</h3>
