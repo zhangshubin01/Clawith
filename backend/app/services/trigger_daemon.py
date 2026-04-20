@@ -742,13 +742,22 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
 
         # Call LLM (outside the DB session to avoid long transactions)
         collected_content = []
+        delivered_platform_message_via_tool = False
 
         async def on_chunk(text):
             collected_content.append(text)
 
         # Persist tool calls into Reflection Session for Reflections visibility
         async def on_tool_call(data):
+            nonlocal delivered_platform_message_via_tool
             try:
+                tool_name = data.get("name")
+                tool_status = data.get("status")
+                if tool_status == "done" and tool_name == "send_web_message":
+                    result_text = str(data.get("result", ""))
+                    if result_text.startswith("✅"):
+                        delivered_platform_message_via_tool = True
+
                 async with async_session() as _tc_db:
                     if data["status"] == "running":
                         _tc_db.add(ChatMessage(
@@ -846,7 +855,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
         is_a2a_internal = all(t.name == "a2a_wake" for t in triggers)
         delivery_target = None if is_a2a_internal else await _resolve_trigger_delivery_target(agent, triggers)
 
-        if final_reply and delivery_target:
+        if final_reply and delivery_target and not delivered_platform_message_via_tool:
             try:
                 from app.api.websocket import manager as ws_manager
                 agent_id_str = str(agent_id)

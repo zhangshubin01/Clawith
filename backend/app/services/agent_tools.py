@@ -4744,6 +4744,7 @@ async def _send_web_message(agent_id: uuid.UUID, args: dict) -> str:
                         "type": "trigger_notification",
                         "content": message_text,
                         "triggers": ["web_message"],
+                        "session_id": str(session.id),
                     },
                 )
             except Exception:
