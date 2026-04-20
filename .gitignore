@@ -32,4 +32,5 @@ _agents/
 # Internal docs
 docs/
 *.log
+.cursor/
 .agents/rules/deploy.md

@@ -39,6 +39,8 @@ from app.services.channel_user_service import get_platform_user_by_org_member
 from app.config import get_settings
 
 
+from collections import OrderedDict
+
 _settings = get_settings()
 WORKSPACE_ROOT = Path(_settings.AGENT_DATA_DIR)
 
@@ -47,6 +49,13 @@ WORKSPACE_ROOT = Path(_settings.AGENT_DATA_DIR)
 # Key: (agent_id, tool_name), Value: (config, expiry_time)
 _tool_config_cache: dict[tuple, tuple[dict, datetime]] = {}
 _TOOL_CONFIG_CACHE_TTL_SECONDS = 60
+
+# ─── Tool Definition Cache (LRU) ────────────────────────────────────────
+# Cache tools definition list to avoid DB queries per request
+# Key: (agent_id, has_feishu, has_any_channel, a2a_async, os_type), Value: (tools_list, expiry_time)
+_MAX_TOOLS_CACHE_SIZE = 100
+_tools_def_cache: OrderedDict[tuple, tuple[list, datetime]] = OrderedDict()
+_tools_def_lock = asyncio.Lock()  # Protect concurrent cache access
 
 # Sensitive field keys that should be encrypted/decrypted
 SENSITIVE_FIELD_KEYS = {"api_key", "private_key", "auth_code", "password", "secret", "atlassian_api_key"}
@@ -156,7 +165,10 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
             _set_cached_tool_config(agent_id, tool_name, decrypted)
             return decrypted
 
-    logger.error(f"[ToolConfig] No DB config found for {tool_name}, agent_id={agent_id}")
+    if tool_name.startswith("agentbay_"):
+        logger.debug(f"[ToolConfig] No DB config found for {tool_name}, agent_id={agent_id} (AgentBay not configured, this is expected if not using AgentBay)")
+    else:
+        logger.error(f"[ToolConfig] No DB config found for {tool_name}, agent_id={agent_id}")
     return None
 
 # ContextVar set by each channel handler so send_channel_file knows where to send
@@ -1846,12 +1858,12 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     When the tenant's a2a_async_enabled flag is False, the msg_type parameter is
     removed from the send_message_to_agent tool so the LLM only sees the
     synchronous consult behaviour.
+
+    Uses LRU cache with TTL (60s) to avoid DB queries per request.
     """
+    # Get dynamic parameters (these cannot be cached reliably)
     has_feishu = await _agent_has_feishu(agent_id)
     has_any_channel = await _agent_has_any_channel(agent_id)
-    _always_tools = _always_core_tools + (_feishu_tools if has_feishu else []) + (_channel_tools if has_any_channel else [])
-
-    # Check tenant-level a2a_async_enabled flag
     _a2a_async = False
     try:
         from app.models.tenant import Tenant
@@ -1866,9 +1878,18 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     _a2a_async = getattr(_tenant, "a2a_async_enabled", False)
     except Exception:
         pass
-
-    # Read os_type once; used to patch agentbay_file_transfer paths below
     computer_os_type = await _get_computer_os_type(agent_id)
+
+    # Check cache hit with full key
+    _cache_key = (str(agent_id), has_feishu, has_any_channel, _a2a_async, computer_os_type)
+    if _cache_key in _tools_def_cache:
+        tools_list, expiry = _tools_def_cache[_cache_key]
+        if datetime.now() < expiry:
+            _tools_def_cache.move_to_end(_cache_key)
+            return tools_list
+
+    # Build _always_tools first (needed for cache key validation)
+    _always_tools = _always_core_tools + (_feishu_tools if has_feishu else []) + (_channel_tools if has_any_channel else [])
 
     try:
         from app.models.tool import Tool, AgentTool
@@ -1933,6 +1954,12 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 # Strip msg_type from send_message_to_agent when async A2A is disabled
                 if not _a2a_async:
                     result = _strip_a2a_msg_type(result)
+
+                # Store in cache (LRU)
+                expiry = datetime.now() + timedelta(seconds=60)
+                while len(_tools_def_cache) >= _MAX_TOOLS_CACHE_SIZE:
+                    _tools_def_cache.popitem(last=False)
+                _tools_def_cache[_cache_key] = (result, expiry)
                 return result
     except Exception as e:
         logger.error(f"[Tools] DB load failed, using fallback: {e}")
@@ -8373,7 +8400,9 @@ async def _feishu_user_search(agent_id: uuid.UUID, arguments: dict) -> str:
     token = await feishu_service.get_tenant_access_token(app_id, app_secret)
 
     # ── Load local contacts cache ─────────────────────────────────────────────
-    _cache_file = _pl.Path(f"/data/workspaces/{agent_id}/feishu_contacts_cache.json")
+    from app.config import get_settings as _get_settings
+    _base_dir = _pl.Path(_get_settings().AGENT_DATA_DIR)
+    _cache_file = _base_dir / str(agent_id) / "feishu_contacts_cache.json"
     _cached_users: list[dict] = []
     try:
         if _cache_file.exists():

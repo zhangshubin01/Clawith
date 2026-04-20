@@ -23,7 +23,7 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
 
         start_time = time.time()
 
-        # Log request
+        # Log request (not bound — entry logs always visible for traceability)
         client_host = request.client.host if request.client else "-"
         logger.info(
             f"--> {request.method} {request.url.path} "
@@ -37,8 +37,15 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
             # Add trace ID to response headers
             response.headers["X-Trace-Id"] = trace_id
 
-            # Log response
-            logger.info(
+            # Log response (bind request_info so the noise filter can evaluate it)
+            logger.bind(
+                request_info={
+                    "path": request.url.path,
+                    "method": request.method,
+                    "status_code": response.status_code,
+                    "duration": duration,
+                }
+            ).info(
                 f"<-- {request.method} {request.url.path} "
                 f"{response.status_code} {duration:.3f}s"
             )

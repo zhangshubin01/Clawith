@@ -8,7 +8,7 @@ from loguru import logger
 
 from app.config import get_settings
 from app.core.events import close_redis
-from app.core.logging_config import configure_logging, intercept_standard_logging
+from app.core.logging_config import configure_logging, configure_file_logging
 from app.core.middleware import TraceIdMiddleware
 from app.schemas.schemas import HealthResponse
 
@@ -67,10 +67,10 @@ async def _start_ss_local() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown events."""
-    # Configure logging first
-    configure_logging()
-    intercept_standard_logging()
-    logger.info("[startup] Logging configured")
+    # Configure logging first — stdout already set up at import time,
+    # now add file handler with settings-based configuration.
+    configure_file_logging(settings)
+    logger.info("[startup] Logging configured (stdout + file)")
 
     # Warn about default JWT secrets in production
     if "change-me" in settings.SECRET_KEY.lower() or "change-me" in settings.JWT_SECRET_KEY.lower():
@@ -159,11 +159,11 @@ async def lifespan(app: FastAPI):
                     _new_dir = _data_dir / f"enterprise_info_{_tenant.id}"
                     if not _new_dir.exists():
                         shutil.copytree(str(_old_dir), str(_new_dir))
-                        print(f"[startup] ✅ Migrated enterprise_info → enterprise_info_{_tenant.id}", flush=True)
+                        logger.info(f"[startup] Migrated enterprise_info → enterprise_info_{_tenant.id}")
                     else:
-                        print(f"[startup] ℹ️ enterprise_info_{_tenant.id} already exists, skipping migration", flush=True)
+                        logger.info(f"[startup] enterprise_info_{_tenant.id} already exists, skipping migration")
     except Exception as e:
-        print(f"[startup] ⚠️ enterprise_info migration failed: {e}", flush=True)
+        logger.warning(f"[startup] enterprise_info migration failed: {e}")
 
     try:
         from app.services.tool_seeder import seed_builtin_tools, clean_orphaned_mcp_tools
@@ -237,9 +237,7 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 return
             if exc:
-                logger.error(f"[startup] Background task {t.get_name()} CRASHED: {exc}")
-                import traceback
-                traceback.print_exception(type(exc), exc, exc.__traceback__)
+                logger.exception(f"[startup] Background task {t.get_name()} CRASHED: {exc}")
 
         for name, coro in [
             ("trigger_daemon", start_trigger_daemon()),
@@ -253,9 +251,7 @@ async def lifespan(app: FastAPI):
             logger.info(f"[startup] created bg task: {name}")
         logger.info("[startup] all background tasks created!")
     except Exception as e:
-        logger.error(f"[startup] Background tasks failed: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[startup] Background tasks failed: {e}")
 
     # Start ss-local SOCKS5 proxy for Discord API calls (non-fatal)
     ss_task = asyncio.create_task(_start_ss_local(), name="ss-local-proxy")
@@ -326,6 +322,7 @@ from app.api.admin import router as admin_router
 from app.api.pages import router as pages_router, public_router as pages_public_router
 from app.api.agent_credentials import router as credentials_router
 from app.api.agentbay_control import router as agentbay_control_router
+from app.plugins.clawith_ide_bridge.plugin import plugin as ide_bridge_plugin
 
 app.include_router(auth_router, prefix=settings.API_PREFIX)
 app.include_router(agents_router, prefix=settings.API_PREFIX)
@@ -367,6 +364,9 @@ app.include_router(pages_router, prefix=settings.API_PREFIX)
 app.include_router(pages_public_router)  # Public endpoint for /p/{short_id}, no API prefix
 app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
+
+# Register the IDE Bridge Plugin
+ide_bridge_plugin.register(app)
 
 # 加载插件（放在所有 include_router 之后）
 from app.plugins import load_plugins

@@ -1,5 +1,6 @@
 """Application configuration."""
 
+import uuid
 from functools import lru_cache
 from pathlib import Path
 
@@ -46,6 +47,13 @@ def _default_agent_template_dir() -> str:
     return str(source_path)
 
 
+def _default_log_dir() -> str:
+    """Docker mode returns empty (managed by json-file driver), local returns ~/.clawith/data/log."""
+    if _running_in_container():
+        return ""
+    return str(Path.home() / ".clawith" / "data" / "log")
+
+
 def _read_version() -> str:
     """Read version from local VERSION file, fallback to root."""
     for candidate in [Path(__file__).resolve().parent.parent / "VERSION",
@@ -86,6 +94,14 @@ class Settings(BaseSettings):
     AGENT_DATA_DIR: str = _default_agent_data_dir()
     AGENT_TEMPLATE_DIR: str = _default_agent_template_dir()
 
+    # Logging
+    LOG_DIR: str = _default_log_dir()
+    LOG_LEVEL: str = "INFO"
+    LOG_ROTATION: str = "00:00"
+    LOG_RETENTION: str = "30 days"
+    LOG_COMPRESSION: str = "gz"
+    LOG_DIAGNOSE: bool = False  # Production-safe: don't expose variable values in tracebacks
+
     # Docker (for Agent containers)
     DOCKER_NETWORK: str = "clawith_network"
     OPENCLAW_IMAGE: str = "openclaw:local"
@@ -116,6 +132,17 @@ class Settings(BaseSettings):
     SANDBOX_ALLOW_NETWORK: bool = False
     SANDBOX_DEFAULT_TIMEOUT: int = 30
     SANDBOX_MAX_TIMEOUT: int = 60
+
+    def get_agent_workspace_path(self, agent_id: str) -> Path:
+        """Return the workspace directory path for a given agent.
+
+        Args:
+            agent_id: The agent's unique identifier (string or UUID)
+
+        Returns:
+            Path object pointing to the agent's workspace directory
+        """
+        return Path(self.AGENT_DATA_DIR) / str(agent_id)
 
     model_config = {
         "env_file": [".env", "../.env"],

@@ -12,6 +12,7 @@ All paths now support:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import TYPE_CHECKING
@@ -76,12 +77,17 @@ class FailoverGuard:
 
 def is_retryable_error(result: str) -> bool:
     """Check if an error result is retryable.
-    
+
     Uses unified classification from failover.py.
     """
+    # Check for HTTP status codes that indicate retryable errors
+    result_lower = result.lower()
+    if any(code in result_lower for code in ["429", "500", "502", "503", "504", "rate limit", "too many requests"]):
+        return True
+
     if not (result.startswith("[LLM Error]") or result.startswith("[LLM call error]") or result.startswith("[Error]")):
         return False
-        
+
     return classify_error(Exception(result)) != FailoverErrorType.NON_RETRYABLE
 
 
@@ -415,7 +421,35 @@ async def call_llm(
 
         full_reasoning_content = response.reasoning_content or ""
 
-        for tc in response.tool_calls:
+        # ─── Parallel tool execution (conservative: read-only only) ────────
+        # Separate read-only tools (can parallel) from write tools (must be serial)
+        _READONLY_TOOLS = frozenset({
+            "read_file", "list_files", "search_in_files",
+            "jina_search", "web_search", "jina_read",
+            "read_document", "get_working_directory"
+        })
+
+        tool_calls = response.tool_calls
+        readonly_calls = [tc for tc in tool_calls if tc.get("function", {}).get("name") in _READONLY_TOOLS]
+        write_calls = [tc for tc in tool_calls if tc.get("function", {}).get("name") not in _READONLY_TOOLS]
+
+        # Execute read-only tools in parallel
+        if readonly_calls:
+            async def _process_readonly(tc):
+                return await _process_tool_call(
+                    tc=tc, api_messages=api_messages, agent_id=agent_id, user_id=user_id,
+                    session_id=session_id, supports_vision=supports_vision,
+                    on_tool_call=on_tool_call, full_reasoning_content=full_reasoning_content,
+                )
+            results = await asyncio.gather(*[_process_readonly(tc) for tc in readonly_calls], return_exceptions=True)
+            for tc, result in zip(readonly_calls, results):
+                if isinstance(result, Exception):
+                    result = str(result)
+                if result:
+                    api_messages.append(LLMMessage(role="tool", content=result, tool_call_id=tc.get("id", "")))
+
+        # Execute write tools serially (preserve order guarantee)
+        for tc in write_calls:
             tool_error = await _process_tool_call(
                 tc=tc,
                 api_messages=api_messages,

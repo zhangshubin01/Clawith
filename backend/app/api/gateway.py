@@ -70,7 +70,7 @@ async def poll_messages(
     Returns all pending messages and marks them as delivered.
     Also updates openclaw_last_seen for online status tracking.
     """
-    logger.info(f"[Gateway] poll called, key_prefix={x_api_key[:8]}...")
+    logger.debug(f"[Gateway] poll called, key_prefix={x_api_key[:8]}...")
     agent = await _get_agent_by_key(x_api_key, db)
 
     # Update last seen
@@ -197,7 +197,7 @@ async def report_result(
     """OpenClaw agent reports the result of a processed message."""
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Missing X-Api-Key header")
-    logger.info(f"[Gateway] report called, key_prefix={x_api_key[:8]}..., msg_id={body.message_id}")
+    logger.debug(f"[Gateway] report called, key_prefix={x_api_key[:8]}..., msg_id={body.message_id}")
     agent = await _get_agent_by_key(x_api_key, db)
 
     result = await db.execute(
@@ -462,9 +462,7 @@ async def _send_to_agent_background(
         logger.info(f"[Gateway] Agent {target_agent_name} replied to {source_agent_name}")
 
     except Exception as e:
-        logger.error(f"[Gateway] send_to_agent_background failed: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[Gateway] send_to_agent_background failed: {e}")
 
 
 @router.post("/send-message")

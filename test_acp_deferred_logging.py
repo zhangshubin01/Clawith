@@ -7,7 +7,7 @@ from pathlib import Path
 
 def check_logs():
     """Check if the new logging is working correctly."""
-    log_file = Path(__file__).parent / ".cursor" / "debug-0afa65.log"
+    log_file = Path.home() / ".clawith" / "data" / "log" / "acp_debug.log"
     
     if not log_file.exists():
         print(f"❌ Log file not found: {log_file}")
@@ -67,7 +67,7 @@ def check_logs():
         print("   This suggests session_id mismatch or write failure")
     
     print("\n💡 Recommendations:")
-    print("1. Check backend/clawith.log for 'ide_write_file write succeeded' messages")
+    print("1. Check ~/.clawith/data/log/clawith_YYYY-MM-DD.log for 'ide_write_file write succeeded' messages")
     print("2. Verify session_id consistency between write and review")
     print("3. Ensure _session_cwds is properly initialized for each session")
     

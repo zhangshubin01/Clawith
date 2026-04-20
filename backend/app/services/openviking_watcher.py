@@ -47,7 +47,7 @@ class AgentMemoryWatcher(FileSystemEventHandler):
         """Wait for file to stabilize before indexing."""
         await asyncio.sleep(self.debounce_delay)
         logger.info(f"[OpenViking] Triggering incremental indexing for {path}")
-        await index_memory_file(path, agent_id)
+        await index_memory_file(agent_id, Path(path))
 
 def start_watcher(agents_root: Path = Path.home() / ".clawith" / "data" / "agents") -> Observer:
     """Start the file watcher in a background thread.

@@ -2,6 +2,7 @@
 
 from typing import Optional, Dict, Any
 from uuid import UUID
+from loguru import logger
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,7 @@ class SessionContextManager:
         session_id: str,
         project_path: Optional[str] = None,
         current_file: Optional[str] = None,
+        open_files: Optional[list[str]] = None,
     ):
         """Update IDEA plugin session context."""
         try:
@@ -36,6 +38,8 @@ class SessionContextManager:
             session.project_path = project_path
         if current_file is not None:
             session.current_file = current_file
+        if open_files is not None:
+            session.open_files = open_files
         
         # Mark as IDE plugin client if not already set
         if session.client_type != "ide_plugin":
@@ -60,6 +64,7 @@ class SessionContextManager:
             "client_type": session.client_type,
             "project_path": session.project_path,
             "current_file": session.current_file,
+            "open_files": session.open_files,
         }
 
     async def get_latest_ide_context_by_agent(self, db: AsyncSession, agent_id: UUID) -> Dict[str, Any]:
@@ -78,4 +83,5 @@ class SessionContextManager:
         return {
             "project_path": session.project_path,
             "current_file": session.current_file,
+            "open_files": session.open_files,
         }

@@ -689,9 +689,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                         except Exception:
                             pass  # Connection may have closed
             except Exception as e:
-                logger.error(f"Failed to push trigger result to WebSocket: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.exception(f"Failed to push trigger result to WebSocket: {e}")
 
         # Audit log
         await write_audit_log("trigger_fired", {
@@ -702,9 +700,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
         logger.info(f"⚡ Triggers fired for {agent.name}: {[t.name for t in triggers]}")
 
     except Exception as e:
-        logger.error(f"Failed to invoke agent {agent_id} for triggers: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Failed to invoke agent {agent_id} for triggers: {e}")
 
 
 # ── Main Tick Loop ──────────────────────────────────────────────────
@@ -857,9 +853,7 @@ async def start_trigger_daemon():
         try:
             await _tick()
         except Exception as e:
-            logger.error(f"Trigger Daemon error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"Trigger Daemon error: {e}")
 
         # Run heartbeat check every 4th tick (~60 seconds)
         _heartbeat_counter += 1

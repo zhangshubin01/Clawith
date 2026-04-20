@@ -519,8 +519,10 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                             if sender_name and sender_open_id:
                                 try:
                                     import pathlib as _pl, json as _cj, time as _ct
+                                    from app.config import get_settings as _get_settings
                                     _safe_id = str(agent_id).replace("..", "").replace("/", "")
-                                    _cache = _pl.Path(f"/data/workspaces/{_safe_id}/feishu_contacts_cache.json")
+                                    _base_dir = _pl.Path(_get_settings().AGENT_DATA_DIR)
+                                    _cache = _base_dir / _safe_id / "feishu_contacts_cache.json"
                                     _cache.parent.mkdir(parents=True, exist_ok=True)
                                     _existing = {}
                                     if _cache.exists():
@@ -1566,13 +1568,11 @@ async def _call_agent_llm(
                 )
                 return f"⚠️ Model response timed out (>{int(_fb_timeout)}s). Please retry or shorten your request."
             except Exception as e2:
-                import traceback
-                traceback.print_exc()
+                logger.exception(f"[Feishu] Fallback model error: {e2}")
                 return f"⚠️ Model error: Primary Timeout | Fallback: {str(e2)[:80]}"
         return f"⚠️ Model response timed out (>{int(_timeout)}s). Please retry or shorten your request."
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[Feishu] Model error: {e}")
         error_msg = str(e) or repr(e)
         logger.error(f"[LLM] Primary model error: {error_msg}")
         # Runtime fallback: primary model failed -> retry with fallback model
@@ -1604,6 +1604,6 @@ async def _call_agent_llm(
                 )
                 return f"⚠️ Model error: Primary: {str(e)[:80]} | Fallback Timeout"
             except Exception as e2:
-                traceback.print_exc()
+                logger.exception(f"[Feishu] Fallback model error (primary also failed): {e2}")
                 return f"⚠️ Model error: Primary: {str(e)[:80]} | Fallback: {str(e2)[:80]}"
         return f"⚠️ 调用模型出错: {error_msg[:150]}"

@@ -1,7 +1,9 @@
 """WebSocket chat endpoint for real-time agent conversations."""
 
+import asyncio
 import json
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from loguru import logger
@@ -19,6 +21,10 @@ from app.models.user import User
 from app.services.llm import call_llm, call_llm_with_failover
 
 router = APIRouter(tags=["websocket"])
+
+# ─── Chunk Buffer for batched sending ─────────────────────────────────────────
+_CHUNK_BUFFER_SIZE = 3
+_CHUNK_BUFFER_TIMEOUT_MS = 50
 
 
 class ConnectionManager:
@@ -268,9 +274,7 @@ async def websocket_chat(
             except Exception as e:
                 logger.warning(f"[WS] History load failed (non-fatal): {e}")
     except Exception as e:
-        logger.error(f"[WS] Setup error: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[WS] Setup error: {type(e).__name__}: {e}")
         await websocket.send_json({"type": "error", "content": "Setup failed"})
         await websocket.close(code=4002)  # Config error — client should NOT retry
         return
@@ -446,12 +450,35 @@ async def websocket_chat(
                     
                     # Accumulate partial content for abort handling
                     partial_chunks: list[str] = []
-                    
+                    _chunk_buffer: list[str] = []
+                    _last_flush_time = None
+
+                    async def _flush_chunk_buffer():
+                        """Flush buffered chunks to WebSocket."""
+                        from datetime import datetime as _dt
+                        nonlocal _chunk_buffer, _last_flush_time
+                        if _chunk_buffer:
+                            combined = "".join(_chunk_buffer)
+                            await websocket.send_json({"type": "chunk", "content": combined})
+                            _chunk_buffer = []
+                            _last_flush_time = _dt.now()
+
                     async def stream_to_ws(text: str):
-                        """Send each chunk to client in real-time."""
-                        partial_chunks.append(text)
-                        await websocket.send_json({"type": "chunk", "content": text})
-                    
+                        """Send chunk to client with buffering for efficiency."""
+                        from datetime import datetime as _dt
+                        nonlocal _chunk_buffer, _last_flush_time
+                        _chunk_buffer.append(text)
+                        _now = _dt.now()
+
+                        # Flush if threshold reached OR timeout exceeded
+                        should_flush = (
+                            len(_chunk_buffer) >= _CHUNK_BUFFER_SIZE or
+                            (_last_flush_time and (_now - _last_flush_time).total_seconds() * 1000 >= _CHUNK_BUFFER_TIMEOUT_MS)
+                        )
+
+                        if should_flush:
+                            await _flush_chunk_buffer()
+
                     async def tool_call_to_ws(data: dict):
                         """Send tool call info to client and persist completed ones."""
                         if data.get("status") == "done":
@@ -594,9 +621,7 @@ async def websocket_chat(
                 except WebSocketDisconnect:
                     raise
                 except Exception as e:
-                    logger.error(f"[WS] LLM error: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception(f"[WS] LLM error: {e}")
                     assistant_response = f"[LLM call error] {str(e)[:200]}"
             else:
                 assistant_response = f"⚠️ {agent_name} has no LLM model configured. Please select a model in the agent's Settings tab."
@@ -645,6 +670,9 @@ async def websocket_chat(
                 await db.commit()
             logger.info("[WS] Assistant message saved")
 
+            # Flush remaining chunk buffer before 'done'
+            await _flush_chunk_buffer()
+
             # Final 'done' packet
             await websocket.send_json({"type": "done", "role": "assistant", "content": assistant_response})
 
@@ -653,11 +681,32 @@ async def websocket_chat(
                 # In a real implementation, you might want to push these back to the main loop
                 pass
 
+            # P2: Check for code diffs and send to IDE plugin if applicable
+            try:
+                from app.plugins.clawith_ide_bridge.diff_handler import extract_code_diffs
+                diffs = extract_code_diffs(assistant_response)
+                if diffs:
+                    # Only send to IDE plugins, not web frontend
+                    # We can check if the connection is from an IDE by checking session context or a flag
+                    # For now, we'll broadcast to the ide-bridge ws if it exists
+                    from app.plugins.clawith_ide_bridge.router import _active_ide_connections
+                    if _active_ide_connections:
+                        diff_payload = {
+                            "type": "code_diff",
+                            "diffs": diffs
+                        }
+                        for ws in _active_ide_connections.values():
+                            try:
+                                await ws.send_json(diff_payload)
+                                logger.info(f"[WS] Sent {len(diffs)} code diff(s) to IDE bridge")
+                            except Exception as e:
+                                logger.warning(f"[WS] Failed to send diff to IDE: {e}")
+            except Exception as e:
+                logger.warning(f"[WS] Diff extraction failed: {e}")
+
     except WebSocketDisconnect:
         logger.info(f"[WS] Client disconnected: {user_id}")
         manager.disconnect(str(agent_id), websocket)
     except Exception as e:
-        logger.error(f"[WS] Unexpected error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"[WS] Unexpected error: {e}")
         manager.disconnect(str(agent_id), websocket)

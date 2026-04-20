@@ -157,6 +157,28 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
+    # --- IDE Bridge tools (for IDEA plugin integration) ---
+    {
+        "name": "ide_screenshot",
+        "display_name": "IDE Screenshot",
+        "description": "Capture a screenshot of the current IDE editor or project view. Use this when you need to see the code structure, analyze error messages in screenshots, or understand the project file tree.",
+        "category": "ide",
+        "icon": "📸",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "area": {
+                    "type": "string",
+                    "enum": ["editor", "project", "full_screen"],
+                    "description": "Area to capture: 'editor' (current editor), 'project' (project tree), 'full_screen' (entire screen). Default: 'editor'"
+                }
+            },
+            "required": [],
+        },
+        "config": {},
+        "config_schema": {},
+    },
     # --- Aware trigger management tools ---
     {
         "name": "set_trigger",

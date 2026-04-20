@@ -166,9 +166,7 @@ class WeComStreamManager:
                     logger.info(f"[WeCom Stream] Replied to {sender_id}: {reply_text[:80]}")
 
                 except Exception as e:
-                    logger.error(f"[WeCom Stream] Error handling text message: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception(f"[WeCom Stream] Error handling text message: {e}")
                     try:
                         stream_id = generate_req_id("stream")
                         await client.reply_stream(
@@ -266,9 +264,7 @@ class WeComStreamManager:
                 except Exception:
                     pass
         except Exception as e:
-            logger.error(f"[WeCom Stream] Fatal client error for {agent_id}: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"[WeCom Stream] Fatal client error for {agent_id}: {e}")
         finally:
             self._connected.pop(agent_id, None)
             self._clients.pop(agent_id, None)

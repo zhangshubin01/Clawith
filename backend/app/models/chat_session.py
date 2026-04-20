@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, String, ForeignKey, func, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -42,3 +42,8 @@ class ChatSession(Base):
     peer_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # IDE Plugin Context
+    client_type: Mapped[str] = mapped_column(String(20), nullable=False, default="web", server_default="web")
+    project_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    current_file: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    open_files: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)

@@ -11,15 +11,14 @@ set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="$ROOT/.data"
 PID_DIR="$DATA_DIR/pid"
-LOG_DIR="$DATA_DIR/log"
+LOG_DIR="$HOME/.clawith/data/log"
 
 BACKEND_DIR="$ROOT/backend"
 FRONTEND_DIR="$ROOT/frontend"
 
 BACKEND_PORT=8008
 FRONTEND_PORT=3008
-FRONTEND_LOG="$LOG_DIR/frontend.log"
-BACKEND_LOG="$LOG_DIR/backend.log"
+FRONTEND_LOG="$LOG_DIR/frontend_$(date +%Y-%m-%d).log"
 BACKEND_PID="$PID_DIR/backend.pid"
 FRONTEND_PID="$PID_DIR/frontend.pid"
 
@@ -208,20 +207,19 @@ start_backend() {
     echo -e "${YELLOW}🔄 Running data migrations...${NC}"
     .venv/bin/python -m app.scripts.migrate_schedules_to_triggers || true
 
-    # Fresh log file per start so tail/grep matches this process only.
-    echo "=== Clawith backend log started at $(date '+%Y-%m-%d %H:%M:%S') port=${BACKEND_PORT} ===" > "$BACKEND_LOG"
+    # Backend logs handled by loguru file handler → ~/.clawith/data/log/clawith_YYYY-MM-DD.log
     nohup env PYTHONUNBUFFERED=1 \
         PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}" \
         DATABASE_URL="$DATABASE_URL" \
         .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $BACKEND_PORT \
-        >> "$BACKEND_LOG" 2>&1 &
+        >> /dev/null 2>&1 &
     echo $! > "$BACKEND_PID"
     wait_for_port $BACKEND_PORT "Backend" 10
 
     local saved listen
     saved=$(cat "$BACKEND_PID" 2>/dev/null || true)
     if [ -z "$saved" ] || ! kill -0 "$saved" 2>/dev/null; then
-        echo -e "${RED}❌ Backend exited immediately (pidfile invalid). See: $BACKEND_LOG${NC}"
+        echo -e "${RED}❌ Backend exited immediately (pidfile invalid). See: ~/.clawith/data/log/clawith_$(date +%Y-%m-%d).log${NC}"
         return 1
     fi
     listen=$(_listener_pid "$BACKEND_PORT")
@@ -229,7 +227,7 @@ start_backend() {
         if [ -z "$(_lsof_path)" ]; then
             echo -e "${YELLOW}⚠️  lsof not found; cannot verify port listener (pidfile $saved). Install lsof or use /usr/sbin/lsof on macOS.${NC}"
         else
-            echo -e "${RED}❌ Nothing listening on port $BACKEND_PORT after start. See: $BACKEND_LOG${NC}"
+            echo -e "${RED}❌ Nothing listening on port $BACKEND_PORT after start. See: ~/.clawith/data/log/clawith_$(date +%Y-%m-%d).log${NC}"
             return 1
         fi
     fi
@@ -246,7 +244,7 @@ start_frontend() {
     echo -e "${YELLOW}🚀 Starting frontend...${NC}"
     cd "$FRONTEND_DIR"
     nohup node_modules/.bin/vite --host 0.0.0.0 --port $FRONTEND_PORT \
-        > "$FRONTEND_LOG" 2>&1 &
+        >> "$FRONTEND_LOG" 2>&1 &
     echo $! > "$FRONTEND_PID"
     wait_for_port $FRONTEND_PORT "Frontend" 8
 }
@@ -282,9 +280,9 @@ print_info() {
     echo -e "  ${CYAN}Network:${NC} http://${SERVER_IP}:$FRONTEND_PORT"
     echo -e "  ${CYAN}API:${NC}     http://${SERVER_IP}:$BACKEND_PORT"
     echo ""
-    echo -e "  Backend log:  tail -f $BACKEND_LOG"
+    echo -e "  Backend log:  tail -f ~/.clawith/data/log/clawith_$(date +%Y-%m-%d).log"
     echo -e "  Frontend log: tail -f $FRONTEND_LOG"
-    echo -e "  ACP traces:   tail -f $BACKEND_LOG | rg '\\[ACP\\]'"
+    echo -e "  ACP traces:   tail -f ~/.clawith/data/log/clawith_$(date +%Y-%m-%d).log | rg '\\[ACP\\]'"
     echo -e "  Backend PID:  $(cat "$BACKEND_PID" 2>/dev/null || echo '?') (port listener: $(_listener_pid "$BACKEND_PORT"))"
 }
 

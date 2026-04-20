@@ -122,17 +122,13 @@ class DingTalkStreamManager:
                             try:
                                 future.result(timeout=120)
                             except Exception as e:
-                                logger.error(f"[DingTalk Stream] LLM processing error: {e}")
-                                import traceback
-                                traceback.print_exc()
+                                logger.exception(f"[DingTalk Stream] LLM processing error: {e}")
                         else:
                             logger.warning("[DingTalk Stream] Main loop not available for dispatch")
 
                         return dingtalk_stream.AckMessage.STATUS_OK, "ok"
                     except Exception as e:
-                        logger.error(f"[DingTalk Stream] Error in message handler: {e}")
-                        import traceback
-                        traceback.print_exc()
+                        logger.exception(f"[DingTalk Stream] Error in message handler: {e}")
                         return dingtalk_stream.AckMessage.STATUS_SYSTEM_EXCEPTION, str(e)
 
             credential = dingtalk_stream.Credential(client_id=app_key, client_secret=app_secret)
@@ -152,9 +148,7 @@ class DingTalkStreamManager:
                 "Install with: pip install dingtalk-stream"
             )
         except Exception as e:
-            logger.error(f"[DingTalk Stream] Client error for {agent_id}: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"[DingTalk Stream] Client error for {agent_id}: {e}")
         finally:
             self._threads.pop(agent_id, None)
             self._stop_events.pop(agent_id, None)

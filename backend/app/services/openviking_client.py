@@ -201,3 +201,86 @@ async def _fire_extract(client: httpx.AsyncClient, session_id: str, headers: dic
                                 headers=headers, timeout=2.0)
         except Exception:
             pass
+
+
+async def index_enterprise_info(project_root: Path) -> bool:
+    """Index enterprise information from the project into OpenViking.
+
+    Searches for enterprise info files (README.md, docs/*.md) and indexes them
+    into OpenViking for semantic search.
+
+    Args:
+        project_root: Root path of the project
+
+    Returns:
+        True if indexing was successful, False otherwise
+    """
+    if not await is_available():
+        return False
+
+    # Look for enterprise info files
+    enterprise_dirs = [
+        project_root / "docs",
+        project_root / "enterprise_info",
+    ]
+
+    indexed_count = 0
+    for enterprise_dir in enterprise_dirs:
+        if not enterprise_dir.exists():
+            continue
+
+        # Index markdown files in the enterprise directory
+        for md_file in enterprise_dir.rglob("*.md"):
+            try:
+                # Use a special agent_id for enterprise info
+                success = await index_memory_file("enterprise", md_file)
+                if success:
+                    indexed_count += 1
+                    logger.debug(f"[OpenViking] Indexed enterprise file: {md_file}")
+            except Exception as e:
+                logger.debug(f"[OpenViking] Failed to index {md_file}: {e}")
+
+    if indexed_count > 0:
+        logger.info(f"[OpenViking] Indexed {indexed_count} enterprise info files")
+    return indexed_count > 0
+
+
+async def index_all_skills(project_root: Path) -> bool:
+    """Index all skill definitions from the project into OpenViking.
+
+    Searches for skill definition files and indexes them for semantic search.
+
+    Args:
+        project_root: Root path of the project
+
+    Returns:
+        True if indexing was successful, False otherwise
+    """
+    if not await is_available():
+        return False
+
+    # Look for skill definition files
+    skills_dirs = [
+        project_root / "skills",
+        project_root / "app" / "skills",
+    ]
+
+    indexed_count = 0
+    for skills_dir in skills_dirs:
+        if not skills_dir.exists():
+            continue
+
+        # Index skill definition files
+        for skill_file in skills_dir.rglob("*.md"):
+            try:
+                # Use a special agent_id for skills
+                success = await index_memory_file("skills", skill_file)
+                if success:
+                    indexed_count += 1
+                    logger.debug(f"[OpenViking] Indexed skill file: {skill_file}")
+            except Exception as e:
+                logger.debug(f"[OpenViking] Failed to index {skill_file}: {e}")
+
+    if indexed_count > 0:
+        logger.info(f"[OpenViking] Indexed {indexed_count} skill files")
+    return indexed_count > 0

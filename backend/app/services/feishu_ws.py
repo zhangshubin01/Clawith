@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import threading
 from typing import Any, Dict
 import uuid
 
@@ -103,9 +102,9 @@ class FeishuWSManager:
             """Handle im.message.receive_v1 events from Feishu WebSocket."""
             try:
                 # The data object carries the raw event body
-                logger.info(f"[Feishu WS] ====> EVENT RECEIVED! entering handle_message for agent {agent_id}")
+                logger.debug(f"[Feishu WS] ====> EVENT RECEIVED! entering handle_message for agent {agent_id}")
                 raw_body = getattr(data, "raw_body", None)
-                logger.info(f"[Feishu WS] Received event: type={type(data)}, data={data}")
+                logger.debug(f"[Feishu WS] Received event: type={type(data)}, data={data}")
                 if not raw_body:
                     # Some SDK versions pass the dict directly
                     if isinstance(data, dict):
@@ -129,7 +128,6 @@ class FeishuWSManager:
                         if hasattr(data, "event"):
                             body_dict["event"] = data.event
                         elif hasattr(data, "content") and isinstance(getattr(data, "content"), str):
-                            import json
                             try:
                                 body_dict["event"] = json.loads(data.content)
                             except json.JSONDecodeError:
@@ -218,7 +216,6 @@ class FeishuWSManager:
                         # recursively convert all nested objects to dicts
                         body_dict["event"] = self._convert_sdk_object_to_dict(data.event)
                     elif hasattr(data, "content") and isinstance(getattr(data, "content"), str):
-                        import json
                         try:
                             body_dict["event"] = json.loads(data.content)
                         except json.JSONDecodeError:
@@ -279,7 +276,7 @@ class FeishuWSManager:
             app_id,
             app_secret,
             event_handler=event_handler,
-            log_level=lark.LogLevel.INFO,
+            log_level=lark.LogLevel.WARNING,  # was .INFO — suppress routine connect/disconnect logs
         )
         self._clients[agent_id] = client
 
@@ -293,25 +290,88 @@ class FeishuWSManager:
 
         # Direct Async runner bypassing the faulty client.start()
         async def _run_async_client():
-            try:
-                # Wrap _connect() in the scoped proxy bypass so macOS system proxy
-                # settings cannot interfere with the WebSocket handshake.
-                if _no_proxy_ctx:
-                    async with _no_proxy_ctx():
+            nonlocal client
+            retry_count = 0
+            max_retries = 3
+            retry_delay = 5
+            ping_task: asyncio.Task | None = None
+            while retry_count < max_retries:
+                try:
+                    # Wrap _connect() in the scoped proxy bypass so macOS system proxy
+                    # settings cannot interfere with the WebSocket handshake.
+                    if _no_proxy_ctx:
+                        async with _no_proxy_ctx():
+                            await client._connect()
+                    else:
                         await client._connect()
-                else:
-                    await client._connect()
-                # Start ping loop natively after connection is established
-                ping_task = asyncio.create_task(client._ping_loop())
-                
-                # Keep this task alive so it doesn't get canceled, and handle reconnections
-                while True:
-                    await asyncio.sleep(3600)  # Keep-alive
-            except asyncio.CancelledError:
-                logger.info(f"[Feishu WS] Async client task cancelled for {agent_id}")
-                await client._disconnect()
-            except Exception as e:
-                logger.exception(f"[Feishu WS] Async client exception for {agent_id}: {e}")
+                    logger.info(f"[Feishu WS] Connected for agent {agent_id}")
+                    # Start ping loop natively after connection is established
+                    ping_task = asyncio.create_task(client._ping_loop())
+
+                    # Keep this task alive so it doesn't get canceled, and handle reconnections
+                    while True:
+                        await asyncio.sleep(3600)  # Keep-alive
+                except asyncio.CancelledError:
+                    logger.info(f"[Feishu WS] Async client task cancelled for {agent_id}")
+                    if ping_task and not ping_task.done():
+                        ping_task.cancel()
+                        try:
+                            await ping_task
+                        except asyncio.CancelledError:
+                            pass
+                    await client._disconnect()
+                    return
+                except Exception as e:
+                    error_str = str(e)
+                    if "python-socks is required to use a SOCKS proxy" in error_str:
+                        logger.error(f"[Feishu WS] Connection failed for {agent_id}: {error_str}")
+                        logger.error("[Feishu WS] To use SOCKS proxy with Feishu WebSocket, please install python-socks: pip install python-socks[socksio]")
+                        if ping_task and not ping_task.done():
+                            ping_task.cancel()
+                            try:
+                                await ping_task
+                            except asyncio.CancelledError:
+                                pass
+                        await client._disconnect()
+                        self._clients.pop(agent_id, None)
+                        return  # Don't retry if python-socks is missing
+
+                    retry_count += 1
+                    logger.exception(f"[Feishu WS] Async client exception for {agent_id}: {e} (retry {retry_count}/{max_retries})")
+                    if ping_task and not ping_task.done():
+                        ping_task.cancel()
+                        try:
+                            await ping_task
+                        except asyncio.CancelledError:
+                            pass
+                    ping_task = None
+                    await client._disconnect()
+                    if retry_count < max_retries:
+                        logger.info(f"[Feishu WS] Trying to reconnect in {retry_delay} seconds...")
+                        await asyncio.sleep(retry_delay)
+                        # Re-create the client for next retry
+                        try:
+                            event_handler = self._create_event_handler(agent_id)
+                            client = ws.Client(
+                                app_id,
+                                app_secret,
+                                event_handler=event_handler,
+                                log_level=lark.LogLevel.WARNING,  # was .INFO
+                            )
+                            self._clients[agent_id] = client
+                        except Exception as create_err:
+                            logger.exception(f"[Feishu WS] Failed to recreate client for {agent_id}: {create_err}")
+                            retry_count = max_retries
+                            break
+
+            if retry_count >= max_retries:
+                logger.error(f"[Feishu WS] Max retries ({max_retries}) exceeded for {agent_id}, stopping reconnections")
+                if ping_task and not ping_task.done():
+                    ping_task.cancel()
+                    try:
+                        await ping_task
+                    except asyncio.CancelledError:
+                        pass
                 await client._disconnect()
                 self._clients.pop(agent_id, None)
 
@@ -342,7 +402,7 @@ class FeishuWSManager:
         async with async_session() as db:
             result = await db.execute(
                 select(ChannelConfig).where(
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured.is_(True),
                     ChannelConfig.channel_type == "feishu",
                 )
             )

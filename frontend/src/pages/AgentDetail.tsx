@@ -3885,7 +3885,7 @@ function AgentDetailInner() {
                                             <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
                                                 <input
                                                     className="input"
-                                                    placeholder="Search skills..."
+                                                    placeholder={t('agent.skills.searchPlaceholder')}
                                                     value={agentClawhubQuery}
                                                     onChange={e => setAgentClawhubQuery(e.target.value)}
                                                     onKeyDown={e => {
@@ -3961,7 +3961,7 @@ function AgentDetailInner() {
                                             </p>
                                             <input
                                                 className="input"
-                                                placeholder="https://github.com/owner/repo/tree/main/path/to/skill"
+                                                placeholder={t('agent.skills.githubUrlPlaceholder')}
                                                 value={agentUrlInput}
                                                 onChange={e => setAgentUrlInput(e.target.value)}
                                                 style={{ width: '100%', fontSize: '13px', marginBottom: '12px', boxSizing: 'border-box' }}
@@ -4622,7 +4622,7 @@ function AgentDetailInner() {
                                         {agentExpired ? (
                                             <div style={{ padding: '7px 16px', borderTop: '1px solid rgba(245,158,11,0.3)', background: 'rgba(245,158,11,0.08)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'rgb(180,100,0)' }}>
                                                 <span>u23f8</span>
-                                                <span>This Agent has <strong>expired</strong> and is off duty. Contact your admin to extend its service.</span>
+                                                <span>{t('agent.expiredMessage')}</span>
                                             </div>
                                         ) : !wsConnected && !!currentUser && sessionUserIdStr(activeSession) === viewerUserIdStr() ? (
                                             <div style={{ padding: '3px 16px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--text-tertiary)' }}>
@@ -4708,7 +4708,7 @@ function AgentDetailInner() {
                                                         }
                                                     }}
                                                     onPaste={handlePaste}
-                                                    placeholder={!wsConnected && !!currentUser && sessionUserIdStr(activeSession) === viewerUserIdStr() ? 'Connecting...' : t('chat.placeholder')}
+                                                    placeholder={!wsConnected && !!currentUser && sessionUserIdStr(activeSession) === viewerUserIdStr() ? t('chat.connecting') : t('chat.placeholder')}
                                                     disabled={!wsConnected}
                                                     rows={1}
                                                 />

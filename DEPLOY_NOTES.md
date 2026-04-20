@@ -52,12 +52,12 @@ kill 7774 7441
    
    查看后端日志：
    ```bash
-   tail -f .data/log/backend.log | grep -E "ide_write|ide_append|deferred"
+   tail -f ~/.clawith/data/log/clawith_$(date +%Y-%m-%d).log | grep -E "ide_write|ide_append|deferred"
    ```
    
    查看 ACP 调试日志：
    ```bash
-   tail -f .cursor/debug-0afa65.log
+   tail -f ~/.clawith/data/log/acp_debug.log
    ```
 
 3. **运行诊断脚本验证**

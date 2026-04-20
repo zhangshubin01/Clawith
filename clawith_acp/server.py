@@ -15,7 +15,7 @@
 `backend/app/plugins/clawith_acp/router.py` 中 ACP_WS_SCHEMA_VERSION 一致（当前 v3：`cancelled`、跨连接 cancel）。
 
 排障日志（复现 ACP 卡住时请同时收集）:
-  后端: tail -f <项目>/.data/log/backend.log ，过滤含 [ACP] 的行
+  后端: tail -f ~/.clawith/data/log/clawith_$(date +%Y-%m-%d).log ，过滤含 [ACP] 的行
   瘦客户端: JetBrains 侧 ACP 子进程 stderr，搜 ACP thin: [trace]
 """
 
@@ -115,7 +115,7 @@ def _configure_thin_client_logging() -> None:
 
 _configure_thin_client_logging()
 
-_THIN_ACP_DEBUG_LOG = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+_THIN_ACP_DEBUG_LOG = Path.home() / ".clawith" / "data" / "log" / "acp_debug.log"
 
 
 def _thin_stdio_debug_ndjson(
@@ -1161,7 +1161,7 @@ class ClawithThinClientAgent(Agent):
         )
         # #region agent log
         try:
-            _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+            _dlp = _THIN_ACP_DEBUG_LOG
             _dlp.parent.mkdir(parents=True, exist_ok=True)
             with _dlp.open("a", encoding="utf-8") as _df:
                 _df.write(
@@ -1520,7 +1520,7 @@ class ClawithThinClientAgent(Agent):
         """
         # #region agent log
         try:
-            _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+            _dlp = _THIN_ACP_DEBUG_LOG
             _dlp.parent.mkdir(parents=True, exist_ok=True)
             with _dlp.open("a", encoding="utf-8") as _df:
                 _df.write(
@@ -1556,7 +1556,7 @@ class ClawithThinClientAgent(Agent):
             )
             # #region agent log
             try:
-                _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+                _dlp = _THIN_ACP_DEBUG_LOG
                 with _dlp.open("a", encoding="utf-8") as _df:
                     _df.write(
                         json.dumps(
@@ -1606,7 +1606,7 @@ class ClawithThinClientAgent(Agent):
 
             # #region agent log
             try:
-                _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+                _dlp = _THIN_ACP_DEBUG_LOG
                 with _dlp.open("a", encoding="utf-8") as _df:
                     _df.write(
                         json.dumps(
@@ -1635,7 +1635,7 @@ class ClawithThinClientAgent(Agent):
             )
             # #region agent log
             try:
-                _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+                _dlp = _THIN_ACP_DEBUG_LOG
                 with _dlp.open("a", encoding="utf-8") as _df:
                     _df.write(
                         json.dumps(
@@ -1712,7 +1712,7 @@ class ClawithThinClientAgent(Agent):
         )
         # #region agent log
         try:
-            _dlp = Path(__file__).resolve().parents[1] / ".cursor" / "debug-0afa65.log"
+            _dlp = _THIN_ACP_DEBUG_LOG
             with _dlp.open("a", encoding="utf-8") as _df:
                 _df.write(
                     json.dumps(
