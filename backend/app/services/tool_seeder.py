@@ -10,7 +10,7 @@ BUILTIN_TOOLS = [
     {
         "name": "list_files",
         "display_name": "List Files",
-        "description": "List files and folders in a directory within the workspace. Can also list enterprise_info/ for shared company information.",
+        "description": "List files and folders in a directory within the workspace. Use this before writing new workspace documents so you can inspect the current folder structure, reuse existing topical subfolders when appropriate, and avoid dumping files directly into the workspace root unless there is a clear reason. Can also list enterprise_info/ for shared company information.",
         "category": "file",
         "icon": "📁",
         "is_default": True,
@@ -49,14 +49,14 @@ BUILTIN_TOOLS = [
     {
         "name": "write_file",
         "display_name": "Write File",
-        "description": "Write or update a file in the workspace. Can update memory/memory.md, create documents in workspace/, create skills in skills/.",
+        "description": "Write or update a file in the workspace. Before creating a new document under workspace/, first inspect the relevant directories with list_files, prefer an existing topical subfolder over the workspace root, and create a new subfolder when the content belongs to a new category. Avoid placing standalone document files directly in workspace/ root unless the user explicitly wants that. Can update memory/memory.md, create documents in workspace/, create skills in skills/.",
         "category": "file",
         "icon": "✏️",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path, e.g.: memory/memory.md, workspace/report.md"},
+                "path": {"type": "string", "description": "File path, e.g.: memory/memory.md, workspace/reports/report.md, workspace/knowledge_base/notes.md. Prefer a meaningful subfolder instead of writing loose files into workspace/ root."},
                 "content": {"type": "string", "description": "File content to write"},
             },
             "required": ["path", "content"],

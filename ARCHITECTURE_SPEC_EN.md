@@ -346,6 +346,7 @@ Current capabilities include:
 - path normalization and traversal-safe file resolution
 - revision history for meaningful writes
 - short-lived human edit locks to prevent agent/user collisions
+- prompt-level workspace organization guidance so agents inspect existing folders before writing, prefer relevant subfolders over `workspace/` root, and create a new topical folder when needed
 - public HTML publishing through `PublishedPage`
 - sandboxed public rendering with CSP on `/p/{short_id}`
 
@@ -510,6 +511,7 @@ Answering those four questions correctly is usually enough to place new code in 
 
 | Date | Summary |
 | --- | --- |
+| 2026-04-20 | Strengthened workspace-writing guidance so agents should inspect existing folder structure before creating documents, prefer relevant subfolders instead of dumping files into `workspace/` root, and create a new topical folder when no suitable location exists. |
 | 2026-04-20 | Tightened trigger result routing so trigger replies no longer fan out to every active web session; user-originated results now land in their primary session, A2A results stay in their A2A session, pure reflection work stays in trigger/reflection sessions, and user-facing `send_web_message` deliveries no longer get duplicated by an extra trigger recap in the same chat. |
 | 2026-04-20 | Made OKR Agent startup patching self-heal missing builtin OKR tool rows before assigning tools, preventing `Unknown tool: upsert_member_daily_report` failures on older databases. |
 | 2026-04-20 | Added primary first-party chat sessions, per-session unread tracking, and agent sidebar unread counts so proactive agent messages reuse one durable platform thread. |
