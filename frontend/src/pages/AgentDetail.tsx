@@ -1094,8 +1094,30 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
     const isChinese = i18n.language?.startsWith('zh');
     const getHumanMemberSourceLabel = useCallback((member: any) => {
         if (member?.provider_name) return member.provider_name;
-        return isChinese ? '平台' : 'Platform';
+        return isChinese ? '平台用户' : 'Platform User';
     }, [isChinese]);
+
+    const renderHumanMemberSourceBadge = useCallback((member: any) => {
+        const isPlatformUser = !member?.provider_name;
+        return (
+            <span
+                style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: '1px 6px',
+                    borderRadius: '999px',
+                    fontSize: '10px',
+                    fontWeight: 600,
+                    marginRight: '6px',
+                    background: isPlatformUser ? 'rgba(99,102,241,0.10)' : 'rgba(16,185,129,0.10)',
+                    color: isPlatformUser ? 'rgb(79,70,229)' : 'rgb(16,185,129)',
+                    border: isPlatformUser ? '1px solid rgba(99,102,241,0.18)' : '1px solid rgba(16,185,129,0.18)',
+                }}
+            >
+                {getHumanMemberSourceLabel(member)}
+            </span>
+        );
+    }, [getHumanMemberSourceLabel]);
 
     const [search, setSearch] = useState('');
     const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -1235,7 +1257,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                                     <div style={{ flex: 1, minWidth: 0 }}>
                                         <div style={{ fontWeight: 600, fontSize: '13px' }}>{r.member?.name || '?'} <span className="badge" style={{ fontSize: '10px', marginLeft: '4px' }}>{r.relation_label}</span></div>
                                         <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                            <span style={{ color: 'var(--accent-color)', fontWeight: 500, marginRight: '6px' }}>[{getHumanMemberSourceLabel(r.member)}]</span>
+                                            {renderHumanMemberSourceBadge(r.member)}
                                             {r.member?.department_path || ''} · {r.member?.email || ''}
                                         </div>
                                         {r.description && editingId !== r.id && <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>{r.description}</div>}
@@ -1284,7 +1306,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                                         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                                         <div style={{ fontWeight: 500 }}>{m.name}</div>
                                         <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                            <span style={{ color: 'var(--accent-color)', fontWeight: 500, marginRight: '6px' }}>[{getHumanMemberSourceLabel(m)}]</span>
+                                            {renderHumanMemberSourceBadge(m)}
                                             {m.department_path} · {m.email}
                                         </div>
                                     </div>
@@ -1298,7 +1320,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                         <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: '8px' }}>
                             {t('agent.detail.addRelationship')}: {adding.name}
                             <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--text-tertiary)', marginLeft: '8px' }}>
-                                ([{getHumanMemberSourceLabel(adding)}] {adding.department_path} · {adding.email})
+                                ({getHumanMemberSourceLabel(adding)} · {adding.department_path} · {adding.email})
                             </span>
                         </div>
                         <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
