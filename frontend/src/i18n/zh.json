@@ -1502,7 +1502,7 @@
           "desc": "钉钉应用集成"
         },
         "google_workspace": {
-          "name": "Google Workspace",
+          "name": "Google",
           "desc": "Google 目录同步 + SSO"
         },
         "oauth2": {

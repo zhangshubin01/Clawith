@@ -1345,7 +1345,7 @@
           "desc": "DingTalk App Integration"
         },
         "google_workspace": {
-          "name": "Google Workspace",
+          "name": "Google",
           "desc": "Google Directory Sync + SSO"
         },
         "oauth2": {

@@ -27,6 +27,7 @@ from anyascii import anyascii as _anyascii
 from app.config import get_settings
 from app.core.security import decrypt_data, hash_password
 from app.services.auth_provider import GoogleWorkspaceAuthProvider
+from app.services.google_workspace_oauth import GOOGLE_HTTP_PROXY
 from jose import jwt
 
 
@@ -1288,7 +1289,7 @@ class GoogleWorkspaceOrgSyncAdapter(BaseOrgSyncAdapter):
             algorithm="RS256",
         )
 
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20, proxy=GOOGLE_HTTP_PROXY) as client:
             resp = await client.post(
                 token_uri,
                 data={
@@ -1328,7 +1329,7 @@ class GoogleWorkspaceOrgSyncAdapter(BaseOrgSyncAdapter):
         customer_id = self.customer_id or "my_customer"
         departments: list[ExternalDepartment] = []
 
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20, proxy=GOOGLE_HTTP_PROXY) as client:
             resp = await client.get(
                 f"{self.GOOGLE_DIRECTORY_BASE_URL}/customer/{customer_id}/orgunits",
                 params={"type": "all"},
@@ -1388,7 +1389,7 @@ class GoogleWorkspaceOrgSyncAdapter(BaseOrgSyncAdapter):
         page_token = ""
         customer = self.customer_id or "my_customer"
 
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20, proxy=GOOGLE_HTTP_PROXY) as client:
             while True:
                 params = {
                     "customer": customer,

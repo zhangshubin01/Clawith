@@ -144,14 +144,14 @@ async def get_sso_config(sid: uuid.UUID, request: Request, db: AsyncSession = De
             from app.services.auth_registry import auth_provider_registry
             from app.services.google_workspace_oauth import (
                 GOOGLE_SSO_STATE_KIND,
-                GOOGLE_CALLBACK_PATH,
+                get_google_redirect_uri,
                 sign_google_oauth_state,
             )
             auth_provider = await auth_provider_registry.get_provider(
                 db, "google_workspace", str(session.tenant_id) if session.tenant_id else None
             )
             if auth_provider:
-                redir = f"{public_base}{GOOGLE_CALLBACK_PATH}"
+                redir = await get_google_redirect_uri(db, p, request)
                 auth_provider.config["redirect_uri"] = redir
                 state = sign_google_oauth_state(GOOGLE_SSO_STATE_KIND, sid)
                 url = await auth_provider.get_authorization_url(redir, state)

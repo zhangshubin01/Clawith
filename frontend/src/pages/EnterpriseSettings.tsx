@@ -557,7 +557,7 @@ function OrgTab({ tenant }: { tenant: any }) {
         { type: 'feishu', name: 'Feishu', desc: 'Feishu / Lark Integration', icon: <img src="/feishu.png" width="20" height="20" alt="Feishu" /> },
         { type: 'wecom', name: 'WeCom', desc: 'WeChat Work Integration', icon: <img src="/wecom.png" width="20" height="20" style={{ borderRadius: '4px' }} alt="WeCom" /> },
         { type: 'dingtalk', name: 'DingTalk', desc: 'DingTalk App Integration', icon: <img src="/dingtalk.png" width="20" height="20" style={{ borderRadius: '4px' }} alt="DingTalk" /> },
-        { type: 'google_workspace', name: 'Google Workspace', desc: 'Google Admin Directory Sync', icon: <img src="/google.svg" width="20" height="20" style={{ borderRadius: '4px' }} alt="Google Workspace" /> },
+        { type: 'google_workspace', name: 'Google', desc: 'Google Admin Directory Sync', icon: <img src="/google.svg" width="20" height="20" alt="Google" /> },
         { type: 'oauth2', name: 'OAuth2', desc: 'Generic OIDC Provider', icon: <div style={{ width: 20, height: 20, background: 'var(--accent-primary)', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 10, fontWeight: 700 }}>O</div> }
     ];
 
@@ -582,7 +582,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                     client_secret: '',
                 },
             };
-            const nameMap: Record<string, string> = { feishu: 'Feishu', wecom: 'WeCom', dingtalk: 'DingTalk', google_workspace: 'Google Workspace', oauth2: 'OAuth2' };
+            const nameMap: Record<string, string> = { feishu: 'Feishu', wecom: 'WeCom', dingtalk: 'DingTalk', google_workspace: 'Google', oauth2: 'OAuth2' };
             setForm({
                 provider_type: type,
                 name: nameMap[type] || type,

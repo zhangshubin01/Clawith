@@ -18,7 +18,8 @@ settings = get_settings()
 
 GOOGLE_SSO_STATE_KIND = "google_sso"
 GOOGLE_SYNC_STATE_KIND = "google_sync"
-GOOGLE_CALLBACK_PATH = "/api/auth/google_workspace/callback"
+GOOGLE_CALLBACK_PATH = "/auth/google_workspace/callback"
+GOOGLE_HTTP_PROXY = settings.HTTP_PROXY or None
 
 
 def sign_google_oauth_state(kind: str, value: uuid.UUID) -> str:
@@ -76,12 +77,12 @@ async def get_google_redirect_uri(
     request: Request | None = None,
 ) -> str:
     base_url = await get_google_provider_base_url(db, provider, request)
-    return f"{base_url}{GOOGLE_CALLBACK_PATH}"
+    return f"{base_url}/api{GOOGLE_CALLBACK_PATH}"
 
 
 async def probe_google_directory(access_token: str, customer_id: str = "my_customer") -> None:
     headers = {"Authorization": f"Bearer {access_token}"}
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with httpx.AsyncClient(timeout=20, proxy=GOOGLE_HTTP_PROXY) as client:
         org_resp = await client.get(
             f"https://admin.googleapis.com/admin/directory/v1/customer/{customer_id}/orgunits",
             params={"type": "all"},
