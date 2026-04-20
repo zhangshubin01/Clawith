@@ -2274,7 +2274,11 @@ function AgentDetailInner() {
                     if (msg.includes('expired')) setAgentExpired(true);
                 }
             } else if (d.type === 'trigger_notification') {
-                setChatMessages(prev => [...prev, parseChatMsg({ role: 'assistant', content: d.content })]);
+                const targetSessionId = d.session_id ? String(d.session_id) : '';
+                const currentSessionId = activeSessionIdRef.current ? String(activeSessionIdRef.current) : '';
+                if (targetSessionId && currentSessionId === targetSessionId) {
+                    setChatMessages(prev => [...prev, parseChatMsg({ role: 'assistant', content: d.content })]);
+                }
                 fetchMySessions(true, agentId);
                 queryClient.invalidateQueries({ queryKey: ['agents'] });
             } else if (d.type === 'info') {

@@ -528,6 +528,86 @@ async def _check_new_agent_messages(trigger: AgentTrigger) -> bool:
 
 # ── Agent Invocation ────────────────────────────────────────────────
 
+async def _resolve_trigger_delivery_target(agent: Agent, triggers: list[AgentTrigger]) -> dict | None:
+    """Resolve where a trigger result should be delivered.
+
+    Priority:
+    1. Explicit A2A callback session
+    2. Originating agent-to-agent session
+    3. Originating platform user → that user's primary platform session
+    4. Pure trigger/reflection context → no user-facing delivery
+    """
+    from app.models.chat_session import ChatSession
+    from app.services.chat_session_service import ensure_primary_platform_session
+
+    # Synthetic A2A wake triggers already carry the callback session explicitly.
+    for trigger in triggers:
+        cfg = trigger.config or {}
+        a2a_sid = cfg.get("_a2a_session_id")
+        if a2a_sid:
+            try:
+                async with async_session() as db:
+                    session = await db.get(ChatSession, uuid.UUID(a2a_sid))
+                    if not session:
+                        return None
+                    return {
+                        "kind": "session",
+                        "session_id": str(session.id),
+                        "owner_user_id": str(session.user_id),
+                        "source_channel": session.source_channel,
+                    }
+            except Exception:
+                return None
+
+    origin_cfg = None
+    for trigger in triggers:
+        cfg = trigger.config or {}
+        if cfg.get("_origin_session_id") or cfg.get("_origin_user_id"):
+            origin_cfg = cfg
+            break
+
+    if not origin_cfg:
+        return None
+
+    origin_source_channel = origin_cfg.get("_origin_source_channel")
+    origin_session_id = origin_cfg.get("_origin_session_id")
+    origin_user_id = origin_cfg.get("_origin_user_id")
+
+    if origin_source_channel == "agent" and origin_session_id:
+        try:
+            async with async_session() as db:
+                session = await db.get(ChatSession, uuid.UUID(origin_session_id))
+                if not session:
+                    return None
+                return {
+                    "kind": "session",
+                    "session_id": str(session.id),
+                    "owner_user_id": str(session.user_id),
+                    "source_channel": "agent",
+                }
+        except Exception:
+            return None
+
+    if origin_source_channel != "trigger" and origin_user_id:
+        try:
+            async with async_session() as db:
+                primary = await ensure_primary_platform_session(
+                    db,
+                    agent.id,
+                    uuid.UUID(origin_user_id),
+                )
+                await db.commit()
+                return {
+                    "kind": "primary_user_session",
+                    "session_id": str(primary.id),
+                    "owner_user_id": str(primary.user_id),
+                    "source_channel": primary.source_channel,
+                }
+        except Exception:
+            return None
+
+    return None
+
 async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTrigger]):
     """Invoke an agent with context from one or more fired triggers.
 
@@ -761,11 +841,12 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                     logger.warning(f"[A2A] Failed to save reply to A2A session {a2a_sid}: {e}")
                 break  # Only save once
 
-        # Push trigger result to user's active WebSocket connections
-
+        # Route trigger results to a single deterministic destination. Pure reflection/system
+        # wakes stay inside the reflection session and should not spill into arbitrary user chats.
         is_a2a_internal = all(t.name == "a2a_wake" for t in triggers)
+        delivery_target = None if is_a2a_internal else await _resolve_trigger_delivery_target(agent, triggers)
 
-        if final_reply and not is_a2a_internal:
+        if final_reply and delivery_target:
             try:
                 from app.api.websocket import manager as ws_manager
                 agent_id_str = str(agent_id)
@@ -814,61 +895,37 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
 
                 notification = f"⚡ {summary}\n\n{cleaned}"
 
-                # Save to user's active chat session(s) for persistence
+                target_session_id = delivery_target["session_id"]
+                owner_user_id = delivery_target.get("owner_user_id")
+
+                # Save to the resolved destination session for persistence.
                 async with async_session() as db:
                     from app.models.chat_session import ChatSession
-                    from sqlalchemy import func
 
-                    # Prefer the session the user currently has open (via WS)
-                    active_session_ids = ws_manager.get_active_session_ids(agent_id_str)
-                    target_session_ids = []
+                    db.add(ChatMessage(
+                        agent_id=agent_id,
+                        conversation_id=target_session_id,
+                        role="assistant",
+                        content=notification,
+                        user_id=agent.creator_id,
+                    ))
+                    session_row = await db.get(ChatSession, uuid.UUID(target_session_id))
+                    if session_row:
+                        session_row.last_message_at = datetime.now(timezone.utc)
+                    await db.commit()
 
-                    if active_session_ids:
-                        target_session_ids = active_session_ids
-                        logger.info(f"[Trigger] Saving notification to {len(active_session_ids)} active session(s)")
-                    else:
-                        # Fallback: most recent web session for this agent
-                        _sr = await db.execute(
-                            select(ChatSession.id)
-                            .where(
-                                ChatSession.agent_id == agent_id,
-                                ChatSession.user_id == agent.creator_id,
-                                ChatSession.source_channel.notin_(["trigger"]),
-                            )
-                            .order_by(
-                                func.coalesce(ChatSession.last_message_at, ChatSession.created_at).desc()
-                            )
-                            .limit(1)
-                        )
-                        row = _sr.scalar_one_or_none()
-                        if row:
-                            target_session_ids = [str(row)]
-                            logger.info(f"[Trigger] No active WS, saving to most recent session {row}")
-                        else:
-                            logger.warning(f"[Trigger] No web session found for agent {agent.name}")
+                payload = {
+                    "type": "trigger_notification",
+                    "content": notification,
+                    "triggers": [t.name for t in triggers],
+                    "session_id": target_session_id,
+                }
 
-                    for sid in target_session_ids:
-                        db.add(ChatMessage(
-                            agent_id=agent_id,
-                            conversation_id=sid,
-                            role="assistant",
-                            content=notification,
-                            user_id=agent.creator_id,
-                        ))
-                    if target_session_ids:
-                        await db.commit()
-
-                # Push to all active WebSocket connections for this agent
-                if agent_id_str in ws_manager.active_connections:
-                    for ws, _sid, _uid in list(ws_manager.active_connections[agent_id_str]):
-                        try:
-                            await ws.send_json({
-                                "type": "trigger_notification",
-                                "content": notification,
-                                "triggers": [t.name for t in triggers],
-                            })
-                        except Exception:
-                            pass  # Connection may have closed
+                # Notify only the user who owns the destination session. The frontend will append
+                # the message only when that exact session is open; otherwise it just refreshes
+                # unread/session state.
+                if owner_user_id:
+                    await ws_manager.send_to_user(agent_id_str, owner_user_id, payload)
             except Exception as e:
                 logger.error(f"Failed to push trigger result to WebSocket: {e}")
                 import traceback

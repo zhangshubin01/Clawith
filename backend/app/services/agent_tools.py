@@ -2323,7 +2323,12 @@ async def execute_tool(
         elif tool_name == "manage_tasks":
             result = await _manage_tasks(agent_id, user_id, ws, arguments)
         elif tool_name == "set_trigger":
-            result = await _handle_set_trigger(agent_id, arguments)
+            result = await _handle_set_trigger(
+                agent_id,
+                arguments,
+                session_id=session_id,
+                user_id=user_id,
+            )
         elif tool_name == "update_trigger":
             result = await _handle_update_trigger(agent_id, arguments)
         elif tool_name == "cancel_trigger":
@@ -6153,13 +6158,20 @@ MAX_TRIGGERS_PER_AGENT = 20
 VALID_TRIGGER_TYPES = {"cron", "once", "interval", "poll", "on_message", "webhook"}
 
 
-async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
+async def _handle_set_trigger(
+    agent_id: uuid.UUID,
+    arguments: dict,
+    *,
+    session_id: str = "",
+    user_id: uuid.UUID | None = None,
+) -> str:
     """Create a new trigger for the agent."""
     from app.models.trigger import AgentTrigger
+    from app.models.chat_session import ChatSession
 
     name = arguments.get("name", "").strip()
     ttype = arguments.get("type", "").strip()
-    config = arguments.get("config", {})
+    config = dict(arguments.get("config", {}) or {})
     reason = arguments.get("reason", "").strip()
     focus_ref = arguments.get("focus_ref", "") or arguments.get("agenda_ref", "")  # backward compat
 
@@ -6216,6 +6228,28 @@ async def _handle_set_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
         import secrets
         token = secrets.token_urlsafe(8)  # ~11 chars, URL-safe
         config["token"] = token
+
+    # Record the session that created this trigger so trigger results can later be routed to
+    # the correct destination instead of being broadcast to every live web session.
+    if session_id:
+        try:
+            async with async_session() as _ctx_db:
+                _session_result = await _ctx_db.execute(
+                    select(ChatSession).where(ChatSession.id == uuid.UUID(session_id))
+                )
+                origin_session = _session_result.scalar_one_or_none()
+                if origin_session:
+                    config["_origin_session_id"] = str(origin_session.id)
+                    config["_origin_source_channel"] = origin_session.source_channel
+                    if origin_session.source_channel == "agent" and origin_session.peer_agent_id:
+                        config["_origin_peer_agent_id"] = str(origin_session.peer_agent_id)
+                    elif origin_session.source_channel != "trigger":
+                        config["_origin_user_id"] = str(origin_session.user_id)
+                elif user_id:
+                    config["_origin_user_id"] = str(user_id)
+        except Exception:
+            if user_id:
+                config["_origin_user_id"] = str(user_id)
 
     try:
         async with async_session() as db:
