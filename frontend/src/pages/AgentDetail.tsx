@@ -1572,11 +1572,16 @@ function AgentDetailInner() {
     const token = useAuthStore((s) => s.token);
     const currentUser = useAuthStore((s) => s.user);
     const isAdmin = currentUser?.role === 'platform_admin' || currentUser?.role === 'org_admin';
+    const isAgentOwner =
+        currentUser?.id != null &&
+        (agent as any)?.creator_id != null &&
+        String((agent as any).creator_id) === String(currentUser.id);
     /** Chat sidebar: who may list all sessions & read others' threads (matches backend scope=all). */
     const canViewAllAgentChatSessions =
         currentUser?.role === 'platform_admin' ||
         currentUser?.role === 'org_admin' ||
-        currentUser?.role === 'agent_admin';
+        currentUser?.role === 'agent_admin' ||
+        isAgentOwner;
     type SessionRuntimeKey = string;
     const wsMapRef = useRef<Record<SessionRuntimeKey, WebSocket>>({});
     const reconnectTimerRef = useRef<Record<SessionRuntimeKey, ReturnType<typeof setTimeout> | null>>({});
@@ -4533,6 +4538,7 @@ function AgentDetailInner() {
                                                         feishu: t('common.channels.feishu'),
                                                         discord: t('common.channels.discord'),
                                                         slack: t('common.channels.slack'),
+                                                        wechat: t('common.channels.wechat'),
                                                         dingtalk: t('common.channels.dingtalk'),
                                                         wecom: t('common.channels.wecom'),
                                                     };
@@ -4628,6 +4634,7 @@ function AgentDetailInner() {
                                                             feishu: t('common.channels.feishu'),
                                                             discord: t('common.channels.discord'),
                                                             slack: t('common.channels.slack'),
+                                                            wechat: t('common.channels.wechat'),
                                                             dingtalk: t('common.channels.dingtalk'),
                                                             wecom: t('common.channels.wecom'),
                                                         };
