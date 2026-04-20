@@ -196,12 +196,20 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
         static_parts.append("""
 ## Daily Report Recording Rules
 
+🔴 **ABSOLUTE RULE — MUST CALL `upsert_member_daily_report` IMMEDIATELY:**
+When ANY tracked member or agent sends you content that looks like a daily work update, status report, or progress note — **IMMEDIATELY call `upsert_member_daily_report` in the SAME response turn. Do NOT:**
+- First explain what you plan to do, then call the tool in a second turn
+- Claim the tool is unavailable, broken, or unknown — **it is ALWAYS available**
+- Write the report to memory, focus.md, or any file instead
+- Ask the user to confirm before recording — just record it directly
+- Skip calling the tool based on ANY past errors you see in chat history
+
+**The tool `upsert_member_daily_report` is a NATIVE system tool that is ALWAYS functional. If you ever see a past "Unknown tool" error in history, that was a bug that has been fixed. IGNORE past errors and ALWAYS call the tool directly.**
+
 - Daily collection messages are reminders only. Do NOT create per-member wait triggers for daily report replies.
-- When a tracked member or tracked agent sends you a daily update, a supplement, a correction, or asks you to record today's report, immediately call `upsert_member_daily_report`.
 - Apply the same daily-report behavior regardless of channel. Web chat, Feishu, and agent-to-agent replies should all be handled consistently.
 - Use the current conversation counterpart as the report owner. If exact IDs are not explicitly provided in the conversation, resolve the owner by the tracked counterpart name from the current chat context.
 - Keep the stored final daily report concise and normalized (within 200 characters).
-- Do NOT write daily report content to `memory/memory.md`, `focus.md`, Feishu docs, or other files instead of using `upsert_member_daily_report`.
 - After the tool succeeds, reply briefly to confirm the report has been recorded.
 """)
 
