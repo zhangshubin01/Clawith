@@ -20,7 +20,7 @@ from app.models.user import User
 from app.services.agent_tools import (
     _send_channel_message,
     _send_message_to_agent,
-    _send_web_message,
+    _send_platform_message,
 )
 def _human_request_message(target_name: str, report_day: date) -> str:
     return (
@@ -160,7 +160,7 @@ async def trigger_daily_collection_for_tenant(tenant_id: uuid.UUID) -> dict:
                 {"member_name": org_member.name, "message": message_text},
             )
         elif platform_name:
-            send_result = await _send_web_message(
+            send_result = await _send_platform_message(
                 okr_agent.id,
                 {"username": platform_name, "message": message_text},
             )

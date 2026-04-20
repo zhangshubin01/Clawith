@@ -1691,7 +1691,7 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         has_channel = bool(org_member.open_id or org_member.external_id)
         if platform_uid:
             channel_hint = (
-                'send_web_message(username="<their_username>", message=...)\n'
+                'send_platform_message(username="<their_username>", message=...)\n'
                 "  OR send_channel_message if they have a linked channel"
             )
         elif has_channel:
@@ -1721,7 +1721,7 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
             if u_row and u_row.display_name:
                 username_hint = (
                     f'\n  Platform account: "{u_row.display_name}"'
-                    f"  (use this as the recipient identifier in send_web_message)"
+                    f"  (use this as the recipient identifier in send_platform_message)"
                 )
 
         member_block = (
@@ -1806,7 +1806,7 @@ Contact the {len(members_to_contact)} member(s) below who have NOT set their OKR
   → Follow the STEP 1-4 sequence in their block exactly.
   → Use ONLY send_message_to_agent — never channel tools for agents.
 • For human members:
-  → If Platform account shown: send_web_message(username="<display_name>", message="...")
+  → If Platform account shown: send_platform_message(username="<display_name>", message="...")
   → If Feishu/DingTalk channel: send_channel_message(member_name="<name>", message="...")
   → If neither: skip and note in summary.
   → Humans are fire-and-forget — do NOT wait for their reply.

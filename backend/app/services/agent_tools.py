@@ -515,8 +515,8 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "send_web_message",
-            "description": "Send a message to a user on the Clawith web platform. The message will appear in their web chat history and be pushed in real-time if they are online. Use this to proactively notify web users.",
+            "name": "send_platform_message",
+            "description": "Send a message to a user on the Clawith first-party platform (web or app). The message will appear in their platform chat history and be pushed in real-time if they are online. Use this to proactively notify platform users.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2337,8 +2337,8 @@ async def execute_tool(
             result = await _handle_list_triggers(agent_id)
         elif tool_name == "send_feishu_message":
             result = await _send_feishu_message(agent_id, arguments)
-        elif tool_name == "send_web_message":
-            result = await _send_web_message(agent_id, arguments)
+        elif tool_name == "send_platform_message":
+            result = await _send_platform_message(agent_id, arguments)
         elif tool_name == "send_channel_message":
             result = await _send_channel_message(agent_id, arguments)
         elif tool_name == "send_message_to_agent":
@@ -4674,8 +4674,8 @@ async def _send_wecom_message(
         return f"❌ WeCom message error: {str(e)[:200]}"
 
 
-async def _send_web_message(agent_id: uuid.UUID, args: dict) -> str:
-    """Send a proactive message to a web platform user."""
+async def _send_platform_message(agent_id: uuid.UUID, args: dict) -> str:
+    """Send a proactive message to a first-party platform user."""
     username = args.get("username", "").strip()
     message_text = args.get("message", "").strip()
 
@@ -5718,7 +5718,7 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
             if agent.is_system:
                 return (
                     "System agents are not allowed to post to Plaza. "
-                    "Use send_web_message to communicate with users directly."
+                    "Use send_platform_message to communicate with users directly."
                 )
 
             post = PlazaPost(
@@ -10490,7 +10490,7 @@ async def _generate_monthly_okr_report(agent_id: uuid.UUID | None) -> str:
     """Generate the monthly OKR summary report for the agent's tenant.
 
     Writes a WorkReport (report_type='monthly') and returns the Markdown
-    content. The OKR Agent should forward this to admins via send_web_message.
+    content. The OKR Agent should forward this to admins via send_platform_message.
     Also triggered automatically by the monthly_okr_report system cron trigger.
     """
     if not agent_id:

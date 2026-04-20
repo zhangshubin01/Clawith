@@ -190,7 +190,7 @@ Two first-party session rules are now important:
 - unread badges are derived from assistant/system/tool messages created after `ChatSession.last_read_at_by_user`
 - when the owning platform user is actively viewing that exact session, newly delivered assistant/tool/trigger messages immediately advance `last_read_at_by_user` so the active thread does not show itself as unread
 - trigger results are routed to one explicit destination session: a user's primary platform session for user-originated context, the matching A2A session for agent-to-agent context, or only the trigger reflection session for pure system/reflection work
-- if a trigger already sends the user-facing platform message via `send_web_message`, the daemon suppresses the extra trigger recap in that primary session and leaves the full execution trace only in the reflection session
+- if a trigger already sends the user-facing platform message via `send_platform_message`, the daemon suppresses the extra trigger recap in that primary session and leaves the full execution trace only in the reflection session
 
 This is why session and participant handling are more complex than a typical one-user/one-bot design.
 
@@ -512,6 +512,7 @@ Answering those four questions correctly is usually enough to place new code in 
 | Date | Summary |
 | --- | --- |
 | 2026-04-20 | Strengthened workspace-writing guidance so agents should inspect existing folder structure before creating documents, prefer relevant subfolders instead of dumping files into `workspace/` root, and create a new topical folder when no suitable location exists. |
-| 2026-04-20 | Tightened trigger result routing so trigger replies no longer fan out to every active web session; user-originated results now land in their primary session, A2A results stay in their A2A session, pure reflection work stays in trigger/reflection sessions, and user-facing `send_web_message` deliveries no longer get duplicated by an extra trigger recap in the same chat. |
+| 2026-04-20 | Tightened trigger result routing so trigger replies no longer fan out to every active web session; user-originated results now land in their primary session, A2A results stay in their A2A session, pure reflection work stays in trigger/reflection sessions, and user-facing `send_platform_message` deliveries no longer get duplicated by an extra trigger recap in the same chat. |
+| 2026-04-20 | Renamed the first-party proactive messaging tool from `send_web_message` to `send_platform_message`, covering both web and app surfaces, and added startup seeder logic to rename legacy tool rows in place so existing agent assignments keep working. |
 | 2026-04-20 | Made OKR Agent startup patching self-heal missing builtin OKR tool rows before assigning tools, preventing `Unknown tool: upsert_member_daily_report` failures on older databases. |
 | 2026-04-20 | Added primary first-party chat sessions, per-session unread tracking, and agent sidebar unread counts so proactive agent messages reuse one durable platform thread. |

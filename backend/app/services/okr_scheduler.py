@@ -544,7 +544,7 @@ async def generate_monthly_report(
     Stores a WorkReport row with report_type="monthly" and also writes the
     file to workspace/reports/monthly_YYYY-MM.md.
     Returns the Markdown content so the calling OKR Agent tool can send it
-    to admins via send_web_message.
+    to admins via send_platform_message.
     """
     async with async_session() as db:
         settings_result = await db.execute(

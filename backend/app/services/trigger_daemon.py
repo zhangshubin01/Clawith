@@ -753,7 +753,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             try:
                 tool_name = data.get("name")
                 tool_status = data.get("status")
-                if tool_status == "done" and tool_name == "send_web_message":
+                if tool_status == "done" and tool_name == "send_platform_message":
                     result_text = str(data.get("result", ""))
                     if result_text.startswith("✅"):
                         delivered_platform_message_via_tool = True

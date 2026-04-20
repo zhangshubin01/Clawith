@@ -342,9 +342,9 @@ BUILTIN_TOOLS = [
     # It was previously duplicated here under 'communication', which could cause
     # 'Tool names must be unique' errors when the DB lacked a UNIQUE constraint.
     {
-        "name": "send_web_message",
-        "display_name": "Web Message",
-        "description": "Send a proactive message to a user on the Clawith web platform. The message appears in their chat history and is pushed in real-time if they are online.",
+        "name": "send_platform_message",
+        "display_name": "Platform Message",
+        "description": "Send a proactive message to a user on the Clawith first-party platform (web or app). The message appears in their platform chat history and is pushed in real-time if they are online.",
         "category": "communication",
         "icon": "🌐",
         "is_default": True,
@@ -2676,6 +2676,32 @@ async def seed_builtin_tools():
 
 
     async with async_session() as db:
+        # Legacy rename: older environments persisted this tool as
+        # `send_web_message`. Rename or merge it in-place so agents keep the
+        # same assignment after the first startup on the new version.
+        old_name = "send_web_message"
+        new_name = "send_platform_message"
+        old_result = await db.execute(select(Tool).where(Tool.name == old_name))
+        old_tool = old_result.scalar_one_or_none()
+        new_result = await db.execute(select(Tool).where(Tool.name == new_name))
+        new_tool = new_result.scalar_one_or_none()
+        if old_tool and not new_tool:
+            old_tool.name = new_name
+            logger.info(f"[ToolSeeder] Renamed builtin tool: {old_name} -> {new_name}")
+        elif old_tool and new_tool:
+            old_assignments = await db.execute(select(AgentTool).where(AgentTool.tool_id == old_tool.id))
+            for assignment in old_assignments.scalars().all():
+                existing_assignment = await db.execute(
+                    select(AgentTool).where(
+                        AgentTool.agent_id == assignment.agent_id,
+                        AgentTool.tool_id == new_tool.id,
+                    )
+                )
+                if not existing_assignment.scalar_one_or_none():
+                    assignment.tool_id = new_tool.id
+            await db.delete(old_tool)
+            logger.info(f"[ToolSeeder] Merged legacy builtin tool into {new_name}")
+
         new_tool_ids = []
         for t in BUILTIN_TOOLS:
             result = await db.execute(select(Tool).where(Tool.name == t["name"]))
