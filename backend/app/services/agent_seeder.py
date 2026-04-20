@@ -679,6 +679,37 @@ async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
         logger.info(f"[AgentSeeder] Created system trigger '{t['name']}' for OKR Agent")
 
 
+async def _ensure_okr_tool_rows_exist(required_tool_names: list[str]) -> dict[str, Tool]:
+    """Ensure all required OKR tool definitions exist in the tools table.
+
+    In older deployments, startup sometimes reached OKR Agent seeding/patching
+    before the newly added builtin tool rows were visible in the target
+    database. When that happened, the OKR Agent could keep a prompt that
+    mentioned `upsert_member_daily_report` but still not receive the actual tool
+    in its LLM tool list, which later surfaced as `Unknown tool`.
+
+    To make the startup path self-healing, we defensively re-run builtin tool
+    seeding if any required OKR tool row is missing, then re-query the rows.
+    """
+    tool_rows: dict[str, Tool] = {}
+    async with async_session() as db:
+        result = await db.execute(select(Tool).where(Tool.name.in_(required_tool_names)))
+        tool_rows = {tool.name: tool for tool in result.scalars().all()}
+
+    missing = [name for name in required_tool_names if name not in tool_rows]
+    if missing:
+        logger.warning(
+            f"[AgentSeeder] Missing OKR tool rows {missing}; re-running builtin tool seeder"
+        )
+        from app.services.tool_seeder import seed_builtin_tools
+        await seed_builtin_tools()
+        async with async_session() as db:
+            result = await db.execute(select(Tool).where(Tool.name.in_(required_tool_names)))
+            tool_rows = {tool.name: tool for tool in result.scalars().all()}
+
+    return tool_rows
+
+
 async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OKRSettings | None) -> bool:
     """Align existing OKR system triggers with tenant report settings."""
     if not settings:
@@ -789,8 +820,7 @@ async def patch_existing_okr_agent() -> None:
             "upsert_member_daily_report",
             "generate_monthly_okr_report",
         ]
-        tool_rows = await db.execute(select(Tool).where(Tool.name.in_(all_okr_tools)))
-        tools_by_name = {tool.name: tool for tool in tool_rows.scalars().all()}
+        tools_by_name = await _ensure_okr_tool_rows_exist(all_okr_tools)
 
         changed_any = False
         for agent in agents:
@@ -960,9 +990,9 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
             "create_objective", "create_key_result", "update_objective",
             "update_any_kr_progress", "upsert_member_daily_report", "generate_monthly_okr_report",
         ]
+        tools_by_name = await _ensure_okr_tool_rows_exist(okr_tool_names)
         for tool_name in okr_tool_names:
-            tool_res = await db.execute(select(Tool).where(Tool.name == tool_name))
-            tool = tool_res.scalar_one_or_none()
+            tool = tools_by_name.get(tool_name)
             if tool:
                 existing_at = await db.execute(
                     select(AgentTool).where(

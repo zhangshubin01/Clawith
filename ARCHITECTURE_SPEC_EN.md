@@ -34,6 +34,8 @@ On startup, the app currently does the following:
 
 This means `main.py` is both a router composition root and an operational bootstrapper.
 
+For OKR-specific startup patching, the bootstrap path now also self-heals missing builtin OKR tool rows before patching existing OKR Agents. This prevents prompt/tool-list mismatches where an OKR Agent mentions `upsert_member_daily_report` in context but does not actually receive the tool in its callable LLM tool set.
+
 ### 1.3 Directory Map
 
 #### Backend (`backend/app/`)
@@ -505,4 +507,5 @@ Answering those four questions correctly is usually enough to place new code in 
 
 | Date | Summary |
 | --- | --- |
+| 2026-04-20 | Made OKR Agent startup patching self-heal missing builtin OKR tool rows before assigning tools, preventing `Unknown tool: upsert_member_daily_report` failures on older databases. |
 | 2026-04-20 | Added primary first-party chat sessions, per-session unread tracking, and agent sidebar unread counts so proactive agent messages reuse one durable platform thread. |
