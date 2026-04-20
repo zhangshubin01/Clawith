@@ -4469,6 +4469,19 @@ function AgentDetailInner() {
                                                             <div style={{ flex: 1, minWidth: 0 }}>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' }}>
                                                                     <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>{s.title}</div>
+                                                                    {s.is_primary && (
+                                                                        <span style={{
+                                                                            fontSize: '9px',
+                                                                            padding: '1px 4px',
+                                                                            borderRadius: '3px',
+                                                                            background: 'var(--bg-tertiary)',
+                                                                            color: 'var(--text-secondary)',
+                                                                            flexShrink: 0,
+                                                                            border: '1px solid var(--border-subtle)',
+                                                                        }}>
+                                                                            {i18n.language === 'zh' ? '主会话' : 'Primary'}
+                                                                        </span>
+                                                                    )}
                                                                     {s.unread_count > 0 && (
                                                                         <span style={{
                                                                             minWidth: s.unread_count > 9 ? '18px' : '14px',
@@ -4550,6 +4563,19 @@ function AgentDetailInner() {
                                                                 onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '1px' }}>
                                                                     <div style={{ fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)', flex: 1 }}>{s.title}</div>
+                                                                    {s.is_primary && (
+                                                                        <span style={{
+                                                                            fontSize: '9px',
+                                                                            padding: '1px 4px',
+                                                                            borderRadius: '3px',
+                                                                            background: 'var(--bg-tertiary)',
+                                                                            color: 'var(--text-secondary)',
+                                                                            flexShrink: 0,
+                                                                            border: '1px solid var(--border-subtle)',
+                                                                        }}>
+                                                                            {i18n.language === 'zh' ? '主会话' : 'Primary'}
+                                                                        </span>
+                                                                    )}
                                                                     {s.unread_count > 0 && (
                                                                         <span style={{
                                                                             minWidth: s.unread_count > 9 ? '18px' : '14px',
