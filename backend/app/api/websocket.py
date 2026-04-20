@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from datetime import datetime, timezone as tz
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from loguru import logger
@@ -76,8 +77,36 @@ class ConnectionManager:
             return []
         return list(set(sid for _ws, sid, _uid in self.active_connections[agent_id] if sid))
 
+    def is_user_viewing_session(self, agent_id: str, session_id: str, user_id: str) -> bool:
+        """Return True if the given platform user currently has this exact session open."""
+        if agent_id not in self.active_connections:
+            return False
+        for _ws, sid, uid in self.active_connections[agent_id]:
+            if sid == session_id and uid == user_id:
+                return True
+        return False
+
 
 manager = ConnectionManager()
+
+
+async def maybe_mark_session_read_for_active_viewer(
+    db: AsyncSession,
+    *,
+    agent_id: uuid.UUID,
+    session_id: str,
+    user_id: uuid.UUID,
+) -> bool:
+    """Advance last_read_at_by_user if the owner is actively viewing this exact session."""
+    if not manager.is_user_viewing_session(str(agent_id), session_id, str(user_id)):
+        return False
+
+    session = await db.get(ChatSession, uuid.UUID(session_id))
+    if not session:
+        return False
+
+    session.last_read_at_by_user = datetime.now(tz.utc)
+    return True
 
 
 from fastapi import Depends
@@ -565,6 +594,12 @@ async def websocket_chat(
                                         conversation_id=conv_id,
                                     )
                                     _tc_db.add(tc_msg)
+                                    await maybe_mark_session_read_for_active_viewer(
+                                        _tc_db,
+                                        agent_id=agent_id,
+                                        session_id=conv_id,
+                                        user_id=user_id,
+                                    )
                                     await _tc_db.commit()
                             except Exception as _tc_err:
                                 logger.warning(f"[WS] Failed to save tool_call: {_tc_err}")
@@ -719,6 +754,12 @@ async def websocket_chat(
                     thinking="".join(thinking_content) if thinking_content else None,
                 )
                 db.add(assistant_msg)
+                await maybe_mark_session_read_for_active_viewer(
+                    db,
+                    agent_id=agent_id,
+                    session_id=conv_id,
+                    user_id=user_id,
+                )
                 await db.commit()
             logger.info("[WS] Assistant message saved")
 

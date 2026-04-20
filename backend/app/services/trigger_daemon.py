@@ -910,6 +910,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 # Save to the resolved destination session for persistence.
                 async with async_session() as db:
                     from app.models.chat_session import ChatSession
+                    from app.api.websocket import maybe_mark_session_read_for_active_viewer
 
                     db.add(ChatMessage(
                         agent_id=agent_id,
@@ -921,6 +922,13 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                     session_row = await db.get(ChatSession, uuid.UUID(target_session_id))
                     if session_row:
                         session_row.last_message_at = datetime.now(timezone.utc)
+                    if owner_user_id:
+                        await maybe_mark_session_read_for_active_viewer(
+                            db,
+                            agent_id=agent_id,
+                            session_id=target_session_id,
+                            user_id=uuid.UUID(owner_user_id),
+                        )
                     await db.commit()
 
                 payload = {

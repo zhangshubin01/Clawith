@@ -4732,6 +4732,17 @@ async def _send_web_message(agent_id: uuid.UUID, args: dict) -> str:
                 conversation_id=str(session.id),
             ))
             session.last_message_at = _dt.now(_tz.utc)
+            try:
+                from app.api.websocket import maybe_mark_session_read_for_active_viewer
+
+                await maybe_mark_session_read_for_active_viewer(
+                    db,
+                    agent_id=agent_id,
+                    session_id=str(session.id),
+                    user_id=target_user.id,
+                )
+            except Exception:
+                pass
             await db.commit()
 
             # Push via WebSocket if user has an active connection

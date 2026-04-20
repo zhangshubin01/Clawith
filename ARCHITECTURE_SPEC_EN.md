@@ -188,6 +188,7 @@ Two first-party session rules are now important:
 
 - agent-initiated platform messages reuse the primary session instead of opening a fresh thread each time
 - unread badges are derived from assistant/system/tool messages created after `ChatSession.last_read_at_by_user`
+- when the owning platform user is actively viewing that exact session, newly delivered assistant/tool/trigger messages immediately advance `last_read_at_by_user` so the active thread does not show itself as unread
 - trigger results are routed to one explicit destination session: a user's primary platform session for user-originated context, the matching A2A session for agent-to-agent context, or only the trigger reflection session for pure system/reflection work
 - if a trigger already sends the user-facing platform message via `send_web_message`, the daemon suppresses the extra trigger recap in that primary session and leaves the full execution trace only in the reflection session
 

@@ -1607,6 +1607,14 @@ function AgentDetailInner() {
         };
     };
 
+    const clearUnreadForSession = (sessionId?: string | null) => {
+        if (!sessionId) return;
+        const sid = String(sessionId);
+        setSessions(prev => prev.map((item: any) => String(item.id) === sid ? { ...item, unread_count: 0 } : item));
+        setAllSessions(prev => prev.map((item: any) => String(item.id) === sid ? { ...item, unread_count: 0 } : item));
+        setActiveSession((prev: any) => prev && String(prev.id) === sid ? { ...prev, unread_count: 0 } : prev);
+    };
+
     const isWritableSession = (sess: any, scopeOverride: 'mine' | 'all' = chatScope) => {
         if (!sess) return false;
         const sc = String(sess.source_channel || 'web').toLowerCase();
@@ -1777,9 +1785,7 @@ function AgentDetailInner() {
             }
             // The backend marks the session as read when the current user opens it. Mirror that
             // immediately in local state so unread badges clear without waiting for the next poll.
-            setSessions(prev => prev.map((item: any) => String(item.id) === String(sess.id) ? { ...item, unread_count: 0 } : item));
-            setAllSessions(prev => prev.map((item: any) => String(item.id) === String(sess.id) ? { ...item, unread_count: 0 } : item));
-            setActiveSession((prev: any) => prev && String(prev.id) === String(sess.id) ? { ...prev, unread_count: 0 } : prev);
+            clearUnreadForSession(String(sess.id));
             queryClient.invalidateQueries({ queryKey: ['agents'] });
         } catch (err: any) {
             if (err?.name === 'AbortError') return;
@@ -2247,6 +2253,11 @@ function AgentDetailInner() {
                     }
                     return [...prev, toolMsg];
                 });
+                if (d.status === 'done') {
+                    const currentSessionId = activeSessionIdRef.current ? String(activeSessionIdRef.current) : '';
+                    if (currentSessionId) clearUnreadForSession(currentSessionId);
+                    queryClient.invalidateQueries({ queryKey: ['agents'] });
+                }
             } else if (d.type === 'chunk') {
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
@@ -2260,6 +2271,8 @@ function AgentDetailInner() {
                     if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), parseChatMsg({ role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() })];
                     return [...prev, parseChatMsg({ role: d.role, content: d.content, timestamp: new Date().toISOString() })];
                 });
+                const currentSessionId = activeSessionIdRef.current ? String(activeSessionIdRef.current) : '';
+                if (currentSessionId) clearUnreadForSession(currentSessionId);
                 fetchMySessions(true, agentId);
                 queryClient.invalidateQueries({ queryKey: ['agents'] });
             } else if (d.type === 'error' || d.type === 'quota_exceeded') {
@@ -2278,6 +2291,7 @@ function AgentDetailInner() {
                 const currentSessionId = activeSessionIdRef.current ? String(activeSessionIdRef.current) : '';
                 if (targetSessionId && currentSessionId === targetSessionId) {
                     setChatMessages(prev => [...prev, parseChatMsg({ role: 'assistant', content: d.content })]);
+                    clearUnreadForSession(targetSessionId);
                 }
                 fetchMySessions(true, agentId);
                 queryClient.invalidateQueries({ queryKey: ['agents'] });
