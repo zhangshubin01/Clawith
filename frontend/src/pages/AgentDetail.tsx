@@ -4207,6 +4207,7 @@ function AgentDetailInner() {
                                                         feishu: t('common.channels.feishu'),
                                                         discord: t('common.channels.discord'),
                                                         slack: t('common.channels.slack'),
+                                                        wechat: t('common.channels.wechat'),
                                                         dingtalk: t('common.channels.dingtalk'),
                                                         wecom: t('common.channels.wecom'),
                                                     };
@@ -4271,6 +4272,7 @@ function AgentDetailInner() {
                                                             feishu: t('common.channels.feishu'),
                                                             discord: t('common.channels.discord'),
                                                             slack: t('common.channels.slack'),
+                                                            wechat: t('common.channels.wechat'),
                                                             dingtalk: t('common.channels.dingtalk'),
                                                             wecom: t('common.channels.wecom'),
                                                         };

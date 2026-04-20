@@ -1323,6 +1323,7 @@
         "feishu": "Feishu: Requires app_id, app_secret. Optional: encrypt_key, verification_token.",
         "dingtalk": "DingTalk: Requires app_key, app_secret.",
         "wecom": "WeCom: Requires corp_id, secret, agent_id.",
+        "google_workspace": "Google Workspace: one Client ID, one Client Secret, and one Redirect URL for both SSO and admin-authorized directory sync.",
         "oauth2": "OAuth2: Enter App ID, App Secret, Authorize URL, Token URL, User Info URL",
         "saml": "SAML: Requires entry_point, issuer, cert (public key).",
         "microsoft_teams": "Microsoft Teams: Requires client_id, client_secret, tenant_id."
@@ -1342,6 +1343,10 @@
         "dingtalk": {
           "name": "DingTalk",
           "desc": "DingTalk App Integration"
+        },
+        "google_workspace": {
+          "name": "Google Workspace",
+          "desc": "Google Directory Sync + SSO"
         },
         "oauth2": {
           "name": "OAuth2",
@@ -1479,6 +1484,8 @@
       "discord": "Discord",
       "slack": "Slack",
       "teams": "Microsoft Teams",
+      "wechat": "WeChat",
+      "whatsapp": "WhatsApp",
       "dingtalk": "DingTalk",
       "wecom": "WeCom"
     },
@@ -1599,6 +1606,20 @@
       "ws_step5": "Copy the Bot ID and Secret that are generated → paste them above → click Save Config",
       "ws_step6": "Find the bot in WeCom and send a test message",
       "ws_note": "WebSocket mode requires no public IP, callback URL, or domain verification (ICP). The connection is managed automatically."
+    },
+    "wechat": {
+      "step1": "Click Generate QR Code below to request a fresh WeChat iLink login QR.",
+      "step2": "Open WeChat on your phone and scan the QR code, then confirm the bot login on the device.",
+      "step3": "After confirmation, Clawith stores the returned bot token and starts the getupdates long-poll worker automatically.",
+      "step4": "Send a direct message to the linked WeChat iLink bot to verify inbound polling and outbound replies.",
+      "note": "This channel follows the iLink Bot protocol: QR login, token-based long polling, and replies bound to the incoming context_token."
+    },
+    "whatsapp": {
+      "step1": "Create a Meta app and enable the WhatsApp product in the Meta App Dashboard.",
+      "step2": "Copy the Phone Number ID and generate a permanent Access Token with WhatsApp permissions.",
+      "step3": "Set a Verify Token you control. Optionally fill App Secret to enable X-Hub-Signature-256 verification.",
+      "step4": "Copy the Webhook URL below into the WhatsApp webhook configuration in Meta and complete verification.",
+      "step5": "Subscribe the app to WhatsApp message webhooks so inbound messages are delivered to this agent."
     }
   },
   "platformDashboard": {

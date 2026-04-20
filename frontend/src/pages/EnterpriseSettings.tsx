@@ -536,10 +536,28 @@ function OrgTab({ tenant }: { tenant: any }) {
         }
     };
 
+    const handleGoogleAdminAuthorize = async (providerId: string) => {
+        const res = await fetchJson<{ authorization_url: string }>(`/enterprise/identity-providers/${providerId}/google-workspace-sync/authorize-url`);
+        const popup = window.open(res.authorization_url, 'google-workspace-sync', 'width=640,height=760');
+        if (!popup) {
+            window.location.href = res.authorization_url;
+            return;
+        }
+
+        const onMessage = (event: MessageEvent) => {
+            if (event.data?.type === 'google-workspace-sync-authorized') {
+                window.removeEventListener('message', onMessage);
+                qc.invalidateQueries({ queryKey: ['identity-providers'] });
+            }
+        };
+        window.addEventListener('message', onMessage);
+    };
+
     const IDP_TYPES = [
         { type: 'feishu', name: 'Feishu', desc: 'Feishu / Lark Integration', icon: <img src="/feishu.png" width="20" height="20" alt="Feishu" /> },
         { type: 'wecom', name: 'WeCom', desc: 'WeChat Work Integration', icon: <img src="/wecom.png" width="20" height="20" style={{ borderRadius: '4px' }} alt="WeCom" /> },
         { type: 'dingtalk', name: 'DingTalk', desc: 'DingTalk App Integration', icon: <img src="/dingtalk.png" width="20" height="20" style={{ borderRadius: '4px' }} alt="DingTalk" /> },
+        { type: 'google_workspace', name: 'Google Workspace', desc: 'Google Admin Directory Sync', icon: <img src="/google.svg" width="20" height="20" style={{ borderRadius: '4px' }} alt="Google Workspace" /> },
         { type: 'oauth2', name: 'OAuth2', desc: 'Generic OIDC Provider', icon: <div style={{ width: 20, height: 20, background: 'var(--accent-primary)', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 10, fontWeight: 700 }}>O</div> }
     ];
 
@@ -559,8 +577,12 @@ function OrgTab({ tenant }: { tenant: any }) {
                 feishu: { app_id: '', app_secret: '', corp_id: '' },
                 dingtalk: { app_key: '', app_secret: '', corp_id: '' },
                 wecom: { corp_id: '', secret: '', agent_id: '', app_secret: '', bot_id: '', bot_secret: '', verify_token: '', verify_aes_key: '' },
+                google_workspace: {
+                    client_id: '',
+                    client_secret: '',
+                },
             };
-            const nameMap: Record<string, string> = { feishu: 'Feishu', wecom: 'WeCom', dingtalk: 'DingTalk', oauth2: 'OAuth2' };
+            const nameMap: Record<string, string> = { feishu: 'Feishu', wecom: 'WeCom', dingtalk: 'DingTalk', google_workspace: 'Google Workspace', oauth2: 'OAuth2' };
             setForm({
                 provider_type: type,
                 name: nameMap[type] || type,
@@ -574,10 +596,19 @@ function OrgTab({ tenant }: { tenant: any }) {
     };
 
     const renderForm = (type: string, existingProvider?: any) => {
+        const providerBaseUrl = (() => {
+            const rawDomain = existingProvider?.sso_domain || tenant?.sso_domain || '';
+            if (rawDomain) {
+                return rawDomain.startsWith('http') ? rawDomain : `https://${rawDomain}`;
+            }
+            return window.location.origin;
+        })();
+        const providerCallbackUrl = `${providerBaseUrl}/api/auth/${type}/callback`;
+
         return (
             <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--border-subtle)' }}>
                 {/* Setup Guide moved to the top */}
-                {['feishu', 'dingtalk'].includes(type) && (
+                {['feishu', 'dingtalk', 'google_workspace'].includes(type) && (
                     <div style={{ background: 'var(--bg-primary)', padding: '16px', borderRadius: '8px', border: '1px solid var(--border-subtle)', marginBottom: '20px', fontSize: '12px' }}>
                         <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '8px', color: 'var(--text-primary)' }}>
                             👉 {t('enterprise.org.syncSetupGuide', 'Setup Guide & Required Permissions')}
@@ -615,6 +646,15 @@ function OrgTab({ tenant }: { tenant: any }) {
                                             {i + 1}. {t(`enterprise.org.syncGuide.dingtalk.step${i + 1}`)}
                                         </div>
                                     ))}
+                                </>
+                            )}
+                            {type === 'google_workspace' && (
+                                <>
+                                    <div style={{ marginBottom: '6px' }}>1. 在 Google Cloud 创建 OAuth Web App，并填入 Client ID 与 Client Secret。</div>
+                                    <div style={{ marginBottom: '6px' }}>2. 将下方同一个 Redirect URL 配置到 Google Cloud 的 Authorized redirect URIs。</div>
+                                    <div style={{ marginBottom: '6px' }}>3. SSO 登录直接使用这套配置。</div>
+                                    <div style={{ marginBottom: '6px' }}>4. 组织同步时，使用有 Directory 读取权限的 Google Workspace 管理员账号点击授权。</div>
+                                    <div style={{ marginBottom: '6px' }}>5. 后端会加密保存管理员 refresh token，后续定时同步会自动刷新 access token。</div>
                                 </>
                             )}
                             {type === 'wecom' && (
@@ -717,6 +757,93 @@ function OrgTab({ tenant }: { tenant: any }) {
                             <input className="form-input" type="password" value={form.config.app_secret || ''} onChange={e => setForm({ ...form, config: { ...form.config, app_secret: e.target.value } })} />
                         </div>
                     </div>
+                ) : type === 'google_workspace' ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                        <div style={{ padding: '14px', borderRadius: '8px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)' }}>
+                            <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '10px' }}>Google OAuth</div>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                        {t('enterprise.identity.providerHints.google_workspace', 'Google Workspace: use one Client ID and Client Secret for both SSO and admin-authorized directory sync.')}
+                                    </div>
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Client ID</label>
+                                    <input
+                                        className="form-input"
+                                        value={form.config.client_id || ''}
+                                        onChange={e => setForm({ ...form, config: { ...form.config, client_id: e.target.value } })}
+                                        placeholder="xxxxxxxx.apps.googleusercontent.com"
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Client Secret</label>
+                                    <input
+                                        className="form-input"
+                                        type="password"
+                                        value={form.config.client_secret || ''}
+                                        onChange={e => setForm({ ...form, config: { ...form.config, client_secret: e.target.value } })}
+                                    />
+                                </div>
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <label className="form-label">{t('enterprise.identity.callbackUrl', 'Redirect URL (paste this in your app settings)')}</label>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <div style={{
+                                            flex: 1,
+                                            padding: '8px 12px',
+                                            background: 'var(--bg-elevated)',
+                                            border: '1px solid var(--border-subtle)',
+                                            borderRadius: '6px',
+                                            fontSize: '12px',
+                                            color: 'var(--text-primary)',
+                                            fontFamily: 'monospace',
+                                            whiteSpace: 'nowrap',
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis'
+                                        }}>
+                                            {providerCallbackUrl}
+                                        </div>
+                                        <LinearCopyButton
+                                            className="btn btn-ghost btn-sm"
+                                            style={{ fontSize: '11px', width: 'auto', minWidth: '70px', height: '33px' }}
+                                            textToCopy={providerCallbackUrl}
+                                            label={t('common.copy', 'Copy')}
+                                            copiedLabel="Copied"
+                                        />
+                                    </div>
+                                    <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+                                        {t('enterprise.identity.callbackUrlHint', "Add this URL as the OAuth redirect URI in your identity provider's app configuration.")}
+                                    </div>
+                                </div>
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <label className="form-label">Directory Sync Authorization</label>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                        <button
+                                            className="btn btn-secondary btn-sm"
+                                            type="button"
+                                            onClick={() => existingProvider && handleGoogleAdminAuthorize(existingProvider.id)}
+                                            disabled={!existingProvider}
+                                        >
+                                            {existingProvider?.config?.google_admin_authorized_email ? 'Re-authorize Admin Sync' : 'Authorize Admin Sync'}
+                                        </button>
+                                        {!existingProvider && (
+                                            <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                Please save the provider first.
+                                            </span>
+                                        )}
+                                        {existingProvider?.config?.google_admin_authorized_email && (
+                                            <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                                                Authorized as {existingProvider.config.google_admin_authorized_email}
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+                                        Sign in with a Google Workspace admin account to grant directory read access. Clawith will securely store a refresh token and use it for scheduled sync.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 ) : type === 'feishu' ? (
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                         <div className="form-group" style={{ gridColumn: '1 / -1' }}>
@@ -807,7 +934,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                     <div style={{ fontWeight: 500, fontSize: '14px' }}>{t('enterprise.org.orgBrowser', 'Organization Browser')}</div>
 
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
-                        {['feishu', 'dingtalk'].includes(p.provider_type) && (
+                        {['feishu', 'dingtalk', 'google_workspace'].includes(p.provider_type) && (
                             <button className="btn btn-secondary btn-sm" style={{ fontSize: '12px' }} onClick={() => triggerSync(p.id)} disabled={!!syncing}>
                                 {syncing === p.id ? 'Syncing...' : 'Sync Directory'}
                             </button>
@@ -919,7 +1046,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                                         {renderForm(idp.type, existingProvider)}
 
                                         {/* Per-channel SSO Login URLs & Toggle */}
-                                        {['feishu', 'dingtalk', 'oauth2'].includes(idp.type) && (
+                                        {['feishu', 'dingtalk', 'google_workspace', 'oauth2'].includes(idp.type) && (
                                             <SsoChannelSection
                                                 idpType={idp.type}
                                                 existingProvider={existingProvider}

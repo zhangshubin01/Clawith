@@ -1501,6 +1501,10 @@
           "name": "钉钉",
           "desc": "钉钉应用集成"
         },
+        "google_workspace": {
+          "name": "Google Workspace",
+          "desc": "Google 目录同步 + SSO"
+        },
         "oauth2": {
           "name": "OAuth2",
           "desc": "通用 OIDC 提供商"
@@ -1510,6 +1514,7 @@
         "feishu": "飞书：需填写 app_id, app_secret（可选：encrypt_key, verification_token）",
         "dingtalk": "钉钉：需填写 app_key, app_secret",
         "wecom": "企业微信：传统模式需 corp_id, secret, agent_id；智能机器人模式需 bot_id, bot_secret",
+        "google_workspace": "Google Workspace：同一套 Client ID、Client Secret 和同一个 Redirect URL 同时用于 SSO 与管理员授权的目录同步",
         "oauth2": "OAuth2：填写 App ID、App Secret、授权地址、Token地址、用户信息地址",
         "saml": "SAML：需填写 entry_point, issuer, cert (公钥)",
         "microsoft_teams": "Microsoft Teams：需填写 client_id, client_secret, tenant_id"
@@ -1571,6 +1576,8 @@
       "discord": "Discord",
       "slack": "Slack",
       "teams": "Microsoft Teams",
+      "wechat": "微信",
+      "whatsapp": "WhatsApp",
       "dingtalk": "钉钉",
       "wecom": "企业微信"
     },
@@ -1772,6 +1779,20 @@
       "ws_step5": "复制生成的 Bot ID 和 Secret → 填入上方 → 点击保存配置",
       "ws_step6": "在企业微信中找到机器人，发送消息测试",
       "ws_note": "WebSocket 长连接模式无需公网 IP、回调地址或域名备案（ICP），连接由系统自动管理。"
+    },
+    "wechat": {
+      "step1": "点击下方“Generate QR Code”，申请新的微信 iLink 登录二维码。",
+      "step2": "用手机微信扫码，并在手机端确认 Bot 登录。",
+      "step3": "确认后，Clawith 会保存返回的 bot token，并自动启动 getupdates 长轮询。",
+      "step4": "给该微信 iLink Bot 发送一条私信，验证入站轮询和出站回复是否正常。",
+      "note": "该通道遵循 iLink Bot 协议：二维码登录、token 长轮询，以及基于入站 context_token 的回复路由。"
+    },
+    "whatsapp": {
+      "step1": "在 Meta 开发者后台创建应用，并启用 WhatsApp 产品。",
+      "step2": "复制 Phone Number ID，并生成具备 WhatsApp 权限的永久 Access Token。",
+      "step3": "填写你自定义的 Verify Token；如需启用 X-Hub-Signature-256 签名校验，可选填写 App Secret。",
+      "step4": "将下方 Webhook URL 粘贴到 Meta 的 WhatsApp Webhook 配置中并完成验证。",
+      "step5": "为应用订阅 WhatsApp message webhook，让入站消息能送达这个智能体。"
     }
   },
   "identity": {
@@ -1786,6 +1807,7 @@
       "feishu": "飞书：需填写 app_id, app_secret（可选：encrypt_key, verification_token）",
       "dingtalk": "钉钉：需填写 app_key, app_secret",
       "wecom": "企业微信：传统模式需 corp_id, secret, agent_id；智能机器人模式需 bot_id, bot_secret",
+      "google_workspace": "Google Workspace：同一套 Client ID 和 Client Secret 同时用于 SSO 与管理员授权的目录同步",
       "oauth2": "OAuth2：填写 App ID、App Secret、授权地址、Token地址、用户信息地址",
       "saml": "SAML：需填写 entry_point, issuer, cert (公钥)",
       "microsoft_teams": "Microsoft Teams：需填写 client_id, client_secret, tenant_id"
