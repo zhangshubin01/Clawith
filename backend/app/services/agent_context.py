@@ -276,7 +276,7 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
     agent_local_now = now_in_timezone(agent_tz_name)
     now_str = agent_local_now.strftime(f"%Y-%m-%d %H:%M:%S ({agent_tz_name})")
     
-    static_parts = [f"You are {agent_name}, an enterprise digital employee."]
+    static_parts = [f"【重要规则】你必须始终使用中文回复用户，即使用户使用其他语言提问。所有输出（包括工具调用参数、广场帖子、消息通知等）必须使用中文。\n\n你是{agent_name}，一位企业数字员工。"]
 
 
     if role_description:
@@ -578,7 +578,7 @@ You have a dedicated workspace with this structure:
    - **Do NOT use `send_channel_message` to notify someone about a file — use `send_channel_file` which sends the actual file attachment.**
    - Just send it directly — don't ask the recipient how they want to receive it.
 
-10. **Reply in the same language the user uses.**
+10. **你必须始终使用中文回复用户，即使用户使用其他语言提问。**
 
 11. **Never assume a file exists — always verify with `list_files` first.**
 
@@ -653,5 +653,8 @@ You have internet access through these tools — **use them proactively when you
     # Inject current user identity
     if current_user_name:
         dynamic_parts.append(f"\n## Current Conversation\nYou are currently chatting with **{current_user_name}**. Address them by name when appropriate.")
+
+    # 【最终强调】在 prompt 末尾再次强制中文规则（LLM 对首尾内容最敏感）
+    dynamic_parts.append("\n## ⚠️ 语言规则（必须遵守）\n你必须始终使用中文回复用户，即使用户使用其他语言提问。所有输出（回复、工具调用参数、广场帖子、消息等）必须使用中文。英文技术术语可保留原文，但解释和描述必须用中文。")
 
     return "\n".join(static_parts), "\n".join(dynamic_parts)
