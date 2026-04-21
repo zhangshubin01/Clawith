@@ -27,6 +27,7 @@ from sqlalchemy import select, delete
 
 from app.api.auth import get_current_user
 from app.database import async_session
+from app.models.identity import IdentityProvider
 from app.models.okr import (
     CompanyReport,
     MemberDailyReport,
