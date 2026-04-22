@@ -916,6 +916,43 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "feishu_doc_search",
+            "description": (
+                "Search Feishu cloud documents by keyword using the official Feishu document search API. "
+                "Use this when a wiki folder or knowledge base contains too many documents for feishu_wiki_list to be practical. "
+                "Returns matching titles, document tokens, and document types so you can then read, share, or delete the target file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search keyword, e.g. '恩菲', '客户周报', or '项目章程'",
+                    },
+                    "docs_types": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["doc", "docx", "sheet", "bitable", "file", "folder", "mindnote", "slides"],
+                        },
+                        "description": "Optional file type filter. Omit to search across all supported Feishu document types.",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of results to return (default 10, max 50).",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Result offset for pagination (default 0).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "feishu_wiki_list",
             "description": (
                 "List all sub-pages (child nodes) of a Feishu Wiki (知识库) page. "
@@ -1644,6 +1681,7 @@ _FEISHU_TOOL_NAMES = {
     "bitable_create_record",
     "bitable_update_record",
     "bitable_delete_record",
+    "feishu_doc_search",
     "feishu_wiki_list",
     "feishu_doc_read",
     "feishu_doc_create",
@@ -2399,6 +2437,8 @@ async def execute_tool(
         elif tool_name == "bitable_delete_record":
             result = await _bitable_delete_record(agent_id, arguments)
         # ── Feishu Document Tools ──
+        elif tool_name == "feishu_doc_search":
+            result = await _feishu_doc_search(agent_id, arguments)
         elif tool_name == "feishu_wiki_list":
             result = await _feishu_wiki_list(agent_id, arguments)
         elif tool_name == "feishu_doc_read":
@@ -7497,6 +7537,91 @@ async def _feishu_wiki_get_node(token_str: str, auth_token: str) -> dict | None:
         "title": node.get("title", ""),
         "node_token": node.get("node_token", token_str),
     }
+
+
+async def _feishu_doc_search(agent_id: uuid.UUID, arguments: dict) -> str:
+    """Search Feishu documents by keyword using the official document search API."""
+    import httpx
+
+    query = (arguments.get("query") or arguments.get("search_key") or "").strip()
+    if not query:
+        return "❌ Missing required argument 'query'"
+
+    count = max(1, min(int(arguments.get("count", 10)), 50))
+    offset = max(0, int(arguments.get("offset", 0)))
+    docs_types = arguments.get("docs_types") or []
+    if docs_types and not isinstance(docs_types, list):
+        return "❌ 'docs_types' must be an array of strings."
+
+    app_id, app_secret = await _get_feishu_credentials(agent_id)
+    if not app_id or not app_secret:
+        return "❌ Agent has no Feishu channel configured."
+
+    from app.services.feishu_service import feishu_service
+
+    token = await feishu_service.get_tenant_access_token(app_id, app_secret)
+    payload: dict[str, object] = {
+        "search_key": query,
+        "count": count,
+        "offset": offset,
+    }
+    if docs_types:
+        payload["docs_types"] = docs_types
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(
+            "https://open.feishu.cn/open-apis/suite/docs-api/search/object",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+
+    data = resp.json()
+    err = _check_feishu_err(data)
+    if err:
+        return err
+
+    result = data.get("data", {})
+    entities = result.get("docs_entities", []) or []
+    total = result.get("total", len(entities))
+    has_more = bool(result.get("has_more", False))
+    if not entities:
+        return (
+            f"🔎 未找到与 `{query}` 匹配的飞书文档。"
+            "\n可以尝试："
+            "\n1. 缩短关键词"
+            "\n2. 换同义词"
+            "\n3. 指定 docs_types 过滤，例如 ['docx'] 或 ['bitable']"
+        )
+
+    lines = [
+        f"🔎 飞书文档搜索结果：关键词 `{query}`",
+        f"返回 {len(entities)} 条，total={total}，offset={offset}，has_more={str(has_more).lower()}",
+        "",
+    ]
+    for idx, item in enumerate(entities, start=offset + 1):
+        title = item.get("title") or "(无标题)"
+        docs_token = item.get("docs_token") or ""
+        docs_type = item.get("docs_type") or "unknown"
+        owner_id = item.get("owner_id") or ""
+        lines.append(
+            f"{idx}. **{title}**\n"
+            f"   - docs_type: `{docs_type}`\n"
+            f"   - docs_token: `{docs_token}`\n"
+            f"   - owner_id: `{owner_id}`"
+        )
+
+    lines.append("")
+    lines.append("💡 后续操作建议：")
+    lines.append("- 读取普通文档/知识库页：`feishu_doc_read(document_token=\"...\")`")
+    lines.append("- 管理权限：`feishu_drive_share(document_token=\"...\", doc_type=\"...\", action=\"list|add|remove\")`")
+    lines.append("- 删除文件：`feishu_drive_delete(file_token=\"...\", file_type=\"...\")`")
+    if has_more:
+        lines.append(f"- 下一页：`feishu_doc_search(query=\"{query}\", offset={offset + len(entities)}, count={count})`")
+
+    return "\n".join(lines)
 
 
 async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
