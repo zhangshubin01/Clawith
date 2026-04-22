@@ -36,6 +36,12 @@ from app.models.user import User as UserModel
 from app.services.auth_registry import auth_provider_registry
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import get_platform_user_by_org_member
+from app.services.workspace_paths import (
+    WorkspacePathError,
+    enterprise_info_root,
+    resolve_agent_visible_path,
+    resolve_path_within_root,
+)
 from app.config import get_settings
 
 
@@ -3336,22 +3342,16 @@ async def _smithery_auto_recover(api_key: str, mcp_url: str, namespace: str, con
 
 
 def _list_files(ws: Path, rel_path: str, tenant_id: str | None = None) -> str:
-    # Handle enterprise_info/ as shared directory (tenant-scoped)
-    if rel_path and rel_path.startswith("enterprise_info"):
-        if tenant_id:
-            enterprise_root = (WORKSPACE_ROOT / f"enterprise_info_{tenant_id}").resolve()
-        else:
-            enterprise_root = (WORKSPACE_ROOT / "enterprise_info").resolve()
-        # Remap: enterprise_info/... → enterprise_info_{tenant_id}/...
-        sub = rel_path[len("enterprise_info"):].lstrip("/")
-        target = (enterprise_root / sub).resolve() if sub else enterprise_root
-        if not str(target).startswith(str(enterprise_root)):
-            return "Access denied for this path"
-    else:
-        target = (ws / rel_path) if rel_path else ws
-        target = target.resolve()
-        if not str(target).startswith(str(ws.resolve())):
-            return "Access denied for this path"
+    try:
+        resolved = resolve_agent_visible_path(
+            ws,
+            rel_path,
+            workspace_root=WORKSPACE_ROOT,
+            tenant_id=tenant_id,
+        )
+        target = resolved.path
+    except WorkspacePathError:
+        return "Access denied for this path"
 
     if not target.exists():
         return f"Directory not found: {rel_path or '/'}"
@@ -3359,10 +3359,7 @@ def _list_files(ws: Path, rel_path: str, tenant_id: str | None = None) -> str:
     items = []
     # If listing root, also show enterprise_info entry
     if not rel_path:
-        if tenant_id:
-            enterprise_dir = WORKSPACE_ROOT / f"enterprise_info_{tenant_id}"
-        else:
-            enterprise_dir = WORKSPACE_ROOT / "enterprise_info"
+        enterprise_dir = enterprise_info_root(WORKSPACE_ROOT, tenant_id)
         if enterprise_dir.exists():
             items.append("  📁 enterprise_info/ (shared company info)")
 
@@ -3404,20 +3401,15 @@ def _read_file(ws: Path, rel_path: str, tenant_id: str | None = None, offset: in
     Returns:
         File content with line numbers, or error message
     """
-    # Handle enterprise_info/ as shared directory (tenant-scoped)
-    if rel_path and rel_path.startswith("enterprise_info"):
-        if tenant_id:
-            enterprise_root = (WORKSPACE_ROOT / f"enterprise_info_{tenant_id}").resolve()
-        else:
-            enterprise_root = (WORKSPACE_ROOT / "enterprise_info").resolve()
-        sub = rel_path[len("enterprise_info"):].lstrip("/")
-        file_path = (enterprise_root / sub).resolve() if sub else enterprise_root
-        if not str(file_path).startswith(str(enterprise_root)):
-            return "Access denied for this path"
-    else:
-        file_path = (ws / rel_path).resolve()
-        if not str(file_path).startswith(str(ws.resolve())):
-            return "Access denied for this path"
+    try:
+        file_path = resolve_agent_visible_path(
+            ws,
+            rel_path,
+            workspace_root=WORKSPACE_ROOT,
+            tenant_id=tenant_id,
+        ).path
+    except WorkspacePathError:
+        return "Access denied for this path"
 
     if not file_path.exists():
         return f"File not found: {rel_path}"
@@ -3457,20 +3449,15 @@ def _read_file(ws: Path, rel_path: str, tenant_id: str | None = None, offset: in
 
 async def _read_document(ws: Path, rel_path: str, max_chars: int = 8000, tenant_id: str | None = None) -> str:
     """Read content from office documents (PDF, DOCX, XLSX, PPTX)."""
-    # Handle enterprise_info/ as shared directory (tenant-scoped)
-    if rel_path and rel_path.startswith("enterprise_info"):
-        if tenant_id:
-            enterprise_root = (WORKSPACE_ROOT / f"enterprise_info_{tenant_id}").resolve()
-        else:
-            enterprise_root = (WORKSPACE_ROOT / "enterprise_info").resolve()
-        sub = rel_path[len("enterprise_info"):].lstrip("/")
-        file_path = (enterprise_root / sub).resolve() if sub else enterprise_root
-        if not str(file_path).startswith(str(enterprise_root)):
-            return "Access denied for this path"
-    else:
-        file_path = (ws / rel_path).resolve()
-        if not str(file_path).startswith(str(ws.resolve())):
-            return "Access denied for this path"
+    try:
+        file_path = resolve_agent_visible_path(
+            ws,
+            rel_path,
+            workspace_root=WORKSPACE_ROOT,
+            tenant_id=tenant_id,
+        ).path
+    except WorkspacePathError:
+        return "Access denied for this path"
 
     if not file_path.exists():
         return f"File not found: {rel_path}"
@@ -3587,22 +3574,16 @@ def _write_file(ws: Path, rel_path: str, content: str, tenant_id: str | None = N
     if rel_path.strip("/") == "tasks.json":
         return "tasks.json is read-only. Use manage_tasks tool to manage tasks."
 
-    # Handle enterprise_info/ as shared directory (tenant-scoped)
-    if rel_path and rel_path.startswith("enterprise_info"):
-        if tenant_id:
-            enterprise_root = (WORKSPACE_ROOT / f"enterprise_info_{tenant_id}").resolve()
-        else:
-            enterprise_root = (WORKSPACE_ROOT / "enterprise_info").resolve()
-        sub = rel_path[len("enterprise_info"):].lstrip("/")
-        if not sub:
-            return "Write failed: please provide a file path under enterprise_info/, e.g. enterprise_info/knowledge_base/report.md"
-        file_path = (enterprise_root / sub).resolve()
-        if not str(file_path).startswith(str(enterprise_root)):
-            return "Access denied for this path"
-    else:
-        file_path = (ws / rel_path).resolve()
-        if not str(file_path).startswith(str(ws.resolve())):
-            return "Access denied for this path"
+    try:
+        file_path = resolve_agent_visible_path(
+            ws,
+            rel_path,
+            workspace_root=WORKSPACE_ROOT,
+            tenant_id=tenant_id,
+            require_subpath_for_enterprise=True,
+        ).path
+    except WorkspacePathError as e:
+        return f"Write failed: {e}" if rel_path.strip().startswith("enterprise_info") else "Access denied for this path"
 
     try:
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3617,8 +3598,9 @@ def _delete_file(ws: Path, rel_path: str) -> str:
     if rel_path.strip("/") in protected:
         return f"{rel_path} cannot be deleted (protected)"
 
-    file_path = (ws / rel_path).resolve()
-    if not str(file_path).startswith(str(ws.resolve())):
+    try:
+        file_path = resolve_path_within_root(ws, rel_path, label="workspace path")
+    except WorkspacePathError:
         return "Access denied for this path"
     if not file_path.exists():
         return f"File not found: {rel_path}"
@@ -3649,20 +3631,15 @@ def _edit_file(ws: Path, rel_path: str, old_string: str, new_string: str, replac
     Returns:
         Success message or error
     """
-    # Handle enterprise_info/ as shared directory (tenant-scoped)
-    if rel_path and rel_path.startswith("enterprise_info"):
-        if tenant_id:
-            enterprise_root = (WORKSPACE_ROOT / f"enterprise_info_{tenant_id}").resolve()
-        else:
-            enterprise_root = (WORKSPACE_ROOT / "enterprise_info").resolve()
-        sub = rel_path[len("enterprise_info"):].lstrip("/")
-        file_path = (enterprise_root / sub).resolve() if sub else enterprise_root
-        if not str(file_path).startswith(str(enterprise_root)):
-            return "Access denied for this path"
-    else:
-        file_path = (ws / rel_path).resolve()
-        if not str(file_path).startswith(str(ws.resolve())):
-            return "Access denied for this path"
+    try:
+        file_path = resolve_agent_visible_path(
+            ws,
+            rel_path,
+            workspace_root=WORKSPACE_ROOT,
+            tenant_id=tenant_id,
+        ).path
+    except WorkspacePathError:
+        return "Access denied for this path"
 
     if not file_path.exists():
         return f"File not found: {rel_path}"
@@ -3708,22 +3685,17 @@ def _search_files(ws: Path, pattern: str, path: str = ".", file_pattern: str = "
     Returns:
         Matching lines with file paths and line numbers
     """
-    # Handle enterprise_info/ as shared directory (tenant-scoped)
-    if path and path.startswith("enterprise_info"):
-        if tenant_id:
-            enterprise_root = (WORKSPACE_ROOT / f"enterprise_info_{tenant_id}").resolve()
-        else:
-            enterprise_root = (WORKSPACE_ROOT / "enterprise_info").resolve()
-        sub = path[len("enterprise_info"):].lstrip("/")
-        search_path = (enterprise_root / sub).resolve() if sub else enterprise_root
-        if not str(search_path).startswith(str(enterprise_root)):
-            return "Access denied for this path"
-        ws_for_relative = enterprise_root
-    else:
-        search_path = (ws / path).resolve() if path and path != "." else ws
-        if not str(search_path).startswith(str(ws.resolve())):
-            return "Access denied for this path"
-        ws_for_relative = ws
+    try:
+        resolved = resolve_agent_visible_path(
+            ws,
+            "" if path == "." else path,
+            workspace_root=WORKSPACE_ROOT,
+            tenant_id=tenant_id,
+        )
+        search_path = resolved.path
+        ws_for_relative = resolved.relative_root
+    except WorkspacePathError:
+        return "Access denied for this path"
 
     if not search_path.exists():
         return f"Directory not found: {path}"
@@ -3790,22 +3762,17 @@ def _find_files(ws: Path, pattern: str, path: str = ".", tenant_id: str | None =
     Returns:
         List of matching files with sizes
     """
-    # Handle enterprise_info/ as shared directory (tenant-scoped)
-    if path and path.startswith("enterprise_info"):
-        if tenant_id:
-            enterprise_root = (WORKSPACE_ROOT / f"enterprise_info_{tenant_id}").resolve()
-        else:
-            enterprise_root = (WORKSPACE_ROOT / "enterprise_info").resolve()
-        sub = path[len("enterprise_info"):].lstrip("/")
-        search_path = (enterprise_root / sub).resolve() if sub else enterprise_root
-        if not str(search_path).startswith(str(enterprise_root)):
-            return "Access denied for this path"
-        ws_for_relative = enterprise_root
-    else:
-        search_path = (ws / path).resolve() if path and path != "." else ws
-        if not str(search_path).startswith(str(ws.resolve())):
-            return "Access denied for this path"
-        ws_for_relative = ws
+    try:
+        resolved = resolve_agent_visible_path(
+            ws,
+            "" if path == "." else path,
+            workspace_root=WORKSPACE_ROOT,
+            tenant_id=tenant_id,
+        )
+        search_path = resolved.path
+        ws_for_relative = resolved.relative_root
+    except WorkspacePathError:
+        return "Access denied for this path"
 
     if not search_path.exists():
         return f"Directory not found: {path}"
@@ -5550,50 +5517,6 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
 
 # ─── Code Execution ─────────────────────────────────────────────
 
-# Dangerous patterns to block (for legacy fallback)
-_DANGEROUS_BASH = [
-    "rm -rf /", "rm -rf ~", "sudo ", "mkfs", "dd if=",
-    ":(){ :", "chmod 777 /", "chown ", "shutdown", "reboot",
-    "curl ", "wget ", "nc ", "ncat ", "ssh ", "scp ",
-    "python3 -c", "python -c",
-]
-
-_DANGEROUS_PYTHON_IMPORTS = [
-    "subprocess", "shutil.rmtree", "os.system", "os.popen",
-    "os.exec", "os.spawn",
-    "socket", "http.client", "urllib.request", "requests",
-    "ftplib", "smtplib", "telnetlib", "ctypes",
-    "__import__", "importlib",
-]
-
-
-def _check_code_safety(language: str, code: str) -> str | None:
-    """Check code for dangerous patterns. Returns error message if unsafe, None if ok."""
-    code_lower = code.lower()
-
-    if language == "bash":
-        for pattern in _DANGEROUS_BASH:
-            if pattern.lower() in code_lower:
-                return f"❌ Blocked: dangerous command detected ({pattern.strip()})"
-        # Block deep path traversal outside workspace
-        if "../../" in code:
-            return "❌ Blocked: directory traversal not allowed"
-
-    elif language == "python":
-        for pattern in _DANGEROUS_PYTHON_IMPORTS:
-            if pattern.lower() in code_lower:
-                return f"❌ Blocked: unsafe operation detected ({pattern})"
-
-    elif language == "node":
-        dangerous_node = ["child_process", "fs.rmSync", "fs.rmdirSync", "process.exit",
-                          "require('http')", "require('https')", "require('net')"]
-        for pattern in dangerous_node:
-            if pattern.lower() in code_lower:
-                return f"❌ Blocked: unsafe operation detected ({pattern})"
-
-    return None
-
-
 async def _execute_code(
     agent_id: Optional[uuid.UUID],
     ws: Path,
@@ -5660,113 +5583,16 @@ async def _execute_code(
         return backend._format_result(result)
 
     except ValueError as e:
-        # Sandbox disabled or misconfigured
         if is_e2b_tool:
-            # Do not silently fall back — surface the config error to the user
             return f"❌ E2B sandbox configuration error: {str(e)[:300]}\nPlease check the API key in the tool settings."
-        logger.warning(f"[Sandbox] Config issue, falling back to legacy subprocess: {e}")
-        return await _execute_code_legacy(ws, arguments)
+        logger.warning(f"[Sandbox] Config issue for agent {agent_id}: {e}")
+        return f"❌ Sandbox configuration error: {str(e)[:300]}"
 
     except Exception as e:
         logger.exception(f"[Sandbox] Execution failed for agent {agent_id} (tool={tool_name})")
         if is_e2b_tool:
-            # Do not silently fall back to local execution
             return f"❌ E2B execution error: {str(e)[:200]}"
-        # For local tool: try legacy subprocess as last resort
-        try:
-            return await _execute_code_legacy(ws, arguments)
-        except Exception:
-            logger.exception(f"[Sandbox] Fallback also failed for agent {agent_id}")
-            return f"❌ Execution error: {str(e)[:200]}"
-
-
-async def _execute_code_legacy(ws: Path, arguments: dict) -> str:
-    """Legacy subprocess-based code execution (fallback)."""
-    import asyncio
-
-    language = arguments.get("language", "python")
-    code = arguments.get("code", "")
-    timeout = min(arguments.get("timeout", 30), 60)
-
-    if not code.strip():
-        return "❌ No code provided"
-
-    if language not in ("python", "bash", "node"):
-        return f"❌ Unsupported language: {language}. Use: python, bash, or node"
-
-    # Security check
-    safety_error = _check_code_safety(language, code)
-    if safety_error:
-        return safety_error
-
-    # Working directory is the agent's root directory (must be absolute)
-    # This allows code to access skills/, workspace/, memory/ etc. directly
-    work_dir = ws.resolve()
-    work_dir.mkdir(parents=True, exist_ok=True)
-
-    # Determine command and file extension
-    if language == "python":
-        ext = ".py"
-        cmd_prefix = ["python3"]
-    elif language == "bash":
-        ext = ".sh"
-        cmd_prefix = ["bash"]
-    elif language == "node":
-        ext = ".js"
-        cmd_prefix = ["node"]
-    else:
-        return f"❌ Unsupported language: {language}"
-
-    # Write code to a temp file inside workspace
-    script_path = work_dir / f"_exec_tmp{ext}"
-    try:
-        script_path.write_text(code, encoding="utf-8")
-
-        # Inherit parent environment but override HOME to workspace
-        safe_env = dict(os.environ)
-        safe_env["HOME"] = str(work_dir)
-        safe_env["PYTHONDONTWRITEBYTECODE"] = "1"
-
-        proc = await asyncio.create_subprocess_exec(
-            *cmd_prefix, str(script_path),
-            cwd=str(work_dir),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=safe_env,
-        )
-
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return f"❌ Code execution timed out after {timeout}s"
-
-        stdout_str = stdout.decode("utf-8", errors="replace")[:10000]
-        stderr_str = stderr.decode("utf-8", errors="replace")[:5000]
-
-        result_parts = []
-        if stdout_str.strip():
-            result_parts.append(f"📤 Output:\n{stdout_str}")
-        if stderr_str.strip():
-            result_parts.append(f"⚠️ Stderr:\n{stderr_str}")
-        if proc.returncode != 0:
-            result_parts.append(f"Exit code: {proc.returncode}")
-
-        if not result_parts:
-            return "✅ Code executed successfully (no output)"
-
-        return "\n\n".join(result_parts)
-
-    except Exception as e:
         return f"❌ Execution error: {str(e)[:200]}"
-    finally:
-        # Clean up temp script
-        try:
-            script_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
 
 # ─── Resource Discovery Executors ───────────────────────────────
 
@@ -6232,8 +6058,9 @@ async def _generate_image(agent_id: uuid.UUID, ws: Path, arguments: dict, provid
         save_path = f"workspace/images/{slug}_{ts}.png"
 
     # Ensure the target directory exists and path is within workspace
-    full_save_path = (ws / save_path).resolve()
-    if not str(full_save_path).startswith(str(ws.resolve())):
+    try:
+        full_save_path = resolve_path_within_root(ws, save_path, label="save path")
+    except WorkspacePathError:
         return "❌ Access denied: save path is outside the workspace"
     full_save_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -8473,8 +8300,9 @@ async def _publish_page(agent_id: uuid.UUID, user_id: uuid.UUID, ws: Path, argum
         return "Only .html and .htm files can be published"
 
     # Resolve and check file exists
-    full_path = (ws / path).resolve()
-    if not str(full_path).startswith(str(ws.resolve())):
+    try:
+        full_path = resolve_path_within_root(ws, path, label="workspace path")
+    except WorkspacePathError:
         return "Path traversal not allowed"
     if not full_path.exists() or not full_path.is_file():
         return f"File not found: {path}"
@@ -9585,8 +9413,9 @@ async def _agentbay_file_transfer(agent_id: Optional[uuid.UUID], ws: Path, argum
     # ── Helper: resolve and validate a workspace-relative path ──────────────
     def resolve_workspace(rel_path: str) -> tuple[str | None, str]:
         """Return (absolute_local_path_str, error_message). error_message is '' on success."""
-        local = (ws / rel_path).resolve()
-        if not str(local).startswith(str(ws.resolve())):
+        try:
+            local = resolve_path_within_root(ws, rel_path, label="workspace path")
+        except WorkspacePathError:
             return None, "Permission denied: path must be inside the agent workspace"
         return str(local), ""
 
