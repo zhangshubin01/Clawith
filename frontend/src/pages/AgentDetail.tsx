@@ -1154,6 +1154,9 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
     const existingHumanRelationshipIds = new Set(
         relationships.map((r: any) => r.member_id),
     );
+    const existingAgentRelationshipIds = new Set(
+        agentRelationships.map((r: any) => r.target_agent_id),
+    );
 
     useEffect(() => {
         if (!search || search.length < 1) { setSearchResults([]); return; }
@@ -1207,7 +1210,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
         refetch();
     };
     const addAgentRelationship = async () => {
-        if (!selectedAgentId) return;
+        if (!selectedAgentId || existingAgentRelationshipIds.has(selectedAgentId)) return;
         const existing = agentRelationships.map((r: any) => ({ target_agent_id: r.target_agent_id, relation: r.relation, description: r.description }));
         existing.push({ target_agent_id: selectedAgentId, relation: agentRelation, description: agentDescription });
         await fetchAuth(`/agents/${agentId}/relationships/agents`, { method: 'PUT', body: JSON.stringify({ relationships: existing }) });
@@ -1431,7 +1434,14 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                         <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
                             <select className="input" value={selectedAgentId} onChange={e => setSelectedAgentId(e.target.value)} style={{ flex: 1, minWidth: 0, fontSize: '12px' }}>
                                 <option value="">— Select Agent —</option>
-                                {availableAgents.map((a: any) => <option key={a.id} value={a.id}>{a.name} — {a.role_description || 'Agent'}</option>)}
+                                {availableAgents.map((a: any) => {
+                                    const isAlreadyAdded = existingAgentRelationshipIds.has(a.id);
+                                    return (
+                                        <option key={a.id} value={a.id} disabled={isAlreadyAdded}>
+                                            {a.name} — {a.role_description || 'Agent'}{isAlreadyAdded ? ` (${t('agent.detail.alreadyAdded', 'Already added')})` : ''}
+                                        </option>
+                                    );
+                                })}
                             </select>
                             <select className="input" value={agentRelation} onChange={e => setAgentRelation(e.target.value)} style={{ width: '150px', flexShrink: 0, fontSize: '12px' }}>
                                 {getAgentRelationOptions(t).map((o: any) => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -1439,7 +1449,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                         </div>
                         <textarea className="input" placeholder="" value={agentDescription} onChange={e => setAgentDescription(e.target.value)} rows={2} style={{ fontSize: '12px', resize: 'vertical', marginBottom: '8px' }} />
                         <div style={{ display: 'flex', gap: '8px' }}>
-                            <button className="btn btn-primary" style={{ fontSize: '12px' }} onClick={addAgentRelationship} disabled={!selectedAgentId}>{t('common.confirm')}</button>
+                            <button className="btn btn-primary" style={{ fontSize: '12px' }} onClick={addAgentRelationship} disabled={!selectedAgentId || existingAgentRelationshipIds.has(selectedAgentId)}>{t('common.confirm')}</button>
                             <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={() => { setAddingAgent(false); setAgentDescription(''); setSelectedAgentId(''); }}>{t('common.cancel')}</button>
                         </div>
                     </div>

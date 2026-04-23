@@ -249,14 +249,21 @@ async def save_agent_relationships(
     """Replace all agent-to-agent relationships."""
     source_agent, _ = await check_agent_access(db, current_user, agent_id)
 
+    deduped_relationships: list[AgentRelationshipIn] = []
+    seen_target_ids: set[str] = set()
+    for relationship in data.relationships:
+        target_id = str(uuid.UUID(relationship.target_agent_id))
+        if target_id == str(agent_id) or target_id in seen_target_ids:
+            continue
+        seen_target_ids.add(target_id)
+        deduped_relationships.append(relationship)
+
     await db.execute(
         delete(AgentAgentRelationship).where(AgentAgentRelationship.agent_id == agent_id)
     )
 
-    for r in data.relationships:
+    for r in deduped_relationships:
         target_id = uuid.UUID(r.target_agent_id)
-        if target_id == agent_id:
-            continue  # skip self-reference
 
         target_result = await db.execute(
             select(Agent.id)
