@@ -6,7 +6,7 @@ This module implements the simplified reporting chain:
   -> company monthly report
 
 The implementation intentionally keeps summarization lightweight:
-  - member reports are capped at 200 chars at write time
+  - member reports are capped at 2000 chars at write time
   - company reports use deterministic section-building
   - bucketed aggregation is used when source volume is large
 """
@@ -26,7 +26,7 @@ from app.models.org import AgentAgentRelationship, AgentRelationship, OrgMember
 from app.models.user import User
 
 
-MEMBER_DAILY_CHAR_LIMIT = 200
+MEMBER_DAILY_CHAR_LIMIT = 2000
 BUCKET_SIZE = 20
 
 RISK_KEYWORDS = (
@@ -49,10 +49,15 @@ class CompanyMember:
 
 def _truncate_report_content(content: str) -> str:
     """Normalize member report content and enforce the character cap."""
-    compact = " ".join((content or "").strip().split())
-    if len(compact) <= MEMBER_DAILY_CHAR_LIMIT:
-        return compact
-    return compact[: MEMBER_DAILY_CHAR_LIMIT - 1].rstrip() + "…"
+    normalized_lines = [
+        " ".join(line.split())
+        for line in (content or "").replace("\r\n", "\n").split("\n")
+        if line.strip()
+    ]
+    normalized = "\n".join(normalized_lines)
+    if len(normalized) <= MEMBER_DAILY_CHAR_LIMIT:
+        return normalized
+    return normalized[: MEMBER_DAILY_CHAR_LIMIT - 1].rstrip() + "…"
 
 
 def _contains_risk(text: str) -> bool:

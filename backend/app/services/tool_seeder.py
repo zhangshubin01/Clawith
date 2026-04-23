@@ -1665,7 +1665,7 @@ BUILTIN_TOOLS = [
         "description": (
             "Create or update the final normalized daily report for any member in the company. "
             "Use this after discussing progress with the member and distilling their update into "
-            "one concise final report. The stored content should stay within 200 characters."
+            "one concise final report. The stored content should stay within 2000 characters."
         ),
         "category": "okr",
         "icon": "📝",
@@ -1679,7 +1679,7 @@ BUILTIN_TOOLS = [
                 },
                 "content": {
                     "type": "string",
-                    "description": "Final concise daily report content. Keep it within 200 characters.",
+                    "description": "Final concise daily report content. Keep it within 2000 characters.",
                 },
                 "member_type": {
                     "type": "string",

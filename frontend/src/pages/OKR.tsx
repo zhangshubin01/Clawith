@@ -1866,7 +1866,7 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
                             )}
                         </div>
 
-                        <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px', minWidth: 0 }}>
                             {selectedMemberReport ? (
                                 <div
                                     key={`content-${selectedMemberReport.id}`}
@@ -1875,6 +1875,7 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
                                         border: '1px solid var(--border-subtle)',
                                         borderRadius: '10px',
                                         background: 'var(--bg-secondary)',
+                                        minWidth: 0,
                                     }}
                                 >
                                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', marginBottom: '8px', flexWrap: 'wrap' }}>
@@ -1888,7 +1889,13 @@ function ReportsTab({ isChinese }: { isChinese: boolean }) {
                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
                                         {selectedMemberReport.group_label}
                                     </div>
-                                    <div style={{ fontSize: '13px', lineHeight: '1.7', color: selectedMemberReport.content ? 'var(--text-secondary)' : 'var(--text-tertiary)' }}>
+                                    <div style={{
+                                        fontSize: '13px',
+                                        lineHeight: '1.7',
+                                        color: selectedMemberReport.content ? 'var(--text-secondary)' : 'var(--text-tertiary)',
+                                        whiteSpace: 'pre-wrap',
+                                        wordBreak: 'break-word',
+                                    }}>
                                         {selectedMemberReport.content || (isChinese ? '当天暂无日报提交。' : 'No daily report submitted for this day.')}
                                     </div>
                                 </div>
