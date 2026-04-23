@@ -837,6 +837,7 @@ export default function OKR() {
     const user = useAuthStore(s => s.user);
     const isChinese = i18n.language?.startsWith('zh');
     const isAdmin = user && ['platform_admin', 'org_admin'].includes(user.role);
+    const okrRoleMode = isAdmin ? 'admin' : 'member';
     const queryClient = useQueryClient();
 
     const [selectedPeriod, setSelectedPeriod] = useState<Period | null>(null);
@@ -976,7 +977,7 @@ export default function OKR() {
     const periodOptions = periods;
 
     return (
-        <div style={{ padding: '24px', maxWidth: 960, margin: '0 auto' }}>
+        <div data-okr-role-mode={okrRoleMode} style={{ padding: '24px', maxWidth: 960, margin: '0 auto' }}>
             {/* Page Header */}
             <div style={{
                 display: 'grid',
