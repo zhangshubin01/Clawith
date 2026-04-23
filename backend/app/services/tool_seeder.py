@@ -1271,8 +1271,9 @@ BUILTIN_TOOLS = [
         "display_name": "My OKR",
         "description": (
             "Get your own OKR Objectives and Key Results for the current period. "
-            "Returns a structured view of your goals, current progress values, and kr_id references "
-            "you need to call update_kr_progress. Call this before reporting progress to confirm your KR IDs."
+            "Returns a structured view of your goals, current progress values, plus objective_id and kr_id references "
+            "you need to update existing OKRs correctly. Call this before changing progress, KR content, "
+            "or Objective text so you reuse the current records instead of creating duplicates."
         ),
         "category": "okr",
         "icon": "🎯",
@@ -1337,7 +1338,9 @@ BUILTIN_TOOLS = [
         "description": (
             "Update the content fields of one of YOUR OWN Key Results, such as title, target value, unit, "
             "focus reference, or status. Use get_my_okr first to obtain the kr_id. "
-            "This tool is for changing KR definition/content, not reporting progress."
+            "This tool is for changing KR definition/content, not reporting progress. "
+            "If the user says to change, revise, adjust, or replace an existing KR target or wording, "
+            "prefer this tool instead of create_key_result."
         ),
         "category": "okr",
         "icon": "✏️",
@@ -1459,6 +1462,8 @@ BUILTIN_TOOLS = [
         "description": (
             "Create an OKR Objective for the company, a specific user, or a specific agent. "
             "Call this after confirming the objective with the relevant person through conversation. "
+            "Use this only when a new Objective needs to be created for the period. "
+            "If the person already has a matching Objective and just wants to revise it, use update_objective instead. "
             "owner_type must be 'company', 'user', or 'agent'. "
             "owner_id is not required for company-level objectives. "
             "period_start and period_end must be ISO date strings (YYYY-MM-DD)."
@@ -1511,6 +1516,8 @@ BUILTIN_TOOLS = [
         "description": (
             "Create a Key Result (KR) under an existing Objective. "
             "Get the objective_id first using get_okr. "
+            "Use this only for a brand-new KR. If the user is revising the wording, target value, unit, "
+            "or focus reference of an existing KR, use update_kr_content instead. "
             "target_value is the goal number (e.g. 50000 for 50000 followers). "
             "unit is optional but recommended for clarity (e.g. '%', 'NPS', '万元', 'followers')."
         ),
@@ -1555,7 +1562,8 @@ BUILTIN_TOOLS = [
             "Modify an Objective's title, description, status, or period dates. "
             "Regular agents can only update their own Objectives — call get_my_okr first "
             "to get your objective_id. The OKR Agent can update any member's Objective. "
-            "Only provide the fields you want to change."
+            "Only provide the fields you want to change. If the request is to revise an existing OKR's "
+            "goal text rather than create a new one, prefer this tool over create_objective."
         ),
         "category": "okr",
         "icon": "✏️",
