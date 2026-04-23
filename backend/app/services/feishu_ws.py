@@ -276,7 +276,7 @@ class FeishuWSManager:
             app_id,
             app_secret,
             event_handler=event_handler,
-            log_level=lark.LogLevel.WARNING,  # was .INFO — suppress routine connect/disconnect logs
+            log_level=lark.LogLevel.INFO,  # 恢复 INFO 级别以便排查连接问题
         )
         self._clients[agent_id] = client
 
@@ -292,8 +292,9 @@ class FeishuWSManager:
         async def _run_async_client():
             nonlocal client
             retry_count = 0
-            max_retries = 3
-            retry_delay = 5
+            max_retries = float('inf')  # 无限重试
+            base_retry_delay = 5  # 基础延迟5秒
+            max_retry_delay = 300  # 最大延迟5分钟
             ping_task: asyncio.Task | None = None
             while retry_count < max_retries:
                 try:
@@ -305,6 +306,7 @@ class FeishuWSManager:
                     else:
                         await client._connect()
                     logger.info(f"[Feishu WS] Connected for agent {agent_id}")
+                    logger.info(f"[Feishu WS] Connection established with event_handler: type={type(event_handler)}, id={id(event_handler)}")
                     # Start ping loop natively after connection is established
                     ping_task = asyncio.create_task(client._ping_loop())
 
@@ -346,23 +348,28 @@ class FeishuWSManager:
                             pass
                     ping_task = None
                     await client._disconnect()
-                    if retry_count < max_retries:
-                        logger.info(f"[Feishu WS] Trying to reconnect in {retry_delay} seconds...")
-                        await asyncio.sleep(retry_delay)
-                        # Re-create the client for next retry
-                        try:
-                            event_handler = self._create_event_handler(agent_id)
-                            client = ws.Client(
-                                app_id,
-                                app_secret,
-                                event_handler=event_handler,
-                                log_level=lark.LogLevel.WARNING,  # was .INFO
-                            )
-                            self._clients[agent_id] = client
-                        except Exception as create_err:
-                            logger.exception(f"[Feishu WS] Failed to recreate client for {agent_id}: {create_err}")
-                            retry_count = max_retries
-                            break
+                    # 指数退避计算延迟时间
+                    current_delay = min(base_retry_delay * (2 ** retry_count), max_retry_delay)
+                    logger.info(f"[Feishu WS] Trying to reconnect in {current_delay} seconds... (retry {retry_count})")
+                    logger.debug(f"[Feishu WS] Current event_handler type: {type(event_handler)}, id: {id(event_handler)}")
+                    await asyncio.sleep(current_delay)
+                    # Re-create the client for next retry
+                    try:
+                        logger.info(f"[Feishu WS] Recreating event handler and client for agent {agent_id}...")
+                        event_handler = self._create_event_handler(agent_id)
+                        logger.info(f"[Feishu WS] New event_handler created: type={type(event_handler)}, id: {id(event_handler)}")
+                        client = ws.Client(
+                            app_id,
+                            app_secret,
+                            event_handler=event_handler,
+                            log_level=lark.LogLevel.INFO,
+                        )
+                        self._clients[agent_id] = client
+                        logger.info(f"[Feishu WS] New client created and registered for agent {agent_id}")
+                    except Exception as create_err:
+                        logger.exception(f"[Feishu WS] Failed to recreate client for {agent_id}: {create_err}")
+                        retry_count = max_retries
+                        break
 
             if retry_count >= max_retries:
                 logger.error(f"[Feishu WS] Max retries ({max_retries}) exceeded for {agent_id}, stopping reconnections")

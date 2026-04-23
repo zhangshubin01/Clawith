@@ -1,1 +1,1 @@
-{"nodes": [{"id": "scripts_init", "label": "scripts____init__.py", "file_type": "code", "source_file": "backend/app/services/skill_creator_files/scripts____init__.py", "source_location": "L1"}], "edges": []}
+{"nodes": [{"id": "scripts_init", "label": "scripts____init__.py", "file_type": "code", "source_file": "backend/app/services/skill_creator_files/scripts____init__.py", "source_location": "L1"}], "edges": [], "hyperedges": []}

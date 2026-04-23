@@ -299,7 +299,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                 reply = ""
                 break
             except Exception as e:
-                logger.error(f"LLM call error in heartbeat: {e}")
+                logger.exception(f"[Heartbeat] LLM call error for agent {agent_id}: {type(e).__name__}: {e}")
                 reply = ""
                 break
 

@@ -315,7 +315,7 @@ data: {"type": "error", "message": "..."}
 也可以用手机扫描下方二维码加入社群：
 
 <p align="center">
-  <img src="assets/QR_Code.png" alt="社群二维码" width="200" />
+  <img src="assets/Clawith_QRcode.png" alt="社群二维码" width="200" />
 </p>
 
 ## ⭐ Star History
