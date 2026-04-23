@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.permissions import check_agent_access, is_agent_creator
+from app.core.permissions import build_visible_agents_query, check_agent_access, is_agent_creator
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent, AgentPermission
@@ -139,47 +139,16 @@ async def list_agents(
     db: AsyncSession = Depends(get_db),
 ):
     """List all agents the current user has access to."""
-    # platform_admin & org_admin see all agents (optionally filtered by tenant)
-    if current_user.role in ("platform_admin", "org_admin"):
-        stmt = select(Agent)
-        if tenant_id:
-            stmt = stmt.where(Agent.tenant_id == tenant_id)
-        result = await db.execute(stmt.order_by(Agent.created_at.desc()))
-        agents = result.scalars().all()
-        # Lazy reset token counters
-        needs_flush = False
-        for a in agents:
-            if await _lazy_reset_token_counters(a, db):
-                needs_flush = True
-        if needs_flush:
-            await db.commit()
-        return [AgentOut.model_validate(a) for a in agents]
+    requested_tenant_id = tenant_id
+    if current_user.role != "platform_admin":
+        requested_tenant_id = current_user.tenant_id
 
-    # agent_admin sees their own created agents + permitted
-    # member sees only permitted
-    # All scoped to user's tenant
-    user_tenant = current_user.tenant_id
+    stmt = build_visible_agents_query(
+        current_user,
+        tenant_id=requested_tenant_id,
+    ).order_by(Agent.created_at.desc())
 
-    # Get agents user created (within their tenant)
-    created = select(Agent).where(Agent.creator_id == current_user.id, Agent.tenant_id == user_tenant)
-
-    # Get agents user has permission to (within their tenant)
-    permitted_ids = (
-        select(AgentPermission.agent_id)
-        .where(
-            (AgentPermission.scope_type == "company")
-            | ((AgentPermission.scope_type == "user") & (AgentPermission.scope_id == current_user.id))
-        )
-    )
-    permitted = select(Agent).where(Agent.id.in_(permitted_ids), Agent.tenant_id == user_tenant)
-
-    # Union
-    from sqlalchemy import union_all
-
-    combined = union_all(created, permitted).subquery()
-    result = await db.execute(
-        select(Agent).where(Agent.id.in_(select(combined.c.id))).order_by(Agent.created_at.desc())
-    )
+    result = await db.execute(stmt)
     agents = result.scalars().all()
     # Lazy reset token counters
     needs_flush = False

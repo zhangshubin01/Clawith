@@ -1031,17 +1031,17 @@ function AnalysisCard({
 
 function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; readOnly?: boolean }) {
     const { t } = useTranslation();
-    const qc = useQueryClient();
     const [search, setSearch] = useState('');
     const [searchResults, setSearchResults] = useState<any[]>([]);
-    const [adding, setAdding] = useState<any>(null);
+    const [selectedMembers, setSelectedMembers] = useState<any[]>([]);
     const [relation, setRelation] = useState('collaborator');
     const [description, setDescription] = useState('');
     // Agent relationships state
-    const [addingAgent, setAddingAgent] = useState(false);
+    const [agentSearch, setAgentSearch] = useState('');
+    const [agentSearchResults, setAgentSearchResults] = useState<any[]>([]);
+    const [selectedAgents, setSelectedAgents] = useState<any[]>([]);
     const [agentRelation, setAgentRelation] = useState('collaborator');
     const [agentDescription, setAgentDescription] = useState('');
-    const [selectedAgentId, setSelectedAgentId] = useState('');
     // Editing state
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editRelation, setEditRelation] = useState('');
@@ -1060,26 +1060,87 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
         queryKey: ['agent-relationships', agentId],
         queryFn: () => fetchAuth<any[]>(`/agents/${agentId}/relationships/agents`),
     });
-    const { data: allAgents = [] } = useQuery({
-        queryKey: ['agents-for-rel'],
-        queryFn: () => fetchAuth<any[]>(`/agents/`),
-    });
-    const availableAgents = allAgents.filter((a: any) => a.id !== agentId);
+
+    const relatedMemberIds = useMemo(() => new Set(relationships.map((r: any) => r.member_id)), [relationships]);
+    const relatedAgentIds = useMemo(() => new Set(agentRelationships.map((r: any) => r.target_agent_id)), [agentRelationships]);
+    const selectedMemberIds = useMemo(() => new Set(selectedMembers.map((m: any) => m.id)), [selectedMembers]);
+    const selectedAgentIds = useMemo(() => new Set(selectedAgents.map((a: any) => a.id)), [selectedAgents]);
+
+    const visibleMemberResults = useMemo(
+        () => searchResults.filter((m: any) => !relatedMemberIds.has(m.id)),
+        [searchResults, relatedMemberIds],
+    );
+    const visibleAgentResults = useMemo(
+        () => agentSearchResults.filter((a: any) => !relatedAgentIds.has(a.id)),
+        [agentSearchResults, relatedAgentIds],
+    );
+
+    const loadOrgMembers = async (keyword = '') => {
+        const query = keyword.trim()
+            ? `?search=${encodeURIComponent(keyword.trim())}`
+            : '';
+        const results = await fetchAuth<any[]>(`/enterprise/org/members${query}`);
+        setSearchResults(results);
+    };
 
     useEffect(() => {
         if (!search || search.length < 1) { setSearchResults([]); return; }
-        const t = setTimeout(() => {
-            fetchAuth<any[]>(`/enterprise/org/members?search=${encodeURIComponent(search)}`).then(setSearchResults);
+        const timer = setTimeout(() => {
+            loadOrgMembers(search);
         }, 300);
-        return () => clearTimeout(t);
+        return () => clearTimeout(timer);
     }, [search]);
 
+    useEffect(() => {
+        if (!agentSearch || agentSearch.length < 1) { setAgentSearchResults([]); return; }
+        const timer = setTimeout(() => {
+            fetchAuth<any[]>(`/agents/${agentId}/relationships/agent-candidates?search=${encodeURIComponent(agentSearch)}`).then(setAgentSearchResults);
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [agentId, agentSearch]);
+
+    const resetHumanDraft = () => {
+        setSearch('');
+        setSearchResults([]);
+        setSelectedMembers([]);
+        setRelation('collaborator');
+        setDescription('');
+    };
+
+    const resetAgentDraft = () => {
+        setAgentSearch('');
+        setAgentSearchResults([]);
+        setSelectedAgents([]);
+        setAgentRelation('collaborator');
+        setAgentDescription('');
+    };
+
+    const toggleMemberSelection = (member: any) => {
+        setSelectedMembers(prev =>
+            prev.some((item: any) => item.id === member.id)
+                ? prev.filter((item: any) => item.id !== member.id)
+                : [...prev, member]
+        );
+    };
+
+    const toggleAgentSelection = (agent: any) => {
+        setSelectedAgents(prev =>
+            prev.some((item: any) => item.id === agent.id)
+                ? prev.filter((item: any) => item.id !== agent.id)
+                : [...prev, agent]
+        );
+    };
+
     const addRelationship = async () => {
-        if (!adding) return;
-        const existing = relationships.map((r: any) => ({ member_id: r.member_id, relation: r.relation, description: r.description }));
-        existing.push({ member_id: adding.id, relation, description });
-        await fetchAuth(`/agents/${agentId}/relationships/`, { method: 'PUT', body: JSON.stringify({ relationships: existing }) });
-        setAdding(null); setSearch(''); setRelation('collaborator'); setDescription('');
+        if (!selectedMembers.length) return;
+        const existing = new Map(
+            relationships.map((r: any) => [r.member_id, { member_id: r.member_id, relation: r.relation, description: r.description }])
+        );
+        selectedMembers.forEach((member: any) => {
+            existing.set(member.id, { member_id: member.id, relation, description });
+        });
+        await fetchAuth(`/agents/${agentId}/relationships/`, { method: 'PUT', body: JSON.stringify({ relationships: Array.from(existing.values()) }) });
+        resetHumanDraft();
         refetch();
     };
     const removeRelationship = async (relId: string) => {
@@ -1112,11 +1173,15 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
         refetch();
     };
     const addAgentRelationship = async () => {
-        if (!selectedAgentId) return;
-        const existing = agentRelationships.map((r: any) => ({ target_agent_id: r.target_agent_id, relation: r.relation, description: r.description }));
-        existing.push({ target_agent_id: selectedAgentId, relation: agentRelation, description: agentDescription });
-        await fetchAuth(`/agents/${agentId}/relationships/agents`, { method: 'PUT', body: JSON.stringify({ relationships: existing }) });
-        setAddingAgent(false); setSelectedAgentId(''); setAgentRelation('collaborator'); setAgentDescription('');
+        if (!selectedAgents.length) return;
+        const existing = new Map(
+            agentRelationships.map((r: any) => [r.target_agent_id, { target_agent_id: r.target_agent_id, relation: r.relation, description: r.description }])
+        );
+        selectedAgents.forEach((agent: any) => {
+            existing.set(agent.id, { target_agent_id: agent.id, relation: agentRelation, description: agentDescription });
+        });
+        await fetchAuth(`/agents/${agentId}/relationships/agents`, { method: 'PUT', body: JSON.stringify({ relationships: Array.from(existing.values()) }) });
+        resetAgentDraft();
         refetchAgentRels();
     };
     const removeAgentRelationship = async (relId: string) => {
@@ -1208,44 +1273,72 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                         ))}
                     </div>
                 )}
-                {!readOnly && !adding && (
-                    <div style={{ position: 'relative' }}>
-                        <input className="input" placeholder={t("agent.detail.searchMembers")} value={search} onChange={e => setSearch(e.target.value)} style={{ fontSize: '13px' }} />
-                        {searchResults.length > 0 && (
-                            <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', marginTop: '4px', maxHeight: '200px', overflowY: 'auto', zIndex: 10, boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
-                                {searchResults.map((m: any) => (
-                                    <div key={m.id} style={{ padding: '8px 12px', cursor: 'pointer', fontSize: '13px', borderBottom: '1px solid var(--border-subtle)' }}
-                                        onClick={() => { setAdding(m); setSearch(''); setSearchResults([]); }}
-                                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-elevated)')}
-                                        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                                        <div style={{ fontWeight: 500 }}>{m.name}</div>
-                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                            {m.provider_name && <span style={{ color: 'var(--accent-color)', fontWeight: 500, marginRight: '6px' }}>[{m.provider_name}]</span>}
-                                            {m.department_path} · {m.email}
-                                        </div>
+                {!readOnly && (
+                    <div style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}>
+                        <div style={{ position: 'relative', marginBottom: '8px' }}>
+                            <input
+                                className="input"
+                                placeholder={t("agent.detail.searchMembers")}
+                                value={search}
+                                onChange={e => setSearch(e.target.value)}
+                                onFocus={() => {
+                                    if (!search.trim() && searchResults.length === 0) {
+                                        loadOrgMembers();
+                                    }
+                                }}
+                                style={{ fontSize: '13px' }}
+                            />
+                            {visibleMemberResults.length > 0 && (
+                                <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', marginTop: '4px', maxHeight: '200px', overflowY: 'auto', zIndex: 10, boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
+                                    {visibleMemberResults.map((m: any) => {
+                                        const checked = selectedMemberIds.has(m.id);
+                                        return (
+                                            <div key={m.id} style={{ padding: '8px 12px', cursor: 'pointer', fontSize: '13px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'flex-start', gap: '8px' }}
+                                                onClick={() => toggleMemberSelection(m)}
+                                                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-elevated)')}
+                                                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                                                <input type="checkbox" checked={checked} readOnly style={{ marginTop: '2px' }} />
+                                                <div style={{ minWidth: 0, flex: 1 }}>
+                                                    <div style={{ fontWeight: 500 }}>{m.name}</div>
+                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                        {m.provider_name && <span style={{ color: 'var(--accent-color)', fontWeight: 500, marginRight: '6px' }}>[{m.provider_name}]</span>}
+                                                        {m.department_path} · {m.email}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                        {search && visibleMemberResults.length === 0 && (
+                            <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
+                                {t('agent.detail.noSearchResults', 'No available results')}
+                            </div>
+                        )}
+                        {selectedMembers.length > 0 && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '8px' }}>
+                                {selectedMembers.map((member: any) => (
+                                    <div key={member.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', border: '1px solid var(--border-subtle)', borderRadius: '999px', padding: '6px 10px', background: 'var(--bg-primary)', fontSize: '12px' }}>
+                                        <span>{member.name}</span>
+                                        <button className="btn btn-ghost" type="button" style={{ fontSize: '11px', padding: 0, minWidth: 'auto' }} onClick={() => toggleMemberSelection(member)}>×</button>
                                     </div>
                                 ))}
                             </div>
                         )}
-                    </div>
-                )}
-                {!readOnly && adding && (
-                    <div style={{ border: '1px solid var(--accent-primary)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}>
-                        <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: '8px' }}>
-                            {t('agent.detail.addRelationship')}: {adding.name}
-                            <span style={{ fontSize: '12px', fontWeight: 400, color: 'var(--text-tertiary)', marginLeft: '8px' }}>
-                                ({adding.provider_name ? `[${adding.provider_name}] ` : ''}{adding.department_path} · {adding.email})
-                            </span>
-                        </div>
                         <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-                            <select className="input" value={relation} onChange={e => setRelation(e.target.value)} style={{ width: '140px', fontSize: '12px' }}>
+                            <select className="input" value={relation} onChange={e => setRelation(e.target.value)} style={{ width: '160px', fontSize: '12px' }}>
                                 {getRelationOptions(t).map((o: any) => <option key={o.value} value={o.value}>{o.label}</option>)}
                             </select>
                         </div>
                         <textarea className="input" placeholder="" value={description} onChange={e => setDescription(e.target.value)} rows={2} style={{ fontSize: '12px', resize: 'vertical', marginBottom: '8px' }} />
                         <div style={{ display: 'flex', gap: '8px' }}>
-                            <button className="btn btn-primary" style={{ fontSize: '12px' }} onClick={addRelationship}>{t('common.confirm')}</button>
-                            <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={() => { setAdding(null); setDescription(''); }}>{t('common.cancel')}</button>
+                            <button className="btn btn-primary" style={{ fontSize: '12px' }} onClick={addRelationship} disabled={selectedMembers.length === 0}>
+                                {t('common.confirm')} {selectedMembers.length > 0 ? `(${selectedMembers.length})` : ''}
+                            </button>
+                            <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={resetHumanDraft}>
+                                {t('common.cancel')}
+                            </button>
                         </div>
                     </div>
                 )}
@@ -1304,24 +1397,64 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                         ))}
                     </div>
                 )}
-                {!readOnly && !addingAgent && (
-                    <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={() => setAddingAgent(true)}>+ {t('agent.detail.addRelationship')}</button>
-                )}
-                {!readOnly && addingAgent && (
-                    <div style={{ border: '1px solid rgba(16,185,129,0.5)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}>
+                {!readOnly && (
+                    <div style={{ border: '1px solid rgba(16,185,129,0.3)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}>
+                        <div style={{ position: 'relative', marginBottom: '8px' }}>
+                            <input
+                                className="input"
+                                placeholder={t('agent.detail.searchAgents', '搜索可见数字员工...')}
+                                value={agentSearch}
+                                onChange={e => setAgentSearch(e.target.value)}
+                                style={{ fontSize: '13px' }}
+                            />
+                            {visibleAgentResults.length > 0 && (
+                                <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', marginTop: '4px', maxHeight: '200px', overflowY: 'auto', zIndex: 10, boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
+                                    {visibleAgentResults.map((agent: any) => {
+                                        const checked = selectedAgentIds.has(agent.id);
+                                        return (
+                                            <div key={agent.id} style={{ padding: '8px 12px', cursor: 'pointer', fontSize: '13px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'flex-start', gap: '8px' }}
+                                                onClick={() => toggleAgentSelection(agent)}
+                                                onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-elevated)')}
+                                                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                                                <input type="checkbox" checked={checked} readOnly style={{ marginTop: '2px' }} />
+                                                <div style={{ minWidth: 0, flex: 1 }}>
+                                                    <div style={{ fontWeight: 500 }}>{agent.name}</div>
+                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{agent.role_description || 'Agent'}</div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                        {agentSearch && visibleAgentResults.length === 0 && (
+                            <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
+                                {t('agent.detail.noSearchResults', 'No available results')}
+                            </div>
+                        )}
+                        {selectedAgents.length > 0 && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '8px' }}>
+                                {selectedAgents.map((agent: any) => (
+                                    <div key={agent.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '999px', padding: '6px 10px', background: 'var(--bg-primary)', fontSize: '12px' }}>
+                                        <span>{agent.name}</span>
+                                        <button className="btn btn-ghost" type="button" style={{ fontSize: '11px', padding: 0, minWidth: 'auto' }} onClick={() => toggleAgentSelection(agent)}>×</button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
                         <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
-                            <select className="input" value={selectedAgentId} onChange={e => setSelectedAgentId(e.target.value)} style={{ flex: 1, minWidth: 0, fontSize: '12px' }}>
-                                <option value="">— Select Agent —</option>
-                                {availableAgents.map((a: any) => <option key={a.id} value={a.id}>{a.name} — {a.role_description || 'Agent'}</option>)}
-                            </select>
-                            <select className="input" value={agentRelation} onChange={e => setAgentRelation(e.target.value)} style={{ width: '150px', flexShrink: 0, fontSize: '12px' }}>
+                            <select className="input" value={agentRelation} onChange={e => setAgentRelation(e.target.value)} style={{ width: '160px', flexShrink: 0, fontSize: '12px' }}>
                                 {getAgentRelationOptions(t).map((o: any) => <option key={o.value} value={o.value}>{o.label}</option>)}
                             </select>
                         </div>
                         <textarea className="input" placeholder="" value={agentDescription} onChange={e => setAgentDescription(e.target.value)} rows={2} style={{ fontSize: '12px', resize: 'vertical', marginBottom: '8px' }} />
                         <div style={{ display: 'flex', gap: '8px' }}>
-                            <button className="btn btn-primary" style={{ fontSize: '12px' }} onClick={addAgentRelationship} disabled={!selectedAgentId}>{t('common.confirm')}</button>
-                            <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={() => { setAddingAgent(false); setAgentDescription(''); setSelectedAgentId(''); }}>{t('common.cancel')}</button>
+                            <button className="btn btn-primary" style={{ fontSize: '12px' }} onClick={addAgentRelationship} disabled={selectedAgents.length === 0}>
+                                {t('common.confirm')} {selectedAgents.length > 0 ? `(${selectedAgents.length})` : ''}
+                            </button>
+                            <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={resetAgentDraft}>
+                                {t('common.cancel')}
+                            </button>
                         </div>
                     </div>
                 )}
