@@ -511,6 +511,7 @@ Answering those four questions correctly is usually enough to place new code in 
 
 | Date | Summary |
 | --- | --- |
+| 2026-04-23 | Improved the Enterprise OKR settings control surface so auto-saved changes now expose explicit saving/saved/error feedback, the daily collection card shows the company timezone that drives cron execution, and admins can trigger a one-off daily collection test from the settings page. Also fixed OKR daily collection to resolve fallback user sessions for external-channel members without raising a missing `ChatSession` import error. |
 | 2026-04-21 | Clarified human messaging tool selection so platform-labeled relationships should use `send_platform_message`, channel-labeled relationships should use `send_channel_message`, and the runtime now transparently reroutes mistaken channel sends for platform-only users back onto the platform messaging path. |
 | 2026-04-20 | Strengthened workspace-writing guidance so agents should inspect existing folder structure before creating documents, prefer relevant subfolders instead of dumping files into `workspace/` root, and create a new topical folder when no suitable location exists. |
 | 2026-04-20 | Tightened trigger result routing so trigger replies no longer fan out to every active web session; user-originated results now land in their primary session, A2A results stay in their A2A session, pure reflection work stays in trigger/reflection sessions, and user-facing `send_platform_message` deliveries no longer get duplicated by an extra trigger recap in the same chat. |
