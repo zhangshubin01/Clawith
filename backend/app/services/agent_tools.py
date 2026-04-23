@@ -2545,6 +2545,8 @@ async def execute_tool(
             result = await _get_okr(agent_id, arguments)
         elif tool_name == "get_my_okr":
             result = await _get_my_okr(agent_id, arguments)
+        elif tool_name == "update_kr_content":
+            result = await _update_kr_content(agent_id, arguments)
         elif tool_name == "update_kr_progress":
             result = await _update_kr_progress(agent_id, arguments)
         # collect_okr_progress: batch-read all focus.md files and sync progress to DB
@@ -10536,6 +10538,82 @@ async def _update_kr_progress(agent_id: uuid.UUID | None, arguments: dict) -> st
     except Exception as e:
         logger.exception(f"[OKR] update_kr_progress failed for agent {agent_id}")
         return f"Failed to update KR progress: {str(e)[:200]}"
+
+
+async def _update_kr_content(agent_id: uuid.UUID | None, arguments: dict) -> str:
+    """Update metadata/content fields of one of the caller's own KRs."""
+    if not agent_id:
+        return "OKR tools require agent context."
+
+    kr_id_str = arguments.get("kr_id", "").strip()
+    if not kr_id_str:
+        return "Missing required argument 'kr_id'. Call get_my_okr first to get your KR IDs."
+
+    try:
+        kr_id = uuid.UUID(kr_id_str)
+    except ValueError:
+        return f"Invalid kr_id format: {kr_id_str}"
+
+    supported_fields = {
+        "title": arguments.get("title"),
+        "target_value": arguments.get("target_value"),
+        "unit": arguments.get("unit"),
+        "focus_ref": arguments.get("focus_ref"),
+        "status": arguments.get("status"),
+    }
+    provided_updates = {key: value for key, value in supported_fields.items() if value is not None}
+    if not provided_updates:
+        return "No KR content fields provided. You can update: title, target_value, unit, focus_ref, status."
+
+    try:
+        from app.models.okr import OKRObjective, OKRKeyResult
+        from sqlalchemy import select as _select
+
+        async with async_session() as db:
+            result = await db.execute(
+                _select(OKRKeyResult, OKRObjective)
+                .join(OKRObjective, OKRKeyResult.objective_id == OKRObjective.id)
+                .where(
+                    OKRKeyResult.id == kr_id,
+                    OKRObjective.owner_type == "agent",
+                    OKRObjective.owner_id == agent_id,
+                )
+            )
+            row = result.first()
+            if not row:
+                return (
+                    f"Key Result {kr_id_str} not found or does not belong to you. "
+                    "Use get_my_okr to retrieve your own KR IDs."
+                )
+
+            kr, _ = row
+            changed_fields: list[str] = []
+            if "title" in provided_updates:
+                kr.title = str(provided_updates["title"]).strip()
+                changed_fields.append("title")
+            if "target_value" in provided_updates:
+                kr.target_value = float(provided_updates["target_value"])
+                changed_fields.append("target_value")
+            if "unit" in provided_updates:
+                kr.unit = str(provided_updates["unit"]).strip() or None
+                changed_fields.append("unit")
+            if "focus_ref" in provided_updates:
+                kr.focus_ref = str(provided_updates["focus_ref"]).strip() or None
+                changed_fields.append("focus_ref")
+            if "status" in provided_updates:
+                kr.status = str(provided_updates["status"]).strip()
+                changed_fields.append("status")
+
+            await db.commit()
+
+        return (
+            f"KR content updated: {kr.title}\n"
+            f"Changed fields: {', '.join(changed_fields)}"
+        )
+
+    except Exception as e:
+        logger.exception(f"[OKR] update_kr_content failed for agent {agent_id}")
+        return f"Failed to update KR content: {str(e)[:200]}"
 
 
 async def _collect_okr_progress(agent_id: uuid.UUID | None) -> str:
