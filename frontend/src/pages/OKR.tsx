@@ -115,6 +115,13 @@ interface MemberWithoutOKR {
     source_label?: string | null;
 }
 
+interface ChannelWarning {
+    channel_type: string;
+    channel_display: string;
+    affected_members: string[];
+    count: number;
+}
+
 interface MembersWithoutOKRData {
     period_start: string;
     period_end: string;
@@ -129,6 +136,7 @@ interface MembersWithoutOKRData {
         timestamp: string;
         is_read: boolean;
     } | null;
+    channel_warnings?: ChannelWarning[];
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1288,7 +1296,17 @@ function MembersWithoutOKRPanel({
         }
     }
 
-    const { members_without_okr: members, company_okr_exists, okr_agent_id, last_outreach_error } = data;
+    const { members_without_okr: members, company_okr_exists, okr_agent_id, last_outreach_error, channel_warnings } = data;
+
+    // Build a set of unreachable member names for ⚠️ icon display
+    const unreachableNames = new Set<string>();
+    if (channel_warnings?.length) {
+        for (const w of channel_warnings) {
+            for (const name of w.affected_members) {
+                unreachableNames.add(name);
+            }
+        }
+    }
 
     return (
         <section style={{ marginTop: '32px' }}>
@@ -1300,6 +1318,46 @@ function MembersWithoutOKRPanel({
                 <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
                 <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{members.length}</span>
             </div>
+
+            {/* Channel misconfiguration warning */}
+            {channel_warnings && channel_warnings.length > 0 && (
+                <div style={{
+                    display: 'flex', alignItems: 'flex-start', gap: '8px',
+                    padding: '10px 14px',
+                    marginBottom: '12px',
+                    background: 'rgba(245, 158, 11, 0.06)',
+                    border: '1px solid rgba(245, 158, 11, 0.2)',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    color: '#92400e',
+                    lineHeight: 1.6,
+                }}>
+                    <span style={{ flexShrink: 0, fontSize: '14px' }}>⚠️</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                        {channel_warnings.map((w, i) => (
+                            <div key={i} style={{ marginBottom: i < channel_warnings.length - 1 ? '4px' : 0 }}>
+                                <span style={{ fontWeight: 600 }}>{w.affected_members.join('、')}</span>
+                                {' '}
+                                {isChinese
+                                    ? `为 ${w.channel_display} 用户，但该 Agent 未配置 ${w.channel_display} 机器人，催办消息无法送达。`
+                                    : `are on ${w.channel_display} but the Agent has no ${w.channel_display} bot configured. Nudge messages cannot be delivered.`}
+                            </div>
+                        ))}
+                        {okr_agent_id && (
+                            <a
+                                href={`/agents/${okr_agent_id}#settings`}
+                                style={{
+                                    fontSize: '11px', color: '#d97706',
+                                    textDecoration: 'none', fontWeight: 500,
+                                    display: 'inline-block', marginTop: '2px',
+                                }}
+                            >
+                                {isChinese ? '前往 Agent Settings 配置 →' : 'Configure in Agent Settings →'}
+                            </a>
+                        )}
+                    </div>
+                </div>
+            )}
 
             {/* Nudge button + description — below title, above member list */}
             <div style={{
@@ -1444,6 +1502,10 @@ function MembersWithoutOKRPanel({
                                             : (isChinese ? '平台成员' : 'Platform member'))}
                                 </div>
                             </div>
+                            {unreachableNames.has(member.display_name) && (
+                                <span title={isChinese ? '渠道未配置，无法推送' : 'Channel not configured, cannot deliver'}
+                                    style={{ fontSize: '12px', cursor: 'help', flexShrink: 0 }}>⚠️</span>
+                            )}
                             <span style={{
                                 fontSize: '10px', color: 'var(--text-tertiary)',
                                 border: '1px dashed var(--border-subtle)',

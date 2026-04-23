@@ -1539,6 +1539,61 @@ async def members_without_okr(user=Depends(get_current_user)):
                     "is_read": notif.is_read,
                 }
 
+    # ── Check for channel members whose channel is not configured on the OKR Agent ──
+    channel_warnings: list[dict] = []
+    if okr_agent_id_val and members_without_okr:
+        # Collect unique channel types referenced by members without OKR
+        from app.models.channel_config import ChannelConfig as _CC
+        member_channels: dict[str, list[str]] = {}  # channel_name -> [member_names]
+        for m in members_without_okr:
+            ch = m.get("channel") or m.get("source_label")
+            if ch and ch not in ("Platform User", "Web"):
+                member_channels.setdefault(ch, []).append(m.get("display_name", "?"))
+
+        if member_channels:
+            # Map display channel names to channel_type enum values
+            _channel_name_to_type = {
+                "feishu": "feishu", "Feishu": "feishu",
+                "dingtalk": "dingtalk", "DingTalk": "dingtalk",
+                "wecom": "wecom", "WeCom": "wecom",
+                "slack": "slack", "Slack": "slack",
+                "discord": "discord", "Discord": "discord",
+                "wechat": "wechat", "WeChat": "wechat",
+            }
+            needed_types = set()
+            for ch_name in member_channels:
+                ct = _channel_name_to_type.get(ch_name)
+                if ct:
+                    needed_types.add(ct)
+
+            if needed_types:
+                async with async_session() as db3:
+                    configured_result = await db3.execute(
+                        select(_CC.channel_type).where(
+                            _CC.agent_id == okr_agent_id_val,
+                            _CC.channel_type.in_(list(needed_types)),
+                            _CC.is_configured == True,  # noqa: E712
+                        )
+                    )
+                    configured_types = {row[0] for row in configured_result.fetchall()}
+
+                missing_types = needed_types - configured_types
+                # Build warnings for each missing channel
+                _type_to_display = {v: k for k, v in _channel_name_to_type.items() if k[0].isupper()}
+                for mt in missing_types:
+                    display_name = _type_to_display.get(mt, mt)
+                    # Find member names on this channel
+                    affected = []
+                    for ch_name, names in member_channels.items():
+                        if _channel_name_to_type.get(ch_name) == mt:
+                            affected.extend(names)
+                    channel_warnings.append({
+                        "channel_type": mt,
+                        "channel_display": display_name,
+                        "affected_members": affected,
+                        "count": len(affected),
+                    })
+
     return {
         "period_start": ps.isoformat(),
         "period_end": pe.isoformat(),
@@ -1549,6 +1604,7 @@ async def members_without_okr(user=Depends(get_current_user)):
         "tracked_agent_ids": tracked_agent_ids,
         "total": len(members_without_okr),
         "last_outreach_error": last_outreach_error,
+        "channel_warnings": channel_warnings,
     }
 
 
