@@ -511,6 +511,7 @@ Answering those four questions correctly is usually enough to place new code in 
 
 | Date | Summary |
 | --- | --- |
+| 2026-04-23 | Tightened OKR editing guidance so `get_my_okr` now returns both `objective_id` and `kr_id`, OKR tool descriptions explicitly prefer `update_objective` and `update_kr_content` for revisions, and the seeded OKR Agent persona/tool assignment now distinguishes revision flows from new OKR creation. Also regrouped member OKRs in the dashboard so multiple Objectives for the same member render under a single owner container instead of appearing as separate top-level blocks. |
 | 2026-04-23 | Expanded stored member daily report content from a 200-character summary cap to a 2000-character normalized body, preserved line breaks during normalization, and updated the OKR reports detail view to render full wrapped report text instead of looking artificially truncated. |
 | 2026-04-23 | Added a first-party `update_kr_content` OKR tool for regular agents so they can modify their own Key Result definition fields such as title, target value, unit, focus reference, and status, complementing the existing progress-only update path. |
 | 2026-04-23 | Hardened relationship management so both human and agent relationships reject duplicate additions in the UI and on the backend replacement APIs, preventing repeated entries from being persisted when an already-linked member or digital employee is selected again. |

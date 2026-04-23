@@ -1199,22 +1199,63 @@ export default function OKR() {
                                 <div style={{ flex: 1, height: '1px', background: 'var(--border-subtle)' }} />
                                 <span style={{ fontSize: '11px', color: 'var(--text-quaternary)' }}>{memberObjs.length}</span>
                             </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                                 {Object.entries(memberGroups).map(([ownerKey, group]) => (
-                                    group.objs.map(obj => (
-                                        <ObjectiveCard
-                                            key={obj.id}
-                                            obj={obj}
-                                            isChinese={isChinese}
-                                            ownerLabel={group.label}
-                                            canEdit={true}
-                                            onInvalidate={invalidateObjectives}
-                                            onDelete={async (id) => {
-                                                await fetchJson(`/okr/objectives/${id}`, { method: 'DELETE' });
-                                                invalidateObjectives();
-                                            }}
-                                        />
-                                    ))
+                                    <div
+                                        key={ownerKey}
+                                        style={{
+                                            border: '1px solid var(--border-subtle)',
+                                            borderRadius: '14px',
+                                            background: 'var(--bg-primary)',
+                                            padding: '14px',
+                                        }}
+                                    >
+                                        <div style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            gap: '12px',
+                                            marginBottom: '12px',
+                                        }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+                                                <div style={{
+                                                    fontSize: '13px',
+                                                    fontWeight: 700,
+                                                    color: 'var(--text-primary)',
+                                                    minWidth: 0,
+                                                }}>
+                                                    {group.label}
+                                                </div>
+                                                <span style={{
+                                                    fontSize: '11px',
+                                                    color: 'var(--text-tertiary)',
+                                                    border: '1px solid var(--border-subtle)',
+                                                    borderRadius: '999px',
+                                                    padding: '2px 8px',
+                                                    whiteSpace: 'nowrap',
+                                                }}>
+                                                    {group.objs.length} {isChinese ? '个目标' : 'objectives'}
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                            {group.objs.map(obj => (
+                                                <ObjectiveCard
+                                                    key={obj.id}
+                                                    obj={obj}
+                                                    isChinese={isChinese}
+                                                    ownerLabel={group.label}
+                                                    canEdit={true}
+                                                    onInvalidate={invalidateObjectives}
+                                                    onDelete={async (id) => {
+                                                        await fetchJson(`/okr/objectives/${id}`, { method: 'DELETE' });
+                                                        invalidateObjectives();
+                                                    }}
+                                                />
+                                            ))}
+                                        </div>
+                                    </div>
                                 ))}
                             </div>
                         </section>
