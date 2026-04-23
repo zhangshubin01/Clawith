@@ -33,8 +33,6 @@ _USER_RESOLUTION_ERROR_TIP = (
     "抱歉，我暂时无法稳定识别你的飞书账号，已停止本次处理以避免重复创建账号。"
     "请稍后重试，或联系管理员检查飞书 Contact API 权限。"
 )
-
-
 def _build_card(
     answer_text: str,
     thinking_text: str = "",
