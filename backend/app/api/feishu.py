@@ -30,6 +30,10 @@ _LLM_TIMEOUT_SECONDS_DEFAULT = 180.0
 _TOOL_STATUS_KEEP_LINES = 20
 
 
+_USER_RESOLUTION_ERROR_TIP = (
+    "抱歉，我暂时无法稳定识别你的飞书账号，已停止本次处理以避免重复创建账号。"
+    "请稍后重试，或联系管理员检查飞书 Contact API 权限。"
+)
 def _build_streaming_card(
     answer_text: str,
     thinking_text: str = "",
@@ -495,7 +499,18 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
         if msg_type in ("file", "image"):
             import asyncio as _asyncio
-            _asyncio.create_task(_handle_feishu_file(db, agent_id, config, message, sender_open_id, chat_type, chat_id))
+            _asyncio.create_task(
+                _handle_feishu_file(
+                    db,
+                    agent_id,
+                    config,
+                    message,
+                    sender_open_id,
+                    sender_user_id_from_event,
+                    chat_type,
+                    chat_id,
+                )
+            )
             return {"code": 0, "msg": "ok"}
 
         if msg_type == "text":
@@ -557,7 +572,10 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
             sender_name = ""
             sender_user_id_feishu = sender_user_id_from_event  # tenant-level user_id, pre-filled from event body
-            extra_info: dict | None = None
+            extra_info: dict | None = {
+                "open_id": sender_open_id,
+                "external_id": sender_user_id_feishu or None,
+            }
 
             try:
                 async with _httpx.AsyncClient() as _client:
@@ -606,10 +624,8 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                             if sender_name and sender_open_id:
                                 try:
                                     import pathlib as _pl, json as _cj, time as _ct
-                                    from app.config import get_settings as _get_settings
                                     _safe_id = str(agent_id).replace("..", "").replace("/", "")
-                                    _base_dir = _pl.Path(_get_settings().AGENT_DATA_DIR)
-                                    _cache = _base_dir / _safe_id / "feishu_contacts_cache.json"
+                                    _cache = _pl.Path(f"/data/workspaces/{_safe_id}/feishu_contacts_cache.json")
                                     _cache.parent.mkdir(parents=True, exist_ok=True)
                                     _existing = {}
                                     if _cache.exists():
@@ -642,13 +658,32 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
             # Resolve channel user via unified service (uses OrgMember + SSO patterns)
             from app.services.channel_user_service import channel_user_service
-            platform_user = await channel_user_service.resolve_channel_user(
-                db=db,
-                agent=agent_obj,
-                channel_type="feishu",
-                external_user_id=sender_open_id,
-                extra_info=extra_info,
-            )
+            try:
+                platform_user = await channel_user_service.resolve_channel_user(
+                    db=db,
+                    agent=agent_obj,
+                    channel_type="feishu",
+                    # For Feishu, external_user_id is strictly user_id.
+                    external_user_id=sender_user_id_feishu or None,
+                    extra_info=extra_info,
+                )
+            except Exception as e:
+                from app.services.channel_user_service import ChannelUserResolutionError
+
+                if isinstance(e, ChannelUserResolutionError):
+                    logger.warning(f"[Feishu] Sender resolution refused: {e}")
+                    _reply_to = chat_id if chat_type == "group" else sender_open_id
+                    _rid_type = "chat_id" if chat_type == "group" else "open_id"
+                    await feishu_service.send_message(
+                        config.app_id,
+                        config.app_secret,
+                        _reply_to,
+                        "text",
+                        json.dumps({"text": _USER_RESOLUTION_ERROR_TIP}),
+                        receive_id_type=_rid_type,
+                    )
+                    return {"code": 0, "msg": "user_resolution_skipped"}
+                raise
             platform_user_id = platform_user.id
 
             # ── Find-or-create a ChatSession via external_conv_id (DB-based, no cache needed) ──
@@ -890,7 +925,16 @@ _FILE_ACK_MESSAGES = [
 ]
 
 
-async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, chat_type, chat_id):
+async def _handle_feishu_file(
+    db,
+    agent_id,
+    config,
+    message,
+    sender_open_id,
+    sender_user_id_from_event,
+    chat_type,
+    chat_id,
+):
     """Handle incoming file or image messages from Feishu (runs as a background task)."""
     import asyncio, random, json
     from pathlib import Path
@@ -955,8 +999,11 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
         agent_obj = agent_r.scalar_one_or_none()
 
         # Resolve sender's Feishu user_id (more stable than open_id)
-        sender_user_id_feishu = ""
-        extra_info: dict | None = None
+        sender_user_id_feishu = sender_user_id_from_event or ""
+        extra_info: dict | None = {
+            "open_id": sender_open_id,
+            "external_id": sender_user_id_feishu or None,
+        }
         try:
             import httpx as _hx
             async with _hx.AsyncClient() as _fc:
@@ -1001,13 +1048,32 @@ async def _handle_feishu_file(db, agent_id, config, message, sender_open_id, cha
 
         # Resolve channel user via unified service (uses OrgMember + SSO patterns)
         from app.services.channel_user_service import channel_user_service
-        platform_user = await channel_user_service.resolve_channel_user(
-            db=db,
-            agent=agent_obj,
-            channel_type="feishu",
-            external_user_id=sender_open_id,
-            extra_info=extra_info,
-        )
+        try:
+            platform_user = await channel_user_service.resolve_channel_user(
+                db=db,
+                agent=agent_obj,
+                channel_type="feishu",
+                # For Feishu, external_user_id is strictly user_id.
+                external_user_id=sender_user_id_feishu or None,
+                extra_info=extra_info,
+            )
+        except Exception as e:
+            from app.services.channel_user_service import ChannelUserResolutionError
+
+            if isinstance(e, ChannelUserResolutionError):
+                logger.warning(f"[Feishu] File sender resolution refused: {e}")
+                _reply_to = chat_id if chat_type == "group" else sender_open_id
+                _rid_type = "chat_id" if chat_type == "group" else "open_id"
+                await feishu_service.send_message(
+                    config.app_id,
+                    config.app_secret,
+                    _reply_to,
+                    "text",
+                    json.dumps({"text": _USER_RESOLUTION_ERROR_TIP}),
+                    receive_id_type=_rid_type,
+                )
+                return
+            raise
         platform_user_id = platform_user.id
 
         # Conv ID — prefer user_id for session continuity
@@ -1371,11 +1437,13 @@ async def _call_agent_llm(
                 )
                 return f"⚠️ Model response timed out (>{int(_fb_timeout)}s). Please retry or shorten your request."
             except Exception as e2:
-                logger.exception(f"[Feishu] Fallback model error: {e2}")
+                import traceback
+                traceback.print_exc()
                 return f"⚠️ Model error: Primary Timeout | Fallback: {str(e2)[:80]}"
         return f"⚠️ Model response timed out (>{int(_timeout)}s). Please retry or shorten your request."
     except Exception as e:
-        logger.exception(f"[Feishu] Model error: {e}")
+        import traceback
+        traceback.print_exc()
         error_msg = str(e) or repr(e)
         logger.error(f"[LLM] Primary model error: {error_msg}")
         # Runtime fallback: primary model failed -> retry with fallback model
@@ -1407,6 +1475,6 @@ async def _call_agent_llm(
                 )
                 return f"⚠️ Model error: Primary: {str(e)[:80]} | Fallback Timeout"
             except Exception as e2:
-                logger.exception(f"[Feishu] Fallback model error (primary also failed): {e2}")
+                traceback.print_exc()
                 return f"⚠️ Model error: Primary: {str(e)[:80]} | Fallback: {str(e2)[:80]}"
         return f"⚠️ 调用模型出错: {error_msg[:150]}"
