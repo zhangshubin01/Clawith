@@ -10379,7 +10379,8 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
 async def _get_my_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
     """Return the calling agent's own Objectives and KRs.
 
-    Includes kr_id values so the agent can call update_kr_progress.
+    Includes objective_id and kr_id values so the agent can update existing OKRs
+    instead of accidentally creating duplicate ones.
     """
     if not agent_id:
         return "OKR tools require agent context."
@@ -10439,10 +10440,17 @@ async def _get_my_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
             for kr in all_krs:
                 krs_by_obj.setdefault(str(kr.objective_id), []).append(kr)
 
-        lines = [f"# My OKRs — {ps} to {pe}\n"]
+        lines = [
+            f"# My OKRs — {ps} to {pe}\n",
+            "If you need to revise an existing OKR, reuse the IDs below:",
+            "- change Objective title/description/status with update_objective(objective_id=...)",
+            "- change KR title/target/unit/focus/status with update_kr_content(kr_id=...)",
+            "- change KR numeric progress with update_kr_progress(kr_id=...)",
+            "",
+        ]
         for o in objectives:
             krs = krs_by_obj.get(str(o.id), [])
-            lines.append(f"**O: {o.title}**")
+            lines.append(f"**O: {o.title}**  objective_id={o.id}")
             if o.description:
                 lines.append(f"  {o.description}")
             for kr in krs:
