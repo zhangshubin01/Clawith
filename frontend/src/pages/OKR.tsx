@@ -124,6 +124,11 @@ interface MembersWithoutOKRData {
     tracked_user_ids: string[];
     tracked_agent_ids: string[];
     total: number;
+    last_outreach_error?: {
+        message: string;
+        timestamp: string;
+        is_read: boolean;
+    } | null;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1247,6 +1252,14 @@ function MembersWithoutOKRPanel({
         refetchOnWindowFocus: true,
     });
 
+    // When a background failure is detected via refetch, clear the stale
+    // success message so the error banner becomes visible automatically.
+    React.useEffect(() => {
+        if (data?.last_outreach_error && nudgeResult) {
+            setNudgeResult(null);
+        }
+    }, [data?.last_outreach_error, nudgeResult]);
+
     // Don't render when loading or no incomplete members
     if (isLoading || !data || !data.members_without_okr?.length) {
         return null;
@@ -1262,6 +1275,12 @@ function MembersWithoutOKRPanel({
             );
             setNudgeResult(result.message);
             queryClient.invalidateQueries({ queryKey: ['okr-members-without-okr'] });
+
+            // The background task may fail asynchronously (e.g. LLM API key invalid).
+            // Schedule delayed re-fetches so the error banner appears automatically
+            // without requiring a manual page refresh.
+            setTimeout(() => queryClient.invalidateQueries({ queryKey: ['okr-members-without-okr'] }), 5000);
+            setTimeout(() => queryClient.invalidateQueries({ queryKey: ['okr-members-without-okr'] }), 12000);
         } catch (e: any) {
             setNudgeResult(e.message ?? (isChinese ? '催促失败，请重试' : 'Failed to trigger outreach'));
         } finally {
@@ -1269,7 +1288,7 @@ function MembersWithoutOKRPanel({
         }
     }
 
-    const { members_without_okr: members, company_okr_exists, okr_agent_id } = data;
+    const { members_without_okr: members, company_okr_exists, okr_agent_id, last_outreach_error } = data;
 
     return (
         <section style={{ marginTop: '32px' }}>
@@ -1313,6 +1332,45 @@ function MembersWithoutOKRPanel({
                                     {isChinese ? '查看会话 →' : 'View chat →'}
                                 </a>
                             )}
+                        </div>
+                    )}
+                    {/* Show error banner if the last background outreach task failed */}
+                    {!nudgeResult && last_outreach_error && (
+                        <div style={{
+                            fontSize: '12px',
+                            color: '#b91c1c',
+                            background: 'rgba(239,68,68,0.08)',
+                            border: '1px solid rgba(239,68,68,0.2)',
+                            borderRadius: '6px',
+                            padding: '8px 10px',
+                            marginTop: '8px',
+                            lineHeight: 1.5,
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            gap: '6px',
+                        }}>
+                            <span style={{ flexShrink: 0 }}>⚠️</span>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontWeight: 600, marginBottom: '2px' }}>
+                                    {isChinese ? 'OKR Agent 上次执行失败' : 'OKR Agent task failed'}
+                                </div>
+                                <div style={{ color: '#991b1b', wordBreak: 'break-word' }}>
+                                    {last_outreach_error.message}
+                                </div>
+                                {last_outreach_error.timestamp && (
+                                    <div style={{ fontSize: '11px', color: '#b45309', marginTop: '4px' }}>
+                                        {new Date(last_outreach_error.timestamp).toLocaleString()}
+                                    </div>
+                                )}
+                                {okr_agent_id && (
+                                    <a
+                                        href={`/agents/${okr_agent_id}#settings`}
+                                        style={{ fontSize: '11px', color: 'var(--accent-primary)', textDecoration: 'none', marginTop: '4px', display: 'inline-block' }}
+                                    >
+                                        {isChinese ? '检查 Agent 设置 →' : 'Check Agent Settings →'}
+                                    </a>
+                                )}
+                            </div>
                         </div>
                     )}
                 </div>

@@ -771,14 +771,28 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                         f"Feishu fetch users error for dept {department_external_id}: "
                         f"code={error_code}, msg={error_msg}"
                     )
-                    raise RuntimeError(
-                        f"Feishu API error (code {error_code}): {error_msg}. "
-                        f"Access denied. One of the following scopes is required: "
-                        f"[contact:user.employee_id:readonly]. "
-                        f"Please enable this permission in Feishu Open Platform -> App -> "
-                        f"Permissions -> search 'employee_id' -> enable and publish a new version. "
-                        f"Note: unlike DingTalk, Feishu permissions require app re-publishing to take effect."
-                    )
+                    # Provide targeted guidance based on error code
+                    if error_code == 40060:
+                        # 40060 = "no dept authority": the app has correct API scopes
+                        # but lacks DATA-level access to this department.
+                        guidance = (
+                            f"Feishu API error (code {error_code}): {error_msg}. "
+                            f"The app does not have data access to this department. "
+                            f"Please go to Feishu Open Platform -> App -> Permissions -> "
+                            f"Data Permissions (数据权限) -> Contact Scope (通讯录权限范围) -> "
+                            f"set to 'All Employees' (全部员工) or add the required departments. "
+                            f"After changing, you must publish a new app version for it to take effect."
+                        )
+                    else:
+                        guidance = (
+                            f"Feishu API error (code {error_code}): {error_msg}. "
+                            f"One of the following scopes may be required: "
+                            f"[contact:user.employee_id:readonly]. "
+                            f"Please enable this permission in Feishu Open Platform -> App -> "
+                            f"Permissions -> search 'employee_id' -> enable and publish a new version. "
+                            f"Note: unlike DingTalk, Feishu permissions require app re-publishing to take effect."
+                        )
+                    raise RuntimeError(guidance)
 
                 res_data = data.get("data", {})
                 items = res_data.get("items", []) or []

@@ -2273,6 +2273,9 @@ function AgentDetailInner() {
                     const activity = d.workspace_activity as WorkspaceActivity;
                     setWorkspaceLiveDraft(null);
                     setWorkspaceActivities(prev => [activity, ...prev.filter(item => item.path !== activity.path)].slice(0, 20));
+                    if (activity.action === 'delete' && activity.ok !== false) {
+                        handleWorkspacePathDeleted(activity.path);
+                    }
                     if (activity.action !== 'delete' && activity.ok !== false && !workspaceEditingRef.current) {
                         setWorkspaceActivePath(activity.path);
                         setSidePanelTab('workspace');
@@ -2376,6 +2379,24 @@ function AgentDetailInner() {
         ensureSessionSocket(activeSession, id, token);
         syncActiveSocketState(activeSession, id);
     }, [id, token, activeTab, activeSession?.id, chatScope, canViewAllAgentChatSessions]);
+
+    const handleWorkspacePathDeleted = useCallback((path: string) => {
+        let removedName = '';
+        setAttachedFiles((prev) => prev.filter((file) => {
+            const shouldRemove = file.source === 'workspace_auto' && file.path === path;
+            if (shouldRemove) removedName = file.name;
+            return !shouldRemove;
+        }));
+        dismissedWorkspaceRefPath.current = path;
+        if (removedName) {
+            setChatInfoMsg(`Removed attachment: ${removedName} (file was deleted).`);
+            if (chatInfoTimerRef.current) clearTimeout(chatInfoTimerRef.current);
+            chatInfoTimerRef.current = setTimeout(() => {
+                setChatInfoMsg(null);
+                chatInfoTimerRef.current = null;
+            }, 4000);
+        }
+    }, []);
 
     useEffect(() => {
         const shouldAutoReference = livePanelVisible && sidePanelTab === 'workspace' && !!workspaceActivePath;
@@ -5158,6 +5179,7 @@ function AgentDetailInner() {
                                     onWorkspaceEditingChange={(editing) => {
                                         workspaceEditingRef.current = editing;
                                     }}
+                                    onWorkspacePathDeleted={handleWorkspacePathDeleted}
                                     agentId={id}
                                     sessionId={wsSessionId}
                                     onLiveUpdate={(env, screenshotDataUri) => {

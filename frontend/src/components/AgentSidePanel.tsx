@@ -14,6 +14,7 @@ interface Props {
     onTabChange: (tab: SidePanelTab) => void;
     onWorkspaceSelectPath: (path: string) => void;
     onWorkspaceEditingChange?: (editing: boolean) => void;
+    onWorkspacePathDeleted?: (path: string) => void;
     agentId?: string;
     sessionId?: string;
     onLiveUpdate?: (env: 'browser' | 'desktop', screenshotDataUri: string) => void;
@@ -48,6 +49,7 @@ export default function AgentSidePanel({
     onTabChange,
     onWorkspaceSelectPath,
     onWorkspaceEditingChange,
+    onWorkspacePathDeleted,
     agentId,
     sessionId,
     onLiveUpdate,
@@ -157,6 +159,7 @@ export default function AgentSidePanel({
                         liveDraft={workspaceLiveDraft}
                         onSelectPath={onWorkspaceSelectPath}
                         onEditingChange={onWorkspaceEditingChange}
+                        onPathDeleted={onWorkspacePathDeleted}
                     />
                 )}
                 {activeTab === 'desktop' && liveState.desktop && (

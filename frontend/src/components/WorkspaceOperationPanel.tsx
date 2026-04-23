@@ -33,6 +33,7 @@ interface Props {
     liveDraft?: WorkspaceLiveDraft | null;
     onSelectPath: (path: string) => void;
     onEditingChange?: (editing: boolean) => void;
+    onPathDeleted?: (path: string) => void;
 }
 
 const WORKSPACE_ROOT = 'workspace';
@@ -186,10 +187,12 @@ export default function WorkspaceOperationPanel({
     liveDraft,
     onSelectPath,
     onEditingChange,
+    onPathDeleted,
 }: Props) {
     const [preview, setPreview] = useState<any>(null);
     const [content, setContent] = useState('');
     const [draft, setDraft] = useState('');
+    const [previewState, setPreviewState] = useState<'idle' | 'loading' | 'ready' | 'deleted'>('idle');
     const [editing, setEditing] = useState(false);
     const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [revisions, setRevisions] = useState<any[]>([]);
@@ -207,13 +210,26 @@ export default function WorkspaceOperationPanel({
     const activityKey = activities.map((item) => `${item.action}:${item.path}`).join('|');
 
     const load = async () => {
-        if (!activePath) return;
-        const data = await fileApi.preview(agentId, activePath);
-        setPreview(data);
-        const text = data.content || '';
-        setContent(text);
-        setDraft(text);
-        setRevisions(await fileApi.revisions(agentId, activePath).catch(() => []));
+        if (!activePath) {
+            setPreviewState('idle');
+            return;
+        }
+        setPreviewState('loading');
+        try {
+            const data = await fileApi.preview(agentId, activePath);
+            setPreview(data);
+            const text = data.content || '';
+            setContent(text);
+            setDraft(text);
+            setRevisions(await fileApi.revisions(agentId, activePath).catch(() => []));
+            setPreviewState('ready');
+        } catch (err: any) {
+            setPreview(null);
+            setContent('');
+            setDraft('');
+            setRevisions([]);
+            setPreviewState(err?.status === 404 ? 'deleted' : 'idle');
+        }
     };
 
     const loadFileTree = async () => {
@@ -233,18 +249,36 @@ export default function WorkspaceOperationPanel({
     useEffect(() => {
         setEditing(false);
         onEditingChange?.(false);
+        if (!activePath) {
+            setPreview(null);
+            setContent('');
+            setDraft('');
+            setRevisions([]);
+            setPreviewState('idle');
+            return;
+        }
         if (liveDraft && (!activePath || !liveDraft.path || liveDraft.path === activePath)) {
             setPreview(null);
             setContent(liveDraft.content || '');
             setDraft(liveDraft.content || '');
+            setPreviewState('ready');
             return;
         }
-        load().catch(() => {
-            setPreview(null);
-            setContent('');
-            setDraft('');
-        });
+        void load();
     }, [agentId, activePath, liveDraft?.id, liveDraft?.path]);
+
+    useEffect(() => {
+        if (!activePath) return;
+        const latestActivity = activities.find((item) => item.path === activePath);
+        if (latestActivity?.action !== 'delete' || latestActivity.ok === false) return;
+        setEditing(false);
+        onEditingChange?.(false);
+        setPreview(null);
+        setContent('');
+        setDraft('');
+        setRevisions([]);
+        setPreviewState('deleted');
+    }, [activities, activePath, onEditingChange]);
 
     useEffect(() => {
         loadFileTree();
@@ -394,8 +428,19 @@ export default function WorkspaceOperationPanel({
         if (!activePath) {
             return <div className="workspace-op-empty">No workspace file activity yet.</div>;
         }
-        if (!preview) {
+        if (previewState === 'loading') {
             return <div className="workspace-op-empty">Loading file preview...</div>;
+        }
+        if (previewState === 'deleted') {
+            return (
+                <div className="workspace-op-empty" style={{ textAlign: 'center', gap: '8px' }}>
+                    <strong style={{ fontSize: '15px', color: 'var(--text-primary)' }}>This file was deleted.</strong>
+                    <span style={{ color: 'var(--text-secondary)' }}>{activePath}</span>
+                </div>
+            );
+        }
+        if (!preview) {
+            return <div className="workspace-op-empty">Preview is not available for this file.</div>;
         }
         if (editing) {
             return (
@@ -516,7 +561,16 @@ export default function WorkspaceOperationPanel({
                             if (confirm(`Are you sure you want to delete ${node.name}?`)) {
                                 try {
                                     await fileApi.delete(agentId, node.path);
-                                    if (selected) onSelectPath('');
+                                    if (selected) {
+                                        setEditing(false);
+                                        onEditingChange?.(false);
+                                        setPreview(null);
+                                        setContent('');
+                                        setDraft('');
+                                        setRevisions([]);
+                                        setPreviewState('deleted');
+                                    }
+                                    onPathDeleted?.(node.path);
                                     loadFileTree();
                                 } catch (err: any) {
                                     alert(`Failed to delete: ${err.message}`);

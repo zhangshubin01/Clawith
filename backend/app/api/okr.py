@@ -1515,6 +1515,30 @@ async def members_without_okr(user=Depends(get_current_user)):
                         "channel": None, "channel_user_id": None,
                     })
 
+    # ── Check for recent oneshot failure notifications ──────────────────────
+    last_outreach_error = None
+    if okr_agent_id_val:
+        from app.models.notification import Notification
+        async with async_session() as db2:
+            notif_result = await db2.execute(
+                select(Notification)
+                .where(
+                    Notification.user_id == user.id,
+                    Notification.ref_id == okr_agent_id_val,
+                    Notification.type == "system",
+                    Notification.title.contains("task failed"),
+                )
+                .order_by(Notification.created_at.desc())
+                .limit(1)
+            )
+            notif = notif_result.scalar_one_or_none()
+            if notif:
+                last_outreach_error = {
+                    "message": notif.body,
+                    "timestamp": notif.created_at.isoformat() if notif.created_at else "",
+                    "is_read": notif.is_read,
+                }
+
     return {
         "period_start": ps.isoformat(),
         "period_end": pe.isoformat(),
@@ -1524,6 +1548,7 @@ async def members_without_okr(user=Depends(get_current_user)):
         "tracked_user_ids": tracked_user_ids,
         "tracked_agent_ids": tracked_agent_ids,
         "total": len(members_without_okr),
+        "last_outreach_error": last_outreach_error,
     }
 
 
@@ -1695,13 +1720,12 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
 
         # Determine channel hint
         has_channel = bool(org_member.open_id or org_member.external_id)
-        if platform_uid:
-            channel_hint = (
-                'send_platform_message(username="<their_username>", message=...)\n'
-                "  OR send_channel_message if they have a linked channel"
-            )
-        elif has_channel:
+        if has_channel:
             channel_hint = f'send_channel_message(member_name="{org_member.name}", message=...)'
+            if platform_uid:
+                channel_hint += "  (They also have a Platform account, but prefer channel message here)"
+        elif platform_uid:
+            channel_hint = 'send_platform_message(username="<their_username>", message=...)'
         else:
             channel_hint = "No channel available — note this in your summary"
 
