@@ -36,6 +36,15 @@ This means `main.py` is both a router composition root and an operational bootst
 
 For OKR-specific startup patching, the bootstrap path now also self-heals missing builtin OKR tool rows before patching existing OKR Agents. This prevents prompt/tool-list mismatches where an OKR Agent mentions `upsert_member_daily_report` in context but does not actually receive the tool in its callable LLM tool set.
 
+The Docker backend entrypoint (`backend/entrypoint.sh`) performs an additional bootstrap sequence before Uvicorn starts:
+
+1. Imports the model graph and runs `Base.metadata.create_all()`.
+2. Applies a small list of legacy additive schema patches (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, plus one partial index).
+3. Runs `alembic upgrade head`, but logs and continues if migrations fail.
+4. Starts `uvicorn`.
+
+Because development and upgrade environments may still have another backend serving traffic against the same database, the additive patch phase now executes each statement in its own short-lived transaction with a `lock_timeout`. This prevents startup from hanging indefinitely while waiting for `ACCESS EXCLUSIVE` table locks on hot tables such as `users`.
+
 ### 1.3 Directory Map
 
 #### Backend (`backend/app/`)
@@ -511,6 +520,7 @@ Answering those four questions correctly is usually enough to place new code in 
 
 | Date | Summary |
 | --- | --- |
+| 2026-04-24 | Hardened the Docker backend entrypoint so additive startup schema patches no longer block container startup indefinitely when another backend instance is already serving traffic on the same database. Each patch now runs in its own transaction with a short PostgreSQL `lock_timeout`, allowing locked legacy patches to be skipped safely while the backend continues booting. |
 | 2026-04-24 | Updated the OKR tool output so `get_okr` resolves member and agent owner names in tool responses instead of exposing raw owner UUIDs wherever a readable owner label is available, keeping chat-based OKR review aligned with the dashboard naming model. |
 | 2026-04-24 | Simplified grouped member OKR presentation in the dashboard so the owner name is shown once at the group header level, while nested objective cards focus on objective titles and KR content without repeating owner badges inside each card. |
 | 2026-04-23 | Hardened OKR authorization across the dashboard and agent-tool path. The web OKR dashboard is now admin-only for mutating actions, while chat-driven OKR mutations are enforced in the OKR tools using the actual requesting user's role rather than prompt-only guidance: non-admin requests may only create or modify the requester's own personal OKRs, and company-level or other-member OKRs require an org/platform admin. Permission failures now return explicit `Permission denied` messages instead of ambiguous owner/not-found wording. |

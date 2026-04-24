@@ -54,6 +54,8 @@ async def main():
     print("[entrypoint] Tables created/verified")
 
     # Apply safe column patches for existing installs that may be missing columns.
+    # Run each patch in its own transaction with a short lock timeout so startup
+    # never hangs behind long-lived readers/writers from another running backend.
     # All statements use IF NOT EXISTS so they are fully idempotent.
     patches = [
         # Quota fields added in v0.2
@@ -88,12 +90,18 @@ async def main():
     ]
 
     from sqlalchemy import text
-    async with engine.begin() as conn:
-        for sql in patches:
-            try:
+    patch_timeout_sql = text("SET lock_timeout = '2000ms'")
+    for sql in patches:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(patch_timeout_sql)
                 await conn.execute(text(sql))
-            except Exception as e:
-                print(f"[entrypoint] Patch skipped ({e})")
+                print(f"[entrypoint] Patch applied: {sql}")
+        except Exception as e:
+            # The most common failure here is waiting on an ACCESS EXCLUSIVE lock
+            # while another backend is serving traffic. Skipping is safe because
+            # these patches are additive and idempotent.
+            print(f"[entrypoint] Patch skipped: {sql} ({e})")
 
     await engine.dispose()
     print("[entrypoint] Column patches applied")
