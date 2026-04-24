@@ -169,9 +169,39 @@ async def list_templates(
             "soul_template": t.soul_template,
             "default_skills": t.default_skills,
             "default_autonomy_policy": t.default_autonomy_policy,
+            "capability_bullets": t.capability_bullets or [],
+            "has_bootstrap": bool(t.bootstrap_content),
         }
         for t in templates
     ]
+
+
+async def _agent_to_out(
+    db: AsyncSession,
+    agent: Agent,
+    viewer_id: uuid.UUID,
+) -> AgentOut:
+    """Serialize one agent with ``onboarded_for_me`` for the given viewer."""
+    from app.services.onboarding import is_onboarded
+    model = AgentOut.model_validate(agent)
+    model.onboarded_for_me = await is_onboarded(db, agent.id, viewer_id)
+    return model
+
+
+async def _agents_to_out(
+    db: AsyncSession,
+    agents: list[Agent],
+    viewer_id: uuid.UUID,
+) -> list[AgentOut]:
+    """List variant that fetches all junction rows in one query."""
+    from app.services.onboarding import onboarded_agent_ids
+    onboarded = await onboarded_agent_ids(db, viewer_id, [a.id for a in agents])
+    out: list[AgentOut] = []
+    for a in agents:
+        model = AgentOut.model_validate(a)
+        model.onboarded_for_me = a.id in onboarded
+        out.append(model)
+    return out
 
 
 @router.get("/", response_model=list[AgentOut])
@@ -204,7 +234,14 @@ async def list_agents(
     if needs_flush:
         await db.commit()
     unread_by_agent = await _build_unread_count_by_agent(db, agents, current_user)
-    return [_serialize_agent_out(a, unread_by_agent.get(str(a.id), 0)) for a in agents]
+    from app.services.onboarding import onboarded_agent_ids
+    onboarded = await onboarded_agent_ids(db, current_user.id, [a.id for a in agents])
+    out: list[AgentOut] = []
+    for a in agents:
+        model = _serialize_agent_out(a, unread_by_agent.get(str(a.id), 0))
+        model.onboarded_for_me = a.id in onboarded
+        out.append(model)
+    return out
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -236,6 +273,7 @@ async def create_agent(
     default_min_poll = 5
     default_webhook_rate = 5
     default_heartbeat_interval = 240  # model default
+    tenant_default_model_id = None
     if target_tenant_id:
         from app.models.tenant import Tenant
         tenant_result = await db.execute(select(Tenant).where(Tenant.id == target_tenant_id))
@@ -245,9 +283,13 @@ async def create_agent(
             default_max_triggers = tenant.default_max_triggers or 20
             default_min_poll = tenant.min_poll_interval_floor or 5
             default_webhook_rate = tenant.max_webhook_rate_ceiling or 5
+            tenant_default_model_id = tenant.default_model_id
             # Enforce heartbeat floor: new agents must respect company minimum
             if tenant.min_heartbeat_interval_minutes and tenant.min_heartbeat_interval_minutes > default_heartbeat_interval:
                 default_heartbeat_interval = tenant.min_heartbeat_interval_minutes
+
+    # If the caller didn't pick a model, fall back to the tenant's default.
+    effective_primary_model_id = data.primary_model_id or tenant_default_model_id
 
     agent = Agent(
         name=data.name,
@@ -257,7 +299,7 @@ async def create_agent(
         creator_id=current_user.id,
         tenant_id=target_tenant_id,
         agent_type=data.agent_type or "native",
-        primary_model_id=data.primary_model_id,
+        primary_model_id=effective_primary_model_id,
         fallback_model_id=data.fallback_model_id,
         max_tokens_per_day=data.max_tokens_per_day,
         max_tokens_per_month=data.max_tokens_per_month,
@@ -312,7 +354,8 @@ async def create_agent(
             await hook_new_agent(db, agent.id, agent.tenant_id)
             await db.commit()
 
-        out = AgentOut.model_validate(agent).model_dump()
+        out_model = await _agent_to_out(db, agent, current_user.id)
+        out = out_model.model_dump()
         out["api_key"] = raw_key  # Return once on creation
         return out
 
@@ -367,7 +410,7 @@ async def create_agent(
         await hook_new_agent(db, agent.id, agent.tenant_id)
         await db.commit()
 
-    return AgentOut.model_validate(agent)
+    return await _agent_to_out(db, agent, current_user.id)
 
 
 @router.get("/{agent_id}")
@@ -381,7 +424,8 @@ async def get_agent(
     # Lazy reset token counters
     if await _lazy_reset_token_counters(agent, db):
         await db.commit()
-    out = AgentOut.model_validate(agent).model_dump()
+    out_model = await _agent_to_out(db, agent, current_user.id)
+    out = out_model.model_dump()
     out["access_level"] = access_level
 
     # Resolve creator username (one extra query, only on detail page).
@@ -576,7 +620,8 @@ async def update_agent(
                 p.avatar_url = agent.avatar_url
             await db.flush()
 
-    out = AgentOut.model_validate(agent).model_dump()
+    out_model = await _agent_to_out(db, agent, current_user.id)
+    out = out_model.model_dump()
     if clamped_fields:
         out["_clamped_fields"] = clamped_fields
     return out
@@ -707,7 +752,7 @@ async def start_agent(
     from app.services.agent_manager import agent_manager
     await agent_manager.start_container(db, agent)
     await db.flush()
-    return AgentOut.model_validate(agent)
+    return await _agent_to_out(db, agent, current_user.id)
 
 
 @router.post("/{agent_id}/stop", response_model=AgentOut)
@@ -724,7 +769,7 @@ async def stop_agent(
     from app.services.agent_manager import agent_manager
     await agent_manager.stop_container(agent)
     await db.flush()
-    return AgentOut.model_validate(agent)
+    return await _agent_to_out(db, agent, current_user.id)
 
 
 # ─── Agent-Level Approvals ──────────────────────────────
