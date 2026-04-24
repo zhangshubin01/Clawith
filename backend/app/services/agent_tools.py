@@ -10275,6 +10275,8 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
         from app.database import async_session
         from app.models.agent import Agent
         from app.models.okr import OKRObjective, OKRKeyResult, OKRSettings
+        from app.models.org import OrgMember
+        from app.models.user import User
         from sqlalchemy import select as _select
         from datetime import date, timedelta
 
@@ -10335,6 +10337,58 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
             for kr in all_krs:
                 krs_by_obj.setdefault(str(kr.objective_id), []).append(kr)
 
+            # Resolve readable owner names so the OKR Agent can reason about
+            # members by display name instead of raw UUIDs.
+            user_owner_ids = [
+                o.owner_id for o in objectives
+                if o.owner_type == "user" and o.owner_id
+            ]
+            agent_owner_ids = [
+                o.owner_id for o in objectives
+                if o.owner_type == "agent" and o.owner_id
+            ]
+
+            user_names: dict[uuid.UUID, str] = {}
+            if user_owner_ids:
+                u_result = await db.execute(
+                    _select(User.id, User.display_name).where(User.id.in_(user_owner_ids))
+                )
+                user_names = {
+                    row.id: (row.display_name or "")
+                    for row in u_result.fetchall()
+                }
+
+                unresolved_ids = [oid for oid in user_owner_ids if oid not in user_names]
+                if unresolved_ids:
+                    m_result = await db.execute(
+                        _select(OrgMember.id, OrgMember.name).where(
+                            OrgMember.id.in_(unresolved_ids)
+                        )
+                    )
+                    for row in m_result.fetchall():
+                        user_names[row.id] = row.name or ""
+
+            agent_names: dict[uuid.UUID, str] = {}
+            if agent_owner_ids:
+                a_result = await db.execute(
+                    _select(Agent.id, Agent.name).where(Agent.id.in_(agent_owner_ids))
+                )
+                agent_names = {
+                    row.id: (row.name or "")
+                    for row in a_result.fetchall()
+                }
+
+            def _resolve_owner_label(obj: OKRObjective) -> str:
+                if obj.owner_type == "company":
+                    return "Company"
+                if not obj.owner_id:
+                    return f"{obj.owner_type}:unassigned"
+                if obj.owner_type == "user":
+                    return user_names.get(obj.owner_id) or f"user:{obj.owner_id}"
+                if obj.owner_type == "agent":
+                    return agent_names.get(obj.owner_id) or f"agent:{obj.owner_id}"
+                return f"{obj.owner_type}:{obj.owner_id}"
+
         # Format output
         lines = [f"# OKR Board — {ps} to {pe}\n"]
 
@@ -10359,7 +10413,7 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
         if member_objs:
             lines.append("\n## Member Objectives")
             for o in member_objs:
-                owner_label = f"{o.owner_type}:{o.owner_id}"
+                owner_label = _resolve_owner_label(o)
                 krs = krs_by_obj.get(str(o.id), [])
                 lines.append(f"\n**{owner_label}** | O: {o.title}")
                 for kr in krs:
