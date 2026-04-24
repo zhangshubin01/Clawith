@@ -1110,6 +1110,8 @@ function AnalysisCard({
 function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; readOnly?: boolean }) {
     const { t, i18n } = useTranslation();
     const isChinese = i18n.language?.startsWith('zh');
+    const humanSearchRef = useRef<HTMLDivElement>(null);
+    const agentSearchRef = useRef<HTMLDivElement>(null);
     const getHumanMemberSourceLabel = useCallback((member: any) => {
         if (member?.provider_name) return member.provider_name;
         return isChinese ? '平台用户' : 'Platform User';
@@ -1139,11 +1141,13 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
 
     const [search, setSearch] = useState('');
     const [searchResults, setSearchResults] = useState<any[]>([]);
+    const [showMemberDropdown, setShowMemberDropdown] = useState(false);
     const [selectedMembers, setSelectedMembers] = useState<any[]>([]);
     const [relation, setRelation] = useState('collaborator');
     const [description, setDescription] = useState('');
     const [agentSearch, setAgentSearch] = useState('');
     const [agentSearchResults, setAgentSearchResults] = useState<any[]>([]);
+    const [showAgentDropdown, setShowAgentDropdown] = useState(false);
     const [selectedAgents, setSelectedAgents] = useState<any[]>([]);
     const [agentRelation, setAgentRelation] = useState('collaborator');
     const [agentDescription, setAgentDescription] = useState('');
@@ -1184,6 +1188,12 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
         setSearchResults(results);
     };
 
+    const loadAgentCandidates = async (keyword = '') => {
+        const query = keyword.trim() ? `?search=${encodeURIComponent(keyword.trim())}` : '';
+        const results = await fetchAuth<any[]>(`/agents/${agentId}/relationships/agent-candidates${query}`);
+        setAgentSearchResults(results);
+    };
+
     useEffect(() => {
         if (!search || search.length < 1) { setSearchResults([]); return; }
         const timer = setTimeout(() => {
@@ -1195,14 +1205,31 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
     useEffect(() => {
         if (!agentSearch || agentSearch.length < 1) { setAgentSearchResults([]); return; }
         const timer = setTimeout(() => {
-            fetchAuth<any[]>(`/agents/${agentId}/relationships/agent-candidates?search=${encodeURIComponent(agentSearch)}`).then(setAgentSearchResults);
+            loadAgentCandidates(agentSearch);
         }, 300);
         return () => clearTimeout(timer);
     }, [agentId, agentSearch]);
 
+    useEffect(() => {
+        const handleClickOutside = (e: MouseEvent) => {
+            const target = e.target as Node;
+            if (showMemberDropdown && humanSearchRef.current && !humanSearchRef.current.contains(target)) {
+                setShowMemberDropdown(false);
+            }
+            if (showAgentDropdown && agentSearchRef.current && !agentSearchRef.current.contains(target)) {
+                setShowAgentDropdown(false);
+            }
+        };
+        if (showMemberDropdown || showAgentDropdown) {
+            document.addEventListener('mousedown', handleClickOutside);
+        }
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [showMemberDropdown, showAgentDropdown]);
+
     const resetHumanDraft = () => {
         setSearch('');
         setSearchResults([]);
+        setShowMemberDropdown(false);
         setSelectedMembers([]);
         setRelation('collaborator');
         setDescription('');
@@ -1211,6 +1238,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
     const resetAgentDraft = () => {
         setAgentSearch('');
         setAgentSearchResults([]);
+        setShowAgentDropdown(false);
         setSelectedAgents([]);
         setAgentRelation('collaborator');
         setAgentDescription('');
@@ -1377,20 +1405,24 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                 )}
                 {!readOnly && (
                     <div style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}>
-                        <div style={{ position: 'relative', marginBottom: '8px' }}>
+                        <div ref={humanSearchRef} style={{ position: 'relative', marginBottom: '8px' }}>
                             <input
                                 className="input"
                                 placeholder={t('agent.detail.searchMembers')}
                                 value={search}
-                                onChange={e => setSearch(e.target.value)}
+                                onChange={e => {
+                                    setSearch(e.target.value);
+                                    setShowMemberDropdown(true);
+                                }}
                                 onFocus={() => {
+                                    setShowMemberDropdown(true);
                                     if (!search.trim() && searchResults.length === 0) {
                                         loadOrgMembers();
                                     }
                                 }}
                                 style={{ fontSize: '13px' }}
                             />
-                            {visibleMemberResults.length > 0 && (
+                            {showMemberDropdown && visibleMemberResults.length > 0 && (
                                 <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', marginTop: '4px', maxHeight: '200px', overflowY: 'auto', zIndex: 10, boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
                                     {visibleMemberResults.map((m: any) => {
                                         const checked = selectedMemberIds.has(m.id);
@@ -1413,7 +1445,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                                 </div>
                             )}
                         </div>
-                        {search && visibleMemberResults.length === 0 && (
+                        {showMemberDropdown && search && visibleMemberResults.length === 0 && (
                             <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
                                 {t('agent.detail.noSearchResults', 'No available results')}
                             </div>
@@ -1499,15 +1531,24 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                 )}
                 {!readOnly && (
                     <div style={{ border: '1px solid rgba(16,185,129,0.3)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}>
-                        <div style={{ position: 'relative', marginBottom: '8px' }}>
+                        <div ref={agentSearchRef} style={{ position: 'relative', marginBottom: '8px' }}>
                             <input
                                 className="input"
                                 placeholder={t('agent.detail.searchAgents', '搜索可见数字员工...')}
                                 value={agentSearch}
-                                onChange={e => setAgentSearch(e.target.value)}
+                                onChange={e => {
+                                    setAgentSearch(e.target.value);
+                                    setShowAgentDropdown(true);
+                                }}
+                                onFocus={() => {
+                                    setShowAgentDropdown(true);
+                                    if (!agentSearch.trim() && agentSearchResults.length === 0) {
+                                        loadAgentCandidates();
+                                    }
+                                }}
                                 style={{ fontSize: '13px' }}
                             />
-                            {visibleAgentResults.length > 0 && (
+                            {showAgentDropdown && visibleAgentResults.length > 0 && (
                                 <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', marginTop: '4px', maxHeight: '200px', overflowY: 'auto', zIndex: 10, boxShadow: '0 4px 12px rgba(0,0,0,0.15)' }}>
                                     {visibleAgentResults.map((agent: any) => {
                                         const checked = selectedAgentIds.has(agent.id);
@@ -1527,7 +1568,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                                 </div>
                             )}
                         </div>
-                        {agentSearch && visibleAgentResults.length === 0 && (
+                        {showAgentDropdown && agentSearch && visibleAgentResults.length === 0 && (
                             <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
                                 {t('agent.detail.noSearchResults', 'No available results')}
                             </div>
