@@ -524,14 +524,12 @@ function AddKRForm({
 function ObjectiveCard({
     obj,
     isChinese,
-    ownerLabel,
     canEdit,
     onInvalidate,
     onDelete,
 }: {
     obj: Objective;
     isChinese: boolean;
-    ownerLabel?: string;
     canEdit: boolean;
     onInvalidate: () => void;
     onDelete?: (objId: string) => void;
@@ -581,37 +579,11 @@ function ObjectiveCard({
 
                 <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ paddingRight: '12px' }}>
-                        <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', lineHeight: 1.5, wordBreak: 'break-word', whiteSpace: 'normal' }}>
-                            {ownerLabel && (
-                                <span style={{
-                                    verticalAlign: 'text-bottom',
-                                    marginRight: '8px',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '4px',
-                                    fontSize: '11px',
-                                    color: obj.owner_type === 'agent' ? '#6366f1' : '#0ea5e9',
-                                    background: obj.owner_type === 'agent' ? 'rgba(99, 102, 241, 0.1)' : 'rgba(14, 165, 233, 0.08)',
-                                    border: obj.owner_type === 'agent' ? '1px solid rgba(99, 102, 241, 0.3)' : '1px solid rgba(14, 165, 233, 0.25)',
-                                    borderRadius: '4px',
-                                    padding: '1px 6px',
-                                    lineHeight: 1,
-                                    fontWeight: 500,
-                                }}>
-                                    {obj.owner_type === 'agent' ? (
-                                        // Robot icon for AI agents
-                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"></rect><circle cx="12" cy="5" r="2"></circle><path d="M12 7v4"></path><line x1="8" y1="16" x2="8" y2="16"></line><line x1="16" y1="16" x2="16" y2="16"></line></svg>
-                                    ) : (
-                                        // Person icon for human members
-                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
-                                    )}
-                                    {ownerLabel}
-                                </span>
-                            )}
+                        <div style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)', lineHeight: 1.5, wordBreak: 'break-word', whiteSpace: 'normal' }}>
                             {obj.title}
                         </div>
                     {obj.description && (
-                        <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{obj.description}</div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '4px', lineHeight: 1.5 }}>{obj.description}</div>
                     )}
                     </div>
                 </div>
@@ -1224,7 +1196,23 @@ export default function OKR() {
                                         }}>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
                                                 <div style={{
+                                                    width: '28px',
+                                                    height: '28px',
+                                                    borderRadius: '999px',
+                                                    background: 'var(--bg-secondary)',
+                                                    border: '1px solid var(--border-subtle)',
+                                                    color: 'var(--text-secondary)',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
                                                     fontSize: '13px',
+                                                    fontWeight: 700,
+                                                    flexShrink: 0,
+                                                }}>
+                                                    {group.label.slice(0, 1).toUpperCase()}
+                                                </div>
+                                                <div style={{
+                                                    fontSize: '14px',
                                                     fontWeight: 700,
                                                     color: 'var(--text-primary)',
                                                     minWidth: 0,
@@ -1250,7 +1238,6 @@ export default function OKR() {
                                                     key={obj.id}
                                                     obj={obj}
                                                     isChinese={isChinese}
-                                                    ownerLabel={group.label}
                                                     canEdit={!!isAdmin}
                                                     onInvalidate={invalidateObjectives}
                                                     onDelete={async (id) => {
