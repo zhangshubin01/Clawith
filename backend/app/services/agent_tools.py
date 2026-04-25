@@ -4011,15 +4011,23 @@ async def _convert_markdown_to_pdf(agent_id: uuid.UUID, ws: Path, arguments: dic
             text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
             return text
 
+        def is_table_separator(line: str) -> bool:
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
+
         html_parts: list[str] = []
+        lines = md_text.splitlines()
         in_list = False
-        for raw_line in md_text.splitlines():
+        i = 0
+        while i < len(lines):
+            raw_line = lines[i]
             line = raw_line.rstrip()
             stripped = line.strip()
             if not stripped:
                 if in_list:
                     html_parts.append("</ul>")
                     in_list = False
+                i += 1
                 continue
 
             heading_match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
@@ -4029,6 +4037,7 @@ async def _convert_markdown_to_pdf(agent_id: uuid.UUID, ws: Path, arguments: dic
                     in_list = False
                 level = len(heading_match.group(1))
                 html_parts.append(f"<h{level}>{render_inline(heading_match.group(2).strip())}</h{level}>")
+                i += 1
                 continue
 
             bullet_match = re.match(r"^[-*+]\s+(.*)$", stripped)
@@ -4037,31 +4046,53 @@ async def _convert_markdown_to_pdf(agent_id: uuid.UUID, ws: Path, arguments: dic
                     html_parts.append("<ul>")
                     in_list = True
                 html_parts.append(f"<li>{render_inline(bullet_match.group(1).strip())}</li>")
+                i += 1
                 continue
 
-            if "|" in stripped:
+            if "|" in stripped and i + 1 < len(lines) and is_table_separator(lines[i + 1].strip()):
                 if in_list:
                     html_parts.append("</ul>")
                     in_list = False
-                cells = [render_inline(cell.strip()) for cell in stripped.strip("|").split("|")]
-                html_parts.append(
-                    "<table><tbody><tr>"
-                    + "".join(f"<td>{cell}</td>" for cell in cells if cell)
-                    + "</tr></tbody></table>"
+                header_cells = [render_inline(cell.strip()) for cell in stripped.strip("|").split("|")]
+                table_rows: list[list[str]] = []
+                i += 2
+                while i < len(lines) and "|" in lines[i].strip():
+                    row = [render_inline(cell.strip()) for cell in lines[i].strip().strip("|").split("|")]
+                    table_rows.append(row)
+                    i += 1
+                html_parts.append("<table><thead><tr>" + "".join(f"<th>{cell}</th>" for cell in header_cells) + "</tr></thead><tbody>")
+                html_parts.extend(
+                    "<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>"
+                    for row in table_rows
                 )
+                html_parts.append("</tbody></table>")
                 continue
 
             if in_list:
                 html_parts.append("</ul>")
                 in_list = False
             html_parts.append(f"<p>{render_inline(stripped)}</p>")
+            i += 1
 
         if in_list:
             html_parts.append("</ul>")
 
         html_text = "\n".join(html_parts)
 
-        full_html = f"<html><head><meta charset='utf-8'><style>body{{font-family: sans-serif; line-height: 1.6; padding: 2em;}}</style></head><body>{html_text}</body></html>"
+        full_html = (
+            "<html><head><meta charset='utf-8'><style>"
+            "body{font-family:'WenQuanYi Micro Hei','Noto Sans CJK SC',sans-serif;line-height:1.65;padding:2em;color:#111827;}"
+            "h1,h2,h3{line-height:1.25;margin:1.2em 0 .55em;}"
+            "p{margin:.55em 0;}"
+            "table{width:100%;border-collapse:collapse;margin:1em 0;font-size:12px;}"
+            "th,td{border:1px solid #d8dee9;padding:7px 9px;text-align:left;vertical-align:top;}"
+            "th{background:#f3f4f6;font-weight:700;}"
+            "code{background:#f3f4f6;padding:1px 4px;border-radius:4px;}"
+            "a{color:#2563eb;text-decoration:none;}"
+            "</style></head><body>"
+            f"{html_text}"
+            "</body></html>"
+        )
 
         tgt_file.parent.mkdir(parents=True, exist_ok=True)
         HTML(string=full_html, base_url=str(ws.resolve())).write_pdf(str(tgt_file))

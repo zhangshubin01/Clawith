@@ -2126,6 +2126,33 @@ select:focus {
   gap: 6px;
 }
 
+.workspace-op-tree-scope {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg-tertiary) 80%, transparent);
+}
+
+.workspace-op-tree-scope button {
+  height: 20px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.workspace-op-tree-scope button.active {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+
 .workspace-op-mini-btn {
   height: 24px;
   padding: 0 8px;

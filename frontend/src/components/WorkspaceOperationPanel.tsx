@@ -53,6 +53,7 @@ const WORKSPACE_ROOT = 'workspace';
 const SKILLS_ROOT = 'skills';
 const MEMORY_ROOT = 'memory';
 const DEFAULT_UPLOAD_DIR = 'workspace/uploads';
+type TreeScope = 'workspace' | 'all';
 const EDITABLE_EXTS = new Set(['.md', '.markdown', '.csv']);
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 const PREVIEW_EXTS = new Set(['.md', '.markdown', '.csv', '.html', '.htm', '.pdf', '.xlsx', '.xls', '.docx', '.doc', '.pptx', '.ppt', '.txt', '.log', '.json', ...IMAGE_EXTS]);
@@ -394,6 +395,7 @@ export default function WorkspaceOperationPanel({
     const [activityOpen, setActivityOpen] = useState(false);
     const [treeOpen, setTreeOpen] = useState(true);
     const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set());
+    const [treeScope, setTreeScope] = useState<TreeScope>('workspace');
     const [pendingSwitchPath, setPendingSwitchPath] = useState<string | null>(null);
     const [sideWidth, setSideWidth] = useState(DEFAULT_TREE_WIDTH);
     const [selectedDirPath, setSelectedDirPath] = useState(WORKSPACE_ROOT);
@@ -448,7 +450,7 @@ export default function WorkspaceOperationPanel({
             return { ...item, children: await loadDir(item.path, depth + 1) };
         }));
         };
-        const roots = await loadDir('', 0);
+        const roots = await loadDir(treeScope === 'workspace' ? WORKSPACE_ROOT : '', 0);
         setFileTree(roots);
     };
 
@@ -525,7 +527,13 @@ export default function WorkspaceOperationPanel({
 
     useEffect(() => {
         loadFileTree();
-    }, [agentId, activityKey, liveDraft?.path]);
+    }, [agentId, activityKey, liveDraft?.path, treeScope]);
+
+    useEffect(() => {
+        if (!activePath || treeScope !== 'workspace') return;
+        if (activePath === WORKSPACE_ROOT || activePath.startsWith(`${WORKSPACE_ROOT}/`)) return;
+        setTreeScope('all');
+    }, [activePath, treeScope]);
 
     useEffect(() => {
         const pathToReveal = activePath || liveDraft?.path;
@@ -679,6 +687,13 @@ export default function WorkspaceOperationPanel({
 
     const handleUploadClick = () => {
         fileInputRef.current?.click();
+    };
+
+    const switchTreeScope = (scope: TreeScope) => {
+        setTreeScope(scope);
+        if (scope === 'workspace') {
+            setSelectedDirPath(WORKSPACE_ROOT);
+        }
     };
 
     const handleUploadFiles = async (files: FileList | null) => {
@@ -1186,11 +1201,32 @@ export default function WorkspaceOperationPanel({
                         <div className="workspace-op-side-title">
                             <span>Files</span>
                             <div className="workspace-op-tree-tools">
+                                <div className="workspace-op-tree-scope" role="tablist" aria-label="File tree scope">
+                                    <button
+                                        className={treeScope === 'workspace' ? 'active' : ''}
+                                        type="button"
+                                        role="tab"
+                                        aria-selected={treeScope === 'workspace'}
+                                        onClick={() => switchTreeScope('workspace')}
+                                    >
+                                        Workspace
+                                    </button>
+                                    <button
+                                        className={treeScope === 'all' ? 'active' : ''}
+                                        type="button"
+                                        role="tab"
+                                        aria-selected={treeScope === 'all'}
+                                        onClick={() => switchTreeScope('all')}
+                                    >
+                                        All
+                                    </button>
+                                </div>
                                 <button className="workspace-op-mini-btn" type="button" onClick={handleUploadClick} title={`Upload into ${treeTargetDir}`}>Upload</button>
                                 <button className="workspace-op-mini-btn" type="button" onClick={handleCreateFolder} title={`Create folder in ${treeTargetDir}`}>New folder</button>
                             </div>
                         </div>
                         <div className="workspace-op-tree-list">
+                            {treeScope === 'workspace' && renderUploadRows(WORKSPACE_ROOT, -1)}
                             {fileTree.length ? renderFileTreeNodes(fileTree, 0) : <div className="workspace-op-tree-empty">No files yet.</div>}
                         </div>
                         <input
