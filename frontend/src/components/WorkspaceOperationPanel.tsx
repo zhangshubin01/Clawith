@@ -1,3 +1,4 @@
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import MarkdownRenderer from './MarkdownRenderer';
 import { fileApi } from '../services/api';
@@ -45,6 +46,10 @@ const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.
 const PREVIEW_EXTS = new Set(['.md', '.markdown', '.csv', '.html', '.htm', '.pdf', '.xlsx', '.docx', '.pptx', '.txt', ...IMAGE_EXTS]);
 const MIN_SAVING_VISIBLE_MS = 650;
 const SAVED_VISIBLE_MS = 1600;
+const DEFAULT_TREE_WIDTH = 240;
+const DEFAULT_HISTORY_WIDTH = 320;
+const MIN_SIDE_WIDTH = 220;
+const MAX_SIDE_WIDTH = 520;
 
 function extOf(path: string): string {
     const idx = path.lastIndexOf('.');
@@ -100,6 +105,23 @@ function parentDirs(path?: string | null): string[] {
         dirs.push(parts.slice(0, i + 1).join('/'));
     }
     return dirs;
+}
+
+function parentDir(path?: string | null): string {
+    if (!path || !path.startsWith(`${WORKSPACE_ROOT}/`)) return WORKSPACE_ROOT;
+    const parts = path.split('/');
+    return parts.length > 1 ? parts.slice(0, -1).join('/') : WORKSPACE_ROOT;
+}
+
+function formatRevisionTime(value?: string | null): string {
+    if (!value) return '';
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return '';
+    const mm = String(dt.getMonth() + 1).padStart(2, '0');
+    const dd = String(dt.getDate()).padStart(2, '0');
+    const hh = String(dt.getHours()).padStart(2, '0');
+    const min = String(dt.getMinutes()).padStart(2, '0');
+    return `${mm}-${dd} ${hh}:${min}`;
 }
 
 function HtmlPreviewFrame({ content, title }: { content: string; title: string }) {
@@ -207,16 +229,21 @@ export default function WorkspaceOperationPanel({
     const [treeOpen, setTreeOpen] = useState(true);
     const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set([WORKSPACE_ROOT]));
     const [pendingSwitchPath, setPendingSwitchPath] = useState<string | null>(null);
+    const [sideWidth, setSideWidth] = useState(DEFAULT_TREE_WIDTH);
     const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const saveStateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lockTimer = useRef<ReturnType<typeof setInterval> | null>(null);
     const prevActivePathRef = useRef<string | null>(null);
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
+    const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
     const ext = activePath ? extOf(activePath) : '';
     const canEdit = !!activePath && EDITABLE_EXTS.has(ext);
     const isHtml = ext === '.html' || ext === '.htm';
     const isImage = IMAGE_EXTS.has(ext);
     const activityKey = activities.map((item) => `${item.action}:${item.path}`).join('|');
+    const treeTargetDir = activePath ? parentDir(activePath) : WORKSPACE_ROOT;
+    const panelSideWidth = activityOpen ? Math.max(sideWidth, DEFAULT_HISTORY_WIDTH) : sideWidth;
 
     const load = async () => {
         if (!activePath) {
@@ -341,6 +368,14 @@ export default function WorkspaceOperationPanel({
     }, [activePath, liveDraft?.path]);
 
     useEffect(() => {
+        setSideWidth((prev) => {
+            const base = activityOpen ? DEFAULT_HISTORY_WIDTH : DEFAULT_TREE_WIDTH;
+            if (prev < MIN_SIDE_WIDTH || prev > MAX_SIDE_WIDTH) return base;
+            return activityOpen ? Math.max(prev, DEFAULT_HISTORY_WIDTH) : prev;
+        });
+    }, [activityOpen]);
+
+    useEffect(() => {
         onEditingChange?.(editing);
         if (!activePath || !editing) return;
         fileApi.lock(agentId, activePath, sessionId).catch(() => {});
@@ -458,6 +493,48 @@ export default function WorkspaceOperationPanel({
         if (!activePath) return;
         await fileApi.restoreRevision(agentId, revisionId);
         await load();
+    };
+
+    const handleUploadClick = () => {
+        fileInputRef.current?.click();
+    };
+
+    const handleUploadFiles = async (files: FileList | null) => {
+        if (!files?.length) return;
+        const selectedFiles = Array.from(files);
+        for (const file of selectedFiles) {
+            await fileApi.upload(agentId, file, treeTargetDir);
+        }
+        await loadFileTree();
+    };
+
+    const handleCreateFolder = async () => {
+        const name = window.prompt('Folder name');
+        if (!name) return;
+        const trimmed = name.trim().replace(/^\/+|\/+$/g, '');
+        if (!trimmed) return;
+        const folderPath = `${treeTargetDir}/${trimmed}`;
+        await fileApi.write(agentId, `${folderPath}/.gitkeep`, '');
+        setExpandedDirs((prev) => new Set(prev).add(folderPath).add(treeTargetDir));
+        await loadFileTree();
+    };
+
+    const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        resizeRef.current = { startX: event.clientX, startWidth: panelSideWidth };
+        const onMove = (moveEvent: MouseEvent) => {
+            const next = resizeRef.current
+                ? resizeRef.current.startWidth - (moveEvent.clientX - resizeRef.current.startX)
+                : panelSideWidth;
+            setSideWidth(Math.max(MIN_SIDE_WIDTH, Math.min(MAX_SIDE_WIDTH, next)));
+        };
+        const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            resizeRef.current = null;
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
     };
 
     const renderPreview = () => {
@@ -720,7 +797,13 @@ export default function WorkspaceOperationPanel({
                 </div>
             </div>
 
-            <div className={`workspace-op-body ${activityOpen ? 'activity-open' : ''} ${treeOpen ? '' : 'tree-closed'}`}>
+            <div
+                className={`workspace-op-body ${activityOpen ? 'activity-open' : ''} ${treeOpen ? '' : 'tree-closed'}`}
+                style={treeOpen || activityOpen ? {
+                    gridTemplateColumns: `minmax(0, 1fr) ${panelSideWidth}px`,
+                    ['--workspace-side-width' as any]: `${panelSideWidth}px`,
+                } : undefined}
+            >
                 <button className={`workspace-op-tree-edge-toggle ${treeOpen && !activityOpen ? 'active' : ''}`} onClick={() => {
                     setActivityOpen(false);
                     setTreeOpen((open) => !open);
@@ -740,27 +823,52 @@ export default function WorkspaceOperationPanel({
                 <div className="workspace-op-main">
                     {renderPreview()}
                 </div>
+                {(treeOpen || activityOpen) && <div className="workspace-op-side-resize" onMouseDown={startResize} />}
                 {activityOpen ? (
                     <aside className="workspace-op-side">
                         <div className="workspace-op-side-title">Version history</div>
-                        {!activePath && <div className="workspace-op-side-empty">Open a file to view its history.</div>}
-                        {activePath && revisions.length === 0 && <div className="workspace-op-side-empty">No versions recorded yet.</div>}
-                        {activePath && revisions.slice(0, 10).map((rev) => (
-                            <div className="workspace-op-revision" key={rev.id}>
-                                <div>
-                                    <strong>{rev.operation}</strong>
-                                    <span>{rev.actor_type}</span>
+                        <div className="workspace-op-side-list">
+                            {!activePath && <div className="workspace-op-side-empty">Open a file to view its history.</div>}
+                            {activePath && revisions.length === 0 && <div className="workspace-op-side-empty">No versions recorded yet.</div>}
+                            {activePath && revisions.map((rev) => (
+                                <div className="workspace-op-revision" key={rev.id}>
+                                    <div className="workspace-op-revision-head">
+                                        <div className="workspace-op-revision-meta">
+                                            <strong>{rev.operation}</strong>
+                                            <span>{rev.actor_type}</span>
+                                        </div>
+                                        <time className="workspace-op-revision-time" dateTime={rev.created_at || undefined}>
+                                            {formatRevisionTime(rev.created_at)}
+                                        </time>
+                                    </div>
+                                    <pre>{rev.diff || 'No text diff'}</pre>
+                                    {rev.after_content != null && <button className="btn btn-secondary" onClick={() => restore(rev.id)}>Restore</button>}
                                 </div>
-                                <pre>{rev.diff || 'No text diff'}</pre>
-                                {rev.after_content != null && <button className="btn btn-secondary" onClick={() => restore(rev.id)}>Restore</button>}
-                            </div>
-                        ))}
+                            ))}
+                        </div>
                     </aside>
                 ) : treeOpen ? (
                     <aside className="workspace-op-tree">
+                        <div className="workspace-op-side-title">
+                            <span>Files</span>
+                            <div className="workspace-op-tree-tools">
+                                <button className="workspace-op-mini-btn" type="button" onClick={handleUploadClick} title={`Upload into ${treeTargetDir}`}>Upload</button>
+                                <button className="workspace-op-mini-btn" type="button" onClick={handleCreateFolder} title={`Create folder in ${treeTargetDir}`}>New folder</button>
+                            </div>
+                        </div>
                         <div className="workspace-op-tree-list">
                             {fileTree.length ? renderFileTreeNodes(fileTree, 0) : <div className="workspace-op-tree-empty">No files yet.</div>}
                         </div>
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            multiple
+                            style={{ display: 'none' }}
+                            onChange={async (e) => {
+                                await handleUploadFiles(e.target.files);
+                                e.target.value = '';
+                            }}
+                        />
                     </aside>
                 ) : null}
             </div>

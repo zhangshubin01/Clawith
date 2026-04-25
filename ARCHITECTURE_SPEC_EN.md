@@ -520,6 +520,7 @@ Answering those four questions correctly is usually enough to place new code in 
 
 | Date | Summary |
 | --- | --- |
+| 2026-04-25 | Expanded the chat-side workspace preview sidebar so both file-tree and version-history modes support manual width resizing, version history now surfaces revision timestamps in a scrollable list, and file-tree mode exposes direct upload plus new-folder actions rooted in the currently viewed workspace directory. |
 | 2026-04-25 | Refined the chat-side workspace preview interaction so switching files during editing now surfaces an explicit save/discard/stay decision instead of silently ignoring the click, and preview pinning now uses a live lock reference so agent-driven workspace, browser, desktop, and code updates cannot steal focus while the user has locked the current file. |
 | 2026-04-25 | Expanded the chat-side workspace preview browser so the file tree now includes common image assets and the preview pane can render uploaded images inline, keeping the side-panel workspace view aligned with the main workspace browser. |
 | 2026-04-25 | Added explicit workspace preview pinning on the chat side panel and tightened auto-focus behavior so agent-driven workspace drafts, file mutations, browser screenshots, desktop screenshots, and code output no longer steal the right-hand preview while the user is editing a file or has manually locked the currently viewed workspace file. |
