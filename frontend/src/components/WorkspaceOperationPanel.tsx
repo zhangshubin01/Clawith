@@ -50,9 +50,12 @@ interface Props {
 }
 
 const WORKSPACE_ROOT = 'workspace';
+const SKILLS_ROOT = 'skills';
+const MEMORY_ROOT = 'memory';
+const DEFAULT_UPLOAD_DIR = 'workspace/uploads';
 const EDITABLE_EXTS = new Set(['.md', '.markdown', '.csv']);
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
-const PREVIEW_EXTS = new Set(['.md', '.markdown', '.csv', '.html', '.htm', '.pdf', '.xlsx', '.docx', '.pptx', '.txt', ...IMAGE_EXTS]);
+const PREVIEW_EXTS = new Set(['.md', '.markdown', '.csv', '.html', '.htm', '.pdf', '.xlsx', '.xls', '.docx', '.doc', '.pptx', '.ppt', '.txt', '.log', '.json', ...IMAGE_EXTS]);
 const MIN_SAVING_VISIBLE_MS = 650;
 const SAVED_VISIBLE_MS = 1600;
 const DEFAULT_TREE_WIDTH = 240;
@@ -119,12 +122,13 @@ function isPreviewable(path: string): boolean {
 }
 
 function parentDirs(path?: string | null): string[] {
-    if (!path || !path.startsWith(`${WORKSPACE_ROOT}/`)) return [WORKSPACE_ROOT];
-    const parts = path.split('/');
-    const dirs: string[] = [WORKSPACE_ROOT];
-    for (let i = 1; i < parts.length - 1; i += 1) {
+    if (!path) return [WORKSPACE_ROOT];
+    const parts = path.split('/').filter(Boolean);
+    const dirs: string[] = [];
+    for (let i = 0; i < parts.length - 1; i += 1) {
         dirs.push(parts.slice(0, i + 1).join('/'));
     }
+    if (!dirs.length) dirs.push(WORKSPACE_ROOT);
     return dirs;
 }
 
@@ -132,6 +136,25 @@ function parentDir(path?: string | null): string {
     if (!path || !path.startsWith(`${WORKSPACE_ROOT}/`)) return WORKSPACE_ROOT;
     const parts = path.split('/');
     return parts.length > 1 ? parts.slice(0, -1).join('/') : WORKSPACE_ROOT;
+}
+
+function directoryOf(path?: string | null): string {
+    if (!path) return WORKSPACE_ROOT;
+    const parts = path.split('/').filter(Boolean);
+    return parts.length > 1 ? parts.slice(0, -1).join('/') : WORKSPACE_ROOT;
+}
+
+function isWritableDir(path?: string | null): boolean {
+    if (!path) return false;
+    return path === WORKSPACE_ROOT
+        || path === SKILLS_ROOT
+        || path.startsWith(`${WORKSPACE_ROOT}/`)
+        || path.startsWith(`${SKILLS_ROOT}/`);
+}
+
+function normalizeWritableDir(path?: string | null): string {
+    if (isWritableDir(path)) return path as string;
+    return DEFAULT_UPLOAD_DIR;
 }
 
 function formatRevisionTime(value?: string | null): string {
@@ -370,7 +393,7 @@ export default function WorkspaceOperationPanel({
     const [fileTree, setFileTree] = useState<WorkspaceFileNode[]>([]);
     const [activityOpen, setActivityOpen] = useState(false);
     const [treeOpen, setTreeOpen] = useState(true);
-    const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set([WORKSPACE_ROOT]));
+    const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set([WORKSPACE_ROOT, SKILLS_ROOT, MEMORY_ROOT]));
     const [pendingSwitchPath, setPendingSwitchPath] = useState<string | null>(null);
     const [sideWidth, setSideWidth] = useState(DEFAULT_TREE_WIDTH);
     const [selectedDirPath, setSelectedDirPath] = useState(WORKSPACE_ROOT);
@@ -388,7 +411,7 @@ export default function WorkspaceOperationPanel({
     const isHtml = ext === '.html' || ext === '.htm';
     const isImage = IMAGE_EXTS.has(ext);
     const activityKey = activities.map((item) => `${item.action}:${item.path}`).join('|');
-    const treeTargetDir = selectedDirPath || (activePath ? parentDir(activePath) : WORKSPACE_ROOT);
+    const treeTargetDir = normalizeWritableDir(selectedDirPath || directoryOf(activePath));
     const panelSideWidth = activityOpen ? Math.max(sideWidth, DEFAULT_HISTORY_WIDTH) : sideWidth;
     const draftMatchesActiveFile = !!(liveDraft?.path && activePath && liveDraft.path === activePath);
     const shouldRenderLiveDraft = !!liveDraft && (!activePath || !liveDraft.path || draftMatchesActiveFile);
@@ -419,14 +442,13 @@ export default function WorkspaceOperationPanel({
     const loadFileTree = async () => {
         const loadDir = async (path: string, depth: number): Promise<WorkspaceFileNode[]> => {
             if (depth > 4) return [];
-            const items = await fileApi.list(agentId, path).catch(() => []);
-            const visible = items.filter((item: WorkspaceFileNode) => item.is_dir || isPreviewable(item.path));
-            return Promise.all(visible.map(async (item: WorkspaceFileNode) => {
-                if (!item.is_dir) return item;
-                return { ...item, children: await loadDir(item.path, depth + 1) };
-            }));
+        const items = await fileApi.list(agentId, path).catch(() => []);
+        return Promise.all(items.map(async (item: WorkspaceFileNode) => {
+            if (!item.is_dir) return item;
+            return { ...item, children: await loadDir(item.path, depth + 1) };
+        }));
         };
-        const roots = await loadDir(WORKSPACE_ROOT, 0);
+        const roots = await loadDir('', 0);
         setFileTree(roots);
     };
 
@@ -517,7 +539,7 @@ export default function WorkspaceOperationPanel({
 
     useEffect(() => {
         if (activePath) {
-            setSelectedDirPath(parentDir(activePath));
+            setSelectedDirPath(directoryOf(activePath));
         }
     }, [activePath]);
 
@@ -664,7 +686,12 @@ export default function WorkspaceOperationPanel({
         const selectedFiles = Array.from(files);
         for (const file of selectedFiles) {
             const itemId = `${treeTargetDir}:${file.name}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
-            setExpandedDirs((prev) => new Set(prev).add(treeTargetDir));
+            setExpandedDirs((prev) => {
+                const next = new Set(prev);
+                parentDirs(treeTargetDir).forEach((dir) => next.add(dir));
+                next.add(treeTargetDir);
+                return next;
+            });
             setUploadItems((prev) => [...prev, {
                 id: itemId,
                 name: file.name,
@@ -710,7 +737,13 @@ export default function WorkspaceOperationPanel({
         const folderPath = `${treeTargetDir}/${trimmed}`;
         await fileApi.write(agentId, `${folderPath}/.gitkeep`, '');
         setSelectedDirPath(folderPath);
-        setExpandedDirs((prev) => new Set(prev).add(folderPath).add(treeTargetDir));
+        setExpandedDirs((prev) => {
+            const next = new Set(prev);
+            parentDirs(folderPath).forEach((dir) => next.add(dir));
+            next.add(folderPath);
+            next.add(treeTargetDir);
+            return next;
+        });
         await loadFileTree();
     };
 
@@ -837,6 +870,9 @@ export default function WorkspaceOperationPanel({
         if (previewType === 'md' || previewType === 'markdown') {
             return <MarkdownRenderer content={content || ''} />;
         }
+        if (previewType === 'text') {
+            return <pre className="workspace-op-text-preview">{preview.content || preview.text || ''}</pre>;
+        }
         if (previewType === 'csv') {
             const rows = csvRows;
             const maxCols = rows.reduce((max, row) => Math.max(max, row.length), 0);
@@ -908,6 +944,9 @@ export default function WorkspaceOperationPanel({
             return <pre className="workspace-op-text-preview">{preview.content || preview.text}</pre>;
         }
         if (previewType === 'pptx') {
+            if (!(preview.slides || []).length) {
+                return <pre className="workspace-op-text-preview">{preview.content || preview.text || ''}</pre>;
+            }
             return (
                 <div className="workspace-op-ppt-preview">
                     {(preview.slides || []).map((slide: any) => (
@@ -990,7 +1029,7 @@ export default function WorkspaceOperationPanel({
                             <span className="workspace-op-tree-chevron">{expanded ? '▾' : '▸'}</span>
                             <span>{node.name}</span>
                         </button>
-                        {node.path !== WORKSPACE_ROOT && (
+                        {node.path !== WORKSPACE_ROOT && node.path !== SKILLS_ROOT && node.path !== MEMORY_ROOT && (
                             <button
                                 className="workspace-op-tree-file-delete"
                                 title="Delete folder"
@@ -1007,7 +1046,7 @@ export default function WorkspaceOperationPanel({
                     </div>
                     {expanded && (
                         <>
-                            {renderUploadRows(node.path, depth + 1)}
+                            {isWritableDir(node.path) && renderUploadRows(node.path, depth + 1)}
                             {node.children && renderFileTreeNodes(node.children, depth + 1)}
                         </>
                     )}
@@ -1146,7 +1185,6 @@ export default function WorkspaceOperationPanel({
                             </div>
                         </div>
                         <div className="workspace-op-tree-list">
-                            {renderUploadRows(WORKSPACE_ROOT, 0)}
                             {fileTree.length ? renderFileTreeNodes(fileTree, 0) : <div className="workspace-op-tree-empty">No files yet.</div>}
                         </div>
                         <input

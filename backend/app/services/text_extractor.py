@@ -1,7 +1,7 @@
 """Extract text from common office file formats.
 
-Supports: PDF, DOCX, XLSX, PPTX, CSV
-Saves extracted text as a companion .txt file alongside the original.
+Supports: PDF, DOCX, XLSX, PPTX
+Saves extracted text as a companion .md file alongside the original.
 """
 
 import io
@@ -48,19 +48,19 @@ def extract_text(file_bytes: bytes, filename: str) -> str | None:
 
 
 def save_extracted_text(save_path: Path, file_bytes: bytes, filename: str) -> Path | None:
-    """Extract text and save as a companion .txt file.
-    
-    For example: report.pdf → report.txt
-    Returns the path to the text file, or None if extraction failed.
+    """Extract text and save as a companion .md file.
+
+    For example: report.pdf -> report.md
+    Returns the path to the markdown file, or None if extraction failed.
     """
     text = extract_text(file_bytes, filename)
     if not text or not text.strip():
         return None
-    
-    txt_path = save_path.parent / f"{save_path.stem}.txt"
-    txt_path.write_text(text, encoding="utf-8")
-    logger.info(f"[TextExtractor] Extracted {len(text)} chars from {filename} → {txt_path.name}")
-    return txt_path
+
+    md_path = save_path.parent / f"{save_path.stem}.md"
+    md_path.write_text(text, encoding="utf-8")
+    logger.info(f"[TextExtractor] Extracted {len(text)} chars from {filename} -> {md_path.name}")
+    return md_path
 
 
 def _extract_pdf(data: bytes) -> str:
