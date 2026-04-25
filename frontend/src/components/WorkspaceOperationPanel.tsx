@@ -208,6 +208,7 @@ export default function WorkspaceOperationPanel({
     const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const saveStateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lockTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+    const prevActivePathRef = useRef<string | null>(null);
 
     const ext = activePath ? extOf(activePath) : '';
     const canEdit = !!activePath && EDITABLE_EXTS.has(ext);
@@ -252,8 +253,11 @@ export default function WorkspaceOperationPanel({
     };
 
     useEffect(() => {
-        setEditing(false);
-        onEditingChange?.(false);
+        if (activePath !== prevActivePathRef.current) {
+            prevActivePathRef.current = activePath ?? null;
+            setEditing(false);
+            onEditingChange?.(false);
+        }
         if (!activePath) {
             setPreview(null);
             setContent('');
@@ -270,7 +274,7 @@ export default function WorkspaceOperationPanel({
             return;
         }
         void load();
-    }, [agentId, activePath, liveDraft?.id, liveDraft?.path]);
+    }, [agentId, activePath, liveDraft?.id, liveDraft?.path, onEditingChange]);
 
     useEffect(() => {
         if (!activePath) return;
