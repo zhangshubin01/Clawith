@@ -393,7 +393,7 @@ export default function WorkspaceOperationPanel({
     const [fileTree, setFileTree] = useState<WorkspaceFileNode[]>([]);
     const [activityOpen, setActivityOpen] = useState(false);
     const [treeOpen, setTreeOpen] = useState(true);
-    const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set([WORKSPACE_ROOT, SKILLS_ROOT, MEMORY_ROOT]));
+    const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set());
     const [pendingSwitchPath, setPendingSwitchPath] = useState<string | null>(null);
     const [sideWidth, setSideWidth] = useState(DEFAULT_TREE_WIDTH);
     const [selectedDirPath, setSelectedDirPath] = useState(WORKSPACE_ROOT);
@@ -924,6 +924,9 @@ export default function WorkspaceOperationPanel({
             );
         }
         if (isHtml) {
+            if (isSideResizing) {
+                return <div className="workspace-op-empty workspace-op-preview-paused">Release to refresh HTML preview.</div>;
+            }
             return <HtmlPreviewFrame content={content || ''} title={fileName(activePath)} src={htmlPreviewSrc || undefined} suspendAutoFit={isSideResizing} />;
         }
         if (isImage) {
@@ -938,6 +941,9 @@ export default function WorkspaceOperationPanel({
             );
         }
         if (previewType === 'pdf') {
+            if (isSideResizing) {
+                return <div className="workspace-op-empty workspace-op-preview-paused">Release to refresh PDF preview.</div>;
+            }
             return <iframe className="workspace-op-pdf" src={fileApi.downloadUrl(agentId, activePath, { inline: true })} title={fileName(activePath)} />;
         }
         if (previewType === 'docx') {

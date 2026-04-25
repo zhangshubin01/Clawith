@@ -3986,18 +3986,83 @@ async def _convert_markdown_to_pdf(agent_id: uuid.UUID, ws: Path, arguments: dic
     if not str(src_file).startswith(str(ws.resolve())) or not str(tgt_file).startswith(str(ws.resolve())):
         return "❌ Access denied."
     if not src_file.exists(): return "❌ Source file not found."
-    
+
     try:
-        import markdown
         from weasyprint import HTML
-        
+
         md_text = src_file.read_text(encoding="utf-8")
-        html_text = markdown.markdown(md_text, extensions=['extra', 'codehilite'])
-        
-        # We need relative paths for local images to be resolved. WeasyPrint supports base_url.
-        # But for now, we just pass string and rely on absolute refs or no images.
+
+        def escape_html(text: str) -> str:
+            return (
+                text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+            )
+
+        def render_inline(text: str) -> str:
+            text = escape_html(text)
+            text = re.sub(r"\*\*\*(.*?)\*\*\*", r"<strong><em>\1</em></strong>", text)
+            text = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", text)
+            text = re.sub(r"__(.*?)__", r"<strong>\1</strong>", text)
+            text = re.sub(r"\*(.*?)\*", r"<em>\1</em>", text)
+            text = re.sub(r"_(.*?)_", r"<em>\1</em>", text)
+            text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+            text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+            return text
+
+        html_parts: list[str] = []
+        in_list = False
+        for raw_line in md_text.splitlines():
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if not stripped:
+                if in_list:
+                    html_parts.append("</ul>")
+                    in_list = False
+                continue
+
+            heading_match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+            if heading_match:
+                if in_list:
+                    html_parts.append("</ul>")
+                    in_list = False
+                level = len(heading_match.group(1))
+                html_parts.append(f"<h{level}>{render_inline(heading_match.group(2).strip())}</h{level}>")
+                continue
+
+            bullet_match = re.match(r"^[-*+]\s+(.*)$", stripped)
+            if bullet_match:
+                if not in_list:
+                    html_parts.append("<ul>")
+                    in_list = True
+                html_parts.append(f"<li>{render_inline(bullet_match.group(1).strip())}</li>")
+                continue
+
+            if "|" in stripped:
+                if in_list:
+                    html_parts.append("</ul>")
+                    in_list = False
+                cells = [render_inline(cell.strip()) for cell in stripped.strip("|").split("|")]
+                html_parts.append(
+                    "<table><tbody><tr>"
+                    + "".join(f"<td>{cell}</td>" for cell in cells if cell)
+                    + "</tr></tbody></table>"
+                )
+                continue
+
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+            html_parts.append(f"<p>{render_inline(stripped)}</p>")
+
+        if in_list:
+            html_parts.append("</ul>")
+
+        html_text = "\n".join(html_parts)
+
         full_html = f"<html><head><meta charset='utf-8'><style>body{{font-family: sans-serif; line-height: 1.6; padding: 2em;}}</style></head><body>{html_text}</body></html>"
-        
+
         tgt_file.parent.mkdir(parents=True, exist_ok=True)
         HTML(string=full_html, base_url=str(ws.resolve())).write_pdf(str(tgt_file))
         return f"✅ Successfully converted Markdown to PDF: {target_path}"

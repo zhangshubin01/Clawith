@@ -2372,6 +2372,13 @@ select:focus {
   font-size: 13px;
 }
 
+.workspace-op-preview-paused {
+  min-height: 420px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-secondary) 88%, white);
+}
+
 .workspace-op-deleted {
   flex-direction: column;
   gap: 10px;
