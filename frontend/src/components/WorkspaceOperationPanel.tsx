@@ -208,15 +208,27 @@ function buildRevisionDiff(revision: any): string {
     return chunks.join('\n');
 }
 
-function HtmlPreviewFrame({ content, title, src }: { content: string; title: string; src?: string }) {
+function HtmlPreviewFrame({
+    content,
+    title,
+    src,
+    suspendAutoFit = false,
+}: {
+    content: string;
+    title: string;
+    src?: string;
+    suspendAutoFit?: boolean;
+}) {
     const viewportRef = useRef<HTMLDivElement>(null);
     const frameRef = useRef<HTMLIFrameElement>(null);
     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [renderContent, setRenderContent] = useState(content);
     const [frameHeight, setFrameHeight] = useState(720);
     const observersRef = useRef<{ resize?: ResizeObserver; mutation?: MutationObserver } | null>(null);
+    const fitRafRef = useRef<number | null>(null);
 
     const fitFrame = () => {
+        if (suspendAutoFit) return;
         const frame = frameRef.current;
         const doc = frame?.contentDocument;
         if (!frame || !doc?.body) return;
@@ -230,6 +242,15 @@ function HtmlPreviewFrame({ content, title, src }: { content: string; title: str
         setFrameHeight(contentHeight);
     };
 
+    const requestFitFrame = () => {
+        if (suspendAutoFit) return;
+        if (fitRafRef.current != null) cancelAnimationFrame(fitRafRef.current);
+        fitRafRef.current = requestAnimationFrame(() => {
+            fitRafRef.current = null;
+            fitFrame();
+        });
+    };
+
     const bindFrameObservers = () => {
         const frame = frameRef.current;
         const doc = frame?.contentDocument;
@@ -240,7 +261,7 @@ function HtmlPreviewFrame({ content, title, src }: { content: string; title: str
         observersRef.current?.mutation?.disconnect();
 
         if (typeof ResizeObserver !== 'undefined') {
-            const resize = new ResizeObserver(() => fitFrame());
+            const resize = new ResizeObserver(() => requestFitFrame());
             resize.observe(body);
             resize.observe(doc.documentElement);
             observersRef.current = { ...(observersRef.current || {}), resize };
@@ -248,7 +269,7 @@ function HtmlPreviewFrame({ content, title, src }: { content: string; title: str
 
         if (typeof MutationObserver !== 'undefined') {
             const mutation = new MutationObserver(() => {
-                requestAnimationFrame(() => fitFrame());
+                requestFitFrame();
             });
             mutation.observe(body, {
                 subtree: true,
@@ -264,11 +285,11 @@ function HtmlPreviewFrame({ content, title, src }: { content: string; title: str
         const viewport = viewportRef.current;
         if (!viewport || typeof ResizeObserver === 'undefined') return;
         const observer = new ResizeObserver(() => {
-            requestAnimationFrame(() => fitFrame());
+            requestFitFrame();
         });
         observer.observe(viewport);
         return () => observer.disconnect();
-    }, []);
+    }, [suspendAutoFit]);
 
     useEffect(() => {
         if (src) return;
@@ -293,7 +314,14 @@ function HtmlPreviewFrame({ content, title, src }: { content: string; title: str
     useEffect(() => () => {
         observersRef.current?.resize?.disconnect();
         observersRef.current?.mutation?.disconnect();
+        if (fitRafRef.current != null) cancelAnimationFrame(fitRafRef.current);
     }, []);
+
+    useEffect(() => {
+        if (!suspendAutoFit) {
+            requestFitFrame();
+        }
+    }, [suspendAutoFit, renderContent, src]);
 
     return (
         <div className="workspace-op-html-fit" ref={viewportRef}>
@@ -307,7 +335,7 @@ function HtmlPreviewFrame({ content, title, src }: { content: string; title: str
                     requestAnimationFrame(() => {
                         fitFrame();
                         bindFrameObservers();
-                        requestAnimationFrame(fitFrame);
+                        requestFitFrame();
                     });
                 }}
                 style={{
@@ -347,6 +375,7 @@ export default function WorkspaceOperationPanel({
     const [sideWidth, setSideWidth] = useState(DEFAULT_TREE_WIDTH);
     const [selectedDirPath, setSelectedDirPath] = useState(WORKSPACE_ROOT);
     const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
+    const [isSideResizing, setIsSideResizing] = useState(false);
     const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const saveStateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lockTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -710,6 +739,7 @@ export default function WorkspaceOperationPanel({
 
     const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
         event.preventDefault();
+        setIsSideResizing(true);
         resizeRef.current = { startX: event.clientX, startWidth: panelSideWidth };
         const onMove = (moveEvent: MouseEvent) => {
             const next = resizeRef.current
@@ -721,6 +751,7 @@ export default function WorkspaceOperationPanel({
             window.removeEventListener('mousemove', onMove);
             window.removeEventListener('mouseup', onUp);
             resizeRef.current = null;
+            setIsSideResizing(false);
         };
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
@@ -735,7 +766,7 @@ export default function WorkspaceOperationPanel({
                     <div className="workspace-op-live">
                         <div className="workspace-op-live-banner">{liveDraft.status === 'drafting' ? 'Drafting HTML...' : 'Writing HTML...'}</div>
                         {draftContent ? (
-                            <HtmlPreviewFrame content={draftContent} title={fileName(liveDraft.path || 'draft.html')} />
+                            <HtmlPreviewFrame content={draftContent} title={fileName(liveDraft.path || 'draft.html')} suspendAutoFit={isSideResizing} />
                         ) : (
                             <div className="workspace-op-empty">Preparing file content...</div>
                         )}
@@ -857,7 +888,7 @@ export default function WorkspaceOperationPanel({
             );
         }
         if (isHtml) {
-            return <HtmlPreviewFrame content={content || ''} title={fileName(activePath)} src={htmlPreviewSrc || undefined} />;
+            return <HtmlPreviewFrame content={content || ''} title={fileName(activePath)} src={htmlPreviewSrc || undefined} suspendAutoFit={isSideResizing} />;
         }
         if (isImage) {
             return (
