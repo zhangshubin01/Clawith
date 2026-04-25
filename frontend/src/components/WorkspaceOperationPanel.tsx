@@ -41,7 +41,8 @@ interface Props {
 
 const WORKSPACE_ROOT = 'workspace';
 const EDITABLE_EXTS = new Set(['.md', '.markdown', '.csv']);
-const PREVIEW_EXTS = new Set(['.md', '.markdown', '.csv', '.html', '.htm', '.pdf', '.xlsx', '.docx', '.pptx', '.txt']);
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
+const PREVIEW_EXTS = new Set(['.md', '.markdown', '.csv', '.html', '.htm', '.pdf', '.xlsx', '.docx', '.pptx', '.txt', ...IMAGE_EXTS]);
 const MIN_SAVING_VISIBLE_MS = 650;
 const SAVED_VISIBLE_MS = 1600;
 
@@ -213,6 +214,7 @@ export default function WorkspaceOperationPanel({
     const ext = activePath ? extOf(activePath) : '';
     const canEdit = !!activePath && EDITABLE_EXTS.has(ext);
     const isHtml = ext === '.html' || ext === '.htm';
+    const isImage = IMAGE_EXTS.has(ext);
     const activityKey = activities.map((item) => `${item.action}:${item.path}`).join('|');
 
     const load = async () => {
@@ -526,6 +528,17 @@ export default function WorkspaceOperationPanel({
         }
         if (isHtml) {
             return <HtmlPreviewFrame content={content || ''} title={fileName(activePath)} />;
+        }
+        if (isImage) {
+            return (
+                <div className="workspace-op-image-preview">
+                    <img
+                        src={fileApi.downloadUrl(agentId, activePath, { inline: true })}
+                        alt={fileName(activePath)}
+                        className="workspace-op-image"
+                    />
+                </div>
+            );
         }
         if (previewType === 'pdf') {
             return <iframe className="workspace-op-pdf" src={fileApi.downloadUrl(agentId, activePath, { inline: true })} title={fileName(activePath)} />;

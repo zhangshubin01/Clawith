@@ -520,6 +520,7 @@ Answering those four questions correctly is usually enough to place new code in 
 
 | Date | Summary |
 | --- | --- |
+| 2026-04-25 | Expanded the chat-side workspace preview browser so the file tree now includes common image assets and the preview pane can render uploaded images inline, keeping the side-panel workspace view aligned with the main workspace browser. |
 | 2026-04-25 | Added explicit workspace preview pinning on the chat side panel and tightened auto-focus behavior so agent-driven workspace drafts, file mutations, browser screenshots, desktop screenshots, and code output no longer steal the right-hand preview while the user is editing a file or has manually locked the currently viewed workspace file. |
 | 2026-04-25 | Added streaming workspace draft propagation for tool-call arguments in the WebSocket runtime. While file-writing and document-conversion tools are still streaming their argument JSON, the backend now forwards incremental `workspace_draft` payloads through the LLM call chain so the frontend can preview pending workspace changes before the tool finishes executing. |
 | 2026-04-24 | Hardened the Docker backend entrypoint so additive startup schema patches no longer block container startup indefinitely when another backend instance is already serving traffic on the same database. Each patch now runs in its own transaction with a short PostgreSQL `lock_timeout`, allowing locked legacy patches to be skipped safely while the backend continues booting. |
