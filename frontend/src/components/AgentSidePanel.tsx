@@ -8,11 +8,13 @@ interface Props {
     workspaceActivePath?: string | null;
     workspaceActivities: WorkspaceActivity[];
     workspaceLiveDraft?: WorkspaceLiveDraft | null;
+    workspaceLocked?: boolean;
     visible: boolean;
     onToggle: () => void;
     activeTab: SidePanelTab;
     onTabChange: (tab: SidePanelTab) => void;
     onWorkspaceSelectPath: (path: string) => void;
+    onWorkspaceToggleLock?: () => void;
     onWorkspaceEditingChange?: (editing: boolean) => void;
     onWorkspacePathDeleted?: (path: string) => void;
     agentId?: string;
@@ -43,11 +45,13 @@ export default function AgentSidePanel({
     workspaceActivePath,
     workspaceActivities,
     workspaceLiveDraft,
+    workspaceLocked = false,
     visible,
     onToggle,
     activeTab,
     onTabChange,
     onWorkspaceSelectPath,
+    onWorkspaceToggleLock,
     onWorkspaceEditingChange,
     onWorkspacePathDeleted,
     agentId,
@@ -157,7 +161,9 @@ export default function AgentSidePanel({
                         activePath={workspaceActivePath}
                         activities={workspaceActivities}
                         liveDraft={workspaceLiveDraft}
+                        locked={workspaceLocked}
                         onSelectPath={onWorkspaceSelectPath}
+                        onToggleLock={onWorkspaceToggleLock}
                         onEditingChange={onWorkspaceEditingChange}
                         onPathDeleted={onWorkspacePathDeleted}
                     />

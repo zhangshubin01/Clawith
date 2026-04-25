@@ -2086,6 +2086,7 @@ function AgentDetailInner() {
     const [livePanelVisible, setLivePanelVisible] = useState(false);
     const [sidePanelTab, setSidePanelTab] = useState<SidePanelTab>('workspace');
     const [workspaceActivePath, setWorkspaceActivePath] = useState<string | null>(null);
+    const [workspaceLockedPath, setWorkspaceLockedPath] = useState<string | null>(null);
     const [workspaceActivities, setWorkspaceActivities] = useState<WorkspaceActivity[]>([]);
     const [workspaceLiveDraft, setWorkspaceLiveDraft] = useState<WorkspaceLiveDraft | null>(null);
     const workspaceEditingRef = useRef(false);
@@ -2114,6 +2115,24 @@ function AgentDetailInner() {
     const chatInputRef = useRef<HTMLTextAreaElement>(null);
     const chatInputAreaRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const workspacePreviewLocked = !!workspaceLockedPath;
+    const allowWorkspaceAutoSwitch = useCallback((path?: string | null) => {
+        if (!path) return false;
+        if (workspaceEditingRef.current) return false;
+        if (!workspaceLockedPath) return true;
+        return workspaceLockedPath === path;
+    }, [workspaceLockedPath]);
+    const allowLivePanelAutoFocus = useCallback(() => {
+        return !workspaceEditingRef.current && !workspaceLockedPath;
+    }, [workspaceLockedPath]);
+    const handleWorkspaceSelectPath = useCallback((path: string) => {
+        setWorkspaceActivePath(path);
+        if (workspaceLockedPath) setWorkspaceLockedPath(path);
+    }, [workspaceLockedPath]);
+    const handleWorkspaceToggleLock = useCallback(() => {
+        setWorkspaceLockedPath((current) => current ? null : workspaceActivePath);
+    }, [workspaceActivePath]);
 
     // Settings form local state
     const [settingsForm, setSettingsForm] = useState({
@@ -2220,6 +2239,12 @@ function AgentDetailInner() {
         setIsWaiting(false);
         setWsConnected(false);
         wsRef.current = null;
+        setWorkspaceLockedPath(null);
+        setWorkspaceActivePath(null);
+        setWorkspaceActivities([]);
+        setWorkspaceLiveDraft(null);
+        setLiveState({});
+        setSidePanelTab('workspace');
         setChatScope('mine');
         setAllUserFilter('');
         setSessions([]);
@@ -2377,11 +2402,15 @@ function AgentDetailInner() {
                         ...parsedDraft,
                     };
                     setWorkspaceLiveDraft(draft);
-                    if (draft.path && !workspaceEditingRef.current) setWorkspaceActivePath(draft.path);
-                    setSidePanelTab('workspace');
-                    setLivePanelVisible(true);
-                    setSessionListCollapsed(true);
-                    useAppStore.setState({ sidebarCollapsed: true });
+                    if (allowWorkspaceAutoSwitch(draft.path)) {
+                        setWorkspaceActivePath(draft.path!);
+                    }
+                    if (allowLivePanelAutoFocus()) {
+                        setSidePanelTab('workspace');
+                        setLivePanelVisible(true);
+                        setSessionListCollapsed(true);
+                        useAppStore.setState({ sidebarCollapsed: true });
+                    }
                 }
             } else if (d.type === 'tool_call') {
                 if (WORKSPACE_TOOLS.has(d.name)) {
@@ -2396,11 +2425,15 @@ function AgentDetailInner() {
                             ...parsedDraft,
                         };
                         setWorkspaceLiveDraft(draft);
-                        if (draft.path && !workspaceEditingRef.current) setWorkspaceActivePath(draft.path);
-                        setSidePanelTab('workspace');
-                        setLivePanelVisible(true);
-                        setSessionListCollapsed(true);
-                        useAppStore.setState({ sidebarCollapsed: true });
+                        if (allowWorkspaceAutoSwitch(draft.path)) {
+                            setWorkspaceActivePath(draft.path!);
+                        }
+                        if (allowLivePanelAutoFocus()) {
+                            setSidePanelTab('workspace');
+                            setLivePanelVisible(true);
+                            setSessionListCollapsed(true);
+                            useAppStore.setState({ sidebarCollapsed: true });
+                        }
                     } else if (d.status === 'done') {
                         setWorkspaceLiveDraft(null);
                     }
@@ -2412,17 +2445,19 @@ function AgentDetailInner() {
                         if ((lp.env === 'desktop' || lp.env === 'browser') && lp.screenshot_url) {
                             if (lp.env === 'desktop') next.desktop = { screenshotUrl: lp.screenshot_url };
                             else next.browser = { screenshotUrl: lp.screenshot_url };
-                            setSidePanelTab(lp.env === 'desktop' ? 'desktop' : 'browser');
+                            if (allowLivePanelAutoFocus()) setSidePanelTab(lp.env === 'desktop' ? 'desktop' : 'browser');
                         } else if (lp.env === 'code' && lp.output) {
                             const existing = prev.code?.output || '';
                             next.code = { output: existing + (existing ? '\n---\n' : '') + lp.output };
-                            setSidePanelTab('code');
+                            if (allowLivePanelAutoFocus()) setSidePanelTab('code');
                         }
                         return next;
                     });
-                    setLivePanelVisible(true);
-                    setSessionListCollapsed(true);
-                    useAppStore.setState({ sidebarCollapsed: true });
+                    if (allowLivePanelAutoFocus()) {
+                        setLivePanelVisible(true);
+                        setSessionListCollapsed(true);
+                        useAppStore.setState({ sidebarCollapsed: true });
+                    }
                 }
                     if (d.workspace_activity) {
                         const activity = d.workspace_activity as WorkspaceActivity;
@@ -2431,13 +2466,15 @@ function AgentDetailInner() {
                         if (activity.action === 'delete' && activity.ok !== false && !activity.pendingApproval) {
                             handleWorkspacePathDeleted(activity.path);
                         }
-                        if (activity.action !== 'delete' && activity.ok !== false && !workspaceEditingRef.current) {
+                        if (activity.action !== 'delete' && activity.ok !== false && allowWorkspaceAutoSwitch(activity.path)) {
                             setWorkspaceActivePath(activity.path);
-                            setSidePanelTab('workspace');
+                        }
+                    if (allowLivePanelAutoFocus()) {
+                        setSidePanelTab('workspace');
+                        setLivePanelVisible(true);
+                        setSessionListCollapsed(true);
+                        useAppStore.setState({ sidebarCollapsed: true });
                     }
-                    setLivePanelVisible(true);
-                    setSessionListCollapsed(true);
-                    useAppStore.setState({ sidebarCollapsed: true });
                     queryClient.invalidateQueries({ queryKey: ['files', id, workspacePath] });
                 }
                 setChatMessages(prev => {
@@ -2542,6 +2579,7 @@ function AgentDetailInner() {
             if (shouldRemove) removedName = file.name;
             return !shouldRemove;
         }));
+        setWorkspaceLockedPath((current) => current === path ? null : current);
         dismissedWorkspaceRefPath.current = path;
         if (removedName) {
             setChatInfoMsg(`Removed attachment: ${removedName} (file was deleted).`);
@@ -5330,7 +5368,9 @@ function AgentDetailInner() {
                                     }}
                                     activeTab={sidePanelTab}
                                     onTabChange={setSidePanelTab}
-                                    onWorkspaceSelectPath={setWorkspaceActivePath}
+                                    workspaceLocked={workspacePreviewLocked}
+                                    onWorkspaceSelectPath={handleWorkspaceSelectPath}
+                                    onWorkspaceToggleLock={handleWorkspaceToggleLock}
                                     onWorkspaceEditingChange={(editing) => {
                                         workspaceEditingRef.current = editing;
                                     }}

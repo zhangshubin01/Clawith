@@ -32,7 +32,9 @@ interface Props {
     activePath?: string | null;
     activities: WorkspaceActivity[];
     liveDraft?: WorkspaceLiveDraft | null;
+    locked?: boolean;
     onSelectPath: (path: string) => void;
+    onToggleLock?: () => void;
     onEditingChange?: (editing: boolean) => void;
     onPathDeleted?: (path: string) => void;
 }
@@ -186,7 +188,9 @@ export default function WorkspaceOperationPanel({
     activePath,
     activities,
     liveDraft,
+    locked = false,
     onSelectPath,
+    onToggleLock,
     onEditingChange,
     onPathDeleted,
 }: Props) {
@@ -631,6 +635,19 @@ export default function WorkspaceOperationPanel({
                 <div className="workspace-op-actions">
                     {saveState !== 'idle' && <span className={`workspace-op-save ${saveState}`}>{saveState}</span>}
                     <button className={`workspace-op-icon-btn ${activityOpen ? 'active' : ''}`} onClick={() => setActivityOpen((open) => !open)} title="Version history">◷</button>
+                    {activePath && (
+                        <button
+                            className={`workspace-op-icon-btn ${locked ? 'active' : ''}`}
+                            onClick={onToggleLock}
+                            title={locked ? 'Unlock current file' : 'Lock current file'}
+                            aria-label={locked ? 'Unlock current file' : 'Lock current file'}
+                        >
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                <path d="M8 10V8a4 4 0 118 0v2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                <rect x="5" y="10" width="14" height="10" rx="2.5" stroke="currentColor" strokeWidth="1.8" />
+                            </svg>
+                        </button>
+                    )}
                     {activePath && canEdit && !editing && <button className="workspace-op-icon-btn" onClick={() => setEditing(true)} title="Edit">✎</button>}
                     {editing && <button className="workspace-op-icon-btn active" onClick={finishEditing} title="Done">✓</button>}
                     {activePath && (
