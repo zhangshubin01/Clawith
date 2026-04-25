@@ -2090,6 +2090,7 @@ function AgentDetailInner() {
     const [workspaceActivities, setWorkspaceActivities] = useState<WorkspaceActivity[]>([]);
     const [workspaceLiveDraft, setWorkspaceLiveDraft] = useState<WorkspaceLiveDraft | null>(null);
     const workspaceEditingRef = useRef(false);
+    const workspaceLockedPathRef = useRef<string | null>(null);
     const [wsSessionId, setWsSessionId] = useState<string>('');
     const [sessionListCollapsed, setSessionListCollapsed] = useState(false);
     const [chatInput, setChatInput] = useState('');
@@ -2117,15 +2118,18 @@ function AgentDetailInner() {
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const workspacePreviewLocked = !!workspaceLockedPath;
+    useEffect(() => {
+        workspaceLockedPathRef.current = workspaceLockedPath;
+    }, [workspaceLockedPath]);
     const allowWorkspaceAutoSwitch = useCallback((path?: string | null) => {
         if (!path) return false;
         if (workspaceEditingRef.current) return false;
-        if (!workspaceLockedPath) return true;
-        return workspaceLockedPath === path;
-    }, [workspaceLockedPath]);
+        if (!workspaceLockedPathRef.current) return true;
+        return workspaceLockedPathRef.current === path;
+    }, []);
     const allowLivePanelAutoFocus = useCallback(() => {
-        return !workspaceEditingRef.current && !workspaceLockedPath;
-    }, [workspaceLockedPath]);
+        return !workspaceEditingRef.current && !workspaceLockedPathRef.current;
+    }, []);
     const handleWorkspaceSelectPath = useCallback((path: string) => {
         setWorkspaceActivePath(path);
         if (workspaceLockedPath) setWorkspaceLockedPath(path);

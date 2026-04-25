@@ -2310,6 +2310,46 @@ select:focus {
   background: #fff;
 }
 
+.workspace-op-modal-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.18);
+  backdrop-filter: blur(2px);
+}
+
+.workspace-op-modal {
+  width: min(420px, calc(100% - 32px));
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  background: var(--bg-primary);
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.18);
+  padding: 20px;
+}
+
+.workspace-op-modal-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.workspace-op-modal-text {
+  margin-top: 10px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.workspace-op-modal-actions {
+  margin-top: 18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .workspace-op-editor {
   width: 100%;
   height: 100%;

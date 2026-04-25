@@ -206,6 +206,7 @@ export default function WorkspaceOperationPanel({
     const [activityOpen, setActivityOpen] = useState(false);
     const [treeOpen, setTreeOpen] = useState(true);
     const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set([WORKSPACE_ROOT]));
+    const [pendingSwitchPath, setPendingSwitchPath] = useState<string | null>(null);
     const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const saveStateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lockTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -418,6 +419,41 @@ export default function WorkspaceOperationPanel({
         }
     };
 
+    const discardEditing = async () => {
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        setDraft(content);
+        setEditing(false);
+        onEditingChange?.(false);
+        if (activePath) {
+            await fileApi.unlock(agentId, activePath).catch(() => {});
+        }
+    };
+
+    const switchToPath = (path: string) => {
+        if (path === activePath) return;
+        if (!editing) {
+            onSelectPath(path);
+            return;
+        }
+        setPendingSwitchPath(path);
+    };
+
+    const saveAndSwitch = async () => {
+        if (!pendingSwitchPath) return;
+        const nextPath = pendingSwitchPath;
+        setPendingSwitchPath(null);
+        await finishEditing();
+        onSelectPath(nextPath);
+    };
+
+    const discardAndSwitch = async () => {
+        if (!pendingSwitchPath) return;
+        const nextPath = pendingSwitchPath;
+        setPendingSwitchPath(null);
+        await discardEditing();
+        onSelectPath(nextPath);
+    };
+
     const restore = async (revisionId: string) => {
         if (!activePath) return;
         await fileApi.restoreRevision(agentId, revisionId);
@@ -604,7 +640,7 @@ export default function WorkspaceOperationPanel({
                 key={node.path}
                 className={`workspace-op-tree-file ${selected ? 'active' : ''}`}
                 style={{ paddingLeft: `${18 + depth * 12}px` }}
-                onClick={() => !editing && onSelectPath(node.path)}
+                onClick={() => switchToPath(node.path)}
                 title={node.path}
             >
                 <div className="workspace-op-tree-file-name">{node.name}</div>
@@ -725,6 +761,22 @@ export default function WorkspaceOperationPanel({
                     </aside>
                 ) : null}
             </div>
+            {pendingSwitchPath && (
+                <div className="workspace-op-modal-overlay" onClick={() => setPendingSwitchPath(null)}>
+                    <div className="workspace-op-modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="workspace-op-modal-title">Switch files?</div>
+                        <div className="workspace-op-modal-text">
+                            You are editing <strong>{activePath ? fileName(activePath) : 'the current file'}</strong>.
+                            {' '}Choose how to handle your changes before opening <strong>{fileName(pendingSwitchPath)}</strong>.
+                        </div>
+                        <div className="workspace-op-modal-actions">
+                            <button className="btn btn-secondary" onClick={() => setPendingSwitchPath(null)}>Stay Here</button>
+                            <button className="btn btn-secondary" onClick={discardAndSwitch}>Discard & Switch</button>
+                            <button className="btn btn-primary" onClick={saveAndSwitch}>Save & Switch</button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
