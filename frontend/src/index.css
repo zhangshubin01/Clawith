@@ -2137,6 +2137,13 @@ select:focus {
   justify-content: flex-start;
 }
 
+.workspace-op-tree-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .workspace-op-tree-scope {
   display: inline-flex;
   align-items: center;
