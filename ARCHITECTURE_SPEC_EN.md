@@ -520,6 +520,7 @@ Answering those four questions correctly is usually enough to place new code in 
 
 | Date | Summary |
 | --- | --- |
+| 2026-04-25 | Added streaming workspace draft propagation for tool-call arguments in the WebSocket runtime. While file-writing and document-conversion tools are still streaming their argument JSON, the backend now forwards incremental `workspace_draft` payloads through the LLM call chain so the frontend can preview pending workspace changes before the tool finishes executing. |
 | 2026-04-24 | Hardened the Docker backend entrypoint so additive startup schema patches no longer block container startup indefinitely when another backend instance is already serving traffic on the same database. Each patch now runs in its own transaction with a short PostgreSQL `lock_timeout`, allowing locked legacy patches to be skipped safely while the backend continues booting. |
 | 2026-04-24 | Updated the OKR tool output so `get_okr` resolves member and agent owner names in tool responses instead of exposing raw owner UUIDs wherever a readable owner label is available, keeping chat-based OKR review aligned with the dashboard naming model. |
 | 2026-04-24 | Simplified grouped member OKR presentation in the dashboard so the owner name is shown once at the group header level, while nested objective cards focus on objective titles and KR content without repeating owner badges inside each card. |
