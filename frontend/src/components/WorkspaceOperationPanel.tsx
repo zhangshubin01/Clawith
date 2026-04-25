@@ -696,8 +696,11 @@ export default function WorkspaceOperationPanel({
                             aria-label={locked ? 'Unlock current file' : 'Lock current file'}
                         >
                             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                <path d="M8 10V8a4 4 0 118 0v2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                <rect x="5" y="10" width="14" height="10" rx="2.5" stroke="currentColor" strokeWidth="1.8" />
+                                <path d="M4 9V6.5A2.5 2.5 0 016.5 4H9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M15 4h2.5A2.5 2.5 0 0120 6.5V9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M20 15v2.5a2.5 2.5 0 01-2.5 2.5H15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M9 20H6.5A2.5 2.5 0 014 17.5V15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                <circle cx="12" cy="12" r="2.6" stroke="currentColor" strokeWidth="1.8" />
                             </svg>
                         </button>
                     )}
