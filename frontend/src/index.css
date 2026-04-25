@@ -2446,6 +2446,12 @@ select:focus {
   font-size: 13px;
 }
 
+.workspace-op-table thead th {
+  background: color-mix(in srgb, var(--bg-tertiary) 92%, transparent);
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
 .workspace-op-table td,
 .workspace-op-table th {
   padding: 8px 10px;

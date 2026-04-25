@@ -3882,32 +3882,79 @@ async def _convert_markdown_to_docx(agent_id: uuid.UUID, ws: Path, arguments: di
     if not str(src_file).startswith(str(ws.resolve())) or not str(tgt_file).startswith(str(ws.resolve())):
         return "❌ Access denied."
     if not src_file.exists(): return "❌ Source file not found."
-    
+
     try:
-        from bs4 import BeautifulSoup
-        import markdown
         from docx import Document
-        
         md_text = src_file.read_text(encoding="utf-8")
-        html_text = markdown.markdown(md_text, extensions=['tables'])
-        soup = BeautifulSoup(html_text, "html.parser")
-        
         doc = Document()
-        for element in soup.children:
-            if element.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                level = int(element.name[1])
-                doc.add_heading(element.get_text(strip=True), level=level)
-            elif element.name == 'p':
-                # Skip paragraphs that contains nothing
-                text = element.get_text(strip=True)
+
+        def flush_paragraph(lines: list[str]) -> None:
+            text = " ".join(line.strip() for line in lines if line.strip()).strip()
+            if text:
+                doc.add_paragraph(text)
+
+        paragraph_lines: list[str] = []
+        lines = md_text.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].rstrip()
+            stripped = line.strip()
+
+            if not stripped:
+                flush_paragraph(paragraph_lines)
+                paragraph_lines = []
+                i += 1
+                continue
+
+            heading_match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+            if heading_match:
+                flush_paragraph(paragraph_lines)
+                paragraph_lines = []
+                level = min(len(heading_match.group(1)), 6)
+                doc.add_heading(heading_match.group(2).strip(), level=level)
+                i += 1
+                continue
+
+            bullet_match = re.match(r"^[-*+]\s+(.*)$", stripped)
+            ordered_match = re.match(r"^\d+\.\s+(.*)$", stripped)
+            if bullet_match or ordered_match:
+                flush_paragraph(paragraph_lines)
+                paragraph_lines = []
+                text = (bullet_match or ordered_match).group(1).strip()
                 if text:
-                    doc.add_paragraph(text)
-            elif element.name in ['ul', 'ol']:
-                for li in element.find_all("li"):
-                    doc.add_paragraph(li.get_text(strip=True), style='List Bullet')
-            elif element.name == 'table':
-                doc.add_paragraph("[Table Content: " + element.get_text(separator=" | ", strip=True) + "]")
-                
+                    doc.add_paragraph(text, style="List Bullet" if bullet_match else "List Number")
+                i += 1
+                continue
+
+            if "|" in stripped:
+                table_lines: list[str] = []
+                flush_paragraph(paragraph_lines)
+                paragraph_lines = []
+                while i < len(lines) and "|" in lines[i]:
+                    candidate = lines[i].strip()
+                    if candidate:
+                        table_lines.append(candidate)
+                    i += 1
+                data_rows = []
+                for raw in table_lines:
+                    cells = [cell.strip() for cell in raw.strip("|").split("|")]
+                    if cells and all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells):
+                        continue
+                    if any(cell for cell in cells):
+                        data_rows.append(cells)
+                if data_rows:
+                    table = doc.add_table(rows=len(data_rows), cols=max(len(row) for row in data_rows))
+                    table.style = "Table Grid"
+                    for row_idx, row in enumerate(data_rows):
+                        for col_idx, cell in enumerate(row):
+                            table.cell(row_idx, col_idx).text = cell
+                continue
+
+            paragraph_lines.append(stripped)
+            i += 1
+
+        flush_paragraph(paragraph_lines)
+
         tgt_file.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(tgt_file))
         return f"✅ Successfully converted Markdown to Word: {target_path}"

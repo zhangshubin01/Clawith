@@ -151,6 +151,8 @@ def _file_kind(path: str) -> str:
         return "pptx"
     if ext in {".txt", ".log", ".json"}:
         return "text"
+    if ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}:
+        return "image"
     return "binary"
 
 
@@ -237,7 +239,40 @@ async def preview_file(
             "url": download_url,
             "download_url": download_url,
         }
-    if kind in {"xlsx", "docx", "pptx"}:
+    if kind == "xlsx":
+        try:
+            from openpyxl import load_workbook
+
+            wb = load_workbook(target, read_only=True, data_only=True)
+            sheets = []
+            for ws in wb.worksheets[:5]:
+                rows = []
+                for row in ws.iter_rows(max_row=120, max_col=30, values_only=True):
+                    values = ["" if cell is None else str(cell) for cell in row]
+                    if any(value.strip() for value in values):
+                        rows.append(values)
+                sheets.append({
+                    "title": ws.title,
+                    "rows": rows,
+                })
+            wb.close()
+            return {
+                "path": path,
+                "kind": kind,
+                "mime_type": mime_type,
+                "text": _extract_document_text(target, kind),
+                "sheets": sheets,
+                "download_url": download_url,
+            }
+        except Exception as exc:
+            return {
+                "path": path,
+                "kind": kind,
+                "mime_type": mime_type,
+                "text": f"Preview extraction failed: {str(exc)[:200]}",
+                "download_url": download_url,
+            }
+    if kind in {"docx", "pptx"}:
         return {
             "path": path,
             "kind": kind,

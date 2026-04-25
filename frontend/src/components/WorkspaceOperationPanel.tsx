@@ -127,6 +127,8 @@ function formatRevisionTime(value?: string | null): string {
 function HtmlPreviewFrame({ content, title }: { content: string; title: string }) {
     const viewportRef = useRef<HTMLDivElement>(null);
     const frameRef = useRef<HTMLIFrameElement>(null);
+    const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const [renderContent, setRenderContent] = useState(content);
     const [frameStyle, setFrameStyle] = useState({
         width: '100%',
         height: '100%',
@@ -171,8 +173,27 @@ function HtmlPreviewFrame({ content, title }: { content: string; title: string }
     }, []);
 
     useEffect(() => {
-        setFrameStyle({ width: '100%', height: '100%', scaledWidth: '100%', scaledHeight: '100%', scale: 1 });
-    }, [content]);
+        if (!content) {
+            setRenderContent(content);
+            return;
+        }
+        if (!renderContent) {
+            setRenderContent(content);
+            return;
+        }
+        if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = setTimeout(() => {
+            setRenderContent(content);
+            debounceTimerRef.current = null;
+        }, 180);
+        return () => {
+            if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+        };
+    }, [content, renderContent]);
+
+    useEffect(() => {
+        setFrameStyle((prev) => ({ ...prev, scale: prev.scale || 1 }));
+    }, [renderContent]);
 
     return (
         <div className="workspace-op-html-fit" ref={viewportRef}>
@@ -185,8 +206,8 @@ function HtmlPreviewFrame({ content, title }: { content: string; title: string }
             >
                 <iframe
                     ref={frameRef}
-                    sandbox="allow-same-origin"
-                    srcDoc={content}
+                    sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups"
+                    srcDoc={renderContent}
                     title={title}
                     onLoad={() => {
                         requestAnimationFrame(() => {
@@ -557,14 +578,20 @@ export default function WorkspaceOperationPanel({
             }
             if (draftExt === '.csv') {
                 const rows = parseCsv(draftContent).slice(0, 200);
+                const [header, ...bodyRows] = rows;
                 return (
                     <div className="workspace-op-live">
                         <div className="workspace-op-live-banner">{liveDraft.status === 'drafting' ? 'Drafting CSV...' : 'Writing CSV...'}</div>
                         {rows.length ? (
                             <div className="workspace-op-table-wrap">
                                 <table className="workspace-op-table">
+                                    {!!header?.length && (
+                                        <thead>
+                                            <tr>{header.map((cell, j) => <th key={j}>{cell}</th>)}</tr>
+                                        </thead>
+                                    )}
                                     <tbody>
-                                        {rows.map((row, i) => (
+                                        {bodyRows.map((row, i) => (
                                             <tr key={i}>{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>
                                         ))}
                                     </tbody>
@@ -614,11 +641,17 @@ export default function WorkspaceOperationPanel({
             return <MarkdownRenderer content={content || ''} />;
         }
         if (previewType === 'csv') {
+            const [header, ...bodyRows] = csvRows;
             return (
                 <div className="workspace-op-table-wrap">
                     <table className="workspace-op-table">
+                        {!!header?.length && (
+                            <thead>
+                                <tr>{header.map((cell, j) => <th key={j}>{cell}</th>)}</tr>
+                            </thead>
+                        )}
                         <tbody>
-                            {csvRows.map((row, i) => (
+                            {bodyRows.map((row, i) => (
                                 <tr key={i}>{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>
                             ))}
                         </tbody>
@@ -627,11 +660,17 @@ export default function WorkspaceOperationPanel({
             );
         }
         if (previewType === 'xlsx') {
+            const [header, ...bodyRows] = xlsxRows;
             return (
                 <div className="workspace-op-table-wrap">
                     <table className="workspace-op-table">
+                        {!!header?.length && (
+                            <thead>
+                                <tr>{header.map((cell: string, j: number) => <th key={j}>{cell}</th>)}</tr>
+                            </thead>
+                        )}
                         <tbody>
-                            {xlsxRows.map((row: string[], i: number) => (
+                            {bodyRows.map((row: string[], i: number) => (
                                 <tr key={i}>{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>
                             ))}
                         </tbody>
