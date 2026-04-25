@@ -7,6 +7,7 @@ export interface WorkspaceActivity {
     path: string;
     tool?: string;
     ok?: boolean;
+    pendingApproval?: boolean;
 }
 
 export interface WorkspaceLiveDraft {
@@ -270,7 +271,7 @@ export default function WorkspaceOperationPanel({
     useEffect(() => {
         if (!activePath) return;
         const latestActivity = activities.find((item) => item.path === activePath);
-        if (latestActivity?.action !== 'delete' || latestActivity.ok === false) return;
+        if (latestActivity?.action !== 'delete' || latestActivity.ok === false || latestActivity.pendingApproval) return;
         setEditing(false);
         onEditingChange?.(false);
         setPreview(null);
@@ -279,6 +280,40 @@ export default function WorkspaceOperationPanel({
         setRevisions([]);
         setPreviewState('deleted');
     }, [activities, activePath, onEditingChange]);
+
+    useEffect(() => {
+        if (!activePath) return undefined;
+        const latestActivity = activities.find((item) => item.path === activePath);
+        if (latestActivity?.action !== 'delete' || !latestActivity.pendingApproval) return undefined;
+
+        let cancelled = false;
+        const pollForDeletion = async () => {
+            try {
+                await fileApi.preview(agentId, activePath);
+            } catch (err: any) {
+                if (cancelled || err?.status !== 404) return;
+                setEditing(false);
+                onEditingChange?.(false);
+                setPreview(null);
+                setContent('');
+                setDraft('');
+                setRevisions([]);
+                setPreviewState('deleted');
+                onPathDeleted?.(activePath);
+                void loadFileTree();
+            }
+        };
+
+        void pollForDeletion();
+        const timer = window.setInterval(() => {
+            void pollForDeletion();
+        }, 4000);
+
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
+    }, [activities, activePath, agentId, onEditingChange, onPathDeleted]);
 
     useEffect(() => {
         loadFileTree();
@@ -433,9 +468,9 @@ export default function WorkspaceOperationPanel({
         }
         if (previewState === 'deleted') {
             return (
-                <div className="workspace-op-empty" style={{ textAlign: 'center', gap: '8px' }}>
-                    <strong style={{ fontSize: '15px', color: 'var(--text-primary)' }}>This file was deleted.</strong>
-                    <span style={{ color: 'var(--text-secondary)' }}>{activePath}</span>
+                <div className="workspace-op-empty workspace-op-deleted">
+                    <strong className="workspace-op-deleted-title">This file was deleted.</strong>
+                    <span className="workspace-op-deleted-path">{activePath}</span>
                 </div>
             );
         }

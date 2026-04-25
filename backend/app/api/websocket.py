@@ -566,11 +566,14 @@ async def websocket_chat(
                                     except Exception:
                                         _ws_args = {}
                                 _ws_path = _ws_args.get("output_path") or _ws_args.get("path", "")
+                                _ws_result = str(data.get("result") or "")
+                                _pending_approval = "requires approval" in _ws_result.lower()
                                 data["workspace_activity"] = {
                                     "action": _WORKSPACE_TOOL_ACTIONS[_done_tool_name],
                                     "path": _ws_path,
                                     "tool": _done_tool_name,
-                                    "ok": True,
+                                    "ok": not _pending_approval,
+                                    "pendingApproval": _pending_approval,
                                 }
                                 logger.info(f"[WS][Workspace] activity: {_done_tool_name} → {_ws_path}")
 

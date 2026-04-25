@@ -2424,16 +2424,16 @@ function AgentDetailInner() {
                     setSessionListCollapsed(true);
                     useAppStore.setState({ sidebarCollapsed: true });
                 }
-                if (d.workspace_activity) {
-                    const activity = d.workspace_activity as WorkspaceActivity;
-                    setWorkspaceLiveDraft(null);
-                    setWorkspaceActivities(prev => [activity, ...prev.filter(item => item.path !== activity.path)].slice(0, 20));
-                    if (activity.action === 'delete' && activity.ok !== false) {
-                        handleWorkspacePathDeleted(activity.path);
-                    }
-                    if (activity.action !== 'delete' && activity.ok !== false && !workspaceEditingRef.current) {
-                        setWorkspaceActivePath(activity.path);
-                        setSidePanelTab('workspace');
+                    if (d.workspace_activity) {
+                        const activity = d.workspace_activity as WorkspaceActivity;
+                        setWorkspaceLiveDraft(null);
+                        setWorkspaceActivities(prev => [activity, ...prev.filter(item => item.path !== activity.path)].slice(0, 20));
+                        if (activity.action === 'delete' && activity.ok !== false && !activity.pendingApproval) {
+                            handleWorkspacePathDeleted(activity.path);
+                        }
+                        if (activity.action !== 'delete' && activity.ok !== false && !workspaceEditingRef.current) {
+                            setWorkspaceActivePath(activity.path);
+                            setSidePanelTab('workspace');
                     }
                     setLivePanelVisible(true);
                     setSessionListCollapsed(true);
