@@ -213,45 +213,59 @@ function HtmlPreviewFrame({ content, title, src }: { content: string; title: str
     const frameRef = useRef<HTMLIFrameElement>(null);
     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [renderContent, setRenderContent] = useState(content);
-    const [frameStyle, setFrameStyle] = useState({
-        width: '100%',
-        height: '100%',
-        scaledWidth: '100%',
-        scaledHeight: '100%',
-        scale: 1,
-    });
+    const [frameHeight, setFrameHeight] = useState(720);
+    const observersRef = useRef<{ resize?: ResizeObserver; mutation?: MutationObserver } | null>(null);
 
     const fitFrame = () => {
-        const viewport = viewportRef.current;
         const frame = frameRef.current;
         const doc = frame?.contentDocument;
-        if (!viewport || !frame || !doc?.body) return;
+        if (!frame || !doc?.body) return;
 
         const body = doc.body;
         const root = doc.documentElement;
         body.style.margin = body.style.margin || '0';
         root.style.margin = root.style.margin || '0';
-        body.style.overflow = 'hidden';
-        root.style.overflow = 'hidden';
 
-        const contentWidth = Math.max(root.scrollWidth, body.scrollWidth, body.offsetWidth, 1);
-        const contentHeight = Math.max(root.scrollHeight, body.scrollHeight, body.offsetHeight, 1);
-        const availableWidth = Math.max(viewport.clientWidth - 18, 1);
-        const scale = Math.min(1, availableWidth / contentWidth);
+        const contentHeight = Math.max(root.scrollHeight, body.scrollHeight, body.offsetHeight, 480);
+        setFrameHeight(contentHeight);
+    };
 
-        setFrameStyle({
-            width: `${contentWidth}px`,
-            height: `${contentHeight}px`,
-            scaledWidth: `${contentWidth * scale}px`,
-            scaledHeight: `${contentHeight * scale}px`,
-            scale,
-        });
+    const bindFrameObservers = () => {
+        const frame = frameRef.current;
+        const doc = frame?.contentDocument;
+        const body = doc?.body;
+        if (!doc || !body) return;
+
+        observersRef.current?.resize?.disconnect();
+        observersRef.current?.mutation?.disconnect();
+
+        if (typeof ResizeObserver !== 'undefined') {
+            const resize = new ResizeObserver(() => fitFrame());
+            resize.observe(body);
+            resize.observe(doc.documentElement);
+            observersRef.current = { ...(observersRef.current || {}), resize };
+        }
+
+        if (typeof MutationObserver !== 'undefined') {
+            const mutation = new MutationObserver(() => {
+                requestAnimationFrame(() => fitFrame());
+            });
+            mutation.observe(body, {
+                subtree: true,
+                childList: true,
+                characterData: true,
+                attributes: true,
+            });
+            observersRef.current = { ...(observersRef.current || {}), mutation };
+        }
     };
 
     useEffect(() => {
         const viewport = viewportRef.current;
         if (!viewport || typeof ResizeObserver === 'undefined') return;
-        const observer = new ResizeObserver(() => fitFrame());
+        const observer = new ResizeObserver(() => {
+            requestAnimationFrame(() => fitFrame());
+        });
         observer.observe(viewport);
         return () => observer.disconnect();
     }, []);
@@ -276,38 +290,32 @@ function HtmlPreviewFrame({ content, title, src }: { content: string; title: str
         };
     }, [content, renderContent]);
 
-    useEffect(() => {
-        setFrameStyle((prev) => ({ ...prev, scale: prev.scale || 1 }));
-    }, [renderContent, src]);
+    useEffect(() => () => {
+        observersRef.current?.resize?.disconnect();
+        observersRef.current?.mutation?.disconnect();
+    }, []);
 
     return (
         <div className="workspace-op-html-fit" ref={viewportRef}>
-            <div
-                className="workspace-op-html-fit-inner"
-                style={{
-                    width: frameStyle.scaledWidth,
-                    height: frameStyle.scaledHeight,
+            <iframe
+                ref={frameRef}
+                sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation"
+                src={src}
+                srcDoc={src ? undefined : renderContent}
+                title={title}
+                onLoad={() => {
+                    requestAnimationFrame(() => {
+                        fitFrame();
+                        bindFrameObservers();
+                        requestAnimationFrame(fitFrame);
+                    });
                 }}
-            >
-                <iframe
-                    ref={frameRef}
-                    sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation"
-                    src={src}
-                    srcDoc={src ? undefined : renderContent}
-                    title={title}
-                    onLoad={() => {
-                        requestAnimationFrame(() => {
-                            fitFrame();
-                            requestAnimationFrame(fitFrame);
-                        });
-                    }}
-                    style={{
-                        width: frameStyle.width,
-                        height: frameStyle.height,
-                        transform: `scale(${frameStyle.scale})`,
-                    }}
-                />
-            </div>
+                style={{
+                    width: '100%',
+                    minHeight: '480px',
+                    height: `${frameHeight}px`,
+                }}
+            />
         </div>
     );
 }

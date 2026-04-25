@@ -2416,16 +2416,11 @@ select:focus {
   padding: 10px;
 }
 
-.workspace-op-html-fit-inner {
-  margin: 0 auto;
-  transform-origin: top center;
-}
-
 .workspace-op-html-fit iframe {
   display: block;
   border: none;
   background: #fff;
-  transform-origin: top left;
+  border-radius: 8px;
 }
 
 .workspace-op-image-preview {
