@@ -2087,6 +2087,12 @@ select:focus {
   border-left: 1px solid var(--border-subtle);
 }
 
+.workspace-op-tree .workspace-op-side-title {
+  justify-content: flex-start;
+  padding-left: 34px;
+  padding-right: 8px;
+}
+
 .workspace-op-side {
   border-left: 1px solid var(--border-subtle);
 }
@@ -2128,7 +2134,7 @@ select:focus {
 
 .workspace-op-tree-tools-full {
   width: 100%;
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 
 .workspace-op-tree-scope {
