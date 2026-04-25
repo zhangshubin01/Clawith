@@ -1,7 +1,7 @@
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import MarkdownRenderer from './MarkdownRenderer';
-import { fileApi } from '../services/api';
+import { fileApi, uploadFileWithProgress } from '../services/api';
 
 export interface WorkspaceActivity {
     action: 'write' | 'edit' | 'convert' | 'delete';
@@ -25,6 +25,15 @@ interface WorkspaceFileNode {
     path: string;
     is_dir: boolean;
     children?: WorkspaceFileNode[];
+}
+
+interface UploadItem {
+    id: string;
+    name: string;
+    dir: string;
+    progress: number;
+    status: 'uploading' | 'processing' | 'done' | 'error';
+    error?: string;
 }
 
 interface Props {
@@ -57,6 +66,18 @@ function extOf(path: string): string {
 }
 
 function parseCsv(text: string): string[][] {
+    const nonEmpty = text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .slice(0, 10);
+    const delimiters = [',', '，', ';', '\t', '|'];
+    const delimiter = delimiters
+        .map((candidate) => ({
+            candidate,
+            score: nonEmpty.reduce((total, line) => total + (line.split(candidate).length - 1), 0),
+        }))
+        .sort((a, b) => b.score - a.score)[0]?.candidate || ',';
     const rows: string[][] = [];
     let row: string[] = [];
     let cell = '';
@@ -69,7 +90,7 @@ function parseCsv(text: string): string[][] {
             i++;
         } else if (ch === '"') {
             quoted = !quoted;
-        } else if (ch === ',' && !quoted) {
+        } else if (ch === delimiter && !quoted) {
             row.push(cell);
             cell = '';
         } else if ((ch === '\n' || ch === '\r') && !quoted) {
@@ -124,7 +145,70 @@ function formatRevisionTime(value?: string | null): string {
     return `${mm}-${dd} ${hh}:${min}`;
 }
 
-function HtmlPreviewFrame({ content, title }: { content: string; title: string }) {
+function buildPreviewVersion(content: string): string {
+    let hash = 0;
+    for (let i = 0; i < content.length; i += 1) {
+        hash = (hash * 31 + content.charCodeAt(i)) >>> 0;
+    }
+    return `${content.length}-${hash}`;
+}
+
+function trimTrailingEmpty(row: string[]): string[] {
+    const next = [...row];
+    while (next.length && !String(next[next.length - 1] || '').trim()) next.pop();
+    return next;
+}
+
+function buildRevisionDiff(revision: any): string {
+    const before = revision.before_content ?? '';
+    const after = revision.after_content ?? '';
+    if (!before && !after) return 'No preview available for this revision.';
+    if (before === after) {
+        if (revision.operation === 'restore') return 'Restored this snapshot.';
+        if (revision.operation === 'autosave') return 'Autosaved with no textual changes.';
+        return 'No textual changes in this revision.';
+    }
+
+    const beforeLines = before.split('\n');
+    const afterLines = after.split('\n');
+
+    let prefix = 0;
+    while (
+        prefix < beforeLines.length &&
+        prefix < afterLines.length &&
+        beforeLines[prefix] === afterLines[prefix]
+    ) {
+        prefix += 1;
+    }
+
+    let suffix = 0;
+    while (
+        suffix < beforeLines.length - prefix &&
+        suffix < afterLines.length - prefix &&
+        beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+    ) {
+        suffix += 1;
+    }
+
+    const removed = beforeLines.slice(prefix, beforeLines.length - suffix);
+    const added = afterLines.slice(prefix, afterLines.length - suffix);
+    const chunks: string[] = [];
+
+    if (removed.length) {
+        chunks.push(...removed.map((line: string) => `- ${line}`));
+    }
+    if (added.length) {
+        chunks.push(...added.map((line: string) => `+ ${line}`));
+    }
+
+    if (!chunks.length) {
+        chunks.push(`Before:\n${before || '(empty)'}`, `After:\n${after || '(empty)'}`);
+    }
+
+    return chunks.join('\n');
+}
+
+function HtmlPreviewFrame({ content, title, src }: { content: string; title: string; src?: string }) {
     const viewportRef = useRef<HTMLDivElement>(null);
     const frameRef = useRef<HTMLIFrameElement>(null);
     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -173,6 +257,7 @@ function HtmlPreviewFrame({ content, title }: { content: string; title: string }
     }, []);
 
     useEffect(() => {
+        if (src) return;
         if (!content) {
             setRenderContent(content);
             return;
@@ -193,7 +278,7 @@ function HtmlPreviewFrame({ content, title }: { content: string; title: string }
 
     useEffect(() => {
         setFrameStyle((prev) => ({ ...prev, scale: prev.scale || 1 }));
-    }, [renderContent]);
+    }, [renderContent, src]);
 
     return (
         <div className="workspace-op-html-fit" ref={viewportRef}>
@@ -206,8 +291,9 @@ function HtmlPreviewFrame({ content, title }: { content: string; title: string }
             >
                 <iframe
                     ref={frameRef}
-                    sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups"
-                    srcDoc={renderContent}
+                    sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation"
+                    src={src}
+                    srcDoc={src ? undefined : renderContent}
                     title={title}
                     onLoad={() => {
                         requestAnimationFrame(() => {
@@ -251,6 +337,8 @@ export default function WorkspaceOperationPanel({
     const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set([WORKSPACE_ROOT]));
     const [pendingSwitchPath, setPendingSwitchPath] = useState<string | null>(null);
     const [sideWidth, setSideWidth] = useState(DEFAULT_TREE_WIDTH);
+    const [selectedDirPath, setSelectedDirPath] = useState(WORKSPACE_ROOT);
+    const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
     const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const saveStateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lockTimer = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -263,8 +351,10 @@ export default function WorkspaceOperationPanel({
     const isHtml = ext === '.html' || ext === '.htm';
     const isImage = IMAGE_EXTS.has(ext);
     const activityKey = activities.map((item) => `${item.action}:${item.path}`).join('|');
-    const treeTargetDir = activePath ? parentDir(activePath) : WORKSPACE_ROOT;
+    const treeTargetDir = selectedDirPath || (activePath ? parentDir(activePath) : WORKSPACE_ROOT);
     const panelSideWidth = activityOpen ? Math.max(sideWidth, DEFAULT_HISTORY_WIDTH) : sideWidth;
+    const draftMatchesActiveFile = !!(liveDraft?.path && activePath && liveDraft.path === activePath);
+    const shouldRenderLiveDraft = !!liveDraft && (!activePath || !liveDraft.path || draftMatchesActiveFile);
 
     const load = async () => {
         if (!activePath) {
@@ -389,6 +479,12 @@ export default function WorkspaceOperationPanel({
     }, [activePath, liveDraft?.path]);
 
     useEffect(() => {
+        if (activePath) {
+            setSelectedDirPath(parentDir(activePath));
+        }
+    }, [activePath]);
+
+    useEffect(() => {
         setSideWidth((prev) => {
             const base = activityOpen ? DEFAULT_HISTORY_WIDTH : DEFAULT_TREE_WIDTH;
             if (prev < MIN_SIDE_WIDTH || prev > MAX_SIDE_WIDTH) return base;
@@ -454,13 +550,19 @@ export default function WorkspaceOperationPanel({
     }, [agentId, activePath, draft, content, editing, sessionId]);
 
     const previewType = preview?.type || preview?.kind;
+    const htmlPreviewSrc = useMemo(() => {
+        if (!activePath || !isHtml || editing || shouldRenderLiveDraft) return '';
+        const base = fileApi.downloadUrl(agentId, activePath, { inline: true });
+        const version = preview?.content_hash || buildPreviewVersion(content || '');
+        return `${base}&v=${encodeURIComponent(version)}`;
+    }, [activePath, agentId, isHtml, editing, preview?.content_hash, content, shouldRenderLiveDraft]);
 
     const csvRows = useMemo(() => {
-        if (previewType === 'csv') return parseCsv(editing ? draft : content).slice(0, 200);
+        if (previewType === 'csv') return parseCsv(editing ? draft : content).slice(0, 200).map(trimTrailingEmpty).filter((row) => row.length);
         return [];
     }, [previewType, content, draft, editing]);
 
-    const xlsxRows = previewType === 'xlsx' ? (preview.sheets?.[0]?.rows || []) : [];
+    const xlsxRows = previewType === 'xlsx' ? (preview.sheets?.[0]?.rows || []).map(trimTrailingEmpty).filter((row: string[]) => row.length) : [];
 
     const finishEditing = async () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -524,9 +626,43 @@ export default function WorkspaceOperationPanel({
         if (!files?.length) return;
         const selectedFiles = Array.from(files);
         for (const file of selectedFiles) {
-            await fileApi.upload(agentId, file, treeTargetDir);
+            const itemId = `${treeTargetDir}:${file.name}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+            setExpandedDirs((prev) => new Set(prev).add(treeTargetDir));
+            setUploadItems((prev) => [...prev, {
+                id: itemId,
+                name: file.name,
+                dir: treeTargetDir,
+                progress: 0,
+                status: 'uploading',
+            }]);
+            try {
+                const { promise } = uploadFileWithProgress(
+                    `/agents/${agentId}/files/upload?path=${encodeURIComponent(treeTargetDir)}`,
+                    file,
+                    (pct) => {
+                        setUploadItems((prev) => prev.map((item) => item.id === itemId
+                            ? {
+                                ...item,
+                                status: pct > 100 ? 'processing' : 'uploading',
+                                progress: pct > 100 ? 100 : pct,
+                            }
+                            : item));
+                    },
+                );
+                await promise;
+                setUploadItems((prev) => prev.map((item) => item.id === itemId
+                    ? { ...item, status: 'done', progress: 100 }
+                    : item));
+                await loadFileTree();
+                window.setTimeout(() => {
+                    setUploadItems((prev) => prev.filter((item) => item.id !== itemId));
+                }, 900);
+            } catch (err: any) {
+                setUploadItems((prev) => prev.map((item) => item.id === itemId
+                    ? { ...item, status: 'error', error: err?.message || 'Upload failed' }
+                    : item));
+            }
         }
-        await loadFileTree();
     };
 
     const handleCreateFolder = async () => {
@@ -536,8 +672,32 @@ export default function WorkspaceOperationPanel({
         if (!trimmed) return;
         const folderPath = `${treeTargetDir}/${trimmed}`;
         await fileApi.write(agentId, `${folderPath}/.gitkeep`, '');
+        setSelectedDirPath(folderPath);
         setExpandedDirs((prev) => new Set(prev).add(folderPath).add(treeTargetDir));
         await loadFileTree();
+    };
+
+    const deleteTreePath = async (path: string, label: string, selected?: boolean) => {
+        if (!confirm(`Are you sure you want to delete ${label}?`)) return;
+        try {
+            await fileApi.delete(agentId, path);
+            if (selected) {
+                setEditing(false);
+                onEditingChange?.(false);
+                setPreview(null);
+                setContent('');
+                setDraft('');
+                setRevisions([]);
+                setPreviewState('deleted');
+            }
+            if (selectedDirPath === path || selectedDirPath.startsWith(`${path}/`)) {
+                setSelectedDirPath(WORKSPACE_ROOT);
+            }
+            onPathDeleted?.(path);
+            await loadFileTree();
+        } catch (err: any) {
+            alert(`Failed to delete: ${err.message}`);
+        }
     };
 
     const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -559,8 +719,6 @@ export default function WorkspaceOperationPanel({
     };
 
     const renderPreview = () => {
-        const draftMatchesActiveFile = liveDraft?.path && activePath && liveDraft.path === activePath;
-        const shouldRenderLiveDraft = !!liveDraft && (!activePath || !liveDraft.path || draftMatchesActiveFile);
         if (shouldRenderLiveDraft) {
             const draftExt = liveDraft.path ? extOf(liveDraft.path) : ext;
             const draftContent = liveDraft.content || '';
@@ -641,18 +799,24 @@ export default function WorkspaceOperationPanel({
             return <MarkdownRenderer content={content || ''} />;
         }
         if (previewType === 'csv') {
-            const [header, ...bodyRows] = csvRows;
+            const rows = csvRows;
+            const maxCols = rows.reduce((max, row) => Math.max(max, row.length), 0);
+            const [header, ...bodyRows] = rows;
             return (
                 <div className="workspace-op-table-wrap">
                     <table className="workspace-op-table">
                         {!!header?.length && (
                             <thead>
-                                <tr>{header.map((cell, j) => <th key={j}>{cell}</th>)}</tr>
+                                <tr>
+                                    {Array.from({ length: maxCols }).map((_, j) => <th key={j}>{header[j] || ''}</th>)}
+                                </tr>
                             </thead>
                         )}
                         <tbody>
                             {bodyRows.map((row, i) => (
-                                <tr key={i}>{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>
+                                <tr key={i}>
+                                    {Array.from({ length: maxCols }).map((_, j) => <td key={j}>{row[j] || ''}</td>)}
+                                </tr>
                             ))}
                         </tbody>
                     </table>
@@ -660,18 +824,24 @@ export default function WorkspaceOperationPanel({
             );
         }
         if (previewType === 'xlsx') {
-            const [header, ...bodyRows] = xlsxRows;
+            const rows = xlsxRows;
+            const maxCols = rows.reduce((max: number, row: string[]) => Math.max(max, row.length), 0);
+            const [header, ...bodyRows] = rows;
             return (
                 <div className="workspace-op-table-wrap">
                     <table className="workspace-op-table">
                         {!!header?.length && (
                             <thead>
-                                <tr>{header.map((cell: string, j: number) => <th key={j}>{cell}</th>)}</tr>
+                                <tr>
+                                    {Array.from({ length: maxCols }).map((_, j) => <th key={j}>{header[j] || ''}</th>)}
+                                </tr>
                             </thead>
                         )}
                         <tbody>
                             {bodyRows.map((row: string[], i: number) => (
-                                <tr key={i}>{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>
+                                <tr key={i}>
+                                    {Array.from({ length: maxCols }).map((_, j) => <td key={j}>{row[j] || ''}</td>)}
+                                </tr>
                             ))}
                         </tbody>
                     </table>
@@ -679,7 +849,7 @@ export default function WorkspaceOperationPanel({
             );
         }
         if (isHtml) {
-            return <HtmlPreviewFrame content={content || ''} title={fileName(activePath)} />;
+            return <HtmlPreviewFrame content={content || ''} title={fileName(activePath)} src={htmlPreviewSrc || undefined} />;
         }
         if (isImage) {
             return (
@@ -728,26 +898,80 @@ export default function WorkspaceOperationPanel({
         return <div className="workspace-op-empty">Preview is not available for this file. Download it instead.</div>;
     };
 
+    const renderUploadRows = (dirPath: string, depth: number) => uploadItems
+        .filter((item) => item.dir === dirPath)
+        .map((item) => (
+            <div
+                key={item.id}
+                                className={`workspace-op-tree-upload ${item.status}`}
+                                style={{ paddingLeft: `${18 + depth * 12}px` }}
+                                title={item.error || `${item.progress}%`}
+                            >
+                <div className="workspace-op-tree-upload-main">
+                    <span className="workspace-op-tree-upload-name">{item.name}</span>
+                    <span className="workspace-op-tree-upload-status">
+                        {item.status === 'error'
+                            ? 'Failed'
+                            : item.status === 'done'
+                                ? 'Done'
+                                : item.status === 'processing'
+                                    ? 'Processing…'
+                                    : `${item.progress}%`}
+                    </span>
+                </div>
+                {item.status !== 'error' && (
+                    <div className="workspace-op-tree-upload-bar">
+                        <span style={{ width: `${Math.max(6, item.progress)}%` }} />
+                    </div>
+                )}
+                {item.status === 'error' && <div className="workspace-op-tree-upload-error">{item.error}</div>}
+            </div>
+        ));
+
     const renderFileTreeNodes = (nodes: WorkspaceFileNode[], depth = 0) => nodes.map((node) => {
         const selected = node.path === activePath;
         if (node.is_dir) {
             const expanded = expandedDirs.has(node.path);
+            const dirSelected = selectedDirPath === node.path;
             return (
                 <div key={node.path || node.name}>
-                    <button
-                        className="workspace-op-tree-dir"
-                        onClick={() => setExpandedDirs((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(node.path)) next.delete(node.path);
-                            else next.add(node.path);
-                            return next;
-                        })}
-                        style={{ paddingLeft: `${6 + depth * 12}px` }}
-                    >
-                        <span className="workspace-op-tree-chevron">{expanded ? '▾' : '▸'}</span>
-                        <span>{node.name}</span>
-                    </button>
-                    {expanded && node.children && renderFileTreeNodes(node.children, depth + 1)}
+                    <div className={`workspace-op-tree-dir ${dirSelected ? 'active' : ''}`} style={{ paddingLeft: `${6 + depth * 12}px` }}>
+                        <button
+                            className="workspace-op-tree-dir-main"
+                            onClick={() => {
+                                setSelectedDirPath(node.path);
+                                setExpandedDirs((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(node.path)) next.delete(node.path);
+                                    else next.add(node.path);
+                                    return next;
+                                });
+                            }}
+                        >
+                            <span className="workspace-op-tree-chevron">{expanded ? '▾' : '▸'}</span>
+                            <span>{node.name}</span>
+                        </button>
+                        {node.path !== WORKSPACE_ROOT && (
+                            <button
+                                className="workspace-op-tree-file-delete"
+                                title="Delete folder"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    void deleteTreePath(node.path, node.name);
+                                }}
+                            >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2M10 11v6M14 11v6"/>
+                                </svg>
+                            </button>
+                        )}
+                    </div>
+                    {expanded && (
+                        <>
+                            {renderUploadRows(node.path, depth + 1)}
+                            {node.children && renderFileTreeNodes(node.children, depth + 1)}
+                        </>
+                    )}
                 </div>
             );
         }
@@ -766,24 +990,7 @@ export default function WorkspaceOperationPanel({
                         title="Delete file"
                         onClick={async (e) => {
                             e.stopPropagation();
-                            if (confirm(`Are you sure you want to delete ${node.name}?`)) {
-                                try {
-                                    await fileApi.delete(agentId, node.path);
-                                    if (selected) {
-                                        setEditing(false);
-                                        onEditingChange?.(false);
-                                        setPreview(null);
-                                        setContent('');
-                                        setDraft('');
-                                        setRevisions([]);
-                                        setPreviewState('deleted');
-                                    }
-                                    onPathDeleted?.(node.path);
-                                    loadFileTree();
-                                } catch (err: any) {
-                                    alert(`Failed to delete: ${err.message}`);
-                                }
-                            }
+                            void deleteTreePath(node.path, node.name, selected);
                         }}
                     >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -869,21 +1076,25 @@ export default function WorkspaceOperationPanel({
                         <div className="workspace-op-side-list">
                             {!activePath && <div className="workspace-op-side-empty">Open a file to view its history.</div>}
                             {activePath && revisions.length === 0 && <div className="workspace-op-side-empty">No versions recorded yet.</div>}
-                            {activePath && revisions.map((rev) => (
-                                <div className="workspace-op-revision" key={rev.id}>
-                                    <div className="workspace-op-revision-head">
-                                        <div className="workspace-op-revision-meta">
-                                            <strong>{rev.operation}</strong>
-                                            <span>{rev.actor_type}</span>
-                                        </div>
-                                        <time className="workspace-op-revision-time" dateTime={rev.created_at || undefined}>
-                                            {formatRevisionTime(rev.created_at)}
-                                        </time>
+                    {activePath && revisions.map((rev) => {
+                        const diffText = buildRevisionDiff(rev);
+                        const isNote = diffText.startsWith('No ') || diffText.startsWith('Restored') || diffText.startsWith('Autosaved');
+                        return (
+                            <div className="workspace-op-revision" key={rev.id}>
+                                <div className="workspace-op-revision-head">
+                                    <div className="workspace-op-revision-meta">
+                                        <strong>{rev.operation}</strong>
+                                        <span>{rev.actor_type}</span>
                                     </div>
-                                    <pre>{rev.diff || 'No text diff'}</pre>
-                                    {rev.after_content != null && <button className="btn btn-secondary" onClick={() => restore(rev.id)}>Restore</button>}
+                                    <time className="workspace-op-revision-time" dateTime={rev.created_at || undefined}>
+                                        {formatRevisionTime(rev.created_at)}
+                                    </time>
                                 </div>
-                            ))}
+                                <pre className={isNote ? 'workspace-op-revision-note' : ''}>{diffText}</pre>
+                                {rev.after_content != null && <button className="btn btn-secondary" onClick={() => restore(rev.id)}>Restore</button>}
+                            </div>
+                        );
+                    })}
                         </div>
                     </aside>
                 ) : treeOpen ? (
@@ -896,6 +1107,7 @@ export default function WorkspaceOperationPanel({
                             </div>
                         </div>
                         <div className="workspace-op-tree-list">
+                            {renderUploadRows(WORKSPACE_ROOT, 0)}
                             {fileTree.length ? renderFileTreeNodes(fileTree, 0) : <div className="workspace-op-tree-empty">No files yet.</div>}
                         </div>
                         <input

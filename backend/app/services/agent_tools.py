@@ -3783,13 +3783,26 @@ async def _convert_csv_to_xlsx(agent_id: uuid.UUID, ws: Path, arguments: dict) -
     try:
         import csv
         from openpyxl import Workbook
+
+        text = src_file.read_text(encoding="utf-8-sig")
+        lines = [line.strip() for line in text.splitlines() if line.strip()][:10]
+        candidates = [",", "，", ";", "\t", "|"]
+        delimiter = ","
+        if lines:
+            scores = {candidate: sum(line.count(candidate) for line in lines) for candidate in candidates}
+            if any(scores.values()):
+                delimiter = max(scores, key=scores.get)
         
         wb = Workbook()
         ws_sheet = wb.active
         with src_file.open("r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.reader(f)
+            reader = csv.reader(f, delimiter=delimiter)
             for row in reader:
-                ws_sheet.append(row)
+                values = list(row)
+                while values and not str(values[-1] or "").strip():
+                    values.pop()
+                if values:
+                    ws_sheet.append(values)
         
         tgt_file.parent.mkdir(parents=True, exist_ok=True)
         wb.save(str(tgt_file))

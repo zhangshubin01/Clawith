@@ -22,6 +22,7 @@ from app.models.user import User
 from app.models.workspace import WorkspaceFileRevision
 from app.services.workspace_collaboration import (
     acquire_edit_lock,
+    content_hash,
     list_revisions,
     read_text_if_exists,
     record_revision,
@@ -194,6 +195,31 @@ def _extract_document_text(target: Path, kind: str) -> str:
     return ""
 
 
+def _detect_csv_delimiter(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()][:10]
+    if not lines:
+        return ","
+    candidates = [",", "，", ";", "\t", "|"]
+    scores = {
+        candidate: sum(line.count(candidate) for line in lines)
+        for candidate in candidates
+    }
+    return max(scores, key=scores.get) if any(scores.values()) else ","
+
+
+def _parse_csv_rows(text: str) -> list[list[str]]:
+    delimiter = _detect_csv_delimiter(text)
+    rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    normalized: list[list[str]] = []
+    for row in rows[:500]:
+        values = list(row)
+        while values and not str(values[-1] or "").strip():
+            values.pop()
+        if values:
+            normalized.append(values)
+    return normalized
+
+
 @router.get("/preview")
 async def preview_file(
     agent_id: uuid.UUID,
@@ -218,16 +244,18 @@ async def preview_file(
             "kind": kind,
             "mime_type": mime_type,
             "content": content or "",
+            "content_hash": content_hash(content or ""),
             "download_url": download_url,
         }
     if kind == "csv":
         content = await read_text_if_exists(target) or ""
-        rows = list(csv.reader(io.StringIO(content)))
+        rows = _parse_csv_rows(content)
         return {
             "path": path,
             "kind": kind,
             "mime_type": mime_type,
             "content": content,
+            "content_hash": content_hash(content),
             "rows": rows[:500],
             "download_url": download_url,
         }
@@ -249,6 +277,8 @@ async def preview_file(
                 rows = []
                 for row in ws.iter_rows(max_row=120, max_col=30, values_only=True):
                     values = ["" if cell is None else str(cell) for cell in row]
+                    while values and not str(values[-1] or "").strip():
+                        values.pop()
                     if any(value.strip() for value in values):
                         rows.append(values)
                 sheets.append({

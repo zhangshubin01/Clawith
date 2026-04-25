@@ -2169,6 +2169,26 @@ select:focus {
   font-weight: 600;
 }
 
+.workspace-op-tree-dir.active,
+.workspace-op-tree-file.active {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.workspace-op-tree-dir-main {
+  min-width: 0;
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
 .workspace-op-tree-file {
   font-weight: 400;
   color: var(--text-secondary);
@@ -2176,11 +2196,6 @@ select:focus {
 
 .workspace-op-tree-dir:hover,
 .workspace-op-tree-file:hover {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-}
-
-.workspace-op-tree-file.active {
   background: var(--bg-tertiary);
   color: var(--text-primary);
 }
@@ -2206,6 +2221,68 @@ select:focus {
   padding: 12px;
   color: var(--text-tertiary);
   font-size: 12px;
+}
+
+.workspace-op-tree-upload {
+  margin: 4px 0;
+  padding: 8px 10px 8px 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-tertiary) 68%, transparent);
+}
+
+.workspace-op-tree-upload-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.workspace-op-tree-upload-name {
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-op-tree-upload-status {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.workspace-op-tree-upload-bar {
+  width: 100%;
+  height: 4px;
+  margin-top: 6px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+
+.workspace-op-tree-upload-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--info);
+  transition: width var(--transition-default);
+}
+
+.workspace-op-tree-upload.processing .workspace-op-tree-upload-bar span {
+  background: var(--warning);
+}
+
+.workspace-op-tree-upload.done .workspace-op-tree-upload-bar span {
+  background: var(--success);
+}
+
+.workspace-op-tree-upload-error {
+  margin-top: 6px;
+  color: var(--error);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .workspace-op-main {
@@ -2444,12 +2521,16 @@ select:focus {
   min-width: 100%;
   border-collapse: collapse;
   font-size: 13px;
+  table-layout: auto;
 }
 
 .workspace-op-table thead th {
   background: color-mix(in srgb, var(--bg-tertiary) 92%, transparent);
   color: var(--text-primary);
   font-weight: 700;
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .workspace-op-table td,
@@ -2458,6 +2539,15 @@ select:focus {
   border-right: 1px solid var(--border-subtle);
   border-bottom: 1px solid var(--border-subtle);
   white-space: nowrap;
+}
+
+.workspace-op-table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--bg-primary) 84%, var(--bg-tertiary));
+}
+
+.workspace-op-table td:empty::after,
+.workspace-op-table th:empty::after {
+  content: " ";
 }
 
 .workspace-op-table tr:last-child td {
@@ -2570,6 +2660,10 @@ select:focus {
   font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
+}
+
+.workspace-op-revision-note {
+  color: var(--text-secondary);
 }
 
 /* Collapsed toggle button (shown on the right edge) */
@@ -3311,6 +3405,7 @@ select:focus {
   background: var(--bg-black-10);
 }
 
+.workspace-op-tree-dir:hover .workspace-op-tree-file-delete,
 .workspace-op-tree-file:hover .workspace-op-tree-file-delete {
   display: flex;
 }
