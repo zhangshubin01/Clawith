@@ -2133,6 +2133,9 @@ function AgentDetailInner() {
     const handleWorkspaceToggleLock = useCallback(() => {
         setWorkspaceLockedPath((current) => current ? null : workspaceActivePath);
     }, [workspaceActivePath]);
+    const handleWorkspaceEditingChange = useCallback((editing: boolean) => {
+        workspaceEditingRef.current = editing;
+    }, []);
 
     // Settings form local state
     const [settingsForm, setSettingsForm] = useState({
@@ -5371,9 +5374,7 @@ function AgentDetailInner() {
                                     workspaceLocked={workspacePreviewLocked}
                                     onWorkspaceSelectPath={handleWorkspaceSelectPath}
                                     onWorkspaceToggleLock={handleWorkspaceToggleLock}
-                                    onWorkspaceEditingChange={(editing) => {
-                                        workspaceEditingRef.current = editing;
-                                    }}
+                                    onWorkspaceEditingChange={handleWorkspaceEditingChange}
                                     onWorkspacePathDeleted={handleWorkspacePathDeleted}
                                     agentId={id}
                                     sessionId={wsSessionId}
