@@ -153,9 +153,16 @@ async def lsp4j_websocket_endpoint(
 
     try:
         # 4. 消息循环
+        # ★ 使用 create_task 并发处理每条消息，避免串行等待导致死锁：
+        #    chat/ask 的 call_llm 会 await tool_future，而 tool/invokeResult
+        #    需要消息循环读取才能 resolve Future。如果串行 await route()，
+        #    消息循环被 chat/ask 阻塞，tool/invokeResult 无法被处理 → 死锁。
+        _ws_tasks: set[asyncio.Task] = set()
         while True:
             raw_data = await websocket.receive_text()
-            await jsonrpc.route(raw_data)
+            t = asyncio.create_task(jsonrpc.route(raw_data))
+            _ws_tasks.add(t)
+            t.add_done_callback(_ws_tasks.discard)
     except WebSocketDisconnect:
         logger.info("[LSP4J-LIFE] WS disconnected agent_id={}", agent_obj.id)
     except Exception as e:

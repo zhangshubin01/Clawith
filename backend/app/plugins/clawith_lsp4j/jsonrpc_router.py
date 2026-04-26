@@ -347,6 +347,8 @@ class JSONRPCRouter:
         # 1. 判断是否为 JSON-RPC 响应（client 响应 server 的请求如 tool/invoke）
         if "id" in msg and "method" not in msg and ("result" in msg or "error" in msg):
             if "method" not in msg:
+                logger.info("[LSP4J ←] response: id={} has_result={} has_error={}",
+                             msg.get("id"), "result" in msg, "error" in msg)
                 await self._handle_response(msg)
                 return
 
@@ -498,6 +500,7 @@ class JSONRPCRouter:
         async with self._chat_lock:
             # 记录当前请求 ID（后续推送消息需要携带）
             self._current_request_id = request_id
+            _ask_start = time.monotonic()  # 计时起点
 
             # 设置 session_id
             if session_id:
@@ -511,6 +514,16 @@ class JSONRPCRouter:
 
             # 创建 cancel 事件
             self._cancel_event = asyncio.Event()
+
+            # ★ 立即返回 JSON-RPC 响应，避免 IDE 端 LSP4J 框架请求超时
+            # chat/ask 是 @JsonRequest，LSP4J 框架会等待响应；但 call_llm 可能运行数分钟，
+            # 所以必须先返回响应确认收到请求，后续内容通过通知推送。
+            # 这与 commitMsg/generate 的模式一致。
+            await self._send_response(msg_id, {
+                "isSuccess": True,
+                "requestId": request_id,
+                "status": "processing",
+            })
 
             # 1. 发送思考状态（ChatThinkingParams 格式）
             await self._send_chat_think(session_id, "思考中...", "start", request_id)
@@ -705,8 +718,8 @@ class JSONRPCRouter:
                 step="step_end", description="处理完成", status="done",
             )
 
-            logger.info("[LSP4J] chat/ask 处理完成: requestId={} cancelled={} reply_len={}",
-                         request_id, cancelled, len(reply))
+            logger.info("[LSP4J] chat/ask 处理完成: requestId={} cancelled={} reply_len={} elapsed={:.1f}s",
+                         request_id, cancelled, len(reply), time.monotonic() - _ask_start)
 
             # 5. 后台持久化
             if session_id and reply:
@@ -738,12 +751,8 @@ class JSONRPCRouter:
                 "REQUEST_FINISHED",
             )
 
-            # 7. 返回 JSON-RPC 响应 (兼容灵码 ChatAskResult 格式)
-            await self._send_response(msg_id, {
-                "isSuccess": True,
-                "requestId": request_id,
-                "status": finish_reason,
-            })
+            # 7. JSON-RPC 响应已在 call_llm 之前发送（避免 IDE 超时）
+            # 完成状态通过 chat/finish 通知传递
 
             self._current_request_id = None
 
@@ -795,7 +804,9 @@ class JSONRPCRouter:
         future = self._pending_tools.get(str(tool_call_id))
         if future and not future.done():
             # 异步工具结果日志
-            logger.info("[LSP4J-TOOL] invokeResult: toolCallId={} success={} name={}", tool_call_id, params.get("success", True), params.get("name"))
+            logger.info("[LSP4J-TOOL] invokeResult matched: toolCallId={} success={} name={} pending_count={}",
+                         tool_call_id[:8], params.get("success", True), params.get("name"),
+                         len(self._pending_tools))
             if params.get("success", True):
                 result = params.get("result", {})
                 # result 可能是 dict，需要转为 JSON 字符串
@@ -857,8 +868,9 @@ class JSONRPCRouter:
                     future.set_result(str(result))
         else:
             if future is None:
-                # 未匹配的响应
-                logger.warning("[LSP4J-TOOL] 收到未匹配的响应: id={}", msg_id)
+                # 未匹配的响应（可能是 tool/invoke 的 ack 响应，正常情况）
+                logger.debug("[LSP4J-TOOL] 收到未匹配的响应: id={} pending_responses={} pending_tools={}",
+                              msg_id, list(self._pending_responses.keys()), list(self._pending_tools.keys())[:3])
             elif future.done():
                 # Future 已完成，忽略响应
                 logger.debug("[LSP4J-TOOL] Future 已完成/不存在，忽略响应: id={}", msg_id)
@@ -957,6 +969,8 @@ class JSONRPCRouter:
         loop = asyncio.get_running_loop()
         tool_future: asyncio.Future = loop.create_future()
         self._pending_tools[tool_call_id] = tool_future
+        logger.info("[LSP4J-TOOL] Future registered: toolCallId={} pending_count={} waiting for invokeResult",
+                     tool_call_id[:8], len(self._pending_tools))
 
         # 发送 tool/invoke 请求（带 id，触发插件 @JsonRequest("invoke") 处理器）
         # 但不注册到 _pending_responses —— 插件的 ack 响应不是工具结果，
