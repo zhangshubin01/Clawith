@@ -920,7 +920,7 @@ class JSONRPCRouter:
     ) -> str:
         """通过 LSP4J 协议调用 IDE 端工具（异步模式）。
 
-        发送 tool/invoke 通知（ToolInvokeRequest 格式）：
+        发送 tool/invoke 请求（ToolInvokeRequest 格式）：
         - requestId: 请求 ID
         - toolCallId: 工具调用 ID（用于匹配结果）
         - name: 工具名称（**必须使用插件原生名称**，如 read_file，不是 ide_read_file）
@@ -930,18 +930,12 @@ class JSONRPCRouter:
         插件执行完成后通过 tool/invokeResult (@JsonRequest) 回传结果，
         由 _handle_tool_invoke_result 解析并 resolve Future。
 
-        注意：必须用通知（notification）而非请求（request）发送，
-        因为插件不保证对 tool/invoke 返回 JSON-RPC 响应，
-        而是通过独立的 tool/invokeResult 异步回传结果。
-        之前用 "async": false + _send_request 会导致 120s 超时。
-
-        Args:
-            tool_name: 插件原生工具名称（read_file, save_file 等）
-            arguments: 工具参数字典
-            timeout: 超时秒数（默认 60s，IDE 工具通常秒级完成）
-
-        Returns:
-            工具执行结果字符串
+        关键设计：必须以请求（带 id）发送，因为插件的 @JsonRequest("invoke")
+        只处理带 id 的 JSON-RPC 请求，不处理通知。但结果不通过 JSON-RPC 响应
+        返回，而是通过独立的 tool/invokeResult 异步回传。因此：
+        - 不将 rpc_id 注册到 _pending_responses（避免 ack 响应误 resolve Future）
+        - 只注册 toolCallId 到 _pending_tools（等待 invokeResult 回传真实结果）
+        - 插件的 ack 响应会被 _handle_response 静默忽略（无匹配 Future）
         """
         tool_call_id = str(uuid.uuid4())
         request_id = self._current_request_id or str(uuid.uuid4())
@@ -964,14 +958,21 @@ class JSONRPCRouter:
         tool_future: asyncio.Future = loop.create_future()
         self._pending_tools[tool_call_id] = tool_future
 
-        # 发送 tool/invoke 通知（不是请求，不期待 JSON-RPC 响应）
-        # 插件通过 tool/invokeResult 异步回传结果
-        await self._send_notification("tool/invoke", {
-            "requestId": request_id,
-            "toolCallId": tool_call_id,
-            "name": tool_name,         # 插件原生名称，不是 ide_ 前缀
-            "parameters": arguments,   # 不是 arguments 字段名，是 parameters
-            "async": True,             # 异步执行，结果通过 invokeResult 回传
+        # 发送 tool/invoke 请求（带 id，触发插件 @JsonRequest("invoke") 处理器）
+        # 但不注册到 _pending_responses —— 插件的 ack 响应不是工具结果，
+        # 真实结果通过 tool/invokeResult 异步回传
+        rpc_id = self._next_request_id()
+        await self._send_message({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "method": "tool/invoke",
+            "params": {
+                "requestId": request_id,
+                "toolCallId": tool_call_id,
+                "name": tool_name,         # 插件原生名称，不是 ide_ 前缀
+                "parameters": arguments,   # 不是 arguments 字段名，是 parameters
+                "async": True,             # 异步执行，结果通过 invokeResult 回传
+            },
         })
 
         # 等待异步结果
@@ -986,6 +987,10 @@ class JSONRPCRouter:
             return result
         except asyncio.TimeoutError:
             logger.warning("LSP4J: 工具调用超时 tool={} callId={}", tool_name, tool_call_id)
+            # 记录已取消的 RPC ID，防止迟达 ack 响应干扰日志
+            self._cancelled_requests[rpc_id] = None
+            if len(self._cancelled_requests) > self._MAX_CANCELLED_REQUESTS_SIZE:
+                self._cancelled_requests.pop(next(iter(self._cancelled_requests)))
             # 工具超时，发送 ERROR sync 通知
             await self._send_tool_call_sync(
                 self._session_id, request_id, tool_call_id,
