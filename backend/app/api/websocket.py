@@ -326,7 +326,7 @@ async def websocket_chat(
         else:
             entry = {"role": msg.role, "content": msg.content}
             if hasattr(msg, 'thinking') and msg.thinking:
-                entry["thinking"] = msg.thinking
+                entry["reasoning_content"] = msg.thinking
             conversation.append(entry)
 
     try:

@@ -35,16 +35,14 @@ async def list_agents_for_ide(
     # 获取所有智能体并过滤有权限的
     agent_result = await db.execute(select(Agent))
     agents = agent_result.scalars().all()
-    
+
     accessible_agents = []
     for agent in agents:
         try:
-            # 简单的权限检查：如果用户是平台管理员或智能体所有者，或者有明确的访问权限
-            # 这里简化处理，实际项目中可能需要更复杂的逻辑
-            if user.role == "platform_admin" or agent.owner_id == user_id:
-                accessible_agents.append(agent)
-            # 如果有更细粒度的权限表，应在此处查询
-        except Exception:
+            # 复用 check_agent_access 进行完整权限校验
+            await check_agent_access(db, user, agent.id)
+            accessible_agents.append(agent)
+        except HTTPException:
             continue
 
     return [

@@ -1,0 +1,10 @@
+{
+  "name": "clawith-lsp4j",
+  "version": "0.1.0",
+  "description": "LSP4J WebSocket bridge for Tongyi Lingma IDE plugin",
+  "author": "Clawith",
+  "min_clawith_version": "1.0.0",
+  "routes": [
+    {"path": "/ws", "methods": ["WS"], "description": "LSP4J WebSocket endpoint for Tongyi Lingma IDE"}
+  ]
+}

@@ -292,6 +292,7 @@ from app.api.websocket import router as ws_router
 from app.api.feishu import router as feishu_router
 from app.api.sso import router as sso_router
 from app.api.organization import router as org_router
+from app.api.ide_plugin import router as ide_plugin_router
 from app.api.enterprise import router as enterprise_router
 from app.api.advanced import router as advanced_router
 from app.api.upload import router as upload_router
@@ -364,6 +365,9 @@ app.include_router(pages_router, prefix=settings.API_PREFIX)
 app.include_router(pages_public_router)  # Public endpoint for /p/{short_id}, no API prefix
 app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
+
+# Register IDE Plugin API (used by Tongyi Lingma IDE plugin for agent listing)
+app.include_router(ide_plugin_router)
 
 # Register the IDE Bridge Plugin
 ide_bridge_plugin.register(app)

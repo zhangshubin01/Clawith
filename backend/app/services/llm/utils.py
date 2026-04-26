@@ -47,7 +47,15 @@ ANTHROPIC_API_PROVIDERS = {"anthropic"}
 
 
 def get_model_api_key(model: LLMModel) -> str:
-    """Decrypt the model's API key, with backward compatibility for plaintext keys."""
+    """Decrypt the model's API key, with backward compatibility for plaintext keys.
+
+    优先读取运行时密钥 _runtime_api_key（BYOK 场景），不入库、不写日志。
+    """
+    # 优先读取运行时密钥（LSP4J BYOK 场景，用户自带密钥不入库）
+    runtime_key = getattr(model, "_runtime_api_key", None)
+    if runtime_key:
+        return runtime_key
+
     raw = model.api_key_encrypted or ""
     if not raw:
         return ""

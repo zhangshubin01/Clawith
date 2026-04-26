@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
-from app.services.agent_tools import AGENT_TOOLS, execute_tool, get_agent_tools_for_llm
+from app.services import agent_tools
 from app.services.token_tracker import record_token_usage, extract_usage_tokens, estimate_tokens_from_chars
 
 from .client import LLMError
@@ -80,21 +80,55 @@ def is_retryable_error(result: str) -> bool:
     """Check if an error result is retryable.
 
     Uses unified classification from failover.py.
-    """
-    # Check for HTTP status codes that indicate retryable errors
-    result_lower = result.lower()
-    if any(code in result_lower for code in ["429", "500", "502", "503", "504", "rate limit", "too many requests"]):
-        return True
 
-    if not (result.startswith("[LLM Error]") or result.startswith("[LLM call error]") or result.startswith("[Error]")):
+    核心原则：先判断是否为错误，再判断是否可重试。
+    非错误响应（正常 LLM 回复）绝不应被分类为可重试。
+    """
+    result_lower = result.lower()
+    is_error = result.startswith("[LLM Error]") or result.startswith("[LLM call error]") or result.startswith("[Error]")
+
+    # 第一步：如果不是错误，直接返回 False
+    if not is_error:
         return False
 
+    # 第二步：已确认为错误，检查限流关键词
+    if any(kw in result_lower for kw in ["rate limit", "too many requests"]):
+        return True
+
+    # 第三步：已确认为错误，检查 HTTP 状态码
+    http_context_keywords = ["status", "code", "http", "error"]
+    for code in ["429", "500", "502", "503", "504"]:
+        idx = result_lower.find(code)
+        while idx != -1:
+            window = result_lower[max(0, idx - 30):idx + len(code) + 30]
+            if any(kw in window for kw in http_context_keywords):
+                return True
+            idx = result_lower.find(code, idx + 1)
+
+    # 第四步：使用分类器判断
     return classify_error(Exception(result)) != FailoverErrorType.NON_RETRYABLE
 
 
 def _get_model_timeout(model: "LLMModel") -> float:
     """Return the effective request timeout for a model."""
     return float(getattr(model, "request_timeout", None) or 120.0)
+
+
+def _get_thinking_kwargs(model: "LLMModel") -> dict:
+    """DeepSeek V4 思考模式参数检测。
+
+    DeepSeek V4（deepseek-v4-pro / deepseek-v4-flash）需要显式传入
+    thinking={"type": "enabled"} 开启思考模式，否则 API 返回 400 错误。
+    参考：https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+
+    Returns:
+        如果是 DeepSeek V4 模型，返回 {"thinking": {"type": "enabled"}}；
+        否则返回空字典，不影响其他模型。
+    """
+    model_name = getattr(model, 'model', '') or ''
+    if 'deepseek-v4' in model_name or 'deepseek_v4' in model_name:
+        return {"thinking": {"type": "enabled"}}
+    return {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -238,7 +272,7 @@ async def _process_tool_call(
             pass
 
     # Execute tool
-    result = await execute_tool(
+    result = await agent_tools.execute_tool(
         tool_name, args,
         agent_id=agent_id,
         user_id=user_id or agent_id,
@@ -300,8 +334,13 @@ async def call_llm(
     on_thinking=None,
     supports_vision=False,
     max_tool_rounds_override: int | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> str:
-    """Call LLM via unified client with function-calling tool loop."""
+    """Call LLM via unified client with function-calling tool loop.
+
+    Args:
+        cancel_event: 可选的取消事件，设置后中断工具循环和流式输出（用于 chat/stop）。
+    """
     # Get agent config for tool rounds
     _max_tool_rounds, _token_limit_msg = await _get_agent_config(agent_id)
     if _token_limit_msg:
@@ -318,7 +357,7 @@ async def call_llm(
     static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_user_name)
 
     # Load tools dynamically from DB
-    tools_for_llm = await get_agent_tools_for_llm(agent_id) if agent_id else AGENT_TOOLS
+    tools_for_llm = await agent_tools.get_agent_tools_for_llm(agent_id) if agent_id else agent_tools.AGENT_TOOLS
 
     # Convert messages to LLMMessage format
     api_messages = [LLMMessage(role="system", content=static_prompt, dynamic_content=dynamic_prompt)]
@@ -328,6 +367,7 @@ async def call_llm(
             content=msg.get("content"),
             tool_calls=msg.get("tool_calls"),
             tool_call_id=msg.get("tool_call_id"),
+            reasoning_content=msg.get("reasoning_content"),
         ))
 
     # Vision format conversion
@@ -350,6 +390,10 @@ async def call_llm(
 
     # Tool-calling loop
     for round_i in range(_max_tool_rounds):
+        # 取消检查：若 cancel_event 已设置，立即中断工具循环
+        if cancel_event and cancel_event.is_set():
+            logger.info("[LLM] cancel_event 已设置，中断工具循环（round={}）", round_i)
+            break
         # Dynamic tool-call limit warning
         _warn_threshold_80 = int(_max_tool_rounds * 0.8)
         _warn_threshold_96 = _max_tool_rounds - 2
@@ -369,6 +413,9 @@ async def call_llm(
             ))
 
         try:
+            # DeepSeek V4 思考模式参数
+            _thinking_kwargs = _get_thinking_kwargs(model)
+
             # Use streaming API for real-time responses
             response = await client.stream(
                 messages=api_messages,
@@ -377,6 +424,8 @@ async def call_llm(
                 max_tokens=max_tokens,
                 on_chunk=on_chunk,
                 on_thinking=on_thinking,
+                cancel_event=cancel_event,
+                **_thinking_kwargs,
             )
         except LLMError as e:
             logger.error(f"[LLM] LLMError: provider={getattr(model, 'provider', '?')} model={getattr(model, 'model', '?')} {e}")
@@ -437,6 +486,9 @@ async def call_llm(
 
         # Execute read-only tools in parallel
         if readonly_calls:
+            # 取消检查：readonly 并行执行前
+            if cancel_event and cancel_event.is_set():
+                break
             async def _process_readonly(tc):
                 return await _process_tool_call(
                     tc=tc, api_messages=api_messages, agent_id=agent_id, user_id=user_id,
@@ -451,6 +503,9 @@ async def call_llm(
                     api_messages.append(LLMMessage(role="tool", content=result, tool_call_id=tc.get("id", "")))
 
         # Execute write tools serially (preserve order guarantee)
+        # 取消检查：write 串行执行前
+        if cancel_event and cancel_event.is_set():
+            break
         for tc in write_calls:
             tool_error = await _process_tool_call(
                 tc=tc,
@@ -490,8 +545,13 @@ async def call_llm_with_failover(
     on_tool_call=None,
     supports_vision=False,
     on_failover=None,
+    cancel_event: asyncio.Event | None = None,
 ) -> str:
-    """Call LLM with automatic failover support."""
+    """Call LLM with automatic failover support.
+
+    Args:
+        cancel_event: 可选的取消事件，透传至 call_llm。
+    """
     guard = FailoverGuard()
 
     # Config-level fallback: if no primary, use fallback directly
@@ -528,10 +588,16 @@ async def call_llm_with_failover(
         on_tool_call=_wrapped_on_tool_call,
         on_thinking=on_thinking,
         supports_vision=supports_vision,
+        cancel_event=cancel_event,
     )
 
     # Check if we need to failover
     if not is_retryable_error(primary_result):
+        # 区分正常回复和真正的非重试错误
+        is_error = primary_result.startswith("[LLM Error]") or primary_result.startswith("[LLM call error]") or primary_result.startswith("[Error]")
+        if not is_error:
+            # 正常回复，不需要 failover，不打 WARNING
+            return primary_result
         logger.warning(f"[Failover] Canceled: Primary model returned a non-retryable error: {primary_result[:150]}")
         return primary_result
 
@@ -588,6 +654,7 @@ async def call_llm_with_failover(
         on_tool_call=_fallback_on_tool_call,
         on_thinking=on_thinking,
         supports_vision=getattr(fallback_model, 'supports_vision', False),
+        cancel_event=cancel_event,
     )
 
     # Combine error messages if fallback also failed
@@ -719,7 +786,7 @@ async def call_agent_llm_with_tools(
     ]
 
     # Load tools
-    tools_for_llm = await get_agent_tools_for_llm(agent_id)
+    tools_for_llm = await agent_tools.get_agent_tools_for_llm(agent_id)
 
     async def _try_model(model: LLMModel) -> tuple[str, bool, bool]:
         """Try to complete with a model. Returns (response, success, tool_executed)."""
@@ -739,6 +806,9 @@ async def call_agent_llm_with_tools(
                 getattr(model, 'max_output_tokens', None)
             )
 
+            # DeepSeek V4 思考模式参数
+            _thinking_kwargs = _get_thinking_kwargs(model)
+
             # Tool-calling loop
             api_messages = list(messages)
             for round_i in range(max_rounds):
@@ -748,6 +818,7 @@ async def call_agent_llm_with_tools(
                         tools=tools_for_llm if tools_for_llm else None,
                         temperature=model.temperature,
                         max_tokens=max_tokens,
+                        **_thinking_kwargs,
                     )
                 except Exception as e:
                     logger.error(f"[call_agent_llm_with_tools] Agent {agent_id}: LLM call error: {e}")
@@ -792,7 +863,7 @@ async def call_agent_llm_with_tools(
                         args = {}
 
                     tool_executed = True
-                    result = await execute_tool(
+                    result = await agent_tools.execute_tool(
                         tool_name, args,
                         agent_id=agent_id,
                         user_id=agent.creator_id,
