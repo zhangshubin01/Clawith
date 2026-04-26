@@ -817,7 +817,7 @@ class JSONRPCRouter:
     async def _handle_response(self, msg: dict) -> None:
         """处理 JSON-RPC 响应 — 同步工具执行结果回传。
 
-        当 tool/invoke 的 async=false 时，工具结果通过 JSON-RPC 响应返回。
+        当 tool/invoke 的 async=false 时（旧路径，已弃用），工具结果通过 JSON-RPC 响应返回。
         """
         msg_id = msg.get("id")
         if msg_id is None:
@@ -918,19 +918,27 @@ class JSONRPCRouter:
     async def invoke_tool_on_ide(
         self, tool_name: str, arguments: dict, timeout: float = 120.0
     ) -> str:
-        """通过 LSP4J 协议调用 IDE 端工具。
+        """通过 LSP4J 协议调用 IDE 端工具（异步模式）。
 
-        发送 tool/invoke 请求（ToolInvokeRequest 格式）：
+        发送 tool/invoke 通知（ToolInvokeRequest 格式）：
         - requestId: 请求 ID
         - toolCallId: 工具调用 ID（用于匹配结果）
         - name: 工具名称（**必须使用插件原生名称**，如 read_file，不是 ide_read_file）
         - parameters: 工具参数（**不是 arguments**）
-        - async: false（同步执行，结果通过 JSON-RPC 响应返回）
+        - async: true（异步执行，结果通过 tool/invokeResult 回传）
+
+        插件执行完成后通过 tool/invokeResult (@JsonRequest) 回传结果，
+        由 _handle_tool_invoke_result 解析并 resolve Future。
+
+        注意：必须用通知（notification）而非请求（request）发送，
+        因为插件不保证对 tool/invoke 返回 JSON-RPC 响应，
+        而是通过独立的 tool/invokeResult 异步回传结果。
+        之前用 "async": false + _send_request 会导致 120s 超时。
 
         Args:
             tool_name: 插件原生工具名称（read_file, save_file 等）
             arguments: 工具参数字典
-            timeout: 超时秒数（默认 120s）
+            timeout: 超时秒数（默认 60s，IDE 工具通常秒级完成）
 
         Returns:
             工具执行结果字符串
@@ -951,29 +959,22 @@ class JSONRPCRouter:
             "RUNNING", tool_name=tool_name, parameters=arguments,
         )
 
-        # 创建 Future 等待结果
+        # 创建 Future 等待异步结果（通过 tool/invokeResult 回传）
         loop = asyncio.get_running_loop()
         tool_future: asyncio.Future = loop.create_future()
         self._pending_tools[tool_call_id] = tool_future
 
-        # 同时注册到 pending_responses（同步路径）
-        rpc_id = self._next_request_id()
-        self._pending_responses[rpc_id] = tool_future
+        # 发送 tool/invoke 通知（不是请求，不期待 JSON-RPC 响应）
+        # 插件通过 tool/invokeResult 异步回传结果
+        await self._send_notification("tool/invoke", {
+            "requestId": request_id,
+            "toolCallId": tool_call_id,
+            "name": tool_name,         # 插件原生名称，不是 ide_ 前缀
+            "parameters": arguments,   # 不是 arguments 字段名，是 parameters
+            "async": True,             # 异步执行，结果通过 invokeResult 回传
+        })
 
-        # 发送 tool/invoke 请求（ToolInvokeRequest 格式）
-        await self._send_request(
-            "tool/invoke",
-            {
-                "requestId": request_id,
-                "toolCallId": tool_call_id,
-                "name": tool_name,         # 插件原生名称，不是 ide_ 前缀
-                "parameters": arguments,   # 不是 arguments 字段名，是 parameters
-                "async": False,            # 同步执行
-            },
-            rpc_id,
-        )
-
-        # 等待结果
+        # 等待异步结果
         try:
             result = await asyncio.wait_for(tool_future, timeout=timeout)
             # 工具执行完成，发送 FINISHED sync 通知
@@ -985,11 +986,6 @@ class JSONRPCRouter:
             return result
         except asyncio.TimeoutError:
             logger.warning("LSP4J: 工具调用超时 tool={} callId={}", tool_name, tool_call_id)
-            # 记录已取消的 RPC ID，防止迟达响应干扰
-            if len(self._cancelled_requests) >= self._MAX_CANCELLED_REQUESTS_SIZE:
-                # FIFO 清理最旧的记录
-                self._cancelled_requests.pop(next(iter(self._cancelled_requests)))
-            self._cancelled_requests[rpc_id] = None
             # 工具超时，发送 ERROR sync 通知
             await self._send_tool_call_sync(
                 self._session_id, request_id, tool_call_id,
@@ -998,7 +994,6 @@ class JSONRPCRouter:
             return f"[超时] 工具 {tool_name} 执行超时（{timeout}s）"
         finally:
             self._pending_tools.pop(tool_call_id, None)
-            self._pending_responses.pop(rpc_id, None)
 
     # ──────────────────────────────────────────
     # 消息发送方法（严格匹配插件协议字段）
