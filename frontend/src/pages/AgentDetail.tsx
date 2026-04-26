@@ -1140,12 +1140,14 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
     }, [getHumanMemberSourceLabel]);
 
     const [search, setSearch] = useState('');
+    const [showHumanForm, setShowHumanForm] = useState(false);
     const [searchResults, setSearchResults] = useState<any[]>([]);
     const [showMemberDropdown, setShowMemberDropdown] = useState(false);
     const [selectedMembers, setSelectedMembers] = useState<any[]>([]);
     const [relation, setRelation] = useState('collaborator');
     const [description, setDescription] = useState('');
     const [agentSearch, setAgentSearch] = useState('');
+    const [showAgentForm, setShowAgentForm] = useState(false);
     const [agentSearchResults, setAgentSearchResults] = useState<any[]>([]);
     const [showAgentDropdown, setShowAgentDropdown] = useState(false);
     const [selectedAgents, setSelectedAgents] = useState<any[]>([]);
@@ -1227,6 +1229,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
     }, [showMemberDropdown, showAgentDropdown]);
 
     const resetHumanDraft = () => {
+        setShowHumanForm(false);
         setSearch('');
         setSearchResults([]);
         setShowMemberDropdown(false);
@@ -1236,6 +1239,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
     };
 
     const resetAgentDraft = () => {
+        setShowAgentForm(false);
         setAgentSearch('');
         setAgentSearchResults([]);
         setShowAgentDropdown(false);
@@ -1403,8 +1407,21 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                         ))}
                     </div>
                 )}
-                {!readOnly && (
-                    <div style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}>
+                {!readOnly && !showHumanForm && (
+                    <button className="btn btn-secondary" type="button" onClick={() => setShowHumanForm(true)}>
+                        {t('agent.detail.addRelationship', 'Add Relationship')}
+                    </button>
+                )}
+                {!readOnly && showHumanForm && (
+                    <div
+                        style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}
+                        onMouseDownCapture={(e) => {
+                            const target = e.target as Node;
+                            if (humanSearchRef.current && !humanSearchRef.current.contains(target)) {
+                                setShowMemberDropdown(false);
+                            }
+                        }}
+                    >
                         <div ref={humanSearchRef} style={{ position: 'relative', marginBottom: '8px' }}>
                             <input
                                 className="input"
@@ -1451,11 +1468,30 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                             </div>
                         )}
                         {selectedMembers.length > 0 && (
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '8px' }}>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginBottom: '10px' }}>
                                 {selectedMembers.map((member: any) => (
-                                    <div key={member.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', border: '1px solid var(--border-subtle)', borderRadius: '999px', padding: '6px 10px', background: 'var(--bg-primary)', fontSize: '12px' }}>
-                                        <span>{member.name}</span>
-                                        <button className="btn btn-ghost" type="button" style={{ fontSize: '11px', padding: 0, minWidth: 'auto' }} onClick={() => toggleMemberSelection(member)}>×</button>
+                                    <div
+                                        key={member.id}
+                                        style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            border: '1px solid var(--border-subtle)',
+                                            borderRadius: '10px',
+                                            padding: '8px 10px',
+                                            background: 'var(--bg-primary)',
+                                            fontSize: '12px',
+                                            lineHeight: 1.2,
+                                        }}
+                                    >
+                                        <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'var(--bg-tertiary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '11px', flexShrink: 0 }}>
+                                            {member.name?.[0] || '?'}
+                                        </div>
+                                        <div style={{ minWidth: 0 }}>
+                                            <div style={{ fontWeight: 600 }}>{member.name}</div>
+                                            <div style={{ color: 'var(--text-tertiary)', fontSize: '11px' }}>{member.department_path || member.email || ''}</div>
+                                        </div>
+                                        <button className="btn btn-ghost" type="button" style={{ fontSize: '12px', padding: 0, minWidth: 'auto', marginLeft: '2px' }} onClick={() => toggleMemberSelection(member)}>×</button>
                                     </div>
                                 ))}
                             </div>
@@ -1529,8 +1565,21 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                         ))}
                     </div>
                 )}
-                {!readOnly && (
-                    <div style={{ border: '1px solid rgba(16,185,129,0.3)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}>
+                {!readOnly && !showAgentForm && (
+                    <button className="btn btn-secondary" type="button" onClick={() => setShowAgentForm(true)}>
+                        {t('agent.detail.addRelationship', 'Add Relationship')}
+                    </button>
+                )}
+                {!readOnly && showAgentForm && (
+                    <div
+                        style={{ border: '1px solid rgba(16,185,129,0.3)', borderRadius: '8px', padding: '12px', background: 'var(--bg-elevated)' }}
+                        onMouseDownCapture={(e) => {
+                            const target = e.target as Node;
+                            if (agentSearchRef.current && !agentSearchRef.current.contains(target)) {
+                                setShowAgentDropdown(false);
+                            }
+                        }}
+                    >
                         <div ref={agentSearchRef} style={{ position: 'relative', marginBottom: '8px' }}>
                             <input
                                 className="input"
@@ -1574,11 +1623,30 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
                             </div>
                         )}
                         {selectedAgents.length > 0 && (
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '8px' }}>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginBottom: '10px' }}>
                                 {selectedAgents.map((agent: any) => (
-                                    <div key={agent.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '999px', padding: '6px 10px', background: 'var(--bg-primary)', fontSize: '12px' }}>
-                                        <span>{agent.name}</span>
-                                        <button className="btn btn-ghost" type="button" style={{ fontSize: '11px', padding: 0, minWidth: 'auto' }} onClick={() => toggleAgentSelection(agent)}>×</button>
+                                    <div
+                                        key={agent.id}
+                                        style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            border: '1px solid rgba(16,185,129,0.24)',
+                                            borderRadius: '10px',
+                                            padding: '8px 10px',
+                                            background: 'var(--bg-primary)',
+                                            fontSize: '12px',
+                                            lineHeight: 1.2,
+                                        }}
+                                    >
+                                        <div style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'rgba(16,185,129,0.12)', color: 'rgb(16,185,129)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '11px', flexShrink: 0 }}>
+                                            {agent.name?.[0] || 'A'}
+                                        </div>
+                                        <div style={{ minWidth: 0 }}>
+                                            <div style={{ fontWeight: 600 }}>{agent.name}</div>
+                                            <div style={{ color: 'var(--text-tertiary)', fontSize: '11px' }}>{agent.role_description || 'Agent'}</div>
+                                        </div>
+                                        <button className="btn btn-ghost" type="button" style={{ fontSize: '12px', padding: 0, minWidth: 'auto', marginLeft: '2px' }} onClick={() => toggleAgentSelection(agent)}>×</button>
                                     </div>
                                 ))}
                             </div>
