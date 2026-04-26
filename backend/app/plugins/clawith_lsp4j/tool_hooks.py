@@ -33,18 +33,21 @@ from .context import current_lsp4j_ws
 # ──────────────────────────────────────────────
 
 # 插件识别这些工具名，不支持 ide_ 前缀
-# add_tasks: 灵码插件原生支持（ToolTypeEnum.java:56），AddTasksToolDetailPanel 渲染任务树
+# 参数名必须严格匹配插件 ToolHandler 的取值逻辑：
+#   read_file / save_file → file_path（snake_case，用 getRequestFilePathWithUnderLine）
+#   replace_text_by_path / create_file_with_text / delete_file_by_path → filePath（camelCase，用 getRequestFilePath）
+#   replace_text_by_path → text（非 oldText/newText，插件直接替换整个文档内容）
 _LSP4J_IDE_TOOL_NAMES = frozenset(
     {
-        "read_file",             # 读取文件（对应 ACP ide_read_file）
-        "save_file",             # 保存文件（对应 ACP ide_write_file）
-        "run_in_terminal",       # 执行终端命令（对应 ACP ide_execute_command）
-        "get_terminal_output",   # 获取终端输出（对应 ACP ide_terminal_output）
-        "replace_text_by_path",  # 文本替换（插件独有）
-        "create_file_with_text", # 创建文件（对应 ACP ide_mkdir，语义不同）
-        "delete_file_by_path",   # 删除文件（对应 ACP delete_file）
-        "get_problems",          # 获取代码问题（插件独有）
-        "add_tasks",             # 任务规划工具（灵码 AddTasksToolDetailPanel 渲染任务树）
+        "read_file",             # 读取文件（file_path）
+        "save_file",             # 保存文件（file_path）
+        "run_in_terminal",       # 执行终端命令（command, workDirectory?）
+        "get_terminal_output",   # 获取终端输出（terminalId?）
+        "replace_text_by_path",  # 文本替换（filePath, text）
+        "create_file_with_text", # 创建文件（filePath, content）
+        "delete_file_by_path",   # 删除文件（filePath）
+        "get_problems",          # 获取代码问题（filePath?）
+        "add_tasks",             # 任务规划工具
     }
 )
 
@@ -63,12 +66,12 @@ _LSP4J_IDE_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filePath": {
+                    "file_path": {
                         "type": "string",
-                        "description": "文件的绝对路径或相对路径",
+                        "description": "文件的绝对路径",
                     },
                 },
-                "required": ["filePath"],
+                "required": ["file_path"],
             },
         },
     },
@@ -80,7 +83,7 @@ _LSP4J_IDE_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filePath": {
+                    "file_path": {
                         "type": "string",
                         "description": "要保存的文件路径",
                     },
@@ -89,7 +92,7 @@ _LSP4J_IDE_TOOLS = [
                         "description": "要写入的文件内容",
                     },
                 },
-                "required": ["filePath", "content"],
+                "required": ["file_path", "content"],
             },
         },
     },
@@ -135,7 +138,7 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "replace_text_by_path",
-            "description": "替换文件中的指定文本内容。",
+            "description": "替换文件内容为指定文本（全文替换）。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -143,16 +146,12 @@ _LSP4J_IDE_TOOLS = [
                         "type": "string",
                         "description": "文件路径",
                     },
-                    "oldText": {
+                    "text": {
                         "type": "string",
-                        "description": "要替换的原始文本",
-                    },
-                    "newText": {
-                        "type": "string",
-                        "description": "替换后的新文本",
+                        "description": "替换后的完整文件内容（Java 转义序列会自动反转义）",
                     },
                 },
-                "required": ["filePath", "oldText", "newText"],
+                "required": ["filePath", "text"],
             },
         },
     },
