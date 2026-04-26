@@ -867,6 +867,21 @@ class JSONRPCRouter:
     # 工具调用编排（server → client）
     # ──────────────────────────────────────────
 
+    @staticmethod
+    def _wrap_results(results: list[dict] | str | None) -> list[dict]:
+        """将 results 转换为 LSP 契约要求的 List<Map<String, Object>> 格式。
+
+        LSP 模型 ToolCallSyncResult.results 定义为 List<Map<String, Object>>，
+        即数组中每个元素必须是 JSON 对象，不能是裸字符串。
+        """
+        if not results:
+            return []
+        if isinstance(results, list):
+            # 过滤掉非 dict 元素，确保每个元素都是 Map<String, Object>
+            return [r for r in results if isinstance(r, dict)]
+        # 字符串结果包装为标准对象
+        return [{"content": results[:500]}]
+
     async def _send_tool_call_sync(
         self,
         session_id: str | None,
@@ -875,7 +890,7 @@ class JSONRPCRouter:
         tool_call_status: str,
         tool_name: str = "",
         parameters: dict | None = None,
-        results: str = "",
+        results: list[dict] | str | None = None,
         error_code: str = "",
         error_msg: str = "",
     ) -> None:
@@ -884,6 +899,9 @@ class JSONRPCRouter:
         插件收到后会在聊天面板渲染工具卡片。
         状态取值参考 ToolCallStatusEnum：
         INIT, PENDING, RUNNING, FINISHED, ERROR, CANCELLED, REQUEST_FINISHED
+
+        注意：results 必须为 List<Map<String, Object>> 格式，
+        由 _wrap_results 自动将字符串结果包装为 [{"content": "..."}]。
         """
         await self._send_notification("tool/call/sync", {
             "sessionId": session_id or "",
@@ -892,7 +910,7 @@ class JSONRPCRouter:
             "toolCallId": tool_call_id,
             "toolCallStatus": tool_call_status,
             "parameters": parameters or {},
-            "results": results,
+            "results": self._wrap_results(results),
             "errorCode": error_code,
             "errorMsg": error_msg,
         })
@@ -959,9 +977,10 @@ class JSONRPCRouter:
         try:
             result = await asyncio.wait_for(tool_future, timeout=timeout)
             # 工具执行完成，发送 FINISHED sync 通知
+            # results 字符串由 _wrap_results 自动包装为 [{"content": "..."}]
             await self._send_tool_call_sync(
                 self._session_id, request_id, tool_call_id,
-                "FINISHED", tool_name=tool_name, results=result[:500] if result else "",
+                "FINISHED", tool_name=tool_name, results=result[:500] if result else None,
             )
             return result
         except asyncio.TimeoutError:
