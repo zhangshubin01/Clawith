@@ -46,10 +46,26 @@ _LSP4J_IDE_TOOL_NAMES = frozenset(
         "replace_text_by_path",  # 文本替换（filePath, text）
         "create_file_with_text", # 创建文件（filePath, content）
         "delete_file_by_path",   # 删除文件（filePath）
-        "get_problems",          # 获取代码问题（filePath?）
-        "add_tasks",             # 任务规划工具
+        "get_problems",          # 获取代码问题（filePaths，复数数组）
     }
 )
+
+# ★ 基础工具名 → 插件原生名的映射
+# LLM 可能调用基础工具名（如 edit_file），需映射为插件 ToolInvokeProcessor 识别的名称
+# 反向映射不存在：插件原生名称（如 replace_text_by_path）不需要映射回来
+_TOOL_NAME_MAP = {
+    "edit_file": "replace_text_by_path",    # 全文替换（非 diff）
+    "create_file": "create_file_with_text", # 创建文件（LLM 可能用此名称调用）
+    "write_file": "create_file_with_text",  # 创建文件（基础工具注册名）
+    "delete_file": "delete_file_by_path",   # 删除文件
+}
+
+# ★ 基础工具中与 IDE 工具重名/重叠的名称，LSP4J 活跃时需过滤
+# 避免向 LLM 注册两套同名工具（基础版 + IDE 版），只保留 IDE 版
+_LSP4J_OVERLAP_BASE_TOOL_NAMES = frozenset({
+    "edit_file", "write_file", "delete_file",
+    "search_files", "find_files",
+})
 
 # ──────────────────────────────────────────────
 # LSP4J IDE 工具定义（OpenAI function-calling 格式）
@@ -201,51 +217,13 @@ _LSP4J_IDE_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "filePath": {
-                        "type": "string",
-                        "description": "文件路径（可选，不传则获取项目级别问题）",
+                    "filePaths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "文件路径列表（可选，不传则获取项目级别问题）",
                     },
                 },
                 "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "add_tasks",
-            "description": "创建多步骤任务计划。灵码插件会渲染为可视化的任务树 UI。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "tasks": {
-                        "type": "array",
-                        "description": "任务列表",
-                        "maxItems": 50,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": {
-                                    "type": "string",
-                                    "description": "任务标题",
-                                    "maxLength": 200,
-                                },
-                                "description": {
-                                    "type": "string",
-                                    "description": "任务描述",
-                                    "maxLength": 2000,
-                                },
-                                "status": {
-                                    "type": "string",
-                                    "description": "任务状态: pending/in_progress/completed",
-                                    "enum": ["pending", "in_progress", "completed"],
-                                },
-                            },
-                            "required": ["title"],
-                        },
-                    },
-                },
-                "required": ["tasks"],
             },
         },
     },
@@ -293,6 +271,20 @@ def install_lsp4j_tool_hooks() -> None:
         """
         lsp4j_ws = current_lsp4j_ws.get()
         is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
+
+        # ★ 已移除的纯 UI 工具拦截（插件无 handler，返回 "tool not support yet"）
+        if tool_name == "add_tasks":
+            logger.warning("[LSP4J-TOOL] add_tasks 为纯 UI 工具，插件 ToolInvokeProcessor 无 handler，已移除注册")
+            return "add_tasks 为纯 UI 工具，插件无 handler，不支持通过 tool/invoke 调用"
+
+        # ★ 工具名映射：基础工具名 → 插件原生名（如 edit_file → replace_text_by_path）
+        # LSP4J 活跃时，LLM 可能调用基础工具名，需映射后才能被插件识别
+        if lsp4j_ws is not None and tool_name in _TOOL_NAME_MAP:
+            mapped_name = _TOOL_NAME_MAP[tool_name]
+            logger.info("[LSP4J-TOOL] 工具名映射: {} → {}", tool_name, mapped_name)
+            tool_name = mapped_name
+            is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
+
         logger.info("[LSP4J-TOOL] execute_tool: name={} lsp4j_ws={} is_lsp4j_tool={}",
                      tool_name, lsp4j_ws is not None, is_lsp4j_tool)
 
@@ -326,6 +318,9 @@ def install_lsp4j_tool_hooks() -> None:
         if lsp4j_ws is not None:
             # LSP4J 活跃：使用插件原生名称的工具定义
             tools = await acp_get_tools(agent_id)
+            # ★ 过滤掉基础工具中与 IDE 工具重名/重叠的（只保留 IDE 版本）
+            tools = [t for t in tools
+                     if t.get("function", {}).get("name", "") not in _LSP4J_OVERLAP_BASE_TOOL_NAMES]
             ide_tool_names = [t["function"]["name"] for t in _LSP4J_IDE_TOOLS]
             logger.info("[LSP4J-TOOL] 注册工具: base_count={} ide_tools={}", len(tools), ide_tool_names)
             return tools + _LSP4J_IDE_TOOLS

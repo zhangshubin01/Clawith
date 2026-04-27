@@ -83,6 +83,15 @@ class ChatAskParam:
 # 后台持久化任务集合（防止 GC 回收未完成的 fire-and-forget 任务）
 _lsp4j_background_tasks: set[asyncio.Task] = set()
 
+# ★ 基础工具名 → 插件原生名的映射（与 tool_hooks._TOOL_NAME_MAP 保持同步）
+# LLM 可能调用基础工具名（如 edit_file），需映射为插件 ToolInvokeProcessor 识别的名称
+_TOOL_NAME_MAP = {
+    "edit_file": "replace_text_by_path",    # 全文替换（非 diff）
+    "create_file": "create_file_with_text", # 创建文件（LLM 可能用此名称调用）
+    "write_file": "create_file_with_text",  # 创建文件（基础工具注册名）
+    "delete_file": "delete_file_by_path",   # 删除文件
+}
+
 # ──────────────────────────────────────────────
 # IDE 上下文提示构建（基于 ChatTaskEnum.java 21 个枚举值）
 # ──────────────────────────────────────────────
@@ -309,6 +318,11 @@ class JSONRPCRouter:
         # 项目根路径（从 initialize 的 rootUri 提取，用于 tool/call/sync 通知）
         self._project_path: str = ""
 
+        # ★ toolCallId 队列：按序存储 (tool_name, tool_call_id)，
+        # 支持 LLM 连续调用多个工具时各工具独立匹配 toolCallId。
+        # 替代旧的单字段 _current_tool_call_id（无法处理多工具并发）。
+        self._tool_call_id_queue: list[tuple[str, str]] = []
+
         # 连接关闭标记（防止断开后继续发送消息）
         self._closed: bool = False
 
@@ -515,6 +529,9 @@ class JSONRPCRouter:
             # 创建 cancel 事件
             self._cancel_event = asyncio.Event()
 
+            # ★ 重置 toolCallId 队列（新请求开始时清空）
+            self._tool_call_id_queue = []
+
             # ★ 立即返回 JSON-RPC 响应，避免 IDE 端 LSP4J 框架请求超时
             # chat/ask 是 @JsonRequest，LSP4J 框架会等待响应；但 call_llm 可能运行数分钟，
             # 所以必须先返回响应确认收到请求，后续内容通过通知推送。
@@ -570,18 +587,54 @@ class JSONRPCRouter:
                     await self._send_chat_answer(session_id, text, request_id)
 
             async def on_thinking(text: str) -> None:
-                """推理过程回调 — 推送 chat/think（ChatThinkingParams 格式）+ 累积 thinking 文本"""
+                """推理过程回调 — 推送 chat/think + think markdown 块 + 累积 thinking 文本"""
                 nonlocal _thinking_started
                 thinking_chunks.append(text)
                 if not _thinking_started:
                     _thinking_started = True
                     await self._send_chat_think(session_id, "思考中...", "start", request_id)
 
+                # ★ 发送 think markdown 块（4 反引号格式）
+                # 插件 MarkdownStreamPanel 解析此格式渲染思考过程 UI
+                # 格式：````think::<time_ms>\n<content>\n````
+                # 使用 {THINK_TIME} 占位符：插件对此有特殊处理，不显示时间
+                if getattr(self, "_stream_mode", True):
+                    think_block = f"````think::{{THINK_TIME}}\n{text}\n````"
+                    await self._send_chat_answer(session_id, think_block, request_id)
+
             async def on_tool_call(data: dict) -> None:
-                """工具调用回调 — 推送状态通知给 IDE + step callback"""
+                """工具调用回调 — 推送状态通知给 IDE + step callback + toolCall markdown"""
                 status = data.get("status", "running")
                 tool_name = data.get("name", "unknown")
                 if status == "running":
+                    # ★ 应用工具名映射（与 tool_hooks._TOOL_NAME_MAP 保持一致）
+                    # LLM 可能调用基础工具名（如 edit_file），需映射为插件原生名称（如 replace_text_by_path）
+                    # 映射后队列中的名称与 invoke_tool_on_ide 收到的一致，保证匹配
+                    original_name = tool_name
+                    tool_name = _TOOL_NAME_MAP.get(tool_name, tool_name)
+                    if tool_name != original_name:
+                        logger.debug("[LSP4J] on_tool_call 工具名映射: {} → {}", original_name, tool_name)
+
+                    # ★ 生成 toolCallId 并入队，供 invoke_tool_on_ide 按序匹配消费
+                    tool_call_id = str(uuid.uuid4())
+                    self._tool_call_id_queue.append((tool_name, tool_call_id))
+                    logger.debug("[LSP4J] toolCallId 入队: name={} callId={} queue_len={}",
+                                 tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
+
+                    # ★ 发送 toolCall markdown 块（双通道之 markdown 通道）
+                    # 插件 MarkdownStreamPanel 解析此格式创建工具卡片 UI
+                    # 格式：```toolCall::<toolName>::<toolCallId>::<status>
+                    markdown_block = f"```toolCall::{tool_name}::{tool_call_id}::INIT\n```"
+                    if getattr(self, "_stream_mode", True):
+                        await self._send_chat_answer(session_id, markdown_block, request_id)
+
+                    # ★ 发送 PENDING sync（双通道之事件通道）
+                    # 插件 ChatToolEventProcessor 收到后更新卡片参数（scopeLabel 依赖 parameters）
+                    await self._send_tool_call_sync(
+                        session_id, request_id, tool_call_id,
+                        "PENDING", tool_name=tool_name, parameters=data.get("args", {}),
+                    )
+
                     await self._send_process_step_callback(
                         session_id, request_id,
                         step=f"tool_{tool_name}", description=f"正在执行: {tool_name}",
@@ -594,6 +647,12 @@ class JSONRPCRouter:
                         request_id,
                     )
                 elif status == "done":
+                    # ★ 应用工具名映射（与 running 分支一致）
+                    tool_name = _TOOL_NAME_MAP.get(tool_name, tool_name)
+
+                    # ★ toolCallId 已被 invoke_tool_on_ide 从队列中消费，无需额外清理
+                    tool_call_id = ""
+
                     await self._send_process_step_callback(
                         session_id, request_id,
                         step=f"tool_{tool_name}", description=f"已完成: {tool_name}",
@@ -949,17 +1008,27 @@ class JSONRPCRouter:
         - 只注册 toolCallId 到 _pending_tools（等待 invokeResult 回传真实结果）
         - 插件的 ack 响应会被 _handle_response 静默忽略（无匹配 Future）
         """
-        tool_call_id = str(uuid.uuid4())
+        # ★ 从 toolCallId 队列中按序匹配消费（保证 markdown 块与 tool/call/sync 一致）
+        # 遍历队列找到第一个 stored_name == tool_name 的条目，pop 并复用其 toolCallId；
+        # 未匹配则新建兜底 ID。
+        tool_call_id = None
+        for i, (stored_name, stored_id) in enumerate(self._tool_call_id_queue):
+            if stored_name == tool_name:
+                tool_call_id = stored_id
+                self._tool_call_id_queue.pop(i)
+                logger.debug("[LSP4J-TOOL] toolCallId 队列匹配: name={} callId={} queue_remaining={}",
+                             tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
+                break
+        if not tool_call_id:
+            tool_call_id = str(uuid.uuid4())
+            logger.debug("[LSP4J-TOOL] toolCallId 队列未匹配，新建兜底: name={} callId={}",
+                         tool_name, tool_call_id[:8])
         request_id = self._current_request_id or str(uuid.uuid4())
 
         logger.info("[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={}",
                      tool_name, tool_call_id[:8], request_id[:8], timeout)
 
-        # 发送 PENDING → RUNNING sync 通知
-        await self._send_tool_call_sync(
-            self._session_id, request_id, tool_call_id,
-            "PENDING", tool_name=tool_name, parameters=arguments,
-        )
+        # 发送 RUNNING sync 通知（PENDING 已在 on_tool_call 中发送）
         await self._send_tool_call_sync(
             self._session_id, request_id, tool_call_id,
             "RUNNING", tool_name=tool_name, parameters=arguments,
@@ -993,10 +1062,12 @@ class JSONRPCRouter:
         try:
             result = await asyncio.wait_for(tool_future, timeout=timeout)
             # 工具执行完成，发送 FINISHED sync 通知
+            # ★ 状态变更由 tool/call/sync 事件通道处理，不再发送 FINISHED markdown 块（避免创建重复卡片）
             # results 字符串由 _wrap_results 自动包装为 [{"content": "..."}]
             await self._send_tool_call_sync(
                 self._session_id, request_id, tool_call_id,
-                "FINISHED", tool_name=tool_name, results=result[:500] if result else None,
+                "FINISHED", tool_name=tool_name, parameters=arguments,
+                results=result[:500] if result else None,
             )
             return result
         except asyncio.TimeoutError:
@@ -1008,7 +1079,8 @@ class JSONRPCRouter:
             # 工具超时，发送 ERROR sync 通知
             await self._send_tool_call_sync(
                 self._session_id, request_id, tool_call_id,
-                "ERROR", tool_name=tool_name, error_msg=f"工具 {tool_name} 执行超时（{timeout}s）",
+                "ERROR", tool_name=tool_name, parameters=arguments,
+                error_msg=f"工具 {tool_name} 执行超时（{timeout}s）",
             )
             return f"[超时] 工具 {tool_name} 执行超时（{timeout}s）"
         finally:
