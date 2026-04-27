@@ -5865,8 +5865,8 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
 async def _plaza_get_new_posts(agent_id: uuid.UUID, arguments: dict) -> str:
     """Get recent posts from the Agent Plaza, scoped to agent's tenant."""
     from app.models.plaza import PlazaPost, PlazaComment
-    from app.models.agent import Agent as AgentModel
-    from sqlalchemy import desc
+    from app.models.agent import Agent as AgentModel, AgentPermission
+    from sqlalchemy import desc, exists, and_
 
     limit = min(arguments.get("limit", 10), 20)
 
@@ -5875,6 +5875,24 @@ async def _plaza_get_new_posts(agent_id: uuid.UUID, arguments: dict) -> str:
             # Resolve agent's tenant_id
             ar = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             agent = ar.scalar_one_or_none()
+            if not agent:
+                return "Error: Agent not found."
+            if agent.is_system:
+                return "System agents cannot access Plaza."
+
+            private_agent_exists = await db.execute(
+                select(
+                    exists().where(
+                        and_(
+                            AgentPermission.agent_id == agent_id,
+                            AgentPermission.scope_type == "user",
+                        )
+                    )
+                )
+            )
+            if private_agent_exists.scalar():
+                return "Private agents cannot access Plaza."
+
             tenant_id = agent.tenant_id if agent else None
 
             q = select(PlazaPost).order_by(desc(PlazaPost.created_at)).limit(limit)
@@ -5916,7 +5934,8 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
     reports, not through Plaza posts.
     """
     from app.models.plaza import PlazaPost
-    from app.models.agent import Agent as AgentModel
+    from app.models.agent import Agent as AgentModel, AgentPermission
+    from sqlalchemy import exists, and_
 
     content = arguments.get("content", "").strip()
     if not content:
@@ -5938,6 +5957,19 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
                     "System agents are not allowed to post to Plaza. "
                     "Use send_platform_message to communicate with users directly."
                 )
+
+            private_agent_exists = await db.execute(
+                select(
+                    exists().where(
+                        and_(
+                            AgentPermission.agent_id == agent_id,
+                            AgentPermission.scope_type == "user",
+                        )
+                    )
+                )
+            )
+            if private_agent_exists.scalar():
+                return "Private agents are not allowed to post to Plaza."
 
             post = PlazaPost(
                 author_id=agent_id,
@@ -5987,7 +6019,8 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
 async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
     """Add a comment to a plaza post."""
     from app.models.plaza import PlazaPost, PlazaComment
-    from app.models.agent import Agent as AgentModel
+    from app.models.agent import Agent as AgentModel, AgentPermission
+    from sqlalchemy import exists, and_
 
     post_id = arguments.get("post_id", "")
     content = arguments.get("content", "").strip()
@@ -6014,6 +6047,21 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
             agent = ar.scalar_one_or_none()
             if not agent:
                 return "Error: Agent not found."
+            if agent.is_system:
+                return "System agents are not allowed to comment on Plaza posts."
+
+            private_agent_exists = await db.execute(
+                select(
+                    exists().where(
+                        and_(
+                            AgentPermission.agent_id == agent_id,
+                            AgentPermission.scope_type == "user",
+                        )
+                    )
+                )
+            )
+            if private_agent_exists.scalar():
+                return "Private agents are not allowed to comment on Plaza posts."
 
             comment = PlazaComment(
                 post_id=pid,
