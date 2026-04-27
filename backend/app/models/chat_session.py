@@ -3,8 +3,8 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, ForeignKey, func, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID, JSON
+from sqlalchemy import Boolean, DateTime, String, ForeignKey, func, UniqueConstraint, Index, text
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -24,6 +24,13 @@ class ChatSession(Base):
     __tablename__ = "chat_sessions"
     __table_args__ = (
         UniqueConstraint("agent_id", "external_conv_id", name="uq_chat_sessions_agent_ext_conv"),
+        Index(
+            "uq_chat_sessions_primary_platform",
+            "agent_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text("is_primary = true AND source_channel = 'web' AND is_group = false"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -40,10 +47,11 @@ class ChatSession(Base):
     participant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("participants.id"), nullable=True)
     # For agent-to-agent sessions: the other agent in the conversation
     peer_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id"), nullable=True)
+    # Primary platform session: the long-lived first-party conversation that agent-initiated
+    # messages should land in. User-created side-topic sessions remain temporary (`is_primary=false`).
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False, index=True)
+    # Tracks when the owning platform user last opened/read this session. Unread badges are derived
+    # from non-user messages created after this timestamp.
+    last_read_at_by_user: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # IDE Plugin Context
-    client_type: Mapped[str] = mapped_column(String(20), nullable=False, default="web", server_default="web")
-    project_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    current_file: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    open_files: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
