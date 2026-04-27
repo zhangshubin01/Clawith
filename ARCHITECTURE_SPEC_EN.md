@@ -498,6 +498,7 @@ Current architectural characteristics:
 - the OKR Agent is seeded and patched at startup
 - daily collection and reporting are coordinated through dedicated backend services
 - tracked relationships determine who participates in collection/reporting flows
+- the OKR relationship sync flow only auto-links company-visible agents; user-scoped private agents are intentionally excluded even if they belong to the same tenant
 - human and agent replies are normalized through the OKR Agent's runtime context and tools
 - frontend OKR views include period-aware browsing, company reports, and member-level daily report inspection
 
@@ -520,6 +521,7 @@ Answering those four questions correctly is usually enough to place new code in 
 
 | Date | Summary |
 | --- | --- |
+| 2026-04-27 | Tightened the OKR relationship sync flow so the tenant-wide "Sync Relationship Network" action excludes user-scoped private agents. Only company-visible digital employees are auto-linked into the OKR Agent's collaborator graph, matching the existing incremental OKR hook behavior for newly created agents. |
 | 2026-04-27 | Aligned relationship-management permissions across the Agent Detail page and relationships APIs so org admins and platform admins can manage agent relationships even when an agent's stored access level is `use`. This fixes production cases where the seeded OKR Agent remained read-only for non-creator org admins despite being company-visible. |
 | 2026-04-25 | Improved workspace document conversion and navigation ergonomics: uploaded PDF/DOCX/XLSX/PPTX extraction now emits more structured Markdown with real tables and slide/page sections, Markdown-to-PDF rendering preserves Markdown tables and CJK-friendly styling, and the chat-side file tree now defaults to a focused `workspace/` scope with an explicit `All` switch for root-level agent files. |
 | 2026-04-25 | Replaced the Markdown-to-PDF tool's dependency on the external `markdown` package with an internal lightweight renderer so PDF export no longer fails on missing runtime modules, defaulted the chat-side file tree to a collapsed initial state, and paused expensive HTML/PDF iframe rendering while the right sidebar is actively being dragged to reduce preview stutter. |

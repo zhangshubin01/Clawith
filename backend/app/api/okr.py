@@ -65,7 +65,7 @@ async def _sync_okr_agent_relationships(db, tenant_id: uuid.UUID, okr_agent_id: 
       - Agent relationships : every non-system, non-stopped agent in this tenant
                               (excludes the OKR Agent itself)
     """
-    from app.models.agent import Agent
+    from app.models.agent import Agent, AgentPermission
     from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
     from sqlalchemy import delete as sa_delete
 
@@ -88,13 +88,25 @@ async def _sync_okr_agent_relationships(db, tenant_id: uuid.UUID, okr_agent_id: 
             description="OKR tracking — auto-linked via Sync Relationships",
         ))
 
-    # 3. Link all company-visible non-system agents as collaborators
+    # 3. Link all company-visible non-system agents as collaborators.
+    # User-scoped permissions mean the agent is private to its creator (or a
+    # small set of users), so it should not be synced into the tenant-wide OKR
+    # relationship network.
+    private_agent_exists = (
+        select(AgentPermission.id)
+        .where(
+            AgentPermission.agent_id == Agent.id,
+            AgentPermission.scope_type == "user",
+        )
+        .exists()
+    )
     agent_result = await db.execute(
         select(Agent.id).where(
             Agent.tenant_id == tenant_id,
             Agent.id != okr_agent_id,
             Agent.is_system == False,  # noqa: E712
             Agent.status.notin_(["stopped", "error"]),
+            ~private_agent_exists,
         )
     )
     for (agent_id,) in agent_result.fetchall():
