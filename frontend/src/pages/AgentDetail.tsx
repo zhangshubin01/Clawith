@@ -5474,7 +5474,9 @@ function AgentDetailInner() {
                                                 <ModelSwitcher
                                                     value={overrideModelId}
                                                     onChange={handleModelChange}
-                                                    tenantDefaultId={myTenant?.default_model_id}
+                                                    /* "默认" badge tracks the
+                                                       agent's saved default. */
+                                                    tenantDefaultId={agent?.primary_model_id || null}
                                                     disabled={!wsConnected}
                                                 />
                                                 {(isStreaming || isWaiting) ? (
