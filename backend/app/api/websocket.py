@@ -157,6 +157,7 @@ async def websocket_chat(
     agent_id: uuid.UUID,
     token: str = Query(...),
     session_id: str = Query(None),
+    lang: str = Query("en"),
 ):
     """WebSocket endpoint for real-time chat with an agent.
 
@@ -780,6 +781,7 @@ async def websocket_chat(
                                 _onb = await resolve_onboarding_prompt(
                                     _ob_db, agent_snapshot, user_id,
                                     user_name=user_display_name,
+                                    user_locale=lang,
                                 )
                             if _onb:
                                 _truncated = [{"role": "system", "content": _onb.prompt}] + _truncated
