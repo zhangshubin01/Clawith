@@ -48,6 +48,23 @@ from .context import (
 from .lsp_protocol import LSPBaseProtocolParser, ParseError
 
 # ──────────────────────────────────────────────
+# LSP4J IDE 工具名称（与 tool_hooks._LSP4J_IDE_TOOL_NAMES 保持一致）
+# ──────────────────────────────────────────────
+_LSP4J_IDE_TOOL_NAMES = frozenset({
+    "read_file",
+    "save_file",
+    "run_in_terminal",
+    "get_terminal_output",
+    "replace_text_by_path",
+    "create_file_with_text",
+    "delete_file_by_path",
+    "get_problems",
+    "add_tasks",
+    "todo_write",
+    "search_replace",
+})
+
+# ──────────────────────────────────────────────
 # 数据类定义（基于灵码插件 ChatAskParam.java 17 字段）
 # ──────────────────────────────────────────────
 
@@ -214,6 +231,30 @@ def _build_lsp4j_ide_prompt(params: ChatAskParam) -> str:
     # shellType（P2-2）
     if params.shellType:
         parts.append(f"项目终端 Shell: {params.shellType}")
+
+    # ★ CODE_EDIT_BLOCK 格式引导（关键：让 LLM 输出可 Apply 的代码块）
+    # 灵码插件 MarkdownStreamPanel.java:39-42 正则表达式：
+    #   ```([\\w#+.-]*\n*)?(.*?)`{2,3}
+    #   group(9) = 语言标识（如 python）
+    #   group(10) = 围栏内容（包含语言标识 + |CODE_EDIT_BLOCK| + 路径 + 代码）
+    # 插件 line 302 解析：group(10).split("|") → [language, "CODE_EDIT_BLOCK", path+code]
+    # 正确格式示例：
+    #   ```python|CODE_EDIT_BLOCK|/path/to/file.java
+    #   <code content>
+    #   ```
+    # 插件识别后会：
+    # 1. 渲染代码块时显示 "Apply" 按钮（CodeMarkdownHighlightComponent.java:358-461）
+    # 2. 用户点击 Apply 后调用 chat/codeChange/apply
+    # 3. 插件渲染 InEditorDiffRenderer 显示 diff（CodeMarkdownHighlightComponent.java:527-530）
+    if params.chatTask in ("CODE_GENERATE_COMMENT", "OPTIMIZE_CODE", "INLINE_EDIT", "DESCRIPTION_GENERATE_CODE", "CODE_PROBLEM_SOLVE"):
+        parts.append(
+            "[代码输出格式要求] 如需生成代码，请使用以下格式让代码可交互编辑：\n"
+            "```python|CODE_EDIT_BLOCK|/absolute/path/to/file.py\n"
+            "<完整代码内容>\n"
+            "```\n"
+            "注意：语言标识（如 python）和 |CODE_EDIT_BLOCK| 必须在同一行，路径后必须换行再写代码。\n"
+            "这样用户可以直接点击 'Apply' 按钮应用代码变更，并查看 diff。"
+        )
 
     # pluginPayloadConfig（P2-2，仅记录日志）
     if params.pluginPayloadConfig:
@@ -569,38 +610,71 @@ class JSONRPCRouter:
             thinking_chunks: list[str] = []
             _thinking_started: bool = False
 
+            # ★ 流式输出缓冲：累积小 chunk，按行或阈值发送，避免表格被拆分成单个字符
+            _chunk_buffer: list[str] = []
+            _BUFFER_THRESHOLD = 50  # 字符阈值，超过则发送
+            _BUFFER_TIMEOUT = 0.05  # 50ms 超时，避免延迟过大
+
+            async def _flush_buffer(force: bool = False) -> None:
+                """刷新缓冲区，发送累积的文本"""
+                nonlocal _chunk_buffer
+                if not _chunk_buffer:
+                    return
+                buffered_text = "".join(_chunk_buffer)
+                _chunk_buffer = []
+                if buffered_text:
+                    await self._send_chat_answer(session_id, buffered_text, request_id)
+                    if force:
+                        logger.debug("[LSP4J] buffer flushed (force): text_len={}", len(buffered_text))
+                    else:
+                        logger.debug("[LSP4J] buffer flushed: text_len={}", len(buffered_text))
+
             async def on_chunk(text: str) -> None:
-                """流式文本回调 — 推送 chat/answer（ChatAnswerParams 格式）"""
-                # 检查取消事件，若用户已发送 chat/stop 则中断流式输出
+                """流式文本回调 — 推送 chat/answer（ChatAnswerParams 格式）
+
+                使用缓冲区累积小 chunk，按行或阈值发送，避免 markdown 表格被拆分成单个字符，
+                导致 MarkdownStreamPanel 无法正确解析。
+                """
+                nonlocal _thinking_started, _chunk_buffer
+                # 思考结束标记：收到首个正文 chunk 即表示思考阶段结束
+                if _thinking_started:
+                    _thinking_started = False
+                    await self._send_chat_think(session_id, "", "end", request_id)
+
+                # 检查取消事件
                 if self._cancel_event and self._cancel_event.is_set():
-                    # 用户取消流式输出
                     logger.info("[LSP4J] on_chunk: cancelled by chat/stop, chunks_sent={}", len(reply_parts))
                     raise asyncio.CancelledError("chat/stop requested")
+
                 reply_parts.append(text)
-                # 首次 chunk 用 info（可观测），后续用 debug（避免高频噪音）
-                if len(reply_parts) == 1:
-                    logger.info("[LSP4J] on_chunk: first_chunk text_len={} requestId={}", len(text), request_id)
-                else:
-                    logger.debug("[LSP4J] on_chunk: chunk_count={} text_len={}", len(reply_parts), len(text))
-                # 仅在流式模式下推送 chat/answer（非流式模式在 finish 中一次性返回）
-                if getattr(self, "_stream_mode", True):
-                    await self._send_chat_answer(session_id, text, request_id)
+
+                # ★ 缓冲逻辑：累积 chunk，按行或阈值发送
+                if not getattr(self, "_stream_mode", True):
+                    # 非流式模式：不发送，在 finish 中一次性返回
+                    return
+
+                _chunk_buffer.append(text)
+                buffered = "".join(_chunk_buffer)
+
+                # 触发发送条件：
+                # 1. 包含换行符（完整行）
+                # 2. 缓冲区超过阈值
+                # 3. 包含 markdown 表格行结束符（| 开头或结尾）
+                if "\n" in text or len(buffered) >= _BUFFER_THRESHOLD or text.strip().endswith("|"):
+                    await _flush_buffer()
+                # 否则继续累积，由 finish 或下一个 chunk 触发发送
 
             async def on_thinking(text: str) -> None:
-                """推理过程回调 — 推送 chat/think + think markdown 块 + 累积 thinking 文本"""
+                """推理过程回调 — 推送 chat/think 通知
+
+                不再通过 chat/answer 发送 think markdown 块，
+                仅使用 chat/think 通知控制 UI "思考中"状态。
+                """
                 nonlocal _thinking_started
                 thinking_chunks.append(text)
                 if not _thinking_started:
                     _thinking_started = True
                     await self._send_chat_think(session_id, "思考中...", "start", request_id)
-
-                # ★ 发送 think markdown 块（4 反引号格式）
-                # 插件 MarkdownStreamPanel 解析此格式渲染思考过程 UI
-                # 格式：````think::<time_ms>\n<content>\n````
-                # 使用 {THINK_TIME} 占位符：插件对此有特殊处理，不显示时间
-                if getattr(self, "_stream_mode", True):
-                    think_block = f"````think::{{THINK_TIME}}\n{text}\n````"
-                    await self._send_chat_answer(session_id, think_block, request_id)
 
             async def on_tool_call(data: dict) -> None:
                 """工具调用回调 — 推送状态通知给 IDE + step callback + toolCall markdown"""
@@ -624,16 +698,39 @@ class JSONRPCRouter:
                     # ★ 发送 toolCall markdown 块（双通道之 markdown 通道）
                     # 插件 MarkdownStreamPanel 解析此格式创建工具卡片 UI
                     # 格式：```toolCall::<toolName>::<toolCallId>::<status>
+                    # 插件正则匹配：group(1)=toolCall, group(2)=name::id, group(3)=status
+                    # 插件解析：s2.split("::") → [name, id]，构造 ToolInfo(name, id, status)
                     markdown_block = f"```toolCall::{tool_name}::{tool_call_id}::INIT\n```"
                     if getattr(self, "_stream_mode", True):
                         await self._send_chat_answer(session_id, markdown_block, request_id)
 
-                    # ★ 发送 PENDING sync（双通道之事件通道）
-                    # 插件 ChatToolEventProcessor 收到后更新卡片参数（scopeLabel 依赖 parameters）
-                    await self._send_tool_call_sync(
-                        session_id, request_id, tool_call_id,
-                        "PENDING", tool_name=tool_name, parameters=data.get("args", {}),
-                    )
+                    # ★ 只对 LSP4J IDE 工具发送 sync 通知
+                    # 后端直接执行的工具（如 execute_code）不发送，因为插件只识别 IDE 工具参数
+                    is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
+                    if is_lsp4j_tool:
+                        # ★ 参数名转换：基础工具使用 snake_case，但插件端期望 camelCase
+                        # create_file_with_text: file_path → filePath, text → content
+                        # read_file: path → filePath
+                        raw_args = data.get("args", {})
+                        params = dict(raw_args)
+                        if tool_name == "create_file_with_text":
+                            if "file_path" in params and "filePath" not in params:
+                                params["filePath"] = params.pop("file_path")
+                            if "text" in params and "content" not in params:
+                                params["content"] = params.pop("text")
+                        elif tool_name == "read_file":
+                            if "path" in params and "filePath" not in params:
+                                params["filePath"] = params.pop("path")
+                        elif tool_name == "save_file":
+                            if "file_path" in params and "filePath" not in params:
+                                params["filePath"] = params.pop("file_path")
+
+                        # 发送 PENDING sync（双通道之事件通道）
+                        # 插件 ChatToolEventProcessor 收到后更新卡片参数（scopeLabel 依赖 parameters）
+                        await self._send_tool_call_sync(
+                            session_id, request_id, tool_call_id,
+                            "PENDING", tool_name=tool_name, parameters=params,
+                        )
 
                     await self._send_process_step_callback(
                         session_id, request_id,
@@ -648,10 +745,33 @@ class JSONRPCRouter:
                     )
                 elif status == "done":
                     # ★ 应用工具名映射（与 running 分支一致）
+                    original_name = tool_name
                     tool_name = _TOOL_NAME_MAP.get(tool_name, tool_name)
+                    if tool_name != original_name:
+                        logger.debug("[LSP4J] on_tool_call done 工具名映射: {} → {}", original_name, tool_name)
 
-                    # ★ toolCallId 已被 invoke_tool_on_ide 从队列中消费，无需额外清理
-                    tool_call_id = ""
+                    # ★ 只对 LSP4J IDE 工具发送 FINISHED sync
+                    is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
+                    if is_lsp4j_tool:
+                        # 获取 toolCallId（从队列中查找匹配的工具调用）
+                        finished_call_id = ""
+                        for i, (stored_name, stored_id) in enumerate(self._tool_call_id_queue):
+                            if stored_name == tool_name:
+                                finished_call_id = stored_id
+                                self._tool_call_id_queue.pop(i)
+                                logger.debug("[LSP4J] toolCallId 队列匹配 (done): name={} callId={}",
+                                             tool_name, finished_call_id[:8])
+                                break
+                        if not finished_call_id:
+                            finished_call_id = str(uuid.uuid4())
+                            logger.debug("[LSP4J] toolCallId 队列未匹配 (done)，新建兜底: name={} callId={}",
+                                         tool_name, finished_call_id[:8])
+
+                        # 发送 FINISHED sync（工具完成状态）
+                        await self._send_tool_call_sync(
+                            session_id, request_id, finished_call_id,
+                            "FINISHED", tool_name=tool_name,
+                        )
 
                     await self._send_process_step_callback(
                         session_id, request_id,
@@ -696,6 +816,18 @@ class JSONRPCRouter:
             tool_hint = "\n[工具可用性] 已连接本地 IDE 环境，可直接使用 read_file、replace_text_by_path、save_file、run_in_terminal、get_terminal_output、create_file_with_text、delete_file_by_path、get_problems 等工具访问项目文件。"
             if self._project_path:
                 tool_hint += f"\n[项目根路径] {self._project_path}"
+            
+            # ★ 代码输出格式提醒（确保 LLM 使用 CODE_EDIT_BLOCK 格式）
+            # 关键：语言标识和 |CODE_EDIT_BLOCK| 必须在同一行！
+            tool_hint += (
+                "\n[代码输出格式] 生成代码时务必使用此格式："
+                "\n```python|CODE_EDIT_BLOCK|/absolute/path/to/file.py"
+                "\n<完整代码内容>"
+                "\n```"
+                "\n注意：语言标识（如 python）必须紧跟 ``` 后面，然后立即接 |CODE_EDIT_BLOCK| 和文件路径，路径后必须换行再写代码。"
+                "\n这样用户才能看到 'Apply' 按钮并使用 diff 功能。"
+            )
+            
             role_desc = role_desc + tool_hint
 
             # ── 模型选择（优先级：customModel > extra.modelConfig.key > 默认） ──
@@ -771,6 +903,14 @@ class JSONRPCRouter:
             # 发送思考完成状态
             await self._send_chat_think(session_id, "", "done", request_id)
 
+            # ★ 兜底发送思考结束通知（修复：只输出 thinking 不输出正文时思考状态不结束）
+            # 场景：某些模型（如 DeepSeek-R1）纯思考拒绝回答、工具调用后直接结束、无正文输出
+            # 原因：若 on_chunk 永不调用则思考结束通知永远不会发送
+            # 判断依据：_thinking_started=True 表示思考阶段未结束
+            if _thinking_started:
+                _thinking_started = False
+                await self._send_chat_think(session_id, "", "end", request_id)
+
             # 发送步骤结束通知（chat/process_step_callback）
             await self._send_process_step_callback(
                 session_id, request_id,
@@ -798,6 +938,9 @@ class JSONRPCRouter:
             # 更新消息历史
             message_history.append({"role": "assistant", "content": reply})
             current_lsp4j_message_history.set(message_history)
+
+            # ★ 刷新缓冲区，确保所有累积的文本都已发送
+            await _flush_buffer(force=True)
 
             # 6. 发送完成信号（ChatFinishParams 格式）
             # statusCode 映射：200=成功, 200=取消(非错误), 500=异常
@@ -831,15 +974,111 @@ class JSONRPCRouter:
     # 工具调用处理
     # ──────────────────────────────────────────
 
-    async def _handle_tool_call_approve(self, params: dict, msg_id: Any) -> None:
-        """处理 tool/callApprove 请求。
+    async def _handle_pre_completion(self, params: dict, msg_id: Any) -> None:
+        """处理 textDocument/preCompletion — IDE 补全预请求。
 
-        MVP 阶段自动批准所有工具调用权限。
-        后续迭代可增加权限审批 UI。
+        插件 TextDocumentService.java:314 定义为 CompletableFuture<Void>，
+        属于 fire-and-forget 模式，返回 null 即可。
+        不实现实际补全逻辑，仅消除 -32601 Method not found 错误。
         """
-        # 工具审批日志
-        logger.info("[LSP4J-TOOL] 工具审批: toolCallId={} name={} → 自动批准", params.get("toolCallId"), params.get("name"))
-        # 返回空结果表示批准
+        logger.debug("[LSP4J] preCompletion: requestId={} triggerMode={}",
+                     params.get("requestId", ""), params.get("triggerMode", ""))
+        await self._send_response(msg_id, None)
+
+    async def _handle_tool_invoke(self, params: dict, msg_id: Any) -> None:
+        """处理 tool/invoke — 工具调用入口。
+        
+        灵码插件通过此方法调用工具（如 add_tasks, todo_write, search_replace）。
+        对于纯 UI 工具（add_tasks/todo_write），直接返回成功响应。
+        对于 search_replace，降级为 replace_text_by_path 处理。
+        
+        ToolInvokeRequest 格式：
+        - toolName: 工具名称
+        - parameters: 工具参数（dict）
+        - requestId: 请求 ID
+        - sessionId: 会话 ID
+        """
+        tool_name = params.get("toolName", "")
+        parameters = params.get("parameters", {})
+        request_id = params.get("requestId", "")
+        session_id = params.get("sessionId", "")
+        
+        logger.info("[LSP4J] tool/invoke: tool={} requestId={} sessionId={}", tool_name, request_id, session_id)
+        
+        # 特殊工具处理（纯 UI 工具）
+        if tool_name in ("add_tasks", "todo_write"):
+            # 直接返回成功响应，插件 AddTasksToolDetailPanel 会自动渲染任务树
+            import json
+            result = {
+                "success": True,
+                "message": f"{tool_name} 工具调用成功",
+                "tool_name": tool_name,
+                "parameters": parameters,
+            }
+            await self._send_response(msg_id, {
+                "requestId": request_id,
+                "errorCode": "",
+                "errorMessage": "",
+                "result": result,
+            })
+            logger.info("[LSP4J] tool/invoke: {} 纯 UI 工具，返回成功响应", tool_name)
+            return
+        
+        if tool_name == "search_replace":
+            # 降级为 replace_text_by_path
+            logger.info("[LSP4J] tool/invoke: search_replace 降级为 replace_text_by_path")
+            tool_name = "replace_text_by_path"
+            # 参数转换
+            if "searchText" in parameters and "replaceText" in parameters:
+                parameters = {
+                    "filePath": parameters.get("filePath", ""),
+                    "text": parameters.get("replaceText", ""),
+                }
+        
+        # 正常工具调用：通过 invoke_tool_on_ide 发送到 IDE
+        try:
+            result = await self.invoke_tool_on_ide(tool_name, parameters)
+            await self._send_response(msg_id, {
+                "requestId": request_id,
+                "errorCode": "",
+                "errorMessage": "",
+                "result": result,
+            })
+            logger.info("[LSP4J] tool/invoke: {} 调用成功", tool_name)
+        except Exception as e:
+            logger.exception("[LSP4J] tool/invoke: {} 调用失败", tool_name)
+            await self._send_response(msg_id, {
+                "requestId": request_id,
+                "errorCode": "TOOL_INVOKE_FAILED",
+                "errorMessage": str(e),
+                "result": None,
+            })
+    
+    
+    async def _handle_tool_call_approve(self, params: dict, msg_id: Any) -> None:
+        """处理 tool/call/approve 请求 — 工具调用审批。
+
+        插件 ToolCallService.java:16 定义为 @JsonRequest("approve")，
+        参数 ToolCallApproveRequest：sessionId, requestId, toolCallId, approval(boolean)。
+        approval=true 表示用户同意，approval=false 表示用户拒绝。
+        无独立 reject 方法 — 拒绝 = approve(approval=false)。
+        """
+        tool_call_id = params.get("toolCallId", "")
+        approved = params.get("approval", True)  # 缺失时默认 true 保持向后兼容
+
+        if not approved:
+            # 用户拒绝工具调用 — 取消 pending Future
+            logger.info("[LSP4J-TOOL] 工具审批拒绝: toolCallId={} name={}",
+                        tool_call_id[:8] if tool_call_id else "", params.get("name"))
+            if tool_call_id:
+                future = self._pending_tools.get(str(tool_call_id))
+                if future and not future.done():
+                    future.set_result("[用户拒绝] 工具调用已被用户拒绝")
+                    logger.info("[LSP4J-TOOL] 已取消 pending Future: toolCallId={}", tool_call_id[:8])
+        else:
+            logger.info("[LSP4J-TOOL] 工具审批通过: toolCallId={} name={}",
+                        tool_call_id[:8] if tool_call_id else "", params.get("name"))
+
         await self._send_response(msg_id, {})
 
     async def _handle_tool_invoke_result(self, params: dict, msg_id: Any) -> None:
@@ -881,8 +1120,13 @@ class JSONRPCRouter:
             # 无匹配 Future（可能已超时）
             logger.warning("[LSP4J-TOOL] invokeResult: toolCallId={} 无匹配 Future（可能已超时）", tool_call_id)
 
-        # tool/invokeResult 是 @JsonRequest，需要返回响应
-        await self._send_response(msg_id, {"status": "ok"})
+        # tool/invokeResult 是 @JsonRequest，需要返回 OperateCommonResult 格式
+        # 插件 ToolService.invokeResult() 期望返回 OperateCommonResult {errorCode, errorMessage}
+        # 如果返回格式不匹配，插件 LanguageWebSocketService.reportToolInvokeResult() 会收到 null
+        await self._send_response(msg_id, {
+            "errorCode": "",
+            "errorMessage": "",
+        })
 
     async def _handle_response(self, msg: dict) -> None:
         """处理 JSON-RPC 响应 — 同步工具执行结果回传。
@@ -974,7 +1218,7 @@ class JSONRPCRouter:
         注意：results 必须为 List<Map<String, Object>> 格式，
         由 _wrap_results 自动将字符串结果包装为 [{"content": "..."}]。
         """
-        await self._send_notification("tool/call/sync", {
+        await self._send_client_request("tool/call/sync", {
             "sessionId": session_id or "",
             "requestId": request_id,
             "projectPath": self._project_path,
@@ -1028,10 +1272,18 @@ class JSONRPCRouter:
         logger.info("[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={}",
                      tool_name, tool_call_id[:8], request_id[:8], timeout)
 
+        # ★ 参数名转换：基础工具使用 snake_case，但插件端期望 camelCase 显示文件名
+        # read_file: path → filePath, save_file: file_path → filePath
+        params = dict(arguments)
+        if tool_name == "read_file" and "path" in params and "filePath" not in params:
+            params["filePath"] = params.pop("path")
+        elif tool_name == "save_file" and "file_path" in params and "filePath" not in params:
+            params["filePath"] = params.pop("file_path")
+
         # 发送 RUNNING sync 通知（PENDING 已在 on_tool_call 中发送）
         await self._send_tool_call_sync(
             self._session_id, request_id, tool_call_id,
-            "RUNNING", tool_name=tool_name, parameters=arguments,
+            "RUNNING", tool_name=tool_name, parameters=params,
         )
 
         # 创建 Future 等待异步结果（通过 tool/invokeResult 回传）
@@ -1053,7 +1305,7 @@ class JSONRPCRouter:
                 "requestId": request_id,
                 "toolCallId": tool_call_id,
                 "name": tool_name,         # 插件原生名称，不是 ide_ 前缀
-                "parameters": arguments,   # 不是 arguments 字段名，是 parameters
+                "parameters": params,      # 已转换参数名（如 path → filePath）
                 "async": True,             # 异步执行，结果通过 invokeResult 回传
             },
         })
@@ -1090,6 +1342,173 @@ class JSONRPCRouter:
     # 消息发送方法（严格匹配插件协议字段）
     # ──────────────────────────────────────────
 
+    @staticmethod
+    def _convert_file_paths_to_links(text: str) -> str:
+        """将文本中的文件路径转换为可点击的 Markdown 链接格式。
+
+        修复问题：灵码插件的 detectFileUrl 方法只有在存在 @workspace 标签
+        时才会将纯文本文件路径转换为可点击链接。我们在后端主动转换，
+        确保文件路径在任何情况下都可点击跳转。
+
+        格式：[`/path/to/file.java`](file:///path/to/file.java)
+
+        支持的路径格式：
+        - 绝对路径：/path/to/file.py, C:\\path\\to\\file.java
+        - 带行号：file.py:123, file.py#L12, file.py#L12-L20
+        - 注意：已在 Markdown 链接或反引号内的路径不重复转换
+        """
+        if not text:
+            return text
+
+        import re
+
+        # ★ 安全策略：先保护所有已存在的 Markdown 结构，再处理纯文本
+        # 1. 提取并保护 Markdown 代码块：```...``` → 占位符（防止 toolCall 等块被误处理）
+        codeblock_placeholder_prefix = "__LSP4J_CODEBLOCK_PLACEHOLDER__"
+        codeblock_placeholders: list[str] = []
+
+        def protect_codeblock(m: re.Match) -> str:
+            codeblock_placeholders.append(m.group(0))
+            return f"{codeblock_placeholder_prefix}{len(codeblock_placeholders) - 1}__"
+
+        # 保护代码块：匹配 ```language\ncontent``` 或 ```toolCall::name::id::status\n```
+        # 使用非贪婪匹配，确保每个代码块独立匹配
+        text = re.sub(
+            r'```[^`]*```',
+            protect_codeblock,
+            text,
+            flags=re.DOTALL
+        )
+
+        # 2. 提取并保护 Markdown 表格：防止表格单元格中的路径被转换
+        table_placeholder_prefix = "__LSP4J_TABLE_PLACEHOLDER__"
+        table_placeholders: list[str] = []
+
+        def protect_table(m: re.Match) -> str:
+            table_placeholders.append(m.group(0))
+            return f"{table_placeholder_prefix}{len(table_placeholders) - 1}__"
+
+        # 保护 Markdown 表格：匹配包含 | 的多行文本块（至少 2 行，其中一行包含 |---|）
+        text = re.sub(
+            r'((?:^|\n)(?:\|[^\n\|]+\|[^\n]*\n)+(?:\|\s*:?-+:?\s*\|[^\n]*\n)(?:\|[^\n\|]+\|[^\n]*\n)*)',
+            protect_table,
+            text
+        )
+
+        # 3. 提取并保护 Markdown 链接：[text](url) → 占位符
+        placeholder_prefix = "__LSP4J_LINK_PLACEHOLDER__"
+        link_placeholders: list[str] = []
+
+        def protect_link(m: re.Match) -> str:
+            link_placeholders.append(m.group(0))
+            return f"{placeholder_prefix}{len(link_placeholders) - 1}__"
+
+        # 保护 Markdown 链接：[...](...)
+        text = re.sub(r'\[[^\]]*\]\([^)]+\)', protect_link, text)
+
+        # 4. 提取并保护反引号代码内容：`code` → 占位符
+        inline_code_placeholders: list[str] = []
+
+        def protect_inline_code(m: re.Match) -> str:
+            inline_code_placeholders.append(m.group(0))
+            return f"__LSP4J_INLINECODE_{len(inline_code_placeholders) - 1}__"
+
+        text = re.sub(r'`[^`]+`', protect_inline_code, text)
+
+        # 4. 现在可以安全地转换纯文本中的文件路径了
+        path_pattern = re.compile(
+            r'('
+            r'/(?:[a-zA-Z0-9_\-./]+[a-zA-Z0-9_\-/]|bin|etc|usr|home|Users|tmp|var|opt)[a-zA-Z0-9_\-./]*'
+            r'|[a-zA-Z]:[/\\\\][a-zA-Z0-9_\-./\\\\]+'
+            r')'
+            r'(?::(\d+)|#L(\d+)(?:-L(\d+))?)?'
+        )
+
+        def replace_path(match: re.Match) -> str:
+            full_path = match.group(1)
+            line_start = match.group(2) or match.group(3)
+            line_end = match.group(4)
+
+            file_url = f"file://{full_path}"
+            display_text = full_path
+
+            if line_start:
+                if line_end:
+                    file_url += f"#L{line_start}-L{line_end}"
+                    display_text += f":{line_start}-{line_end}"
+                else:
+                    file_url += f"#L{line_start}"
+                    display_text += f":{line_start}"
+
+            return f"[`{display_text}`]({file_url})"
+
+        try:
+            text = path_pattern.sub(replace_path, text)
+        except Exception as e:
+            logger.debug("[LSP4J] 文件路径转换失败，使用原文: {}", e)
+            return text
+
+        # 5. 还原内联代码
+        for i, code in enumerate(inline_code_placeholders):
+            text = text.replace(f"__LSP4J_INLINECODE_{i}__", code)
+
+        # 6. 还原表格（在链接还原之前，避免表格内的链接占位符被误处理）
+        for i, table in enumerate(table_placeholders):
+            text = text.replace(f"{table_placeholder_prefix}{i}__", table)
+
+        # 7. 还原链接
+        for i, link in enumerate(link_placeholders):
+            text = text.replace(f"{placeholder_prefix}{i}__", link)
+
+        # 8. 还原代码块（最后还原，确保代码块内的所有内容都不被修改）
+        for i, codeblock in enumerate(codeblock_placeholders):
+            text = text.replace(f"{codeblock_placeholder_prefix}{i}__", codeblock)
+
+        return text
+
+    @staticmethod
+    def _fix_code_edit_block_format(text: str) -> str:
+        """修复 CODE_EDIT_BLOCK 格式异常（流式断裂、换行问题）。
+
+        修复场景（基于灵码插件 MarkdownStreamPanel.java:301-331 源码）：
+        1. 语言标识和 |CODE_EDIT_BLOCK| 分成两行
+           输入:  ```python\n|CODE_EDIT_BLOCK|/path\n...
+           输出:  ```python|CODE_EDIT_BLOCK|/path\n...
+        2. （未来扩展）流式输出中 |CODE_EDIT_BLOCK| 前后断裂
+
+        为什么需要：
+        - 插件正则要求 group(10).split("|") 长度 >= 3，且第二个元素是 CODE_EDIT_BLOCK
+        - 流式输出时语言和 |CODE_EDIT_BLOCK| 可能分到不同 chunk，导致解析失败
+        - 本地弱模型可能理解偏差，把 |CODE_EDIT_BLOCK| 放到第二行
+        - 格式异常会导致 Apply 按钮消失，仅渲染普通代码块
+
+        返回：修复后的文本
+        """
+        if not text:
+            return text
+
+        original = text
+
+        # 场景 1: 语言和 |CODE_EDIT_BLOCK| 换行
+        # 匹配: ```语言\n|CODE_EDIT_BLOCK|... → 替换为 ```语言|CODE_EDIT_BLOCK|...
+        # 正则说明: 捕获 ``` 后的语言标识（[a-zA-Z0-9_-]+），然后是换行 + |CODE_EDIT_BLOCK|
+        text = re.sub(
+            r"```([a-zA-Z0-9_-]+)\n\|CODE_EDIT_BLOCK\|",
+            r"```\1|CODE_EDIT_BLOCK|",
+            text
+        )
+
+        # 日志：如果发生了修复，记录差异
+        if text != original:
+            logger.debug(
+                "[LSP4J] CODE_EDIT_BLOCK 格式已修复\n"
+                "  修复前: {}\n"
+                "  修复后: {}",
+                original[:100], text[:100]
+            )
+
+        return text
+
     async def _send_chat_answer(
         self, session_id: str | None, text: str, request_id: str
     ) -> None:
@@ -1111,10 +1530,24 @@ class JSONRPCRouter:
         # chat/answer 发送追踪
         logger.debug("[LSP4J] chat/answer: requestId={} text_len={}", request_id, len(text))
 
-        await self._send_notification("chat/answer", {
+        # ★ 修复 1：CODE_EDIT_BLOCK 格式自动修复
+        # 流式输出时语言标识和 |CODE_EDIT_BLOCK| 可能分到不同 chunk，导致 Apply 按钮消失
+        fixed_text = self._fix_code_edit_block_format(text)
+
+        # ★ 修复 2：将文件路径转换为可点击的 Markdown 链接
+        # 注意：流式模式下每个 chunk 单独处理，_convert_file_paths_to_links 设计用于完整文本
+        # 表格等多行结构在流式 chunk 中会被错误处理，因此仅在非流式或 finish 时转换
+        # 流式输出的文件路径转换由 chat/finish 的 fullAnswer 统一处理（用于历史记录）
+        is_streaming = getattr(self, "_stream_mode", True)
+        if is_streaming:
+            converted_text = fixed_text
+        else:
+            converted_text = self._convert_file_paths_to_links(fixed_text)
+
+        await self._send_client_request("chat/answer", {
             "requestId": request_id,
             "sessionId": session_id or "",
-            "text": text,
+            "text": converted_text,
             "overwrite": False,
             "isFiltered": False,
             "timestamp": int(time.time() * 1000),
@@ -1132,7 +1565,7 @@ class JSONRPCRouter:
         - requestId（必须携带）
         - timestamp（毫秒时间戳）
         """
-        await self._send_notification("chat/think", {
+        await self._send_client_request("chat/think", {
             "requestId": request_id,
             "sessionId": session_id or "",
             "text": text,
@@ -1155,12 +1588,25 @@ class JSONRPCRouter:
         """
         logger.info("[LSP4J] chat/finish: requestId={} statusCode={} reason={}",
                      request_id, status_code, reason)
-        await self._send_notification("chat/finish", {
+        # ★ 修复 1：fullAnswer 也需要修复 CODE_EDIT_BLOCK 格式（历史记录显示时 Apply 按钮可用）
+        fixed_full_answer = self._fix_code_edit_block_format(full_answer)
+        # ★ 修复 2：fullAnswer 也需要转换文件路径（历史记录显示时可点击）
+        converted_full_answer = self._convert_file_paths_to_links(fixed_full_answer)
+        
+        # ★ 修复 3：ChatFinishParams 有 extra 字段（Map<String, Object>）
+        # 虽然插件不强制要求，但保持一致性更好
+        extra = {}
+        session_type = getattr(self, "_current_session_type", "")
+        if session_type:
+            extra["sessionType"] = session_type
+        
+        await self._send_client_request("chat/finish", {
             "requestId": request_id,
             "sessionId": session_id or "",
             "reason": reason,
             "statusCode": status_code,
-            "fullAnswer": full_answer,
+            "fullAnswer": converted_full_answer,
+            "extra": extra if extra else None,  # 空 dict 发 null 避免无意义数据
         })
 
     async def _send_session_title_update(
@@ -1170,7 +1616,7 @@ class JSONRPCRouter:
 
         参数：sessionId, sessionTitle
         """
-        await self._send_notification("session/title/update", {
+        await self._send_client_request("session/title/update", {
             "sessionId": session_id or "",
             "sessionTitle": title,
         })
@@ -1188,7 +1634,7 @@ class JSONRPCRouter:
         """
         # 步骤推送日志
         logger.info("[LSP4J] process_step_callback: requestId={} step={} status={} desc={}", request_id, step, status, description[:80])
-        await self._send_notification("chat/process_step_callback", {
+        await self._send_client_request("chat/process_step_callback", {
             "requestId": request_id,
             "sessionId": session_id or "",
             "step": step,
@@ -1208,7 +1654,23 @@ class JSONRPCRouter:
             _method = message.get("method", "")
             if _method:
                 _pkeys = list(message.get("params", {}).keys()) if isinstance(message.get("params"), dict) else []
-                logger.info("[LSP4J →] method={} id={} params_keys={}", _method, message.get("id"), _pkeys)
+                _params = message.get("params", {})
+                # ★ 临时调试：记录 chat/answer 的详细内容
+                if _method == "chat/answer" and isinstance(_params, dict):
+                    _text = _params.get("text", "")
+                    # 记录 toolCall markdown 块
+                    if "toolCall::" in _text:
+                        logger.info("[LSP4J →] method={} id={} TOOLCALL_BLOCK={!r}", _method, message.get("id"), _text)
+                    # 记录包含工具名称的文本（可能是 LLM 回复中的纯文本）
+                    elif any(tool in _text for tool in ["replace_text_by_path", "read_file", "list_files"]):
+                        logger.info("[LSP4J →] method={} id={} TOOL_TEXT={!r}", _method, message.get("id"), _text[:200])
+                    # 记录表格内容
+                    elif _text and "|" in _text:
+                        logger.info("[LSP4J →] method={} id={} text={!r}", _method, message.get("id"), _text)
+                    else:
+                        logger.debug("[LSP4J →] method={} id={} params_keys={}", _method, message.get("id"), _pkeys)
+                else:
+                    logger.info("[LSP4J →] method={} id={} params_keys={}", _method, message.get("id"), _pkeys)
             elif "result" in message:
                 logger.debug("[LSP4J →] response id={} result_type={}", message.get("id"), type(message["result"]).__name__)
             elif "error" in message:
@@ -1252,13 +1714,34 @@ class JSONRPCRouter:
     async def _send_notification(self, method: str, params: dict) -> None:
         """发送 JSON-RPC 通知（无 id，不期望响应）。
 
-        注意：chat/answer, chat/think, chat/finish 在插件中是 @JsonRequest，
-        但由于 LSP4J 的请求-响应模式，我们发送带 id 的请求。
-        如果插件不回响应会导致超时，所以这里改用通知方式避免阻塞。
-        实际上 LSP4J Launcher 会自动处理未匹配的响应。
+        仅用于插件 LanguageClient.java 中标注为 @JsonNotification 的方法
+        （如 image/uploadResultNotification）。
+        对于 @JsonRequest 方法（chat/answer, chat/think, chat/finish 等），
+        必须使用 _send_client_request 以确保 LSP4J 正确分发。
         """
         await self._send_message({
             "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        })
+
+    async def _send_client_request(self, method: str, params: dict) -> None:
+        """发送 JSON-RPC 请求到客户端（带 id，但不等待响应）。
+
+        用于插件 LanguageClient.java 中标注为 @JsonRequest 的方法：
+        chat/answer, chat/think, chat/finish, chat/process_step_callback,
+        session/title/update, tool/call/sync, commitMsg/answer, commitMsg/finish,
+        chat/codeChange/apply/finish。
+
+        LSP4J 框架要求：@JsonRequest 处理器只能被带 id 的 RequestMessage 触发，
+        不带 id 的 NotificationMessage 会被静默忽略。
+        因此必须发送带 id 的请求，但不需要注册 pending_response Future
+        （插件的响应会被 _handle_response 静默处理）。
+        """
+        request_id = self._next_request_id()
+        await self._send_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
             "method": method,
             "params": params,
         })
@@ -1310,6 +1793,26 @@ class JSONRPCRouter:
     # ──────────────────────────────────────────
     # 存根与扩展方法
     # ──────────────────────────────────────────
+
+    async def _handle_inline_edit(self, params: dict, msg_id: Any) -> None:
+        """处理 textDocument/inlineEdit — 行内编辑建议。
+
+        插件 TextDocumentService.java:308 定义为 CompletableFuture<InlineEditResult>，
+        InlineEditResult 格式：{success: boolean, message: String}。
+        当前不实现行内编辑功能，返回 success=false 让插件静默跳过。
+        """
+        logger.debug("[LSP4J] inlineEdit: uri={}", params.get("textDocument", {}).get("uri", ""))
+        await self._send_response(msg_id, {"success": False, "message": ""})
+
+    async def _handle_edit_predict(self, params: dict, msg_id: Any) -> None:
+        """处理 textDocument/editPredict — 编辑预测。
+
+        插件 TextDocumentService.java:318 定义为 CompletableFuture<Void>，
+        属于 fire-and-forget 模式，返回 null 即可。
+        当前不实现编辑预测功能。
+        """
+        logger.debug("[LSP4J] editPredict: uri={}", params.get("textDocument", {}).get("uri", ""))
+        await self._send_response(msg_id, None)
 
     async def _handle_stub(self, params: dict, msg_id: Any) -> None:
         """通用存根处理器 — 返回空成功响应，避免 Method not found 错误。
@@ -1488,7 +1991,7 @@ class JSONRPCRouter:
         # 3. 定义流式回调
         async def _on_chunk(text: str) -> None:
             if stream:
-                await self._send_notification("commitMsg/answer", {
+                await self._send_client_request("commitMsg/answer", {
                     "requestId": request_id,
                     "text": text,
                     "timestamp": int(time.time() * 1000),
@@ -1511,14 +2014,14 @@ class JSONRPCRouter:
 
         # 5. 非流式模式一次性返回
         if not stream and reply:
-            await self._send_notification("commitMsg/answer", {
+            await self._send_client_request("commitMsg/answer", {
                 "requestId": request_id,
                 "text": reply,
                 "timestamp": int(time.time() * 1000),
             })
 
         # 6. 发送完成通知
-        await self._send_notification("commitMsg/finish", {
+        await self._send_client_request("commitMsg/finish", {
             "requestId": request_id,
             "statusCode": 0,
             "reason": "",
@@ -1580,7 +2083,7 @@ class JSONRPCRouter:
         await self._send_response(msg_id, result)
 
         # 发送 apply/finish 通知（部分插件版本依赖此通知刷新 diff）
-        await self._send_notification("chat/codeChange/apply/finish", result)
+        await self._send_client_request("chat/codeChange/apply/finish", result)
         logger.debug("[LSP4J] codeChange/apply/finish sent: applyId={}", apply_id)
 
     # ──────────────────────────────────────────
@@ -1622,11 +2125,14 @@ class JSONRPCRouter:
         "commitMsg/generate": _handle_commit_msg_generate,       # 生成 commit message（流式）
         # ── tool/ 方法（ToolCallService.java + ToolService.java） ──
         "tool/call/results": _handle_tool_call_results,        # ToolCallService.listToolCallInfo（MVP 空列表）
+        # ── 任务规划工具（ToolTypeEnum.java:56-60） ──
+        "tool/invoke": _handle_tool_invoke,                    # 工具调用入口（add_tasks/todo_write/search_replace 在此处理）
         # ── agents/ 方法（TestAgentService.java） ──
         "agents/testAgent/stepProcessConfirm": _handle_step_process_confirm,
         # ── textDocument/ 方法（TextDocumentService.java — inline edit，P2-3） ──
-        "textDocument/inlineEdit": _handle_stub,               # 旧版 NES 行内编辑建议
-        "textDocument/editPredict": _handle_stub,              # 新版 NES 编辑预测
+        "textDocument/preCompletion": _handle_pre_completion,  # IDE 补全预请求（返回 Void）
+        "textDocument/inlineEdit": _handle_inline_edit,        # 行内编辑建议（返回 InlineEditResult）
+        "textDocument/editPredict": _handle_edit_predict,      # 编辑预测（返回 Void）
         # ── LanguageServer.java 直接定义的 @JsonRequest 方法 ──
         "config/getGlobal": _handle_stub,                     # 全局配置查询
         "config/queryModels": _handle_stub,                   # 模型查询
@@ -1697,6 +2203,34 @@ async def invoke_lsp4j_tool(
     Returns:
         工具执行结果字符串
     """
+    # ── 特殊工具处理（纯 UI 工具，不需要发送到 IDE） ──
+    if tool_name in ("add_tasks", "todo_write"):
+        # 任务规划工具：直接返回成功响应，插件 AddTasksToolDetailPanel 会自动从工具结果中解析 TaskResponseItem 格式 JSON
+        # LLM 会在回复中输出任务列表，插件自动渲染为任务树 UI
+        logger.info("[LSP4J-TOOL] 纯 UI 工具: tool={} 返回成功响应", tool_name)
+        import json
+        # 返回空的成功响应，让插件知道工具调用成功，实际任务内容由 LLM 在 chat/answer 中输出
+        return json.dumps({
+            "success": True,
+            "message": f"{tool_name} 工具调用成功，任务内容由 LLM 在回复中输出",
+            "tool_name": tool_name,
+        }, ensure_ascii=False)
+    
+    if tool_name == "search_replace":
+        # 搜索替换工具：降级为 replace_text_by_path（插件 ToolInvokeProcessor 有 handler）
+        # 注意：search_replace 的参数格式可能不同，需要转换
+        logger.info("[LSP4J-TOOL] search_replace 降级为 replace_text_by_path")
+        tool_name = "replace_text_by_path"
+        # 参数转换：search_replace 可能使用 searchText/replaceText，需要映射为 text
+        if "searchText" in arguments and "replaceText" in arguments:
+            # 简化处理：直接使用 replaceText 作为全文替换内容
+            arguments = {
+                "filePath": arguments.get("filePath", ""),
+                "text": arguments.get("replaceText", ""),
+            }
+        # 继续走正常的 LSP4J 路径
+    
+    # ── 正常 LSP4J 工具调用 ──
     # 使用 (user_id, agent_id) 复合键查找路由器，确保不同用户的连接不会互相干扰
     agent_key = (str(user_id), str(agent_id))
     router_instance = _active_routers.get(agent_key)
@@ -1769,6 +2303,9 @@ async def _persist_lsp4j_chat_turn(
                 sess.last_message_at = now
 
             # 添加消息
+            # ★ 显式设置 created_at，确保用户消息时间戳早于助手消息
+            # 避免同一事务中两条消息的 server_default 时间戳相同导致排序错乱
+            from datetime import timedelta
             if user_text:
                 db.add(ChatMessage(
                     agent_id=agent_id,
@@ -1776,6 +2313,7 @@ async def _persist_lsp4j_chat_turn(
                     role="user",
                     content=user_text,
                     conversation_id=str(sid_uuid),
+                    created_at=now - timedelta(seconds=1),  # 用户消息时间戳早 1 秒
                 ))
 
             if reply_text:
@@ -1786,6 +2324,7 @@ async def _persist_lsp4j_chat_turn(
                     content=reply_text,
                     conversation_id=str(sid_uuid),
                     thinking=thinking_text,  # 构造时传入，非事后更新
+                    created_at=now,  # 助手消息时间戳
                 ))
 
             await db.commit()

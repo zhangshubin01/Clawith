@@ -1,0 +1,247 @@
+---
+description: Android F2C 专项规范：图片资源目录、包结构、MVVM 职责边界、页面交付、设置页接入、UI 环境依赖、资源命名、布局规范、夜间模式，请结合skill使用~
+globs: **/*.xml,**/*.kt,**/*.java
+alwaysApply: true
+---
+
+# Android F2C 专项规范
+
+---
+
+# 一、F2C Android 专项
+
+## 图片资源目录
+
+| 切图倍数 | 目标目录 |
+|---|---|
+| 3x（设计稿标准输出，默认）| `app/src/main/res/drawable-xxhdpi/` |
+
+> **禁止**将 3x 切图放入 `drawable/`（高密度屏二次放大 OOM）；也不应全部放入 `drawable-nodpi/`（高密度屏模糊/锯齿）。
+
+图片文件名必须带业务模块前缀（如 `novel_cover.png`）。若源文件无前缀，复制时通过 `cp` 重命名，**禁止将无前缀文件直接拷入项目**。
+
+---
+
+## 包结构规范
+
+生成代码前先识别项目已有包组织方式，严格与之保持一致。两级结构：
+
+**第一级**：按业务模块拆包，例如 `com.baidu.searchbox.feed.biserialdetail`。
+
+**第二级**：选其一，勿混用：
+
+**模式 A：架构分层（MVVM / MVP / MVC）**
+```
+{模块根包}/
+  model/         ← 数据模型 (VO / DTO / Entity)
+  view/          ← Activity / Fragment / Adapter / 自定义 View
+  viewmodel/     ← ViewModel (MVVM) 或 presenter/ (MVP)
+  repository/    ← 数据仓库（MVVM 常见）
+```
+
+**模式 B：按职责功能拆包（大型模块）**
+```
+{模块根包}/
+  XxxActivity.kt      ← 入口 Activity 直接放根包
+  view/               ← UI 层，按功能特性再拆子包
+  base/               ← 模块内公共基础层（ui/ util/）
+  model/  net/  listeners/  linkage/  ubc/  runtime/  utils/
+```
+
+- **平铺/Demo 结构**：若项目无任何子包，**不得跟随平铺**，新页面仍须建立两级结构，默认选模式 A。
+- **禁止**：不同模块代码混放，或支撑类直接平铺在根包下。
+
+---
+
+## MVVM 职责边界（强制）
+
+- `Activity / Fragment`：仅做 UI 绑定与用户交互，**禁止**在此编写数据构建/业务逻辑（含 `buildMockData()`、网络调用）
+- `ViewModel`：持有所有数据状态（`LiveData` / `StateFlow`），负责数据加载与转换，Mock 数据统一放此处
+- `model/`：纯数据类，不引用任何 Android Context 或 R 资源
+
+若项目未引入 `activity-ktx`（禁止新增依赖），用以下替代 `by viewModels()`：
+
+```kotlin
+private val viewModel: XxxViewModel by lazy {
+    ViewModelProvider(this)[XxxViewModel::class.java]
+}
+```
+
+---
+
+## 页面交付归档
+
+生成新页面后，必须同步归档到模板目录：
+
+```
+.comate/templates/<页面名>/
+├── README.md       # 文件清单 / 包名替换 / Manifest 注册 / 依赖 / 图片说明
+├── java/XxxActivity.kt
+└── res/layout/ drawable/ drawable-xxhdpi/
+```
+
+执行顺序：写入项目文件 → mkdir 模板目录 → cp 文件 → 写 README.md
+
+---
+
+# 二、业务规范
+
+## 设置页面接入
+
+> 设置组件只负责条目样式，操作时回调业务方；与业务解耦，可独立输出，最小化依赖。
+
+### 静态接入（整个页面为设置组件）
+
+新建 `setting_xxx.xml`：
+
+```xml
+<PreferenceScreen>
+    <PreferenceCategory preference:key="pref_key_category_xxx">
+        <Preference preference:key="pref_key_title" preference:title="标题" preference:pref_subtitle="副标题" />
+        <CheckBoxPreference preference:key="pref_key_checkbox" preference:title="标题checkbox" />
+        <TickPreference preference:key="pref_key_tick" preference:title="标题Tick" />
+    </PreferenceCategory>
+</PreferenceScreen>
+```
+
+Activity 继承 `BasePreferenceActivity`，实现 `getPreferenceFragment`；Fragment 继承 `PreferenceFragment`，`onCreate` 中调用 `addPreferencesFromResource(R.xml.setting_xxx)`。
+
+### 动态接入（数据动态下发 / 页面局部嵌入）
+
+使用 `SettingFrameLayout`，调用 `setData(List<SettingItemBean>)`：
+
+```java
+item = new SettingItemBean(SettingItemType.TICK_PREFERENCE, SettingItemCardStyle.SINGLE);
+item.setTitle(title);
+item.setSummary(summary);
+settingList.add(item);
+settingFrameLayout.setData(settingList, true);
+```
+
+常用 API：`findPreference(key)` / `removePreference()` / `setOnPreferenceClickListener()`
+
+---
+
+# 三、整体规范
+
+## UI 设计环境依赖
+
+> 版本基线：`LIB_BASE_UI_VERSION=19.2.2`，配置入口：`xbuild/modules/version.properties`
+
+### Design Token
+
+| 系列 | 含义 | 来源 |
+|---|---|---|
+| `GC*` | 全局通用色（文字、背景、分割线） | `base_styles` AAR，**无需本地声明** |
+| `FC*` | 功能语义色（成功、警告、链接） | `base_styles` AAR，**无需本地声明** |
+| `BC*` | 业务自定义色 | 本模块 `values/colors.xml` + `values-night/colors.xml` 手动声明 |
+| `dimen_ui_*` | 通用间距/尺寸（步长 1dp） | `base_styles` AAR，**无需本地声明** |
+
+```xml
+android:textColor="@color/GC1"       <!-- 主文字 -->
+android:textColor="@color/GC4"       <!-- 次级文字 -->
+android:textColor="@color/GC84"      <!-- 品牌蓝/链接 -->
+android:background="@color/FC320"    <!-- 功能强调色 -->
+android:padding="@dimen/dimen_ui_16"
+```
+
+### 核心 UI 组件速查
+
+| 场景 | 推荐 |
+|---|---|
+| 本地图标 / 静态图片 | `BdBaseImageView`（替代原生 `ImageView`，支持皮肤适配） |
+| 网络图片 / GIF / WebP | `SimpleDraweeView`（Fresco） |
+| PAG 动效 | `PAGView` + `lib_bd_pag` |
+| 骨架屏/Shimmer | `LoadingViewD25` |
+| 角标 | `BadgeView` |
+| 顶部 Bar | `UnifiedBar` |
+| 弹窗/浮层 | `lib_dialog` / `bd_popupwindow` |
+
+### AndroidX 版本
+
+| 库 | 版本 |
+|---|---|
+| appcompat | 1.2.0 |
+| constraintlayout | 2.0.4 |
+| recyclerview | 1.1.0 |
+| core-ktx | 1.3.2 |
+| lifecycle-runtime-ktx / lifecycle-viewmodel-ktx | 2.2.0 |
+
+---
+
+## 资源命名规范
+
+**所有资源文件名和 ID 必须以业务模块名为前缀**，不得使用无前缀通用名。
+
+| 资源类型 | 格式 | 正确示例 | 错误示例 |
+|---|---|---|---|
+| 图片文件 | `{模块}_{语义}.png/webp` | `novel_cover.png` | `cover.png` |
+| drawable XML | `{模块}_bg_{语义}.xml` | `novel_bg_tag.xml` | `bg_tag.xml` |
+| layout | `{模块}_{语义}_{类型}.xml` | `novel_tab_activity.xml` | `activity_novel_tab.xml` |
+| View ID | `{模块}_{控件缩写}_{语义}` | `novel_tv_title` | `tv_title` |
+| string / color / dimen | `{模块}_{语义}` 或 `@dimen/dimen_ui_*` | `novel_str_loading` | `str_loading` |
+
+> 生成资源后扫描 `res/drawable*/`、`res/layout/`、`res/values/`，确认全部以模块名开头。
+
+---
+
+## UI 布局规范
+
+### 崩溃类
+
+- **ScrollView** 只能有一个直接子 View（用 `LinearLayout` 包裹）
+- **TextView** 内禁止嵌套 `<android.text.SpannableString>` 等非 View 标签（触发 `InflateException`）
+
+### 视觉 Bug 类
+
+- **ConstraintLayout** 子 View 用 `0dp` 代替 `match_parent`；宽/高均 `0dp` 时四边约束必须完整
+- **ConstraintLayout 前向引用**用 `@+id/`（避免 aapt2 编译失败）
+- **RecyclerView Item** 高度禁止 `match_parent`（改用 `wrap_content`）
+- **NestedScrollView 内嵌 RecyclerView**：必须 `wrap_content` + `nestedScrollingEnabled="false"`
+- **TextView 单行截断**：必须同时声明 `maxLines` + `ellipsize`，宽度用 `0dp`
+- **gravity vs layout_gravity**：`gravity` 控制内容对齐；`layout_gravity` 控制自身在父容器位置；ConstraintLayout 子 View 不支持 `layout_gravity`
+
+### 单位规范
+
+- `textSize` 必须用 **sp**；间距用 **dp** 或 `@dimen/dimen_ui_*`；**禁止**硬编码 `px`
+
+### 触摸热区
+
+图标视觉尺寸通常 24dp，用 `padding="12dp"` 补足最小 48dp 热区，背景用 `?attr/selectableItemBackgroundBorderless`。
+
+### RecyclerView 必填属性
+
+```xml
+<androidx.recyclerview.widget.RecyclerView
+    android:overScrollMode="never"
+    android:clipToPadding="false"
+    android:scrollbars="none" />
+```
+
+### GONE vs INVISIBLE
+
+| 值 | 占位 | 绘制 | 用途 |
+|---|---|---|---|
+| `VISIBLE` | ✅ | ✅ | 正常显示 |
+| `INVISIBLE` | ✅ | ❌ | 隐藏但保留位置（少用） |
+| `GONE` | ❌ | ❌ | 彻底隐藏，首选 |
+
+ConstraintLayout 中 View GONE 后约束自动折叠，用 `app:layout_goneMarginStart` 等属性补偿间距。
+
+### 布局选型速查
+
+| 场景 | 推荐 |
+|---|---|
+| 多元素复杂约束 | `ConstraintLayout`（层级 ≤ 5） |
+| 单方向线性 | `LinearLayout` |
+| 图片+角标叠加 | `FrameLayout` |
+| ScrollView 唯一子 | `LinearLayout`（vertical） |
+| 卡片效果 | `LinearLayout` + `@drawable/bg_card` + `elevation` |
+
+---
+
+## 夜间模式 / 皮肤
+
+- **禁止**硬编码颜色值，**必须**用 `@color/GC*` / `@color/FC*`
+- 业务专属色（`BC*`）在 `values/colors.xml` **和** `values-night/colors.xml` 同时声明
+- 本地静态图标统一用 `BdBaseImageView`，皮肤库自动适配

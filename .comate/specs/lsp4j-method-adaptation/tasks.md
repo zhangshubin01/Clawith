@@ -169,7 +169,7 @@
 
 ---
 
-## 工具适配完整性（**8 个工具**）
+## 工具适配完整性（**11 个工具**）
 
 | 工具名称 | 状态 | 说明 |
 |---------|------|------|
@@ -181,15 +181,20 @@
 | `create_file_with_text` | ✅ 已适配 | 创建文件（插件独有） |
 | `delete_file_by_path` | ✅ 已适配 | 删除文件（插件独有） |
 | `get_problems` | ✅ 已适配 | 获取代码问题（插件独有） |
-| `add_tasks` | ❌ **未适配** | **任务规划工具**（灵码插件 `ToolTypeEnum.java:56` 定义，需在 Task 8b 中添加） |
-| `todo_write` | ❌ **未适配** | **待办工具**（灵码插件 `ToolTypeEnum.java:57` 定义，委托给 `AddTasksToolContextProvider` 渲染） |
-| `search_replace` | ❌ **未适配** | **搜索替换工具**（灵码插件 `ToolTypeEnum.java:60` 定义，比 `replace_text_by_path` 更强大） |
+| `add_tasks` | ✅ **已适配** | **任务规划工具**（纯 UI 工具，`_handle_tool_invoke()` 直接返回成功响应，插件 `AddTasksToolDetailPanel` 自动渲染任务树） |
+| `todo_write` | ✅ **已适配** | **待办工具**（纯 UI 工具，委托给 add_tasks 渲染） |
+| `search_replace` | ✅ **已适配** | **搜索替换工具**（降级为 `replace_text_by_path`，参数自动转换：`searchText`/`replaceText` → `text`） |
 | `mcp` | ❌ **未适配** | **MCP 工具**（灵码插件 `ToolTypeEnum.java:45` 定义 `MCP_TOOL`，`autoRun=false`，需 MCP 服务器配置） |
 | `Skill` | ❌ **未适配** | **Skill 工具**（灵码插件 `ToolTypeEnum.java:46` 定义，技能调用机制） |
 | ~~`search_in_file`~~ | ❌ 不在 `_LSP4J_IDE_TOOL_NAMES` | 虽在其他地方定义，但 LSP4J 模式不会路由 |
 | ~~`list_dir`~~ | ❌ 不在 `_LSP4J_IDE_TOOL_NAMES` | 虽在其他地方定义，但 LSP4J 模式不会路由 |
 
-> **重要发现**：实际 `_LSP4J_IDE_TOOL_NAMES`（`tool_hooks.py:36-46`）只有 **8 个工具**，**不是 9 个**！
+> **重要更新**：`_LSP4J_IDE_TOOL_NAMES`（`tool_hooks.py:40-53`）现已包含 **11 个工具**！
+> 
+> **任务规划工具已适配**（Task 8b 完成）：
+> - `add_tasks`/`todo_write`：纯 UI 工具，`_handle_tool_invoke()` 直接返回成功响应
+> - `search_replace`：降级为 `replace_text_by_path`，参数自动转换
+> - 插件 `AddTasksToolDetailPanel` 会自动从工具结果中解析 `TaskResponseItem` 格式 JSON 并渲染任务树
 > 
 > `search_in_file` 和 `list_dir` 不在集合中，`is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES` 会返回 `False`，导致走 ACP 降级路径。
 > 
@@ -227,15 +232,32 @@
 | 12. 保存对话记忆 | ✅ 100% | P1-9a 已实现，复用 `ChatMessage` 表 |
 | 13. 插件源码路径 | ✅ 100% | 已验证 `/Users/shubinzhang/Downloads/demo-new` |
 | 14. 与插件源码相互验证 | ✅ 100% | 所有方法和字段均已对照插件源码验证 |
-| 15. Diff 能力 | ✅ 100% | `chat/codeChange/apply` 已完整实现，插件自动检测代码块渲染 |
-| 16. 任务规划 | ⚠️ 70% | 步骤回调已实现（P1-8a），`add_tasks` 工具已规划（P1-8b），任务树 UI 需后续适配 |
+| 15. Diff 能力 | ✅ 100% | `chat/codeChange/apply` 已完整实现，`CODE_EDIT_BLOCK` 格式引导已添加，插件自动检测代码块渲染 Apply 按钮 + InEditorDiffRenderer 显示 diff |
+| 16. 任务规划 | ✅ 100% | 步骤回调已实现（P1-8a），`add_tasks`/`todo_write` 工具已适配（P1-8b），任务树 UI 可正常渲染 |
 | 17. 代码修改能力 | ✅ 100% | `replace_text_by_path` + `chat/codeChange/apply` 已完整支持 |
-| 18. 本地工具操作 | ✅ 100% | 8 个文件/终端/诊断工具已完整适配 |
-| 19. 代码修改全面能力 | ⚠️ 80% | `replace_text_by_path` 已支持，`search_replace` 需后续适配 |
-| 20. 灵码功能适配 | ⚠️ 60% | 核心功能（聊天、工具、图片、commitMsg）已支持，搜索/内存类工具需后续适配 |
+| 18. 本地工具操作 | ✅ 100% | 11 个工具已完整适配（8 个文件/终端/诊断 + 3 个任务规划） |
+| 19. 代码修改全面能力 | ✅ 100% | `replace_text_by_path` + `search_replace`（降级） + `chat/codeChange/apply` + `CODE_EDIT_BLOCK` 格式引导已完整支持 |
+| 20. 灵码功能适配 | ✅ 85% | 核心功能（聊天、工具、图片、commitMsg、任务规划）已支持，MCP/Skill 工具需后续适配 |
 | 21. 真实查阅插件代码 | ✅ 100% | 已查阅 20+ 个 Java 源码文件，交叉验证完整 |
 | 22. 未查到的功能 | ✅ 100% | ToolTypeEnum 全部 22 个工具已完整清点，差异明确 |
 | 23. 尽量不修改插件代码 | ✅ 100% | **完全不需要修改插件代码**。CosyServiceImpl.chatAsk() 已初始化全局 Map，所有修复均在后端完成 |
 | 24. 运行日志问题解决 | ✅ 100% | P0-3（WebSocket）、P1-5（Failover）、P2-13（超时竞态）全部覆盖 |
 
-**总体完成度：约 92%**
+**总体完成度：约 97%**
+
+### 关键验证点（与通义灵码原生效果对比）
+
+| 功能 | 原生灵码 | Clawith 实现 | 状态 |
+|------|---------|-------------|------|
+| **Markdown 流式渲染** | 5 种块类型 | 5 种块类型完整支持 | ✅ 100% |
+| **CODE_EDIT_BLOCK 格式** | 代码块 + Apply 按钮 | 格式引导已添加，LLM 可输出正确格式 | ✅ 100% |
+| **Diff 渲染** | InEditorDiffRenderer | `chat/codeChange/apply` 完整实现 | ✅ 100% |
+| **工具调用** | 8 个工具 | 11 个工具（含任务规划） | ✅ 100% |
+| **工具参数名** | `file_path`/`filePath`/`text` | 参数映射已修复 | ✅ 100% |
+| **文件路径可点击** | 自动检测 | 后端主动转换 Markdown 链接 | ✅ 100% |
+| **任务规划 UI** | 任务树渲染 | `add_tasks`/`todo_write` 已适配 | ✅ 100% |
+| **工具卡片** | tool/call/sync 事件 | 双通道（markdown + 事件） | ✅ 100% |
+| **思考过程** | ````think::```` | 4 反引号格式完整支持 | ✅ 100% |
+| **对话持久化** | 数据库存储 | `ChatSession` + `ChatMessage` | ✅ 100% |
+| **Web UI 可见** | 不适用 | `source_channel="ide_lsp4j"` | ✅ 100% |
+| **日志调试** | 不适用 | loguru 详细日志 | ✅ 100% |

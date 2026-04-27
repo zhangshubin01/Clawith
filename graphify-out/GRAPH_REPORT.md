@@ -1,25 +1,25 @@
-# Graph Report - .  (2026-04-26)
+# Graph Report - .  (2026-04-27)
 
 ## Corpus Check
-- 319 files · ~541,979 words
+- 319 files · ~543,724 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 4003 nodes · 15493 edges · 159 communities detected
-- Extraction: 34% EXTRACTED · 66% INFERRED · 0% AMBIGUOUS · INFERRED: 10185 edges (avg confidence: 0.5)
+- 4019 nodes · 15574 edges · 159 communities detected
+- Extraction: 34% EXTRACTED · 66% INFERRED · 0% AMBIGUOUS · INFERRED: 10241 edges (avg confidence: 0.5)
 - Token cost: 0 input · 0 output
 
 ## God Nodes (most connected - your core abstractions)
 1. `User` - 843 edges
-2. `Agent` - 640 edges
+2. `Agent` - 648 edges
 3. `IdentityProvider` - 394 edges
-4. `LLMModel` - 357 edges
+4. `LLMModel` - 365 edges
 5. `ChannelConfig` - 342 edges
 6. `OrgMember` - 327 edges
-7. `Tenant` - 324 edges
-8. `ChatMessage` - 317 edges
+7. `ChatMessage` - 325 edges
+8. `Tenant` - 324 edges
 9. `SystemSetting` - 314 edges
-10. `ChatSession` - 285 edges
+10. `ChatSession` - 293 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Clawith ACP Thin Client — IDE 侧瘦客户端（JetBrains Agent Client Protocol）  通过 WebSock` --uses--> `AgentSideConnection`  [INFERRED]
@@ -37,35 +37,35 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.02
-Nodes (342): DailyTokenUsage, CompanyCreateRequest, CompanyCreateResponse, CompanyStats, create_company(), get_enhanced_metrics(), get_platform_leaderboards(), get_platform_settings() (+334 more)
+Nodes (363): DailyTokenUsage, Rolled up token consumption per agent per day for time-series analytics., CompanyCreateRequest, CompanyCreateResponse, CompanyStats, create_company(), get_enhanced_metrics(), get_platform_leaderboards() (+355 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.04
-Nodes (406): get_agent_activity(), get_conversation_messages(), list_conversations(), Activity log API — view agent work history., Get messages for a specific conversation., Get recent activity logs for an agent., List all conversation partners for this agent (web users + other agents)., Agent (+398 more)
+Nodes (411): get_agent_activity(), get_conversation_messages(), list_conversations(), Activity log API — view agent work history., Get messages for a specific conversation., Get recent activity logs for an agent., List all conversation partners for this agent (web users + other agents)., Agent (+403 more)
 
 ### Community 2 - "Community 2"
+Cohesion: 0.02
+Nodes (300): create_template(), delegate_task(), DelegateRequest, delete_template(), get_agent_metrics(), get_template(), handover_agent(), HandoverRequest (+292 more)
+
+### Community 3 - "Community 3"
 Cohesion: 0.01
 Nodes (108): fetchJson(), handleCreate(), handleSendTestEmail(), handleToggle(), handleToggleSetting(), loadCompanies(), saveEmailConfig(), saveEmailTemplates() (+100 more)
 
-### Community 3 - "Community 3"
-Cohesion: 0.04
-Nodes (225): authorize(), bind_identity(), change_password(), check_duplicate(), forgot_password(), get_email_hint(), get_me(), get_my_tenants() (+217 more)
-
 ### Community 4 - "Community 4"
-Cohesion: 0.02
-Nodes (185): AgentActivityLog, Activity log model for tracking agent actions., Records every action taken by a digital employee., Rolled up token consumption per agent per day for time-series analytics., log_activity(), Activity logger — simple async function to record agent actions., Record an agent activity. Fire-and-forget, never raises., create_template() (+177 more)
-
-### Community 5 - "Community 5"
 Cohesion: 0.02
 Nodes (171): extract_config_schema(), extract_skill_metadata(), Extract metadata from Superpowers SKILL.md.      Superpowers skills can have YAM, Convert Superpowers skill to Clawith Skill create/update dict., Extract JSON Schema for configuration from metadata., to_clawith_skill(), _agent_base_dir(), agent_import_from_clawhub() (+163 more)
 
-### Community 6 - "Community 6"
+### Community 5 - "Community 5"
 Cohesion: 0.02
 Nodes (121): call_agent_llm(), call_agent_llm_with_tools(), call_llm(), call_llm_with_failover(), _check_tool_requires_args(), _convert_messages_for_vision(), FailoverGuard, _get_agent_config() (+113 more)
 
-### Community 7 - "Community 7"
+### Community 6 - "Community 6"
 Cohesion: 0.03
 Nodes (107): AioSandboxBackend, aio-sandbox backend.      Connects to aio-sandbox (https://github.com/agent-infr, Check if aio-sandbox service is available., Execute code using aio-sandbox., BaseSandboxBackend, ExecutionResult, Result of code execution in a sandbox., Format execution result for user display. (+99 more)
+
+### Community 7 - "Community 7"
+Cohesion: 0.02
+Nodes (122): AgentActivityLog, Activity log model for tracking agent actions., Records every action taken by a digital employee., log_activity(), Activity logger — simple async function to record agent actions., Record an agent activity. Fire-and-forget, never raises., Audit log, approval request, chat message, and enterprise info models., Audit trail for all operations. (+114 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.04
@@ -81,7 +81,7 @@ Nodes (56): AboutCommand, about command - display version information about Claw
 
 ### Community 11 - "Community 11"
 Cohesion: 0.04
-Nodes (35): LSP4J 插件上下文变量定义。  将 ContextVar 集中在独立模块中，避免 router.py 与 tool_hooks.py 之间的循环导入。 所有, _build_lsp4j_ide_prompt(), invoke_lsp4j_tool(), JSONRPCRouter, _load_lsp4j_history_from_db(), _persist_lsp4j_chat_turn(), _resolve_model_by_key(), _parse_content_length() (+27 more)
+Nodes (38): LSP4J 插件上下文变量定义。  将 ContextVar 集中在独立模块中，避免 router.py 与 tool_hooks.py 之间的循环导入。 所有, _build_lsp4j_ide_prompt(), _convert_file_paths_to_links(), invoke_lsp4j_tool(), JSONRPCRouter, _load_lsp4j_history_from_db(), _persist_lsp4j_chat_turn(), _resolve_model_by_key() (+30 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.05
@@ -89,35 +89,35 @@ Nodes (29): ABC, BaseAuthProvider, DingTalkAuthProvider, FeishuAuthProvider, Mic
 
 ### Community 13 - "Community 13"
 Cohesion: 0.04
-Nodes (42): AgentBayClient, cleanup_agentbay_sessions(), get_agentbay_api_key_for_agent(), get_agentbay_client_for_agent(), _inject_credentials(), AgentBay API client using official SDK.  This module provides a client wrapper a, Navigate browser to URL using SDK.          The AgentBay SDK default navigation, Take a screenshot of the current browser page without navigating.          Use t (+34 more)
+Nodes (44): AgentBayClient, AgentBaySession, cleanup_agentbay_sessions(), get_agentbay_api_key_for_agent(), get_agentbay_client_for_agent(), _inject_credentials(), AgentBay API client using official SDK.  This module provides a client wrapper a, Navigate browser to URL using SDK.          The AgentBay SDK default navigation (+36 more)
 
 ### Community 14 - "Community 14"
 Cohesion: 0.05
 Nodes (59): _cdp_exec(), ClickRequest, control_click(), control_current_url(), control_drag(), control_lock(), control_press_keys(), control_screenshot() (+51 more)
 
 ### Community 15 - "Community 15"
-Cohesion: 0.05
-Nodes (55): _execute_heartbeat(), _heartbeat_tick(), _is_in_active_hours(), Heartbeat service — proactive agent awareness loop.  Periodically triggers agent, Execute a single heartbeat for an agent.      Uses three short DB transactions t, One heartbeat tick: find agents due for heartbeat., Start the background heartbeat loop. Call from FastAPI startup., Check if current time is within the agent's active hours.      Format: "HH:MM-HH (+47 more)
-
-### Community 16 - "Community 16"
 Cohesion: 0.07
 Nodes (30): _AsyncSessionCtx, _FakeAsyncSessionFactory, _FakeDb, _load_thin_server_module(), patch_acp_async_session(), Unit / integration-style tests for the clawith-acp WebSocket bridge (no real IDE, Inject a fake async_session factory; restore after test., Must not hit DB when history already present. (+22 more)
 
-### Community 17 - "Community 17"
+### Community 16 - "Community 16"
 Cohesion: 0.09
 Nodes (32): DummyResult, _make_agent(), _make_participant(), _make_tenant(), Tests for async A2A msg_type differentiation (notify/consult/task_delegate).  Va, notify msg_type should return immediately without calling LLM., task_delegate should create a focus item and an on_message trigger., consult msg_type should call LLM synchronously and return reply. (+24 more)
 
-### Community 18 - "Community 18"
+### Community 17 - "Community 17"
 Cohesion: 0.08
 Nodes (12): client(), FakeAsyncSessionFactory, FakeQuery, FakeScalarResult, FakeSession, FakeSkill, QueryField, RaiseOnInstanceAccess (+4 more)
 
-### Community 19 - "Community 19"
+### Community 18 - "Community 18"
 Cohesion: 0.1
 Nodes (25): _agent_headers(), _fire_extract(), _get_client(), index_all_skills(), index_enterprise_info(), index_memory_file(), _invalidate_availability_cache(), is_available() (+17 more)
 
-### Community 20 - "Community 20"
+### Community 19 - "Community 19"
 Cohesion: 0.12
 Nodes (18): DummyResult, _make_identity(), _make_login_data(), _make_user(), Unit tests for the authentication API (app/api/auth.py)., Login with a nonexistent user returns 401., Login with wrong password returns 401., Login with a disabled account returns 403. (+10 more)
+
+### Community 20 - "Community 20"
+Cohesion: 0.11
+Nodes (25): deliver_broadcast_emails(), get_email_templates(), _load_templates_from_db(), System-owned outbound email service.  Supports both: 1. Platform-level configura, Send email with provided config., Send a password reset email using the configured template.      Args:         to, Send a company invitation email using the configured template.      Args:, Deliver broadcast emails while isolating per-recipient failures. (+17 more)
 
 ### Community 21 - "Community 21"
 Cohesion: 0.1
@@ -152,8 +152,8 @@ Cohesion: 0.11
 Nodes (12): FeishuWSManager, _make_no_proxy_connect(), Feishu WebSocket Long Connection Manager., Recursively convert lark-oapi SDK objects to dictionaries for downstream process, Handle im.message.receive_v1 events from Feishu WebSocket asynchronously., Spawns a WebSocket client fully asynchronously inside FastAPI's loop., Return a drop-in replacement for websockets.connect that forces proxy=None., Stops an actively running WebSocket client for an agent. (+4 more)
 
 ### Community 29 - "Community 29"
-Cohesion: 0.27
-Nodes (19): TaskCreate, TaskLogCreate, TaskLogOut, TaskOut, TaskUpdate, add_task_log(), create_task(), _enrich_task_out() (+11 more)
+Cohesion: 0.13
+Nodes (17): configure_teams_channel(), delete_teams_channel(), _get_teams_access_token(), get_teams_channel(), get_teams_webhook_url(), Microsoft Teams Bot Channel API routes., Send an activity (message) to Microsoft Teams., Send a single chunked message to Microsoft Teams. (+9 more)
 
 ### Community 30 - "Community 30"
 Cohesion: 0.12
@@ -760,17 +760,17 @@ Nodes (0):
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `User` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 10`, `Community 11`, `Community 12`, `Community 14`, `Community 15`, `Community 22`, `Community 25`, `Community 27`, `Community 29`, `Community 32`, `Community 35`, `Community 37`, `Community 41`, `Community 56`, `Community 68`, `Community 72`, `Community 78`?**
-  _High betweenness centrality (0.232) - this node is a cross-community bridge._
-- **Why does `Agent` connect `Community 1` to `Community 0`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 10`, `Community 11`, `Community 15`, `Community 25`, `Community 27`, `Community 32`, `Community 35`, `Community 38`, `Community 41`, `Community 52`, `Community 56`, `Community 62`, `Community 78`?**
-  _High betweenness centrality (0.135) - this node is a cross-community bridge._
-- **Why does `ChannelConfig` connect `Community 1` to `Community 0`, `Community 35`, `Community 3`, `Community 4`, `Community 38`, `Community 36`, `Community 37`, `Community 41`, `Community 10`, `Community 13`, `Community 28`?**
-  _High betweenness centrality (0.053) - this node is a cross-community bridge._
+- **Why does `User` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 10`, `Community 11`, `Community 12`, `Community 14`, `Community 22`, `Community 25`, `Community 27`, `Community 29`, `Community 32`, `Community 35`, `Community 37`, `Community 41`, `Community 56`, `Community 68`, `Community 72`, `Community 78`?**
+  _High betweenness centrality (0.231) - this node is a cross-community bridge._
+- **Why does `Agent` connect `Community 1` to `Community 0`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 10`, `Community 11`, `Community 25`, `Community 27`, `Community 29`, `Community 32`, `Community 35`, `Community 38`, `Community 41`, `Community 52`, `Community 56`, `Community 62`, `Community 78`?**
+  _High betweenness centrality (0.137) - this node is a cross-community bridge._
+- **Why does `ChannelConfig` connect `Community 1` to `Community 0`, `Community 2`, `Community 35`, `Community 36`, `Community 37`, `Community 38`, `Community 7`, `Community 41`, `Community 10`, `Community 13`, `Community 28`, `Community 29`?**
+  _High betweenness centrality (0.052) - this node is a cross-community bridge._
 - **Are the 840 inferred relationships involving `User` (e.g. with `Seed data script — creates initial admin user and built-in templates.` and `Create tables and seed initial data.`) actually correct?**
   _`User` has 840 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 638 inferred relationships involving `Agent` (e.g. with `Seed data script — creates initial admin user and built-in templates.` and `Create tables and seed initial data.`) actually correct?**
-  _`Agent` has 638 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 646 inferred relationships involving `Agent` (e.g. with `Seed data script — creates initial admin user and built-in templates.` and `Create tables and seed initial data.`) actually correct?**
+  _`Agent` has 646 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 391 inferred relationships involving `IdentityProvider` (e.g. with `Base` and `Create a new SSO scan session for QR code login.`) actually correct?**
   _`IdentityProvider` has 391 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 354 inferred relationships involving `LLMModel` (e.g. with `Seed data script — creates initial admin user and built-in templates.` and `Create tables and seed initial data.`) actually correct?**
-  _`LLMModel` has 354 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 362 inferred relationships involving `LLMModel` (e.g. with `Seed data script — creates initial admin user and built-in templates.` and `Create tables and seed initial data.`) actually correct?**
+  _`LLMModel` has 362 INFERRED edges - model-reasoned connections that need verification._

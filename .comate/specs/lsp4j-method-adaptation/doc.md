@@ -1790,9 +1790,66 @@ LLM 返回 Markdown 代码块（如 ```java\n...\n```）
 | 工具调用审批 | `tool/call/approve` | ✅ 已适配 | `ToolCallService.java:16-21` |
 | 工具调用历史 | `tool/call/results` | ✅ P2-19 添加 | `ToolCallService.java:23-28` |
 | 工具结果返回 | `tool/invokeResult` | ✅ 已适配 | `ToolService.java:15-20` |
+| 工具调用同步 | `tool/call/sync` | ✅ P0-2 添加 | `LanguageClient.java:633-636` |
 | 聊天问答 | `chat/ask` | ✅ 已适配 | `ChatAskParam.java` |
 | 聊天停止 | `chat/stop` | ✅ 已适配 | - |
+| 聊天回答 | `chat/answer` | ✅ 已适配 | `LanguageClient.java:325-328` |
+| 聊天结束 | `chat/finish` | ✅ 已适配 | `LanguageClient.java:336-339` |
+| 聊天思考 | `chat/think` | ✅ 已适配 | `LanguageClient.java:358-361` |
+| 聊天步骤回调 | `chat/process_step_callback` | ✅ P1-8a 添加 | `LanguageClient.java:314-317` |
 | 代码变更应用 | `chat/codeChange/apply` | ✅ 已适配 | `ChatAskApplyDiffHandler.java` |
+| 代码变更完成 | `chat/codeChange/apply/finish` | ✅ 已适配 | `LanguageClient.java:644-647` |
+| 图片上传 | `image/upload` | ✅ P1-4 添加 | `ImageChatContextRefProvider.java` |
+| 图片上传结果通知 | `image/uploadResultNotification` | ✅ P1-4 添加 | `LanguageClient.java:512-515` |
+| 提交信息生成 | `commitMsg/generate` | ✅ P2-11 添加 | `GenerateCommitMsgParam.java` |
+| 提交信息回答 | `commitMsg/answer` | ✅ P2-11 添加 | `LanguageClient.java:435-438` |
+| 提交信息完成 | `commitMsg/finish` | ✅ P2-11 添加 | `LanguageClient.java:446-449` |
+| 会话标题更新 | `session/title/update` | ✅ P2-12 添加 | `LanguageClient.java:666-669` |
+| 配置查询/更新 | `config/getEndpoint`, `config/updateEndpoint` | ✅ P2-10 添加 | - |
+| 配置变更通知 | `config/changeGlobal` | ✅ Stub | `LanguageClient.java:391-394` |
+| 配置端点变更 | `config/changeEndpoint` | ✅ Stub | `LanguageClient.java:402-405` |
+| 配置刷新模型 | `config/refreshModels` | ✅ Stub | `LanguageClient.java:413-416` |
+| 认证报告 | `auth/report` | ✅ Stub | `LanguageClient.java:380-383` |
+| 网络恢复 | `system/network_recover` | ✅ Stub | `LanguageClient.java:490-493` |
+| 聊天删除通知 | `chat/delete` | ✅ Stub | `LanguageClient.java:556-559` |
+| 聊天发布通知 | `chat/publish/notice` | ✅ Stub | `LanguageClient.java:655-658` |
+| 聊天通知 | `chat/notification` | ✅ Stub | `LanguageClient.java:677-680` |
+| 过滤超时 | `chat/filterTimeout` | ✅ Stub | `LanguageClient.java:347-350` |
+| 错误通知 | `error/notificationError` | ✅ Stub | `LanguageClient.java:457-460` |
+| 扩展注册 | `extension/register` | ✅ Stub | `LanguageClient.java:479-482` |
+| 更新就绪 | `update/ready` | ✅ Stub | `LanguageClient.java:424-427` |
+| 快照同步 | `snapshot/syncAll` | ✅ Stub | `LanguageClient.java:534-537` |
+| 工作区文件同步 | `workingSpaceFile/sync` | ✅ Stub | `LanguageClient.java:545-548` |
+| 测试代理构建 | `agents/testAgent/buildProject` | ✅ Stub | `LanguageClient.java:523-526` |
+| 测试代理 Maven 配置 | `agents/testAgent/getMavenConfig` | ✅ Stub | `LanguageClient.java:567-570` |
+| 测试代理 Java Home | `agents/testAgent/getJavaHome` | ✅ Stub | `LanguageClient.java:578-581` |
+| 测试代理类路径 | `agents/testAgent/getJavaClassPath` | ✅ Stub | `LanguageClient.java:589-592` |
+| 测试代理 Profiles | `agents/testAgent/getMavenProfiles` | ✅ Stub | `LanguageClient.java:600-603` |
+| 测试代理步骤确认 | `agents/testAgent/stepProcessConfirm` | ✅ 已适配 | `jsonrpc_router.py:1626` |
+| NES 行内编辑 | `textDocument/inlineEdit` | ✅ Stub | `jsonrpc_router.py:1628` |
+| NES 编辑预测 | `textDocument/editPredict` | ✅ Stub | `jsonrpc_router.py:1629` |
+| NES 编辑操作 | `textDocument/editPredictAction` | ✅ Stub | `LanguageClient.java:688-691` |
+| NES 下一个操作 | `textDocument/nextEditAction` | ✅ Stub | `LanguageClient.java:622-625` |
+| 补全结果收集 | `textDocument/collectCompletionResult` | ✅ Stub | `LanguageClient.java:369-372` |
+| 代码引用查询 | `textDocument/queryReference` | ✅ Stub | `LanguageClient.java:468-471` |
+| PSI 可用列表 | `psi/availableList` | ✅ Stub | `LanguageClient.java:270-273` |
+| PSI 候选分析 | `psi/candidateAnalyze` | ✅ Stub | `LanguageClient.java:281-284` |
+| PSI 变量列表 | `psi/listVariables` | ✅ Stub | `LanguageClient.java:292-295` |
+| PSI 继承关系 | `psi/inherits` | ✅ Stub | `LanguageClient.java:303-306` |
+
+### ⚠️ 未完全验证的功能（**发现遗漏**）
+
+| 功能 | 方法名 | 状态 | 说明 |
+|------|--------|------|------|
+| 任务规划 UI 渲染 | `add_tasks` 工具 | ❌ **未适配** | 灵码插件 `ToolTypeEnum.java:56` 定义了 `ADD_TASKS("add_tasks", ...)`，`AddTasksToolDetailPanel` 可渲染任务树，但 `_LSP4J_IDE_TOOL_NAMES` **未包含**此工具 |
+| 任务列表（todo） | `todo_write` 工具 | ❌ **未适配** | 灵码插件 `ToolTypeEnum.java:57` 定义了 `TODO_WRITE("todo_write", ...)`，委托给 `AddTasksToolContextProvider` 渲染，但 LSP4J 模式未支持 |
+| 代码搜索替换 | `search_replace` 工具 | ❌ **未适配** | 灵码插件 `ToolTypeEnum.java:60` 定义了 `SEARCH_REPLACE("search_replace", ...)`，比 `replace_text_by_path` 更强大，但 LSP4J 模式未支持 |
+
+> **重要结论修正**：灵码插件**有**任务规划功能（通过 `add_tasks`/`todo_write` 工具 + `AddTasksToolDetailPanel` UI 组件），但当前 LSP4J 模式**未适配这些工具**，导致任务树 UI 无法渲染。
+> 
+> **标准 15（任务规划）部分适用**——需要后续在 `_LSP4J_IDE_TOOL_NAMES` 中添加 `add_tasks` 工具映射，并在系统提示词中引导 LLM 输出 `TaskResponseItem` 格式 JSON。
+
+### ✅ 工具适配完整性验证
 | 图片上传 | `image/upload` | ✅ P1-4 添加 | `ImageChatContextRefProvider.java` |
 | 提交信息生成 | `commitMsg/generate` | ✅ P2-11 添加 | `GenerateCommitMsgParam.java` |
 | 会话标题更新 | `session/title/update` | ✅ P2-12 添加 | - |
