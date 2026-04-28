@@ -952,14 +952,16 @@ class JSONRPCRouter:
                         done_params = self._tool_params.pop(finished_call_id, {}) if finished_call_id else {}
 
                         if not finished_call_id:
-                            finished_call_id = str(uuid.uuid4())
-                            logger.debug("[LSP4J] toolCallId 未匹配 (done)，新建兜底: name={} callId={}",
-                                         tool_name, finished_call_id[:8])
-
-                        await self._send_tool_call_sync(
-                            session_id, request_id, finished_call_id,
-                            "FINISHED", tool_name=original_name, parameters=done_params,
-                        )
+                            # ★ 没有匹配的 toolCallId → 没有对应的 ToolPanel
+                            # 不能发送 FINISHED sync：若使用随机 UUID，ChatToolEventProcessor
+                            # 会为每个幽灵事件等待 10s（timeoutWaitPanel），堵塞所有后续工具事件。
+                            logger.warning("[LSP4J] toolCallId 未匹配 (done)，跳过 FINISHED sync: name={}",
+                                           tool_name)
+                        else:
+                            await self._send_tool_call_sync(
+                                session_id, request_id, finished_call_id,
+                                "FINISHED", tool_name=original_name, parameters=done_params,
+                            )
 
                     await self._send_process_step_callback(
                         session_id, request_id,
