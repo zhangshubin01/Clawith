@@ -289,6 +289,7 @@ function SsoChannelSection({ idpType, existingProvider, tenant, t }: {
 // ─── Org & Identity Tab ─────────────────────────────
 function OrgTab({ tenant }: { tenant: any }) {
     const { t } = useTranslation();
+    const dialog = useDialog();
     const qc = useQueryClient();
 
 
