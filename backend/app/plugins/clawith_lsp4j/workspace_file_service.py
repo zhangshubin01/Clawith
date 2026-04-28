@@ -269,6 +269,63 @@ class WorkspaceFileService:
         """获取所有 snapshot。"""
         return list(self._snapshots.values())
 
+    def _derive_snapshot_status(self, snapshot_id: str, current_status: str = "ACTIVE") -> str:
+        """根据 snapshot 下文件状态推导快照状态（用于按钮显示）。"""
+        files = self.list_by_snapshot(snapshot_id)
+        if not files:
+            return current_status
+
+        statuses = {f.status for f in files if f.status}
+        if not statuses:
+            return current_status
+
+        if "APPLYING" in statuses or "GENERATING" in statuses:
+            return "APPLYING"
+        if statuses == {"ACCEPTED"}:
+            return "ACCEPTED"
+        if statuses == {"REJECTED"}:
+            return "REJECTED"
+        if "APPLIED" in statuses:
+            if "ACCEPTED" in statuses or "REJECTED" in statuses:
+                return "PARTIALLY_ACCEPTED"
+            return "APPLIED"
+        return current_status
+
+    def refresh_snapshot_statuses(self) -> None:
+        """按文件状态刷新所有 snapshot.status。"""
+        for snap in self._snapshots.values():
+            snap.status = self._derive_snapshot_status(snap.id, snap.status)
+
+    def list_snapshots_by_session(self, session_id: str) -> list[SnapshotInfo]:
+        """按会话筛选快照并返回。"""
+        self.refresh_snapshot_statuses()
+        return [s for s in self._snapshots.values() if s.session_id == session_id]
+
+    def operate_snapshot(self, snapshot_id: str, op_type: str) -> bool:
+        """对快照执行批量操作（ACCEPT_ALL/REJECT_ALL/ACTIVATE）。"""
+        files = self.list_by_snapshot(snapshot_id)
+        if not files:
+            logger.warning("[WS-FILE] operate_snapshot: snapshot 无文件 id={}", snapshot_id)
+            return False
+
+        op = (op_type or "").upper()
+        if op in ("ACCEPT_ALL", "ACCEPT"):
+            for f in files:
+                f.status = "ACCEPTED"
+        elif op in ("REJECT_ALL", "REJECT"):
+            for f in files:
+                f.status = "REJECTED"
+        elif op in ("ACTIVATE",):
+            self._current_snapshot_id = snapshot_id
+        else:
+            logger.warning("[WS-FILE] operate_snapshot: 未知操作 op={}", op_type)
+            return False
+
+        self.refresh_snapshot_statuses()
+        logger.info("[WS-FILE] operate_snapshot: snapshot={} op={} file_count={}",
+                    snapshot_id[:8], op, len(files))
+        return True
+
     def build_sync_result(
         self,
         ws_file: WorkspaceFile,
@@ -289,13 +346,22 @@ class WorkspaceFileService:
         project_path: str,
         sync_type: str = "ADD",
     ) -> dict:
-        """构建 SnapshotSyncAllResult 格式。"""
+        """构建 SnapshotSyncAllResult 格式。
+
+        只发送当前 snapshot 归属的文件，避免把历史请求的文件（如 focus.md）
+        带入新会话，导致插件 diff 面板出现"找不到相关文件"的过期条目。
+        """
+        self.refresh_snapshot_statuses()
         snapshots = self.get_all_snapshots()
-        all_files = list(self._files.values())
         current = self._current_snapshot_id or ""
+        # 只包含当前 snapshot 的文件；历史 snapshot 的文件不推给插件
+        if current:
+            current_files = [f for f in self._files.values() if f.snapshot_id == current]
+        else:
+            current_files = []
         return {
             "snapshots": [s.to_dict() for s in snapshots],
-            "workingSpaceFiles": [f.to_wire_format() for f in all_files],
+            "workingSpaceFiles": [f.to_wire_format() for f in current_files],
             "currentSnapshotId": current,
             "currentSessionId": session_id,
             "type": sync_type,
