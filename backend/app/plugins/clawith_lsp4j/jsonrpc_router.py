@@ -1407,10 +1407,13 @@ class JSONRPCRouter:
             # 和 results[0]["fileId"] → 两者均非空时创建 AIDevFilePanel（diff 卡片）。
             # 因此必须注入 fileId（值为文件路径），否则文件卡片不会创建。
             results = result[:500] if result else None
-            if tool_name in _LSP4J_FILE_EDIT_TOOLS and arguments.get("file_path"):
-                results = [{"fileId": arguments["file_path"], "message": result[:500] if result else ""}]
+            # fileId 注入同时检查 snake_case(file_path) 和 camelCase(filePath)，
+            # 防止 LLM 因模型差异使用不同参数命名风格导致文件卡片不创建。
+            file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
+            if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
+                results = [{"fileId": file_path_for_id, "message": result[:500] if result else ""}]
                 logger.info("[LSP4J-TOOL] FINISHED results 注入 fileId: path={} tool={}",
-                            arguments["file_path"], tool_name)
+                            file_path_for_id, tool_name)
 
             await self._send_tool_call_sync(
                 self._session_id, request_id, tool_call_id,
