@@ -62,3 +62,11 @@ class Tenant(Base):
     default_model_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("llm_models.id", ondelete="SET NULL"), nullable=True,
     )
+
+    @property
+    def logo_url(self) -> str | None:
+        """Tenant logo URL stored in flexible tenant config."""
+        if isinstance(self.im_config, dict):
+            value = self.im_config.get("logo_url")
+            return value if isinstance(value, str) and value else None
+        return None
