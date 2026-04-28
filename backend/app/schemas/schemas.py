@@ -312,6 +312,37 @@ class AgentStatusOut(BaseModel):
 
 # ─── Task ───────────────────────────────────────────────
 
+
+
+class TaskListParams(BaseModel):
+    """任务列表查询参数."""
+    status_filter: str | None = Field(None, description="按状态过滤: pending/doing/done")
+    type_filter: str | None = Field(None, description="按类型过滤: todo/supervision")
+    priority_filter: str | None = Field(None, description="按优先级过滤: low/medium/high/urgent")
+    search_keyword: str | None = Field(None, description="搜索关键词（标题/描述）")
+    sort_by: str = Field("created_at", description="排序字段: created_at/updated_at/due_date/priority/title")
+    sort_order: str = Field("desc", description="排序方向: asc/desc")
+    page: int = Field(1, ge=1, description="页码")
+    page_size: int = Field(20, ge=1, le=100, description="每页数量")
+
+
+class TaskStatisticsOut(BaseModel):
+    """任务统计响应."""
+    by_status: dict[str, int]
+    by_priority: dict[str, int]
+    upcoming_deadline_count: int
+    total: int
+
+
+class TaskPaginatedResponse(BaseModel):
+    """任务分页响应."""
+    items: list["TaskOut"]
+    total: int
+    page: int
+    page_size: int
+    statistics: TaskStatisticsOut | None = None
+
+
 class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     description: str | None = None
@@ -574,3 +605,9 @@ class GatewaySendMessageRequest(BaseModel):
     target: str  # Name of target person or agent
     content: str = Field(min_length=1)
     channel: str | None = None  # Optional: "feishu", "agent", etc. Auto-detected if omitted.
+
+# 更新前向引用
+try:
+    TaskPaginatedResponse.model_rebuild()
+except Exception:
+    pass

@@ -46,6 +46,7 @@ from .context import (
     _active_routers,
 )
 from .lsp_protocol import LSPBaseProtocolParser, ParseError
+from .workspace_file_service import WorkspaceFileService
 
 # ──────────────────────────────────────────────
 # LSP4J IDE 工具名称（与 tool_hooks._LSP4J_IDE_TOOL_NAMES 保持一致）
@@ -117,6 +118,18 @@ _TOOL_NAME_MAP = {
     "delete_file": "delete_file_by_path",   # 删除文件
     "list_files": "list_dir",              # 列出目录（基础工具名 → 插件 UI 工具名）
     "search_files": "search_file",         # 搜索文件（基础工具名 → 插件 UI 工具名）
+}
+
+# ★ 插件原生名 → 用户友好名（反向映射，用于 markdown 块显示）
+# 当 LLM 直接调用插件原生名称（如 replace_text_by_path）时，
+# 插件 ToolTypeEnum.getByToolName() 不识别插件原生名，返回 UNKNOWN，
+# 导致文件工具分支不进入、无 diff 卡片。因此 markdown 块必须使用 LLM 侧名称。
+_TOOL_DISPLAY_NAME_MAP = {
+    "replace_text_by_path": "edit_file",
+    "create_file_with_text": "write_file",
+    "delete_file_by_path": "delete_file",
+    "list_dir": "list_files",
+    "search_file": "search_files",
 }
 
 # ──────────────────────────────────────────────
@@ -471,6 +484,9 @@ class JSONRPCRouter:
         self._cancelled_requests: dict[int, None] = {}
         self._MAX_CANCELLED_REQUESTS_SIZE: int = 100
 
+        # 工作区文件服务（diff 卡片支持）
+        self._ws_file_service = WorkspaceFileService()
+
     # ──────────────────────────────────────────
     # 主路由入口
     # ──────────────────────────────────────────
@@ -547,25 +563,46 @@ class JSONRPCRouter:
         # LSP 初始化
         logger.info("[LSP4J-LIFE] initialize: params_keys={}", list(params.keys()))
 
-        # 从 rootUri 提取 projectPath（兼容 file:/// 和 file://localhost/ 格式）
-        root_uri = params.get("rootUri", "")
-        if root_uri:
+        # 提取项目根路径：优先 rootUri，其次 workspaceFolders[0].uri
+        # 通义灵码插件不传 rootUri，只传 workspaceFolders（LSP 标准格式）
+        import urllib.parse
+        import os
+
+        def _extract_path_from_uri(uri: str) -> str | None:
+            """从 file:// URI 提取文件路径，含安全校验。"""
+            if not uri:
+                return None
             try:
-                import urllib.parse
-                import os
-                parsed = urllib.parse.urlparse(root_uri)
-                # file:///path 或 file://localhost/path
+                parsed = urllib.parse.urlparse(uri)
                 path = parsed.path
                 if path:
-                    # 安全校验：禁止路径穿越
                     norm_path = os.path.normpath(path)
                     if ".." in norm_path.split(os.sep):
-                        logger.warning("[LSP4J-LIFE] rootUri 含路径穿越，忽略: {}", root_uri)
-                    else:
-                        self._project_path = norm_path
-                        logger.info("[LSP4J-LIFE] projectPath 从 rootUri 提取: {}", self._project_path)
+                        logger.warning("[LSP4J-LIFE] URI 含路径穿越，忽略: {}", uri)
+                        return None
+                    return norm_path
             except Exception as e:
-                logger.warning("[LSP4J-LIFE] rootUri 解析失败: {} error={}", root_uri, e)
+                logger.warning("[LSP4J-LIFE] URI 解析失败: {} error={}", uri, e)
+            return None
+
+        # 1. 尝试 rootUri
+        root_uri = params.get("rootUri", "")
+        self._project_path = _extract_path_from_uri(root_uri) or ""
+
+        # 2. rootUri 为空时尝试 workspaceFolders
+        if not self._project_path:
+            workspace_folders = params.get("workspaceFolders", [])
+            if workspace_folders:
+                first_folder = workspace_folders[0] if isinstance(workspace_folders[0], dict) else {}
+                folder_uri = first_folder.get("uri", "")
+                self._project_path = _extract_path_from_uri(folder_uri) or ""
+
+        if self._project_path:
+            logger.info("[LSP4J-LIFE] projectPath 提取: {}", self._project_path)
+        else:
+            logger.warning("[LSP4J-LIFE] projectPath 未能提取: rootUri={} workspaceFolders={}",
+                           root_uri[:80] if root_uri else "(empty)",
+                           [f.get("uri", "")[:80] for f in (params.get("workspaceFolders") or [])])
 
         await self._send_response(msg_id, {
             "capabilities": {
@@ -666,6 +703,13 @@ class JSONRPCRouter:
 
             # ★ 重置 toolCallId 队列（新请求开始时清空）
             self._tool_call_id_queue = []
+
+            # ★ 创建 snapshot 并发送 snapshot/syncAll（diff 卡片支持）
+            self._ws_file_service.get_or_create_snapshot(session_id, request_id)
+            try:
+                await self._send_snapshot_sync_all(session_id)
+            except Exception as e:
+                logger.warning("[WS-FILE] snapshot/syncAll 发送失败（非致命）: {}", e)
 
             # ★ 立即返回 JSON-RPC 响应，避免 IDE 端 LSP4J 框架请求超时
             # chat/ask 是 @JsonRequest，LSP4J 框架会等待响应；但 call_llm 可能运行数分钟，
@@ -783,30 +827,41 @@ class JSONRPCRouter:
                     if tool_name != original_name:
                         logger.debug("[LSP4J] on_tool_call 工具名映射: {} → {}", original_name, tool_name)
 
+                    # ★ 显示名映射：插件 ToolTypeEnum.getByToolName() 不识别插件原生名称，
+                    # 只识别 LLM 侧名称（如 edit_file）。markdown 块必须用 LLM 侧名称。
+                    # 当 LLM 直接调用插件原生名（如 replace_text_by_path）时，反向映射为显示名。
+                    display_name = _TOOL_DISPLAY_NAME_MAP.get(original_name, original_name)
+
                     # ★ 只对 LSP4J IDE 工具生成 toolCallId 并入队（供后续 invoke_tool_on_ide 按序匹配）
                     # 非IDE 工具不需要 toolCallId，因为不走 tool/call/sync 通道
                     is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
                     tool_call_id = ""
                     if is_lsp4j_tool:
                         tool_call_id = str(uuid.uuid4())
-                        # ★ 队列存储 3 元组：(LLM 侧名称, 插件原生名称, UUID)
-                        # original_name 供 markdown 块和 sync 通知使用（ToolPanel 需要 LLM 侧名称识别文件工具）
+                        # ★ 队列存储 3 元组：(显示名, 插件原生名称, UUID)
+                        # display_name 供 markdown 块使用（ToolPanel 需要 LLM 侧名称识别文件工具）
                         # tool_name 供 invoke_tool_on_ide 按插件原生名称匹配
-                        self._tool_call_id_queue.append((original_name, tool_name, tool_call_id))
+                        self._tool_call_id_queue.append((display_name, tool_name, tool_call_id))
                         raw_args = data.get("args", {})
                         # ★ 保留原始 snake_case 参数（不做 camelCase 转换）
                         # sync 通知的 parameters 需用 snake_case（ToolPanel.constructFileItem() 读取 file_path 键），
                         # tool/invoke 的 camelCase 转换统一在 invoke_tool_on_ide 中集中处理。
                         # 此前分散在此处的转换逻辑已全部移除。
                         params = dict(raw_args)
+                        # read_file/save_file 的链接渲染依赖 parameters["file_path"]，
+                        # 但模型常传 "path"；这里统一补齐给 ToolPanel 用。
+                        if tool_name in ("read_file", "save_file"):
+                            fp = params.get("file_path") or params.get("path") or params.get("filePath")
+                            if fp and "file_path" not in params:
+                                params["file_path"] = fp
                         self._tool_params[tool_call_id] = params
                         llm_call_id = data.get("call_id", "")
                         if llm_call_id:
                             self._call_id_to_tool_id[llm_call_id] = tool_call_id
                         logger.debug("[LSP4J] toolCallId 入队: name={} callId={} queue_len={}",
                                      tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
-                        logger.info("[LSP4J-TOOL] toolCall 入队: original={} mapped={} callId={} queue_len={}",
-                                    original_name, tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
+                        logger.info("[LSP4J-TOOL] toolCall 入队: display={} mapped={} callId={} queue_len={}",
+                                    display_name, tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
 
                     if is_lsp4j_tool:
                         # ★ 发送 toolCall markdown 块（双通道之 markdown 通道）
@@ -817,17 +872,17 @@ class JSONRPCRouter:
                         # ⚠️ 关键：status 必须用 :: 分隔（第三组），不能换行！
                         #   正确：```toolCall::name::id::INIT\n```
                         #   错误：```toolCall::name::id\nINIT\n```  ← 会导致 astring[1] 越界
-                        # ★ 使用 LLM 侧名称（original_name），而非插件原生名称（tool_name）
+                        # ★ 使用显示名（display_name），而非插件原生名称（tool_name）
                         # 插件 MarkdownStreamPanel 解析此块 → 构造 ToolInfo → ToolPanel 构造时调用
                         # ToolTypeEnum.getByToolName(toolName) 识别工具类型。
                         # 若使用插件原生名称（如 replace_text_by_path），getByToolName 返回 UNKNOWN，
                         # 文件工具分支永远不进入，导致无 AIDevFilePanel（diff 卡片）。
-                        markdown_block = f"```toolCall::{original_name}::{tool_call_id}::INIT\n```"
+                        markdown_block = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
 
                         logger.info("[LSP4J-TOOL] 准备发送 toolCall markdown 块: mapped={} callId={}",
                                      tool_name, tool_call_id[:8])
-                        logger.info("[LSP4J-TOOL] markdown 块使用 LLM 侧名称: name={} callId={}",
-                                    original_name, tool_call_id[:8])
+                        logger.info("[LSP4J-TOOL] markdown 块使用显示名: name={} callId={}",
+                                    display_name, tool_call_id[:8])
                         if getattr(self, "_stream_mode", True):
                             await self._send_chat_answer(session_id, markdown_block, request_id)
                             logger.info("[LSP4J-TOOL] toolCall markdown 块已发送: callId={}", tool_call_id[:8])
@@ -1377,6 +1432,83 @@ class JSONRPCRouter:
             "errorMsg": error_msg,
         })
 
+    async def _send_workspace_file_sync(
+        self, ws_file: Any, sync_type: str = "MODIFIED"
+    ) -> None:
+        """发送 workingSpaceFile/sync 通知（WorkspaceFileSyncResult 格式）。
+
+        插件 LanguageClientImpl.syncWorkspaceFile 收到后：
+        - type=ADD → WorkspaceFileAddedNotifier（新增文件卡片）
+        - type=MODIFIED → WorkspaceFileModifiedNotifier（更新状态/diff/showNewDiff）
+        - type=FRUSH → VFS 刷新
+        """
+        payload = self._ws_file_service.build_sync_result(
+            ws_file, self._project_path, sync_type)
+        logger.info("[WS-FILE] 发送 workingSpaceFile/sync: type={} fileId={} status={} +{} -{}",
+                    sync_type, ws_file.file_id, ws_file.status,
+                    ws_file.diff_info.add, ws_file.diff_info.delete)
+        await self._send_client_request("workingSpaceFile/sync", payload)
+
+    async def _send_snapshot_sync_all(self, session_id: str, sync_type: str = "ADD") -> None:
+        """发送 snapshot/syncAll 通知（SnapshotSyncAllResult 格式）。"""
+        payload = self._ws_file_service.build_snapshot_sync_all(
+            session_id, self._project_path, sync_type)
+        logger.info("[WS-FILE] 发送 snapshot/syncAll: type={} snapshot_count={} file_count={}",
+                    sync_type, len(payload["snapshots"]), len(payload["workingSpaceFiles"]))
+        await self._send_client_request("snapshot/syncAll", payload)
+
+    async def _handle_file_edit_finished(
+        self,
+        tool_name: str,
+        file_path: str,
+        arguments: dict,
+        tool_call_id: str,
+        request_id: str,
+    ) -> Any:
+        """文件编辑工具完成后：创建工作区文件、计算 diff、设置状态。
+
+        返回 WorkspaceFile 对象供 toolCallSync FINISHED 注入 fileId。
+        """
+        session_id = self._session_id or ""
+
+        # 获取或创建 snapshot
+        snap = self._ws_file_service.get_or_create_snapshot(session_id, request_id)
+
+        # 确定变更类型
+        if tool_name == "create_file_with_text":
+            mode = "ADD"
+        elif tool_name == "delete_file_by_path":
+            mode = "DELETE"
+        else:
+            mode = "MODIFIED"
+
+        # 创建或更新工作区文件
+        ws_file = self._ws_file_service.create_or_update_file(
+            session_id, snap.id, file_path, mode, tool_call_id)
+
+        # 获取编辑前后内容
+        if tool_name == "create_file_with_text":
+            last_stable = ""
+            full_content = arguments.get("text") or arguments.get("content") or ""
+        elif tool_name == "delete_file_by_path":
+            last_stable = self._ws_file_service.get_cached_content(file_path) or ""
+            full_content = ""
+        else:
+            # replace_text_by_path: 全文替换，新内容就是 text 参数
+            last_stable = self._ws_file_service.get_cached_content(file_path) or ""
+            full_content = arguments.get("text") or ""
+
+        # 计算 DiffInfo 并存储
+        self._ws_file_service.set_content(file_path, last_stable, full_content)
+
+        # 设置状态为 APPLIED
+        self._ws_file_service.update_status(file_path, "APPLIED")
+
+        logger.info("[WS-FILE] 文件编辑完成: tool={} path={} mode={} wsId={} +{} -{}",
+                    tool_name, file_path, mode, ws_file.id[:8],
+                    ws_file.diff_info.add, ws_file.diff_info.delete)
+        return ws_file
+
     async def invoke_tool_on_ide(
         self, tool_name: str, arguments: dict, timeout: float = 120.0
     ) -> str:
@@ -1412,39 +1544,44 @@ class JSONRPCRouter:
                 logger.info("[LSP4J-TOOL] toolCallId 队列匹配: original={} mapped={} callId={} queue_remaining={}",
                              original_name, tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
                 break
+        queue_matched = bool(tool_call_id)
         if not tool_call_id:
             tool_call_id = str(uuid.uuid4())
             logger.info("[LSP4J-TOOL] toolCallId 队列未匹配，新建兜底: name={} callId={}",
                          tool_name, tool_call_id[:8])
         request_id = self._current_request_id or str(uuid.uuid4())
 
-        logger.info("[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={}",
-                     tool_name, tool_call_id[:8], request_id[:8], timeout)
+        logger.info("[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={} queue_matched={}",
+                     tool_name, tool_call_id[:8], request_id[:8], timeout, queue_matched)
 
         # ★ 本地工具（list_dir, search_file）：后端本地执行，不发送到 IDE
-        # 插件 ToolInvokeProcessor 不处理这两个工具，但 ToolPanel 需要它们的 tool/call/sync 事件
         if tool_name in ("list_dir", "search_file"):
-            await self._send_tool_call_sync(
-                self._session_id, request_id, tool_call_id,
-                "RUNNING", tool_name=original_name, parameters=arguments,
-            )
             try:
                 result_str, results_list = _execute_local_tool(tool_name, arguments)
-                await self._send_tool_call_sync(
-                    self._session_id, request_id, tool_call_id,
-                    "FINISHED", tool_name=original_name, parameters=arguments,
-                    results=results_list,
-                )
+                if not queue_matched:
+                    # 队列未匹配 → on_tool_call 未被调用 → 没有 markdown_block → 没有 ToolPanel
+                    # 发送 FINISHED sync 只会导致消费线程阻塞等待不存在的 panel
+                    logger.warning("[LSP4J-TOOL] 跳过本地工具 FINISHED sync（无匹配 panel）: tool={} callId={}",
+                                   tool_name, tool_call_id[:8])
+                else:
+                    # 等待插件 UI 注册 panel（on_tool_call 已发送 markdown_block + 500ms sleep + PENDING）
+                    await asyncio.sleep(1.0)
+                    await self._send_tool_call_sync(
+                        self._session_id, request_id, tool_call_id,
+                        "FINISHED", tool_name=original_name, parameters=arguments,
+                        results=results_list,
+                    )
                 logger.info("[LSP4J-TOOL] 本地工具执行完成: tool={} results_count={}",
                              tool_name, len(results_list))
                 return result_str
             except Exception as e:
                 logger.exception("[LSP4J-TOOL] 本地工具执行失败: tool={}", tool_name)
-                await self._send_tool_call_sync(
-                    self._session_id, request_id, tool_call_id,
-                    "ERROR", tool_name=original_name, parameters=arguments,
-                    error_msg=str(e),
-                )
+                if queue_matched:
+                    await self._send_tool_call_sync(
+                        self._session_id, request_id, tool_call_id,
+                        "ERROR", tool_name=original_name, parameters=arguments,
+                        error_msg=str(e),
+                    )
                 return f"[错误] 工具 {tool_name} 执行失败: {e}"
 
         # ★ 参数名统一转换：LLM 使用 snake_case，插件 ToolHandler 期望 camelCase
@@ -1477,9 +1614,16 @@ class JSONRPCRouter:
         # ★ 使用 LLM 侧名称发送 RUNNING sync，参数保留原始 snake_case
         # ToolPanel 用 toolName 判断工具类型（如 edit_file 而非 replace_text_by_path），
         # 用 parameters["file_path"] 渲染文件链接。
+        sync_parameters = dict(arguments)
+        # ToolPanel 链接构建优先取 parameters["file_path"]，补齐避免“查看文件无链接”。
+        if tool_name in ("read_file", "save_file"):
+            fp = sync_parameters.get("file_path") or sync_parameters.get("path") or sync_parameters.get("filePath")
+            if fp and "file_path" not in sync_parameters:
+                sync_parameters["file_path"] = fp
+
         await self._send_tool_call_sync(
             self._session_id, request_id, tool_call_id,
-            "RUNNING", tool_name=original_name, parameters=arguments,
+            "RUNNING", tool_name=original_name, parameters=sync_parameters,
         )
 
         # 创建 Future 等待异步结果（通过 tool/invokeResult 回传）
@@ -1509,53 +1653,66 @@ class JSONRPCRouter:
         # 等待异步结果
         try:
             result = await asyncio.wait_for(tool_future, timeout=timeout)
-            # ★ 使用 LLM 侧名称发送 FINISHED sync，注入 fileId 供插件创建文件卡片
-            # 插件 ToolPanel 收到后：判断 toolName 为文件工具 → 检查 parameters["file_path"]
-            # 和 results[0]["fileId"] → 两者均非空时创建 AIDevFilePanel（diff 卡片）。
-            # 因此必须注入 fileId（值为文件路径），否则文件卡片不会创建。
             results = result[:500] if result else None
-            # fileId 注入同时检查 snake_case(file_path) 和 camelCase(filePath)，
-            # 防止 LLM 因模型差异使用不同参数命名风格导致文件卡片不创建。
             file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
             if tool_name == "read_file":
-                # ★ read_file: 注入 path 到 results，使 ToolPanel 点击文件卡片可跳转
-                # 插件 ToolPanel.syncToolCall() 先查 results[0]["path"]，后查 parameters["file_path"]
-                # ReadFileToolContextProvider.getScopeLabel() 同样先查 results[0]["path"]
                 path = arguments.get("path") or arguments.get("file_path") or arguments.get("filePath") or ""
-                content = result[:500] if result else ""
-                results = [{"path": path, "content": content}]
-                # 确保 parameters 有 file_path 用于 scope label 后备
+                content = result if result else ""
+                results = [{"path": path, "content": content[:500]}]
                 if path and "file_path" not in arguments:
                     arguments["file_path"] = path
+                # ★ 缓存 read_file 内容，供后续编辑工具的 diff 计算使用
+                if path and content:
+                    self._ws_file_service.cache_file_content(path, content)
                 logger.info("[LSP4J-TOOL] read_file FINISHED results 注入 path: path={}", path)
             elif tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
-                # ★ 编辑工具: 同时注入 path 和 fileId，确保 ToolPanel 能创建文件链接和 diff 卡片
-                # - results[0]["path"] → ToolPanel.syncToolCall() 创建文件链接（点击可跳转）
-                # - results[0]["fileId"] + parameters["file_path"] → AIDevFilePanel 创建 diff 卡片
-                results = [{"path": file_path_for_id, "fileId": file_path_for_id, "message": result[:500] if result else ""}]
+                # ★ 文件编辑工具：创建工作区文件 + 计算 diff + 发送 workingSpaceFile/sync
+                ws_file = await self._handle_file_edit_finished(
+                    tool_name, file_path_for_id, arguments, tool_call_id, request_id)
+
+                # ★ 注入工作区文件 UUID 作为 fileId（而非文件路径）
+                # ToolPanel.constructFileItem 用 results[0]["fileId"] 设置 FileItem.id，
+                # 后续 workingSpaceFile/sync 的 WorkingSpaceFileInfo.id 需与此一致，
+                # AIDevFilePanel.syncWorkspaceFile 才能通过 id 匹配更新。
+                ws_id = ws_file.id if ws_file else file_path_for_id
+                results = [{"path": file_path_for_id, "fileId": ws_id,
+                            "message": result[:500] if result else ""}]
                 if "file_path" not in arguments:
                     arguments["file_path"] = file_path_for_id
-                logger.info("[LSP4J-TOOL] FINISHED results 注入 path+fileId: path={} tool={}",
-                            file_path_for_id, tool_name)
+                logger.info("[LSP4J-TOOL] FINISHED results 注入 path+fileId: path={} wsId={} tool={}",
+                            file_path_for_id, ws_id[:8], tool_name)
 
             await self._send_tool_call_sync(
                 self._session_id, request_id, tool_call_id,
                 "FINISHED", tool_name=original_name, parameters=arguments,
                 results=results,
             )
+
+            # ★ 文件编辑工具完成后发送 workingSpaceFile/sync 通知（APPLIED 状态）
+            # 必须在 toolCallSync FINISHED 之后发送，确保 ToolPanel 已创建 AIDevFilePanel
+            if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
+                ws_file = self._ws_file_service.get_file(file_path_for_id)
+                if ws_file:
+                    await asyncio.sleep(0.5)
+                    await self._send_workspace_file_sync(ws_file, "MODIFIED")
+
             return result
         except asyncio.TimeoutError:
             logger.warning("LSP4J: 工具调用超时 tool={} callId={}", tool_name, tool_call_id)
-            # 记录已取消的 RPC ID，防止迟达 ack 响应干扰日志
             self._cancelled_requests[rpc_id] = None
             if len(self._cancelled_requests) > self._MAX_CANCELLED_REQUESTS_SIZE:
                 self._cancelled_requests.pop(next(iter(self._cancelled_requests)))
-            # 工具超时，发送 ERROR sync 通知
             await self._send_tool_call_sync(
                 self._session_id, request_id, tool_call_id,
                 "ERROR", tool_name=original_name, parameters=arguments,
                 error_msg=f"工具 {tool_name} 执行超时（{timeout}s）",
             )
+            # 文件编辑超时也更新状态
+            if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
+                ws_file = self._ws_file_service.update_status(
+                    file_path_for_id, "APPLYING_FAILED", f"超时（{timeout}s）")
+                if ws_file:
+                    await self._send_workspace_file_sync(ws_file, "MODIFIED")
             return f"[超时] 工具 {tool_name} 执行超时（{timeout}s）"
         finally:
             self._pending_tools.pop(tool_call_id, None)
@@ -2041,13 +2198,118 @@ class JSONRPCRouter:
         await self._send_response(msg_id, None)
 
     async def _handle_stub(self, params: dict, msg_id: Any) -> None:
-        """通用存根处理器 — 返回空成功响应，避免 Method not found 错误。
-
-        用于 chat/listAllSessions、chat/like 等暂不实现的方法。
-        注意：这些方法在 ChatService.java 中定义为 @JsonRequest，必须返回响应，
-        否则 LSP4J 框架会超时等待。
-        """
+        """通用存根处理器 — 返回空成功响应，避免 Method not found 错误。"""
         await self._send_response(msg_id, {})
+
+    # ──────────────────────────────────────────
+    # 工作区文件服务（workingSpaceFile/*）
+    # ──────────────────────────────────────────
+
+    async def _handle_ws_get_last_stable_content(self, params: dict, msg_id: Any) -> None:
+        """workingSpaceFile/getLastStableContent — 返回编辑前的文件内容。
+
+        插件 InlineDiffManager.showSingleDiff 调用此方法获取 diff 左侧内容。
+        参数：WorkingSpaceFileParams { id, sessionId?, fileId?, version? }
+        返回：WorkingSpaceFileContent { content, version, errorCode?, errorMessage? }
+        """
+        ws_id = params.get("id", "")
+        ws_file = self._ws_file_service.get_file_by_id(ws_id)
+        if ws_file:
+            logger.info("[WS-FILE] getLastStableContent: id={} len={}",
+                        ws_id[:8], len(ws_file.last_stable_content))
+            await self._send_response(msg_id, {
+                "content": ws_file.last_stable_content,
+                "version": ws_file.version,
+                "errorCode": None,
+                "errorMessage": None,
+            })
+        else:
+            logger.warning("[WS-FILE] getLastStableContent: 未找到 id={}", ws_id)
+            await self._send_response(msg_id, {
+                "content": "",
+                "version": "0",
+                "errorCode": None,
+                "errorMessage": None,
+            })
+
+    async def _handle_ws_get_full_content(self, params: dict, msg_id: Any) -> None:
+        """workingSpaceFile/getFullContent — 返回编辑后的文件内容。
+
+        插件 InlineDiffManager.showSingleDiff 调用此方法获取 diff 右侧内容。
+        """
+        ws_id = params.get("id", "")
+        ws_file = self._ws_file_service.get_file_by_id(ws_id)
+        if ws_file:
+            logger.info("[WS-FILE] getFullContent: id={} len={}",
+                        ws_id[:8], len(ws_file.content))
+            await self._send_response(msg_id, {
+                "content": ws_file.content,
+                "version": ws_file.version,
+                "errorCode": None,
+                "errorMessage": None,
+            })
+        else:
+            logger.warning("[WS-FILE] getFullContent: 未找到 id={}", ws_id)
+            await self._send_response(msg_id, {
+                "content": "",
+                "version": "0",
+                "errorCode": None,
+                "errorMessage": None,
+            })
+
+    async def _handle_ws_list_by_snapshot(self, params: dict, msg_id: Any) -> None:
+        """workingSpaceFile/listBySnapshot — 列出某个快照下的所有工作区文件。
+
+        参数：ListWorkingSpaceFileBySnapshotParams { snapshotId, sessionId, requestId }
+        返回：ListWorkingSpaceFileResult { workingSpaceFiles, errorCode, errorMessage }
+        """
+        snapshot_id = params.get("snapshotId", "")
+        files = self._ws_file_service.list_by_snapshot(snapshot_id)
+        logger.info("[WS-FILE] listBySnapshot: snapshotId={} count={}",
+                    snapshot_id[:8] if snapshot_id else "?", len(files))
+        await self._send_response(msg_id, {
+            "workingSpaceFiles": [f.to_wire_format() for f in files],
+            "errorCode": None,
+            "errorMessage": None,
+        })
+
+    async def _handle_ws_operate(self, params: dict, msg_id: Any) -> None:
+        """workingSpaceFile/operate — 接受/拒绝文件变更。
+
+        参数：WorkingSpaceFileOperateParams { id, opType, content }
+        """
+        ws_id = params.get("id", "")
+        op_type = params.get("opType", "")
+        content = params.get("content")
+        success = self._ws_file_service.operate(ws_id, op_type, content)
+        logger.info("[WS-FILE] operate: id={} op={} success={}", ws_id[:8], op_type, success)
+        await self._send_response(msg_id, {
+            "errorCode": None,
+            "errorMessage": None,
+        })
+        # 操作后发送状态更新通知
+        if success:
+            ws_file = self._ws_file_service.get_file_by_id(ws_id)
+            if ws_file:
+                try:
+                    await self._send_workspace_file_sync(ws_file, "MODIFIED")
+                except Exception as e:
+                    logger.warning("[WS-FILE] operate 后发送 sync 失败: {}", e)
+
+    async def _handle_ws_update_content(self, params: dict, msg_id: Any) -> None:
+        """workingSpaceFile/updateContent — 更新文件内容。
+
+        参数：UpdateWorkingSpaceFileContentRequest { id, content?, localContent? }
+        """
+        ws_id = params.get("id", "")
+        content = params.get("content")
+        local_content = params.get("localContent")
+        success = self._ws_file_service.update_content(ws_id, content, local_content)
+        logger.info("[WS-FILE] updateContent: id={} success={}", ws_id[:8], success)
+        await self._send_response(msg_id, {
+            "errorCode": None,
+            "errorMessage": None,
+        })
 
     async def _handle_step_process_confirm(self, params: dict, msg_id: Any) -> None:
         """处理 agents/testAgent/stepProcessConfirm — 步骤确认请求。
@@ -2394,11 +2656,11 @@ class JSONRPCRouter:
         "snapshot/listBySession": _handle_stub,               # 按会话列出快照
         "snapshot/operate": _handle_stub,                     # 快照操作
         # ── @JsonDelegate 服务: WorkingSpaceFileService（5 个方法） ──
-        "workingSpaceFile/operate": _handle_stub,             # 工作区文件操作
-        "workingSpaceFile/listBySnapshot": _handle_stub,      # 按快照列出文件
-        "workingSpaceFile/getLastStableContent": _handle_stub, # 获取最后稳定内容
-        "workingSpaceFile/getFullContent": _handle_stub,      # 获取完整内容
-        "workingSpaceFile/updateContent": _handle_stub,       # 更新文件内容
+        "workingSpaceFile/operate": _handle_ws_operate,
+        "workingSpaceFile/listBySnapshot": _handle_ws_list_by_snapshot,
+        "workingSpaceFile/getLastStableContent": _handle_ws_get_last_stable_content,
+        "workingSpaceFile/getFullContent": _handle_ws_get_full_content,
+        "workingSpaceFile/updateContent": _handle_ws_update_content,
         # ── @JsonDelegate 服务: SessionService（1 个方法） ──
         "session/getCurrent": _handle_stub,                   # 获取当前会话
         # ── @JsonDelegate 服务: SystemService（1 个方法） ──
