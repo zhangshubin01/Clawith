@@ -64,6 +64,14 @@ _LSP4J_IDE_TOOL_NAMES = frozenset({
     "search_replace",
 })
 
+# LSP4J 文件编辑工具（需要 filePath 转换 + fileId 注入）
+# 这些工具在 invoke_tool_on_ide 中统一处理参数转换和 results 注入
+_LSP4J_FILE_EDIT_TOOLS = frozenset({
+    "replace_text_by_path",
+    "create_file_with_text",
+    "delete_file_by_path",
+})
+
 # ──────────────────────────────────────────────
 # 数据类定义（基于灵码插件 ChatAskParam.java 17 字段）
 # ──────────────────────────────────────────────
@@ -359,10 +367,20 @@ class JSONRPCRouter:
         # 项目根路径（从 initialize 的 rootUri 提取，用于 tool/call/sync 通知）
         self._project_path: str = ""
 
-        # ★ toolCallId 队列：按序存储 (tool_name, tool_call_id)，
+        # ★ toolCallId 队列：按序存储 (original_name, mapped_name, tool_call_id)，
+        # original_name 为 LLM 侧名称（如 edit_file），mapped_name 为插件原生名称（如 replace_text_by_path）。
         # 支持 LLM 连续调用多个工具时各工具独立匹配 toolCallId。
         # 替代旧的单字段 _current_tool_call_id（无法处理多工具并发）。
-        self._tool_call_id_queue: list[tuple[str, str]] = []
+        self._tool_call_id_queue: list[tuple[str, str, str]] = []
+
+        # ★ 工具参数暂存：tool_call_id → params，
+        # 用于 on_tool_call done 时发送 FINISHED sync 携带原始参数（如 file_path），
+        # 确保插件端点击工具卡片可获取文件路径并打开文件。
+        self._tool_params: dict[str, dict] = {}
+
+        # ★ call_id → tool_call_id 映射：LLM 的 call_id → 后端生成的工具调用 ID，
+        # 用于 on_tool_call done 时获取与 PENDING/RUNNING sync 一致的 toolCallId。
+        self._call_id_to_tool_id: dict[str, str] = {}
 
         # 连接关闭标记（防止断开后继续发送消息）
         self._closed: bool = False
@@ -689,47 +707,74 @@ class JSONRPCRouter:
                     if tool_name != original_name:
                         logger.debug("[LSP4J] on_tool_call 工具名映射: {} → {}", original_name, tool_name)
 
-                    # ★ 生成 toolCallId 并入队，供 invoke_tool_on_ide 按序匹配消费
-                    tool_call_id = str(uuid.uuid4())
-                    self._tool_call_id_queue.append((tool_name, tool_call_id))
-                    logger.debug("[LSP4J] toolCallId 入队: name={} callId={} queue_len={}",
-                                 tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
-
-                    # ★ 发送 toolCall markdown 块（双通道之 markdown 通道）
-                    # 插件 MarkdownStreamPanel 解析此格式创建工具卡片 UI
-                    # 格式：```toolCall::<toolName>::<toolCallId>::<status>
-                    # 插件正则匹配：group(1)=toolCall, group(2)=name::id, group(3)=status
-                    # 插件解析：s2.split("::") → [name, id]，构造 ToolInfo(name, id, status)
-                    markdown_block = f"```toolCall::{tool_name}::{tool_call_id}::INIT\n```"
-                    if getattr(self, "_stream_mode", True):
-                        await self._send_chat_answer(session_id, markdown_block, request_id)
-
-                    # ★ 只对 LSP4J IDE 工具发送 sync 通知
-                    # 后端直接执行的工具（如 execute_code）不发送，因为插件只识别 IDE 工具参数
+                    # ★ 只对 LSP4J IDE 工具生成 toolCallId 并入队（供后续 invoke_tool_on_ide 按序匹配）
+                    # 非IDE 工具不需要 toolCallId，因为不走 tool/call/sync 通道
                     is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
+                    tool_call_id = ""
                     if is_lsp4j_tool:
-                        # ★ 参数名转换：基础工具使用 snake_case，但插件端期望 camelCase
-                        # create_file_with_text: file_path → filePath, text → content
-                        # read_file: path → filePath
+                        tool_call_id = str(uuid.uuid4())
+                        # ★ 队列存储 3 元组：(LLM 侧名称, 插件原生名称, UUID)
+                        # original_name 供 markdown 块和 sync 通知使用（ToolPanel 需要 LLM 侧名称识别文件工具）
+                        # tool_name 供 invoke_tool_on_ide 按插件原生名称匹配
+                        self._tool_call_id_queue.append((original_name, tool_name, tool_call_id))
                         raw_args = data.get("args", {})
+                        # ★ 保留原始 snake_case 参数（不做 camelCase 转换）
+                        # sync 通知的 parameters 需用 snake_case（ToolPanel.constructFileItem() 读取 file_path 键），
+                        # tool/invoke 的 camelCase 转换统一在 invoke_tool_on_ide 中集中处理。
+                        # 此前分散在此处的转换逻辑已全部移除。
                         params = dict(raw_args)
-                        if tool_name == "create_file_with_text":
-                            if "file_path" in params and "filePath" not in params:
-                                params["filePath"] = params.pop("file_path")
-                            if "text" in params and "content" not in params:
-                                params["content"] = params.pop("text")
-                        elif tool_name == "read_file":
-                            if "path" in params and "filePath" not in params:
-                                params["filePath"] = params.pop("path")
-                        elif tool_name == "save_file":
-                            if "file_path" in params and "filePath" not in params:
-                                params["filePath"] = params.pop("file_path")
+                        self._tool_params[tool_call_id] = params
+                        llm_call_id = data.get("call_id", "")
+                        if llm_call_id:
+                            self._call_id_to_tool_id[llm_call_id] = tool_call_id
+                        logger.debug("[LSP4J] toolCallId 入队: name={} callId={} queue_len={}",
+                                     tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
+                        logger.info("[LSP4J-TOOL] toolCall 入队: original={} mapped={} callId={} queue_len={}",
+                                    original_name, tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
+
+                    if is_lsp4j_tool:
+                        # ★ 发送 toolCall markdown 块（双通道之 markdown 通道）
+                        # 插件 MarkdownStreamPanel 解析此格式创建工具卡片 UI
+                        # 插件正则：```([\w#+.-]+)::([^\n]+)::([^\n]+)\n+(.*?)```
+                        # group(1)=toolCall, group(2)=name::id, group(3)=status
+                        # 插件解析：s2.split("::") → [name, id]，构造 ToolInfo(name, id, group3)
+                        # ⚠️ 关键：status 必须用 :: 分隔（第三组），不能换行！
+                        #   正确：```toolCall::name::id::INIT\n```
+                        #   错误：```toolCall::name::id\nINIT\n```  ← 会导致 astring[1] 越界
+                        # ★ 使用 LLM 侧名称（original_name），而非插件原生名称（tool_name）
+                        # 插件 MarkdownStreamPanel 解析此块 → 构造 ToolInfo → ToolPanel 构造时调用
+                        # ToolTypeEnum.getByToolName(toolName) 识别工具类型。
+                        # 若使用插件原生名称（如 replace_text_by_path），getByToolName 返回 UNKNOWN，
+                        # 文件工具分支永远不进入，导致无 AIDevFilePanel（diff 卡片）。
+                        markdown_block = f"```toolCall::{original_name}::{tool_call_id}::INIT\n```"
+
+                        logger.info("[LSP4J-TOOL] 准备发送 toolCall markdown 块: mapped={} callId={}",
+                                     tool_name, tool_call_id[:8])
+                        logger.info("[LSP4J-TOOL] markdown 块使用 LLM 侧名称: name={} callId={}",
+                                    original_name, tool_call_id[:8])
+                        if getattr(self, "_stream_mode", True):
+                            await self._send_chat_answer(session_id, markdown_block, request_id)
+                            logger.info("[LSP4J-TOOL] toolCall markdown 块已发送: callId={}", tool_call_id[:8])
+                        else:
+                            logger.info("[LSP4J-TOOL] 非流式模式，跳过 toolCall markdown 块发送: callId={}", tool_call_id[:8])
+
+
+                        # ★ 等待插件 UI 线程处理 markdown 块、注册 toolPanel（500ms）
+                        # 问题：markdown 块（chat/answer 通道）需经 Swing UI 线程渲染后，
+                        # ToolMarkdownComponent 才调用 registerPanel。而 tool/call/sync（LSP4J
+                        # 事件通道）被 ChatToolEventProcessor 的消费线程立即处理，此时
+                        # toolPanel 若未注册，会进入 wait toolPanel 循环（每1s重试，最多60s）。
+                        # 实测 Swing UI 渲染延迟约 300-1000ms，500ms 覆盖大部分场景。
+                        await asyncio.sleep(0.5)
 
                         # 发送 PENDING sync（双通道之事件通道）
                         # 插件 ChatToolEventProcessor 收到后更新卡片参数（scopeLabel 依赖 parameters）
+                        # ★ 使用 LLM 侧名称 + snake_case 参数
+                        # ToolPanel 存储 sync 中的 toolName 用于后续 FINISHED 时判断是否为文件工具，
+                        # 同时 parameters["file_path"] 用于 constructFileItem() 渲染文件链接。
                         await self._send_tool_call_sync(
                             session_id, request_id, tool_call_id,
-                            "PENDING", tool_name=tool_name, parameters=params,
+                            "PENDING", tool_name=original_name, parameters=params,
                         )
 
                     await self._send_process_step_callback(
@@ -750,27 +795,39 @@ class JSONRPCRouter:
                     if tool_name != original_name:
                         logger.debug("[LSP4J] on_tool_call done 工具名映射: {} → {}", original_name, tool_name)
 
-                    # ★ 只对 LSP4J IDE 工具发送 FINISHED sync
+                    # ★ IDE 工具：FINISHED sync 已由 invoke_tool_on_ide 发送（携带实际执行结果和 fileId），
+                    # 跳过此处的重复 FINISHED，避免：1) 空结果覆盖 invoke_tool_on_ide 的真实结果；
+                    # 2) invoke_tool_on_ide 已从队列 pop 后此处匹配失败导致新建兜底 UUID（两个不同 callId）。
                     is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
                     if is_lsp4j_tool:
-                        # 获取 toolCallId（从队列中查找匹配的工具调用）
-                        finished_call_id = ""
-                        for i, (stored_name, stored_id) in enumerate(self._tool_call_id_queue):
-                            if stored_name == tool_name:
-                                finished_call_id = stored_id
-                                self._tool_call_id_queue.pop(i)
-                                logger.debug("[LSP4J] toolCallId 队列匹配 (done): name={} callId={}",
-                                             tool_name, finished_call_id[:8])
-                                break
+                        logger.debug("[LSP4J] on_tool_call done: 跳过 IDE 工具的 FINISHED sync, "
+                                     "已由 invoke_tool_on_ide 发送, original={} mapped={}",
+                                     original_name, tool_name)
+                    else:
+                        # ★ 非 IDE 工具（纯后端执行，不走 invoke_tool_on_ide）：正常发送 FINISHED sync
+                        llm_call_id = data.get("call_id", "")
+                        finished_call_id = self._call_id_to_tool_id.pop(llm_call_id, "") if llm_call_id else ""
+
+                        if not finished_call_id:
+                            # 队列匹配兜底（适配 3 元组）
+                            for i, (orig_name, mapped_name, stored_id) in enumerate(self._tool_call_id_queue):
+                                if mapped_name == tool_name:
+                                    finished_call_id = stored_id
+                                    self._tool_call_id_queue.pop(i)
+                                    logger.debug("[LSP4J] toolCallId 队列匹配 (done): name={} callId={}",
+                                                 tool_name, finished_call_id[:8])
+                                    break
+
+                        done_params = self._tool_params.pop(finished_call_id, {}) if finished_call_id else {}
+
                         if not finished_call_id:
                             finished_call_id = str(uuid.uuid4())
-                            logger.debug("[LSP4J] toolCallId 队列未匹配 (done)，新建兜底: name={} callId={}",
+                            logger.debug("[LSP4J] toolCallId 未匹配 (done)，新建兜底: name={} callId={}",
                                          tool_name, finished_call_id[:8])
 
-                        # 发送 FINISHED sync（工具完成状态）
                         await self._send_tool_call_sync(
                             session_id, request_id, finished_call_id,
-                            "FINISHED", tool_name=tool_name,
+                            "FINISHED", tool_name=original_name, parameters=done_params,
                         )
 
                     await self._send_process_step_callback(
@@ -820,11 +877,16 @@ class JSONRPCRouter:
             # ★ 代码输出格式提醒（确保 LLM 使用 CODE_EDIT_BLOCK 格式）
             # 关键：语言标识和 |CODE_EDIT_BLOCK| 必须在同一行！
             tool_hint += (
-                "\n[代码输出格式] 生成代码时务必使用此格式："
-                "\n```python|CODE_EDIT_BLOCK|/absolute/path/to/file.py"
-                "\n<完整代码内容>"
+                "\n[代码输出格式] 生成代码时务必使用此格式（关键：语言标识和 |CODE_EDIT_BLOCK| 必须在同一行）："
+                "\n```kotlin|CODE_EDIT_BLOCK|/absolute/path/to/File.kt"
+                "\nn<完整代码内容>"
                 "\n```"
-                "\n注意：语言标识（如 python）必须紧跟 ``` 后面，然后立即接 |CODE_EDIT_BLOCK| 和文件路径，路径后必须换行再写代码。"
+                "\n规则："
+                "\n1. 语言标识（如 kotlin/java/python）必须紧跟 ``` 后面"
+                "\n2. 然后立即接 |CODE_EDIT_BLOCK|"
+                "\n3. 然后是文件的绝对路径"
+                "\n4. 路径后必须换行再写代码"
+                "\n5. 不要有任何空格或换行在 ``` 和语言标识之间"
                 "\n这样用户才能看到 'Apply' 按钮并使用 diff 功能。"
             )
             
@@ -985,6 +1047,14 @@ class JSONRPCRouter:
                      params.get("requestId", ""), params.get("triggerMode", ""))
         await self._send_response(msg_id, None)
 
+    async def _handle_completion(self, params: dict, msg_id: Any) -> None:
+        """处理 textDocument/completion — LSP 标准代码补全。
+
+        Clawith 模式不支持实时代码补全（需要专用模型），返回空列表避免
+        IDE 侧每按键都收到 -32601 Method not found 错误。
+        """
+        await self._send_response(msg_id, {"isIncomplete": False, "items": []})
+
     async def _handle_tool_invoke(self, params: dict, msg_id: Any) -> None:
         """处理 tool/invoke — 工具调用入口。
         
@@ -1017,8 +1087,8 @@ class JSONRPCRouter:
             }
             await self._send_response(msg_id, {
                 "requestId": request_id,
-                "errorCode": "",
-                "errorMessage": "",
+                "errorCode": None,  # 成功时必须为 null，不能是 ""
+                "errorMessage": None,
                 "result": result,
             })
             logger.info("[LSP4J] tool/invoke: {} 纯 UI 工具，返回成功响应", tool_name)
@@ -1040,8 +1110,8 @@ class JSONRPCRouter:
             result = await self.invoke_tool_on_ide(tool_name, parameters)
             await self._send_response(msg_id, {
                 "requestId": request_id,
-                "errorCode": "",
-                "errorMessage": "",
+                "errorCode": None,  # 成功时必须为 null，不能是 ""
+                "errorMessage": None,
                 "result": result,
             })
             logger.info("[LSP4J] tool/invoke: {} 调用成功", tool_name)
@@ -1049,7 +1119,7 @@ class JSONRPCRouter:
             logger.exception("[LSP4J] tool/invoke: {} 调用失败", tool_name)
             await self._send_response(msg_id, {
                 "requestId": request_id,
-                "errorCode": "TOOL_INVOKE_FAILED",
+                "errorCode": "TOOL_INVOKE_FAILED",  # 错误时保留错误码
                 "errorMessage": str(e),
                 "result": None,
             })
@@ -1122,10 +1192,11 @@ class JSONRPCRouter:
 
         # tool/invokeResult 是 @JsonRequest，需要返回 OperateCommonResult 格式
         # 插件 ToolService.invokeResult() 期望返回 OperateCommonResult {errorCode, errorMessage}
-        # 如果返回格式不匹配，插件 LanguageWebSocketService.reportToolInvokeResult() 会收到 null
+        # ⚠️ 关键：成功时 errorCode 必须为 null（不是空字符串），否则插件会认为是错误响应
+        # 插件源码：if (result.getErrorCode() != null) { log.warn("error response"); }
         await self._send_response(msg_id, {
-            "errorCode": "",
-            "errorMessage": "",
+            "errorCode": None,  # 成功时必须为 null，不能是 ""
+            "errorMessage": None,
         })
 
     async def _handle_response(self, msg: dict) -> None:
@@ -1252,38 +1323,56 @@ class JSONRPCRouter:
         - 只注册 toolCallId 到 _pending_tools（等待 invokeResult 回传真实结果）
         - 插件的 ack 响应会被 _handle_response 静默忽略（无匹配 Future）
         """
-        # ★ 从 toolCallId 队列中按序匹配消费（保证 markdown 块与 tool/call/sync 一致）
-        # 遍历队列找到第一个 stored_name == tool_name 的条目，pop 并复用其 toolCallId；
-        # 未匹配则新建兜底 ID。
+        # ★ 从 toolCallId 队列中按序匹配消费（3 元组格式）
+        # tool_name 已是插件原生名称（由 tool_hooks 映射），与队列中的 mapped_name 匹配。
+        # 匹配成功后提取 original_name（LLM 侧名称），供后续 sync 通知使用。
         tool_call_id = None
-        for i, (stored_name, stored_id) in enumerate(self._tool_call_id_queue):
-            if stored_name == tool_name:
+        original_name = tool_name  # 默认值（队列未匹配时使用）
+        for i, (orig_name, mapped_name, stored_id) in enumerate(self._tool_call_id_queue):
+            if mapped_name == tool_name:
+                original_name = orig_name
                 tool_call_id = stored_id
                 self._tool_call_id_queue.pop(i)
-                logger.debug("[LSP4J-TOOL] toolCallId 队列匹配: name={} callId={} queue_remaining={}",
-                             tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
+                logger.info("[LSP4J-TOOL] toolCallId 队列匹配: original={} mapped={} callId={} queue_remaining={}",
+                             original_name, tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
                 break
         if not tool_call_id:
             tool_call_id = str(uuid.uuid4())
-            logger.debug("[LSP4J-TOOL] toolCallId 队列未匹配，新建兜底: name={} callId={}",
+            logger.info("[LSP4J-TOOL] toolCallId 队列未匹配，新建兜底: name={} callId={}",
                          tool_name, tool_call_id[:8])
         request_id = self._current_request_id or str(uuid.uuid4())
 
         logger.info("[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={}",
                      tool_name, tool_call_id[:8], request_id[:8], timeout)
 
-        # ★ 参数名转换：基础工具使用 snake_case，但插件端期望 camelCase 显示文件名
-        # read_file: path → filePath, save_file: file_path → filePath
+        # ★ 参数名统一转换：LLM 使用 snake_case，插件 ToolHandler 期望 camelCase
+        # 按插件 ToolInvokeProcessor 中每个 handler 的取参方法分类：
+        #   - replace_text_by_path / create_file_with_text / delete_file_by_path
+        #     → handler 调用 getRequestFilePath()，取 filePath (camelCase)
+        #   - read_file / save_file
+        #     → handler 调用 getRequestFilePathWithUnderLine()，取 file_path (snake_case)
+        # 因此前 3 个需转换 file_path→filePath，后 2 个保留 file_path 不变。
+        # 注意：read_file 的 LLM 参数名是 "path"（非 "file_path"），仅它特殊。
         params = dict(arguments)
-        if tool_name == "read_file" and "path" in params and "filePath" not in params:
-            params["filePath"] = params.pop("path")
-        elif tool_name == "save_file" and "file_path" in params and "filePath" not in params:
-            params["filePath"] = params.pop("file_path")
+        if tool_name in _LSP4J_FILE_EDIT_TOOLS:
+            if "file_path" in params and "filePath" not in params:
+                params["filePath"] = params.pop("file_path")
+        elif tool_name == "read_file":
+            if "path" in params and "filePath" not in params:
+                params["filePath"] = params.pop("path")
+        elif tool_name == "save_file":
+            # save_file 的 ToolHandler 使用 getRequestFilePathWithUnderLine()，
+            # 读取的是 file_path (snake_case)，不需要转换。此处保留代码以消除歧义。
+            # 但若 LLM 误传 filePath，需转回 file_path。
+            if "filePath" in params and "file_path" not in params:
+                params["file_path"] = params.pop("filePath")
 
-        # 发送 RUNNING sync 通知（PENDING 已在 on_tool_call 中发送）
+        # ★ 使用 LLM 侧名称发送 RUNNING sync，参数保留原始 snake_case
+        # ToolPanel 用 toolName 判断工具类型（如 edit_file 而非 replace_text_by_path），
+        # 用 parameters["file_path"] 渲染文件链接。
         await self._send_tool_call_sync(
             self._session_id, request_id, tool_call_id,
-            "RUNNING", tool_name=tool_name, parameters=params,
+            "RUNNING", tool_name=original_name, parameters=arguments,
         )
 
         # 创建 Future 等待异步结果（通过 tool/invokeResult 回传）
@@ -1313,13 +1402,20 @@ class JSONRPCRouter:
         # 等待异步结果
         try:
             result = await asyncio.wait_for(tool_future, timeout=timeout)
-            # 工具执行完成，发送 FINISHED sync 通知
-            # ★ 状态变更由 tool/call/sync 事件通道处理，不再发送 FINISHED markdown 块（避免创建重复卡片）
-            # results 字符串由 _wrap_results 自动包装为 [{"content": "..."}]
+            # ★ 使用 LLM 侧名称发送 FINISHED sync，注入 fileId 供插件创建文件卡片
+            # 插件 ToolPanel 收到后：判断 toolName 为文件工具 → 检查 parameters["file_path"]
+            # 和 results[0]["fileId"] → 两者均非空时创建 AIDevFilePanel（diff 卡片）。
+            # 因此必须注入 fileId（值为文件路径），否则文件卡片不会创建。
+            results = result[:500] if result else None
+            if tool_name in _LSP4J_FILE_EDIT_TOOLS and arguments.get("file_path"):
+                results = [{"fileId": arguments["file_path"], "message": result[:500] if result else ""}]
+                logger.info("[LSP4J-TOOL] FINISHED results 注入 fileId: path={} tool={}",
+                            arguments["file_path"], tool_name)
+
             await self._send_tool_call_sync(
                 self._session_id, request_id, tool_call_id,
-                "FINISHED", tool_name=tool_name, parameters=arguments,
-                results=result[:500] if result else None,
+                "FINISHED", tool_name=original_name, parameters=arguments,
+                results=results,
             )
             return result
         except asyncio.TimeoutError:
@@ -1331,7 +1427,7 @@ class JSONRPCRouter:
             # 工具超时，发送 ERROR sync 通知
             await self._send_tool_call_sync(
                 self._session_id, request_id, tool_call_id,
-                "ERROR", tool_name=tool_name, parameters=arguments,
+                "ERROR", tool_name=original_name, parameters=arguments,
                 error_msg=f"工具 {tool_name} 执行超时（{timeout}s）",
             )
             return f"[超时] 工具 {tool_name} 执行超时（{timeout}s）"
@@ -1521,6 +1617,10 @@ class JSONRPCRouter:
         - timestamp（毫秒时间戳）
         - extra: Map<String,String>（含 sessionType）
         """
+        # ★ 临时调试：记录 toolCall markdown 块的详细内容
+        if "toolCall::" in text:
+            logger.info("[LSP4J-DEBUG] chat/answer TOOLCALL text={!r} len={}", text, len(text))
+        
         # 构建 extra 字段（ChatAnswerParams.extra 类型为 Map<String, String>）
         extra: dict[str, str] = {}
         session_type = getattr(self, "_current_session_type", "")
@@ -2130,6 +2230,7 @@ class JSONRPCRouter:
         # ── agents/ 方法（TestAgentService.java） ──
         "agents/testAgent/stepProcessConfirm": _handle_step_process_confirm,
         # ── textDocument/ 方法（TextDocumentService.java — inline edit，P2-3） ──
+        "textDocument/completion": _handle_completion,        # 标准 LSP 补全（返回空列表，避免 -32601）
         "textDocument/preCompletion": _handle_pre_completion,  # IDE 补全预请求（返回 Void）
         "textDocument/inlineEdit": _handle_inline_edit,        # 行内编辑建议（返回 InlineEditResult）
         "textDocument/editPredict": _handle_edit_predict,      # 编辑预测（返回 Void）
@@ -2235,6 +2336,16 @@ async def invoke_lsp4j_tool(
     agent_key = (str(user_id), str(agent_id))
     router_instance = _active_routers.get(agent_key)
     if router_instance is None:
+        # ★ 子 Agent 回退：当子 Agent（通过 send_message_to_agent 调用）没有独立
+        # LSP4J 连接时，回退到同一 user_id 下主 Agent 的 LSP4J 连接。
+        # 只要 user_id 相同，说明是同一用户的 IDE，工具调用结果可以正确返回。
+        for (rk_uid, rk_aid), rk_instance in _active_routers.items():
+            if rk_uid == str(user_id):
+                logger.info("[LSP4J-TOOL] 子 Agent 回退: sub_agent={} → primary_agent={} tool={}",
+                            agent_id, rk_aid, tool_name)
+                router_instance = rk_instance
+                break
+    if router_instance is None:
         logger.warning("[LSP4J-TOOL] 路由器未找到: agent_key={} active_keys={}",
                         agent_key, list(_active_routers.keys()))
         return f"[错误] LSP4J 连接不可用（user_id={user_id}, agent_id={agent_id}）"
@@ -2292,7 +2403,6 @@ async def _persist_lsp4j_chat_turn(
                     user_id=user_id,
                     title=f"LSP4J {local_now.strftime('%m-%d %H:%M')}",
                     source_channel="ide_lsp4j",
-                    client_type="ide_plugin",
                     created_at=now,
                     last_message_at=now,
                 )

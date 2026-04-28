@@ -80,6 +80,7 @@ _PARAM_NAME_MAP = {
 _LSP4J_OVERLAP_BASE_TOOL_NAMES = frozenset({
     "edit_file", "write_file", "delete_file",
     "search_files", "find_files",
+    "create_file",
 })
 
 # ──────────────────────────────────────────────
