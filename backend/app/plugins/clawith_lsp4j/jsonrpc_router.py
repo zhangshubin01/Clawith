@@ -115,7 +115,82 @@ _TOOL_NAME_MAP = {
     "create_file": "create_file_with_text", # 创建文件（LLM 可能用此名称调用）
     "write_file": "create_file_with_text",  # 创建文件（基础工具注册名）
     "delete_file": "delete_file_by_path",   # 删除文件
+    "list_files": "list_dir",              # 列出目录（基础工具名 → 插件 UI 工具名）
+    "search_files": "search_file",         # 搜索文件（基础工具名 → 插件 UI 工具名）
 }
+
+# ──────────────────────────────────────────────
+# 本地工具执行（不在 IDE 端，由后端直接执行）
+# ──────────────────────────────────────────────
+
+def _execute_local_tool(tool_name: str, arguments: dict) -> tuple[str, list[dict]]:
+    """本地执行 list_dir / search_file，返回 (result_json_str, results_list).
+
+    results_list 格式匹配插件期望：
+    - list_dir → DirItem[] (fileName, fileCount, fileSize, type, path)
+      插件 ListDirToolDetailPanel.refreshToolDetailPanel() 从 results 反序列化为 List<DirItem>
+      点击 DirItem 可打开文件或导航到目录
+    - search_file → FileItem[] (fileName, path)
+      插件 SearchFileToolDetailPanel.refreshToolDetailPanel() 从 results 反序列化为 List<FileItem>
+      点击 FileItem 可打开文件
+    """
+    from pathlib import Path
+
+    if tool_name == "list_dir":
+        rel_path = arguments.get("relative_workspace_path", ".")
+        ws_path = Path(rel_path)
+        if not ws_path.is_absolute():
+            ws_path = Path.cwd() / rel_path
+        items: list[dict] = []
+        try:
+            if ws_path.exists() and ws_path.is_dir():
+                for entry in sorted(ws_path.iterdir()):
+                    try:
+                        is_dir = entry.is_dir()
+                        stat = entry.stat()
+                        file_size = "" if is_dir else str(stat.st_size)
+                    except OSError:
+                        is_dir = False
+                        file_size = ""
+                    items.append({
+                        "fileName": entry.name,
+                        "fileCount": "",
+                        "fileSize": file_size,
+                        "type": "directory" if is_dir else "file",
+                        "path": str(entry.absolute()),
+                    })
+        except PermissionError:
+            logger.warning("[LSP4J-TOOL] list_dir 权限不足: path={}", ws_path)
+        result_str = json.dumps(items, ensure_ascii=False, default=str)
+        return result_str, items
+
+    elif tool_name == "search_file":
+        pattern = arguments.get("file_pattern", "") or arguments.get("query", "") or "*"
+        search_path = arguments.get("path", ".")
+        search_dir = Path(search_path)
+        if not search_dir.is_absolute():
+            search_dir = Path.cwd() / search_path
+        items: list[dict] = []
+        try:
+            if search_dir.exists() and search_dir.is_dir():
+                matched = list(search_dir.rglob(pattern)) if pattern else []
+                matched = matched[:50]
+                for p in sorted(matched):
+                    try:
+                        if p.is_file():
+                            items.append({
+                                "fileName": p.name,
+                                "path": str(p.absolute()),
+                            })
+                    except OSError:
+                        pass
+        except PermissionError:
+            logger.warning("[LSP4J-TOOL] search_file 权限不足: path={}", search_dir)
+        result_str = json.dumps(items, ensure_ascii=False, default=str)
+        return result_str, items
+
+    else:
+        raise ValueError(f"未知的本地工具: {tool_name}")
 
 # ──────────────────────────────────────────────
 # IDE 上下文提示构建（基于 ChatTaskEnum.java 21 个枚举值）
@@ -1345,6 +1420,32 @@ class JSONRPCRouter:
         logger.info("[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={}",
                      tool_name, tool_call_id[:8], request_id[:8], timeout)
 
+        # ★ 本地工具（list_dir, search_file）：后端本地执行，不发送到 IDE
+        # 插件 ToolInvokeProcessor 不处理这两个工具，但 ToolPanel 需要它们的 tool/call/sync 事件
+        if tool_name in ("list_dir", "search_file"):
+            await self._send_tool_call_sync(
+                self._session_id, request_id, tool_call_id,
+                "RUNNING", tool_name=original_name, parameters=arguments,
+            )
+            try:
+                result_str, results_list = _execute_local_tool(tool_name, arguments)
+                await self._send_tool_call_sync(
+                    self._session_id, request_id, tool_call_id,
+                    "FINISHED", tool_name=original_name, parameters=arguments,
+                    results=results_list,
+                )
+                logger.info("[LSP4J-TOOL] 本地工具执行完成: tool={} results_count={}",
+                             tool_name, len(results_list))
+                return result_str
+            except Exception as e:
+                logger.exception("[LSP4J-TOOL] 本地工具执行失败: tool={}", tool_name)
+                await self._send_tool_call_sync(
+                    self._session_id, request_id, tool_call_id,
+                    "ERROR", tool_name=original_name, parameters=arguments,
+                    error_msg=str(e),
+                )
+                return f"[错误] 工具 {tool_name} 执行失败: {e}"
+
         # ★ 参数名统一转换：LLM 使用 snake_case，插件 ToolHandler 期望 camelCase
         # 按插件 ToolInvokeProcessor 中每个 handler 的取参方法分类：
         #   - replace_text_by_path / create_file_with_text / delete_file_by_path
@@ -1366,6 +1467,11 @@ class JSONRPCRouter:
             # 但若 LLM 误传 filePath，需转回 file_path。
             if "filePath" in params and "file_path" not in params:
                 params["file_path"] = params.pop("filePath")
+        elif tool_name == "run_in_terminal":
+            # ToolCallConstant.TERMINAL_TOOL_PARAM_NAME_BACKGROUND = "is_background"
+            # ToolPanel.syncToolCall() 用 parameters["is_background"] 判断是否显示后台按钮
+            if "isBackground" in params:
+                params["is_background"] = params.pop("isBackground")
 
         # ★ 使用 LLM 侧名称发送 RUNNING sync，参数保留原始 snake_case
         # ToolPanel 用 toolName 判断工具类型（如 edit_file 而非 replace_text_by_path），
@@ -1410,7 +1516,18 @@ class JSONRPCRouter:
             # fileId 注入同时检查 snake_case(file_path) 和 camelCase(filePath)，
             # 防止 LLM 因模型差异使用不同参数命名风格导致文件卡片不创建。
             file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
-            if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
+            if tool_name == "read_file":
+                # ★ read_file: 注入 path 到 results，使 ToolPanel 点击文件卡片可跳转
+                # 插件 ToolPanel.syncToolCall() 先查 results[0]["path"]，后查 parameters["file_path"]
+                # ReadFileToolContextProvider.getScopeLabel() 同样先查 results[0]["path"]
+                path = arguments.get("path") or arguments.get("file_path") or arguments.get("filePath") or ""
+                content = result[:500] if result else ""
+                results = [{"path": path, "content": content}]
+                # 确保 parameters 有 file_path 用于 scope label 后备
+                if path and "file_path" not in arguments:
+                    arguments["file_path"] = path
+                logger.info("[LSP4J-TOOL] read_file FINISHED results 注入 path: path={}", path)
+            elif tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
                 results = [{"fileId": file_path_for_id, "message": result[:500] if result else ""}]
                 logger.info("[LSP4J-TOOL] FINISHED results 注入 fileId: path={} tool={}",
                             file_path_for_id, tool_name)

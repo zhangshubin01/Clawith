@@ -52,6 +52,8 @@ _LSP4J_IDE_TOOL_NAMES = frozenset(
         "add_tasks",             # 任务规划（纯 UI 工具，返回成功响应让插件渲染任务树）
         "todo_write",            # 待办列表（纯 UI 工具，委托给 add_tasks 渲染）
         "search_replace",        # 搜索替换（比 replace_text_by_path 更强大）
+        "list_dir",              # 列出目录（本地执行，结果格式 DirItem[]）
+        "search_file",           # 搜索文件（本地执行，结果格式 FileItem[]）
     }
 )
 
@@ -63,6 +65,8 @@ _TOOL_NAME_MAP = {
     "create_file": "create_file_with_text", # 创建文件（LLM 可能用此名称调用）
     "write_file": "create_file_with_text",  # 创建文件（基础工具注册名）
     "delete_file": "delete_file_by_path",   # 删除文件
+    "list_files": "list_dir",              # 列出目录（基础工具名 → 插件 UI 工具名）
+    "search_files": "search_file",         # 搜索文件（基础工具名 → 插件 UI 工具名）
 }
 
 # ★ 工具参数名映射：后端工具定义 → 插件 ToolHandler 期望的参数名
@@ -239,7 +243,102 @@ _LSP4J_IDE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": "列出指定目录的内容（文件和子目录）。用于查看项目目录结构。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "relative_workspace_path": {
+                        "type": "string",
+                        "description": "要列出的目录路径（相对于工作区的路径，或绝对路径）",
+                    },
+                },
+                "required": ["relative_workspace_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_file",
+            "description": "搜索指定目录下的文件（支持 glob 模式匹配）。用于查找文件。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索查询或文件模式（如 *.py, test*.js），用于 scope label 显示",
+                    },
+                    "file_pattern": {
+                        "type": "string",
+                        "description": "glob 文件匹配模式（如 **/*.py, *Test.java）",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "搜索起始路径（默认为工作区根目录）",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
+
+# ──────────────────────────────────────────────
+# 路径判断辅助函数
+# ──────────────────────────────────────────────
+
+# ★ 涉及文件路径读取/写入的工具（需判断路径是否指向 IDE 项目）
+_LSP4J_FILE_PATH_TOOLS = frozenset({
+    "read_file",
+    "save_file",
+    "replace_text_by_path",
+    "create_file_with_text",
+    "delete_file_by_path",
+})
+
+
+def _extract_file_path(tool_name: str, args: dict) -> str | None:
+    """从工具参数中提取文件路径。
+
+    LLM 可能使用不同的参数名调用同一工具：
+      - read_file: 基础工具用 path，IDE 工具用 file_path
+      - save_file: IDE 工具用 file_path
+      - replace_text_by_path / create_file_with_text / delete_file_by_path: filePath (camelCase)
+    """
+    if tool_name == "read_file":
+        return args.get("file_path") or args.get("path")
+    if tool_name == "save_file":
+        return args.get("file_path")
+    return args.get("filePath")
+
+
+def _should_route_to_ide(tool_name: str, args: dict) -> bool:
+    """判断文件工具调用是否应路由到 IDE 插件。
+
+    规则：非文件工具始终路由；文件工具仅当路径为绝对路径时才路由。
+    相对路径（如 focus.md、skills/.../SKILL.md）是 agent 工作空间文件，
+    应由本地工具执行，不应发送到 IDE 插件。
+    """
+    if tool_name not in _LSP4J_FILE_PATH_TOOLS:
+        return True
+
+    file_path = _extract_file_path(tool_name, args)
+    if not file_path:
+        # 无路径参数（如 read_file 不带参数），不路由到 IDE
+        logger.debug("[LSP4J-TOOL] {} 未提供文件路径，回退到本地执行", tool_name)
+        return False
+
+    # 绝对路径 → IDE；相对路径 → 本地
+    is_absolute = file_path.startswith("/")
+    if not is_absolute:
+        logger.info("[LSP4J-TOOL] {} 路径为相对路径，回退到本地执行: path={}",
+                    tool_name, file_path)
+    return is_absolute
+
 
 # ──────────────────────────────────────────────
 # 钩子安装
@@ -295,7 +394,12 @@ def install_lsp4j_tool_hooks() -> None:
         logger.info("[LSP4J-TOOL] execute_tool: name={} lsp4j_ws={} is_lsp4j_tool={}",
                      tool_name, lsp4j_ws is not None, is_lsp4j_tool)
 
-        if lsp4j_ws is not None and is_lsp4j_tool:
+        # ★ 路径判断：相对路径 → agent 工作空间文件（如 focus.md），走本地执行
+        # 绝对路径 → IDE 项目文件，走 LSP4J 路由
+        # 解决 read_file/save_file 同时被注册为基础工具和 IDE 工具时，
+        # LLM 用相对路径读 agent 工作空间文件却被误路由到 IDE 插件的问题
+        _should_route = _should_route_to_ide(tool_name, args)
+        if lsp4j_ws is not None and is_lsp4j_tool and _should_route:
             # ★ 参数名映射：后端工具定义 → 插件 ToolHandler 期望的参数名
             if tool_name in _PARAM_NAME_MAP:
                 name_map = _PARAM_NAME_MAP[tool_name]

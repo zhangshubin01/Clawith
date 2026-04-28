@@ -10,7 +10,7 @@ from loguru import logger
 
 from app.config import get_settings
 from app.core.events import close_redis
-from app.core.logging_config import configure_logging, intercept_standard_logging
+from app.core.logging_config import configure_logging, configure_file_logging, intercept_standard_logging
 from app.core.middleware import TraceIdMiddleware
 from app.schemas.schemas import HealthResponse
 
@@ -97,10 +97,11 @@ async def _start_ss_local() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown events."""
-    # Configure logging first
+    # Configure logging first (stdout + file)
     configure_logging()
+    configure_file_logging(settings)
     intercept_standard_logging()
-    logger.info("[startup] Logging configured")
+    logger.info("[startup] Logging configured (stdout + file)")
     _log_bwrap_startup_status()
 
     # Warn about default JWT secrets in production
