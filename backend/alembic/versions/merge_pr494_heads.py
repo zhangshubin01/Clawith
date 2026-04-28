@@ -1,7 +1,7 @@
 """Merge release heads after PR #494.
 
 Revision ID: merge_pr494_heads
-Revises: add_default_mcp_servers, add_whatsapp_channel_support, rm_agent_credential_secrets
+Revises: add_default_mcp_servers, add_whatsapp_channel_support, add_workspace_revisions, merge_okr_api_key, rm_agent_credential_secrets
 Create Date: 2026-04-28
 """
 
@@ -12,6 +12,8 @@ revision: str = "merge_pr494_heads"
 down_revision: Union[str, Sequence[str], None] = (
     "add_default_mcp_servers",
     "add_whatsapp_channel_support",
+    "add_workspace_revisions",
+    "merge_okr_api_key",
     "rm_agent_credential_secrets",
 )
 branch_labels: Union[str, Sequence[str], None] = None

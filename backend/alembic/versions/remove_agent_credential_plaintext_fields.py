@@ -1,7 +1,7 @@
 """Remove plaintext-style agent credential fields.
 
 Revision ID: rm_agent_credential_secrets
-Revises: add_primary_chat_sessions_unread, add_wechat_channel_support, add_workspace_revisions, merge_okr_api_key
+Revises: add_primary_chat_sessions_unread
 Create Date: 2026-04-22
 """
 
@@ -11,14 +11,13 @@ from alembic import op
 
 
 revision: str = "rm_agent_credential_secrets"
-down_revision: Union[str, Sequence[str], None] = (
-    "add_primary_chat_sessions_unread",
+down_revision: Union[str, Sequence[str], None] = "add_primary_chat_sessions_unread"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = (
     "add_wechat_channel_support",
     "add_workspace_revisions",
     "merge_okr_api_key",
 )
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
