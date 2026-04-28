@@ -1453,6 +1453,18 @@
       "title": "Company Name",
       "placeholder": "Enter company name"
     },
+    "logo": {
+      "title": "Company Logo",
+      "description": "Used in the sidebar workspace switcher and company selection menus.",
+      "upload": "Upload logo",
+      "hint": "PNG, JPG, or WebP. Max 1 MB. You will crop it to a square before saving.",
+      "cropTitle": "Crop company logo",
+      "zoom": "Zoom",
+      "tooLarge": "Logo image must be 1 MB or smaller.",
+      "invalidType": "Please choose an image file.",
+      "croppedTooLarge": "Cropped logo is still larger than 1 MB.",
+      "uploadFailed": "Failed to upload logo."
+    },
     "companyIntro": {
       "title": "Company Intro",
       "description": "Describe your company's mission, products, and culture. This information will be included as context in every Agent conversation.",

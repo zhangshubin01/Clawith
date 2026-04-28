@@ -1642,7 +1642,234 @@ function SkillsTab() {
 
 
 
-// ─── Company Name Editor ───────────────────────────
+// ─── Company Identity Editor ───────────────────────
+function CompanyLogoCropModal({ imageUrl, imageName, onCancel, onSave }: {
+    imageUrl: string;
+    imageName: string;
+    onCancel: () => void;
+    onSave: (blob: Blob) => void;
+}) {
+    const { t } = useTranslation();
+    const imgRef = useRef<HTMLImageElement>(null);
+    const [naturalSize, setNaturalSize] = useState({ width: 1, height: 1 });
+    const [zoom, setZoom] = useState(1);
+    const [offset, setOffset] = useState({ x: 0, y: 0 });
+    const [dragStart, setDragStart] = useState<{ x: number; y: number; ox: number; oy: number } | null>(null);
+    const cropSize = 240;
+
+    const clampOffset = (next: { x: number; y: number }, nextZoom = zoom) => {
+        const baseScale = Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height);
+        const displayW = naturalSize.width * baseScale * nextZoom;
+        const displayH = naturalSize.height * baseScale * nextZoom;
+        const maxX = Math.max(0, (displayW - cropSize) / 2);
+        const maxY = Math.max(0, (displayH - cropSize) / 2);
+        return {
+            x: Math.min(maxX, Math.max(-maxX, next.x)),
+            y: Math.min(maxY, Math.max(-maxY, next.y)),
+        };
+    };
+
+    const handleSave = () => {
+        const img = imgRef.current;
+        if (!img) return;
+        const outputSize = 512;
+        const ratio = outputSize / cropSize;
+        const baseScale = Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height);
+        const displayW = naturalSize.width * baseScale * zoom;
+        const displayH = naturalSize.height * baseScale * zoom;
+        const dx = ((cropSize - displayW) / 2 + offset.x) * ratio;
+        const dy = ((cropSize - displayH) / 2 + offset.y) * ratio;
+        const canvas = document.createElement('canvas');
+        canvas.width = outputSize;
+        canvas.height = outputSize;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, outputSize, outputSize);
+        ctx.drawImage(img, dx, dy, displayW * ratio, displayH * ratio);
+        canvas.toBlob((blob) => {
+            if (blob) onSave(blob);
+        }, 'image/png');
+    };
+
+    return (
+        <div className="tenant-logo-crop-backdrop" onClick={onCancel}>
+            <div className="tenant-logo-crop-modal" onClick={e => e.stopPropagation()}>
+                <div className="tenant-logo-crop-header">
+                    <div>
+                        <h3>{t('enterprise.logo.cropTitle', 'Crop company logo')}</h3>
+                        <p>{imageName}</p>
+                    </div>
+                    <button type="button" onClick={onCancel}>×</button>
+                </div>
+                <div
+                    className="tenant-logo-crop-stage"
+                    onPointerDown={e => {
+                        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                        setDragStart({ x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y });
+                    }}
+                    onPointerMove={e => {
+                        if (!dragStart) return;
+                        setOffset(clampOffset({
+                            x: dragStart.ox + e.clientX - dragStart.x,
+                            y: dragStart.oy + e.clientY - dragStart.y,
+                        }));
+                    }}
+                    onPointerUp={() => setDragStart(null)}
+                    onPointerCancel={() => setDragStart(null)}
+                >
+                    <img
+                        ref={imgRef}
+                        src={imageUrl}
+                        alt=""
+                        draggable={false}
+                        onLoad={e => {
+                            const img = e.currentTarget;
+                            setNaturalSize({ width: img.naturalWidth || 1, height: img.naturalHeight || 1 });
+                            setOffset({ x: 0, y: 0 });
+                            setZoom(1);
+                        }}
+                        style={{
+                            width: `${naturalSize.width * Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height)}px`,
+                            height: `${naturalSize.height * Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height)}px`,
+                            transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+                        }}
+                    />
+                </div>
+                <div className="tenant-logo-crop-controls">
+                    <span>{t('enterprise.logo.zoom', 'Zoom')}</span>
+                    <input
+                        type="range"
+                        min="1"
+                        max="3"
+                        step="0.01"
+                        value={zoom}
+                        onChange={e => {
+                            const nextZoom = Number(e.target.value);
+                            setZoom(nextZoom);
+                            setOffset(prev => clampOffset(prev, nextZoom));
+                        }}
+                    />
+                </div>
+                <div className="tenant-logo-crop-actions">
+                    <button className="btn btn-secondary" type="button" onClick={onCancel}>{t('common.cancel', 'Cancel')}</button>
+                    <button className="btn btn-primary" type="button" onClick={handleSave}>{t('common.save', 'Save')}</button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function CompanyLogoEditor() {
+    const { t } = useTranslation();
+    const qc = useQueryClient();
+    const tenantId = localStorage.getItem('current_tenant_id') || '';
+    const [name, setName] = useState('');
+    const [logoUrl, setLogoUrl] = useState('');
+    const [logoError, setLogoError] = useState('');
+    const [logoSaving, setLogoSaving] = useState(false);
+    const [cropSource, setCropSource] = useState<{ url: string; name: string } | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (!tenantId) return;
+        fetchJson<any>(`/tenants/${tenantId}`)
+            .then(d => {
+                if (d?.name) setName(d.name);
+                setLogoUrl(d?.logo_url || '');
+            })
+            .catch(() => { });
+    }, [tenantId]);
+
+    const handleLogoFile = (file: File | undefined) => {
+        setLogoError('');
+        if (!file) return;
+        if (file.size > 1024 * 1024) {
+            setLogoError(t('enterprise.logo.tooLarge', 'Logo image must be 1 MB or smaller.'));
+            return;
+        }
+        if (!file.type.startsWith('image/')) {
+            setLogoError(t('enterprise.logo.invalidType', 'Please choose an image file.'));
+            return;
+        }
+        setCropSource({ url: URL.createObjectURL(file), name: file.name });
+    };
+
+    const uploadCroppedLogo = async (blob: Blob) => {
+        if (!tenantId) return;
+        setLogoError('');
+        if (blob.size > 1024 * 1024) {
+            setLogoError(t('enterprise.logo.croppedTooLarge', 'Cropped logo is still larger than 1 MB.'));
+            return;
+        }
+        setLogoSaving(true);
+        try {
+            const form = new FormData();
+            form.append('file', blob, 'company-logo.png');
+            const res = await fetch(`/api/tenants/${tenantId}/logo`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
+                body: form,
+            });
+            if (!res.ok) {
+                throw new Error(t('enterprise.logo.uploadFailed', 'Failed to upload logo.'));
+            }
+            const tenant = await res.json();
+            setLogoUrl(tenant.logo_url || '');
+            setCropSource(null);
+            qc.invalidateQueries({ queryKey: ['tenant', tenantId] });
+            qc.invalidateQueries({ queryKey: ['my-tenants'] });
+        } catch (e: any) {
+            setLogoError(e.message || t('enterprise.logo.uploadFailed', 'Failed to upload logo.'));
+        } finally {
+            setLogoSaving(false);
+        }
+    };
+
+    return (
+        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
+                {t('enterprise.logo.title', 'Company Logo')}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '14px' }}>
+                {t('enterprise.logo.description', 'Used in the sidebar workspace switcher and company selection menus.')}
+            </div>
+            <div className="company-identity-logo-row">
+                <div className="company-identity-logo-preview">
+                    {logoUrl ? <img src={logoUrl} alt="" /> : <span>{(Array.from(name.trim())[0] as string | undefined)?.toUpperCase() || 'C'}</span>}
+                </div>
+                <div>
+                    <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        style={{ display: 'none' }}
+                        onChange={e => {
+                            handleLogoFile(e.target.files?.[0]);
+                            e.currentTarget.value = '';
+                        }}
+                    />
+                    <button className="btn btn-secondary" type="button" onClick={() => fileInputRef.current?.click()} disabled={logoSaving}>
+                        {logoSaving ? t('common.loading') : t('enterprise.logo.upload', 'Upload logo')}
+                    </button>
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '6px' }}>
+                        {t('enterprise.logo.hint', 'PNG, JPG, or WebP. Max 1 MB. You will crop it to a square before saving.')}
+                    </div>
+                    {logoError && <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '6px' }}>{logoError}</div>}
+                </div>
+            </div>
+            {cropSource && (
+                <CompanyLogoCropModal
+                    imageUrl={cropSource.url}
+                    imageName={cropSource.name}
+                    onCancel={() => setCropSource(null)}
+                    onSave={uploadCroppedLogo}
+                />
+            )}
+        </div>
+    );
+}
+
 function CompanyNameEditor() {
     const { t } = useTranslation();
     const qc = useQueryClient();
@@ -1666,6 +1893,8 @@ function CompanyNameEditor() {
                 method: 'PUT', body: JSON.stringify({ name: name.trim() }),
             });
             qc.invalidateQueries({ queryKey: ['tenants'] });
+            qc.invalidateQueries({ queryKey: ['tenant', tenantId] });
+            qc.invalidateQueries({ queryKey: ['my-tenants'] });
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
         } catch (e) { }
@@ -3146,6 +3375,7 @@ export default function EnterpriseSettings() {
                 {/* ── Company Management ── */}
                 {activeTab === 'info' && (
                     <div>
+                        <CompanyLogoEditor key={`logo-${selectedTenantId}`} />
                         <CompanyNameEditor key={`name-${selectedTenantId}`} />
                         <CompanyTimezoneEditor key={`tz-${selectedTenantId}`} />
                         <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>

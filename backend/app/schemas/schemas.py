@@ -104,6 +104,7 @@ class TenantChoice(BaseModel):
     tenant_id: uuid.UUID | None
     tenant_name: str
     tenant_slug: str
+    logo_url: str | None = None
 
 
 class MultiTenantResponse(BaseModel):

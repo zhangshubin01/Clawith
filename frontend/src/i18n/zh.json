@@ -1393,6 +1393,18 @@
       "title": "公司名称",
       "placeholder": "输入公司名称"
     },
+    "logo": {
+      "title": "公司标识",
+      "description": "用于左侧公司切换入口和公司选择菜单。",
+      "upload": "上传标识",
+      "hint": "支持 PNG、JPG 或 WebP，最大 1MB。保存前需要裁剪为正方形。",
+      "cropTitle": "裁剪公司标识",
+      "zoom": "缩放",
+      "tooLarge": "Logo 图片不能大于 1MB。",
+      "invalidType": "请选择图片文件。",
+      "croppedTooLarge": "裁剪后的 Logo 仍然大于 1MB。",
+      "uploadFailed": "Logo 上传失败。"
+    },
     "companyIntro": {
       "title": "公司简介",
       "description": "描述你的公司使命、产品和文化。此信息会作为上下文包含在每次 Agent 对话中。",

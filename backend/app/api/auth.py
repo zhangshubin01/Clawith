@@ -500,6 +500,7 @@ async def login(data: UserLogin, background_tasks: BackgroundTasks, db: AsyncSes
                     tenant_id=u.tenant_id,
                     tenant_name=tenant.name if tenant else "Create or Join Organization",
                     tenant_slug=tenant.slug if tenant else "",
+                    logo_url=tenant.logo_url if tenant else None,
                 ))
 
             return MultiTenantResponse(
@@ -759,7 +760,8 @@ async def get_my_tenants(
         TenantChoice(
             tenant_id=t.id,
             tenant_name=t.name,
-            tenant_slug=t.slug
+            tenant_slug=t.slug,
+            logo_url=t.logo_url,
         ) for t in tenants
     ]
 

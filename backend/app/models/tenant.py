@@ -54,3 +54,11 @@ class Tenant(Base):
     # A2A async communication (notify / task_delegate)
     # When False, all agent-to-agent messages use synchronous consult mode
     a2a_async_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    @property
+    def logo_url(self) -> str | None:
+        """Tenant logo URL stored in flexible tenant config."""
+        if isinstance(self.im_config, dict):
+            value = self.im_config.get("logo_url")
+            return value if isinstance(value, str) and value else None
+        return None

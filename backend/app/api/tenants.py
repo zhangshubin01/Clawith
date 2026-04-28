@@ -7,13 +7,19 @@ Admin endpoints for platform-level company management.
 import re
 import secrets
 import uuid
+import io
 from datetime import datetime
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import aiofiles
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
+from PIL import Image
 from pydantic import BaseModel, Field
 from sqlalchemy import func as sqla_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.core.security import get_current_user, require_role, get_authenticated_user
 from app.database import get_db
 from app.models.tenant import Tenant
@@ -39,6 +45,7 @@ class TenantOut(BaseModel):
     sso_enabled: bool = False
     sso_domain: str | None = None
     a2a_async_enabled: bool = False
+    logo_url: str | None = None
     created_at: datetime | None = None
 
     model_config = {"from_attributes": True}
@@ -53,6 +60,42 @@ class TenantUpdate(BaseModel):
     sso_enabled: bool | None = None
     sso_domain: str | None = None
     a2a_async_enabled: bool | None = None
+
+
+def _tenant_logo_dir() -> Path:
+    return Path(get_settings().AGENT_DATA_DIR) / "_tenant_logos"
+
+
+def _tenant_logo_path(tenant_id: uuid.UUID) -> Path:
+    return _tenant_logo_dir() / f"{tenant_id}.png"
+
+
+def _tenant_logo_url(tenant_id: uuid.UUID) -> str:
+    try:
+        mtime = int(_tenant_logo_path(tenant_id).stat().st_mtime)
+    except OSError:
+        mtime = int(datetime.utcnow().timestamp())
+    return f"/api/tenants/{tenant_id}/logo?v={mtime}"
+
+
+async def _get_updateable_tenant(
+    tenant_id: uuid.UUID,
+    current_user: User,
+    db: AsyncSession,
+) -> Tenant:
+    if current_user.role == "org_admin":
+        if not current_user.tenant_id:
+            raise HTTPException(status_code=403, detail="Organization admin must belong to a company")
+        if current_user.tenant_id != tenant_id:
+            raise HTTPException(status_code=403, detail="Can only update your own company")
+    elif current_user.role != "platform_admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    tenant = result.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return tenant
 
 
 # ─── Helpers ────────────────────────────────────────────
@@ -472,6 +515,61 @@ async def update_tenant(
 
     for field, value in update_data.items():
         setattr(tenant, field, value)
+    await db.flush()
+    return TenantOut.model_validate(tenant)
+
+
+@router.get("/{tenant_id}/logo")
+async def get_tenant_logo(tenant_id: uuid.UUID):
+    """Serve a tenant logo. Logos are public UI assets, addressed by UUID."""
+    path = _tenant_logo_path(tenant_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Logo not found")
+    return FileResponse(path, media_type="image/png")
+
+
+@router.post("/{tenant_id}/logo", response_model=TenantOut)
+async def upload_tenant_logo(
+    tenant_id: uuid.UUID,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_role("org_admin", "platform_admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a cropped square company logo.
+
+    The frontend crops to a 1:1 PNG before upload. The backend keeps a hard
+    1 MB limit and stores the image outside git-managed source files.
+    """
+    tenant = await _get_updateable_tenant(tenant_id, current_user, db)
+    if file.content_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise HTTPException(status_code=400, detail="Logo must be a PNG, JPEG, or WebP image")
+
+    data = await file.read()
+    if len(data) > 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Logo image must be 1 MB or smaller")
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid image file") from exc
+    if image.width != image.height:
+        raise HTTPException(status_code=400, detail="Logo image must be a 1:1 square")
+
+    output = io.BytesIO()
+    image.convert("RGBA").save(output, format="PNG", optimize=True)
+    png_data = output.getvalue()
+    if len(png_data) > 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Logo image must be 1 MB or smaller after processing")
+
+    logo_dir = _tenant_logo_dir()
+    logo_dir.mkdir(parents=True, exist_ok=True)
+    path = _tenant_logo_path(tenant_id)
+    async with aiofiles.open(path, "wb") as f:
+        await f.write(png_data)
+
+    config = dict(tenant.im_config or {})
+    config["logo_url"] = _tenant_logo_url(tenant_id)
+    tenant.im_config = config
     await db.flush()
     return TenantOut.model_validate(tenant)
 
