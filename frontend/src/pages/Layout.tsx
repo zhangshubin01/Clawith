@@ -250,6 +250,10 @@ export default function Layout() {
     const isChinese = i18n.language?.startsWith('zh');
     // Detect chat page: needs fixed-height main-content for inner scroll to work
     const isChatPage = !!useMatch('/agents/:id/chat');
+    const isAgentSettingsPage = !!useMatch('/agents/:id/settings');
+    const activeAgentNestedMatch = useMatch('/agents/:id/*');
+    const activeAgentRootMatch = useMatch('/agents/:id');
+    const activeAgentId = activeAgentNestedMatch?.params.id || activeAgentRootMatch?.params.id;
 
     const [showAccountSettings, setShowAccountSettings] = useState(false);
     const [showAccountMenu, setShowAccountMenu] = useState(false);
@@ -746,8 +750,8 @@ export default function Layout() {
                             return (
                             <div key={agent.id} style={{ position: 'relative' }} className={`sidebar-agent-item${agent.creator_id === user?.id ? ' owned' : ''}`}>
                                 <NavLink
-                                    to={`/agents/${agent.id}`}
-                                    className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}
+                                    to={`/agents/${agent.id}/chat`}
+                                    className={({ isActive }) => `sidebar-item ${isActive || activeAgentId === agent.id ? 'active' : ''}`}
                                     title={agent.name}
                                 >
                                     <span className="sidebar-item-icon" style={{ position: 'relative' }}>
@@ -1102,7 +1106,7 @@ export default function Layout() {
                 </div>
             )}
 
-            <main className={`main-content${isChatPage ? ' chat-page' : ''}`}>
+            <main className={`main-content${isChatPage ? ' chat-page' : ''}${isAgentSettingsPage ? ' agent-settings-page' : ''}`}>
                 <Outlet />
             </main>
 

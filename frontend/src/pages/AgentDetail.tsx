@@ -22,7 +22,7 @@ import { useAppStore } from '../stores';
 import { useAuthStore } from '../stores';
 import { copyToClipboard } from '../utils/clipboard';
 import { formatFileSize } from '../utils/formatFileSize';
-import { IconPaperclip, IconSend } from '@tabler/icons-react';
+import { IconBrain, IconFolder, IconMessageCircle, IconPaperclip, IconSettings, IconSend } from '@tabler/icons-react';
 import { useDropZone } from '../hooks/useDropZone';
 
 const TABS = ['status', 'aware', 'mind', 'tools', 'skills', 'relationships', 'workspace', 'chat', 'activityLog', 'approvals', 'settings'] as const;
@@ -1676,14 +1676,37 @@ function AgentDetailInner() {
     const queryClient = useQueryClient();
     const location = useLocation();
     const validTabs = ['status', 'aware', 'mind', 'tools', 'skills', 'relationships', 'workspace', 'chat', 'activityLog', 'approvals', 'settings'];
+    const settingsTabs = validTabs.filter(tab => !['aware', 'workspace', 'chat'].includes(tab));
+    const isSettingsRoute = location.pathname.endsWith('/settings');
+    const isChatRoute = !isSettingsRoute;
     const hashTab = location.hash?.replace('#', '');
-    const [activeTab, setActiveTabRaw] = useState<string>(hashTab && validTabs.includes(hashTab) ? hashTab : 'status');
+    const [activeTab, setActiveTabRaw] = useState<string>(
+        isSettingsRoute && hashTab && settingsTabs.includes(hashTab) ? hashTab : (isSettingsRoute ? 'status' : 'chat')
+    );
 
-    // Sync URL hash when tab changes
     const setActiveTab = (tab: string) => {
-        setActiveTabRaw(tab);
-        window.history.replaceState(null, '', `#${tab}`);
+        if (tab === 'chat') {
+            setActiveTabRaw('chat');
+            if (id) navigate(`/agents/${id}/chat`);
+            return;
+        }
+        const nextTab = settingsTabs.includes(tab) ? tab : 'status';
+        setActiveTabRaw(nextTab);
+        if (id && !location.pathname.endsWith('/settings')) {
+            navigate(`/agents/${id}/settings#${nextTab}`);
+        } else {
+            window.history.replaceState(null, '', `#${nextTab}`);
+        }
     };
+
+    useEffect(() => {
+        if (isChatRoute) {
+            if (activeTab !== 'chat') setActiveTabRaw('chat');
+            return;
+        }
+        const nextTab = hashTab && settingsTabs.includes(hashTab) ? hashTab : 'status';
+        if (activeTab !== nextTab) setActiveTabRaw(nextTab);
+    }, [location.pathname, location.hash]);
 
     const { data: agent, isLoading } = useQuery({
         queryKey: ['agent', id],
@@ -1729,27 +1752,31 @@ function AgentDetailInner() {
     // once per session. The agent opens the conversation itself — no visible
     // user message — by sending a tagged trigger the backend filters out.
     const onboardingKickoffRef = useRef<Set<string>>(new Set());
+    const [livePanelVisible, setLivePanelVisible] = useState(false);
+    const [sidePanelTab, setSidePanelTab] = useState<SidePanelTab>('workspace');
+    const awarePanelVisible = activeTab === 'chat' && livePanelVisible && sidePanelTab === 'aware';
+    const awareDataActive = activeTab === 'aware' || awarePanelVisible;
 
     // ── Aware tab data: triggers ──
     const { data: awareTriggers = [], refetch: refetchTriggers } = useQuery({
         queryKey: ['triggers', id],
         queryFn: () => triggerApi.list(id!),
-        enabled: !!id && activeTab === 'aware',
-        refetchInterval: activeTab === 'aware' ? 5000 : false,
+        enabled: !!id && awareDataActive,
+        refetchInterval: awareDataActive ? 5000 : false,
     });
 
     // ── Aware tab data: focus.md ──
     const { data: focusFile } = useQuery({
         queryKey: ['file', id, 'focus.md'],
         queryFn: () => fileApi.read(id!, 'focus.md').catch(() => null),
-        enabled: !!id && activeTab === 'aware',
+        enabled: !!id && awareDataActive,
     });
 
     // ── Aware tab data: task_history.md ──
     const { data: taskHistoryFile } = useQuery({
         queryKey: ['file', id, 'task_history.md'],
         queryFn: () => fileApi.read(id!, 'task_history.md').catch(() => null),
-        enabled: !!id && activeTab === 'aware',
+        enabled: !!id && awareDataActive,
     });
 
     // ── Aware tab data: reflection sessions (trigger monologues) ──
@@ -1762,8 +1789,8 @@ function AgentDetailInner() {
             const all = await res.json();
             return all.filter((s: any) => s.source_channel === 'trigger');
         },
-        enabled: !!id && activeTab === 'aware',
-        refetchInterval: activeTab === 'aware' ? 10000 : false,
+        enabled: !!id && awareDataActive,
+        refetchInterval: awareDataActive ? 10000 : false,
     });
 
     // ── Aware tab state ──
@@ -2191,8 +2218,6 @@ function AgentDetailInner() {
         setToolGroupExpandedVersion(v => v + 1); // trigger re-render
     };
     const [liveState, setLiveState] = useState<LivePreviewState>({});
-    const [livePanelVisible, setLivePanelVisible] = useState(false);
-    const [sidePanelTab, setSidePanelTab] = useState<SidePanelTab>('workspace');
     const [workspaceActivePath, setWorkspaceActivePath] = useState<string | null>(null);
     const [workspaceLockedPath, setWorkspaceLockedPath] = useState<string | null>(null);
     const [workspaceActivities, setWorkspaceActivities] = useState<WorkspaceActivity[]>([]);
@@ -2274,6 +2299,15 @@ function AgentDetailInner() {
     const handleWorkspaceEditingChange = useCallback((editing: boolean) => {
         workspaceEditingRef.current = editing;
     }, []);
+    const togglePreviewPanel = useCallback((tab: SidePanelTab) => {
+        setLivePanelVisible((visible) => {
+            if (visible && sidePanelTab === tab) return false;
+            setSidePanelTab(tab);
+            setSessionListCollapsed(true);
+            useAppStore.setState({ sidebarCollapsed: true });
+            return true;
+        });
+    }, [sidePanelTab]);
 
     // Settings form local state
     const [settingsForm, setSettingsForm] = useState({
@@ -2327,8 +2361,9 @@ function AgentDetailInner() {
             setWmSaved(false);
             // Invalidate all queries for the old agent to force fresh data
             queryClient.invalidateQueries({ queryKey: ['agent', id] });
-            // Re-apply hash so refresh preserves the current tab
-            window.history.replaceState(null, '', `#${activeTab}`);
+            if (location.pathname.endsWith('/settings')) {
+                window.history.replaceState(null, '', `#${activeTab}`);
+            }
         }
     }, [id]);
 
@@ -3385,14 +3420,146 @@ function AgentDetailInner() {
     };
     const statusKey = computeStatusKey();
     const canManage = (agent as any).access_level === 'manage' || isAdmin;
+    const formatAgentDate = (d?: string | null) => {
+        if (!d) return '—';
+        try { return new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return d; }
+    };
+    const primaryModel = llmModels.find((m: any) => m.id === agent.primary_model_id);
+    const modelLabel = primaryModel ? (primaryModel.label || primaryModel.model) : '—';
+    const renderAgentInfoCard = () => (
+        <div className="agent-info-card">
+            <div className="agent-info-card-title">{agent.name}</div>
+            <div className="agent-info-card-grid">
+                <div className="agent-info-card-section">
+                    <div className="agent-info-card-section-title">Token</div>
+                    <div className="agent-info-token-main">
+                        <span>{t('agent.settings.today')}</span>
+                        <strong>{formatTokens(agent.tokens_used_today || 0)}</strong>
+                    </div>
+                    <div className="agent-info-token-grid">
+                        <div>
+                            <span>{t('agent.settings.month')}</span>
+                            <strong>{formatTokens(agent.tokens_used_month || 0)}</strong>
+                        </div>
+                        <div>
+                            <span>{t('agent.status.totalToken')}</span>
+                            <strong>{formatTokens((agent as any).tokens_used_total || 0)}</strong>
+                        </div>
+                    </div>
+                </div>
+                <div className="agent-info-card-section">
+                    <div className="agent-info-card-section-title">{t('agent.profile.title')}</div>
+                    <div className="agent-info-row">
+                        <span>{t('agent.profile.created')}</span>
+                        <strong>{formatAgentDate(agent.created_at)}</strong>
+                    </div>
+                    <div className="agent-info-row">
+                        <span>{t('agent.fields.createdBy', 'Created by')}</span>
+                        <strong>{(agent as any).creator_username ? `@${(agent as any).creator_username}` : '—'}</strong>
+                    </div>
+                    <div className="agent-info-row">
+                        <span>{t('agent.profile.timezone')}</span>
+                        <strong>{(agent as any).effective_timezone || agent.timezone || 'UTC'}</strong>
+                    </div>
+                    <div className="agent-info-row">
+                        <span>{t('agent.modelConfig.model')}</span>
+                        <strong className="agent-info-model" title={modelLabel}>{modelLabel}</strong>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+    const renderAwarePreview = () => {
+        const raw = focusFile?.content || '';
+        const focusItems = raw
+            .split('\n')
+            .map((line: string) => {
+                const match = line.match(/^\s*-\s*\[([ x/])\]\s*(.+)/i);
+                if (!match) return null;
+                const text = match[2].trim();
+                const colonIdx = text.indexOf(':');
+                return {
+                    marker: match[1],
+                    title: colonIdx > 0 ? text.slice(colonIdx + 1).trim() : text,
+                    key: colonIdx > 0 ? text.slice(0, colonIdx).trim() : text,
+                };
+            })
+            .filter(Boolean) as Array<{ marker: string; title: string; key: string }>;
+        const isZh = i18n.language?.startsWith('zh');
+        const formatTrigger = (trig: any) => {
+            if (trig.type === 'cron' && trig.config?.expr) return `Cron ${trig.config.expr}`;
+            if (trig.type === 'interval' && trig.config?.minutes) return isZh ? `每 ${trig.config.minutes} 分钟` : `Every ${trig.config.minutes} min`;
+            if (trig.type === 'once' && trig.config?.at) return new Date(trig.config.at).toLocaleString();
+            return trig.name || trig.type;
+        };
+        return (
+            <div className="aware-side-preview">
+                <div className="aware-side-section">
+                    <div className="aware-side-section-title">{t('agent.aware.focus')}</div>
+                    {focusItems.length === 0 ? (
+                        <div className="aware-side-empty">{t('agent.aware.focusEmpty')}</div>
+                    ) : focusItems.slice(0, 12).map((item) => (
+                        <div key={item.key} className="aware-side-item">
+                            <span className={`aware-side-dot ${item.marker.toLowerCase() === 'x' ? 'done' : item.marker === '/' ? 'active' : ''}`} />
+                            <div>
+                                <div className="aware-side-item-title">{item.title || item.key}</div>
+                                {item.title !== item.key && <div className="aware-side-item-meta">{item.key}</div>}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+                <div className="aware-side-section">
+                    <div className="aware-side-section-title">{t('agent.aware.standaloneTriggers')}</div>
+                    {(awareTriggers as any[]).length === 0 ? (
+                        <div className="aware-side-empty">{t('agent.aware.noTriggers')}</div>
+                    ) : (awareTriggers as any[]).slice(0, 16).map((trig: any) => (
+                        <div key={trig.id} className="aware-side-trigger">
+                            <div className="aware-side-trigger-main">
+                                <div className="aware-side-item-title">{formatTrigger(trig)}</div>
+                                <div className="aware-side-item-meta">{trig.reason || trig.type}</div>
+                            </div>
+                            <button
+                                className="btn btn-ghost"
+                                style={{ padding: '2px 7px', fontSize: '11px' }}
+                                onClick={async () => {
+                                    await triggerApi.update(id!, trig.id, { is_enabled: !trig.is_enabled });
+                                    refetchTriggers();
+                                }}
+                            >
+                                {trig.is_enabled ? t('agent.aware.disable') : t('agent.aware.enable')}
+                            </button>
+                        </div>
+                    ))}
+                </div>
+                <div className="aware-side-section">
+                    <div className="aware-side-section-title">{t('agent.aware.reflections')}</div>
+                    {(reflectionSessions as any[]).length === 0 ? (
+                        <div className="aware-side-empty">{isZh ? '暂无自主思考记录' : 'No reflections yet'}</div>
+                    ) : (reflectionSessions as any[]).slice(0, 10).map((session: any) => (
+                        <div key={session.id} className="aware-side-item">
+                            <span className="aware-side-dot active" />
+                            <div>
+                                <div className="aware-side-item-title">{(session.title || 'Trigger execution').replace(/^🤖\s*/, '')}</div>
+                                <div className="aware-side-item-meta">
+                                    {new Date(session.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                    {session.message_count > 0 ? ` · ${session.message_count}` : ''}
+                                </div>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+    };
 
     return (
         <>
-            <div>
+            <div className={`agent-detail-page ${activeTab === 'chat' ? 'agent-detail-page--chat' : 'agent-detail-page--settings'}`}>
                 {/* Header */}
-                <div className="page-header">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-                        <div style={{ width: '48px', height: '48px', borderRadius: '12px', background: 'var(--accent-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px' }}>{(Array.from(agent.name || 'A')[0] as string || 'A').toUpperCase()}</div>
+                <div className="page-header agent-detail-header">
+                    {activeTab === 'chat' ? <div className="agent-detail-identity agent-detail-identity--compact">
+                        <div className="agent-detail-identity-trigger">
+                        <div className="agent-detail-avatar">{(Array.from(agent.name || 'A')[0] as string || 'A').toUpperCase()}</div>
                         <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
                             {canManage && editingName ? (
                                 <input
@@ -3431,74 +3598,42 @@ function AgentDetailInner() {
                                     {agent.name}
                                 </h1>
                             )}
-                            <p className="page-subtitle" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
-                                <span className={`status-dot ${statusKey}`} />
-                                {t(`agent.status.${statusKey}`)}
-                                {canManage && editingRole ? (
-                                    <textarea
-                                        autoFocus
-                                        value={roleInput}
-                                        onChange={e => setRoleInput(e.target.value)}
-                                        onBlur={async () => {
-                                            setEditingRole(false);
-                                            if (roleInput !== agent.role_description) {
-                                                await agentApi.update(id!, { role_description: roleInput } as any);
-                                                queryClient.invalidateQueries({ queryKey: ['agent', id] });
-                                            }
-                                        }}
-                                        onKeyDown={async e => {
-                                            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); (e.target as HTMLTextAreaElement).blur(); }
-                                            if (e.key === 'Escape') { setEditingRole(false); setRoleInput(agent.role_description || ''); }
-                                        }}
-                                        rows={2}
-                                        style={{
-                                            background: 'var(--bg-elevated)', border: '1px solid var(--accent-primary)',
-                                            borderRadius: '6px', color: 'var(--text-primary)', fontSize: '13px',
-                                            padding: '6px 10px', width: 'min(500px, 50vw)', outline: 'none',
-                                            resize: 'vertical', lineHeight: '1.5', fontFamily: 'inherit',
-                                        }}
-                                    />
-                                ) : (
-                                    <span
-                                        title={canManage ? (agent.role_description || 'Click to edit') : (agent.role_description || '')}
-                                        onClick={() => { if (canManage) { setRoleInput(agent.role_description || ''); setEditingRole(true); } }}
-                                        style={{ cursor: canManage ? 'text' : 'default', borderBottom: canManage ? '1px dashed transparent' : 'none', maxWidth: '38vw', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'middle' }}
-                                        onMouseEnter={e => { if (canManage) e.currentTarget.style.borderBottomColor = 'var(--text-tertiary)'; }}
-                                        onMouseLeave={e => { if (canManage) e.currentTarget.style.borderBottomColor = 'transparent'; }}
-                                    >
-                                        {agent.role_description ? `· ${agent.role_description}` : (canManage ? <span style={{ color: 'var(--text-tertiary)', fontSize: '12px' }}>· {t('agent.fields.role', 'Click to add a description...')}</span> : null)}
-                                    </span>
-                                )}
-                                {(agent as any).is_expired && (
-                                    <span style={{ background: 'var(--error)', color: '#fff', padding: '2px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600 }}>Expired</span>
-                                )}
-                                {(agent as any).agent_type === 'openclaw' && (
-                                    <span style={{
-                                        fontSize: '10px', padding: '2px 6px', borderRadius: '4px',
-                                        background: 'linear-gradient(135deg, #6366f1, #8b5cf6)', color: '#fff', fontWeight: 600,
-                                        letterSpacing: '0.5px',
-                                    }}>OpenClaw · Lab</span>
-                                )}
-                                {!(agent as any).is_expired && (agent as any).expires_at && (
-                                    <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                        Expires: {new Date((agent as any).expires_at).toLocaleString()}
-                                    </span>
-                                )}
-                                {isAdmin && (
-                                    <button
-                                        onClick={openExpiryModal}
-                                        title="Edit expiry time"
-                                        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: 'var(--text-tertiary)', padding: '1px 4px', borderRadius: '4px', lineHeight: 1 }}
-                                        onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-secondary)')}
-                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                    >✏️ {t((agent as any).expires_at || (agent as any).is_expired ? 'agent.settings.expiry.renew' : 'agent.settings.expiry.setExpiry')}</button>
-                                )}
-                            </p>
                         </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                        <button className="btn btn-primary" onClick={() => setActiveTab('chat')}>{t('agent.actions.chat')}</button>
-                        {(agent as any)?.agent_type !== 'openclaw' && (
+                        </div>
+                        {renderAgentInfoCard()}
+                    </div> : <div />}
+                    <div className="agent-detail-actions">
+                        {activeTab === 'chat' && (
+                            <>
+                                <button
+                                    className={`btn btn-ghost agent-top-action ${livePanelVisible && sidePanelTab === 'workspace' ? 'active' : ''}`}
+                                    onClick={() => togglePreviewPanel('workspace')}
+                                >
+                                    <IconFolder size={16} stroke={1.7} />
+                                    <span>{t('agent.tabs.workspace')}</span>
+                                </button>
+                                {(agent as any)?.agent_type !== 'openclaw' && (
+                                    <button
+                                        className={`btn btn-ghost agent-top-action ${livePanelVisible && sidePanelTab === 'aware' ? 'active' : ''}`}
+                                        onClick={() => togglePreviewPanel('aware')}
+                                    >
+                                        <IconBrain size={16} stroke={1.7} />
+                                        <span>{t('agent.tabs.aware')}</span>
+                                    </button>
+                                )}
+                                <button className="btn btn-ghost agent-top-action" onClick={() => navigate(`/agents/${id}/settings`)}>
+                                    <IconSettings size={16} stroke={1.7} />
+                                    <span>{t('agent.tabs.settings')}</span>
+                                </button>
+                            </>
+                        )}
+                        {activeTab !== 'chat' && (
+                            <button className="btn btn-ghost agent-top-action" onClick={() => setActiveTab('chat')}>
+                                <IconMessageCircle size={16} stroke={1.7} />
+                                <span>{t('agent.actions.chat')}</span>
+                            </button>
+                        )}
+                        {activeTab === 'chat' && (agent as any)?.agent_type !== 'openclaw' && (
                             <>
                                 {agent.status === 'stopped' ? (
                                     <button className="btn btn-secondary" onClick={async () => { await agentApi.start(id!); queryClient.invalidateQueries({ queryKey: ['agent', id] }); }}>{t('agent.actions.start')}</button>
@@ -3511,8 +3646,9 @@ function AgentDetailInner() {
                 </div>
 
                 {/* Tabs */}
-                <div className="tabs">
+                {activeTab !== 'chat' && <div className="tabs">
                     {TABS.filter(tab => {
+                        if (['aware', 'workspace', 'chat'].includes(tab)) return false;
                         // 'use' access: hide settings and approvals tabs
                         if ((agent as any)?.access_level === 'use') {
                             if (tab === 'settings' || tab === 'approvals') return false;
@@ -3527,7 +3663,7 @@ function AgentDetailInner() {
                             {t(`agent.tabs.${tab}`)}
                         </div>
                     ))}
-                </div>
+                </div>}
 
                 {/* ── Enhanced Status Tab ── */}
                 {activeTab === 'status' && (() => {
@@ -3711,7 +3847,6 @@ function AgentDetailInner() {
                             {/* Quick Actions */}
                             <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
                                 <button className="btn btn-secondary" onClick={() => setActiveTab('chat')}>{t('agent.actions.chat')}</button>
-                                {(agent as any)?.agent_type !== 'openclaw' && <button className="btn btn-secondary" onClick={() => setActiveTab('aware')}>{t('agent.tabs.aware')}</button>}
                                 <button className="btn btn-secondary" onClick={() => setActiveTab('settings')}>{t('agent.tabs.settings')}</button>
                             </div>
                         </div>
@@ -4755,12 +4890,14 @@ function AgentDetailInner() {
                 {
                     activeTab === 'chat' && (
                         <div
+                            className="agent-chat-shell"
                             style={{
                                 display: 'flex',
                                 gap: 0,
                                 flex: 1,
                                 minHeight: 0,
-                                height: 'calc(100vh - 206px)',
+                                height: 'calc(100vh - 100px)',
+                                margin: '0 8px 8px',
                                 border: '1px solid color-mix(in srgb, var(--border-subtle) 55%, var(--bg-primary))',
                                 borderRadius: '12px',
                                 overflow: 'hidden',
@@ -5468,9 +5605,6 @@ function AgentDetailInner() {
                                                 >
                                                     <IconPaperclip size={16} stroke={1.75} />
                                                 </button>
-                                                {/* Right-hugging group: ModelSwitcher stays docked to the send
-                                                    button regardless of textarea width. */}
-                                                <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
                                                 <ModelSwitcher
                                                     value={overrideModelId}
                                                     onChange={handleModelChange}
@@ -5479,6 +5613,7 @@ function AgentDetailInner() {
                                                     tenantDefaultId={agent?.primary_model_id || null}
                                                     disabled={!wsConnected}
                                                 />
+                                                <div style={{ flex: 1 }} />
                                                 {(isStreaming || isWaiting) ? (
                                                     <button
                                                         type="button"
@@ -5509,7 +5644,6 @@ function AgentDetailInner() {
                                                         <IconSend size={16} stroke={1.75} />
                                                     </button>
                                                 )}
-                                                </div>
                                             </div>
                                         </div>
                                         </div>
@@ -5522,18 +5656,10 @@ function AgentDetailInner() {
                                     workspaceActivities={workspaceActivities}
                                     workspaceLiveDraft={workspaceLiveDraft}
                                     visible={livePanelVisible}
-                                    onToggle={() => {
-                                        if (!livePanelVisible) {
-                                            setSidePanelTab('workspace');
-                                            setLivePanelVisible(true);
-                                            setSessionListCollapsed(true);
-                                            useAppStore.setState({ sidebarCollapsed: true });
-                                        } else {
-                                            setLivePanelVisible(false);
-                                        }
-                                    }}
+                                    onToggle={() => setLivePanelVisible(false)}
                                     activeTab={sidePanelTab}
                                     onTabChange={setSidePanelTab}
+                                    awareContent={renderAwarePreview()}
                                     workspaceLocked={workspacePreviewLocked}
                                     onWorkspaceSelectPath={handleWorkspaceSelectPath}
                                     onWorkspaceToggleLock={handleWorkspaceToggleLock}
@@ -5858,7 +5984,7 @@ function AgentDetailInner() {
 
                         return (
                             <div>
-                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', marginBottom: '8px', position: 'sticky', top: '41px', zIndex: 6, background: 'var(--bg-primary)', paddingTop: '4px', paddingBottom: '8px' }}>
+                                <div className="agent-settings-savebar">
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                                         {settingsSaved && <span style={{ fontSize: '12px', color: 'var(--success)' }}>{t('agent.settings.saved', 'Saved')}</span>}
                                         {settingsError && <span style={{ fontSize: '12px', color: settingsError.includes('adjusted') ? 'var(--warning)' : 'var(--error)', whiteSpace: 'pre-line' }}>{settingsError}</span>}

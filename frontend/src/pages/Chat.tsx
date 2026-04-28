@@ -1021,18 +1021,6 @@ export default function Chat() {
                                 rows={1}
                             />
                         </div>
-                        <div style={{ padding: '0 8px', marginTop: '4px' }}>
-                            <ModelSwitcher
-                                value={overrideModelId}
-                                onChange={handleModelChange}
-                                /* "默认" badge marks the agent's current saved
-                                   default (= primary_model_id), so it stays in
-                                   sync with whatever the picker / settings page
-                                   reports as the default. */
-                                tenantDefaultId={agent?.primary_model_id || null}
-                                disabled={!connected}
-                            />
-                        </div>
                         <div className="chat-composer-toolbar">
                             <input type="file" ref={fileInputRef} onChange={handleFileSelect} style={{ display: 'none' }} />
                             <button
@@ -1044,6 +1032,17 @@ export default function Chat() {
                             >
                                 <IconPaperclip size={16} stroke={1.75} />
                             </button>
+                            <ModelSwitcher
+                                value={overrideModelId}
+                                onChange={handleModelChange}
+                                /* "默认" badge marks the agent's current saved
+                                   default (= primary_model_id), so it stays in
+                                   sync with whatever the picker / settings page
+                                   reports as the default. */
+                                tenantDefaultId={agent?.primary_model_id || null}
+                                disabled={!connected}
+                            />
+                            <div style={{ flex: 1 }} />
                             {(streaming || isWaiting) ? (
                                 <button
                                     type="button"

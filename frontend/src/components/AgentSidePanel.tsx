@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import TakeControlPanel from './TakeControlPanel';
 import WorkspaceOperationPanel, { WorkspaceActivity, WorkspaceLiveDraft } from './WorkspaceOperationPanel';
 import type { LivePreviewState } from './AgentBayLivePanel';
@@ -17,24 +18,27 @@ interface Props {
     onWorkspaceToggleLock?: () => void;
     onWorkspaceEditingChange?: (editing: boolean) => void;
     onWorkspacePathDeleted?: (path: string) => void;
+    awareContent?: ReactNode;
     agentId?: string;
     sessionId?: string;
     onLiveUpdate?: (env: 'browser' | 'desktop', screenshotDataUri: string) => void;
 }
 
-export type SidePanelTab = 'workspace' | 'browser' | 'desktop' | 'code';
+export type SidePanelTab = 'workspace' | 'aware' | 'browser' | 'desktop' | 'code';
 
 const MIN_WIDTH = 340;
 const MAX_WIDTH_VW = 0.68;
 
 function calcInitialWidth(): number {
-    const container = document.querySelector('.chat-container') as HTMLElement | null;
+    const container = (document.querySelector('.agent-chat-area') as HTMLElement | null)
+        || (document.querySelector('.chat-container') as HTMLElement | null);
     if (container) return Math.max(MIN_WIDTH, Math.floor(container.clientWidth / 2));
     return Math.max(MIN_WIDTH, Math.floor((window.innerWidth - 60) / 2));
 }
 
 const labels: Record<SidePanelTab, string> = {
     workspace: 'Workspace',
+    aware: 'Aware',
     browser: 'Browser',
     desktop: 'Desktop',
     code: 'Code',
@@ -54,6 +58,7 @@ export default function AgentSidePanel({
     onWorkspaceToggleLock,
     onWorkspaceEditingChange,
     onWorkspacePathDeleted,
+    awareContent,
     agentId,
     sessionId,
     onLiveUpdate,
@@ -72,6 +77,7 @@ export default function AgentSidePanel({
     });
 
     const availableTabs: SidePanelTab[] = ['workspace'];
+    if (awareContent) availableTabs.push('aware');
     if (liveState.browser) availableTabs.push('browser');
     if (liveState.desktop) availableTabs.push('desktop');
     if (liveState.code) availableTabs.push('code');
@@ -123,13 +129,7 @@ export default function AgentSidePanel({
         };
     }, []);
 
-    if (!visible) {
-        return (
-            <button className="live-panel-toggle" onClick={onToggle} title="Open workspace">
-                <span>‹</span>
-            </button>
-        );
-    }
+    if (!visible) return null;
 
     return (
         <div className="live-panel agent-side-panel" style={{ width: `${panelWidth}px`, flexShrink: 0 }}>
@@ -168,6 +168,7 @@ export default function AgentSidePanel({
                         onPathDeleted={onWorkspacePathDeleted}
                     />
                 )}
+                {activeTab === 'aware' && awareContent}
                 {activeTab === 'desktop' && liveState.desktop && (
                     <div className="live-panel-browser">
                         <img src={liveState.desktop.screenshotUrl} alt="Desktop preview" className="live-panel-screenshot" />
