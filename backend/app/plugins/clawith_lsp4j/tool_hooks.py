@@ -313,7 +313,8 @@ def _extract_file_path(tool_name: str, args: dict) -> str | None:
         return args.get("file_path") or args.get("path")
     if tool_name == "save_file":
         return args.get("file_path")
-    return args.get("filePath")
+    # 编辑工具定义用 filePath (camelCase)，但 LLM 可能传 file_path (snake_case)
+    return args.get("filePath") or args.get("file_path")
 
 
 def _should_route_to_ide(tool_name: str, args: dict) -> bool:

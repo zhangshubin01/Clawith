@@ -137,7 +137,8 @@ def _execute_local_tool(tool_name: str, arguments: dict) -> tuple[str, list[dict
     from pathlib import Path
 
     if tool_name == "list_dir":
-        rel_path = arguments.get("relative_workspace_path", ".")
+        # LLM 可能使用 relative_workspace_path 或 path 参数
+        rel_path = arguments.get("relative_workspace_path") or arguments.get("path") or "."
         ws_path = Path(rel_path)
         if not ws_path.is_absolute():
             ws_path = Path.cwd() / rel_path
@@ -1528,8 +1529,13 @@ class JSONRPCRouter:
                     arguments["file_path"] = path
                 logger.info("[LSP4J-TOOL] read_file FINISHED results 注入 path: path={}", path)
             elif tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
-                results = [{"fileId": file_path_for_id, "message": result[:500] if result else ""}]
-                logger.info("[LSP4J-TOOL] FINISHED results 注入 fileId: path={} tool={}",
+                # ★ 编辑工具: 同时注入 path 和 fileId，确保 ToolPanel 能创建文件链接和 diff 卡片
+                # - results[0]["path"] → ToolPanel.syncToolCall() 创建文件链接（点击可跳转）
+                # - results[0]["fileId"] + parameters["file_path"] → AIDevFilePanel 创建 diff 卡片
+                results = [{"path": file_path_for_id, "fileId": file_path_for_id, "message": result[:500] if result else ""}]
+                if "file_path" not in arguments:
+                    arguments["file_path"] = file_path_for_id
+                logger.info("[LSP4J-TOOL] FINISHED results 注入 path+fileId: path={} tool={}",
                             file_path_for_id, tool_name)
 
             await self._send_tool_call_sync(
