@@ -102,15 +102,20 @@ async def lsp4j_websocket_endpoint(
     - 4002: agent 未找到
     """
     # 先 accept 再认证（LSP4J 框架要求）
+    logger.info("[LSP4J-LIFE] WS accepting connection from {}:{}", websocket.client.host if websocket.client else "unknown", websocket.client.port if websocket.client else "unknown")
     await websocket.accept()
+    logger.info("[LSP4J-LIFE] WS connection accepted")
 
     # 1. token 认证
+    logger.info("[LSP4J-LIFE] WS authenticating with token: {}...", token[:20] if token else "None")
     if not token:
+        logger.warning("[LSP4J-LIFE] WS auth failed: missing token")
         await websocket.close(code=4001, reason="Missing token")
         return
 
     try:
         user_id = await verify_api_key_or_token(token)
+        logger.info("[LSP4J-LIFE] WS auth success: user_id={}", user_id)
     except HTTPException as e:
         msg = e.detail if isinstance(e.detail, str) else "Unauthorized"
         logger.warning("[LSP4J-LIFE] WS auth failed: {}", msg)

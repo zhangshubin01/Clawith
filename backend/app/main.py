@@ -318,7 +318,11 @@ from app.api.admin import router as admin_router
 from app.api.pages import router as pages_router, public_router as pages_public_router
 from app.api.agent_credentials import router as credentials_router
 from app.api.agentbay_control import router as agentbay_control_router
+from app.api.ide_plugin import router as ide_plugin_router
 from app.api.okr import router as okr_router
+
+# ★ LSP4J 插件路由
+from app.plugins.clawith_lsp4j.router import router as lsp4j_router
 
 app.include_router(auth_router, prefix=settings.API_PREFIX)
 app.include_router(agents_router, prefix=settings.API_PREFIX)
@@ -364,6 +368,17 @@ app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
 app.include_router(okr_router)  # OKR — self-prefixed at /api/okr
 
+# Register IDE Plugin API (used by Tongyi Lingma IDE plugin for agent listing)
+app.include_router(ide_plugin_router)
+
+# ★ Register LSP4J WebSocket router (Tongyi Lingma IDE plugin)
+# Expected path: /api/plugins/clawith-lsp4j/ws
+# LSP4J router defines /ws endpoint, so prefix should be /api/plugins/clawith-lsp4j
+app.include_router(lsp4j_router, prefix="/api/plugins/clawith-lsp4j")
+
+# Load plugins (LSP4J, MCP, etc.)
+from app.plugins import load_plugins
+load_plugins(app)
 
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])
 async def health_check():

@@ -269,8 +269,8 @@ async def _process_tool_call(
                 "status": "running",
                 "reasoning_content": full_reasoning_content
             })
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning(f"[LLM] on_tool_call running error: {_e}")
 
     # Execute tool
     result = await agent_tools.execute_tool(
@@ -307,8 +307,8 @@ async def _process_tool_call(
                 "result": result,
                 "reasoning_content": full_reasoning_content
             })
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning(f"[LLM] on_tool_call done error: {_e}")
     
     api_messages.append(LLMMessage(
         role="tool",
