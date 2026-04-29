@@ -419,6 +419,8 @@
       "uploadFailed": "上传失败",
       "askAboutFile": "关于 {{name}} 的问题...",
       "thinking": "思考中...",
+      "thinkingLabel": "思考中",
+      "thoughtLabel": "已思考",
       "collapseSessions": "折叠会话列表",
       "showSessions": "显示聊天会话",
       "toolCallChain": "使用工具",

@@ -2393,16 +2393,19 @@ select:focus {
 }
 
 .agent-detail-page--settings .agent-detail-actions {
-  position: absolute;
-  top: 8px;
-  right: var(--space-8);
-  z-index: 8;
+  display: none;
 }
 
 .agent-detail-page--settings > .tabs {
+  align-items: center;
   border-bottom: none;
   padding-top: 0;
   margin-top: 0;
+}
+
+.agent-tabs-chat-action {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .agent-settings-savebar {
@@ -4104,6 +4107,59 @@ select:focus {
 }
 
 /* Thinking indicator */
+.thinking-panel {
+  margin-bottom: 8px;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 68%, var(--bg-primary));
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.thinking-panel[open] {
+  background: var(--bg-primary);
+  border-color: var(--border-default);
+}
+
+.thinking-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 10px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  user-select: none;
+}
+
+.thinking-summary::marker,
+.thinking-summary::-webkit-details-marker {
+  display: none;
+  content: "";
+}
+
+.thinking-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--text-tertiary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-tertiary) 12%, transparent);
+  flex-shrink: 0;
+}
+
+.thinking-content {
+  max-height: 300px;
+  overflow: auto;
+  padding: 0 10px 9px 23px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .thinking-indicator {
   display: flex;
   align-items: center;

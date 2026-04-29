@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { IconPlus, IconSearch, IconX } from '@tabler/icons-react';
+import { IconPlus, IconSearch, IconWorld, IconX } from '@tabler/icons-react';
 import { agentApi } from '../services/api';
 import PostHireSettingsModal from './PostHireSettingsModal';
 import { translateTemplate } from '../i18n/templateTranslations';
@@ -138,7 +138,8 @@ export default function TalentMarketModal({ open, onClose }: Props) {
                     {/* Search box */}
                     <div style={{
                         display: 'flex', alignItems: 'center', gap: '8px',
-                        padding: '8px 12px',
+                        height: '40px',
+                        padding: '0 12px',
                         background: 'var(--bg-secondary)',
                         border: '1px solid var(--border-subtle)',
                         borderRadius: '8px',
@@ -157,6 +158,7 @@ export default function TalentMarketModal({ open, onClose }: Props) {
                                 flex: 1, minWidth: 0,
                                 background: 'transparent', border: 'none', outline: 'none',
                                 color: 'var(--text-primary)', fontSize: '13px',
+                                height: '100%',
                             }}
                             aria-label={t('talentMarket.searchLabel', isChinese ? '搜索 Agent' : 'Search agents')}
                         />
@@ -244,6 +246,11 @@ export default function TalentMarketModal({ open, onClose }: Props) {
                             {t('common.loading', 'Loading...')}
                         </div>
                     )}
+                    {!isLoading && (
+                        <CustomCard
+                            onClick={() => { onClose(); navigate('/agents/new'); }}
+                        />
+                    )}
                     {!isLoading && visibleTemplates.length === 0 && (
                         <div style={{ gridColumn: '1 / -1', padding: '40px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px' }}>
                             {isSearching
@@ -260,11 +267,6 @@ export default function TalentMarketModal({ open, onClose }: Props) {
                             onHire={() => setPendingTemplate(tpl)}
                         />
                     ))}
-                    {!isLoading && (
-                        <CustomCard
-                            onClick={() => { onClose(); navigate('/agents/new'); }}
-                        />
-                    )}
                 </div>
 
                 {/* Footer */}
@@ -389,12 +391,31 @@ function CustomCard({ onClick }: { onClick: () => void }) {
                 color: 'var(--text-secondary)', lineHeight: 1.6,
             }}>
                 {t('talentMarket.customDescription', isChinese
-                    ? '从零开始定义身份、性格、权限和工具，完全按你的需求打造。'
-                    : 'Define identity, personality, permissions, and tools from scratch.')}
+                    ? '创建本地 Native Agent，按你的需求定义身份、权限和工具。'
+                    : 'Create a native agent, then define its identity, permissions, and tools.')}
             </p>
+            <div style={{
+                marginTop: '14px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                color: 'var(--text-tertiary)',
+                fontSize: '11.5px',
+                lineHeight: 1.2,
+            }}>
+                <IconWorld size={13} stroke={1.5} style={{ flexShrink: 0 }} />
+                <span>
+                    {t('talentMarket.externalAgentHint', isChinese
+                        ? '支持 Native、OpenClaw 等外部 Agent'
+                        : 'Supports native, OpenClaw, and external agents')}
+                </span>
+            </div>
             <button
                 className="btn btn-secondary"
-                onClick={onClick}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    onClick();
+                }}
                 style={{ marginTop: '16px', width: '100%' }}
             >
                 {t('talentMarket.customStart', isChinese ? '开始' : 'Start')}

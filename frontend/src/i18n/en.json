@@ -412,6 +412,8 @@
       "uploadFailed": "Upload failed",
       "askAboutFile": "Ask about {{name}}...",
       "thinking": "Thinking...",
+      "thinkingLabel": "Thinking",
+      "thoughtLabel": "Thought",
       "collapseSessions": "Collapse sessions",
       "showSessions": "Show chat sessions",
       "toolCallChain": "Tools Used",

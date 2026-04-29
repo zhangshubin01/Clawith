@@ -849,8 +849,8 @@ if (typeof document !== 'undefined' && !document.getElementById(_PULSE_STYLE_ID)
     _s.id = _PULSE_STYLE_ID;
     _s.textContent = `
         @keyframes cw-pulse-led {
-            0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(99,102,241,0.6); }
-            50%       { opacity: 0.55; transform: scale(1.5); box-shadow: 0 0 0 4px rgba(99,102,241,0); }
+            0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(107,114,128,0.45); }
+            50%       { opacity: 0.55; transform: scale(1.5); box-shadow: 0 0 0 4px rgba(107,114,128,0); }
         }
         .cw-running-led { animation: cw-pulse-led 1.4s ease-in-out infinite; }
     `;
@@ -904,8 +904,8 @@ function AnalysisCard({
         <div style={{ paddingLeft: '36px', marginBottom: '6px' }}>
             <div style={{
                 borderRadius: '8px',
-                background: 'rgba(99,102,241,0.06)',
-                border: `1px solid ${isRunning ? 'rgba(99,102,241,0.32)' : 'rgba(99,102,241,0.18)'}`,
+                background: isRunning ? 'color-mix(in srgb, var(--bg-secondary) 72%, var(--bg-primary))' : 'var(--bg-primary)',
+                border: `1px solid ${isRunning ? 'var(--border-default)' : 'var(--border-subtle)'}`,
                 fontSize: '12px',
                 overflow: 'hidden',
                 transition: 'border-color 0.3s ease',
@@ -917,14 +917,14 @@ function AnalysisCard({
                         background: 'none', border: 'none', cursor: 'pointer',
                         width: '100%', display: 'flex', alignItems: 'center', gap: '6px',
                         padding: '7px 10px',
-                        color: 'var(--accent-text, #818cf8)',
+                        color: 'var(--text-secondary)',
                     }}
                 >
                     {/* Status indicator: pulse when running, static green when done */}
                     {isRunning ? (
                         <span className="cw-running-led" style={{
                             display: 'inline-block', width: '6px', height: '6px',
-                            borderRadius: '50%', background: '#818cf8', flexShrink: 0,
+                            borderRadius: '50%', background: 'var(--text-tertiary)', flexShrink: 0,
                         }} />
                     ) : (
                         <span style={{
@@ -935,12 +935,12 @@ function AnalysisCard({
 
                     {/* Title + contextual subtitle */}
                     <span style={{ flex: 1, textAlign: 'left', display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0 }}>
-                        <span style={{ fontWeight: 500, flexShrink: 0 }}>{t('agent.chat.analysing')}</span>
-                        <span style={{ color: 'rgba(99,102,241,0.35)', flexShrink: 0 }}>·</span>
+                        <span style={{ fontWeight: 500, flexShrink: 0, color: 'var(--text-primary)' }}>{t('agent.chat.analysing')}</span>
+                        <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>·</span>
                         {isRunning ? (
                             // Running: show current tool name, or 'Thinking...' if no active tool
                             <span style={{
-                                fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#a5b4fc',
+                                fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-secondary)',
                                 overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                             }}>
                                 {runningTool ? runningTool.name : t('agent.chat.thinking')}
@@ -957,7 +957,7 @@ function AnalysisCard({
                     {/* Tool count badge (hidden when no tools) */}
                     {toolCount > 0 && (
                         <span style={{
-                            background: 'rgba(99,102,241,0.18)', color: '#818cf8',
+                            background: 'var(--bg-secondary)', color: 'var(--text-secondary)',
                             borderRadius: '10px', padding: '1px 7px',
                             fontSize: '10px', fontWeight: 600, flexShrink: 0,
                         }}>{toolCount}</span>
@@ -979,17 +979,17 @@ function AnalysisCard({
                             const running = tc.status === 'running';
                             return (
                                 <span key={i} style={{
-                                    background: running ? 'rgba(99,102,241,0.14)' : 'rgba(99,102,241,0.08)',
-                                    border: `1px solid ${running ? 'rgba(99,102,241,0.28)' : 'rgba(99,102,241,0.14)'}`,
+                                    background: running ? 'var(--bg-secondary)' : 'var(--bg-primary)',
+                                    border: '1px solid var(--border-subtle)',
                                     borderRadius: '4px', padding: '1px 6px',
-                                    fontSize: '10px', color: running ? '#818cf8' : '#a5b4fc',
+                                    fontSize: '10px', color: 'var(--text-secondary)',
                                     fontFamily: 'var(--font-mono)',
                                     display: 'inline-flex', alignItems: 'center', gap: '4px',
                                 }}>
                                     {running && (
                                         <span className="cw-running-led" style={{
                                             display: 'inline-block', width: '4px', height: '4px',
-                                            borderRadius: '50%', background: '#818cf8', flexShrink: 0,
+                                            borderRadius: '50%', background: 'var(--text-tertiary)', flexShrink: 0,
                                         }} />
                                     )}
                                     {tc.name}
@@ -1001,20 +1001,20 @@ function AnalysisCard({
 
                 {/* ── Expanded: all items in chronological order ── */}
                 {expanded && (
-                    <div style={{ borderTop: '1px solid rgba(99,102,241,0.15)' }}>
+                    <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
                         {items.map((item, idx) => {
                             if (item.type === 'thinking') {
                                 // Thinking block: plain italic text, scrollable
                                 return (
                                     <div key={idx} style={{
                                         padding: '8px 12px',
-                                        borderBottom: idx < items.length - 1 ? '1px solid rgba(99,102,241,0.08)' : 'none',
+                                        borderBottom: idx < items.length - 1 ? '1px solid var(--border-subtle)' : 'none',
                                         fontSize: '11px', lineHeight: '1.7',
                                         color: 'var(--text-tertiary)',
                                         whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                                         maxHeight: '200px', overflowY: 'auto',
                                         fontStyle: 'italic',
-                                        background: 'rgba(147,130,220,0.04)',
+                                        background: 'var(--bg-secondary)',
                                     }}>
                                         {item.content}
                                     </div>
@@ -1032,7 +1032,7 @@ function AnalysisCard({
                                     key={idx}
                                     open={running}
                                     style={{
-                                        borderBottom: idx < items.length - 1 ? '1px solid rgba(99,102,241,0.10)' : 'none',
+                                        borderBottom: idx < items.length - 1 ? '1px solid var(--border-subtle)' : 'none',
                                     }}
                                 >
                                     <summary style={{
@@ -1052,7 +1052,7 @@ function AnalysisCard({
                                         />
                                         <span style={{
                                             fontFamily: 'var(--font-mono)', fontSize: '11px',
-                                            color: '#818cf8', fontWeight: 600, flex: 1,
+                                            color: 'var(--text-secondary)', fontWeight: 600, flex: 1,
                                         }}>{tc.name}</span>
                                         {running && (
                                             <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>
@@ -1068,7 +1068,7 @@ function AnalysisCard({
                                                     fontFamily: 'var(--font-mono)', fontSize: '10px',
                                                     color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap',
                                                     wordBreak: 'break-all', maxHeight: '80px', overflowY: 'auto',
-                                                    background: 'rgba(0,0,0,0.12)', borderRadius: '4px',
+                                                    background: 'var(--bg-secondary)', borderRadius: '4px',
                                                     padding: '4px 6px', marginBottom: tc.result ? '4px' : 0,
                                                 }}>{argsStr}</div>
                                             )}
@@ -1077,7 +1077,7 @@ function AnalysisCard({
                                                     fontSize: '10px', color: 'var(--text-secondary)',
                                                     whiteSpace: 'pre-wrap', wordBreak: 'break-all',
                                                     maxHeight: '120px', overflowY: 'auto',
-                                                    borderTop: argsStr ? '1px solid rgba(99,102,241,0.10)' : 'none',
+                                                    borderTop: argsStr ? '1px solid var(--border-subtle)' : 'none',
                                                     paddingTop: argsStr ? '4px' : 0,
                                                 }}>
                                                     {tc.result.length > 500 ? tc.result.slice(0, 500) + '…' : tc.result}
@@ -2922,13 +2922,18 @@ function AgentDetailInner() {
                         </div>
                     )}
                     {msg.thinking && (
-                        <details style={{ marginBottom: '8px', fontSize: '12px', background: 'rgba(147, 130, 220, 0.08)', borderRadius: '6px', border: '1px solid rgba(147, 130, 220, 0.15)' }}>
-                            <summary style={{ padding: '6px 10px', cursor: 'pointer', color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500, userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}>Thinking</summary>
-                            <div style={{ padding: '4px 10px 8px', fontSize: '12px', lineHeight: '1.6', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '300px', overflow: 'auto' }}>{msg.thinking}</div>
+                        <details className="thinking-panel">
+                            <summary className="thinking-summary">
+                                <span className="thinking-status-dot" />
+                                {(msg as any)._streaming && !msg.content
+                                    ? t('agent.chat.thinkingLabel', '思考中')
+                                    : t('agent.chat.thoughtLabel', '已思考')}
+                            </summary>
+                            <div className="thinking-content">{msg.thinking}</div>
                         </details>
                     )}
                     {msg.role === 'assistant' ? (
-                        (msg as any)._streaming && !msg.content ? (
+                        (msg as any)._streaming && !msg.content && !msg.thinking ? (
                             <div className="thinking-indicator">
                                 <div className="thinking-dots"><span /><span /><span /></div>
                                 <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
@@ -3627,12 +3632,6 @@ function AgentDetailInner() {
                                 </button>
                             </>
                         )}
-                        {activeTab !== 'chat' && (
-                            <button className="btn btn-ghost agent-top-action" onClick={() => setActiveTab('chat')}>
-                                <IconMessageCircle size={16} stroke={1.7} />
-                                <span>{t('agent.actions.chat')}</span>
-                            </button>
-                        )}
                         {activeTab === 'chat' && (agent as any)?.agent_type !== 'openclaw' && (
                             <>
                                 {agent.status === 'stopped' ? (
@@ -3663,6 +3662,10 @@ function AgentDetailInner() {
                             {t(`agent.tabs.${tab}`)}
                         </div>
                     ))}
+                    <button className="btn btn-ghost agent-top-action agent-tabs-chat-action" onClick={() => setActiveTab('chat')}>
+                        <IconMessageCircle size={16} stroke={1.7} />
+                        <span>{t('agent.actions.chat')}</span>
+                    </button>
                 </div>}
 
                 {/* ── Enhanced Status Tab ── */}
@@ -5273,23 +5276,12 @@ function AgentDetailInner() {
                                                         if (m.thinking) {
                                                             return (
                                                                 <div key={i} style={{ paddingLeft: '36px', marginBottom: '6px' }}>
-                                                                    <details style={{
-                                                                        fontSize: '12px',
-                                                                        background: 'rgba(147, 130, 220, 0.08)', borderRadius: '6px',
-                                                                        border: '1px solid rgba(147, 130, 220, 0.15)',
-                                                                    }}>
-                                                                        <summary style={{
-                                                                            padding: '6px 10px', cursor: 'pointer',
-                                                                            color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500,
-                                                                            userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px',
-                                                                        }}>Thinking</summary>
-                                                                        <div style={{
-                                                                            padding: '4px 10px 8px',
-                                                                            fontSize: '12px', lineHeight: '1.6',
-                                                                            color: 'var(--text-secondary)',
-                                                                            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                                                                            maxHeight: '300px', overflow: 'auto',
-                                                                        }}>{m.thinking}</div>
+                                                                    <details className="thinking-panel">
+                                                                        <summary className="thinking-summary">
+                                                                            <span className="thinking-status-dot" />
+                                                                            {t('agent.chat.thoughtLabel', '已思考')}
+                                                                        </summary>
+                                                                        <div className="thinking-content">{m.thinking}</div>
                                                                     </details>
                                                                 </div>
                                                             );

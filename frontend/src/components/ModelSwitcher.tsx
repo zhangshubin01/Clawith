@@ -26,6 +26,7 @@ interface Props {
 export default function ModelSwitcher({ value, onChange, tenantDefaultId, disabled }: Props) {
     const { t } = useTranslation();
     const [open, setOpen] = useState(false);
+    const [hovered, setHovered] = useState(false);
     const ref = useRef<HTMLDivElement>(null);
     const buttonRef = useRef<HTMLButtonElement>(null);
     const popoverRef = useRef<HTMLDivElement>(null);
@@ -113,13 +114,20 @@ export default function ModelSwitcher({ value, onChange, tenantDefaultId, disabl
                 type="button"
                 onClick={() => !disabled && setOpen(o => !o)}
                 disabled={disabled}
+                onMouseEnter={() => setHovered(true)}
+                onMouseLeave={() => setHovered(false)}
                 style={{
                     display: 'inline-flex', alignItems: 'center', gap: '6px',
-                    padding: '4px 10px', fontSize: '12px',
-                    border: '1px solid var(--border-subtle)', borderRadius: '999px',
-                    background: 'var(--bg-secondary)', color: 'var(--text-secondary)',
+                    height: '28px',
+                    padding: '0 10px 0 12px', fontSize: '12px',
+                    border: `1px solid ${open || hovered ? 'var(--border-default)' : 'var(--border-subtle)'}`,
+                    borderRadius: '999px',
+                    background: open || hovered ? 'var(--bg-elevated)' : 'var(--bg-primary)',
+                    color: 'var(--text-primary)',
                     cursor: disabled ? 'not-allowed' : 'pointer',
                     opacity: disabled ? 0.6 : 1,
+                    boxShadow: open ? '0 0 0 2px color-mix(in srgb, var(--accent-primary) 12%, transparent)' : 'none',
+                    transition: 'background 120ms, border-color 120ms, box-shadow 120ms, color 120ms',
                 }}
                 title={t('chat.modelSwitcher.title', 'Switch model for this session')}
             >
@@ -129,7 +137,15 @@ export default function ModelSwitcher({ value, onChange, tenantDefaultId, disabl
                 }}>
                     {selected ? labelFor(selected) : t('chat.modelSwitcher.none', 'No model')}
                 </span>
-                <IconChevronDown size={12} stroke={2} />
+                <IconChevronDown
+                    size={13}
+                    stroke={2}
+                    style={{
+                        color: 'var(--text-secondary)',
+                        transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+                        transition: 'transform 120ms',
+                    }}
+                />
             </button>
             {open && coords && createPortal(
                 <div

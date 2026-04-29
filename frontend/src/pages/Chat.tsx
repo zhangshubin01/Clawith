@@ -65,8 +65,8 @@ if (typeof document !== 'undefined' && !document.getElementById(PULSE_STYLE_ID))
     s.id = PULSE_STYLE_ID;
     s.textContent = `
         @keyframes cw-pulse-led {
-            0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(99,102,241,0.6); }
-            50%       { opacity: 0.55; transform: scale(1.5); box-shadow: 0 0 0 4px rgba(99,102,241,0); }
+            0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(107,114,128,0.45); }
+            50%       { opacity: 0.55; transform: scale(1.5); box-shadow: 0 0 0 4px rgba(107,114,128,0); }
         }
         .cw-running-led { animation: cw-pulse-led 1.4s ease-in-out infinite; }
     `;
@@ -91,8 +91,8 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
     return (
         <div style={{
             borderRadius: '8px',
-            background: 'rgba(99,102,241,0.06)',
-            border: `1px solid ${isRunning ? 'rgba(99,102,241,0.32)' : 'rgba(99,102,241,0.18)'}`,
+            background: isRunning ? 'color-mix(in srgb, var(--bg-secondary) 72%, var(--bg-primary))' : 'var(--bg-primary)',
+            border: `1px solid ${isRunning ? 'var(--border-default)' : 'var(--border-subtle)'}`,
             fontSize: '12px',
             overflow: 'hidden',
             marginBottom: '6px',
@@ -105,13 +105,13 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                     background: 'none', border: 'none', cursor: 'pointer',
                     width: '100%', display: 'flex', alignItems: 'center', gap: '6px',
                     padding: '7px 10px',
-                    color: 'var(--accent-text, #818cf8)',
+                    color: 'var(--text-secondary)',
                 }}
             >
                 {/* Left label: title + running-tool indicator */}
                 <span style={{ flex: 1, textAlign: 'left', display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
-                    <span style={{ fontWeight: 500, flexShrink: 0 }}>{t('agent.chat.toolCallChain')}</span>
-                    <span style={{ color: 'rgba(99,102,241,0.4)', flexShrink: 0 }}>·</span>
+                    <span style={{ fontWeight: 500, flexShrink: 0, color: 'var(--text-primary)' }}>{t('agent.chat.toolCallChain')}</span>
+                    <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>·</span>
                     {isRunning && activeTool ? (
                         <>
                             {/* Pulse LED: breathing dot while a tool runs */}
@@ -121,7 +121,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                     display: 'inline-block',
                                     width: '6px', height: '6px',
                                     borderRadius: '50%',
-                                    background: '#818cf8',
+                                    background: 'var(--text-tertiary)',
                                     flexShrink: 0,
                                 }}
                             />
@@ -129,7 +129,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                             <span style={{
                                 fontFamily: 'var(--font-mono)',
                                 fontSize: '11px',
-                                color: '#a5b4fc',
+                                color: 'var(--text-secondary)',
                                 overflow: 'hidden',
                                 textOverflow: 'ellipsis',
                                 whiteSpace: 'nowrap',
@@ -152,7 +152,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
 
                 {/* Count badge */}
                 <span style={{
-                    background: 'rgba(99,102,241,0.18)', color: '#818cf8',
+                    background: 'var(--bg-secondary)', color: 'var(--text-secondary)',
                     borderRadius: '10px', padding: '1px 7px',
                     fontSize: '10px', fontWeight: 600, flexShrink: 0,
                 }}>
@@ -175,10 +175,10 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                         const running = !tc.result;
                         return (
                             <span key={i} style={{
-                                background: running ? 'rgba(99,102,241,0.14)' : 'rgba(99,102,241,0.08)',
-                                border: `1px solid ${running ? 'rgba(99,102,241,0.28)' : 'rgba(99,102,241,0.14)'}`,
+                                background: running ? 'var(--bg-secondary)' : 'var(--bg-primary)',
+                                border: '1px solid var(--border-subtle)',
                                 borderRadius: '4px', padding: '1px 6px',
-                                fontSize: '10px', color: running ? '#818cf8' : '#a5b4fc',
+                                fontSize: '10px', color: 'var(--text-secondary)',
                                 fontFamily: 'var(--font-mono)',
                                 display: 'inline-flex', alignItems: 'center', gap: '4px',
                             }}>
@@ -189,7 +189,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                             display: 'inline-block',
                                             width: '4px', height: '4px',
                                             borderRadius: '50%',
-                                            background: '#818cf8',
+                                            background: 'var(--text-tertiary)',
                                             flexShrink: 0,
                                         }}
                                     />
@@ -203,13 +203,13 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
 
             {/* ── Expanded: each tool's full detail row ── */}
             {expanded && (
-                <div style={{ borderTop: '1px solid rgba(99,102,241,0.15)' }}>
+                <div style={{ borderTop: '1px solid var(--border-subtle)' }}>
                     {toolCalls.map((tc, i) => {
                         const running = !tc.result;
                         return (
                             <div key={i} style={{
                                 padding: '7px 10px',
-                                borderBottom: i < toolCalls.length - 1 ? '1px solid rgba(99,102,241,0.10)' : 'none',
+                                borderBottom: i < toolCalls.length - 1 ? '1px solid var(--border-subtle)' : 'none',
                             }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '4px' }}>
                                     {/* Status dot: amber + pulse = running; green = done */}
@@ -223,7 +223,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                             flexShrink: 0,
                                         }}
                                     />
-                                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: '#818cf8', fontWeight: 600 }}>
+                                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 600 }}>
                                         {tc.name}
                                     </span>
                                     {running && (
@@ -237,7 +237,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                         fontFamily: 'var(--font-mono)', fontSize: '10px',
                                         color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap',
                                         wordBreak: 'break-all', maxHeight: '80px', overflowY: 'auto',
-                                        background: 'rgba(0,0,0,0.12)', borderRadius: '4px',
+                                        background: 'var(--bg-secondary)', borderRadius: '4px',
                                         padding: '4px 6px', marginBottom: tc.result ? '4px' : 0,
                                     }}>
                                         {JSON.stringify(tc.args, null, 2)}
@@ -248,7 +248,7 @@ function ChatToolChain({ toolCalls }: { toolCalls: ToolCall[] }) {
                                         fontSize: '10px', color: 'var(--text-secondary)',
                                         whiteSpace: 'pre-wrap', wordBreak: 'break-all',
                                         maxHeight: '80px', overflowY: 'auto',
-                                        borderTop: '1px solid rgba(99,102,241,0.10)', paddingTop: '4px',
+                                        borderTop: '1px solid var(--border-subtle)', paddingTop: '4px',
                                     }}>
                                         {tc.result.length > 500 ? tc.result.slice(0, 500) + '…' : tc.result}
                                     </div>
@@ -895,25 +895,14 @@ export default function Chat() {
                                     return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><span>{fi}</span><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
                                 })()}
                                 {msg.thinking && (
-                                    <details style={{
-                                        marginBottom: '8px', fontSize: '12px',
-                                        background: 'rgba(147, 130, 220, 0.08)', borderRadius: '6px',
-                                        border: '1px solid rgba(147, 130, 220, 0.15)',
-                                    }}>
-                                        <summary style={{
-                                            padding: '6px 10px', cursor: 'pointer',
-                                            color: 'rgba(147, 130, 220, 0.9)', fontWeight: 500,
-                                            userSelect: 'none', display: 'flex', alignItems: 'center', gap: '4px',
-                                        }}>
-                                            Thinking
+                                    <details className="thinking-panel">
+                                        <summary className="thinking-summary">
+                                            <span className="thinking-status-dot" />
+                                            {streaming && i === messages.length - 1 && !msg.content
+                                                ? t('agent.chat.thinkingLabel', '思考中')
+                                                : t('agent.chat.thoughtLabel', '已思考')}
                                         </summary>
-                                        <div style={{
-                                            padding: '4px 10px 8px',
-                                            fontSize: '12px', lineHeight: '1.6',
-                                            color: 'var(--text-secondary)',
-                                            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                                            maxHeight: '300px', overflow: 'auto',
-                                        }}>
+                                        <div className="thinking-content">
                                             {msg.thinking}
                                         </div>
                                     </details>
@@ -922,7 +911,7 @@ export default function Chat() {
                                     <ChatToolChain toolCalls={msg.toolCalls} />
                                 )}
                                 {msg.role === 'assistant' ? (
-                                    streaming && !msg.content && i === messages.length - 1 ? (
+                                    streaming && !msg.content && !msg.thinking && i === messages.length - 1 ? (
                                         <div className="thinking-indicator">
                                             <div className="thinking-dots">
                                                 <span /><span /><span />
