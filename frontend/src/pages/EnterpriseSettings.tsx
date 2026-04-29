@@ -12,6 +12,7 @@ import InvitationCodes from './InvitationCodes';
 import LinearCopyButton from '../components/LinearCopyButton';
 import { useDialog } from '../components/Dialog/DialogProvider';
 import { useToast } from '../components/Toast/ToastProvider';
+import { buildCompanyRegions, type CompanyRegion } from '../utils/companyRegions';
 // API helpers for enterprise endpoints
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
     const token = localStorage.getItem('token');
@@ -1930,51 +1931,56 @@ function CompanyNameEditor() {
 }
 
 
-// ─── Company Region Editor ───────────────────────
-const COMPANY_REGIONS = [
-    { code: '001', zh: '全球 / UTC', en: 'Global / UTC', timezone: 'UTC' },
-    { code: 'CN', zh: '中国', en: 'China', timezone: 'Asia/Shanghai' },
-    { code: 'HK', zh: '中国香港', en: 'Hong Kong, China', timezone: 'Asia/Hong_Kong' },
-    { code: 'MO', zh: '中国澳门', en: 'Macao, China', timezone: 'Asia/Macau' },
-    { code: 'TW', zh: '中国台湾', en: 'Taiwan, China', timezone: 'Asia/Taipei' },
-    { code: 'JP', zh: '日本', en: 'Japan', timezone: 'Asia/Tokyo' },
-    { code: 'KR', zh: '大韩民国', en: 'Republic of Korea', timezone: 'Asia/Seoul' },
-    { code: 'SG', zh: '新加坡', en: 'Singapore', timezone: 'Asia/Singapore' },
-    { code: 'IN', zh: '印度', en: 'India', timezone: 'Asia/Kolkata' },
-    { code: 'AE', zh: '阿拉伯联合酋长国', en: 'United Arab Emirates', timezone: 'Asia/Dubai' },
-    { code: 'GB', zh: '大不列颠及北爱尔兰联合王国', en: 'United Kingdom of Great Britain and Northern Ireland', timezone: 'Europe/London' },
-    { code: 'FR', zh: '法国', en: 'France', timezone: 'Europe/Paris' },
-    { code: 'DE', zh: '德国', en: 'Germany', timezone: 'Europe/Berlin' },
-    { code: 'IT', zh: '意大利', en: 'Italy', timezone: 'Europe/Rome' },
-    { code: 'ES', zh: '西班牙', en: 'Spain', timezone: 'Europe/Madrid' },
-    { code: 'NL', zh: '荷兰', en: 'Netherlands', timezone: 'Europe/Amsterdam' },
-    { code: 'CH', zh: '瑞士', en: 'Switzerland', timezone: 'Europe/Zurich' },
-    { code: 'SE', zh: '瑞典', en: 'Sweden', timezone: 'Europe/Stockholm' },
-    { code: 'US', zh: '美利坚合众国', en: 'United States of America', timezone: 'America/New_York' },
-    { code: 'CA', zh: '加拿大', en: 'Canada', timezone: 'America/Toronto' },
-    { code: 'MX', zh: '墨西哥', en: 'Mexico', timezone: 'America/Mexico_City' },
-    { code: 'BR', zh: '巴西', en: 'Brazil', timezone: 'America/Sao_Paulo' },
-    { code: 'AU', zh: '澳大利亚', en: 'Australia', timezone: 'Australia/Sydney' },
-    { code: 'NZ', zh: '新西兰', en: 'New Zealand', timezone: 'Pacific/Auckland' },
-];
-
 function CompanyTimezoneEditor() {
     const { t, i18n } = useTranslation();
     const user = useAuthStore((s) => s.user);
     const tenantId = user?.tenant_id || localStorage.getItem('current_tenant_id') || '';
+    const regionPickerRef = useRef<HTMLDivElement>(null);
     const [timezone, setTimezone] = useState('UTC');
     const [countryRegion, setCountryRegion] = useState('001');
     const [regionInput, setRegionInput] = useState('');
+    const [regionOpen, setRegionOpen] = useState(false);
+    const [highlightedRegion, setHighlightedRegion] = useState(0);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState('');
     const zh = i18n.language?.startsWith('zh');
-    const regionLabel = (r: typeof COMPANY_REGIONS[number]) => zh ? r.zh : r.en;
+    const companyRegions = useMemo(() => buildCompanyRegions(zh ? 'zh-Hans' : 'en'), [zh]);
+    const regionLabel = (r: CompanyRegion) => zh ? r.zh : r.en;
+    const selectedRegion = companyRegions.find(r => r.code === countryRegion) || companyRegions[0];
+    const filteredRegions = useMemo(() => {
+        const query = regionInput.trim().toLowerCase();
+        if (!query || (!regionOpen && regionInput === regionLabel(selectedRegion))) return companyRegions;
+        return companyRegions.filter(r => {
+            const localName = regionLabel(r).toLowerCase();
+            const altName = (zh ? r.en : r.zh).toLowerCase();
+            return localName.includes(query)
+                || altName.includes(query)
+                || r.code.toLowerCase().includes(query)
+                || r.timezone.toLowerCase().includes(query);
+        });
+    }, [companyRegions, regionInput, regionOpen, selectedRegion, zh]);
 
     useEffect(() => {
-        const selected = COMPANY_REGIONS.find(r => r.code === countryRegion) || COMPANY_REGIONS[0];
-        setRegionInput(regionLabel(selected));
+        setRegionInput(regionLabel(selectedRegion));
     }, [countryRegion, zh]);
+
+    useEffect(() => {
+        if (!regionOpen) return;
+        const handlePointerDown = (e: MouseEvent) => {
+            if (!regionPickerRef.current?.contains(e.target as Node)) {
+                setRegionOpen(false);
+                setRegionInput(regionLabel(selectedRegion));
+                setHighlightedRegion(0);
+            }
+        };
+        document.addEventListener('mousedown', handlePointerDown);
+        return () => document.removeEventListener('mousedown', handlePointerDown);
+    }, [regionOpen, selectedRegion, zh]);
+
+    useEffect(() => {
+        setHighlightedRegion(0);
+    }, [regionInput]);
 
     useEffect(() => {
         if (!tenantId) return;
@@ -1988,7 +1994,7 @@ function CompanyTimezoneEditor() {
 
     const handleSave = async (regionCode: string) => {
         if (!tenantId) return;
-        const region = COMPANY_REGIONS.find(r => r.code === regionCode) || COMPANY_REGIONS[0];
+        const region = companyRegions.find(r => r.code === regionCode) || companyRegions[0];
         setCountryRegion(region.code);
         setTimezone(region.timezone);
         setSaving(true);
@@ -2009,6 +2015,15 @@ function CompanyTimezoneEditor() {
         setSaving(false);
     };
 
+    const selectRegion = (region: CompanyRegion) => {
+        setRegionInput(regionLabel(region));
+        setRegionOpen(false);
+        setHighlightedRegion(0);
+        if (region.code !== countryRegion) {
+            handleSave(region.code);
+        }
+    };
+
     return (
         <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
             <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
@@ -2020,29 +2035,152 @@ function CompanyTimezoneEditor() {
                     : `Used to set the company timezone and OKR non-workday rules. Current timezone: ${timezone}`}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '10px', width: '100%' }}>
-                <input
-                    className="form-input"
-                    list="company-region-options"
-                    value={regionInput}
-                    onChange={e => {
-                        const value = e.target.value;
-                        setRegionInput(value);
-                        const matched = COMPANY_REGIONS.find(r => regionLabel(r) === value || r.code === value);
-                        if (matched) handleSave(matched.code);
-                    }}
-                    onBlur={() => {
-                        const selected = COMPANY_REGIONS.find(r => r.code === countryRegion) || COMPANY_REGIONS[0];
-                        setRegionInput(regionLabel(selected));
-                    }}
-                    placeholder={zh ? '搜索国家或地区' : 'Search country or region'}
-                    style={{ width: 'min(420px, 100%)', fontSize: '13px' }}
-                    disabled={saving || !tenantId}
-                />
-                <datalist id="company-region-options">
-                    {COMPANY_REGIONS.map(region => (
-                        <option key={region.code} value={regionLabel(region)} label={`${region.code} · ${region.timezone}`} />
-                    ))}
-                </datalist>
+                <div ref={regionPickerRef} style={{ position: 'relative', width: 'min(420px, 100%)' }}>
+                    <input
+                        className="form-input"
+                        value={regionInput}
+                        onChange={e => {
+                            setRegionInput(e.target.value);
+                            setRegionOpen(true);
+                        }}
+                        onFocus={() => {
+                            setRegionOpen(true);
+                            setRegionInput('');
+                        }}
+                        onKeyDown={e => {
+                            if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                setRegionOpen(true);
+                                setHighlightedRegion(i => Math.min(i + 1, Math.max(filteredRegions.length - 1, 0)));
+                            } else if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                setHighlightedRegion(i => Math.max(i - 1, 0));
+                            } else if (e.key === 'Enter') {
+                                e.preventDefault();
+                                const region = filteredRegions[highlightedRegion];
+                                if (region) selectRegion(region);
+                            } else if (e.key === 'Escape') {
+                                setRegionOpen(false);
+                                setRegionInput(regionLabel(selectedRegion));
+                            }
+                        }}
+                        placeholder={zh ? '搜索国家或地区、代码或时区' : 'Search country, code, or timezone'}
+                        style={{
+                            width: '100%',
+                            fontSize: '13px',
+                            paddingRight: '42px',
+                            cursor: saving || !tenantId ? 'not-allowed' : 'text',
+                        }}
+                        disabled={saving || !tenantId}
+                        role="combobox"
+                        aria-expanded={regionOpen}
+                        aria-controls="company-region-listbox"
+                        aria-autocomplete="list"
+                    />
+                    <button
+                        type="button"
+                        onClick={() => {
+                            if (saving || !tenantId) return;
+                            setRegionOpen(v => !v);
+                            if (!regionOpen) setRegionInput('');
+                        }}
+                        disabled={saving || !tenantId}
+                        aria-label={regionOpen ? (zh ? '收起地区列表' : 'Collapse region list') : (zh ? '展开地区列表' : 'Expand region list')}
+                        style={{
+                            position: 'absolute',
+                            right: '7px',
+                            top: '50%',
+                            transform: `translateY(-50%) rotate(${regionOpen ? 180 : 0}deg)`,
+                            border: 'none',
+                            background: 'transparent',
+                            color: 'var(--text-secondary)',
+                            cursor: saving || !tenantId ? 'not-allowed' : 'pointer',
+                            width: '30px',
+                            height: '30px',
+                            padding: 0,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            transition: 'transform 120ms ease',
+                        }}
+                    >
+                        <span
+                            aria-hidden="true"
+                            style={{
+                                width: '8px',
+                                height: '8px',
+                                borderRight: '1.6px solid currentColor',
+                                borderBottom: '1.6px solid currentColor',
+                                transform: 'rotate(45deg) translateY(-2px)',
+                                borderRadius: '1px',
+                            }}
+                        />
+                    </button>
+                    {regionOpen && (
+                        <div
+                            id="company-region-listbox"
+                            role="listbox"
+                            style={{
+                                position: 'absolute',
+                                top: 'calc(100% + 6px)',
+                                left: 0,
+                                right: 0,
+                                zIndex: 30,
+                                background: 'var(--bg-primary)',
+                                border: '1px solid var(--border-subtle)',
+                                borderRadius: '8px',
+                                boxShadow: '0 12px 28px rgba(15, 23, 42, 0.14)',
+                                maxHeight: '260px',
+                                overflowY: 'auto',
+                                padding: '6px',
+                            }}
+                        >
+                            {filteredRegions.length > 0 ? filteredRegions.map((region, index) => {
+                                const active = region.code === countryRegion;
+                                const highlighted = index === highlightedRegion;
+                                return (
+                                    <button
+                                        key={region.code}
+                                        type="button"
+                                        role="option"
+                                        aria-selected={active}
+                                        onMouseEnter={() => setHighlightedRegion(index)}
+                                        onMouseDown={e => e.preventDefault()}
+                                        onClick={() => selectRegion(region)}
+                                        style={{
+                                            width: '100%',
+                                            border: 'none',
+                                            background: highlighted ? 'var(--bg-elevated)' : 'transparent',
+                                            color: 'var(--text-primary)',
+                                            borderRadius: '6px',
+                                            padding: '9px 10px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            gap: '12px',
+                                            textAlign: 'left',
+                                            cursor: 'pointer',
+                                        }}
+                                    >
+                                        <span style={{ minWidth: 0 }}>
+                                            <span style={{ display: 'block', fontSize: '13px', fontWeight: active ? 600 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                {regionLabel(region)}
+                                            </span>
+                                            <span style={{ display: 'block', marginTop: '2px', color: 'var(--text-tertiary)', fontSize: '11px' }}>
+                                                {region.code} · {region.timezone}
+                                            </span>
+                                        </span>
+                                        {active && <span style={{ color: 'var(--text-primary)', fontSize: '14px', flexShrink: 0 }}>✓</span>}
+                                    </button>
+                                );
+                            }) : (
+                                <div style={{ padding: '12px 10px', color: 'var(--text-tertiary)', fontSize: '12px' }}>
+                                    {zh ? '没有匹配的国家或地区' : 'No matching country or region'}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
                 {(saved || error || !tenantId) && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minHeight: '16px', flexWrap: 'wrap' }}>
                         {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>已保存</span>}

@@ -627,6 +627,31 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "read_webpage",
+            "description": "Fetch a public HTTP/HTTPS URL directly and extract readable webpage text. Use this when you already have a specific link and need the page content without relying on an external reader service. Private, local, and internal network URLs are blocked.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The full public HTTP/HTTPS URL of the web page to read, e.g. 'https://example.com/article'",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Max characters to return (default 12000, max 50000)",
+                    },
+                    "include_links": {
+                        "type": "boolean",
+                        "description": "Include up to 30 extracted page links (default false)",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_document",
             "description": "Read office document contents (PDF, Word, Excel, PPT, etc.) and extract text. Suitable for reading knowledge base documents.",
             "parameters": {
@@ -2131,6 +2156,8 @@ async def _execute_tool_direct(
             return await _web_search(arguments, agent_id)
         elif tool_name == "jina_search":
             return await _jina_search(arguments)
+        elif tool_name == "read_webpage":
+            return await _read_webpage(arguments)
         elif tool_name == "exa_search":
             return await _exa_search(arguments, agent_id)
         elif tool_name == "duckduckgo_search":
@@ -2412,7 +2439,7 @@ async def execute_tool(
         elif tool_name == "jina_read":
             result = await _jina_read(arguments)
         elif tool_name == "read_webpage":
-            result = await _jina_read(arguments)  # redirect legacy to jina
+            result = await _read_webpage(arguments)
         elif tool_name == "plaza_get_new_posts":
             result = await _plaza_get_new_posts(agent_id, arguments)
         elif tool_name == "plaza_create_post":
@@ -2766,6 +2793,207 @@ async def _jina_read(arguments: dict) -> str:
 
     except Exception as e:
         return f"❌ Jina Reader error: {str(e)[:300]}"
+
+
+async def _validate_public_http_url(url: str) -> tuple[str | None, str | None]:
+    """Normalize a URL and reject local/private network targets."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    url = (url or "").strip()
+    if not url:
+        return None, "❌ Please provide a URL"
+    if "://" not in url:
+        url = "https://" + url
+
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return None, "❌ Only HTTP and HTTPS URLs are supported"
+    if not parsed.hostname:
+        return None, "❌ URL must include a hostname"
+
+    hostname = parsed.hostname
+    try:
+        ipaddress.ip_address(hostname)
+        host_is_ip = True
+    except ValueError:
+        host_is_ip = False
+
+    if hostname.lower() in {"localhost", "localhost.localdomain"}:
+        return None, "❌ Localhost URLs are blocked for safety"
+
+    try:
+        if host_is_ip:
+            addresses = [hostname]
+        else:
+            loop = asyncio.get_running_loop()
+            infos = await loop.run_in_executor(
+                None,
+                lambda: socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM),
+            )
+            addresses = [info[4][0] for info in infos]
+    except Exception as exc:
+        return None, f"❌ Could not resolve hostname {hostname}: {str(exc)[:160]}"
+
+    for address in set(addresses):
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            return None, f"❌ Could not validate resolved address: {address}"
+        is_proxy_test_range = (not host_is_ip) and ip in ipaddress.ip_network("198.18.0.0/15")
+        if (
+            ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_unspecified
+            or ip.is_reserved
+            or (ip.is_private and not is_proxy_test_range)
+        ):
+            return None, f"❌ Private, local, reserved, or internal network URLs are blocked ({address})"
+
+    return url, None
+
+
+def _fallback_extract_visible_text(html: str) -> str:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "template", "svg", "canvas", "header", "footer", "nav", "aside"]):
+        tag.decompose()
+    text = soup.get_text("\n")
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def _extract_page_links(html: str, base_url: str, limit: int = 30) -> list[str]:
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin
+
+    soup = BeautifulSoup(html, "html.parser")
+    links: list[str] = []
+    seen: set[str] = set()
+    for anchor in soup.find_all("a", href=True):
+        href = urljoin(base_url, anchor["href"].strip())
+        if not href.startswith(("http://", "https://")) or href in seen:
+            continue
+        label = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True))[:80] or href
+        seen.add(href)
+        links.append(f"- {label}: {href}")
+        if len(links) >= limit:
+            break
+    return links
+
+
+async def _read_webpage(arguments: dict) -> str:
+    """Fetch and extract readable content from a public webpage without a third-party reader API."""
+    import httpx
+    import trafilatura
+    from bs4 import BeautifulSoup
+
+    url, validation_error = await _validate_public_http_url(arguments.get("url", ""))
+    if validation_error:
+        return validation_error
+
+    max_chars = min(max(int(arguments.get("max_chars", 12000)), 500), 50000)
+    include_links = bool(arguments.get("include_links", False))
+    max_bytes = 2_000_000
+    headers = {
+        "User-Agent": "ClawithBot/1.0 (+https://clawith.ai) Mozilla/5.0",
+        "Accept": "text/html, text/plain, application/json, application/xml;q=0.9, text/*;q=0.8, */*;q=0.5",
+    }
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            async with client.stream("GET", url, headers=headers) as resp:
+                content_length = resp.headers.get("content-length")
+                if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+                    return f"❌ Page is too large to read safely ({content_length} bytes, limit {max_bytes} bytes)"
+
+                chunks: list[bytes] = []
+                total = 0
+                truncated_bytes = False
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        remaining = max_bytes - sum(len(part) for part in chunks)
+                        if remaining > 0:
+                            chunks.append(chunk[:remaining])
+                        truncated_bytes = True
+                        break
+                    chunks.append(chunk)
+
+                status_code = resp.status_code
+                final_url = str(resp.url)
+                content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                encoding = resp.encoding or "utf-8"
+
+        if status_code >= 400:
+            return f"❌ Webpage fetch failed HTTP {status_code}: {final_url}"
+
+        raw = b"".join(chunks)
+        text = raw.decode(encoding, errors="replace").strip()
+        if not text:
+            return f"❌ Empty response from {final_url}"
+
+        title = ""
+        description = ""
+        extracted = text
+        links: list[str] = []
+
+        if content_type in {"", "text/html", "application/xhtml+xml"} or "<html" in text[:500].lower():
+            soup = BeautifulSoup(text, "html.parser")
+            if soup.title and soup.title.string:
+                title = soup.title.string.strip()
+            meta_description = soup.find("meta", attrs={"name": "description"})
+            if meta_description and meta_description.get("content"):
+                description = meta_description["content"].strip()
+
+            extracted = trafilatura.extract(
+                text,
+                url=final_url,
+                output_format="markdown",
+                include_links=include_links,
+                include_comments=False,
+                include_tables=True,
+            ) or _fallback_extract_visible_text(text)
+            if include_links:
+                links = _extract_page_links(text, final_url)
+        elif content_type.startswith("text/") or content_type in {"application/json", "application/xml", "text/xml"}:
+            title = final_url
+        else:
+            return f"❌ Unsupported content type: {content_type or 'unknown'}"
+
+        extracted = extracted.strip()
+        if not extracted:
+            return f"❌ Could not extract readable content from {final_url}"
+
+        truncated_chars = len(extracted) > max_chars
+        if truncated_chars:
+            extracted = extracted[:max_chars].rstrip() + f"\n\n[... truncated at {max_chars} chars]"
+
+        meta_lines = [
+            f"URL: {final_url}",
+            f"Status: HTTP {status_code}",
+        ]
+        if title:
+            meta_lines.append(f"Title: {title}")
+        if description:
+            meta_lines.append(f"Description: {description}")
+        if truncated_bytes:
+            meta_lines.append(f"Note: response body truncated at {max_bytes} bytes before extraction")
+        if truncated_chars:
+            meta_lines.append(f"Note: extracted text truncated at {max_chars} characters")
+
+        result = "🌐 **Webpage content**\n\n" + "\n".join(meta_lines) + "\n\n---\n\n" + extracted
+        if links:
+            result += "\n\n---\n\nLinks:\n" + "\n".join(links)
+        return result
+
+    except httpx.TimeoutException:
+        return f"❌ Webpage fetch timed out: {url}"
+    except Exception as e:
+        return f"❌ Webpage read error: {str(e)[:300]}"
 
 
 
