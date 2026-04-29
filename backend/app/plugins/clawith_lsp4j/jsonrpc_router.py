@@ -131,8 +131,8 @@ _TOOL_DISPLAY_NAME_MAP = {
     "replace_text_by_path": "edit_file",
     "create_file_with_text": "write_file",
     "delete_file_by_path": "delete_file",
-    "list_dir": "list_files",
-    "search_file": "search_files",
+    "list_files": "list_dir",
+    "search_files": "search_file",
 }
 
 # ──────────────────────────────────────────────
@@ -902,16 +902,18 @@ class JSONRPCRouter:
                         # ★ 发送 toolCall markdown 块（双通道之 markdown 通道）
                         # 插件 MarkdownStreamPanel 解析此格式创建工具卡片 UI
                         # 插件正则：```([\w#+.-]+)::([^\n]+)::([^\n]+)\n+(.*?)```
-                        # group(1)=toolCall, group(2)=name::id, group(3)=status
-                        # 插件解析：s2.split("::") → [name, id]，构造 ToolInfo(name, id, group3)
-                        # ⚠️ 关键：status 必须用 :: 分隔（第三组），不能换行！
-                        #   正确：```toolCall::name::id::INIT\n```
-                        #   错误：```toolCall::name::id\nINIT\n```  ← 会导致 astring[1] 越界
+                        # group(1)=toolCall, group(2)=name, group(3)=toolCallId
+                        # ⚠️ 关键：markdown 块仅用于创建工具卡片，不在这里发送 INIT/FINISHED。
+                        # 状态流转统一走 tool/call/sync，避免 UI 出现 “list_files FINISHED” 刷屏。
                         # ★ 使用显示名（display_name），而非插件原生名称（tool_name）
                         # 插件 MarkdownStreamPanel 解析此块 → 构造 ToolInfo → ToolPanel 构造时调用
                         # ToolTypeEnum.getByToolName(toolName) 识别工具类型。
                         # 若使用插件原生名称（如 replace_text_by_path），getByToolName 返回 UNKNOWN，
                         # 文件工具分支永远不进入，导致无 AIDevFilePanel（diff 卡片）。
+                        # 插件 MarkdownStreamPanel.parseBlock 依赖四段结构：
+                        # ```toolCall::toolName::toolCallId::INIT
+                        # ```
+                        # 若缺少末尾状态段，插件会在 split("::")[1] 处越界。
                         markdown_block = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
 
                         logger.info("[LSP4J-TOOL] 准备发送 toolCall markdown 块: mapped={} callId={}",
@@ -1689,10 +1691,16 @@ class JSONRPCRouter:
             if "filePath" in params and "file_path" not in params:
                 params["file_path"] = params.pop("filePath")
         elif tool_name == "run_in_terminal":
-            # ToolCallConstant.TERMINAL_TOOL_PARAM_NAME_BACKGROUND = "is_background"
-            # ToolPanel.syncToolCall() 用 parameters["is_background"] 判断是否显示后台按钮
-            if "isBackground" in params:
-                params["is_background"] = params.pop("isBackground")
+            # 插件执行处理器 RunTerminalToolHandlerV2 读取 isBackground（camelCase），
+            # 而 UI 展示层使用 is_background（snake_case）。两者都补齐，避免 NPE 与展示不一致。
+            if "isBackground" in params and "is_background" not in params:
+                params["is_background"] = params["isBackground"]
+            elif "is_background" in params and "isBackground" not in params:
+                params["isBackground"] = params["is_background"]
+            if "isBackground" not in params:
+                params["isBackground"] = False
+            if "is_background" not in params:
+                params["is_background"] = params["isBackground"]
 
         # ★ 使用 LLM 侧名称发送 RUNNING sync，参数保留原始 snake_case
         # ToolPanel 用 toolName 判断工具类型（如 edit_file 而非 replace_text_by_path），
@@ -1703,6 +1711,13 @@ class JSONRPCRouter:
             fp = sync_parameters.get("file_path") or sync_parameters.get("path") or sync_parameters.get("filePath")
             if fp and "file_path" not in sync_parameters:
                 sync_parameters["file_path"] = fp
+        elif tool_name == "run_in_terminal":
+            bg = sync_parameters.get("is_background")
+            if bg is None:
+                bg = sync_parameters.get("isBackground")
+            if bg is None:
+                bg = False
+            sync_parameters["is_background"] = bg
 
         await self._send_tool_call_sync(
             self._session_id, request_id, tool_call_id,
