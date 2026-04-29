@@ -25,8 +25,9 @@ from datetime import datetime, timezone as tz_utc
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
+from app.config import get_settings
 from app.database import async_session
 from app.models.agent import Agent as AgentModel
 from app.models.llm import LLMModel
@@ -63,6 +64,8 @@ _LSP4J_IDE_TOOL_NAMES = frozenset({
     "add_tasks",
     "todo_write",
     "search_replace",
+    "list_dir",
+    "search_file",
 })
 
 # LSP4J 文件编辑工具（需要 filePath 转换 + fileId 注入）
@@ -440,6 +443,9 @@ class JSONRPCRouter:
         # pending tool Futures: toolCallId → asyncio.Future
         # 从 ContextVar 读取（由 router.py 的 WebSocket 端点设置）
         self._pending_tools: dict[str, asyncio.Future] = {}
+        # pending tool 元数据：toolCallId → {request_id, tool_name, created_at}
+        # 用于 tool/invokeResult 缺少 toolCallId 时的兜底匹配。
+        self._pending_tool_meta: dict[str, dict[str, Any]] = {}
 
         # pending JSON-RPC 响应 Futures: request_id → asyncio.Future
         self._pending_responses: dict[int, asyncio.Future] = {}
@@ -479,6 +485,10 @@ class JSONRPCRouter:
         self._image_cache_max_size: int = 10
         self._image_cache_ttl: float = 600.0  # 10 分钟
         self._image_cleanup_task: asyncio.Task | None = None
+
+        # tool/call/results 历史缓存（按 sessionId 分桶，Clawith-only 内存实现）。
+        self._tool_call_history_by_session: dict[str, list[dict[str, Any]]] = {}
+        self._tool_call_history_limit: int = 200
 
         # 已取消请求的 RPC ID 集合（防止超时后迟达响应干扰，OrderedDict 保证 FIFO）
         self._cancelled_requests: dict[int, None] = {}
@@ -531,13 +541,24 @@ class JSONRPCRouter:
             await handler(self, params, msg_id)
             return
 
-        # 3. 非核心方法通用处理
+        # 3. 非核心方法通用处理（插件 JsonNotification / LSP 标准，无业务实现，静默忽略以免 -32601）
         if method in (
             "initialized",               # 生命周期通知，无需响应
             "textDocument/didOpen",       # 文档同步（通义灵码自动发送，忽略）
             "textDocument/didChange",
             "textDocument/didClose",
             "textDocument/didSave",
+            # LanguageServer.java — 见 docs/plugin-analysis/15-complete-method-by-method-gap-analysis.md P0
+            "window/workDoneProgress/cancel",
+            "settings/change",
+            "statistics/compute",
+            "statistics/general",
+            "config/updateGlobal",
+            "config/updateGlobalMcpAutoRun",
+            "config/appendCommandAllowList",
+            "config/removeCommandAllowList",
+            "config/updateGlobalWebToolsAutoExecute",
+            "config/updateGlobalTerminalRunMode",
         ):
             # 通知类型，无需响应
             return
@@ -612,6 +633,18 @@ class JSONRPCRouter:
             "serverInfo": {"name": "Clawith LSP4J", "version": "0.1.0"},
         })
 
+    async def _ensure_project_path_ready(self, msg_id: Any, method: str) -> bool:
+        """确保 projectPath 已就绪，防止空 projectPath 导致跨事件路由异常。"""
+        if self._project_path:
+            return True
+        message = (
+            "projectPath is empty; initialize with rootUri/workspaceFolders before chat."
+        )
+        logger.warning("[LSP4J-LIFE] {} rejected: {}", method, message)
+        if msg_id is not None:
+            await self._send_error_response(msg_id, -32002, message)
+        return False
+
     async def _handle_shutdown(self, params: dict, msg_id: Any) -> None:
         """处理 shutdown 请求。"""
         logger.info("[LSP4J-LIFE] shutdown")
@@ -671,6 +704,8 @@ class JSONRPCRouter:
             # 空消息拒绝
             logger.warning("[LSP4J] chat/ask rejected: empty questionText, requestId={}", request_id)
             await self._send_error_response(msg_id, -32602, "Missing questionText")
+            return
+        if not await self._ensure_project_path_ready(msg_id, "chat/ask"):
             return
 
         logger.info("[LSP4J] chat/ask 开始处理: requestId={} sessionId={} stream={} chatTask={} mode={}",
@@ -1297,9 +1332,45 @@ class JSONRPCRouter:
         """
         tool_call_id = params.get("toolCallId")
         if not tool_call_id:
-            logger.warning("LSP4J: tool/invokeResult 缺少 toolCallId")
-            await self._send_response(msg_id, {"status": "error", "message": "Missing toolCallId"})
-            return
+            request_id = str(params.get("requestId") or "")
+            tool_name = str(params.get("name") or "")
+            now = time.time()
+            candidates: list[str] = []
+            for call_id, future in self._pending_tools.items():
+                if future.done():
+                    continue
+                meta = self._pending_tool_meta.get(call_id, {})
+                if request_id and meta.get("request_id") != request_id:
+                    continue
+                if tool_name and meta.get("tool_name") != tool_name:
+                    continue
+                created_at = float(meta.get("created_at") or 0.0)
+                if created_at and now - created_at > 180:
+                    continue
+                candidates.append(call_id)
+
+            if len(candidates) == 1:
+                tool_call_id = candidates[0]
+                logger.warning(
+                    "[LSP4J-TOOL] invokeResult toolCallId 缺失，补偿命中: callId={} requestId={} name={}",
+                    tool_call_id[:8], request_id[:8], tool_name,
+                )
+            elif len(candidates) > 1:
+                logger.warning(
+                    "[LSP4J-TOOL] invokeResult toolCallId 缺失且候选冲突: requestId={} name={} candidates={}",
+                    request_id[:8], tool_name, [c[:8] for c in candidates],
+                )
+                await self._send_response(
+                    msg_id, {"status": "error", "message": "Missing toolCallId and ambiguous fallback match"}
+                )
+                return
+            else:
+                logger.warning(
+                    "[LSP4J-TOOL] invokeResult toolCallId 缺失且无候选: requestId={} name={}",
+                    request_id[:8], tool_name,
+                )
+                await self._send_response(msg_id, {"status": "error", "message": "Missing toolCallId"})
+                return
 
         # 查找 pending Future
         future = self._pending_tools.get(str(tool_call_id))
@@ -1422,17 +1493,27 @@ class JSONRPCRouter:
         注意：results 必须为 List<Map<String, Object>> 格式，
         由 _wrap_results 自动将字符串结果包装为 [{"content": "..."}]。
         """
-        await self._send_client_request("tool/call/sync", {
+        wrapped_results = self._wrap_results(results)
+        payload = {
             "sessionId": session_id or "",
             "requestId": request_id,
             "projectPath": self._project_path,
             "toolCallId": tool_call_id,
             "toolCallStatus": tool_call_status,
             "parameters": parameters or {},
-            "results": self._wrap_results(results),
+            "results": wrapped_results,
             "errorCode": error_code,
             "errorMsg": error_msg,
-        })
+        }
+        await self._send_client_request("tool/call/sync", payload)
+
+        # 记录历史，供 tool/call/results 拉取。
+        session_key = session_id or ""
+        if session_key:
+            bucket = self._tool_call_history_by_session.setdefault(session_key, [])
+            bucket.append(payload)
+            if len(bucket) > self._tool_call_history_limit:
+                del bucket[: len(bucket) - self._tool_call_history_limit]
 
     async def _send_workspace_file_sync(
         self, ws_file: Any, sync_type: str = "MODIFIED"
@@ -1632,6 +1713,11 @@ class JSONRPCRouter:
         loop = asyncio.get_running_loop()
         tool_future: asyncio.Future = loop.create_future()
         self._pending_tools[tool_call_id] = tool_future
+        self._pending_tool_meta[tool_call_id] = {
+            "request_id": request_id,
+            "tool_name": tool_name,
+            "created_at": time.time(),
+        }
         logger.info("[LSP4J-TOOL] Future registered: toolCallId={} pending_count={} waiting for invokeResult",
                      tool_call_id[:8], len(self._pending_tools))
 
@@ -1697,6 +1783,11 @@ class JSONRPCRouter:
                 if ws_file:
                     await asyncio.sleep(0.5)
                     await self._send_workspace_file_sync(ws_file, "MODIFIED")
+                    if self._session_id:
+                        try:
+                            await self._send_snapshot_sync_all(self._session_id)
+                        except Exception as e:
+                            logger.warning("[WS-FILE] 工具编辑后 snapshot/syncAll 失败（非致命）: {}", e)
 
             return result
         except asyncio.TimeoutError:
@@ -1718,6 +1809,7 @@ class JSONRPCRouter:
             return f"[超时] 工具 {tool_name} 执行超时（{timeout}s）"
         finally:
             self._pending_tools.pop(tool_call_id, None)
+            self._pending_tool_meta.pop(tool_call_id, None)
 
     # ──────────────────────────────────────────
     # 消息发送方法（严格匹配插件协议字段）
@@ -2158,6 +2250,7 @@ class JSONRPCRouter:
             if not future.done():
                 future.set_result("[连接断开] 工具调用未完成")
         self._pending_tools.clear()
+        self._pending_tool_meta.clear()
 
         # 清理 pending response Futures
         for req_id, future in list(self._pending_responses.items()):
@@ -2171,6 +2264,7 @@ class JSONRPCRouter:
 
         # 清理图片缓存
         self._image_cache.clear()
+        self._tool_call_history_by_session.clear()
 
         # 清理已取消请求记录
         self._cancelled_requests.clear()
@@ -2202,6 +2296,365 @@ class JSONRPCRouter:
     async def _handle_stub(self, params: dict, msg_id: Any) -> None:
         """通用存根处理器 — 返回空成功响应，避免 Method not found 错误。"""
         await self._send_response(msg_id, {})
+
+    @staticmethod
+    def _epoch_ms(dt: datetime | None) -> int:
+        if dt is None:
+            return 0
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz_utc)
+        return int(dt.timestamp() * 1000)
+
+    async def _handle_snapshot_list_by_session(self, params: dict, msg_id: Any) -> None:
+        """snapshot/listBySession → ListSnapshotsResult（与 SnapshotService.java 一致）。"""
+        session_id = params.get("sessionId") or ""
+        snaps = self._ws_file_service.list_snapshots_for_session(session_id)
+        await self._send_response(msg_id, {
+            "snapshots": [s.to_dict() for s in snaps],
+            "errorCode": None,
+            "errorMessage": None,
+        })
+        logger.debug("[LSP4J] snapshot/listBySession: sessionId={} count={}", session_id[:16] if session_id else "", len(snaps))
+
+    async def _handle_snapshot_operate(self, params: dict, msg_id: Any) -> None:
+        """snapshot/operate → OperateCommonResult；在内存中更新工作区文件状态。"""
+        snap_id = params.get("id") or ""
+        op_type = (params.get("opType") or "").upper()
+        inner = params.get("params") or {}
+        target_snap = inner.get("targetSnapshotId") if isinstance(inner, dict) else None
+        ws_items = params.get("workingSpaceFiles") or []
+
+        err: str | None = None
+        try:
+            if op_type in ("ACCEPT_ALL",):
+                self._ws_file_service.apply_snapshot_accept_all(snap_id)
+            elif op_type in ("REJECT_ALL",):
+                self._ws_file_service.apply_snapshot_reject_all(snap_id)
+            elif op_type in ("SWITCH", "ACTIVATE") and target_snap:
+                if not self._ws_file_service.set_current_snapshot(target_snap):
+                    err = "snapshot_not_found"
+            elif op_type in ("ACCEPT", "APPLY"):
+                for item in ws_items:
+                    if not isinstance(item, dict):
+                        continue
+                    wid = item.get("id") or ""
+                    if wid:
+                        self._ws_file_service.operate(wid, "ACCEPT", item.get("content"))
+            elif op_type in ("REJECT",):
+                for item in ws_items:
+                    if not isinstance(item, dict):
+                        continue
+                    wid = item.get("id") or ""
+                    if wid:
+                        self._ws_file_service.operate(wid, "REJECT", None)
+            elif op_type in ("CANCEL", "UPDATE_CHAT_RECORD"):
+                pass
+            else:
+                logger.debug("[LSP4J] snapshot/operate noop opType={} id={}", op_type, snap_id[:8] if snap_id else "")
+
+            sess_for_sync = ""
+            if target_snap and op_type in ("SWITCH", "ACTIVATE"):
+                sinfo = self._ws_file_service.find_snapshot_by_id(target_snap)
+                sess_for_sync = sinfo.session_id if sinfo else ""
+            elif snap_id:
+                sinfo = self._ws_file_service.find_snapshot_by_id(snap_id)
+                sess_for_sync = sinfo.session_id if sinfo else (self._session_id or "")
+            else:
+                sess_for_sync = self._session_id or ""
+
+            if sess_for_sync and op_type in (
+                "ACCEPT_ALL", "REJECT_ALL", "ACCEPT", "REJECT", "APPLY", "SWITCH", "ACTIVATE",
+            ):
+                try:
+                    await self._send_snapshot_sync_all(sess_for_sync)
+                except Exception as e:
+                    logger.warning("[WS-FILE] snapshot/operate 后 snapshot/syncAll 失败: {}", e)
+
+            if err:
+                await self._send_response(msg_id, {"errorCode": err, "errorMessage": err})
+            else:
+                await self._send_response(msg_id, {"errorCode": None, "errorMessage": None})
+        except Exception as e:
+            logger.warning("[LSP4J] snapshot/operate failed: {}", e)
+            await self._send_response(msg_id, {"errorCode": "operate_failed", "errorMessage": str(e)})
+
+    async def _handle_chat_list_all_sessions(self, params: dict, msg_id: Any) -> None:
+        """chat/listAllSessions → IDE 历史列表（仅 ide_lsp4j 持久化会话）。"""
+        project_uri = params.get("projectUri") or ""
+        try:
+            async with async_session() as db:
+                r = await db.execute(
+                    select(ChatSession)
+                    .where(ChatSession.user_id == self._user_id)
+                    .where(ChatSession.agent_id == self._agent_id)
+                    .where(ChatSession.source_channel == "ide_lsp4j")
+                    .order_by(ChatSession.created_at.desc())
+                    .limit(50)
+                )
+                sessions = list(r.scalars().all())
+        except Exception as e:
+            logger.warning("[LSP4J] chat/listAllSessions DB error: {}", e)
+            await self._send_response(msg_id, [])
+            return
+
+        out: list[dict[str, Any]] = []
+        for sess in sessions:
+            out.append({
+                "sessionId": str(sess.id),
+                "sessionTitle": sess.title or "Chat",
+                "chatRecords": [],
+                "gmtCreate": self._epoch_ms(sess.created_at),
+                "gmtModified": self._epoch_ms(sess.last_message_at or sess.created_at),
+                "sessionType": "ASSISTANT",
+                "userId": str(sess.user_id),
+                "userName": "",
+                "projectId": "",
+                "projectUri": project_uri,
+                "projectName": "",
+            })
+        await self._send_response(msg_id, out)
+
+    async def _handle_chat_get_session_by_id(self, params: dict, msg_id: Any) -> None:
+        """chat/getSessionById → 从 DB 组装可恢复的 ChatSession（含 REPLY_TASK 记录）。"""
+        session_id = params.get("sessionId") or ""
+        try:
+            sid_uuid = uuid.UUID(session_id)
+        except ValueError:
+            await self._send_response(msg_id, {
+                "sessionId": session_id,
+                "sessionTitle": "",
+                "chatRecords": [],
+                "sessionType": "ASSISTANT",
+                "gmtCreate": 0,
+                "gmtModified": 0,
+            })
+            return
+
+        try:
+            async with async_session() as db:
+                sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid))
+                sess = sr.scalar_one_or_none()
+                if not sess or sess.user_id != self._user_id or sess.agent_id != self._agent_id:
+                    await self._send_response(msg_id, {
+                        "sessionId": session_id,
+                        "sessionTitle": "",
+                        "chatRecords": [],
+                        "sessionType": "ASSISTANT",
+                        "gmtCreate": 0,
+                        "gmtModified": 0,
+                    })
+                    return
+
+                mr = await db.execute(
+                    select(ChatMessage)
+                    .where(ChatMessage.conversation_id == str(sid_uuid))
+                    .where(ChatMessage.agent_id == self._agent_id)
+                    .where(ChatMessage.user_id == self._user_id)
+                    .where(ChatMessage.role.in_(("user", "assistant")))
+                    .order_by(ChatMessage.created_at.asc())
+                )
+                rows = list(mr.scalars().all())
+        except Exception as e:
+            logger.warning("[LSP4J] chat/getSessionById DB error: {}", e)
+            await self._send_response(msg_id, {
+                "sessionId": session_id,
+                "sessionTitle": "",
+                "chatRecords": [],
+                "sessionType": "ASSISTANT",
+                "gmtCreate": 0,
+                "gmtModified": 0,
+            })
+            return
+
+        records: list[dict[str, Any]] = []
+        i = 0
+        while i < len(rows):
+            row = rows[i]
+            if row.role != "user":
+                i += 1
+                continue
+            user_msg = row
+            asst_msg = rows[i + 1] if i + 1 < len(rows) and rows[i + 1].role == "assistant" else None
+            rid = str(uuid.uuid4())
+            qtext = user_msg.content or ""
+            ctx = json.dumps({"text": qtext, "displayText": qtext}, ensure_ascii=False)
+            atext = (asst_msg.content if asst_msg else "") or ""
+            think = (asst_msg.thinking if asst_msg else None) or ""
+            records.append({
+                "requestId": rid,
+                "sessionId": session_id,
+                "chatTask": "REPLY_TASK",
+                "chatContext": ctx,
+                "question": qtext,
+                "answer": atext,
+                "extra": "",
+                "likeStatus": 0,
+                "gmtCreate": self._epoch_ms(user_msg.created_at),
+                "gmtModified": self._epoch_ms(asst_msg.created_at if asst_msg else user_msg.created_at),
+                "filterStatus": "",
+                "sessionType": "ASSISTANT",
+                "summary": "",
+                "intentionType": "",
+                "reasoningContent": think,
+            })
+            i += 2 if asst_msg else 1
+
+        await self._send_response(msg_id, {
+            "sessionId": session_id,
+            "sessionTitle": sess.title or "Chat",
+            "chatRecords": records,
+            "sessionType": "ASSISTANT",
+            "userId": str(sess.user_id),
+            "userName": "",
+            "projectId": "",
+            "projectUri": "",
+            "projectName": "",
+            "gmtCreate": self._epoch_ms(sess.created_at),
+            "gmtModified": self._epoch_ms(sess.last_message_at or sess.created_at),
+        })
+
+    async def _handle_chat_delete_session_by_id(self, params: dict, msg_id: Any) -> None:
+        """chat/deleteSessionById → 删除单个 IDE 会话（Clawith-only）。"""
+        session_id = params.get("sessionId") or ""
+        try:
+            sid_uuid = uuid.UUID(session_id)
+        except ValueError:
+            await self._send_response(msg_id, None)
+            return
+
+        try:
+            async with async_session() as db:
+                sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid))
+                sess = sr.scalar_one_or_none()
+                if sess and sess.user_id == self._user_id and sess.agent_id == self._agent_id and sess.source_channel == "ide_lsp4j":
+                    await db.execute(
+                        delete(ChatMessage)
+                        .where(ChatMessage.conversation_id == str(sid_uuid))
+                        .where(ChatMessage.agent_id == self._agent_id)
+                        .where(ChatMessage.user_id == self._user_id)
+                    )
+                    await db.delete(sess)
+                    await db.commit()
+        except Exception as e:
+            logger.warning("[LSP4J] chat/deleteSessionById DB error: {}", e)
+
+        if self._session_id == session_id:
+            self._session_id = None
+        await self._send_response(msg_id, None)
+
+    async def _handle_chat_clear_all_sessions(self, params: dict, msg_id: Any) -> None:
+        """chat/clearAllSessions → 清空当前 agent+user 的 IDE 会话（Clawith-only）。"""
+        _ = params
+        try:
+            async with async_session() as db:
+                sr = await db.execute(
+                    select(ChatSession.id)
+                    .where(ChatSession.user_id == self._user_id)
+                    .where(ChatSession.agent_id == self._agent_id)
+                    .where(ChatSession.source_channel == "ide_lsp4j")
+                )
+                session_ids = [str(v) for v in sr.scalars().all()]
+                if session_ids:
+                    await db.execute(delete(ChatMessage).where(ChatMessage.conversation_id.in_(session_ids)))
+                await db.execute(
+                    delete(ChatSession)
+                    .where(ChatSession.user_id == self._user_id)
+                    .where(ChatSession.agent_id == self._agent_id)
+                    .where(ChatSession.source_channel == "ide_lsp4j")
+                )
+                await db.commit()
+        except Exception as e:
+            logger.warning("[LSP4J] chat/clearAllSessions DB error: {}", e)
+
+        self._session_id = None
+        await self._send_response(msg_id, None)
+
+    async def _handle_chat_delete_chat_by_id(self, params: dict, msg_id: Any) -> None:
+        """chat/deleteChatById → 删除单条聊天记录（若 requestId 可映射为消息 UUID）。"""
+        session_id = params.get("sessionId") or ""
+        request_id = params.get("requestId") or ""
+        try:
+            sid_uuid = uuid.UUID(session_id)
+            rid_uuid = uuid.UUID(request_id)
+        except ValueError:
+            await self._send_response(msg_id, None)
+            return
+
+        try:
+            async with async_session() as db:
+                await db.execute(
+                    delete(ChatMessage)
+                    .where(ChatMessage.id == rid_uuid)
+                    .where(ChatMessage.conversation_id == str(sid_uuid))
+                    .where(ChatMessage.agent_id == self._agent_id)
+                    .where(ChatMessage.user_id == self._user_id)
+                )
+                await db.commit()
+        except Exception as e:
+            logger.warning("[LSP4J] chat/deleteChatById DB error: {}", e)
+        await self._send_response(msg_id, None)
+
+    async def _handle_config_query_models(self, params: dict, msg_id: Any) -> None:
+        """config/queryModels → Map<String, List<ChatModelItem>>（Clawith-only 真数据）。"""
+        _ = params
+        tenant_id = getattr(self._agent_obj, "tenant_id", None)
+        try:
+            async with async_session() as db:
+                stmt = (
+                    select(LLMModel)
+                    .where(LLMModel.enabled.is_(True))
+                    .order_by(LLMModel.updated_at.desc(), LLMModel.created_at.desc())
+                )
+                if tenant_id:
+                    stmt = stmt.where((LLMModel.tenant_id.is_(None)) | (LLMModel.tenant_id == tenant_id))
+                rows = list((await db.execute(stmt)).scalars().all())
+        except Exception as e:
+            logger.warning("[LSP4J] config/queryModels DB error: {}", e)
+            rows = []
+
+        models: list[dict[str, Any]] = []
+        for m in rows:
+            label = (m.label or "").strip() or m.model
+            models.append(
+                {
+                    "key": str(m.id),
+                    "displayName": label,
+                    "format": m.provider or "openai",
+                    "isVl": bool(m.supports_vision),
+                    "isReasoning": False,
+                    "baseUrl": m.base_url or "",
+                    "source": "tenant" if m.tenant_id else "system",
+                }
+            )
+
+        if not models:
+            models = [
+                {
+                    "key": "clawith-default",
+                    "displayName": "Clawith",
+                    "format": "openai",
+                    "isVl": False,
+                    "isReasoning": False,
+                    "baseUrl": "",
+                    "source": "system",
+                }
+            ]
+        await self._send_response(msg_id, {"default": models})
+
+    async def _handle_model_query_classes(self, params: dict, msg_id: Any) -> None:
+        """model/queryClasses → 返回模型类别列表，供插件 UI 分类筛选。"""
+        _ = params
+        await self._send_response(msg_id, {
+            "classes": [
+                {"key": "clawith", "displayName": "Clawith Models"},
+                {"key": "byok", "displayName": "BYOK (Bring Your Own Key)"},
+            ],
+        })
+
+    async def _handle_ping(self, params: dict, msg_id: Any) -> None:
+        """ping → PingResult（success 不可为 null，避免 IDE 端 NPE）。"""
+        _ = params
+        await self._send_response(msg_id, {"success": True})
 
     # ──────────────────────────────────────────
     # 工作区文件服务（workingSpaceFile/*）
@@ -2423,8 +2876,11 @@ class JSONRPCRouter:
         返回 GlobalEndpointConfig 格式：{"endpoint": "https://..."}。
         插件 GlobalEndpointConfig.java 只有 endpoint: String 字段。
         """
-        # 返回当前服务端地址（MVP：返回空字符串，插件会使用默认值）
-        await self._send_response(msg_id, {"endpoint": ""})
+        _ = params
+        settings = get_settings()
+        endpoint = settings.PUBLIC_BASE_URL or ""
+        logger.debug("[LSP4J] config/getEndpoint: endpoint={}", endpoint)
+        await self._send_response(msg_id, {"endpoint": endpoint})
 
     async def _handle_config_update_endpoint(self, params: dict, msg_id: Any) -> None:
         """处理 config/updateEndpoint 请求。
@@ -2518,18 +2974,48 @@ class JSONRPCRouter:
         })
 
     async def _handle_tool_call_results(self, params: dict, msg_id: Any) -> None:
-        """处理 tool/call/results 请求 — MVP 阶段返回空列表。
-
-        参数格式（GetSessionToolCallRequest）：sessionId
-        返回格式（ListToolCallInfoResponse）：toolCalls, sessionId, totalCount
-
-        后续迭代可实现完整的工具调用历史查询。
-        """
+        """处理 tool/call/results 请求（Clawith-only：返回会话内历史）。"""
         session_id = params.get("sessionId", "")
+        tool_results = self._tool_call_history_by_session.get(session_id, [])
         await self._send_response(msg_id, {
-            "toolCalls": [],
-            "sessionId": session_id,
-            "totalCount": 0,
+            "successful": True,
+            "errorMessage": "",
+            "toolResults": tool_results,
+        })
+
+    async def _handle_auth_status(self, params: dict, msg_id: Any) -> None:
+        """auth/status → AuthStatus（Clawith-only 固定为已登录可用态）。"""
+        _ = params
+        await self._send_response(msg_id, {
+            "messageId": "",
+            "status": 2,  # AuthStateEnum.LOGIN
+            "name": "Clawith User",
+            "id": str(self._user_id),
+            "accountId": str(self._user_id),
+            "token": "",
+            "quota": 1,
+            "whitelist": 3,  # AuthWhitelistStatusEnum.PASS
+            "orgId": "",
+            "orgName": "Clawith",
+            "yxUid": str(self._user_id),
+            "avatarUrl": "",
+            "userType": "clawith",
+            "isSubAccount": False,
+            "cloudType": "private",
+            "email": "",
+            "userTag": "clawith-only",
+            "privacyPolicyAgreed": True,
+            "isPrivacyPolicyModifiable": False,
+        })
+
+    async def _handle_session_get_current(self, params: dict, msg_id: Any) -> None:
+        """session/getCurrent → ListCurrentSessionResult。"""
+        _ = params
+        current_session_ids = [self._session_id] if self._session_id else []
+        await self._send_response(msg_id, {
+            "errorCode": None,
+            "errorMessage": None,
+            "currentSessionIds": current_session_ids,
         })
 
     async def _handle_code_change_apply(self, params: dict, msg_id: Any) -> None:
@@ -2603,11 +3089,11 @@ class JSONRPCRouter:
         "chat/stopSession": _handle_stub,
         "chat/receive/notice": _handle_stub,
         "chat/quota/doNotRemindAgain": _handle_stub,
-        "chat/listAllSessions": _handle_stub,                    # 插件打开聊天面板时调用
-        "chat/getSessionById": _handle_stub,                     # 查看历史会话时调用
-        "chat/deleteSessionById": _handle_stub,                  # 删除会话时调用
-        "chat/clearAllSessions": _handle_stub,                   # 清空所有会话时调用
-        "chat/deleteChatById": _handle_stub,                     # 删除单条消息时调用
+        "chat/listAllSessions": _handle_chat_list_all_sessions,  # ide_lsp4j 持久化会话列表
+        "chat/getSessionById": _handle_chat_get_session_by_id,     # 从 DB 恢复聊天记录
+        "chat/deleteSessionById": _handle_chat_delete_session_by_id,  # 删除会话
+        "chat/clearAllSessions": _handle_chat_clear_all_sessions,      # 清空会话
+        "chat/deleteChatById": _handle_chat_delete_chat_by_id,         # 删除单条消息
         # ── config/ 方法（ConfigService.java） ──
         "config/getEndpoint": _handle_config_get_endpoint,       # 返回 GlobalEndpointConfig
         "config/updateEndpoint": _handle_config_update_endpoint, # 更新端点配置
@@ -2626,8 +3112,8 @@ class JSONRPCRouter:
         "textDocument/editPredict": _handle_edit_predict,      # 编辑预测（返回 Void）
         # ── LanguageServer.java 直接定义的 @JsonRequest 方法 ──
         "config/getGlobal": _handle_stub,                     # 全局配置查询
-        "config/queryModels": _handle_stub,                   # 模型查询
-        "ping": _handle_stub,                                 # 心跳 ping
+        "config/queryModels": _handle_config_query_models,    # 模型查询（占位列表）
+        "ping": _handle_ping,                                 # 心跳 ping
         "ide/update": _handle_stub,                           # IDE 状态更新
         "dataPolicy/query": _handle_stub,                     # 数据政策查询
         "dataPolicy/sign": _handle_stub,                      # 同意数据政策
@@ -2638,14 +3124,14 @@ class JSONRPCRouter:
         "extension/contextProvider/loadComboBoxItems": _handle_stub,  # 上下文下拉项加载
         "codebase/recommendation": _handle_stub,              # 代码库推荐
         "kb/list": _handle_stub,                              # 知识库列表
-        "model/queryClasses": _handle_stub,                   # 查询模型类别
+        "model/queryClasses": _handle_model_query_classes,     # 查询模型类别
         "model/getByokConfig": _handle_stub,                  # BYOK 配置查询
         "model/checkByokConfig": _handle_stub,                # BYOK 配置校验
         "user/plan": _handle_stub,                            # 用户计划查询
         "webview/command/list": _handle_stub,                 # WebView 命令列表
         # ── @JsonDelegate 服务: AuthService（6 个方法） ──
         "auth/login": _handle_stub,                           # 登录
-        "auth/status": _handle_stub,                          # 登录状态
+        "auth/status": _handle_auth_status,                   # Clawith-only 登录态
         "auth/logout": _handle_stub,                          # 登出
         "auth/grantInfos": _handle_stub,                      # 授权信息（@Deprecated）
         "auth/grantInfosWrap": _handle_stub,                  # 授权信息（新版）
@@ -2655,8 +3141,8 @@ class JSONRPCRouter:
         # ── @JsonDelegate 服务: FeedbackService（1 个方法） ──
         "feedback/submit": _handle_stub,                      # 提交反馈
         # ── @JsonDelegate 服务: SnapshotService（2 个方法） ──
-        "snapshot/listBySession": _handle_stub,               # 按会话列出快照
-        "snapshot/operate": _handle_stub,                     # 快照操作
+        "snapshot/listBySession": _handle_snapshot_list_by_session,
+        "snapshot/operate": _handle_snapshot_operate,
         # ── @JsonDelegate 服务: WorkingSpaceFileService（5 个方法） ──
         "workingSpaceFile/operate": _handle_ws_operate,
         "workingSpaceFile/listBySnapshot": _handle_ws_list_by_snapshot,
@@ -2664,7 +3150,7 @@ class JSONRPCRouter:
         "workingSpaceFile/getFullContent": _handle_ws_get_full_content,
         "workingSpaceFile/updateContent": _handle_ws_update_content,
         # ── @JsonDelegate 服务: SessionService（1 个方法） ──
-        "session/getCurrent": _handle_stub,                   # 获取当前会话
+        "session/getCurrent": _handle_session_get_current,    # 获取当前会话
         # ── @JsonDelegate 服务: SystemService（1 个方法） ──
         "system/reportDiagnosisLog": _handle_stub,            # 上报诊断日志
         # ── @JsonDelegate 服务: SnippetService（2 个方法） ──
