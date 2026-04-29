@@ -111,6 +111,13 @@ const formatTokens = (n: number) => {
     return String(n);
 };
 
+const formatTokensParts = (n: number): { value: string; unit: string } => {
+    if (!n) return { value: '0', unit: '' };
+    if (n >= 1000000) return { value: (n / 1000000).toFixed(1), unit: 'M' };
+    if (n >= 1000) return { value: (n / 1000).toFixed(1), unit: 'K' };
+    return { value: String(n), unit: '' };
+};
+
 const getCategoryLabels = (t: any): Record<string, string> => ({
     file: t('agent.toolCategories.file'),
     task: t('agent.toolCategories.task'),
@@ -1849,7 +1856,9 @@ function AgentDetailInner() {
     const [allSessions, setAllSessions] = useState<any[]>([]);
     const [activeSession, setActiveSession] = useState<any | null>(null);
     const [chatScope, setChatScope] = useState<'mine' | 'all'>('mine');
-    const [allUserFilter, setAllUserFilter] = useState<string>('');  // filter by username in All Users
+    const [allUserFilter, setAllUserFilter] = useState<string>('');
+    const [scopeDropdownOpen, setScopeDropdownOpen] = useState(false);
+    const scopeDropdownRef = useRef<HTMLDivElement>(null);
     const [historyMsgs, setHistoryMsgs] = useState<any[]>([]);
     const [sessionsLoading, setSessionsLoading] = useState(false);
     const [allSessionsLoading, setAllSessionsLoading] = useState(false);
@@ -1986,6 +1995,15 @@ function AgentDetailInner() {
     useEffect(() => {
         if (!canViewAllAgentChatSessions && chatScope === 'all') setChatScope('mine');
     }, [canViewAllAgentChatSessions, chatScope]);
+
+    useEffect(() => {
+        if (!scopeDropdownOpen) return;
+        const handler = (e: MouseEvent) => {
+            if (scopeDropdownRef.current && !scopeDropdownRef.current.contains(e.target as Node)) setScopeDropdownOpen(false);
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [scopeDropdownOpen]);
 
     const clearChatSelection = () => {
         activeSessionIdRef.current = null;
@@ -2885,7 +2903,7 @@ function AgentDetailInner() {
             else if (diffMs < 7 * 86400000) timeStr = d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             else timeStr = d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             return (
-                <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px', opacity: 0.6, display: 'flex', alignItems: 'center', justifyContent: isLeft ? 'flex-start' : 'flex-end' }}>
+                <div className="chat-msg-timestamp">
                     {timeStr}
                     {msg.content && <CopyMessageButton text={msg.content} />}
                 </div>
@@ -2893,53 +2911,54 @@ function AgentDetailInner() {
         })() : null;
 
         return (
-            <div key={i} style={{ display: 'flex', flexDirection: isLeft ? 'row' : 'row-reverse', gap: '8px', marginBottom: '8px' }}>
-                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: isLeft ? 'var(--bg-elevated)' : 'rgba(16,185,129,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>{resolvedAvatarText}</div>
-                <div style={{ maxWidth: '75%', padding: '8px 12px', borderRadius: '12px', background: isLeft ? 'var(--bg-secondary)' : 'rgba(16,185,129,0.1)', fontSize: '13px', lineHeight: '1.5', wordBreak: 'break-word' }}>
-                    {showSenderLabel && <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginBottom: '2px', fontWeight: 600 }}>{resolvedSenderLabel}</div>}
-                    {isImage ? (
-                        <div style={{ marginBottom: '4px' }}>
-                            <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} loading="lazy" />
-                        </div>
-                    ) : (msg.fileName && (
-                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: isLeft ? 'rgba(0,0,0,0.05)' : 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}>
-                            <span>{fi}</span>
-                            <span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span>
-                        </div>
-                    ))}
-                    {/* Render images extracted from [image_data:] markers (multimodal context) */}
-                    {inlineImages.length > 0 && (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: displayContent ? '6px' : '0' }}>
-                            {inlineImages.map((url, idx) => (
-                                <img
-                                    key={idx}
-                                    src={url}
-                                    alt="attached image"
-                                    style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)', objectFit: 'cover' }}
-                                    loading="lazy"
-                                />
-                            ))}
-                        </div>
-                    )}
-                    {msg.thinking && (
-                        <details className="thinking-panel">
-                            <summary className="thinking-summary">
-                                <span className="thinking-status-dot" />
-                                {(msg as any)._streaming && !msg.content
-                                    ? t('agent.chat.thinkingLabel', '思考中')
-                                    : t('agent.chat.thoughtLabel', '已思考')}
-                            </summary>
-                            <div className="thinking-content">{msg.thinking}</div>
-                        </details>
-                    )}
-                    {msg.role === 'assistant' ? (
-                        (msg as any)._streaming && !msg.content && !msg.thinking ? (
-                            <div className="thinking-indicator">
-                                <div className="thinking-dots"><span /><span /><span /></div>
-                                <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
+            <div key={i} className={`chat-msg-row${isLeft ? '' : ' chat-msg-row--user'}`}>
+                <div className={`chat-msg-avatar${isLeft ? '' : ' chat-msg-avatar--user'}`}>{resolvedAvatarText}</div>
+                <div className="chat-msg-col">
+                    <div className={`chat-msg-bubble${isLeft ? '' : ' chat-msg-bubble--user'}`}>
+                        {showSenderLabel && <div className="chat-msg-sender">{resolvedSenderLabel}</div>}
+                        {isImage ? (
+                            <div style={{ marginBottom: '4px' }}>
+                                <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} loading="lazy" />
                             </div>
-                        ) : <MarkdownRenderer content={displayContent} />
-                    ) : <div style={{ whiteSpace: 'pre-wrap' }}>{displayContent}</div>}
+                        ) : (msg.fileName && (
+                            <div className="chat-msg-file-chip" style={{ marginBottom: msg.content ? '4px' : '0' }}>
+                                <span>{fi}</span>
+                                <span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span>
+                            </div>
+                        ))}
+                        {inlineImages.length > 0 && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: displayContent ? '6px' : '0' }}>
+                                {inlineImages.map((url, idx) => (
+                                    <img
+                                        key={idx}
+                                        src={url}
+                                        alt="attached image"
+                                        style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)', objectFit: 'cover' }}
+                                        loading="lazy"
+                                    />
+                                ))}
+                            </div>
+                        )}
+                        {msg.thinking && (
+                            <details className="thinking-panel">
+                                <summary className="thinking-summary">
+                                    <span className="thinking-status-dot" />
+                                    {(msg as any)._streaming && !msg.content
+                                        ? t('agent.chat.thinkingLabel', '思考中')
+                                        : t('agent.chat.thoughtLabel', '已思考')}
+                                </summary>
+                                <div className="thinking-content">{msg.thinking}</div>
+                            </details>
+                        )}
+                        {msg.role === 'assistant' ? (
+                            (msg as any)._streaming && !msg.content && !msg.thinking ? (
+                                <div className="thinking-indicator">
+                                    <div className="thinking-dots"><span /><span /><span /></div>
+                                    <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
+                                </div>
+                            ) : <MarkdownRenderer content={displayContent} />
+                        ) : <div style={{ whiteSpace: 'pre-wrap' }}>{displayContent}</div>}
+                    </div>
                     {timestampHtml}
                 </div>
             </div>
@@ -3366,6 +3385,10 @@ function AgentDetailInner() {
     const [roleInput, setRoleInput] = useState('');
     const [editingName, setEditingName] = useState(false);
     const [nameInput, setNameInput] = useState('');
+    const [infoCardOpen, setInfoCardOpen] = useState(false);
+    const infoCardCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const clearCardCloseTimer = () => { if (infoCardCloseTimer.current) { clearTimeout(infoCardCloseTimer.current); infoCardCloseTimer.current = null; } };
+    const scheduleCardClose = () => { clearCardCloseTimer(); infoCardCloseTimer.current = setTimeout(() => setInfoCardOpen(false), 180); };
     const showToast = (message: string, type: 'success' | 'error' = 'success') => {
         setUploadToast({ message, type });
         setTimeout(() => setUploadToast(null), 3000);
@@ -3431,44 +3454,89 @@ function AgentDetailInner() {
     };
     const primaryModel = llmModels.find((m: any) => m.id === agent.primary_model_id);
     const modelLabel = primaryModel ? (primaryModel.label || primaryModel.model) : '—';
+    const modelProvider = primaryModel ? primaryModel.provider : '—';
+    const todayParts = formatTokensParts(agent.tokens_used_today || 0);
+    const monthParts = formatTokensParts(agent.tokens_used_month || 0);
+    const totalParts = formatTokensParts((agent as any).tokens_used_total || 0);
     const renderAgentInfoCard = () => (
-        <div className="agent-info-card">
-            <div className="agent-info-card-title">{agent.name}</div>
-            <div className="agent-info-card-grid">
-                <div className="agent-info-card-section">
-                    <div className="agent-info-card-section-title">Token</div>
-                    <div className="agent-info-token-main">
-                        <span>{t('agent.settings.today')}</span>
-                        <strong>{formatTokens(agent.tokens_used_today || 0)}</strong>
-                    </div>
-                    <div className="agent-info-token-grid">
-                        <div>
-                            <span>{t('agent.settings.month')}</span>
-                            <strong>{formatTokens(agent.tokens_used_month || 0)}</strong>
+        <div className={`agent-info-card${infoCardOpen ? ' agent-info-card--open' : ''}`}>
+            <div className="agent-info-card-inner">
+                <div className="agent-info-card-glow" />
+                <div className="agent-info-card-grid">
+                    {/* Token Usage */}
+                    <div className="agent-info-card-section">
+                        <div className="agent-info-card-section-header">
+                            <span className="agent-info-section-icon agent-info-section-icon--blue">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                            </span>
+                            <span className="agent-info-card-section-title">Token</span>
                         </div>
-                        <div>
-                            <span>{t('agent.status.totalToken')}</span>
-                            <strong>{formatTokens((agent as any).tokens_used_total || 0)}</strong>
+                        <div className="agent-info-card-body">
+                            <div className="agent-info-token-glass">
+                                <div className="agent-info-token-hero">
+                                    <span className="agent-info-token-hero-label">{t('agent.settings.today')}</span>
+                                    <span className="agent-info-token-hero-value">
+                                        {todayParts.value}
+                                        {todayParts.unit && <span className="agent-info-token-hero-unit">{todayParts.unit}</span>}
+                                    </span>
+                                </div>
+                                <div className="agent-info-token-stats">
+                                    <div className="agent-info-stat-item">
+                                        <span className="agent-info-stat-label">{t('agent.settings.month')}</span>
+                                        <span className="agent-info-stat-value">
+                                            {monthParts.value}
+                                            {monthParts.unit && <span className="agent-info-stat-unit">{monthParts.unit}</span>}
+                                        </span>
+                                    </div>
+                                    <div className="agent-info-stat-item">
+                                        <span className="agent-info-stat-label">{t('agent.status.totalToken')}</span>
+                                        <span className="agent-info-stat-value">
+                                            {totalParts.value}
+                                            {totalParts.unit && <span className="agent-info-stat-unit">{totalParts.unit}</span>}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                </div>
-                <div className="agent-info-card-section">
-                    <div className="agent-info-card-section-title">{t('agent.profile.title')}</div>
-                    <div className="agent-info-row">
-                        <span>{t('agent.profile.created')}</span>
-                        <strong>{formatAgentDate(agent.created_at)}</strong>
-                    </div>
-                    <div className="agent-info-row">
-                        <span>{t('agent.fields.createdBy', 'Created by')}</span>
-                        <strong>{(agent as any).creator_username ? `@${(agent as any).creator_username}` : '—'}</strong>
-                    </div>
-                    <div className="agent-info-row">
-                        <span>{t('agent.profile.timezone')}</span>
-                        <strong>{(agent as any).effective_timezone || agent.timezone || 'UTC'}</strong>
-                    </div>
-                    <div className="agent-info-row">
-                        <span>{t('agent.modelConfig.model')}</span>
-                        <strong className="agent-info-model" title={modelLabel}>{modelLabel}</strong>
+                    {/* Configuration */}
+                    <div className="agent-info-card-section">
+                        <div className="agent-info-card-section-header">
+                            <span className="agent-info-section-icon agent-info-section-icon--indigo">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                            </span>
+                            <span className="agent-info-card-section-title">{t('agent.modelConfig.title', 'Configuration')}</span>
+                        </div>
+                        <div className="agent-info-card-body">
+                            <div className="agent-info-model-card">
+                                <div className="agent-info-model-card-text">
+                                    <span className="agent-info-model-card-label">{t('agent.modelConfig.model')}</span>
+                                    <span className="agent-info-model-card-name" title={modelLabel}>{modelLabel}</span>
+                                </div>
+                            </div>
+                            <div className="agent-info-meta-list">
+                                <div className="agent-info-meta-row">
+                                    <span>{t('agent.modelConfig.provider', 'Provider')}</span>
+                                    <span>{modelProvider}</span>
+                                </div>
+                                <div className="agent-info-meta-row">
+                                    <span>{t('agent.modelConfig.contextWindow', 'Context')}</span>
+                                    <span>{(agent as any).context_window_size || 100}</span>
+                                </div>
+                                <div className="agent-info-meta-row">
+                                    <span>{t('agent.profile.created')}</span>
+                                    <span>{formatAgentDate(agent.created_at)}</span>
+                                </div>
+                                <div className="agent-info-meta-row">
+                                    <span>{t('agent.fields.createdBy', 'Created by')}</span>
+                                    <span>{(agent as any).creator_username ? `@${(agent as any).creator_username}` : '—'}</span>
+                                </div>
+                                <div className="agent-info-meta-row">
+                                    <span>{t('agent.profile.timezone')}</span>
+                                    <span>{(agent as any).effective_timezone || agent.timezone || 'UTC'}</span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -3562,7 +3630,11 @@ function AgentDetailInner() {
             <div className={`agent-detail-page ${activeTab === 'chat' ? 'agent-detail-page--chat' : 'agent-detail-page--settings'}`}>
                 {/* Header */}
                 <div className="page-header agent-detail-header">
-                    {activeTab === 'chat' ? <div className="agent-detail-identity agent-detail-identity--compact">
+                    {activeTab === 'chat' ? <div
+                        className="agent-detail-identity agent-detail-identity--compact"
+                        onMouseEnter={clearCardCloseTimer}
+                        onMouseLeave={scheduleCardClose}
+                    >
                         <div className="agent-detail-identity-trigger">
                         <div className="agent-detail-avatar">{(Array.from(agent.name || 'A')[0] as string || 'A').toUpperCase()}</div>
                         <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
@@ -3604,6 +3676,13 @@ function AgentDetailInner() {
                                 </h1>
                             )}
                         </div>
+                        <button
+                            className={`agent-info-chevron${infoCardOpen ? ' agent-info-chevron--open' : ''}`}
+                            onClick={e => { e.stopPropagation(); setInfoCardOpen(prev => !prev); }}
+                            aria-label="Toggle agent info"
+                        >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                        </button>
                         </div>
                         {renderAgentInfoCard()}
                     </div> : <div />}
@@ -3626,7 +3705,10 @@ function AgentDetailInner() {
                                         <span>{t('agent.tabs.aware')}</span>
                                     </button>
                                 )}
-                                <button className="btn btn-ghost agent-top-action" onClick={() => navigate(`/agents/${id}/settings`)}>
+                                <button
+                                    className={`btn btn-ghost agent-top-action ${isSettingsRoute ? 'active' : ''}`}
+                                    onClick={() => navigate(`/agents/${id}/settings`)}
+                                >
                                     <IconSettings size={16} stroke={1.7} />
                                     <span>{t('agent.tabs.settings')}</span>
                                 </button>
@@ -4901,71 +4983,64 @@ function AgentDetailInner() {
                                 minHeight: 0,
                                 height: 'calc(100vh - 100px)',
                                 margin: '0 8px 8px',
-                                border: '1px solid color-mix(in srgb, var(--border-subtle) 55%, var(--bg-primary))',
+                                border: '1px solid rgba(0, 0, 0, 0.06)',
                                 borderRadius: '12px',
                                 overflow: 'hidden',
+                                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.04)',
                             }}
                         >
                             {/* ── Left: session sidebar ── */}
                             <div className={`session-sidebar ${sessionListCollapsed ? 'collapsed' : ''}`} style={{ width: sessionListCollapsed ? '0px' : '220px', transition: 'width 0.2s ease', flexShrink: 0, minHeight: 0, borderRight: sessionListCollapsed ? 'none' : '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                                {/* ── Header: title + collapse, then new session ── */}
+                                {/* ── Header: scope dropdown + collapse ── */}
                                 <div style={{ flexShrink: 0 }}>
-                                    <div
-                                        style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'space-between',
-                                            gap: '8px',
-                                            padding: '10px 12px 8px',
-                                            minHeight: '40px',
-                                            boxSizing: 'border-box',
-                                        }}
-                                    >
-                                        <span
-                                            style={{
-                                                fontSize: '14px',
-                                                fontWeight: 600,
-                                                color: 'var(--text-primary)',
-                                                lineHeight: '1.25',
-                                                flex: 1,
-                                                minWidth: 0,
-                                            }}
-                                        >
-                                            {t('agent.chat.sessionListTitle')}
-                                        </span>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px', padding: '10px 8px 8px 12px', minHeight: '40px', boxSizing: 'border-box' }}>
+                                        {canViewAllAgentChatSessions ? (
+                                            <div className="scope-dropdown" ref={scopeDropdownRef}>
+                                                <button className="scope-dropdown-trigger" onClick={() => { setScopeDropdownOpen(v => !v); if (chatScope === 'all' && !allSessions.length) fetchAllSessions(); }}>
+                                                    <span className="scope-dropdown-label">
+                                                        {chatScope === 'mine'
+                                                            ? t('agent.chat.mySessions')
+                                                            : (otherUserPickerOptions.find(([uid]) => uid === allUserFilter)?.[1] || t('agent.chat.mySessions'))
+                                                        }
+                                                    </span>
+                                                    <svg className={`scope-dropdown-chevron${scopeDropdownOpen ? ' scope-dropdown-chevron--open' : ''}`} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                                                </button>
+                                                {scopeDropdownOpen && (
+                                                    <div className="scope-dropdown-menu">
+                                                        <div
+                                                            className={`scope-dropdown-item${chatScope === 'mine' ? ' scope-dropdown-item--active' : ''}`}
+                                                            onClick={() => { onAdminTabMine(); setScopeDropdownOpen(false); }}
+                                                        >{t('agent.chat.mySessions')}</div>
+                                                        {otherUserPickerOptions.length > 0
+                                                            ? otherUserPickerOptions.map(([uid, label]) => (
+                                                                <div
+                                                                    key={uid}
+                                                                    className={`scope-dropdown-item${chatScope === 'all' && allUserFilter === uid ? ' scope-dropdown-item--active' : ''}`}
+                                                                    onClick={() => { setChatScope('all'); setAllUserFilter(uid); fetchAllSessions(); if (activeSession && sessionUserIdStr(activeSession) === viewerUserIdStr()) clearChatSelection(); setScopeDropdownOpen(false); }}
+                                                                >{label}</div>
+                                                            ))
+                                                            : <div className="scope-dropdown-item scope-dropdown-item--disabled">{t('agent.chat.noOtherUserSessions', '暂无其他用户会话')}</div>
+                                                        }
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', lineHeight: '1.25', flex: 1, minWidth: 0 }}>
+                                                {t('agent.chat.mySessions')}
+                                            </span>
+                                        )}
                                         {!sessionListCollapsed && (
                                             <button
                                                 type="button"
                                                 onClick={() => setSessionListCollapsed(true)}
-                                                className="session-sidebar-collapseBtn"
-                                                style={{
-                                                    display: 'inline-flex',
-                                                    alignItems: 'center',
-                                                    justifyContent: 'center',
-                                                    background: 'none',
-                                                    border: 'none',
-                                                    color: 'var(--text-tertiary)',
-                                                    cursor: 'pointer',
-                                                    padding: '4px',
-                                                    borderRadius: '4px',
-                                                    flexShrink: 0,
-                                                    lineHeight: 0,
-                                                }}
+                                                className="session-sidebar-toggle-btn"
                                                 title={t('agent.chat.collapseSidebar')}
-                                                onMouseEnter={(e) => {
-                                                    e.currentTarget.style.background = 'var(--bg-secondary)';
-                                                }}
-                                                onMouseLeave={(e) => {
-                                                    e.currentTarget.style.background = 'none';
-                                                }}
                                             >
-                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                                                    <path d="M15 18l-6-6 6-6" />
-                                                </svg>
+                                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
                                             </button>
                                         )}
                                     </div>
-                                    {!canViewAllAgentChatSessions && (
+                                    {(!canViewAllAgentChatSessions || chatScope === 'mine') && (
                                         <div style={{ padding: '0 12px 8px' }}>
                                             <button
                                                 type="button"
@@ -4982,59 +5057,9 @@ function AgentDetailInner() {
                                     )}
                                 </div>
 
-                                {canViewAllAgentChatSessions && (
-                                    <div className="session-sidebar-segment-control" role="tablist">
-                                        <div
-                                            role="tab"
-                                            tabIndex={0}
-                                            aria-selected={chatScope === 'mine'}
-                                            className={`segment-item ${chatScope === 'mine' ? 'active' : ''}`}
-                                            onClick={onAdminTabMine}
-                                            onKeyDown={(e) => {
-                                                if (e.key === 'Enter' || e.key === ' ') {
-                                                    e.preventDefault();
-                                                    onAdminTabMine();
-                                                }
-                                            }}
-                                        >
-                                            {t('agent.chat.mySessions')}
-                                        </div>
-                                        <div
-                                            role="tab"
-                                            tabIndex={0}
-                                            aria-selected={chatScope === 'all'}
-                                            className={`segment-item ${chatScope === 'all' ? 'active' : ''}`}
-                                            onClick={onAdminTabOthers}
-                                            onKeyDown={(e) => {
-                                                if (e.key === 'Enter' || e.key === ' ') {
-                                                    e.preventDefault();
-                                                    onAdminTabOthers();
-                                                }
-                                            }}
-                                        >
-                                            {t('agent.chat.otherUsersTab')}
-                                        </div>
-                                    </div>
-                                )}
-
                                 <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                                     {(!canViewAllAgentChatSessions || chatScope === 'mine') ? (
                                         <>
-                                            {canViewAllAgentChatSessions && (
-                                                <div style={{ padding: '0 12px 8px', flexShrink: 0 }}>
-                                                    <button
-                                                        type="button"
-                                                        onClick={createNewSession}
-                                                        className="new-session-btn"
-                                                    >
-                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ display: 'block', flexShrink: 0 }}>
-                                                            <line x1="12" y1="5" x2="12" y2="19" />
-                                                            <line x1="5" y1="12" x2="19" y2="12" />
-                                                        </svg>
-                                                        <span>{t('agent.chat.newSession')}</span>
-                                                    </button>
-                                                </div>
-                                            )}
                                             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 0' }}>
                                                 {sessionsLoading ? (
                                                     <div style={{ padding: '20px 12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>{t('common.loading')}</div>
@@ -5111,18 +5136,6 @@ function AgentDetailInner() {
                                         </>
                                     ) : (
                                         <>
-                                            <div style={{ padding: '0 12px 8px', flexShrink: 0 }}>
-                                                <select
-                                                    value={allUserFilter}
-                                                    onChange={(e) => setAllUserFilter(e.target.value)}
-                                                    style={{ width: '100%', height: '28px', fontSize: '12px', backgroundColor: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', color: 'var(--text-primary)' }}
-                                                >
-                                                    <option value="">{t('agent.chat.allUsers')}</option>
-                                                    {otherUserPickerOptions.map(([uid, label]) => (
-                                                        <option key={uid} value={uid}>{label}</option>
-                                                    ))}
-                                                </select>
-                                            </div>
                                             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 0' }}>
                                                 {allSessionsLoading ? (
                                                     <div style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -5206,8 +5219,8 @@ function AgentDetailInner() {
                             <div className={`agent-chat-area ${livePanelVisible ? 'has-live-panel' : ''}`} style={{ flex: 1, display: 'flex', flexDirection: 'row', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
                                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', position: 'relative', minWidth: 0, overflow: 'hidden' }}>
                                     {sessionListCollapsed && (
-                                        <button onClick={() => setSessionListCollapsed(false)} style={{ position: 'absolute', top: '12px', left: '12px', zIndex: 10, width: '28px', height: '28px', borderRadius: '6px', background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', cursor: 'pointer' }} title="Show chat sessions" onMouseEnter={e => e.currentTarget.style.background='var(--bg-secondary)'} onMouseLeave={e => e.currentTarget.style.background='var(--bg-elevated)'}>
-                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+                                        <button onClick={() => setSessionListCollapsed(false)} className="session-sidebar-toggle-btn session-sidebar-toggle-btn--floating" title="Show chat sessions">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
                                         </button>
                                     )}
                                 {!activeSession ? (
@@ -5304,7 +5317,7 @@ function AgentDetailInner() {
                                             })()}
                                         </div>
                                         {showHistoryScrollBtn && (
-                                            <button onClick={scrollHistoryToBottom} style={{ position: 'absolute', bottom: '20px', right: '20px', width: '32px', height: '32px', borderRadius: '50%', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', boxShadow: 'var(--shadow-sm)', zIndex: 10 }} title="Scroll to bottom">↓</button>
+                                            <button onClick={scrollHistoryToBottom} className="chat-scroll-btn" style={{ bottom: '20px' }} title="Scroll to bottom">↓</button>
                                         )}
                                     </>
                                 ) : (
@@ -5319,10 +5332,10 @@ function AgentDetailInner() {
                                         )}
                                         <div ref={chatContainerRef} onScroll={handleChatScroll} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
                                             {chatMessages.length === 0 && (
-                                                <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-tertiary)' }}>
-                                                    <div style={{ fontSize: '13px', marginBottom: '4px' }}>{activeSession?.title || t('agent.chat.startChat')}</div>
-                                                    <div style={{ fontSize: '12px' }}>{t('agent.chat.startConversation', { name: agent.name })}</div>
-                                                    <div style={{ fontSize: '11px', marginTop: '4px', opacity: 0.7 }}>{t('agent.chat.fileSupport')}</div>
+                                                <div className="chat-empty-state">
+                                                    <div className="chat-empty-state__title">{activeSession?.title || t('agent.chat.startChat')}</div>
+                                                    <div className="chat-empty-state__subtitle">{t('agent.chat.startConversation', { name: agent.name })}</div>
+                                                    <div className="chat-empty-state__hint">{t('agent.chat.fileSupport')}</div>
                                                 </div>
                                             )}
                                             {(() => {
@@ -5459,9 +5472,9 @@ function AgentDetailInner() {
                                             })()
                                             }
                                             {isWaiting && (
-                                                <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', animation: 'fadeIn .2s ease' }}>
-                                                    <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: 'var(--bg-elevated)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', flexShrink: 0, color: 'var(--text-secondary)', fontWeight: 600 }}>A</div>
-                                                    <div style={{ padding: '8px 12px', borderRadius: '12px', background: 'var(--bg-secondary)', fontSize: '13px' }}>
+                                                <div className="chat-msg-row">
+                                                    <div className="chat-msg-avatar">A</div>
+                                                    <div className="chat-msg-bubble">
                                                         <div className="thinking-indicator">
                                                             <div className="thinking-dots">
                                                                 <span /><span /><span />
@@ -5474,7 +5487,7 @@ function AgentDetailInner() {
                                             <div ref={chatEndRef} />
                                         </div>
                                         {showScrollBtn && (
-                                            <button onClick={scrollToBottom} style={{ position: 'absolute', bottom: `${chatScrollBtnBottom}px`, right: '20px', width: '32px', height: '32px', borderRadius: '50%', background: 'var(--bg-elevated)', border: '1px solid var(--border-default)', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', boxShadow: 'var(--shadow-sm)', zIndex: 10 }} title="Scroll to bottom">↓</button>
+                                            <button onClick={scrollToBottom} className="chat-scroll-btn" style={{ bottom: `${chatScrollBtnBottom}px` }} title="Scroll to bottom">↓</button>
                                         )}
                                         {/* Transient info banner — e.g. fallback model switch */}
                                         {chatInfoMsg && (

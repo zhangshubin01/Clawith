@@ -37,8 +37,8 @@ function calcInitialWidth(): number {
 }
 
 const labels: Record<SidePanelTab, string> = {
-    workspace: 'Workspace',
-    aware: 'Aware',
+    workspace: '工作区',
+    aware: '自我意识',
     browser: 'Browser',
     desktop: 'Desktop',
     code: 'Code',
@@ -65,6 +65,7 @@ export default function AgentSidePanel({
 }: Props) {
     const [panelWidth, setPanelWidth] = useState(() => calcInitialWidth());
     const [showTakeControl, setShowTakeControl] = useState(false);
+    const [workspaceActivityOpen, setWorkspaceActivityOpen] = useState(false);
     const isDragging = useRef(false);
     const userResized = useRef(false);
     const dragStartX = useRef(0);
@@ -135,23 +136,29 @@ export default function AgentSidePanel({
         <div className="live-panel agent-side-panel" style={{ width: `${panelWidth}px`, flexShrink: 0 }}>
             <div className="live-panel-resize-handle" onMouseDown={handleDragMouseDown} title="Drag to resize" />
             <div className="live-panel-header">
-                <div className="live-panel-tabs">
-                    {availableTabs.map((tab) => (
-                        <button
-                            key={tab}
-                            className={`live-panel-tab ${activeTab === tab ? 'active' : ''}`}
-                            onClick={() => onTabChange(tab)}
-                        >
-                            <span>{labels[tab]}</span>
-                        </button>
-                    ))}
-                </div>
+                <span className="live-panel-title">{labels[activeTab]}</span>
                 {agentId && sessionId && (activeTab === 'browser' || activeTab === 'desktop') && (
                     <button className="live-panel-take-control" onClick={() => setShowTakeControl(true)} title="Take control">
                         <span>Control</span>
                     </button>
                 )}
-                <button className="live-panel-collapse" onClick={onToggle} title="Collapse">›</button>
+                <div className="live-panel-header-right">
+                    {activeTab === 'workspace' && (
+                        <>
+                            <button
+                                className={`live-panel-icon-btn ${workspaceActivityOpen ? 'active' : ''}`}
+                                onClick={() => setWorkspaceActivityOpen(o => !o)}
+                                title="Version history"
+                            >
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                            </button>
+                            <span className="live-panel-header-sep" />
+                        </>
+                    )}
+                    <button className="live-panel-collapse" onClick={onToggle} title="Close">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                    </button>
+                </div>
             </div>
             <div className="live-panel-content">
                 {activeTab === 'workspace' && agentId && (
@@ -166,6 +173,8 @@ export default function AgentSidePanel({
                         onToggleLock={onWorkspaceToggleLock}
                         onEditingChange={onWorkspaceEditingChange}
                         onPathDeleted={onWorkspacePathDeleted}
+                        activityOpen={workspaceActivityOpen}
+                        onActivityToggle={setWorkspaceActivityOpen}
                     />
                 )}
                 {activeTab === 'aware' && awareContent}
