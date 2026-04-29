@@ -16,8 +16,7 @@ from __future__ import annotations
 
 import difflib
 import uuid
-from dataclasses import dataclass, field, asdict
-from typing import Any
+from dataclasses import dataclass, field
 
 from loguru import logger
 
@@ -82,13 +81,18 @@ class SnapshotInfo:
     status: str = "ACTIVE"
 
     def to_dict(self) -> dict:
+        # 插件端状态枚举不包含 ACTIVE，统一映射到可识别状态，避免按钮面板失效。
+        status_map = {
+            "ACTIVE": "ACTIVE_INIT",
+        }
+        wire_status = status_map.get((self.status or "").upper(), self.status)
         return {
             "id": self.id,
             "sessionId": self.session_id,
             "requestId": self.request_id,
             "name": self.name,
             "description": self.description,
-            "status": self.status,
+            "status": wire_status,
         }
 
 
@@ -102,8 +106,10 @@ class WorkspaceFileService:
         self._files_by_id: dict[str, WorkspaceFile] = {}
         # request_id → snapshot_id
         self._snapshots: dict[str, SnapshotInfo] = {}
-        # 当前活跃 snapshot_id
+        # 当前活跃 snapshot_id（全局，兼容旧逻辑；新代码优先用 _current_snapshot_by_session）
         self._current_snapshot_id: str | None = None
+        # session_id → 该会话最近一次使用的 snapshot_id（避免多会话共用全局 current 时 syncAll 文件列表为空）
+        self._current_snapshot_by_session: dict[str, str] = {}
         # 文件内容缓存：file_path → content（由 read_file 结果填充）
         self._file_content_cache: dict[str, str] = {}
         # snapshot_id → request_id（反向索引）
@@ -122,7 +128,10 @@ class WorkspaceFileService:
     def get_or_create_snapshot(self, session_id: str, request_id: str) -> SnapshotInfo:
         """获取或创建与 request 关联的 snapshot。"""
         if request_id in self._snapshots:
-            return self._snapshots[request_id]
+            snap = self._snapshots[request_id]
+            self._current_snapshot_by_session[session_id] = snap.id
+            self._current_snapshot_id = snap.id
+            return snap
 
         snapshot_id = str(uuid.uuid4())
         idx = len(self._snapshots) + 1
@@ -135,6 +144,7 @@ class WorkspaceFileService:
         self._snapshots[request_id] = snap
         self._snapshot_to_request[snapshot_id] = request_id
         self._current_snapshot_id = snapshot_id
+        self._current_snapshot_by_session[session_id] = snapshot_id
         logger.info("[WS-FILE] 创建 snapshot: id={} requestId={} idx={}",
                     snapshot_id[:8], request_id[:8], idx)
         return snap
@@ -269,6 +279,46 @@ class WorkspaceFileService:
         """获取所有 snapshot。"""
         return list(self._snapshots.values())
 
+    def list_snapshots_for_session(self, session_id: str) -> list[SnapshotInfo]:
+        """按会话 ID 列出快照（snapshot/listBySession）。"""
+        if not session_id:
+            return []
+        return [s for s in self.get_all_snapshots() if s.session_id == session_id]
+
+    def find_snapshot_by_id(self, snapshot_id: str) -> SnapshotInfo | None:
+        """按快照 UUID 查找。"""
+        if not snapshot_id:
+            return None
+        for s in self._snapshots.values():
+            if s.id == snapshot_id:
+                return s
+        return None
+
+    def set_current_snapshot(self, snapshot_id: str) -> bool:
+        """将给定快照设为当前会话的快照（SWITCH / ACTIVATE）。"""
+        snap = self.find_snapshot_by_id(snapshot_id)
+        if not snap:
+            return False
+        self._current_snapshot_by_session[snap.session_id] = snapshot_id
+        self._current_snapshot_id = snapshot_id
+        return True
+
+    def apply_snapshot_accept_all(self, snapshot_id: str) -> int:
+        """快照下全部工作区文件标为已接受。"""
+        n = 0
+        for f in self.list_by_snapshot(snapshot_id):
+            if self.update_status(f.id, "ACCEPTED"):
+                n += 1
+        return n
+
+    def apply_snapshot_reject_all(self, snapshot_id: str) -> int:
+        """快照下全部工作区文件标为已拒绝。"""
+        n = 0
+        for f in self.list_by_snapshot(snapshot_id):
+            if self.update_status(f.id, "REJECTED"):
+                n += 1
+        return n
+
     def build_sync_result(
         self,
         ws_file: WorkspaceFile,
@@ -290,9 +340,15 @@ class WorkspaceFileService:
         sync_type: str = "ADD",
     ) -> dict:
         """构建 SnapshotSyncAllResult 格式。"""
-        snapshots = self.get_all_snapshots()
-        all_files = list(self._files.values())
-        current = self._current_snapshot_id or ""
+        snapshots = [s for s in self.get_all_snapshots() if s.session_id == session_id]
+        current = self._current_snapshot_by_session.get(session_id) or ""
+        if current:
+            all_files = [
+                f for f in self._files.values()
+                if f.session_id == session_id and f.snapshot_id == current
+            ]
+        else:
+            all_files = [f for f in self._files.values() if f.session_id == session_id]
         return {
             "snapshots": [s.to_dict() for s in snapshots],
             "workingSpaceFiles": [f.to_wire_format() for f in all_files],

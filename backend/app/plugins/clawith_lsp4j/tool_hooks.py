@@ -285,6 +285,93 @@ _LSP4J_IDE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_tasks",
+            "description": "在 IDE 任务面板中创建任务列表，用于规划多步骤任务并跟踪进度。任务树会在 IDE 侧边栏中渲染为可折叠的树形 UI。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "summary": {
+                                    "type": "string",
+                                    "description": "任务摘要（简短标题）",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "任务详细描述",
+                                },
+                            },
+                            "required": ["summary"],
+                        },
+                        "description": "要显示在 IDE 任务面板中的任务列表",
+                    },
+                },
+                "required": ["tasks"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": "在 IDE 中写入待办事项列表。与 add_tasks 类似，将任务内容渲染为可折叠的树形 UI。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "summary": {
+                                    "type": "string",
+                                    "description": "待办事项摘要",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "待办事项详细描述",
+                                },
+                            },
+                            "required": ["summary"],
+                        },
+                        "description": "要显示的待办事项列表",
+                    },
+                },
+                "required": ["tasks"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_replace",
+            "description": "在文件中搜索指定文本并替换。适用于精确的文本搜索替换操作。注意：这会将搜索和替换文本发送到 IDE 执行，比 replace_text_by_path（全文替换）更适合局部修改。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filePath": {
+                        "type": "string",
+                        "description": "要修改的文件路径（绝对路径）",
+                    },
+                    "searchText": {
+                        "type": "string",
+                        "description": "要搜索的文本内容",
+                    },
+                    "replaceText": {
+                        "type": "string",
+                        "description": "替换后的文本内容",
+                    },
+                },
+                "required": ["filePath", "searchText", "replaceText"],
+            },
+        },
+    },
 ]
 
 # ──────────────────────────────────────────────
