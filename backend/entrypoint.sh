@@ -16,10 +16,7 @@ if [ "$(id -u)" = '0' ]; then
 fi
 # -------------------------------------------------------
 
-echo "[entrypoint] Step 1: Creating/verifying database tables..."
-PYTHONPATH=/app python /app/app/scripts/bootstrap_db.py
-
-echo "[entrypoint] Step 2: Running alembic migrations..."
+echo "[entrypoint] Step 1: Running alembic migrations..."
 # Run all migrations to ensure database schema is up to date.
 # Capture exit code explicitly — do NOT let a migration failure go unnoticed.
 set +e
@@ -52,5 +49,5 @@ else
     echo "[entrypoint] Alembic migrations completed successfully."
 fi
 
-echo "[entrypoint] Step 3: Starting uvicorn..."
+echo "[entrypoint] Step 2: Starting uvicorn..."
 exec uvicorn app.main:app --host 0.0.0.0 --port 8000
