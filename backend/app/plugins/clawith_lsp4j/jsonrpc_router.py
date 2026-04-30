@@ -65,6 +65,7 @@ _LSP4J_IDE_TOOL_NAMES = LSP4J_IDE_TOOL_NAMES
 # 这些工具在 invoke_tool_on_ide 中统一处理参数转换和 results 注入
 _LSP4J_FILE_EDIT_TOOLS = frozenset({
     "replace_text_by_path",
+    "search_replace",
     "create_file_with_text",
     "delete_file_by_path",
 })
@@ -765,24 +766,96 @@ class JSONRPCRouter:
             thinking_chunks: list[str] = []
             _thinking_started: bool = False
 
-            # ★ 流式输出缓冲：累积小 chunk，按行或阈值发送，避免表格被拆分成单个字符
-            _chunk_buffer: list[str] = []
-            _BUFFER_THRESHOLD = 50  # 字符阈值，超过则发送
-            _BUFFER_TIMEOUT = 0.05  # 50ms 超时，避免延迟过大
+            # ★ 流式输出缓冲：按“完整行”发送；Markdown 表格按整块发送，避免被拆成半截列。
+            _line_buffer = ""
+            _ready_segments: list[str] = []
+            _table_lines: list[str] = []
+            _table_mode = False
+            _BUFFER_THRESHOLD = 200  # 非表格文本累计阈值
+            _TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
+            _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|\s*[:\-\| ]+\|\s*$")
+
+            def _is_table_line(line: str) -> bool:
+                return bool(_TABLE_LINE_RE.match(line))
+
+            def _is_valid_table_block(lines: list[str]) -> bool:
+                return len(lines) >= 2 and any(_TABLE_SEPARATOR_RE.match(ln) for ln in lines[1:])
+
+            def _drain_ready_text(max_len_only: bool = False) -> str:
+                if not _ready_segments:
+                    return ""
+                if max_len_only:
+                    acc = []
+                    total = 0
+                    while _ready_segments and total < _BUFFER_THRESHOLD:
+                        seg = _ready_segments[0]
+                        if total > 0 and total + len(seg) > _BUFFER_THRESHOLD:
+                            break
+                        acc.append(_ready_segments.pop(0))
+                        total += len(seg)
+                    return "".join(acc)
+                text = "".join(_ready_segments)
+                _ready_segments.clear()
+                return text
+
+            def _flush_table_lines() -> None:
+                nonlocal _table_lines
+                if not _table_lines:
+                    return
+                if _is_valid_table_block(_table_lines):
+                    _ready_segments.append("".join(f"{ln}\n" for ln in _table_lines))
+                else:
+                    for ln in _table_lines:
+                        _ready_segments.append(f"{ln}\n")
+                _table_lines = []
 
             async def _flush_buffer(force: bool = False) -> None:
-                """刷新缓冲区，发送累积的文本"""
-                nonlocal _chunk_buffer
-                if not _chunk_buffer:
+                nonlocal _line_buffer, _table_mode, _table_lines
+                if force:
+                    if _line_buffer:
+                        # 结束阶段若尾部是未换行的残片，也要一并送出。
+                        if _table_mode:
+                            _table_lines.append(_line_buffer)
+                            _flush_table_lines()
+                            _table_mode = False
+                        else:
+                            _ready_segments.append(_line_buffer)
+                        _line_buffer = ""
+                    if _table_mode:
+                        _flush_table_lines()
+                        _table_mode = False
+                    payload = _drain_ready_text(max_len_only=False)
+                    if payload:
+                        await self._send_chat_answer(session_id, payload, request_id)
+                        logger.debug("[LSP4J] buffer flushed (force): text_len={}", len(payload))
                     return
-                buffered_text = "".join(_chunk_buffer)
-                _chunk_buffer = []
-                if buffered_text:
-                    await self._send_chat_answer(session_id, buffered_text, request_id)
-                    if force:
-                        logger.debug("[LSP4J] buffer flushed (force): text_len={}", len(buffered_text))
+
+                while "\n" in _line_buffer:
+                    line, _line_buffer = _line_buffer.split("\n", 1)
+                    if _table_mode:
+                        if _is_table_line(line):
+                            _table_lines.append(line)
+                            continue
+                        _flush_table_lines()
+                        _table_mode = False
+                        if line == "":
+                            _ready_segments.append("\n")
+                        elif _is_table_line(line):
+                            _table_mode = True
+                            _table_lines = [line]
+                        else:
+                            _ready_segments.append(f"{line}\n")
                     else:
-                        logger.debug("[LSP4J] buffer flushed: text_len={}", len(buffered_text))
+                        if _is_table_line(line):
+                            _table_mode = True
+                            _table_lines = [line]
+                        else:
+                            _ready_segments.append(f"{line}\n")
+
+                payload = _drain_ready_text(max_len_only=True)
+                if payload:
+                    await self._send_chat_answer(session_id, payload, request_id)
+                    logger.debug("[LSP4J] buffer flushed: text_len={}", len(payload))
 
             async def on_chunk(text: str) -> None:
                 """流式文本回调 — 推送 chat/answer（ChatAnswerParams 格式）
@@ -790,7 +863,7 @@ class JSONRPCRouter:
                 使用缓冲区累积小 chunk，按行或阈值发送，避免 markdown 表格被拆分成单个字符，
                 导致 MarkdownStreamPanel 无法正确解析。
                 """
-                nonlocal _thinking_started, _chunk_buffer
+                nonlocal _thinking_started, _line_buffer
                 # 思考结束标记：收到首个正文 chunk 即表示思考阶段结束
                 if _thinking_started:
                     _thinking_started = False
@@ -808,16 +881,10 @@ class JSONRPCRouter:
                     # 非流式模式：不发送，在 finish 中一次性返回
                     return
 
-                _chunk_buffer.append(text)
-                buffered = "".join(_chunk_buffer)
-
-                # 触发发送条件：
-                # 1. 包含换行符（完整行）
-                # 2. 缓冲区超过阈值
-                # 3. 包含 markdown 表格行结束符（| 开头或结尾）
-                if "\n" in text or len(buffered) >= _BUFFER_THRESHOLD or text.strip().endswith("|"):
+                _line_buffer += text
+                # 仅在形成完整行时切分发送；表格由 _table_mode 聚合成整块再发。
+                if "\n" in text or len(_line_buffer) >= _BUFFER_THRESHOLD:
                     await _flush_buffer()
-                # 否则继续累积，由 finish 或下一个 chunk 触发发送
 
             async def on_thinking(text: str) -> None:
                 """推理过程回调 — 推送 chat/think 通知
@@ -879,6 +946,13 @@ class JSONRPCRouter:
                                      tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
                         logger.info("[LSP4J-TOOL] toolCall 入队: display={} mapped={} callId={} queue_len={}",
                                     display_name, tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
+                        logger.info(
+                            "[LSP4J-TRACE] 入队 trace=req={} call={} logical={} invoke={}",
+                            request_id[:8],
+                            tool_call_id[:8],
+                            display_name,
+                            tool_name,
+                        )
 
                     if is_lsp4j_tool:
                         # ★ 发送 toolCall markdown 块（双通道之 markdown 通道）
@@ -907,7 +981,6 @@ class JSONRPCRouter:
                             logger.info("[LSP4J-TOOL] toolCall markdown 块已发送: callId={}", tool_call_id[:8])
                         else:
                             logger.info("[LSP4J-TOOL] 非流式模式，跳过 toolCall markdown 块发送: callId={}", tool_call_id[:8])
-
 
                         # ★ 等待插件 UI 线程处理 markdown 块、注册 toolPanel（500ms）
                         # 问题：markdown 块（chat/answer 通道）需经 Swing UI 线程渲染后，
@@ -1625,7 +1698,7 @@ class JSONRPCRouter:
         request_id = self._current_request_id or str(uuid.uuid4())
 
         logger.info("[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={} queue_matched={}",
-                     tool_name, tool_call_id[:8], request_id[:8], timeout, queue_matched)
+                    tool_name, tool_call_id[:8], request_id[:8], timeout, queue_matched)
 
         # ★ 本地工具（list_dir, search_file）：后端本地执行，不发送到 IDE
         if tool_name in ("list_dir", "search_file"):
@@ -1666,6 +1739,17 @@ class JSONRPCRouter:
         # 因此前 3 个需转换 file_path→filePath，后 2 个保留 file_path 不变。
         # 注意：read_file 的 LLM 参数名是 "path"（非 "file_path"），仅它特殊。
         params = dict(arguments)
+        invoke_tool_name = tool_name
+        if tool_name == "search_replace":
+            # search_replace 需要保持逻辑名称不变（用于 toolCallId 队列匹配与前端展示），
+            # 但 IDE 端实际执行器使用 replace_text_by_path。
+            invoke_tool_name = "replace_text_by_path"
+            # search_replace 参数通常是 search_text/replace_text；插件 replace_text_by_path 只认 text。
+            # 这里退化为全量替换文本，至少保证 IDE 有可执行输入，不再落空文本导致“生成中+无diff”。
+            if "text" not in params:
+                replacement_text = params.get("replace_text") or params.get("replaceText")
+                if isinstance(replacement_text, str):
+                    params["text"] = replacement_text
         if tool_name in _LSP4J_FILE_EDIT_TOOLS:
             if "file_path" in params and "filePath" not in params:
                 params["filePath"] = params.pop("file_path")
@@ -1689,6 +1773,11 @@ class JSONRPCRouter:
                 params["isBackground"] = False
             if "is_background" not in params:
                 params["is_background"] = params["isBackground"]
+        trace_key = (
+            f"req={request_id[:8]} call={tool_call_id[:8]} "
+            f"logical={original_name} invoke={invoke_tool_name}"
+        )
+        logger.info("[LSP4J-TRACE] 队列状态 trace={} matched={}", trace_key, queue_matched)
 
         # ★ 使用 LLM 侧名称发送 RUNNING sync，参数保留原始 snake_case
         # ToolPanel 用 toolName 判断工具类型（如 edit_file 而非 replace_text_by_path），
@@ -1733,6 +1822,7 @@ class JSONRPCRouter:
         }
         logger.info("[LSP4J-TOOL] Future registered: toolCallId={} pending_count={} waiting for invokeResult",
                      tool_call_id[:8], len(self._pending_tools))
+        logger.info("[LSP4J-TRACE] 调用工具 trace={}", trace_key)
 
         # 发送 tool/invoke 请求（带 id，触发插件 @JsonRequest("invoke") 处理器）
         # 但不注册到 _pending_responses —— 插件的 ack 响应不是工具结果，
@@ -1745,17 +1835,18 @@ class JSONRPCRouter:
             "params": {
                 "requestId": request_id,
                 "toolCallId": tool_call_id,
-                "name": tool_name,         # 插件原生名称，不是 ide_ 前缀
+                "name": invoke_tool_name,  # 实际调用名（search_replace 在此降级为 replace_text_by_path）
                 "parameters": params,      # 已转换参数名（如 path → filePath）
                 "async": True,             # 异步执行，结果通过 invokeResult 回传
             },
         })
 
         # 等待异步结果
+        file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
         try:
             result = await asyncio.wait_for(tool_future, timeout=timeout)
             results = result[:500] if result else None
-            file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
+            finished_backfilled = False
             if tool_name == "read_file":
                 path = arguments.get("path") or arguments.get("file_path") or arguments.get("filePath") or ""
                 content = result if result else ""
@@ -1783,11 +1874,44 @@ class JSONRPCRouter:
                 logger.info("[LSP4J-TOOL] FINISHED results 注入 path+fileId: path={} wsId={} tool={}",
                             file_path_for_id, ws_id[:8], tool_name)
 
+            # P1 兜底：文件工具 FINISHED 结果为空/缺 fileId 时，按 file_path 回填一次，避免 ToolPanel 早退。
+            if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
+                first_result = results[0] if isinstance(results, list) and results else {}
+                has_file_id = isinstance(first_result, dict) and bool(first_result.get("fileId"))
+                has_path = isinstance(first_result, dict) and bool(first_result.get("path"))
+                if not (has_file_id and has_path):
+                    ws_file_fallback = self._ws_file_service.get_file(file_path_for_id)
+                    fallback_ws_id = ws_file_fallback.id if ws_file_fallback else file_path_for_id
+                    results = [{
+                        "path": file_path_for_id,
+                        "fileId": fallback_ws_id,
+                        "message": result[:500] if isinstance(result, str) else "",
+                    }]
+                    if "file_path" not in arguments:
+                        arguments["file_path"] = file_path_for_id
+                    finished_backfilled = True
+                    logger.warning(
+                        "[LSP4J-TRACE] FINISHED 回填 fileId trace={} path={} wsId={} reason=missing_result_fields",
+                        trace_key,
+                        file_path_for_id,
+                        str(fallback_ws_id)[:8],
+                    )
+                else:
+                    logger.info(
+                        "[LSP4J-TRACE] FINISHED 结果完整 trace={} hasFileId=true hasPath=true",
+                        trace_key,
+                    )
+
             if queue_matched:
                 await self._send_tool_call_sync(
                     self._session_id, request_id, tool_call_id,
                     "FINISHED", tool_name=original_name, parameters=arguments,
                     results=results,
+                )
+                logger.info(
+                    "[LSP4J-TRACE] FINISHED 已发送 trace={} backfilled={}",
+                    trace_key,
+                    finished_backfilled,
                 )
             else:
                 logger.warning(
@@ -1803,9 +1927,13 @@ class JSONRPCRouter:
                 ws_file = self._ws_file_service.get_file(file_path_for_id)
                 if ws_file:
                     await asyncio.sleep(0.5)
-                    # 新建文件需要 ADD 才能触发插件新增文件卡片/差异展示链路
-                    sync_type = "ADD" if ws_file.mode == "ADD" else "MODIFIED"
-                    await self._send_workspace_file_sync(ws_file, sync_type)
+                    # 插件双通道路由差异：
+                    # 1) WorkingSpacePanel 只通过 ADD notifier 把文件加入“变更文件”列表；
+                    # 2) ToolPanel 内 FileItemPanel 通过 MODIFIED notifier 更新状态（GENERATING→APPLIED）。
+                    # 为保证“列表完整 + 卡片状态正确”，文件编辑工具统一双发 ADD + MODIFIED。
+                    await self._send_workspace_file_sync(ws_file, "ADD")
+                    await self._send_workspace_file_sync(ws_file, "MODIFIED")
+                    logger.info("[LSP4J-TRACE] WS 双发已完成 trace={} sent=ADD,MODIFIED", trace_key)
                     if self._session_id:
                         try:
                             await self._send_snapshot_sync_all(self._session_id)
@@ -3225,20 +3353,6 @@ async def invoke_lsp4j_tool(
             "message": f"{tool_name} 工具调用成功，任务内容由 LLM 在回复中输出",
             "tool_name": tool_name,
         }, ensure_ascii=False)
-    
-    if tool_name == "search_replace":
-        # 搜索替换工具：降级为 replace_text_by_path（插件 ToolInvokeProcessor 有 handler）
-        # 注意：search_replace 的参数格式可能不同，需要转换
-        logger.info("[LSP4J-TOOL] search_replace 降级为 replace_text_by_path")
-        tool_name = "replace_text_by_path"
-        # 参数转换：search_replace 可能使用 searchText/replaceText，需要映射为 text
-        if "searchText" in arguments and "replaceText" in arguments:
-            # 简化处理：直接使用 replaceText 作为全文替换内容
-            arguments = {
-                "filePath": arguments.get("filePath", ""),
-                "text": arguments.get("replaceText", ""),
-            }
-        # 继续走正常的 LSP4J 路径
     
     # ── 正常 LSP4J 工具调用 ──
     # 使用 (user_id, agent_id) 复合键查找路由器，确保不同用户的连接不会互相干扰

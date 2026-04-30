@@ -379,14 +379,58 @@ class WorkspaceFileService:
                 ]
             else:
                 all_files = [f for f in self._files.values() if f.session_id == session_id]
+            snapshot_status = {
+                s.id: self._derive_snapshot_status(s.id, s.status)
+                for s in snapshots
+            }
             return {
-                "snapshots": [s.to_dict() for s in snapshots],
+                "snapshots": [
+                    {
+                        **s.to_dict(),
+                        "status": snapshot_status.get(s.id, s.to_dict().get("status")),
+                    }
+                    for s in snapshots
+                ],
                 "workingSpaceFiles": [f.to_wire_format() for f in all_files],
                 "currentSnapshotId": current,
                 "currentSessionId": session_id,
                 "type": sync_type,
                 "projectPath": project_path,
             }
+
+    def _derive_snapshot_status(self, snapshot_id: str, default_status: str | None) -> str:
+        """根据快照下文件状态推导插件可识别的快照状态。"""
+        files = [f for f in self._files.values() if f.snapshot_id == snapshot_id]
+        status_set = {(f.status or "").upper() for f in files if f.status}
+
+        if not status_set:
+            return self._map_snapshot_wire_status(default_status)
+
+        if "APPLYING" in status_set:
+            return "APPLYING"
+        if "APPLIED" in status_set:
+            return "APPLIED"
+        if status_set == {"ACCEPTED"}:
+            return "ACCEPTED"
+        if "ACCEPTED" in status_set and "REJECTED" in status_set:
+            return "PARTIALLY_ACCEPTED"
+        if status_set == {"REJECTED"}:
+            return "REJECTED"
+        if "GENERATING" in status_set:
+            return "GENERATING"
+        if "CANCELLED" in status_set:
+            return "CANCELLED"
+        if "APPLYING_FAILED" in status_set or "GENERATING_FAILED" in status_set:
+            return "CANCELLED"
+
+        return self._map_snapshot_wire_status(default_status)
+
+    @staticmethod
+    def _map_snapshot_wire_status(status: str | None) -> str:
+        status_up = (status or "").upper()
+        if status_up == "ACTIVE":
+            return "ACTIVE_INIT"
+        return status_up or "ACTIVE_INIT"
 
     @staticmethod
     def compute_diff_info(old_content: str, new_content: str) -> DiffInfo:

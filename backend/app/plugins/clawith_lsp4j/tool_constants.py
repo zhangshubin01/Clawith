@@ -34,7 +34,10 @@ TOOL_NAME_MAP = {
 # Name used in markdown toolCall blocks for plugin-side rendering.
 TOOL_DISPLAY_NAME_MAP = {
     "replace_text_by_path": "edit_file",
-    "create_file_with_text": "write_file",
+    # Plugin ToolPanel file-branch switching checks raw string toolName and expects "create_file".
+    # If we send "write_file", it won't enter the file-tool branch consistently.
+    "create_file_with_text": "create_file",
+    "write_file": "create_file",
     "delete_file_by_path": "delete_file",
     "list_files": "list_dir",
     "search_files": "search_file",
