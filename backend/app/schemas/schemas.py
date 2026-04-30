@@ -104,6 +104,7 @@ class TenantChoice(BaseModel):
     tenant_id: uuid.UUID | None
     tenant_name: str
     tenant_slug: str
+    logo_url: str | None = None
 
 
 class MultiTenantResponse(BaseModel):
@@ -270,6 +271,12 @@ class AgentOut(BaseModel):
     unread_count: int = 0
     has_api_key: bool = False
     api_key_hash: str | None = None
+    # True when the current viewer already has an onboarding row for this
+    # agent. Computed per-request by the API layer from the junction table;
+    # not an ORM attribute, so callers must set it explicitly. Defaults to
+    # True so list endpoints that don't care about onboarding don't leak
+    # stale "needs onboarding" UI to users they shouldn't prompt.
+    onboarded_for_me: bool = True
     created_at: datetime
     last_active_at: datetime | None = None
 

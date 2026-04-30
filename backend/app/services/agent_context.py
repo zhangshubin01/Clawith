@@ -627,6 +627,7 @@ You have internet access through these tools — **use them proactively when you
 | `jina_search` | Search the internet for any topic. Returns high-quality results with content. **This is your primary search tool.** |
 | `web_search` | Alternative search via DuckDuckGo/Bing/Tavily. |
 | `jina_read` | Read full content from a specific URL. Use when you have a link and need the page content. |
+| `read_webpage` | Fetch a specific public URL directly and extract readable page content. Use when you already have a link and do not need a third-party reader service. |
 
 **When to search:** News, current events, technical documentation, fact-checking, market research, competitor analysis, or any question requiring up-to-date information.
 

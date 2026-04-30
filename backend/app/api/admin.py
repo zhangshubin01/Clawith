@@ -480,21 +480,38 @@ async def get_enhanced_metrics(
 
     # ── 5. Churn Warnings (>10M tokens, 14+ days inactive) ──
     churn_q = await db.execute(text("""
+        WITH tenant_token_totals AS (
+            SELECT
+                tenant_id,
+                SUM(tokens_used_total) AS total_tokens
+            FROM agents
+            GROUP BY tenant_id
+        ),
+        tenant_last_active AS (
+            SELECT
+                a.tenant_id,
+                MAX(cs.created_at) AS last_active
+            FROM agents a
+            LEFT JOIN chat_sessions cs ON cs.agent_id = a.id
+            GROUP BY a.tenant_id
+        )
         SELECT
             t.name,
-            SUM(a.tokens_used_total) AS total_tokens,
-            MAX(cs.created_at) AS last_active,
-            EXTRACT(DAY FROM NOW() - MAX(cs.created_at))::int AS days_inactive
+            tt.total_tokens,
+            tla.last_active,
+            CASE
+                WHEN tla.last_active IS NULL THEN NULL
+                ELSE EXTRACT(DAY FROM NOW() - tla.last_active)::int
+            END AS days_inactive
         FROM tenants t
-        JOIN agents a ON a.tenant_id = t.id
-        LEFT JOIN chat_sessions cs ON cs.agent_id = a.id
-        GROUP BY t.id, t.name
-        HAVING SUM(a.tokens_used_total) > 10000000
+        JOIN tenant_token_totals tt ON tt.tenant_id = t.id
+        LEFT JOIN tenant_last_active tla ON tla.tenant_id = t.id
+        WHERE tt.total_tokens > 10000000
             AND (
-                MAX(cs.created_at) IS NULL
-                OR MAX(cs.created_at) < NOW() - INTERVAL '14 days'
+                tla.last_active IS NULL
+                OR tla.last_active < NOW() - INTERVAL '14 days'
             )
-        ORDER BY SUM(a.tokens_used_total) DESC
+        ORDER BY tt.total_tokens DESC
     """))
     churn_warnings = []
     for row in churn_q.all():

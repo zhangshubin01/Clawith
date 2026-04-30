@@ -338,6 +338,7 @@ async def call_llm(
     supports_vision=False,
     max_tool_rounds_override: int | None = None,
     cancel_event: asyncio.Event | None = None,
+    skip_tools: bool = False,
 ) -> str:
     """Call LLM via unified client with function-calling tool loop.
 
@@ -360,7 +361,10 @@ async def call_llm(
     static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_user_name)
 
     # Load tools dynamically from DB
-    tools_for_llm = await agent_tools.get_agent_tools_for_llm(agent_id) if agent_id else agent_tools.AGENT_TOOLS
+    if skip_tools:
+        tools_for_llm = []
+    else:
+        tools_for_llm = await agent_tools.get_agent_tools_for_llm(agent_id) if agent_id else agent_tools.AGENT_TOOLS
 
     # Convert messages to LLMMessage format
     api_messages = [LLMMessage(role="system", content=static_prompt, dynamic_content=dynamic_prompt)]
@@ -551,6 +555,7 @@ async def call_llm_with_failover(
     supports_vision=False,
     on_failover=None,
     cancel_event: asyncio.Event | None = None,
+    skip_tools: bool = False,
 ) -> str:
     """Call LLM with automatic failover support.
 
@@ -595,6 +600,7 @@ async def call_llm_with_failover(
         on_thinking=on_thinking,
         supports_vision=supports_vision,
         cancel_event=cancel_event,
+        skip_tools=skip_tools,
     )
 
     # Check if we need to failover
@@ -662,6 +668,7 @@ async def call_llm_with_failover(
         on_thinking=on_thinking,
         supports_vision=getattr(fallback_model, 'supports_vision', False),
         cancel_event=cancel_event,
+        skip_tools=skip_tools,
     )
 
     # Combine error messages if fallback also failed

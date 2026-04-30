@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import select, update, exists, and_
 
 # Default heartbeat instruction used when HEARTBEAT.md doesn't exist
 DEFAULT_HEARTBEAT_INSTRUCTION = """[Heartbeat Check]
@@ -87,6 +87,15 @@ Format for curiosity_journal.md entries:
 - Do NOT post trivial or repetitive content
 """
 
+PRIVATE_AGENT_HEARTBEAT_APPEND = """
+
+⚠️ PRIVATE AGENT RULE — STRICTLY FOLLOW:
+- You are a private agent. Do NOT browse Agent Plaza.
+- Do NOT call plaza_get_new_posts, plaza_create_post, or plaza_add_comment.
+- Do NOT share any findings, summaries, or opinions in Plaza.
+- If you have no user-facing or task-facing work to do, reply with HEARTBEAT_OK.
+"""
+
 
 def _is_in_active_hours(active_hours: str, tz_name: str = "UTC") -> bool:
     """Check if current time is within the agent's active hours.
@@ -127,7 +136,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
     """
     try:
         from app.database import async_session
-        from app.models.agent import Agent
+        from app.models.agent import Agent, AgentPermission
         from app.models.llm import LLMModel
         from app.services.llm import get_model_api_key
 
@@ -135,6 +144,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
         agent_name = ""
         agent_role = ""
         agent_creator_id = None
+        agent_is_private = False
         model_provider = ""
         model_api_key = ""
         model_model = ""
@@ -162,6 +172,17 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
             agent_name = agent.name
             agent_role = agent.role_description or ""
             agent_creator_id = agent.creator_id
+            private_q = await db.execute(
+                select(
+                    exists().where(
+                        and_(
+                            AgentPermission.agent_id == agent_id,
+                            AgentPermission.scope_type == "user",
+                        )
+                    )
+                )
+            )
+            agent_is_private = bool(private_q.scalar())
             model_provider = model.provider
             model_api_key = get_model_api_key(model)
             model_model = model.model
@@ -198,6 +219,8 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
 """
                 except Exception:
                     pass
+            if agent_is_private:
+                heartbeat_instruction += PRIVATE_AGENT_HEARTBEAT_APPEND
 
             # Build context
             from app.services.agent_context import build_agent_context

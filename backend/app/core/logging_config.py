@@ -39,6 +39,17 @@ _LOG_FORMAT_PLAIN = (
 )
 
 
+NOISY_CONNECTION_LOGGERS = {
+    # WebSocket accepted / HTTP access lines from uvicorn.
+    "uvicorn.access": logging.WARNING,
+    # "connection open" / "connection closed" emitted by websockets.
+    "websockets": logging.WARNING,
+    "websockets.server": logging.WARNING,
+    "websockets.client": logging.WARNING,
+    "uvicorn.protocols.websockets.websockets_impl": logging.WARNING,
+}
+
+
 def get_trace_id() -> str:
     """Get current trace ID from context."""
     return trace_id_var.get()
@@ -185,6 +196,13 @@ def _add_file_handler(settings: Settings, log_path: Path) -> None:
     )
 
 
+def quiet_noisy_connection_loggers() -> None:
+    """Reduce chatty transport-level logs while keeping warnings/errors visible."""
+    for logger_name, level in NOISY_CONNECTION_LOGGERS.items():
+        target = logging.getLogger(logger_name)
+        target.setLevel(level)
+
+
 def _intercept_standard_logging():
     """Redirect standard library logging to loguru."""
 
@@ -221,6 +239,7 @@ def _intercept_standard_logging():
     for name in list(logging.root.manager.loggerDict):
         logging.getLogger(name).handlers = [handler]
         logging.getLogger(name).propagate = False
+    quiet_noisy_connection_loggers()
 
     # Suppress noisy third-party loggers
     for name in ("httpx", "httpcore", "urllib3"):

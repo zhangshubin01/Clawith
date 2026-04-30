@@ -639,6 +639,31 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "read_webpage",
+            "description": "Fetch a public HTTP/HTTPS URL directly and extract readable webpage text. Use this when you already have a specific link and need the page content without relying on an external reader service. Private, local, and internal network URLs are blocked.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The full public HTTP/HTTPS URL of the web page to read, e.g. 'https://example.com/article'",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Max characters to return (default 12000, max 50000)",
+                    },
+                    "include_links": {
+                        "type": "boolean",
+                        "description": "Include up to 30 extracted page links (default false)",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_document",
             "description": "Read office document contents (PDF, Word, Excel, PPT, etc.) and extract text. Suitable for reading knowledge base documents.",
             "parameters": {
@@ -2168,6 +2193,8 @@ async def _execute_tool_direct(
             return await _web_search(arguments, agent_id)
         elif tool_name == "jina_search":
             return await _jina_search(arguments)
+        elif tool_name == "read_webpage":
+            return await _read_webpage(arguments)
         elif tool_name == "exa_search":
             return await _exa_search(arguments, agent_id)
         elif tool_name == "duckduckgo_search":
@@ -2449,7 +2476,7 @@ async def execute_tool(
         elif tool_name == "jina_read":
             result = await _jina_read(arguments)
         elif tool_name == "read_webpage":
-            result = await _jina_read(arguments)  # redirect legacy to jina
+            result = await _read_webpage(arguments)
         elif tool_name == "plaza_get_new_posts":
             result = await _plaza_get_new_posts(agent_id, arguments)
         elif tool_name == "plaza_create_post":
@@ -2803,6 +2830,207 @@ async def _jina_read(arguments: dict) -> str:
 
     except Exception as e:
         return f"❌ Jina Reader error: {str(e)[:300]}"
+
+
+async def _validate_public_http_url(url: str) -> tuple[str | None, str | None]:
+    """Normalize a URL and reject local/private network targets."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    url = (url or "").strip()
+    if not url:
+        return None, "❌ Please provide a URL"
+    if "://" not in url:
+        url = "https://" + url
+
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return None, "❌ Only HTTP and HTTPS URLs are supported"
+    if not parsed.hostname:
+        return None, "❌ URL must include a hostname"
+
+    hostname = parsed.hostname
+    try:
+        ipaddress.ip_address(hostname)
+        host_is_ip = True
+    except ValueError:
+        host_is_ip = False
+
+    if hostname.lower() in {"localhost", "localhost.localdomain"}:
+        return None, "❌ Localhost URLs are blocked for safety"
+
+    try:
+        if host_is_ip:
+            addresses = [hostname]
+        else:
+            loop = asyncio.get_running_loop()
+            infos = await loop.run_in_executor(
+                None,
+                lambda: socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM),
+            )
+            addresses = [info[4][0] for info in infos]
+    except Exception as exc:
+        return None, f"❌ Could not resolve hostname {hostname}: {str(exc)[:160]}"
+
+    for address in set(addresses):
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            return None, f"❌ Could not validate resolved address: {address}"
+        is_proxy_test_range = (not host_is_ip) and ip in ipaddress.ip_network("198.18.0.0/15")
+        if (
+            ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_unspecified
+            or ip.is_reserved
+            or (ip.is_private and not is_proxy_test_range)
+        ):
+            return None, f"❌ Private, local, reserved, or internal network URLs are blocked ({address})"
+
+    return url, None
+
+
+def _fallback_extract_visible_text(html: str) -> str:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "template", "svg", "canvas", "header", "footer", "nav", "aside"]):
+        tag.decompose()
+    text = soup.get_text("\n")
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def _extract_page_links(html: str, base_url: str, limit: int = 30) -> list[str]:
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin
+
+    soup = BeautifulSoup(html, "html.parser")
+    links: list[str] = []
+    seen: set[str] = set()
+    for anchor in soup.find_all("a", href=True):
+        href = urljoin(base_url, anchor["href"].strip())
+        if not href.startswith(("http://", "https://")) or href in seen:
+            continue
+        label = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True))[:80] or href
+        seen.add(href)
+        links.append(f"- {label}: {href}")
+        if len(links) >= limit:
+            break
+    return links
+
+
+async def _read_webpage(arguments: dict) -> str:
+    """Fetch and extract readable content from a public webpage without a third-party reader API."""
+    import httpx
+    import trafilatura
+    from bs4 import BeautifulSoup
+
+    url, validation_error = await _validate_public_http_url(arguments.get("url", ""))
+    if validation_error:
+        return validation_error
+
+    max_chars = min(max(int(arguments.get("max_chars", 12000)), 500), 50000)
+    include_links = bool(arguments.get("include_links", False))
+    max_bytes = 2_000_000
+    headers = {
+        "User-Agent": "ClawithBot/1.0 (+https://clawith.ai) Mozilla/5.0",
+        "Accept": "text/html, text/plain, application/json, application/xml;q=0.9, text/*;q=0.8, */*;q=0.5",
+    }
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            async with client.stream("GET", url, headers=headers) as resp:
+                content_length = resp.headers.get("content-length")
+                if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+                    return f"❌ Page is too large to read safely ({content_length} bytes, limit {max_bytes} bytes)"
+
+                chunks: list[bytes] = []
+                total = 0
+                truncated_bytes = False
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        remaining = max_bytes - sum(len(part) for part in chunks)
+                        if remaining > 0:
+                            chunks.append(chunk[:remaining])
+                        truncated_bytes = True
+                        break
+                    chunks.append(chunk)
+
+                status_code = resp.status_code
+                final_url = str(resp.url)
+                content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                encoding = resp.encoding or "utf-8"
+
+        if status_code >= 400:
+            return f"❌ Webpage fetch failed HTTP {status_code}: {final_url}"
+
+        raw = b"".join(chunks)
+        text = raw.decode(encoding, errors="replace").strip()
+        if not text:
+            return f"❌ Empty response from {final_url}"
+
+        title = ""
+        description = ""
+        extracted = text
+        links: list[str] = []
+
+        if content_type in {"", "text/html", "application/xhtml+xml"} or "<html" in text[:500].lower():
+            soup = BeautifulSoup(text, "html.parser")
+            if soup.title and soup.title.string:
+                title = soup.title.string.strip()
+            meta_description = soup.find("meta", attrs={"name": "description"})
+            if meta_description and meta_description.get("content"):
+                description = meta_description["content"].strip()
+
+            extracted = trafilatura.extract(
+                text,
+                url=final_url,
+                output_format="markdown",
+                include_links=include_links,
+                include_comments=False,
+                include_tables=True,
+            ) or _fallback_extract_visible_text(text)
+            if include_links:
+                links = _extract_page_links(text, final_url)
+        elif content_type.startswith("text/") or content_type in {"application/json", "application/xml", "text/xml"}:
+            title = final_url
+        else:
+            return f"❌ Unsupported content type: {content_type or 'unknown'}"
+
+        extracted = extracted.strip()
+        if not extracted:
+            return f"❌ Could not extract readable content from {final_url}"
+
+        truncated_chars = len(extracted) > max_chars
+        if truncated_chars:
+            extracted = extracted[:max_chars].rstrip() + f"\n\n[... truncated at {max_chars} chars]"
+
+        meta_lines = [
+            f"URL: {final_url}",
+            f"Status: HTTP {status_code}",
+        ]
+        if title:
+            meta_lines.append(f"Title: {title}")
+        if description:
+            meta_lines.append(f"Description: {description}")
+        if truncated_bytes:
+            meta_lines.append(f"Note: response body truncated at {max_bytes} bytes before extraction")
+        if truncated_chars:
+            meta_lines.append(f"Note: extracted text truncated at {max_chars} characters")
+
+        result = "🌐 **Webpage content**\n\n" + "\n".join(meta_lines) + "\n\n---\n\n" + extracted
+        if links:
+            result += "\n\n---\n\nLinks:\n" + "\n".join(links)
+        return result
+
+    except httpx.TimeoutException:
+        return f"❌ Webpage fetch timed out: {url}"
+    except Exception as e:
+        return f"❌ Webpage read error: {str(e)[:300]}"
 
 
 
@@ -3308,8 +3536,19 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
         from app.services.mcp_client import MCPClient
 
         async with async_session() as db:
+            # Primary lookup: clawith-prefixed name (e.g.
+            # mcp_shibui_finance_unlock_financial_analysis).
             result = await db.execute(select(Tool).where(Tool.name == tool_name, Tool.type == "mcp"))
             tool = result.scalar_one_or_none()
+
+            # Fallback: LLM sometimes drops the mcp_<server>_ prefix and calls
+            # the bare MCP-side tool name (e.g. unlock_financial_analysis).
+            # Resolve by mcp_tool_name when the prefixed name doesn't match.
+            if not tool:
+                result = await db.execute(
+                    select(Tool).where(Tool.mcp_tool_name == tool_name, Tool.type == "mcp")
+                )
+                tool = result.scalar_one_or_none()
 
             if not tool:
                 logger.warning(f"[MCP] Unknown tool: {tool_name}")
@@ -3406,9 +3645,14 @@ async def _execute_via_smithery_connect(mcp_url: str, tool_name: str, arguments:
             "Please set smithery_namespace and smithery_connection_id in the tool configuration."
         )
 
+    # Smithery Connect (and many MCP servers) emit SSE responses for tools/call.
+    # The server returns 406 Not Acceptable if the client doesn't declare both
+    # application/json and text/event-stream in the Accept header. We parse
+    # both formats below, so advertise both.
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
     }
 
     try:
@@ -4629,7 +4873,7 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
 
 
 async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:
-    """Send message via the recipient's configured channel (Feishu/DingTalk/WeCom).
+    """Send message via the recipient's configured external channel.
 
     1. Find target user from relationships (AgentRelationship -> OrgMember)
     2. Determine user's provider type (via OrgMember.provider_id -> IdentityProvider)
@@ -4643,7 +4887,8 @@ async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:
 
     member_name = (args.get("member_name") or "").strip()
     message_text = (args.get("message") or "").strip()
-    target_channel = (args.get("channel") or "").strip().lower()
+    raw_target_channel = (args.get("channel") or "").strip().lower()
+    target_channel = "teams" if raw_target_channel == "microsoft_teams" else raw_target_channel
 
     if not member_name:
         return "❌ Please provide member_name"
@@ -4668,25 +4913,30 @@ async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:
             target_member = None
             provider_type = None
 
+            def _normalize_provider_type(value: str | None) -> str | None:
+                if not value:
+                    return None
+                return "teams" if value == "microsoft_teams" else value
+
             # Handle multiple matches across different providers
             if target_channel:
                 for rel, member, provider in rows:
-                    if provider and provider.provider_type == target_channel:
+                    if provider and _normalize_provider_type(provider.provider_type) == target_channel:
                         target_member = member
-                        provider_type = target_channel
+                        provider_type = _normalize_provider_type(provider.provider_type)
                         break
                 if not target_member:
-                    available = [p.provider_type for _, _, p in rows if p]
+                    available = sorted({_normalize_provider_type(p.provider_type) for _, _, p in rows if p})
                     return f"❌ {member_name} not found in {target_channel} channel. Available channels: {', '.join(available)}"
             else:
                 if len(rows) > 1:
-                    available = [p.provider_type for _, _, p in rows if p]
+                    available = [_normalize_provider_type(p.provider_type) for _, _, p in rows if p]
                     logger.warning(f"[ChannelMessage] Ambiguous member '{member_name}' found in multiple channels: {available}")
                     # Pick the first one as before, but mention others if possible
                 
                 rel, member, provider = rows[0]
                 target_member = member
-                provider_type = provider.provider_type if provider else None
+                provider_type = _normalize_provider_type(provider.provider_type) if provider else None
 
             # 2. Determine channel based on provider type
             if not provider_type:
@@ -4735,6 +4985,12 @@ async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:
                 return await _send_dingtalk_message(agent_id, member_name, message_text, target_member)
             elif provider_type == "wecom":
                 return await _send_wecom_message(agent_id, member_name, message_text, target_member)
+            elif provider_type == "slack":
+                return await _send_slack_message(agent_id, member_name, message_text, target_member)
+            elif provider_type == "teams":
+                return await _send_teams_channel_message(agent_id, member_name, message_text, target_member)
+            elif provider_type == "wechat":
+                return await _send_wechat_channel_message(agent_id, member_name, message_text, target_member)
             else:
                 return f"❌ Unsupported channel type: {provider_type}"
 
@@ -4928,7 +5184,247 @@ async def _send_wecom_message(
         logger.exception("[WeCom] Error")
         return f"❌ WeCom message error: {str(e)[:200]}"
 
+async def _send_slack_message(
+    agent_id: uuid.UUID,
+    member_name: str,
+    message_text: str,
+    target_member: "OrgMember",
+) -> str:
+    """Send proactive Slack DM via conversations.open + chat.postMessage."""
+    import httpx
 
+    from app.api.slack import _send_slack_messages
+
+    try:
+        async with async_session() as db:
+            config_result = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "slack",
+                    ChannelConfig.is_configured == True,
+                )
+            )
+            config = config_result.scalar_one_or_none()
+            if not config:
+                return "❌ This agent has no Slack channel configured"
+
+            user_id = (target_member.external_id or "").strip()
+            if not user_id:
+                return f"❌ {member_name} has no Slack user_id"
+
+            bot_token = (config.app_secret or "").strip()
+            if not bot_token:
+                return "❌ Slack bot token is missing"
+
+            async with httpx.AsyncClient(timeout=10) as client:
+                open_resp = await client.post(
+                    "https://slack.com/api/conversations.open",
+                    headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"},
+                    json={"users": user_id},
+                )
+                data = open_resp.json()
+                if open_resp.status_code >= 400 or not data.get("ok"):
+                    err = data.get("error") or open_resp.text[:200]
+                    return f"❌ Slack conversations.open failed: {err}"
+                channel_id = (((data.get("channel") or {})).get("id") or "").strip()
+
+            if not channel_id:
+                return f"❌ Slack DM channel unavailable for {member_name}"
+
+            await _send_slack_messages(bot_token, channel_id, message_text)
+
+            try:
+                agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+                agent_obj = agent_r.scalar_one_or_none()
+                platform_user = await get_platform_user_by_org_member(
+                    db=db,
+                    org_member=target_member,
+                    agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
+                )
+                conv_id = f"slack_{channel_id}"
+                sess = await find_or_create_channel_session(
+                    db=db,
+                    agent_id=agent_id,
+                    user_id=platform_user.id,
+                    external_conv_id=conv_id,
+                    source_channel="slack",
+                    first_message_title=message_text[:30],
+                )
+                db.add(ChatMessage(
+                    agent_id=agent_id,
+                    user_id=platform_user.id,
+                    role="assistant",
+                    content=message_text,
+                    conversation_id=str(sess.id),
+                ))
+                sess.last_message_at = datetime.now(timezone.utc)
+                await db.commit()
+                logger.info(f"[Slack] Proactive message saved to session {sess.id}")
+            except Exception as ex:
+                logger.error(f"[Slack] Failed to save proactive message to session: {ex}")
+
+            return f"✅ Message sent to {member_name} via Slack"
+    except Exception as e:
+        logger.exception("[Slack] Error")
+        return f"❌ Slack message error: {str(e)[:200]}"
+
+
+async def _send_teams_channel_message(
+    agent_id: uuid.UUID,
+    member_name: str,
+    message_text: str,
+    target_member: "OrgMember",
+) -> str:
+    """Send proactive Teams message using the latest known conversation context."""
+    from app.api.teams import _send_teams_message
+
+    try:
+        async with async_session() as db:
+            config_result = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "microsoft_teams",
+                    ChannelConfig.is_configured == True,
+                )
+            )
+            config = config_result.scalar_one_or_none()
+            if not config:
+                return "❌ This agent has no Teams channel configured"
+
+            service_url = str((config.extra_config or {}).get("service_url") or "").strip()
+            if not service_url:
+                return "❌ Teams proactive send requires an existing inbound conversation to capture service_url"
+
+            agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            agent_obj = agent_r.scalar_one_or_none()
+            platform_user = await get_platform_user_by_org_member(
+                db=db,
+                org_member=target_member,
+                agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
+            )
+
+            session_result = await db.execute(
+                select(ChatSession)
+                .where(
+                    ChatSession.agent_id == agent_id,
+                    ChatSession.user_id == platform_user.id,
+                    ChatSession.source_channel == "microsoft_teams",
+                    ChatSession.is_group == False,
+                )
+                .order_by(ChatSession.last_message_at.desc(), ChatSession.created_at.desc())
+                .limit(1)
+            )
+            session = session_result.scalar_one_or_none()
+            conversation_id = str(session.external_conv_id or "").strip() if session else ""
+            if not conversation_id:
+                return f"❌ Teams proactive send to {member_name} requires them to message the bot first"
+
+            await _send_teams_message(
+                config,
+                conversation_id,
+                {
+                    "type": "message",
+                    "text": message_text,
+                    "conversation": {"id": conversation_id},
+                },
+            )
+
+            db.add(ChatMessage(
+                agent_id=agent_id,
+                user_id=platform_user.id,
+                role="assistant",
+                content=message_text,
+                conversation_id=str(session.id),
+            ))
+            session.last_message_at = datetime.now(timezone.utc)
+            await db.commit()
+            logger.info(f"[Teams] Proactive message saved to session {session.id}")
+            return f"✅ Message sent to {member_name} via Teams"
+    except Exception as e:
+        logger.exception("[Teams] Error")
+        return f"❌ Teams message error: {str(e)[:200]}"
+
+
+async def _send_wechat_channel_message(
+    agent_id: uuid.UUID,
+    member_name: str,
+    message_text: str,
+    target_member: "OrgMember",
+) -> str:
+    """Send proactive WeChat message using the latest cached context_token."""
+    from app.services.wechat_channel import (
+        WECHAT_ILINK_BASE_URL,
+        get_wechat_context_entry,
+        send_wechat_text_message,
+    )
+
+    try:
+        async with async_session() as db:
+            config_result = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "wechat",
+                    ChannelConfig.is_configured == True,
+                )
+            )
+            config = config_result.scalar_one_or_none()
+            if not config:
+                return "❌ This agent has no WeChat channel configured"
+
+            user_id = (target_member.external_id or "").strip()
+            if not user_id:
+                return f"❌ {member_name} has no WeChat user_id"
+
+            ctx_entry = get_wechat_context_entry(config.extra_config, from_user_id=user_id)
+            context_token = str((ctx_entry or {}).get("context_token") or "").strip()
+            conv_id = str((ctx_entry or {}).get("conv_id") or f"wechat_{user_id}").strip()
+            if not context_token:
+                return f"❌ WeChat proactive send to {member_name} requires them to message the bot first"
+
+            token = str((config.extra_config or {}).get("bot_token") or "").strip()
+            base_url = str((config.extra_config or {}).get("baseurl") or WECHAT_ILINK_BASE_URL).strip()
+            route_tag = str((config.extra_config or {}).get("route_tag") or "").strip() or None
+            if not token:
+                return "❌ WeChat bot token is missing"
+
+            await send_wechat_text_message(
+                token=token,
+                base_url=base_url,
+                to_user_id=user_id,
+                context_token=context_token,
+                text=message_text,
+                route_tag=route_tag,
+            )
+
+            agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            agent_obj = agent_r.scalar_one_or_none()
+            platform_user = await get_platform_user_by_org_member(
+                db=db,
+                org_member=target_member,
+                agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
+            )
+            sess = await find_or_create_channel_session(
+                db=db,
+                agent_id=agent_id,
+                user_id=platform_user.id,
+                external_conv_id=conv_id,
+                source_channel="wechat",
+                first_message_title=message_text[:30],
+            )
+            db.add(ChatMessage(
+                agent_id=agent_id,
+                user_id=platform_user.id,
+                role="assistant",
+                content=message_text,
+                conversation_id=str(sess.id),
+            ))
+            sess.last_message_at = datetime.now(timezone.utc)
+            await db.commit()
+            logger.info(f"[WeChat] Proactive message saved to session {sess.id}")
+            return f"✅ Message sent to {member_name} via WeChat"
+    except Exception as e:
+        logger.exception("[WeChat] Error")
+        return f"❌ WeChat message error: {str(e)[:200]}"
 async def _send_platform_message(agent_id: uuid.UUID, args: dict) -> str:
     """Send a proactive message to a first-party platform user."""
     username = args.get("username", "").strip()
@@ -5902,8 +6398,8 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
 async def _plaza_get_new_posts(agent_id: uuid.UUID, arguments: dict) -> str:
     """Get recent posts from the Agent Plaza, scoped to agent's tenant."""
     from app.models.plaza import PlazaPost, PlazaComment
-    from app.models.agent import Agent as AgentModel
-    from sqlalchemy import desc
+    from app.models.agent import Agent as AgentModel, AgentPermission
+    from sqlalchemy import desc, exists, and_
 
     limit = min(arguments.get("limit", 10), 20)
 
@@ -5912,6 +6408,24 @@ async def _plaza_get_new_posts(agent_id: uuid.UUID, arguments: dict) -> str:
             # Resolve agent's tenant_id
             ar = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             agent = ar.scalar_one_or_none()
+            if not agent:
+                return "Error: Agent not found."
+            if agent.is_system:
+                return "System agents cannot access Plaza."
+
+            private_agent_exists = await db.execute(
+                select(
+                    exists().where(
+                        and_(
+                            AgentPermission.agent_id == agent_id,
+                            AgentPermission.scope_type == "user",
+                        )
+                    )
+                )
+            )
+            if private_agent_exists.scalar():
+                return "Private agents cannot access Plaza."
+
             tenant_id = agent.tenant_id if agent else None
 
             q = select(PlazaPost).order_by(desc(PlazaPost.created_at)).limit(limit)
@@ -5953,7 +6467,8 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
     reports, not through Plaza posts.
     """
     from app.models.plaza import PlazaPost
-    from app.models.agent import Agent as AgentModel
+    from app.models.agent import Agent as AgentModel, AgentPermission
+    from sqlalchemy import exists, and_
 
     content = arguments.get("content", "").strip()
     if not content:
@@ -5976,6 +6491,18 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
                     "Use send_platform_message to communicate with users directly."
                 )
 
+            private_agent_exists = await db.execute(
+                select(
+                    exists().where(
+                        and_(
+                            AgentPermission.agent_id == agent_id,
+                            AgentPermission.scope_type == "user",
+                        )
+                    )
+                )
+            )
+            if private_agent_exists.scalar():
+                return "Private agents are not allowed to post to Plaza."
             post = PlazaPost(
                 author_id=agent_id,
                 author_type="agent",
@@ -6024,7 +6551,8 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
 async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
     """Add a comment to a plaza post."""
     from app.models.plaza import PlazaPost, PlazaComment
-    from app.models.agent import Agent as AgentModel
+    from app.models.agent import Agent as AgentModel, AgentPermission
+    from sqlalchemy import exists, and_
 
     post_id = arguments.get("post_id", "")
     content = arguments.get("content", "").strip()
@@ -6051,6 +6579,21 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
             agent = ar.scalar_one_or_none()
             if not agent:
                 return "Error: Agent not found."
+            if agent.is_system:
+                return "System agents are not allowed to comment on Plaza posts."
+
+            private_agent_exists = await db.execute(
+                select(
+                    exists().where(
+                        and_(
+                            AgentPermission.agent_id == agent_id,
+                            AgentPermission.scope_type == "user",
+                        )
+                    )
+                )
+            )
+            if private_agent_exists.scalar():
+                return "Private agents are not allowed to comment on Plaza posts."
 
             comment = PlazaComment(
                 post_id=pid,

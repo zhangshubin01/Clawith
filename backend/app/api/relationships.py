@@ -41,6 +41,10 @@ AGENT_RELATION_LABELS = {
 }
 
 
+def _can_manage_relationships(current_user: User, access_level: str) -> bool:
+    return access_level == "manage" or current_user.role in ("platform_admin", "org_admin")
+
+
 # ─── Schemas ───────────────────────────────────────────
 
 class RelationshipIn(BaseModel):
@@ -129,7 +133,18 @@ async def save_relationships(
     db: AsyncSession = Depends(get_db),
 ):
     """Replace all human relationships for this agent."""
-    await check_agent_access(db, current_user, agent_id)
+    _agent, access_level = await check_agent_access(db, current_user, agent_id)
+    if not _can_manage_relationships(current_user, access_level):
+        raise HTTPException(status_code=403, detail="Only org admins or managers can modify relationships")
+
+    deduped_relationships: list[RelationshipIn] = []
+    seen_member_ids: set[str] = set()
+    for relationship in data.relationships:
+        member_id = str(uuid.UUID(relationship.member_id))
+        if member_id in seen_member_ids:
+            continue
+        seen_member_ids.add(member_id)
+        deduped_relationships.append(relationship)
 
     deduped_relationships: list[RelationshipIn] = []
     seen_member_ids: set[str] = set()
@@ -168,7 +183,9 @@ async def delete_relationship(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a single human relationship."""
-    await check_agent_access(db, current_user, agent_id)
+    _agent, access_level = await check_agent_access(db, current_user, agent_id)
+    if not _can_manage_relationships(current_user, access_level):
+        raise HTTPException(status_code=403, detail="Only org admins or managers can modify relationships")
     result = await db.execute(
         select(AgentRelationship).where(AgentRelationship.id == rel_id, AgentRelationship.agent_id == agent_id)
     )
@@ -272,7 +289,9 @@ async def save_agent_relationships(
     db: AsyncSession = Depends(get_db),
 ):
     """Replace all agent-to-agent relationships."""
-    source_agent, _ = await check_agent_access(db, current_user, agent_id)
+    source_agent, access_level = await check_agent_access(db, current_user, agent_id)
+    if not _can_manage_relationships(current_user, access_level):
+        raise HTTPException(status_code=403, detail="Only org admins or managers can modify relationships")
 
     await db.execute(
         delete(AgentAgentRelationship).where(AgentAgentRelationship.agent_id == agent_id)
@@ -307,7 +326,9 @@ async def delete_agent_relationship(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a single agent-to-agent relationship."""
-    await check_agent_access(db, current_user, agent_id)
+    _agent, access_level = await check_agent_access(db, current_user, agent_id)
+    if not _can_manage_relationships(current_user, access_level):
+        raise HTTPException(status_code=403, detail="Only org admins or managers can modify relationships")
     result = await db.execute(
         select(AgentAgentRelationship).where(
             AgentAgentRelationship.id == rel_id,
