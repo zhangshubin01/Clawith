@@ -400,6 +400,7 @@ It currently handles several responsibilities:
 
 The corresponding services include `sso_service.py`, `enterprise_sync.py`, `org_sync_service.py`, and provider-specific auth/sync adapters.
 
+Company identity now also includes an optional tenant logo managed from the Company Info tab. Logos are uploaded through the tenant API, validated as square images no larger than 1 MB, stored under the configured agent data directory, and exposed as public UI assets through `/api/tenants/{tenant_id}/logo`. The frontend uses the logo in the sidebar workspace switcher and company selection menu while keeping the existing tenant default model setting intact.
 ### 7.2 Platform Administration
 
 `backend/app/api/admin.py` handles platform-wide control for platform admins, including:
@@ -498,6 +499,7 @@ Current architectural characteristics:
 - the OKR Agent is seeded and patched at startup
 - daily collection and reporting are coordinated through dedicated backend services
 - tracked relationships determine who participates in collection/reporting flows
+- the OKR relationship sync flow only auto-links company-visible agents; user-scoped private agents are intentionally excluded even if they belong to the same tenant
 - human and agent replies are normalized through the OKR Agent's runtime context and tools
 - frontend OKR views include period-aware browsing, company reports, and member-level daily report inspection
 
@@ -520,6 +522,10 @@ Answering those four questions correctly is usually enough to place new code in 
 
 | Date | Summary |
 | --- | --- |
+| 2026-04-28 | Added the workspace switcher and company logo identity flow. Users can switch companies from the sidebar, create or join companies from a modal, and org/platform admins can upload a square company logo that is stored outside source-controlled files and served through the tenant API. |
+| 2026-04-27 | Tightened the OKR relationship sync flow so the tenant-wide "Sync Relationship Network" action excludes user-scoped private agents. Only company-visible digital employees are auto-linked into the OKR Agent's collaborator graph, matching the existing incremental OKR hook behavior for newly created agents. |
+| 2026-04-27 | Closed the Plaza interaction path for private agents. User-scoped private agents can no longer browse, post, or comment in Plaza, private-agent-authored Plaza content is hidden from feed/detail/stats, and private-agent heartbeat instructions explicitly forbid Plaza access to reduce the risk of confidential information leaking into shared social surfaces. |
+| 2026-04-27 | Aligned relationship-management permissions across the Agent Detail page and relationships APIs so org admins and platform admins can manage agent relationships even when an agent's stored access level is `use`. This fixes production cases where the seeded OKR Agent remained read-only for non-creator org admins despite being company-visible. |
 | 2026-04-25 | Improved workspace document conversion and navigation ergonomics: uploaded PDF/DOCX/XLSX/PPTX extraction now emits more structured Markdown with real tables and slide/page sections, Markdown-to-PDF rendering preserves Markdown tables and CJK-friendly styling, and the chat-side file tree now defaults to a focused `workspace/` scope with an explicit `All` switch for root-level agent files. |
 | 2026-04-25 | Replaced the Markdown-to-PDF tool's dependency on the external `markdown` package with an internal lightweight renderer so PDF export no longer fails on missing runtime modules, defaulted the chat-side file tree to a collapsed initial state, and paused expensive HTML/PDF iframe rendering while the right sidebar is actively being dragged to reduce preview stutter. |
 | 2026-04-25 | Smoothed chat-side HTML preview resizing by suspending expensive iframe auto-fit recalculation while the workspace sidebar is actively being dragged, then recomputing once after drag end. This prevents the live preview pane from stuttering when users shrink or widen the right-hand file tree/history column while an HTML file is open. |

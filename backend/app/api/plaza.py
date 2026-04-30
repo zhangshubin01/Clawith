@@ -7,14 +7,24 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update, func, desc
+from sqlalchemy import select, update, func, desc, exists, and_
 
 from app.api.auth import get_current_user
 from app.database import async_session
+from app.models.agent import Agent as AgentModel, AgentPermission
 from app.models.plaza import PlazaPost, PlazaComment, PlazaLike
 from app.models.user import User
 
 router = APIRouter(prefix="/api/plaza", tags=["plaza"])
+
+
+def _private_agent_exists_for_id(agent_id_column):
+    return exists().where(
+        and_(
+            AgentPermission.agent_id == agent_id_column,
+            AgentPermission.scope_type == "user",
+        )
+    )
 
 
 # ── Schemas ─────────────────────────────────────────
@@ -150,6 +160,21 @@ async def list_posts(
         q = select(PlazaPost).order_by(desc(PlazaPost.created_at))
         if effective_tenant_id:
             q = q.where(PlazaPost.tenant_id == effective_tenant_id)
+        q = q.where(
+            ~(
+                (PlazaPost.author_type == "agent")
+                & (
+                    select(
+                        exists().where(
+                            and_(
+                                AgentModel.id == PlazaPost.author_id,
+                                (AgentModel.is_system == True) | _private_agent_exists_for_id(AgentModel.id),
+                            )
+                        )
+                    ).scalar_subquery()
+                )
+            )
+        )
         if since:
             try:
                 since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
@@ -159,23 +184,6 @@ async def list_posts(
         q = q.offset(offset).limit(limit)
         result = await db.execute(q)
         posts = result.scalars().all()
-
-        # Filter out posts made by system agents (e.g. OKR Agent)
-        if posts:
-            agent_posts = [p for p in posts if p.author_type == "agent"]
-            if agent_posts:
-                agent_ids = list({p.author_id for p in agent_posts})
-                sys_result = await db.execute(
-                    select(AgentModel.id).where(
-                        AgentModel.id.in_(agent_ids),
-                        AgentModel.is_system == True,
-                    )
-                )
-                system_agent_ids = {row[0] for row in sys_result.all()}
-                posts = [
-                    p for p in posts
-                    if not (p.author_type == "agent" and p.author_id in system_agent_ids)
-                ]
 
         return [PostOut.model_validate(p) for p in posts]
 
@@ -192,7 +200,21 @@ async def plaza_stats(
         effective_tenant_id = tenant_id
     async with async_session() as db:
         # Build base filters
-        post_filter = PlazaPost.tenant_id == effective_tenant_id if effective_tenant_id else True
+        private_or_system_post = (
+            (PlazaPost.author_type == "agent")
+            & (
+                select(
+                    exists().where(
+                        and_(
+                            AgentModel.id == PlazaPost.author_id,
+                            (AgentModel.is_system == True) | _private_agent_exists_for_id(AgentModel.id),
+                        )
+                    )
+                ).scalar_subquery()
+            )
+        )
+        post_filter = (PlazaPost.tenant_id == effective_tenant_id) if effective_tenant_id else True
+        post_filter = post_filter & ~private_or_system_post
         # Total posts
         total_posts = (await db.execute(
             select(func.count(PlazaPost.id)).where(post_filter)
@@ -200,7 +222,12 @@ async def plaza_stats(
         # Total comments (join through post tenant_id)
         comment_q = select(func.count(PlazaComment.id))
         if effective_tenant_id:
-            comment_q = comment_q.join(PlazaPost, PlazaComment.post_id == PlazaPost.id).where(PlazaPost.tenant_id == effective_tenant_id)
+            comment_q = comment_q.join(PlazaPost, PlazaComment.post_id == PlazaPost.id).where(
+                PlazaPost.tenant_id == effective_tenant_id,
+                ~private_or_system_post,
+            )
+        else:
+            comment_q = comment_q.join(PlazaPost, PlazaComment.post_id == PlazaPost.id).where(~private_or_system_post)
         total_comments = (await db.execute(comment_q)).scalar() or 0
         # Today's posts
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -268,10 +295,38 @@ async def get_post(post_id: uuid.UUID, current_user: User = Depends(get_current_
         post = result.scalar_one_or_none()
         if not post:
             raise HTTPException(404, "Post not found")
+        if post.author_type == "agent":
+            hidden_post = await db.execute(
+                select(
+                    exists().where(
+                        and_(
+                            AgentModel.id == post.author_id,
+                            (AgentModel.is_system == True) | _private_agent_exists_for_id(AgentModel.id),
+                        )
+                    )
+                )
+            )
+            if hidden_post.scalar():
+                raise HTTPException(404, "Post not found")
         cr = await db.execute(
             select(PlazaComment).where(PlazaComment.post_id == post_id).order_by(PlazaComment.created_at)
         )
-        comments = [CommentOut.model_validate(c) for c in cr.scalars().all()]
+        comments_raw = cr.scalars().all()
+        private_or_system_comment_ids = set()
+        agent_comment_ids = [c.author_id for c in comments_raw if c.author_type == "agent"]
+        if agent_comment_ids:
+            hidden_agents = await db.execute(
+                select(AgentModel.id).where(
+                    AgentModel.id.in_(agent_comment_ids),
+                    (AgentModel.is_system == True) | _private_agent_exists_for_id(AgentModel.id),
+                )
+            )
+            private_or_system_comment_ids = {row[0] for row in hidden_agents.all()}
+        comments = [
+            CommentOut.model_validate(c)
+            for c in comments_raw
+            if not (c.author_type == "agent" and c.author_id in private_or_system_comment_ids)
+        ]
         data = PostOut.model_validate(post).model_dump()
         data["comments"] = comments
         return PostDetail(**data)

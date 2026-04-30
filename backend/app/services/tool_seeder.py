@@ -5,6 +5,8 @@ from sqlalchemy import select
 from app.database import async_session
 from app.models.tool import Tool
 
+SYNC_IS_DEFAULT_TOOL_NAMES = {"read_webpage", "duckduckgo_search", "jina_search", "jina_read"}
+
 # Builtin tool definitions — these map to the hardcoded AGENT_TOOLS
 BUILTIN_TOOLS = [
     {
@@ -469,7 +471,7 @@ BUILTIN_TOOLS = [
         "description": "Search the internet using Jina AI (s.jina.ai). Returns high-quality results with full content. Requires Jina AI API key for higher rate limits.",
         "category": "search",
         "icon": "🔮",
-        "is_default": True,
+        "is_default": False,
         "parameters_schema": {
             "type": "object",
             "properties": {
@@ -497,7 +499,7 @@ BUILTIN_TOOLS = [
         "description": "Read and extract full content from a URL using Jina AI Reader (r.jina.ai). Returns clean markdown. Requires Jina AI API key for higher rate limits.",
         "category": "search",
         "icon": "📖",
-        "is_default": True,
+        "is_default": False,
         "parameters_schema": {
             "type": "object",
             "properties": {
@@ -518,6 +520,25 @@ BUILTIN_TOOLS = [
                 },
             ]
         },
+    },
+    {
+        "name": "read_webpage",
+        "display_name": "Read Webpage",
+        "description": "Fetch a public HTTP/HTTPS URL directly and extract readable webpage text. Use this when you already have a specific link and need its page content without relying on an external reader service.",
+        "category": "search",
+        "icon": "🌐",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full public HTTP/HTTPS URL to read"},
+                "max_chars": {"type": "integer", "description": "Max characters to return (default 12000, max 50000)"},
+                "include_links": {"type": "boolean", "description": "Whether to include extracted page links (default false)"},
+            },
+            "required": ["url"],
+        },
+        "config": {},
+        "config_schema": {},
     },
     {
         "name": "exa_search",
@@ -579,7 +600,7 @@ BUILTIN_TOOLS = [
         "description": "Search the internet using DuckDuckGo. Free, no API key required. Returns titles, URLs, and snippets.",
         "category": "search",
         "icon": "🦆",
-        "is_default": False,
+        "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
@@ -2862,6 +2883,9 @@ async def seed_builtin_tools():
                 if existing.icon != t["icon"]:
                     existing.icon = t["icon"]
                     updated_fields.append("icon")
+                if t["name"] in SYNC_IS_DEFAULT_TOOL_NAMES and existing.is_default != t["is_default"]:
+                    existing.is_default = t["is_default"]
+                    updated_fields.append("is_default")
                 if t.get("config_schema") and existing.config_schema != t["config_schema"]:
                     existing.config_schema = t["config_schema"]
                     updated_fields.append("config_schema")
@@ -2903,7 +2927,7 @@ async def seed_builtin_tools():
                         db.add(AgentTool(agent_id=agent_id, tool_id=tool_id, enabled=True))
             logger.info(f"[ToolSeeder] Auto-assigned {len(new_tool_ids)} new tools to {len(agent_ids)} agents")
 
-        OBSOLETE_TOOLS = ["bing_search", "read_webpage", "manage_tasks"]
+        OBSOLETE_TOOLS = ["bing_search", "manage_tasks"]
         for obsolete_name in OBSOLETE_TOOLS:
             result = await db.execute(select(Tool).where(Tool.name == obsolete_name))
             obsolete = result.scalar_one_or_none()

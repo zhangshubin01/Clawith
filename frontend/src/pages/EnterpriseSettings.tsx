@@ -10,6 +10,9 @@ import { saveAccentColor, getSavedAccentColor, resetAccentColor, PRESET_COLORS }
 import UserManagement from './UserManagement';
 import InvitationCodes from './InvitationCodes';
 import LinearCopyButton from '../components/LinearCopyButton';
+import { useDialog } from '../components/Dialog/DialogProvider';
+import { useToast } from '../components/Toast/ToastProvider';
+import { buildCompanyRegions, type CompanyRegion } from '../utils/companyRegions';
 // API helpers for enterprise endpoints
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
     const token = localStorage.getItem('token');
@@ -131,6 +134,8 @@ function SsoChannelSection({ idpType, existingProvider, tenant, t }: {
     idpType: string; existingProvider: any; tenant: any; t: any;
 }) {
     const qc = useQueryClient();
+    const dialog = useDialog();
+    const toast = useToast();
     const [liveDomain, setLiveDomain] = useState<string>(existingProvider?.sso_domain || tenant?.sso_domain || '');
     const [ssoError, setSsoError] = useState<string>('');
     const [toggling, setToggling] = useState(false);
@@ -145,7 +150,7 @@ function SsoChannelSection({ idpType, existingProvider, tenant, t }: {
 
     const handleSsoToggle = async () => {
         if (!existingProvider) {
-            alert(t('enterprise.identity.saveFirst', 'Please save the configuration first to enable SSO.'));
+            toast.warning(t('enterprise.identity.saveFirst', 'Please save the configuration first to enable SSO.'));
             return;
         }
         const newVal = !ssoEnabled;
@@ -285,6 +290,7 @@ function SsoChannelSection({ idpType, existingProvider, tenant, t }: {
 // ─── Org & Identity Tab ─────────────────────────────
 function OrgTab({ tenant }: { tenant: any }) {
     const { t } = useTranslation();
+    const dialog = useDialog();
     const qc = useQueryClient();
 
 
@@ -870,7 +876,7 @@ function OrgTab({ tenant }: { tenant: any }) {
                             <span style={{ fontSize: '12px', color: 'var(--success)' }}>Saved</span>
                         )}
                         {existingProvider && (
-                            <button className="btn btn-ghost btn-sm" style={{ color: 'var(--error)' }} onClick={() => confirm('Are you sure you want to delete this configuration?') && deleteProvider.mutate(existingProvider.id)}>
+                            <button className="btn btn-ghost btn-sm" style={{ color: 'var(--error)' }} onClick={async () => { const ok = await dialog.confirm('确定要删除此配置吗？', { title: '删除配置', danger: true, confirmLabel: '删除' }); if (ok) deleteProvider.mutate(existingProvider.id); }}>
                                 {t('common.delete', 'Delete')}
                             </button>
                         )}
@@ -1642,7 +1648,267 @@ function SkillsTab() {
 
 
 
-// ─── Company Name Editor ───────────────────────────
+// ─── Company Identity Editor ───────────────────────
+function CompanyLogoCropModal({ imageUrl, imageName, onCancel, onSave }: {
+    imageUrl: string;
+    imageName: string;
+    onCancel: () => void;
+    onSave: (blob: Blob) => void;
+}) {
+    const { t } = useTranslation();
+    const imgRef = useRef<HTMLImageElement>(null);
+    const [naturalSize, setNaturalSize] = useState({ width: 1, height: 1 });
+    const [zoom, setZoom] = useState(1);
+    const [offset, setOffset] = useState({ x: 0, y: 0 });
+    const [dragStart, setDragStart] = useState<{ x: number; y: number; ox: number; oy: number } | null>(null);
+    const cropSize = 240;
+
+    const clampOffset = (next: { x: number; y: number }, nextZoom = zoom) => {
+        const baseScale = Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height);
+        const displayW = naturalSize.width * baseScale * nextZoom;
+        const displayH = naturalSize.height * baseScale * nextZoom;
+        const maxX = Math.max(0, (displayW - cropSize) / 2);
+        const maxY = Math.max(0, (displayH - cropSize) / 2);
+        return {
+            x: Math.min(maxX, Math.max(-maxX, next.x)),
+            y: Math.min(maxY, Math.max(-maxY, next.y)),
+        };
+    };
+
+    const handleSave = () => {
+        const img = imgRef.current;
+        if (!img) return;
+        const outputSize = 512;
+        const ratio = outputSize / cropSize;
+        const baseScale = Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height);
+        const displayW = naturalSize.width * baseScale * zoom;
+        const displayH = naturalSize.height * baseScale * zoom;
+        const dx = ((cropSize - displayW) / 2 + offset.x) * ratio;
+        const dy = ((cropSize - displayH) / 2 + offset.y) * ratio;
+        const canvas = document.createElement('canvas');
+        canvas.width = outputSize;
+        canvas.height = outputSize;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, outputSize, outputSize);
+        ctx.drawImage(img, dx, dy, displayW * ratio, displayH * ratio);
+        canvas.toBlob((blob) => {
+            if (blob) onSave(blob);
+        }, 'image/png');
+    };
+
+    return (
+        <div className="tenant-logo-crop-backdrop" onClick={onCancel}>
+            <div className="tenant-logo-crop-modal" onClick={e => e.stopPropagation()}>
+                <div className="tenant-logo-crop-header">
+                    <div>
+                        <h3>{t('enterprise.logo.cropTitle', 'Crop company logo')}</h3>
+                        <p>{imageName}</p>
+                    </div>
+                    <button type="button" onClick={onCancel}>×</button>
+                </div>
+                <div
+                    className="tenant-logo-crop-stage"
+                    onPointerDown={e => {
+                        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+                        setDragStart({ x: e.clientX, y: e.clientY, ox: offset.x, oy: offset.y });
+                    }}
+                    onPointerMove={e => {
+                        if (!dragStart) return;
+                        setOffset(clampOffset({
+                            x: dragStart.ox + e.clientX - dragStart.x,
+                            y: dragStart.oy + e.clientY - dragStart.y,
+                        }));
+                    }}
+                    onPointerUp={() => setDragStart(null)}
+                    onPointerCancel={() => setDragStart(null)}
+                >
+                    <img
+                        ref={imgRef}
+                        src={imageUrl}
+                        alt=""
+                        draggable={false}
+                        onLoad={e => {
+                            const img = e.currentTarget;
+                            setNaturalSize({ width: img.naturalWidth || 1, height: img.naturalHeight || 1 });
+                            setOffset({ x: 0, y: 0 });
+                            setZoom(1);
+                        }}
+                        style={{
+                            width: `${naturalSize.width * Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height)}px`,
+                            height: `${naturalSize.height * Math.max(cropSize / naturalSize.width, cropSize / naturalSize.height)}px`,
+                            transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})`,
+                        }}
+                    />
+                </div>
+                <div className="tenant-logo-crop-controls">
+                    <span>{t('enterprise.logo.zoom', 'Zoom')}</span>
+                    <input
+                        type="range"
+                        min="1"
+                        max="3"
+                        step="0.01"
+                        value={zoom}
+                        onChange={e => {
+                            const nextZoom = Number(e.target.value);
+                            setZoom(nextZoom);
+                            setOffset(prev => clampOffset(prev, nextZoom));
+                        }}
+                    />
+                </div>
+                <div className="tenant-logo-crop-actions">
+                    <button className="btn btn-secondary" type="button" onClick={onCancel}>{t('common.cancel', 'Cancel')}</button>
+                    <button className="btn btn-primary" type="button" onClick={handleSave}>{t('common.save', 'Save')}</button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function CompanyLogoEditor() {
+    const { t } = useTranslation();
+    const qc = useQueryClient();
+    const tenantId = localStorage.getItem('current_tenant_id') || '';
+    const [name, setName] = useState('');
+    const [logoUrl, setLogoUrl] = useState('');
+    const [logoError, setLogoError] = useState('');
+    const [logoSaving, setLogoSaving] = useState(false);
+    const [cropSource, setCropSource] = useState<{ url: string; name: string } | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (!tenantId) return;
+        fetchJson<any>(`/tenants/${tenantId}`)
+            .then(d => {
+                if (d?.name) setName(d.name);
+                setLogoUrl(d?.logo_url || '');
+            })
+            .catch(() => { });
+    }, [tenantId]);
+
+    const handleLogoFile = (file: File | undefined) => {
+        setLogoError('');
+        if (!file) return;
+        if (file.size > 1024 * 1024) {
+            setLogoError(t('enterprise.logo.tooLarge', 'Logo image must be 1 MB or smaller.'));
+            return;
+        }
+        if (!file.type.startsWith('image/')) {
+            setLogoError(t('enterprise.logo.invalidType', 'Please choose an image file.'));
+            return;
+        }
+        setCropSource({ url: URL.createObjectURL(file), name: file.name });
+    };
+
+    const uploadCroppedLogo = async (blob: Blob) => {
+        if (!tenantId) return;
+        setLogoError('');
+        if (blob.size > 1024 * 1024) {
+            setLogoError(t('enterprise.logo.croppedTooLarge', 'Cropped logo is still larger than 1 MB.'));
+            return;
+        }
+        setLogoSaving(true);
+        try {
+            const form = new FormData();
+            form.append('file', blob, 'company-logo.png');
+            const res = await fetch(`/api/tenants/${tenantId}/logo`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
+                body: form,
+            });
+            if (!res.ok) {
+                throw new Error(t('enterprise.logo.uploadFailed', 'Failed to upload logo.'));
+            }
+            const tenant = await res.json();
+            setLogoUrl(tenant.logo_url || '');
+            setCropSource(null);
+            qc.invalidateQueries({ queryKey: ['tenant', tenantId] });
+            qc.invalidateQueries({ queryKey: ['my-tenants'] });
+        } catch (e: any) {
+            setLogoError(e.message || t('enterprise.logo.uploadFailed', 'Failed to upload logo.'));
+        } finally {
+            setLogoSaving(false);
+        }
+    };
+
+    const resetLogo = async () => {
+        if (!tenantId || !logoUrl) return;
+        setLogoError('');
+        setLogoSaving(true);
+        try {
+            const res = await fetch(`/api/tenants/${tenantId}/logo`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
+            });
+            if (!res.ok) {
+                throw new Error(t('enterprise.logo.resetFailed', 'Failed to reset logo.'));
+            }
+            setLogoUrl('');
+            qc.invalidateQueries({ queryKey: ['tenant', tenantId] });
+            qc.invalidateQueries({ queryKey: ['my-tenants'] });
+        } catch (e: any) {
+            setLogoError(e.message || t('enterprise.logo.resetFailed', 'Failed to reset logo.'));
+        } finally {
+            setLogoSaving(false);
+        }
+    };
+
+    return (
+        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
+                {t('enterprise.logo.title', 'Company Logo')}
+            </div>
+            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '14px' }}>
+                {t('enterprise.logo.description', 'Used in the sidebar workspace switcher and company selection menus.')}
+            </div>
+            <div className="company-identity-logo-row">
+                <div className="company-identity-logo-preview">
+                    {logoUrl ? <img src={logoUrl} alt="" /> : <span>{(Array.from(name.trim())[0] as string | undefined)?.toUpperCase() || 'C'}</span>}
+                </div>
+                <div>
+                    <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        style={{ display: 'none' }}
+                        onChange={e => {
+                            handleLogoFile(e.target.files?.[0]);
+                            e.currentTarget.value = '';
+                        }}
+                    />
+                    <button className="btn btn-secondary" type="button" onClick={() => fileInputRef.current?.click()} disabled={logoSaving}>
+                        {logoSaving ? t('common.loading') : t('enterprise.logo.upload', 'Upload logo')}
+                    </button>
+                    {logoUrl && (
+                        <button
+                            className="btn btn-ghost"
+                            type="button"
+                            onClick={resetLogo}
+                            disabled={logoSaving}
+                            style={{ marginLeft: '8px' }}
+                        >
+                            {t('enterprise.logo.reset', 'Reset to default')}
+                        </button>
+                    )}
+                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '6px' }}>
+                        {t('enterprise.logo.hint', 'PNG, JPG, or WebP. Max 1 MB. You will crop it to a square before saving.')}
+                    </div>
+                    {logoError && <div style={{ fontSize: '12px', color: 'var(--error)', marginTop: '6px' }}>{logoError}</div>}
+                </div>
+            </div>
+            {cropSource && (
+                <CompanyLogoCropModal
+                    imageUrl={cropSource.url}
+                    imageName={cropSource.name}
+                    onCancel={() => setCropSource(null)}
+                    onSave={uploadCroppedLogo}
+                />
+            )}
+        </div>
+    );
+}
+
 function CompanyNameEditor() {
     const { t } = useTranslation();
     const qc = useQueryClient();
@@ -1666,6 +1932,8 @@ function CompanyNameEditor() {
                 method: 'PUT', body: JSON.stringify({ name: name.trim() }),
             });
             qc.invalidateQueries({ queryKey: ['tenants'] });
+            qc.invalidateQueries({ queryKey: ['tenant', tenantId] });
+            qc.invalidateQueries({ queryKey: ['my-tenants'] });
             setSaved(true);
             setTimeout(() => setSaved(false), 2000);
         } catch (e) { }
@@ -1696,51 +1964,56 @@ function CompanyNameEditor() {
 }
 
 
-// ─── Company Region Editor ───────────────────────
-const COMPANY_REGIONS = [
-    { code: '001', zh: '全球 / UTC', en: 'Global / UTC', timezone: 'UTC' },
-    { code: 'CN', zh: '中国', en: 'China', timezone: 'Asia/Shanghai' },
-    { code: 'HK', zh: '中国香港', en: 'Hong Kong, China', timezone: 'Asia/Hong_Kong' },
-    { code: 'MO', zh: '中国澳门', en: 'Macao, China', timezone: 'Asia/Macau' },
-    { code: 'TW', zh: '中国台湾', en: 'Taiwan, China', timezone: 'Asia/Taipei' },
-    { code: 'JP', zh: '日本', en: 'Japan', timezone: 'Asia/Tokyo' },
-    { code: 'KR', zh: '大韩民国', en: 'Republic of Korea', timezone: 'Asia/Seoul' },
-    { code: 'SG', zh: '新加坡', en: 'Singapore', timezone: 'Asia/Singapore' },
-    { code: 'IN', zh: '印度', en: 'India', timezone: 'Asia/Kolkata' },
-    { code: 'AE', zh: '阿拉伯联合酋长国', en: 'United Arab Emirates', timezone: 'Asia/Dubai' },
-    { code: 'GB', zh: '大不列颠及北爱尔兰联合王国', en: 'United Kingdom of Great Britain and Northern Ireland', timezone: 'Europe/London' },
-    { code: 'FR', zh: '法国', en: 'France', timezone: 'Europe/Paris' },
-    { code: 'DE', zh: '德国', en: 'Germany', timezone: 'Europe/Berlin' },
-    { code: 'IT', zh: '意大利', en: 'Italy', timezone: 'Europe/Rome' },
-    { code: 'ES', zh: '西班牙', en: 'Spain', timezone: 'Europe/Madrid' },
-    { code: 'NL', zh: '荷兰', en: 'Netherlands', timezone: 'Europe/Amsterdam' },
-    { code: 'CH', zh: '瑞士', en: 'Switzerland', timezone: 'Europe/Zurich' },
-    { code: 'SE', zh: '瑞典', en: 'Sweden', timezone: 'Europe/Stockholm' },
-    { code: 'US', zh: '美利坚合众国', en: 'United States of America', timezone: 'America/New_York' },
-    { code: 'CA', zh: '加拿大', en: 'Canada', timezone: 'America/Toronto' },
-    { code: 'MX', zh: '墨西哥', en: 'Mexico', timezone: 'America/Mexico_City' },
-    { code: 'BR', zh: '巴西', en: 'Brazil', timezone: 'America/Sao_Paulo' },
-    { code: 'AU', zh: '澳大利亚', en: 'Australia', timezone: 'Australia/Sydney' },
-    { code: 'NZ', zh: '新西兰', en: 'New Zealand', timezone: 'Pacific/Auckland' },
-];
-
 function CompanyTimezoneEditor() {
     const { t, i18n } = useTranslation();
     const user = useAuthStore((s) => s.user);
     const tenantId = user?.tenant_id || localStorage.getItem('current_tenant_id') || '';
+    const regionPickerRef = useRef<HTMLDivElement>(null);
     const [timezone, setTimezone] = useState('UTC');
     const [countryRegion, setCountryRegion] = useState('001');
     const [regionInput, setRegionInput] = useState('');
+    const [regionOpen, setRegionOpen] = useState(false);
+    const [highlightedRegion, setHighlightedRegion] = useState(0);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [error, setError] = useState('');
     const zh = i18n.language?.startsWith('zh');
-    const regionLabel = (r: typeof COMPANY_REGIONS[number]) => zh ? r.zh : r.en;
+    const companyRegions = useMemo(() => buildCompanyRegions(zh ? 'zh-Hans' : 'en'), [zh]);
+    const regionLabel = (r: CompanyRegion) => zh ? r.zh : r.en;
+    const selectedRegion = companyRegions.find(r => r.code === countryRegion) || companyRegions[0];
+    const filteredRegions = useMemo(() => {
+        const query = regionInput.trim().toLowerCase();
+        if (!query || (!regionOpen && regionInput === regionLabel(selectedRegion))) return companyRegions;
+        return companyRegions.filter(r => {
+            const localName = regionLabel(r).toLowerCase();
+            const altName = (zh ? r.en : r.zh).toLowerCase();
+            return localName.includes(query)
+                || altName.includes(query)
+                || r.code.toLowerCase().includes(query)
+                || r.timezone.toLowerCase().includes(query);
+        });
+    }, [companyRegions, regionInput, regionOpen, selectedRegion, zh]);
 
     useEffect(() => {
-        const selected = COMPANY_REGIONS.find(r => r.code === countryRegion) || COMPANY_REGIONS[0];
-        setRegionInput(regionLabel(selected));
+        setRegionInput(regionLabel(selectedRegion));
     }, [countryRegion, zh]);
+
+    useEffect(() => {
+        if (!regionOpen) return;
+        const handlePointerDown = (e: MouseEvent) => {
+            if (!regionPickerRef.current?.contains(e.target as Node)) {
+                setRegionOpen(false);
+                setRegionInput(regionLabel(selectedRegion));
+                setHighlightedRegion(0);
+            }
+        };
+        document.addEventListener('mousedown', handlePointerDown);
+        return () => document.removeEventListener('mousedown', handlePointerDown);
+    }, [regionOpen, selectedRegion, zh]);
+
+    useEffect(() => {
+        setHighlightedRegion(0);
+    }, [regionInput]);
 
     useEffect(() => {
         if (!tenantId) return;
@@ -1754,7 +2027,7 @@ function CompanyTimezoneEditor() {
 
     const handleSave = async (regionCode: string) => {
         if (!tenantId) return;
-        const region = COMPANY_REGIONS.find(r => r.code === regionCode) || COMPANY_REGIONS[0];
+        const region = companyRegions.find(r => r.code === regionCode) || companyRegions[0];
         setCountryRegion(region.code);
         setTimezone(region.timezone);
         setSaving(true);
@@ -1775,6 +2048,15 @@ function CompanyTimezoneEditor() {
         setSaving(false);
     };
 
+    const selectRegion = (region: CompanyRegion) => {
+        setRegionInput(regionLabel(region));
+        setRegionOpen(false);
+        setHighlightedRegion(0);
+        if (region.code !== countryRegion) {
+            handleSave(region.code);
+        }
+    };
+
     return (
         <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
             <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
@@ -1786,29 +2068,152 @@ function CompanyTimezoneEditor() {
                     : `Used to set the company timezone and OKR non-workday rules. Current timezone: ${timezone}`}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '10px', width: '100%' }}>
-                <input
-                    className="form-input"
-                    list="company-region-options"
-                    value={regionInput}
-                    onChange={e => {
-                        const value = e.target.value;
-                        setRegionInput(value);
-                        const matched = COMPANY_REGIONS.find(r => regionLabel(r) === value || r.code === value);
-                        if (matched) handleSave(matched.code);
-                    }}
-                    onBlur={() => {
-                        const selected = COMPANY_REGIONS.find(r => r.code === countryRegion) || COMPANY_REGIONS[0];
-                        setRegionInput(regionLabel(selected));
-                    }}
-                    placeholder={zh ? '搜索国家或地区' : 'Search country or region'}
-                    style={{ width: 'min(420px, 100%)', fontSize: '13px' }}
-                    disabled={saving || !tenantId}
-                />
-                <datalist id="company-region-options">
-                    {COMPANY_REGIONS.map(region => (
-                        <option key={region.code} value={regionLabel(region)} label={`${region.code} · ${region.timezone}`} />
-                    ))}
-                </datalist>
+                <div ref={regionPickerRef} style={{ position: 'relative', width: 'min(420px, 100%)' }}>
+                    <input
+                        className="form-input"
+                        value={regionInput}
+                        onChange={e => {
+                            setRegionInput(e.target.value);
+                            setRegionOpen(true);
+                        }}
+                        onFocus={() => {
+                            setRegionOpen(true);
+                            setRegionInput('');
+                        }}
+                        onKeyDown={e => {
+                            if (e.key === 'ArrowDown') {
+                                e.preventDefault();
+                                setRegionOpen(true);
+                                setHighlightedRegion(i => Math.min(i + 1, Math.max(filteredRegions.length - 1, 0)));
+                            } else if (e.key === 'ArrowUp') {
+                                e.preventDefault();
+                                setHighlightedRegion(i => Math.max(i - 1, 0));
+                            } else if (e.key === 'Enter') {
+                                e.preventDefault();
+                                const region = filteredRegions[highlightedRegion];
+                                if (region) selectRegion(region);
+                            } else if (e.key === 'Escape') {
+                                setRegionOpen(false);
+                                setRegionInput(regionLabel(selectedRegion));
+                            }
+                        }}
+                        placeholder={zh ? '搜索国家或地区、代码或时区' : 'Search country, code, or timezone'}
+                        style={{
+                            width: '100%',
+                            fontSize: '13px',
+                            paddingRight: '42px',
+                            cursor: saving || !tenantId ? 'not-allowed' : 'text',
+                        }}
+                        disabled={saving || !tenantId}
+                        role="combobox"
+                        aria-expanded={regionOpen}
+                        aria-controls="company-region-listbox"
+                        aria-autocomplete="list"
+                    />
+                    <button
+                        type="button"
+                        onClick={() => {
+                            if (saving || !tenantId) return;
+                            setRegionOpen(v => !v);
+                            if (!regionOpen) setRegionInput('');
+                        }}
+                        disabled={saving || !tenantId}
+                        aria-label={regionOpen ? (zh ? '收起地区列表' : 'Collapse region list') : (zh ? '展开地区列表' : 'Expand region list')}
+                        style={{
+                            position: 'absolute',
+                            right: '7px',
+                            top: '50%',
+                            transform: `translateY(-50%) rotate(${regionOpen ? 180 : 0}deg)`,
+                            border: 'none',
+                            background: 'transparent',
+                            color: 'var(--text-secondary)',
+                            cursor: saving || !tenantId ? 'not-allowed' : 'pointer',
+                            width: '30px',
+                            height: '30px',
+                            padding: 0,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            transition: 'transform 120ms ease',
+                        }}
+                    >
+                        <span
+                            aria-hidden="true"
+                            style={{
+                                width: '8px',
+                                height: '8px',
+                                borderRight: '1.6px solid currentColor',
+                                borderBottom: '1.6px solid currentColor',
+                                transform: 'rotate(45deg) translateY(-2px)',
+                                borderRadius: '1px',
+                            }}
+                        />
+                    </button>
+                    {regionOpen && (
+                        <div
+                            id="company-region-listbox"
+                            role="listbox"
+                            style={{
+                                position: 'absolute',
+                                top: 'calc(100% + 6px)',
+                                left: 0,
+                                right: 0,
+                                zIndex: 30,
+                                background: 'var(--bg-primary)',
+                                border: '1px solid var(--border-subtle)',
+                                borderRadius: '8px',
+                                boxShadow: '0 12px 28px rgba(15, 23, 42, 0.14)',
+                                maxHeight: '260px',
+                                overflowY: 'auto',
+                                padding: '6px',
+                            }}
+                        >
+                            {filteredRegions.length > 0 ? filteredRegions.map((region, index) => {
+                                const active = region.code === countryRegion;
+                                const highlighted = index === highlightedRegion;
+                                return (
+                                    <button
+                                        key={region.code}
+                                        type="button"
+                                        role="option"
+                                        aria-selected={active}
+                                        onMouseEnter={() => setHighlightedRegion(index)}
+                                        onMouseDown={e => e.preventDefault()}
+                                        onClick={() => selectRegion(region)}
+                                        style={{
+                                            width: '100%',
+                                            border: 'none',
+                                            background: highlighted ? 'var(--bg-elevated)' : 'transparent',
+                                            color: 'var(--text-primary)',
+                                            borderRadius: '6px',
+                                            padding: '9px 10px',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            justifyContent: 'space-between',
+                                            gap: '12px',
+                                            textAlign: 'left',
+                                            cursor: 'pointer',
+                                        }}
+                                    >
+                                        <span style={{ minWidth: 0 }}>
+                                            <span style={{ display: 'block', fontSize: '13px', fontWeight: active ? 600 : 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                {regionLabel(region)}
+                                            </span>
+                                            <span style={{ display: 'block', marginTop: '2px', color: 'var(--text-tertiary)', fontSize: '11px' }}>
+                                                {region.code} · {region.timezone}
+                                            </span>
+                                        </span>
+                                        {active && <span style={{ color: 'var(--text-primary)', fontSize: '14px', flexShrink: 0 }}>✓</span>}
+                                    </button>
+                                );
+                            }) : (
+                                <div style={{ padding: '12px 10px', color: 'var(--text-tertiary)', fontSize: '12px' }}>
+                                    {zh ? '没有匹配的国家或地区' : 'No matching country or region'}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
                 {(saved || error || !tenantId) && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minHeight: '16px', flexWrap: 'wrap' }}>
                         {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>已保存</span>}
@@ -1930,6 +2335,7 @@ function A2AAsyncToggle() {
 // ── Broadcast Section ──────────────────────────
 function BroadcastSection() {
     const { t } = useTranslation();
+    const toast = useToast();
     const [title, setTitle] = useState('');
     const [body, setBody] = useState('');
     const [sendEmail, setSendEmail] = useState(false);
@@ -1949,7 +2355,7 @@ function BroadcastSection() {
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
-                alert(err.detail || 'Failed to send broadcast');
+                toast.error('广播发送失败', { details: String(err.detail || `HTTP ${res.status}`) });
                 setSending(false);
                 return;
             }
@@ -1963,7 +2369,7 @@ function BroadcastSection() {
             setBody('');
             setSendEmail(false);
         } catch (e: any) {
-            alert(e.message || 'Failed');
+            toast.error('广播发送失败', { details: String(e?.message || e) });
         }
         setSending(false);
     };
@@ -2446,6 +2852,8 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
 
 export default function EnterpriseSettings() {
     const { t } = useTranslation();
+    const dialog = useDialog();
+    const toast = useToast();
     const qc = useQueryClient();
     type TabKey = 'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr';
     const VALID_TABS: TabKey[] = ['info', 'llm', 'tools', 'skills', 'okr', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'];
@@ -2495,7 +2903,7 @@ export default function EnterpriseSettings() {
         try {
             await fetchJson('/enterprise/tenant-quotas', { method: 'PATCH', body: JSON.stringify(quotaForm) });
             setQuotaSaved(true); setTimeout(() => setQuotaSaved(false), 2000);
-        } catch (e) { alert('Failed to save'); }
+        } catch (e: any) { toast.error('保存失败', { details: String(e?.message || e) }); }
         setQuotaSaving(false);
     };
     const [companyIntro, setCompanyIntro] = useState('');
@@ -2676,6 +3084,18 @@ export default function EnterpriseSettings() {
         mutationFn: ({ id, data }: { id: string; data: any }) => fetchJson(`/enterprise/llm-models/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
         onSuccess: () => { qc.invalidateQueries({ queryKey: ['llm-models', selectedTenantId] }); setShowAddModel(false); setEditingModelId(null); },
     });
+    // Tenant default model — for rendering a "默认" badge in the model list.
+    const { data: tenantForDefault, refetch: refetchTenantForDefault } = useQuery({
+        queryKey: ['tenant-default-model', selectedTenantId],
+        queryFn: () => fetchJson<{ default_model_id: string | null }>(
+            selectedTenantId ? `/tenants/${selectedTenantId}` : '/tenants/me'
+        ),
+        enabled: activeTab === 'llm',
+    });
+    const setDefaultModel = useMutation({
+        mutationFn: (modelId: string) => fetchJson(`/enterprise/llm-models/${modelId}/set-default`, { method: 'POST' }),
+        onSuccess: () => { refetchTenantForDefault(); },
+    });
     const deleteModel = useMutation({
         mutationFn: async ({ id, force = false }: { id: string; force?: boolean }) => {
             const url = force ? `/enterprise/llm-models/${id}?force=true` : `/enterprise/llm-models/${id}`;
@@ -2686,8 +3106,8 @@ export default function EnterpriseSettings() {
             if (res.status === 409) {
                 const data = await res.json();
                 const agents = data.detail?.agents || [];
-                const msg = `This model is used by ${agents.length} agent(s):\n\n${agents.join(', ')}\n\nDelete anyway? (their model config will be cleared)`;
-                if (confirm(msg)) {
+                const msg = `该模型正在被 ${agents.length} 个数字员工使用：\n\n${agents.join(', ')}\n\n仍要删除吗？（对应的模型配置会被清空）`;
+                if (await dialog.confirm(msg, { title: '删除模型', danger: true, confirmLabel: '强制删除' })) {
                     // Retry with force
                     const r2 = await fetch(`/api/enterprise/llm-models/${id}?force=true`, {
                         method: 'DELETE',
@@ -2871,11 +3291,11 @@ export default function EnterpriseSettings() {
                                                 if (btn) { btn.textContent = t('enterprise.llm.testSuccess', { latency: result.latency_ms }); btn.style.color = 'var(--success)'; }
                                                 setTimeout(() => { if (btn) { btn.textContent = origText; btn.style.color = ''; } }, 3000);
                                             } else {
-                                                alert(t('enterprise.llm.testFailed', { error: result.error || 'Unknown error', latency: result.latency_ms }));
+                                                await dialog.alert(t('enterprise.llm.testFailedShort', '连通性测试失败'), { type: 'error', title: t('enterprise.llm.testTitle', '连通性测试'), details: String(result.error || 'Unknown error') });
                                                 if (btn) btn.textContent = origText;
                                             }
                                         } catch (e: any) {
-                                            alert(t('enterprise.llm.testError', { message: e.message }));
+                                            await dialog.alert(t('enterprise.llm.testErrorShort', '连通性测试出错'), { type: 'error', title: t('enterprise.llm.testTitle', '连通性测试'), details: String(e?.message || e) });
                                             if (btn) btn.textContent = origText;
                                         }
                                     }}>{t('enterprise.llm.test')}</button>
@@ -2981,11 +3401,11 @@ export default function EnterpriseSettings() {
                                                             if (btn) { btn.textContent = t('enterprise.llm.testSuccess', { latency: result.latency_ms }); btn.style.color = 'var(--success)'; }
                                                             setTimeout(() => { if (btn) { btn.textContent = origText; btn.style.color = ''; } }, 3000);
                                                         } else {
-                                                            alert(t('enterprise.llm.testFailed', { error: result.error || 'Unknown error', latency: result.latency_ms }));
+                                                            await dialog.alert(t('enterprise.llm.testFailedShort', '连通性测试失败'), { type: 'error', title: t('enterprise.llm.testTitle', '连通性测试'), details: String(result.error || 'Unknown error') });
                                                             if (btn) btn.textContent = origText;
                                                         }
                                                     } catch (e: any) {
-                                                        alert(t('enterprise.llm.testError', { message: e.message }));
+                                                        await dialog.alert(t('enterprise.llm.testErrorShort', '连通性测试出错'), { type: 'error', title: t('enterprise.llm.testTitle', '连通性测试'), details: String(e?.message || e) });
                                                         if (btn) btn.textContent = origText;
                                                     }
                                                 }}>{t('enterprise.llm.test')}</button>
@@ -3040,6 +3460,13 @@ export default function EnterpriseSettings() {
                                                     }} />
                                                 </button>
                                                 {m.supports_vision && <span className="badge" style={{ background: 'rgba(99,102,241,0.15)', color: 'rgb(99,102,241)', fontSize: '10px' }}>Vision</span>}
+                                                {tenantForDefault?.default_model_id === m.id ? (
+                                                    <span className="badge" style={{ background: 'rgba(34,197,94,0.15)', color: 'rgb(34,197,94)', fontSize: '10px' }}>{t('enterprise.llm.defaultBadge', '默认')}</span>
+                                                ) : m.enabled ? (
+                                                    <button className="btn btn-ghost" style={{ fontSize: '12px' }} onClick={() => setDefaultModel.mutate(m.id)} title={t('enterprise.llm.setAsDefaultTitle', 'Set as default for new agents')}>
+                                                        {t('enterprise.llm.setAsDefault', '设为默认')}
+                                                    </button>
+                                                ) : null}
                                                 <button className="btn btn-ghost" onClick={() => {
                                                     setEditingModelId(m.id);
                                                     setModelForm({ provider: m.provider, model: m.model, label: m.label, base_url: m.base_url || '', api_key: m.api_key_masked || '', supports_vision: m.supports_vision || false, max_output_tokens: m.max_output_tokens ? String(m.max_output_tokens) : '', request_timeout: m.request_timeout ? String(m.request_timeout) : '', temperature: m.temperature !== null && m.temperature !== undefined ? String(m.temperature) : '' });
@@ -3146,6 +3573,7 @@ export default function EnterpriseSettings() {
                 {/* ── Company Management ── */}
                 {activeTab === 'info' && (
                     <div>
+                        <CompanyLogoEditor key={`logo-${selectedTenantId}`} />
                         <CompanyNameEditor key={`name-${selectedTenantId}`} />
                         <CompanyTimezoneEditor key={`tz-${selectedTenantId}`} />
                         <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
@@ -3197,8 +3625,11 @@ export default function EnterpriseSettings() {
                             <button
                                 className="btn"
                                 onClick={async () => {
-                                    const name = document.querySelector<HTMLInputElement>('.company-name-input')?.value || selectedTenantId;
-                                    if (!confirm(t('enterprise.deleteCompanyConfirm', 'Are you sure you want to delete this company and ALL its data? This cannot be undone.'))) return;
+                                    const ok = await dialog.confirm(
+                                        t('enterprise.deleteCompanyConfirm', 'Are you sure you want to delete this company and ALL its data? This cannot be undone.'),
+                                        { title: '删除公司', danger: true, confirmLabel: '永久删除' },
+                                    );
+                                    if (!ok) return;
                                     try {
                                         const res = await fetchJson<any>(`/tenants/${selectedTenantId}`, { method: 'DELETE' });
                                         // Switch to fallback tenant
@@ -3208,7 +3639,7 @@ export default function EnterpriseSettings() {
                                         window.dispatchEvent(new StorageEvent('storage', { key: 'current_tenant_id', newValue: fallbackId }));
                                         qc.invalidateQueries({ queryKey: ['tenants'] });
                                     } catch (e: any) {
-                                        alert(e.message || 'Delete failed');
+                                        await dialog.alert('删除失败', { type: 'error', details: String(e?.message || e) });
                                     }
                                 }}
                                 style={{
@@ -3365,7 +3796,8 @@ export default function EnterpriseSettings() {
                                                     </div>
                                                 </div>
                                                 <button className="btn btn-ghost" style={{ color: 'var(--error)', fontSize: '12px' }} onClick={async () => {
-                                                    if (!confirm(t('enterprise.tools.removeFromAgent', { name: row.tool_display_name }))) return;
+                                                    const ok = await dialog.confirm(t('enterprise.tools.removeFromAgent', { name: row.tool_display_name }), { title: '移除工具', danger: true, confirmLabel: '移除' });
+                                                    if (!ok) return;
                                                     try {
                                                         await fetchJson(`/tools/agent-tool/${row.agent_tool_id}`, { method: 'DELETE' });
                                                     } catch {
@@ -3495,7 +3927,7 @@ export default function EnterpriseSettings() {
                                                                         }
                                                                         await loadAllTools();
                                                                     } catch (e: any) {
-                                                                        alert(`${t('enterprise.tools.importFailed') || 'Import failed'}: ${e.message}`);
+                                                                        await dialog.alert(t('enterprise.tools.importFailed') || '导入失败', { type: 'error', details: String(e?.message || e) });
                                                                     }
                                                                 }}>{t('enterprise.tools.import') || 'Import'}</button>
                                                             </div>
@@ -3536,7 +3968,9 @@ export default function EnterpriseSettings() {
                                                                 await loadAllTools();
                                                                 setShowAddMCP(false); setMcpTestResult(null); setMcpForm({ server_url: '', server_name: '', api_key: '' }); setMcpRawInput('');
                                                                 if (errors.length > 0) {
-                                                                    alert(`Imported ${successCount}/${tools.length} tools.\nFailed:\n${errors.join('\n')}`);
+                                                                    await dialog.alert(`已导入 ${successCount}/${tools.length} 个工具`, { type: 'warning', title: '部分导入失败', details: errors.join('\n') });
+                                                                } else if (successCount > 0) {
+                                                                    toast.success(`已导入 ${successCount} 个工具`);
                                                                 }
                                                             }}>{t('enterprise.tools.importAll')}</button>
                                                         </div>
@@ -3643,7 +4077,8 @@ export default function EnterpriseSettings() {
                                                                                 </div>
                                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
                                                                                     <button className="btn btn-danger" style={{ padding: '3px 7px', fontSize: '10px' }} onClick={async () => {
-                                                                                        if (!confirm(`${t('common.delete')} ${tool.display_name}?`)) return;
+                                                                                        const ok = await dialog.confirm(`确定删除 ${tool.display_name}？`, { title: '删除工具', danger: true, confirmLabel: '删除' });
+                                                                                        if (!ok) return;
                                                                                         await fetchJson(`/tools/${tool.id}`, { method: 'DELETE' });
                                                                                         await loadAllTools();
                                                                                     }}>{t('common.delete')}</button>
@@ -3682,7 +4117,8 @@ export default function EnterpriseSettings() {
                                                                                             <button style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }} onClick={() => { setEditingToolId(tool.id); setEditingConfig({ ...tool.config }); }}>Configure</button>
                                                                                         )}
                                                                                         <button className="btn btn-danger" style={{ padding: '4px 8px', fontSize: '11px' }} onClick={async () => {
-                                                                                            if (!confirm(`${t('common.delete')} ${tool.display_name}?`)) return;
+                                                                                            const ok = await dialog.confirm(`确定删除 ${tool.display_name}？`, { title: '删除工具', danger: true, confirmLabel: '删除' });
+                                                                                            if (!ok) return;
                                                                                             await fetchJson(`/tools/${tool.id}`, { method: 'DELETE' });
                                                                                             loadAllTools();
                                                                                         }}>{t('common.delete')}</button>
@@ -3745,7 +4181,7 @@ export default function EnterpriseSettings() {
                                                                             await fetchJson('/tools/bulk', { method: 'PUT', body: JSON.stringify(payload) });
                                                                             loadAllTools();
                                                                         } catch (err: any) {
-                                                                            alert('Bulk update failed: ' + err.message);
+                                                                            toast.error('批量更新失败', { details: String(err?.message || err) });
                                                                         }
                                                                     }}
                                                                     style={{ opacity: 0, width: 0, height: 0 }} />
@@ -3813,7 +4249,8 @@ export default function EnterpriseSettings() {
                                                                             {/* Delete (non-builtin only) */}
                                                                             {tool.type !== 'builtin' && (
                                                                                 <button className="btn btn-danger" style={{ padding: '4px 8px', fontSize: '11px' }} onClick={async () => {
-                                                                                    if (!confirm(`${t('common.delete')} ${tool.display_name}?`)) return;
+                                                                                    const ok = await dialog.confirm(`确定删除 ${tool.display_name}？`, { title: '删除工具', danger: true, confirmLabel: '删除' });
+                                                                                    if (!ok) return;
                                                                                     await fetchJson(`/tools/${tool.id}`, { method: 'DELETE' });
                                                                                     loadAllTools();
                                                                                     loadAgentInstalledTools();
@@ -3912,7 +4349,7 @@ export default function EnterpriseSettings() {
                                                     await loadAllTools();
                                                     setEditingMcpServer(null);
                                                 } catch (e: any) {
-                                                    alert('Failed to update server: ' + e.message);
+                                                    toast.error('更新服务器失败', { details: String(e?.message || e) });
                                                 }
                                                 setMcpServerSaving(false);
                                             }}>{mcpServerSaving ? 'Saving...' : 'Save Changes'}</button>

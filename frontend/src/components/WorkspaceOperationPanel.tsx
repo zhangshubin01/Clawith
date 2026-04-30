@@ -47,6 +47,8 @@ interface Props {
     onToggleLock?: () => void;
     onEditingChange?: (editing: boolean) => void;
     onPathDeleted?: (path: string) => void;
+    activityOpen?: boolean;
+    onActivityToggle?: (open: boolean) => void;
 }
 
 const WORKSPACE_ROOT = 'workspace';
@@ -383,6 +385,8 @@ export default function WorkspaceOperationPanel({
     onToggleLock,
     onEditingChange,
     onPathDeleted,
+    activityOpen: activityOpenProp,
+    onActivityToggle,
 }: Props) {
     const [preview, setPreview] = useState<any>(null);
     const [content, setContent] = useState('');
@@ -392,7 +396,9 @@ export default function WorkspaceOperationPanel({
     const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [revisions, setRevisions] = useState<any[]>([]);
     const [fileTree, setFileTree] = useState<WorkspaceFileNode[]>([]);
-    const [activityOpen, setActivityOpen] = useState(false);
+    const [activityOpenLocal, setActivityOpenLocal] = useState(false);
+    const activityOpen = activityOpenProp ?? activityOpenLocal;
+    const setActivityOpen = onActivityToggle ?? setActivityOpenLocal;
     const [treeOpen, setTreeOpen] = useState(true);
     const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => new Set());
     const [treeScope, setTreeScope] = useState<TreeScope>('workspace');
@@ -791,7 +797,7 @@ export default function WorkspaceOperationPanel({
         resizeRef.current = { startX: event.clientX, startWidth: panelSideWidth };
         const onMove = (moveEvent: MouseEvent) => {
             const next = resizeRef.current
-                ? resizeRef.current.startWidth - (moveEvent.clientX - resizeRef.current.startX)
+                ? resizeRef.current.startWidth + (resizeRef.current.startX - moveEvent.clientX)
                 : panelSideWidth;
             setSideWidth(Math.max(MIN_SIDE_WIDTH, Math.min(MAX_SIDE_WIDTH, next)));
         };
@@ -1103,13 +1109,9 @@ export default function WorkspaceOperationPanel({
 
     return (
         <div className="workspace-op">
-            <div className="workspace-op-header">
-                <div className="workspace-op-heading">
-                    <div className="workspace-op-title">{activePath ? fileName(activePath) : liveDraft?.path ? fileName(liveDraft.path) : 'Workspace'}</div>
-                </div>
-                <div className="workspace-op-actions">
+            {(saveState !== 'idle' || (activePath && (canEdit || locked !== undefined))) && (
+                <div className="workspace-op-inline-actions">
                     {saveState !== 'idle' && <span className={`workspace-op-save ${saveState}`}>{saveState}</span>}
-                    <button className={`workspace-op-icon-btn ${activityOpen ? 'active' : ''}`} onClick={() => setActivityOpen((open) => !open)} title="Version history">◷</button>
                     {activePath && (
                         <button
                             className={`workspace-op-icon-btn ${locked ? 'active' : ''}`}
@@ -1140,7 +1142,7 @@ export default function WorkspaceOperationPanel({
                         </a>
                     )}
                 </div>
-            </div>
+            )}
 
             <div
                 className={`workspace-op-body ${activityOpen ? 'activity-open' : ''} ${treeOpen ? '' : 'tree-closed'}`}
@@ -1149,29 +1151,39 @@ export default function WorkspaceOperationPanel({
                     ['--workspace-side-width' as any]: `${panelSideWidth}px`,
                 } : undefined}
             >
-                <button className={`workspace-op-tree-edge-toggle ${treeOpen && !activityOpen ? 'active' : ''}`} onClick={() => {
-                    setActivityOpen(false);
-                    setTreeOpen((open) => !open);
-                }} title={treeOpen && !activityOpen ? 'Hide files' : 'Show files'} aria-label={treeOpen && !activityOpen ? 'Hide files' : 'Show files'}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.9" />
-                        <path d="M14 5v14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-                        <path
-                            d={treeOpen && !activityOpen ? 'M10 9l-3 3 3 3' : 'M8 9l3 3-3 3'}
-                            stroke="currentColor"
-                            strokeWidth="1.9"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        />
-                    </svg>
-                </button>
+                {!treeOpen && !activityOpen && (
+                    <button className="workspace-op-tree-edge-toggle" onClick={() => {
+                        setTreeOpen(true);
+                    }} title="Show files" aria-label="Show files">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                            <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.9" />
+                            <path d="M10 5v14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                            <path d="M16 9l-3 3 3 3" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                    </button>
+                )}
                 <div className="workspace-op-main">
                     {renderPreview()}
                 </div>
                 {(treeOpen || activityOpen) && <div className="workspace-op-side-resize" onMouseDown={startResize} />}
                 {activityOpen ? (
                     <aside className="workspace-op-side">
-                        <div className="workspace-op-side-title">Version history</div>
+                        <div className="workspace-op-side-title">
+                            <span>Version history</span>
+                            <button
+                                className="workspace-op-mini-btn workspace-op-mini-btn-icon"
+                                type="button"
+                                onClick={() => setActivityOpen(false)}
+                                title="Hide history"
+                                aria-label="Hide history"
+                            >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                    <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.9" />
+                                    <path d="M10 5v14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                                    <path d="M14 9l3 3-3 3" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                            </button>
+                        </div>
                         <div className="workspace-op-side-list">
                             {!activePath && <div className="workspace-op-side-empty">Open a file to view its history.</div>}
                             {activePath && revisions.length === 0 && <div className="workspace-op-side-empty">No versions recorded yet.</div>}
@@ -1208,7 +1220,7 @@ export default function WorkspaceOperationPanel({
                                         aria-selected={treeScope === 'workspace'}
                                         onClick={() => switchTreeScope('workspace')}
                                     >
-                                        Workspace
+                                        工作区
                                     </button>
                                     <button
                                         className={treeScope === 'all' ? 'active' : ''}
@@ -1217,7 +1229,7 @@ export default function WorkspaceOperationPanel({
                                         aria-selected={treeScope === 'all'}
                                         onClick={() => switchTreeScope('all')}
                                     >
-                                        All
+                                        全部
                                     </button>
                                 </div>
                                 <div className="workspace-op-tree-actions">
@@ -1245,6 +1257,19 @@ export default function WorkspaceOperationPanel({
                                             <path d="M4 8.5A2.5 2.5 0 016.5 6H10l1.4 1.6H17.5A2.5 2.5 0 0120 10.1v6.4A2.5 2.5 0 0117.5 19h-11A2.5 2.5 0 014 16.5v-8Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
                                             <path d="M12 10.5v5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                                             <path d="M9.5 13h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                        </svg>
+                                    </button>
+                                    <button
+                                        className="workspace-op-mini-btn workspace-op-mini-btn-icon"
+                                        type="button"
+                                        onClick={() => { setActivityOpen(false); setTreeOpen(false); }}
+                                        title="Hide files"
+                                        aria-label="Hide files"
+                                    >
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                            <rect x="4" y="5" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.9" />
+                                            <path d="M10 5v14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                                            <path d="M14 9l3 3-3 3" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
                                         </svg>
                                     </button>
                                 </div>
