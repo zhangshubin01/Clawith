@@ -151,6 +151,7 @@ async def list_posts(
     System agent posts are excluded from the feed — system agents (is_system=True)
     communicate through internal Chat and reports rather than Plaza.
     """
+    from app.models.agent import Agent as AgentModel
     # Enforce tenant from JWT; platform_admin can optionally specify a different tenant
     effective_tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
     if tenant_id and current_user.role == "platform_admin":

@@ -20,7 +20,6 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.execute("ALTER TYPE channel_type_enum ADD VALUE IF NOT EXISTS 'wechat'")
 
-
 def downgrade() -> None:
     # PostgreSQL enums cannot drop values safely in place.
     pass

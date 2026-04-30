@@ -5492,6 +5492,14 @@ function AgentDetailInner() {
                                                 <button onClick={() => setChatInfoMsg(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: '14px', lineHeight: 1, padding: '0 2px' }}>✕</button>
                                             </div>
                                         )}
+                                        {/* Transient info banner — e.g. fallback model switch */}
+                                        {chatInfoMsg && (
+                                            <div style={{ padding: '6px 14px', borderTop: '1px solid rgba(99,102,241,0.25)', background: 'rgba(99,102,241,0.07)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'var(--text-secondary)', animation: 'fadeIn 0.2s ease' }}>
+                                                <span style={{ opacity: 0.7 }}>ℹ️</span>
+                                                <span style={{ flex: 1 }}>{chatInfoMsg}</span>
+                                                <button onClick={() => setChatInfoMsg(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: '14px', lineHeight: 1, padding: '0 2px' }}>✕</button>
+                                            </div>
+                                        )}
                                         {agentExpired ? (
                                             <div style={{ padding: '7px 16px', borderTop: '1px solid rgba(245,158,11,0.3)', background: 'rgba(245,158,11,0.08)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'rgb(180,100,0)' }}>
                                                 <span>⏸</span>

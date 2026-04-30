@@ -146,6 +146,15 @@ async def save_relationships(
         seen_member_ids.add(member_id)
         deduped_relationships.append(relationship)
 
+    deduped_relationships: list[RelationshipIn] = []
+    seen_member_ids: set[str] = set()
+    for relationship in data.relationships:
+        member_id = str(uuid.UUID(relationship.member_id))
+        if member_id in seen_member_ids:
+            continue
+        seen_member_ids.add(member_id)
+        deduped_relationships.append(relationship)
+
     await db.execute(
         delete(AgentRelationship).where(AgentRelationship.agent_id == agent_id)
     )

@@ -401,7 +401,6 @@ It currently handles several responsibilities:
 The corresponding services include `sso_service.py`, `enterprise_sync.py`, `org_sync_service.py`, and provider-specific auth/sync adapters.
 
 Company identity now also includes an optional tenant logo managed from the Company Info tab. Logos are uploaded through the tenant API, validated as square images no larger than 1 MB, stored under the configured agent data directory, and exposed as public UI assets through `/api/tenants/{tenant_id}/logo`. The frontend uses the logo in the sidebar workspace switcher and company selection menu while keeping the existing tenant default model setting intact.
-
 ### 7.2 Platform Administration
 
 `backend/app/api/admin.py` handles platform-wide control for platform admins, including:

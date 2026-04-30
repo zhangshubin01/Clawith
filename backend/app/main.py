@@ -156,7 +156,6 @@ async def lifespan(app: FastAPI):
         logger.info("[startup] Database tables ready")
     except Exception as e:
         logger.warning(f"[startup] create_all failed: {e}")
-
     # Startup: seed data — each step isolated so one failure doesn't block others
     logger.info("[startup] seeding...")
 

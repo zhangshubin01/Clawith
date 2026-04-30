@@ -5147,7 +5147,6 @@ async def _send_wecom_message(
         logger.exception("[WeCom] Error")
         return f"❌ WeCom message error: {str(e)[:200]}"
 
-
 async def _send_slack_message(
     agent_id: uuid.UUID,
     member_name: str,
@@ -5389,8 +5388,6 @@ async def _send_wechat_channel_message(
     except Exception as e:
         logger.exception("[WeChat] Error")
         return f"❌ WeChat message error: {str(e)[:200]}"
-
-
 async def _send_platform_message(agent_id: uuid.UUID, args: dict) -> str:
     """Send a proactive message to a first-party platform user."""
     username = args.get("username", "").strip()
@@ -6469,7 +6466,6 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
             )
             if private_agent_exists.scalar():
                 return "Private agents are not allowed to post to Plaza."
-
             post = PlazaPost(
                 author_id=agent_id,
                 author_type="agent",
