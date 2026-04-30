@@ -1786,6 +1786,7 @@ function AgentDetailInner() {
     const [allSessions, setAllSessions] = useState<any[]>([]);
     const [activeSession, setActiveSession] = useState<any | null>(null);
     const [chatScope, setChatScope] = useState<'mine' | 'all'>('mine');
+    const [ideOnlySessions, setIdeOnlySessions] = useState(false);
     const [allUserFilter, setAllUserFilter] = useState<string>('');  // filter by username in All Users
     const [historyMsgs, setHistoryMsgs] = useState<any[]>([]);
     const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -1919,6 +1920,16 @@ function AgentDetailInner() {
         if (!allUserFilter) return otherUsersSessions;
         return otherUsersSessions.filter((s: any) => sessionUserIdStr(s) === allUserFilter);
     }, [otherUsersSessions, allUserFilter]);
+
+    const filteredMineSessions = useMemo(() => {
+        if (!ideOnlySessions) return sessions;
+        return sessions.filter((s: any) => String(s.source_channel || "").toLowerCase() === "ide_lsp4j");
+    }, [sessions, ideOnlySessions]);
+
+    const filteredOthersSessions = useMemo(() => {
+        if (!ideOnlySessions) return othersListForPicker;
+        return othersListForPicker.filter((s: any) => String(s.source_channel || "").toLowerCase() === "ide_lsp4j");
+    }, [othersListForPicker, ideOnlySessions]);
 
     useEffect(() => {
         if (!canViewAllAgentChatSessions && chatScope === 'all') setChatScope('mine');
@@ -4797,6 +4808,24 @@ function AgentDetailInner() {
                                         </div>
                                     </div>
                                 )}
+                                <div style={{ padding: '0 12px 8px', flexShrink: 0 }}>
+                                    <button
+                                        type="button"
+                                        onClick={() => setIdeOnlySessions((v) => !v)}
+                                        style={{
+                                            width: '100%',
+                                            height: '28px',
+                                            borderRadius: '6px',
+                                            border: '1px solid var(--border-subtle)',
+                                            background: ideOnlySessions ? 'var(--bg-tertiary)' : 'var(--bg-secondary)',
+                                            color: 'var(--text-primary)',
+                                            fontSize: '12px',
+                                            cursor: 'pointer',
+                                        }}
+                                    >
+                                        {ideOnlySessions ? 'IDE Only: On' : 'IDE Only: Off'}
+                                    </button>
+                                </div>
 
                                 <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                                     {(!canViewAllAgentChatSessions || chatScope === 'mine') ? (
@@ -4819,9 +4848,9 @@ function AgentDetailInner() {
                                             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '4px 0' }}>
                                                 {sessionsLoading ? (
                                                     <div style={{ padding: '20px 12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>{t('common.loading')}</div>
-                                                ) : sessions.length === 0 ? (
+                                                ) : filteredMineSessions.length === 0 ? (
                                                     <div style={{ padding: '20px 12px', fontSize: '12px', color: 'var(--text-tertiary)' }}>{t('agent.chat.noSessionsYet')}<br />{t('agent.chat.clickToStart')}</div>
-                                                ) : sessions.map((s: any) => {
+                                                ) : filteredMineSessions.map((s: any) => {
                                                     const isActive = activeSession?.id === s.id && (chatScope === 'mine' || !canViewAllAgentChatSessions);
                                                     const channelLabel: Record<string, string> = {
                                                         feishu: t('common.channels.feishu'),
@@ -4830,6 +4859,7 @@ function AgentDetailInner() {
                                                         wechat: t('common.channels.wechat'),
                                                         dingtalk: t('common.channels.dingtalk'),
                                                         wecom: t('common.channels.wecom'),
+                                                        ide_lsp4j: t('common.channels.ide_lsp4j'),
                                                     };
                                                     const chLabel = channelLabel[s.source_channel];
                                                     return (
@@ -4914,10 +4944,10 @@ function AgentDetailInner() {
                                                             </div>
                                                         ))}
                                                     </div>
-                                                ) : othersListForPicker.length === 0 ? (
+                                                ) : filteredOthersSessions.length === 0 ? (
                                                     <div style={{ padding: '16px 12px', fontSize: '12px', color: 'var(--text-tertiary)', textAlign: 'center' }}>{t('agent.chat.noSessionsYet')}</div>
                                                 ) : (
-                                                    othersListForPicker.map((s: any) => {
+                                                    filteredOthersSessions.map((s: any) => {
                                                         const isActive = activeSession?.id === s.id && chatScope === 'all';
                                                         const channelLabel: Record<string, string> = {
                                                             feishu: t('common.channels.feishu'),
@@ -4926,6 +4956,7 @@ function AgentDetailInner() {
                                                             wechat: t('common.channels.wechat'),
                                                             dingtalk: t('common.channels.dingtalk'),
                                                             wecom: t('common.channels.wecom'),
+                                                            ide_lsp4j: t('common.channels.ide_lsp4j'),
                                                         };
                                                         const chLabel = channelLabel[s.source_channel];
                                                         return (

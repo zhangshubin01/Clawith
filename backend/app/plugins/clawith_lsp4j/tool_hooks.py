@@ -27,6 +27,7 @@ from loguru import logger
 from app.services import agent_tools
 
 from .context import current_lsp4j_ws
+from .tool_constants import LSP4J_IDE_TOOL_NAMES, TOOL_NAME_MAP
 
 # ──────────────────────────────────────────────
 # 插件原生工具名称（基于 ToolInvokeProcessor.java 源码验证）
@@ -39,35 +40,12 @@ from .context import current_lsp4j_ws
 #   replace_text_by_path / create_file_with_text / delete_file_by_path → filePath（camelCase，用 getRequestFilePath）
 #   replace_text_by_path → text（非 oldText/newText，插件直接替换整个文档内容）
 #   create_file_with_text → text（getRequestText 查找 "text" 键，后端定义 "content" 需映射）
-_LSP4J_IDE_TOOL_NAMES = frozenset(
-    {
-        "read_file",             # 读取文件（file_path）
-        "save_file",             # 保存文件（file_path）
-        "run_in_terminal",       # 执行终端命令（command, workDirectory?）
-        "get_terminal_output",   # 获取终端输出（terminalId?）
-        "replace_text_by_path",  # 文本替换（filePath, text）
-        "create_file_with_text", # 创建文件（filePath, content）
-        "delete_file_by_path",   # 删除文件（filePath）
-        "get_problems",          # 获取代码问题（filePaths，复数数组）
-        "add_tasks",             # 任务规划（纯 UI 工具，返回成功响应让插件渲染任务树）
-        "todo_write",            # 待办列表（纯 UI 工具，委托给 add_tasks 渲染）
-        "search_replace",        # 搜索替换（比 replace_text_by_path 更强大）
-        "list_dir",              # 列出目录（本地执行，结果格式 DirItem[]）
-        "search_file",           # 搜索文件（本地执行，结果格式 FileItem[]）
-    }
-)
+_LSP4J_IDE_TOOL_NAMES = LSP4J_IDE_TOOL_NAMES
 
 # ★ 基础工具名 → 插件原生名的映射
 # LLM 可能调用基础工具名（如 edit_file），需映射为插件 ToolInvokeProcessor 识别的名称
 # 反向映射不存在：插件原生名称（如 replace_text_by_path）不需要映射回来
-_TOOL_NAME_MAP = {
-    "edit_file": "replace_text_by_path",    # 全文替换（非 diff）
-    "create_file": "create_file_with_text", # 创建文件（LLM 可能用此名称调用）
-    "write_file": "create_file_with_text",  # 创建文件（基础工具注册名）
-    "delete_file": "delete_file_by_path",   # 删除文件
-    "list_files": "list_dir",              # 列出目录（基础工具名 → 插件 UI 工具名）
-    "search_files": "search_file",         # 搜索文件（基础工具名 → 插件 UI 工具名）
-}
+_TOOL_NAME_MAP = TOOL_NAME_MAP
 
 # ★ 工具参数名映射：后端工具定义 → 插件 ToolHandler 期望的参数名
 # 插件各 ToolHandler 的参数名约定不一致：

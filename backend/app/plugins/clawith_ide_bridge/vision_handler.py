@@ -1,5 +1,6 @@
 """Vision handler for IDEA plugin integration."""
 
+import asyncio
 import base64
 import io
 from typing import Optional
@@ -88,3 +89,15 @@ def process_ide_image(base64_data: str) -> Optional[str]:
     except Exception as e:
         logger.warning(f"[IDE-Vision] Failed to process image: {e}")
         return None
+
+
+async def compress_image_if_needed_async(
+    base64_data: str, max_size: int = MAX_IMAGE_SIZE
+) -> str:
+    """Run Pillow compression off the event loop (sync Image.open/resize)."""
+    return await asyncio.to_thread(compress_image_if_needed, base64_data, max_size)
+
+
+async def process_ide_image_async(base64_data: str) -> Optional[str]:
+    """Async entry point for callers in asyncio contexts."""
+    return await asyncio.to_thread(process_ide_image, base64_data)

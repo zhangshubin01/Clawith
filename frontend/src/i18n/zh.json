@@ -1582,7 +1582,8 @@
       "wechat": "微信",
       "whatsapp": "WhatsApp",
       "dingtalk": "钉钉",
-      "wecom": "企业微信"
+      "wecom": "企业微信",
+      "ide_lsp4j": "IDE"
     },
     "searching": "搜索中...",
     "upload": "⬆ 上传",

@@ -35,7 +35,8 @@ from .context import (
     current_lsp4j_session_id,
     current_lsp4j_user_id,
     current_lsp4j_agent_id,
-    _active_routers,
+    register_active_router,
+    unregister_active_router,
 )
 from .jsonrpc_router import JSONRPCRouter
 
@@ -153,7 +154,7 @@ async def lsp4j_websocket_endpoint(
     # 注册到 _active_routers（供 tool_hooks 查找）
     # 使用 (user_id, agent_id) 复合键，防止不同用户连接同一 agent 时互相覆盖
     agent_key = (str(user_id), str(agent_obj.id))
-    _active_routers[agent_key] = jsonrpc
+    await register_active_router(agent_key, jsonrpc)
     jsonrpc._agent_key = agent_key  # 保存到实例变量，cleanup 时使用
 
     try:
@@ -183,7 +184,7 @@ async def lsp4j_websocket_endpoint(
         current_lsp4j_session_id.set(None)
 
         # 5.2 从 _active_routers 移除（使用实例变量中的复合键）
-        _active_routers.pop(getattr(jsonrpc, "_agent_key", None), None)
+        await unregister_active_router(getattr(jsonrpc, "_agent_key", None))
 
         # 5.3 resolve 所有 pending Futures（防止协程挂起）
         await jsonrpc.cleanup()

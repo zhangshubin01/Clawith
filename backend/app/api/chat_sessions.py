@@ -33,7 +33,7 @@ class SessionOut(BaseModel):
     agent_id: str
     user_id: str
     username: Optional[str] = None      # display_name ?? username
-    source_channel: str = "web"         # web / feishu / discord / slack / agent
+    source_channel: str = "web"         # web / ide_lsp4j / feishu / discord / slack / agent
     title: str
     created_at: str
     last_message_at: Optional[str] = None

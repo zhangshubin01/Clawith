@@ -1489,7 +1489,8 @@
       "wechat": "WeChat",
       "whatsapp": "WhatsApp",
       "dingtalk": "DingTalk",
-      "wecom": "WeCom"
+      "wecom": "WeCom",
+      "ide_lsp4j": "IDE"
     },
     "searching": "Searching...",
     "upload": "⬆ Upload",
