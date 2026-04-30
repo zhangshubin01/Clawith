@@ -1771,7 +1771,7 @@ select:focus {
   box-sizing: border-box;
 }
 .scope-dropdown-trigger:hover .scope-dropdown-label {
-  color: var(--accent-primary);
+  color: var(--text-primary);
 }
 .scope-dropdown-label {
   font-size: 13px;
@@ -1826,7 +1826,7 @@ select:focus {
   color: var(--text-primary);
 }
 .scope-dropdown-item--active {
-  color: var(--accent-primary);
+  color: var(--text-primary);
   font-weight: 500;
 }
 .scope-dropdown-item--disabled {
@@ -1876,12 +1876,12 @@ select:focus {
   width: 100%;
   height: 28px;
   padding: 0 10px;
-  background: rgba(59, 130, 246, 0.08);
-  border: 1px solid rgba(59, 130, 246, 0.2);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
   cursor: pointer;
   font-size: 12px;
-  color: #3b82f6;
+  color: var(--text-secondary);
   font-weight: 500;
   display: flex;
   align-items: center;
@@ -1893,19 +1893,19 @@ select:focus {
 }
 
 .new-session-btn:hover {
-  background: rgba(59, 130, 246, 0.14);
-  color: #2563eb;
-  border-color: rgba(59, 130, 246, 0.35);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
 }
 [data-theme="dark"] .new-session-btn {
-  background: rgba(59, 130, 246, 0.12);
-  border-color: rgba(59, 130, 246, 0.25);
-  color: #60a5fa;
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
 }
 [data-theme="dark"] .new-session-btn:hover {
-  background: rgba(59, 130, 246, 0.2);
-  border-color: rgba(59, 130, 246, 0.4);
-  color: #93bbfd;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--text-primary);
 }
 
 /* Session item — delete button & message count hover behaviour */
@@ -2715,13 +2715,13 @@ select:focus {
   right: -40px;
   width: 120px;
   height: 120px;
-  background: rgba(59, 130, 246, 0.06);
+  background: rgba(0, 0, 0, 0.04);
   border-radius: 50%;
   filter: blur(40px);
   pointer-events: none;
 }
 [data-theme="dark"] .agent-info-card-glow {
-  background: rgba(99, 102, 241, 0.08);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 /* ── Two-column grid ── */
@@ -2760,12 +2760,12 @@ select:focus {
   flex-shrink: 0;
 }
 .agent-info-section-icon--blue {
-  background: rgba(59, 130, 246, 0.1);
-  color: #3b82f6;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
 }
 .agent-info-section-icon--indigo {
-  background: rgba(59, 130, 246, 0.1);
-  color: #3b82f6;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
 }
 .agent-info-card-section-title {
   font-size: 13px;
@@ -2872,7 +2872,7 @@ select:focus {
   gap: 10px;
   padding: 10px 12px;
   border-radius: 10px;
-  background: rgba(59, 130, 246, 0.04);
+  background: var(--bg-secondary);
   border: none;
   margin-bottom: 12px;
 }
@@ -2886,8 +2886,8 @@ select:focus {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  background: rgba(99, 102, 241, 0.08);
-  color: #6366f1;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
   font-size: 14px;
   flex-shrink: 0;
 }
@@ -2983,6 +2983,27 @@ select:focus {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.agent-info-meta-list--model {
+  margin-bottom: 12px;
+}
+
+.agent-info-profile-block {
+  margin-top: 2px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+[data-theme="dark"] .agent-info-profile-block {
+  border-top-color: rgba(255, 255, 255, 0.06);
+}
+
+.agent-info-profile-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
 }
 
 /* (variant toggle removed — saas is the only style) */
@@ -3221,8 +3242,8 @@ select:focus {
   background: var(--bg-tertiary);
 }
 .live-panel-icon-btn.active {
-  color: var(--accent);
-  background: rgba(59, 130, 246, 0.08);
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
 }
 
 .live-panel-header-sep {
@@ -3240,9 +3261,9 @@ select:focus {
   gap: 5px;
   padding: 5px 10px;
   border-radius: 6px;
-  border: 1px solid rgba(99, 102, 241, 0.25);
-  background: rgba(99, 102, 241, 0.08);
-  color: var(--accent-primary);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
@@ -3251,8 +3272,8 @@ select:focus {
 }
 
 .live-panel-take-control:hover {
-  background: rgba(99, 102, 241, 0.15);
-  border-color: rgba(99, 102, 241, 0.4);
+  background: var(--bg-tertiary);
+  border-color: var(--border-strong);
 }
 
 .live-panel-content {
@@ -4225,13 +4246,13 @@ select:focus {
   border: 1px solid var(--border-subtle);
 }
 .chat-msg-avatar--user {
-  background: rgba(59, 130, 246, 0.1);
-  border-color: rgba(59, 130, 246, 0.15);
-  color: #3B82F6;
+  background: var(--bg-tertiary);
+  border-color: var(--border-subtle);
+  color: var(--text-secondary);
 }
 [data-theme="dark"] .chat-msg-avatar--user {
-  background: rgba(59, 130, 246, 0.18);
-  border-color: rgba(59, 130, 246, 0.25);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 .chat-msg-col {
@@ -4254,8 +4275,8 @@ select:focus {
   transition: box-shadow 150ms ease;
 }
 .chat-msg-bubble--user {
-  background: rgba(59, 130, 246, 0.08);
-  border-color: rgba(59, 130, 246, 0.15);
+  background: var(--bg-secondary);
+  border-color: var(--border-default);
 }
 [data-theme="dark"] .chat-msg-bubble {
   background: rgba(255, 255, 255, 0.05);
@@ -4263,8 +4284,8 @@ select:focus {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 [data-theme="dark"] .chat-msg-bubble--user {
-  background: rgba(59, 130, 246, 0.12);
-  border-color: rgba(59, 130, 246, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
 .chat-msg-sender {
@@ -4289,16 +4310,16 @@ select:focus {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  background: rgba(59, 130, 246, 0.06);
+  background: var(--bg-secondary);
   border-radius: 6px;
   padding: 4px 8px;
   font-size: 11px;
-  border: 1px solid rgba(59, 130, 246, 0.12);
+  border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
 }
 [data-theme="dark"] .chat-msg-file-chip {
-  background: rgba(59, 130, 246, 0.1);
-  border-color: rgba(59, 130, 246, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 /* Empty state */
@@ -4379,12 +4400,12 @@ select:focus {
 }
 
 .chat-composer:focus-within {
-  border-color: rgba(59, 130, 246, 0.45);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px rgba(58, 58, 66, 0.08);
 }
 [data-theme="dark"] .chat-composer:focus-within {
-  border-color: rgba(59, 130, 246, 0.4);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08);
 }
 
 .chat-composer-attachments {
@@ -4442,12 +4463,31 @@ select:focus {
 
 /* Send: same as global .btn-primary (theme bg + primary-fg); icon uses currentColor */
 .chat-composer .btn.chat-composer-send {
+  background: #3a3a42;
+  color: #ffffff;
+  border-color: #3a3a42;
   padding: 0;
   width: 28px;
   min-width: 28px;
   height: 28px;
   flex-shrink: 0;
   border-radius: 6px;
+}
+
+.chat-composer .btn.chat-composer-send:hover:not(:disabled) {
+  background: #28282e;
+  border-color: #28282e;
+}
+
+[data-theme="dark"] .chat-composer .btn.chat-composer-send {
+  background: #e1e1e8;
+  border-color: #e1e1e8;
+  color: #0a0a0f;
+}
+
+[data-theme="dark"] .chat-composer .btn.chat-composer-send:hover:not(:disabled) {
+  background: #ffffff;
+  border-color: #ffffff;
 }
 
 .chat-composer .btn.chat-composer-send:disabled {

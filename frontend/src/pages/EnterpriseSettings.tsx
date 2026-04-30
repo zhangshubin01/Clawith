@@ -1832,6 +1832,28 @@ function CompanyLogoEditor() {
         }
     };
 
+    const resetLogo = async () => {
+        if (!tenantId || !logoUrl) return;
+        setLogoError('');
+        setLogoSaving(true);
+        try {
+            const res = await fetch(`/api/tenants/${tenantId}/logo`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${localStorage.getItem('token') || ''}` },
+            });
+            if (!res.ok) {
+                throw new Error(t('enterprise.logo.resetFailed', 'Failed to reset logo.'));
+            }
+            setLogoUrl('');
+            qc.invalidateQueries({ queryKey: ['tenant', tenantId] });
+            qc.invalidateQueries({ queryKey: ['my-tenants'] });
+        } catch (e: any) {
+            setLogoError(e.message || t('enterprise.logo.resetFailed', 'Failed to reset logo.'));
+        } finally {
+            setLogoSaving(false);
+        }
+    };
+
     return (
         <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
             <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
@@ -1858,6 +1880,17 @@ function CompanyLogoEditor() {
                     <button className="btn btn-secondary" type="button" onClick={() => fileInputRef.current?.click()} disabled={logoSaving}>
                         {logoSaving ? t('common.loading') : t('enterprise.logo.upload', 'Upload logo')}
                     </button>
+                    {logoUrl && (
+                        <button
+                            className="btn btn-ghost"
+                            type="button"
+                            onClick={resetLogo}
+                            disabled={logoSaving}
+                            style={{ marginLeft: '8px' }}
+                        >
+                            {t('enterprise.logo.reset', 'Reset to default')}
+                        </button>
+                    )}
                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '6px' }}>
                         {t('enterprise.logo.hint', 'PNG, JPG, or WebP. Max 1 MB. You will crop it to a square before saving.')}
                     </div>

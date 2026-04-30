@@ -1856,7 +1856,6 @@ function AgentDetailInner() {
     const [allSessions, setAllSessions] = useState<any[]>([]);
     const [activeSession, setActiveSession] = useState<any | null>(null);
     const [chatScope, setChatScope] = useState<'mine' | 'all'>('mine');
-    const [allUserFilter, setAllUserFilter] = useState<string>('');
     const [scopeDropdownOpen, setScopeDropdownOpen] = useState(false);
     const scopeDropdownRef = useRef<HTMLDivElement>(null);
     const [historyMsgs, setHistoryMsgs] = useState<any[]>([]);
@@ -1914,6 +1913,9 @@ function AgentDetailInner() {
     /** Normalize IDs — API/JSON may use number vs string; loose equality was breaking "own session" detection. */
     const sessionUserIdStr = (s: any) => (s?.user_id == null ? '' : String(s.user_id));
     const viewerUserIdStr = () => (currentUser?.id == null ? '' : String(currentUser.id));
+    const isAgentChatSession = (s: any) =>
+        String(s?.source_channel || '').toLowerCase() === 'agent' ||
+        String(s?.participant_type || '').toLowerCase() === 'agent';
 
     /** Ensure session shape from POST/list so P2P "mine" is never mistaken for read-only or agent thread. */
     const normalizeChatSession = (sess: any) => {
@@ -1970,27 +1972,14 @@ function AgentDetailInner() {
         const vu = viewerUserIdStr();
         return allSessions.filter((s: any) => {
             // Always show agent-to-agent sessions in the "Other users" tab
-            if (String(s.source_channel || '').toLowerCase() === 'agent') return true;
+            if (isAgentChatSession(s)) return true;
             const su = sessionUserIdStr(s);
             if (vu && su === vu) return false;
             return true;
         });
     }, [allSessions, currentUser?.id]);
 
-    const otherUserPickerOptions = useMemo(() => {
-        const m = new Map<string, string>();
-        for (const s of otherUsersSessions) {
-            const uid = sessionUserIdStr(s);
-            if (!uid) continue;
-            if (!m.has(uid)) m.set(uid, String(s.username || s.user_id || uid));
-        }
-        return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));
-    }, [otherUsersSessions]);
-
-    const othersListForPicker = useMemo(() => {
-        if (!allUserFilter) return otherUsersSessions;
-        return otherUsersSessions.filter((s: any) => sessionUserIdStr(s) === allUserFilter);
-    }, [otherUsersSessions, allUserFilter]);
+    const othersListForPicker = otherUsersSessions;
 
     useEffect(() => {
         if (!canViewAllAgentChatSessions && chatScope === 'all') setChatScope('mine');
@@ -2017,13 +2006,11 @@ function AgentDetailInner() {
 
     const onAdminTabMine = () => {
         setChatScope('mine');
-        setAllUserFilter('');
         if (activeSession && sessionUserIdStr(activeSession) !== viewerUserIdStr()) clearChatSelection();
     };
 
     const onAdminTabOthers = () => {
         setChatScope('all');
-        setAllUserFilter('');
         fetchAllSessions();
         if (activeSession && sessionUserIdStr(activeSession) === viewerUserIdStr()) clearChatSelection();
     };
@@ -2440,7 +2427,6 @@ function AgentDetailInner() {
         setLiveState({});
         setSidePanelTab('workspace');
         setChatScope('mine');
-        setAllUserFilter('');
         setSessions([]);
         setAllSessions([]);
         setAgentExpired(false);
@@ -2451,7 +2437,6 @@ function AgentDetailInner() {
     useEffect(() => {
         setSessions([]);
         setAllSessions([]);
-        setAllUserFilter('');
         setChatScope('mine');
         sessionMsgAbortRef.current?.abort();
         activeSessionIdRef.current = null;
@@ -2710,6 +2695,9 @@ function AgentDetailInner() {
                 const currentSessionId = activeSessionIdRef.current ? String(activeSessionIdRef.current) : '';
                 if (currentSessionId) clearUnreadForSession(currentSessionId);
                 fetchMySessions(true, agentId);
+                if (canViewAllAgentChatSessions && (scopeDropdownOpen || chatScope === 'all' || allSessions.length > 0)) {
+                    fetchAllSessions();
+                }
                 queryClient.invalidateQueries({ queryKey: ['agents'] });
             } else if (d.type === 'error' || d.type === 'quota_exceeded') {
                 const msg = d.content || d.detail || d.message || 'Request denied';
@@ -3514,26 +3502,32 @@ function AgentDetailInner() {
                                     <span className="agent-info-model-card-name" title={modelLabel}>{modelLabel}</span>
                                 </div>
                             </div>
-                            <div className="agent-info-meta-list">
+                            <div className="agent-info-meta-list agent-info-meta-list--model">
                                 <div className="agent-info-meta-row">
                                     <span>{t('agent.modelConfig.provider', 'Provider')}</span>
                                     <span>{modelProvider}</span>
                                 </div>
-                                <div className="agent-info-meta-row">
-                                    <span>{t('agent.modelConfig.contextWindow', 'Context')}</span>
-                                    <span>{(agent as any).context_window_size || 100}</span>
+                            </div>
+                            <div className="agent-info-profile-block">
+                                <div className="agent-info-profile-header">
+                                    <span className="agent-info-section-icon agent-info-section-icon--indigo">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 0 0-16 0"/></svg>
+                                    </span>
+                                    <span className="agent-info-card-section-title">{t('agent.profile.title', 'Agent Profile')}</span>
                                 </div>
-                                <div className="agent-info-meta-row">
-                                    <span>{t('agent.profile.created')}</span>
-                                    <span>{formatAgentDate(agent.created_at)}</span>
-                                </div>
-                                <div className="agent-info-meta-row">
-                                    <span>{t('agent.fields.createdBy', 'Created by')}</span>
-                                    <span>{(agent as any).creator_username ? `@${(agent as any).creator_username}` : '—'}</span>
-                                </div>
-                                <div className="agent-info-meta-row">
-                                    <span>{t('agent.profile.timezone')}</span>
-                                    <span>{(agent as any).effective_timezone || agent.timezone || 'UTC'}</span>
+                                <div className="agent-info-meta-list">
+                                    <div className="agent-info-meta-row">
+                                        <span>{t('agent.profile.created')}</span>
+                                        <span>{formatAgentDate(agent.created_at)}</span>
+                                    </div>
+                                    <div className="agent-info-meta-row">
+                                        <span>{t('agent.fields.createdBy', 'Created by')}</span>
+                                        <span>{(agent as any).creator_username ? `@${(agent as any).creator_username}` : '—'}</span>
+                                    </div>
+                                    <div className="agent-info-meta-row">
+                                        <span>{t('agent.profile.timezone')}</span>
+                                        <span>{(agent as any).effective_timezone || agent.timezone || 'UTC'}</span>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -4996,11 +4990,18 @@ function AgentDetailInner() {
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px', padding: '10px 8px 8px 12px', minHeight: '40px', boxSizing: 'border-box' }}>
                                         {canViewAllAgentChatSessions ? (
                                             <div className="scope-dropdown" ref={scopeDropdownRef}>
-                                                <button className="scope-dropdown-trigger" onClick={() => { setScopeDropdownOpen(v => !v); if (chatScope === 'all' && !allSessions.length) fetchAllSessions(); }}>
+                                                <button
+                                                    className="scope-dropdown-trigger"
+                                                    onClick={() => {
+                                                        const nextOpen = !scopeDropdownOpen;
+                                                        setScopeDropdownOpen(nextOpen);
+                                                        if (nextOpen && !allSessions.length) fetchAllSessions();
+                                                    }}
+                                                >
                                                     <span className="scope-dropdown-label">
                                                         {chatScope === 'mine'
                                                             ? t('agent.chat.mySessions')
-                                                            : (otherUserPickerOptions.find(([uid]) => uid === allUserFilter)?.[1] || t('agent.chat.mySessions'))
+                                                            : t('agent.chat.otherSessions', '其他会话')
                                                         }
                                                     </span>
                                                     <svg className={`scope-dropdown-chevron${scopeDropdownOpen ? ' scope-dropdown-chevron--open' : ''}`} width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
@@ -5011,16 +5012,10 @@ function AgentDetailInner() {
                                                             className={`scope-dropdown-item${chatScope === 'mine' ? ' scope-dropdown-item--active' : ''}`}
                                                             onClick={() => { onAdminTabMine(); setScopeDropdownOpen(false); }}
                                                         >{t('agent.chat.mySessions')}</div>
-                                                        {otherUserPickerOptions.length > 0
-                                                            ? otherUserPickerOptions.map(([uid, label]) => (
-                                                                <div
-                                                                    key={uid}
-                                                                    className={`scope-dropdown-item${chatScope === 'all' && allUserFilter === uid ? ' scope-dropdown-item--active' : ''}`}
-                                                                    onClick={() => { setChatScope('all'); setAllUserFilter(uid); fetchAllSessions(); if (activeSession && sessionUserIdStr(activeSession) === viewerUserIdStr()) clearChatSelection(); setScopeDropdownOpen(false); }}
-                                                                >{label}</div>
-                                                            ))
-                                                            : <div className="scope-dropdown-item scope-dropdown-item--disabled">{t('agent.chat.noOtherUserSessions', '暂无其他用户会话')}</div>
-                                                        }
+                                                        <div
+                                                            className={`scope-dropdown-item${chatScope === 'all' ? ' scope-dropdown-item--active' : ''}`}
+                                                            onClick={() => { onAdminTabOthers(); setScopeDropdownOpen(false); }}
+                                                        >{t('agent.chat.otherSessions', '其他会话')}</div>
                                                     </div>
                                                 )}
                                             </div>
@@ -5491,7 +5486,7 @@ function AgentDetailInner() {
                                         )}
                                         {/* Transient info banner — e.g. fallback model switch */}
                                         {chatInfoMsg && (
-                                            <div style={{ padding: '6px 14px', borderTop: '1px solid rgba(99,102,241,0.25)', background: 'rgba(99,102,241,0.07)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'var(--text-secondary)', animation: 'fadeIn 0.2s ease' }}>
+                                            <div style={{ padding: '6px 14px', borderTop: '1px solid var(--border-subtle)', background: 'var(--bg-secondary)', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', color: 'var(--text-secondary)', animation: 'fadeIn 0.2s ease' }}>
                                                 <span style={{ opacity: 0.7 }}>ℹ️</span>
                                                 <span style={{ flex: 1 }}>{chatInfoMsg}</span>
                                                 <button onClick={() => setChatInfoMsg(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', fontSize: '14px', lineHeight: 1, padding: '0 2px' }}>✕</button>

@@ -593,6 +593,29 @@ async def upload_tenant_logo(
     return TenantOut.model_validate(tenant)
 
 
+@router.delete("/{tenant_id}/logo", response_model=TenantOut)
+async def delete_tenant_logo(
+    tenant_id: uuid.UUID,
+    current_user: User = Depends(require_role("org_admin", "platform_admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a custom company logo and fall back to the generated default."""
+    tenant = await _get_updateable_tenant(tenant_id, current_user, db)
+
+    path = _tenant_logo_path(tenant_id)
+    if path.exists():
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Failed to delete logo") from exc
+
+    config = dict(tenant.im_config or {})
+    config.pop("logo_url", None)
+    tenant.im_config = config
+    await db.flush()
+    return TenantOut.model_validate(tenant)
+
+
 @router.put("/{tenant_id}/assign-user/{user_id}")
 async def assign_user_to_tenant(
     tenant_id: uuid.UUID,

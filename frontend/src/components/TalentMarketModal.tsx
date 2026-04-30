@@ -6,6 +6,7 @@ import { IconPlus, IconSearch, IconWorld, IconX } from '@tabler/icons-react';
 import { agentApi } from '../services/api';
 import PostHireSettingsModal from './PostHireSettingsModal';
 import { translateTemplate } from '../i18n/templateTranslations';
+import customAgentBackground from '../assets/talent-market/custom-agent-botanical.png';
 
 interface Template {
     id: string;
@@ -358,8 +359,11 @@ function CustomCard({ onClick }: { onClick: () => void }) {
             style={{
                 border: '1.5px dashed var(--border-subtle)', borderRadius: '10px',
                 padding: '18px', display: 'flex', flexDirection: 'column',
-                cursor: 'pointer', background: 'transparent',
+                cursor: 'pointer',
+                background: 'linear-gradient(135deg, rgba(255,255,255,0.97) 0%, rgba(255,255,255,0.92) 54%, rgba(249,246,238,0.82) 100%)',
                 transition: 'border-color 120ms, background 120ms',
+                position: 'relative',
+                overflow: 'hidden',
             }}
             onMouseEnter={(e) => {
                 (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--accent)';
@@ -368,27 +372,44 @@ function CustomCard({ onClick }: { onClick: () => void }) {
                 (e.currentTarget as HTMLDivElement).style.borderColor = 'var(--border-subtle)';
             }}
         >
+            <div
+                aria-hidden="true"
+                style={{
+                    position: 'absolute',
+                    inset: 0,
+                    backgroundImage: `linear-gradient(90deg, rgba(255,255,255,0.97) 0%, rgba(255,255,255,0.84) 48%, rgba(255,255,255,0.18) 100%), url(${customAgentBackground})`,
+                    backgroundRepeat: 'no-repeat',
+                    backgroundPosition: 'right -44px center',
+                    backgroundSize: '260px auto',
+                    filter: 'grayscale(18%) saturate(76%) sepia(8%)',
+                    opacity: 0.68,
+                    pointerEvents: 'none',
+                }}
+            />
             <div style={{
                 width: '40px', height: '40px', borderRadius: '8px',
                 background: 'var(--bg-secondary)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 marginBottom: '14px', color: 'var(--text-secondary)',
+                position: 'relative', zIndex: 1,
             }}>
                 <IconPlus size={20} stroke={1.5} />
             </div>
-            <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '2px' }}>
+            <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '2px', position: 'relative', zIndex: 1 }}>
                 {t('talentMarket.customTitle', isChinese ? '自建 Agent' : 'Build custom')}
             </div>
             <div style={{
                 fontSize: '10px', fontWeight: 500, letterSpacing: '0.06em',
                 color: 'var(--text-tertiary)', textTransform: 'uppercase',
                 marginBottom: '12px',
+                position: 'relative', zIndex: 1,
             }}>
                 {t('talentMarket.customCategory', 'Custom')}
             </div>
             <p style={{
                 margin: 0, flex: 1, fontSize: '12.5px',
                 color: 'var(--text-secondary)', lineHeight: 1.6,
+                position: 'relative', zIndex: 1,
             }}>
                 {t('talentMarket.customDescription', isChinese
                     ? '创建本地 Native Agent，按你的需求定义身份、权限和工具。'
@@ -402,6 +423,8 @@ function CustomCard({ onClick }: { onClick: () => void }) {
                 color: 'var(--text-tertiary)',
                 fontSize: '11.5px',
                 lineHeight: 1.2,
+                position: 'relative',
+                zIndex: 1,
             }}>
                 <IconWorld size={13} stroke={1.5} style={{ flexShrink: 0 }} />
                 <span>
@@ -416,7 +439,7 @@ function CustomCard({ onClick }: { onClick: () => void }) {
                     e.stopPropagation();
                     onClick();
                 }}
-                style={{ marginTop: '16px', width: '100%' }}
+                style={{ marginTop: '16px', width: '100%', position: 'relative', zIndex: 1 }}
             >
                 {t('talentMarket.customStart', isChinese ? '开始' : 'Start')}
             </button>
