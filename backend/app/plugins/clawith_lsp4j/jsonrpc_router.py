@@ -1917,6 +1917,12 @@ class JSONRPCRouter:
             if bg is None:
                 bg = False
             sync_parameters["is_background"] = bg
+            # 插件 RunInTerminalToolContextProvider 从 parameters 读取 run_mode
+            # 缺失时日志 warn "run_mode is null"，补齐为 autoRun（允许自动执行）
+            if "run_mode" not in sync_parameters:
+                sync_parameters["run_mode"] = "autoRun"
+            if "run_mode" not in arguments:
+                arguments["run_mode"] = "autoRun"
 
         if queue_matched:
             await self._send_tool_call_sync(
@@ -1967,7 +1973,21 @@ class JSONRPCRouter:
         file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
         try:
             result = await asyncio.wait_for(tool_future, timeout=timeout)
-            results = result[:500] if result else None
+            # ★ IDE 搜索工具（grep_code/search_codebase/search_symbol）：插件返回
+            # {"results": [{fileName, path, ...}]} JSON 字符串，需解析提取内层列表
+            # 否则 _wrap_results 会将整个 JSON 串包装为 [{"content": "..."}]
+            # 导致插件端 CodeItem 反序列化时拿到 content 而非 fileName → truncateFirst null
+            if tool_name in ("grep_code", "search_codebase", "search_symbol") and result:
+                try:
+                    parsed = json.loads(result) if isinstance(result, str) else result
+                    if isinstance(parsed, dict) and "results" in parsed:
+                        results = parsed["results"]
+                    else:
+                        results = [{"raw": str(result)[:500]}]
+                except (json.JSONDecodeError, TypeError):
+                    results = [{"raw": str(result)[:500]}]
+            else:
+                results = result[:500] if result else None
             finished_backfilled = False
             if tool_name == "read_file":
                 path = arguments.get("path") or arguments.get("file_path") or arguments.get("filePath") or ""
@@ -3781,8 +3801,10 @@ async def invoke_lsp4j_tool(
                         agent_key, active_keys)
         return f"[错误] LSP4J 连接不可用（user_id={user_id}, agent_id={agent_id}）"
 
-    logger.info("[LSP4J-TOOL] 调用 IDE 工具: tool={} agent_key={}", tool_name, agent_key)
-    return await router_instance.invoke_tool_on_ide(tool_name, arguments)
+    # read_file 可能读取大文件，超时需更长
+    timeout = 300.0 if tool_name == "read_file" else 120.0
+    logger.info("[LSP4J-TOOL] 调用 IDE 工具: tool={} agent_key={} timeout={}", tool_name, agent_key, timeout)
+    return await router_instance.invoke_tool_on_ide(tool_name, arguments, timeout=timeout)
 
 
 # ──────────────────────────────────────────────
