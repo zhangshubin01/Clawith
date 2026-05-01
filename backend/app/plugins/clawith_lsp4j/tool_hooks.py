@@ -266,6 +266,57 @@ _LSP4J_IDE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "grep_code",
+            "description": "使用正则表达式在项目文件中搜索代码内容。用于精确的模式匹配搜索。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "regex": {
+                        "type": "string",
+                        "description": "正则表达式模式（如 'class\\s+\\w+', 'import\\s+.*'）",
+                    },
+                },
+                "required": ["regex"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_codebase",
+            "description": "在项目代码库中搜索指定文本内容。用于关键词和文本片段搜索。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词或文本片段",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_symbol",
+            "description": "在项目中搜索类、函数等代码符号。Android 项目中文件名即类名，按文件名匹配。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "符号名称（类名/函数名）",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "add_tasks",
             "description": "在 IDE 任务面板中创建任务列表，用于规划多步骤任务并跟踪进度。任务树会在 IDE 侧边栏中渲染为可折叠的树形 UI。",
             "parameters": {

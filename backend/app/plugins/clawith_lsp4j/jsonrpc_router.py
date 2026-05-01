@@ -71,6 +71,36 @@ _LSP4J_FILE_EDIT_TOOLS = frozenset({
 })
 
 # ──────────────────────────────────────────────
+# 本地搜索工具配置（Android 项目优化）
+# ──────────────────────────────────────────────
+
+# 可搜索的源文件扩展名（覆盖 Java/Kotlin/Android 项目）
+_SEARCHABLE_EXTENSIONS = frozenset({
+    # 源代码
+    '.kt', '.java', '.kts', '.py', '.go', '.rs', '.swift',
+    '.js', '.ts', '.tsx', '.jsx', '.c', '.cpp', '.h', '.hpp',
+    '.rb', '.php', '.scala', '.dart',
+    # Android 资源与配置
+    '.xml', '.json', '.yaml', '.yml', '.properties', '.pro',
+    # Gradle
+    '.gradle',
+    # 其他
+    '.sql', '.sh', '.bash', '.zsh', '.html', '.css', '.scss', '.md',
+})
+
+# 排除的目录（构建产物 + IDE 配置）
+_EXCLUDED_DIRS = frozenset({
+    'build', '.gradle', '.idea', '.git', '.comate',
+    '__pycache__', 'node_modules', '.claude', 'logs',
+    'generated', '.kotlin',
+})
+
+# 最大扫描文件数（防止大项目超时）
+_MAX_FILES_TO_SCAN = 500
+# 最大结果数
+_MAX_RESULTS = 30
+
+# ──────────────────────────────────────────────
 # 数据类定义（基于灵码插件 ChatAskParam.java 17 字段）
 # ──────────────────────────────────────────────
 
@@ -123,24 +153,45 @@ _TOOL_DISPLAY_NAME_MAP = TOOL_DISPLAY_NAME_MAP
 # ──────────────────────────────────────────────
 
 def _execute_local_tool(tool_name: str, arguments: dict) -> tuple[str, list[dict]]:
-    """本地执行 list_dir / search_file，返回 (result_json_str, results_list).
+    """本地执行搜索工具，返回 (result_json_str, results_list).
 
     results_list 格式匹配插件期望：
     - list_dir → DirItem[] (fileName, fileCount, fileSize, type, path)
-      插件 ListDirToolDetailPanel.refreshToolDetailPanel() 从 results 反序列化为 List<DirItem>
-      点击 DirItem 可打开文件或导航到目录
     - search_file → FileItem[] (fileName, path)
-      插件 SearchFileToolDetailPanel.refreshToolDetailPanel() 从 results 反序列化为 List<FileItem>
-      点击 FileItem 可打开文件
+    - grep_code → [{fileName, path, startLine, endLine}]
+    - search_codebase → [{fileName, path, startLine, endLine}]
+    - search_symbol → [{fileName, path}]
     """
     from pathlib import Path
+    import re as _re
+
+    cwd = Path.cwd()
+
+    def _is_searchable(file_path: Path) -> bool:
+        parts = set(file_path.parts)
+        if parts & _EXCLUDED_DIRS:
+            return False
+        if file_path.suffix not in _SEARCHABLE_EXTENSIONS:
+            return False
+        return True
+
+    def _iter_project_files():
+        count = 0
+        for p in cwd.rglob("*"):
+            if count >= _MAX_FILES_TO_SCAN:
+                break
+            if not p.is_file():
+                continue
+            if not _is_searchable(p):
+                continue
+            count += 1
+            yield p
 
     if tool_name == "list_dir":
-        # LLM 可能使用 relative_workspace_path 或 path 参数
         rel_path = arguments.get("relative_workspace_path") or arguments.get("path") or "."
         ws_path = Path(rel_path)
         if not ws_path.is_absolute():
-            ws_path = Path.cwd() / rel_path
+            ws_path = cwd / rel_path
         items: list[dict] = []
         try:
             if ws_path.exists() and ws_path.is_dir():
@@ -169,7 +220,7 @@ def _execute_local_tool(tool_name: str, arguments: dict) -> tuple[str, list[dict
         search_path = arguments.get("path", ".")
         search_dir = Path(search_path)
         if not search_dir.is_absolute():
-            search_dir = Path.cwd() / search_path
+            search_dir = cwd / search_path
         items: list[dict] = []
         try:
             if search_dir.exists() and search_dir.is_dir():
@@ -186,6 +237,73 @@ def _execute_local_tool(tool_name: str, arguments: dict) -> tuple[str, list[dict
                         pass
         except PermissionError:
             logger.warning("[LSP4J-TOOL] search_file 权限不足: path={}", search_dir)
+        result_str = json.dumps(items, ensure_ascii=False, default=str)
+        return result_str, items
+
+    elif tool_name == "grep_code":
+        regex = arguments.get("regex", "")
+        try:
+            pattern = _re.compile(regex, _re.IGNORECASE)
+        except _re.error:
+            return json.dumps({"error": f"无效的正则表达式: {regex}"}), []
+        items = []
+        for p in _iter_project_files():
+            if len(items) >= _MAX_RESULTS:
+                break
+            try:
+                text = p.read_text(errors='ignore')
+                matches = list(pattern.finditer(text))
+                for m in matches[:5]:
+                    if len(items) >= _MAX_RESULTS:
+                        break
+                    start_line = text[:m.start()].count('\n') + 1
+                    end_line = text[:m.end()].count('\n') + 1
+                    items.append({
+                        "fileName": p.name,
+                        "path": str(p.absolute()),
+                        "startLine": start_line,
+                        "endLine": end_line,
+                    })
+            except (OSError, UnicodeDecodeError):
+                pass
+        result_str = json.dumps(items, ensure_ascii=False, default=str)
+        return result_str, items
+
+    elif tool_name == "search_codebase":
+        query = arguments.get("query", "")
+        query_lower = query.lower()
+        items = []
+        for p in _iter_project_files():
+            if len(items) >= _MAX_RESULTS:
+                break
+            try:
+                text = p.read_text(errors='ignore').lower()
+                idx = text.find(query_lower)
+                if idx >= 0:
+                    start_line = text[:idx].count('\n') + 1
+                    items.append({
+                        "fileName": p.name,
+                        "path": str(p.absolute()),
+                        "startLine": start_line,
+                        "endLine": start_line,
+                    })
+            except (OSError, UnicodeDecodeError):
+                pass
+        result_str = json.dumps(items, ensure_ascii=False, default=str)
+        return result_str, items
+
+    elif tool_name == "search_symbol":
+        query = arguments.get("query", "")
+        query_lower = query.lower()
+        items = []
+        for p in _iter_project_files():
+            if len(items) >= _MAX_RESULTS:
+                break
+            if query_lower in p.name.lower():
+                items.append({
+                    "fileName": p.name,
+                    "path": str(p.absolute()),
+                })
         result_str = json.dumps(items, ensure_ascii=False, default=str)
         return result_str, items
 
@@ -1705,7 +1823,7 @@ class JSONRPCRouter:
                     tool_name, tool_call_id[:8], request_id[:8], timeout, queue_matched)
 
         # ★ 本地工具（list_dir, search_file）：后端本地执行，不发送到 IDE
-        if tool_name in ("list_dir", "search_file"):
+        if tool_name in ("list_dir", "search_file", "grep_code", "search_codebase", "search_symbol"):
             try:
                 result_str, results_list = _execute_local_tool(tool_name, arguments)
                 if not queue_matched:
