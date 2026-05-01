@@ -1823,7 +1823,7 @@ class JSONRPCRouter:
                     tool_name, tool_call_id[:8], request_id[:8], timeout, queue_matched)
 
         # ★ 本地工具（list_dir, search_file）：后端本地执行，不发送到 IDE
-        if tool_name in ("list_dir", "search_file", "grep_code", "search_codebase", "search_symbol"):
+        if tool_name in ("list_dir", "search_file"):
             try:
                 result_str, results_list = _execute_local_tool(tool_name, arguments)
                 if not queue_matched:
