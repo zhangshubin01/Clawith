@@ -1,0 +1,325 @@
+;
+; Archive created at 2026-04-30 21:05:48 CST
+;     dbname: clawith
+;     TOC Entries: 314
+;     Compression: -1
+;     Dump Version: 1.14-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 15.17 (Homebrew)
+;     Dumped by pg_dump version: 15.17 (Homebrew)
+;
+;
+; Selected TOC Entries:
+;
+917; 1247 16498 TYPE public activity_action_enum clawith
+890; 1247 16406 TYPE public agent_status_enum clawith
+908; 1247 16468 TYPE public approval_status_enum clawith
+905; 1247 16450 TYPE public channel_type_enum clawith
+911; 1247 16476 TYPE public chat_role_enum clawith
+914; 1247 16486 TYPE public im_provider_enum clawith
+893; 1247 16418 TYPE public permission_scope_enum clawith
+902; 1247 16440 TYPE public task_priority_enum clawith
+899; 1247 16432 TYPE public task_status_enum clawith
+896; 1247 16426 TYPE public task_type_enum clawith
+887; 1247 16396 TYPE public user_role_enum clawith
+244; 1259 17016 TABLE public agent_activity_logs clawith
+239; 1259 16901 TABLE public agent_agent_relationships clawith
+252; 1259 17176 TABLE public agent_credentials clawith
+235; 1259 16832 TABLE public agent_permissions clawith
+238; 1259 16883 TABLE public agent_relationships clawith
+246; 1259 17053 TABLE public agent_schedules clawith
+229; 1259 16715 TABLE public agent_templates clawith
+247; 1259 17073 TABLE public agent_tools clawith
+248; 1259 17091 TABLE public agent_triggers clawith
+254; 1259 24812 TABLE public agent_user_onboardings clawith
+234; 1259 16798 TABLE public agents clawith
+241; 1259 16938 TABLE public approval_requests clawith
+240; 1259 16919 TABLE public audit_logs clawith
+237; 1259 16866 TABLE public channel_configs clawith
+242; 1259 16956 TABLE public chat_messages clawith
+243; 1259 16981 TABLE public chat_sessions clawith
+261; 1259 24927 TABLE public company_reports clawith
+245; 1259 17031 TABLE public daily_token_usage clawith
+231; 1259 16752 TABLE public enterprise_info clawith
+250; 1259 17128 TABLE public gateway_messages clawith
+214; 1259 16523 TABLE public identities clawith
+215; 1259 16535 TABLE public identity_providers clawith
+232; 1259 16768 TABLE public invitation_codes clawith
+223; 1259 16623 TABLE public llm_models clawith
+260; 1259 24908 TABLE public member_daily_reports clawith
+249; 1259 17107 TABLE public notifications clawith
+258; 1259 24886 TABLE public okr_alignments clawith
+263; 1259 24955 TABLE public okr_key_results clawith
+257; 1259 24871 TABLE public okr_objectives clawith
+264; 1259 24970 TABLE public okr_progress_logs clawith
+262; 1259 24945 TABLE public okr_settings clawith
+224; 1259 16638 TABLE public org_departments clawith
+230; 1259 16728 TABLE public org_members clawith
+219; 1259 16570 TABLE public participants clawith
+225; 1259 16658 TABLE public plaza_comments clawith
+226; 1259 16672 TABLE public plaza_likes clawith
+221; 1259 16592 TABLE public plaza_posts clawith
+251; 1259 17151 TABLE public published_pages clawith
+233; 1259 16786 TABLE public skill_files clawith
+227; 1259 16684 TABLE public skills clawith
+216; 1259 16544 TABLE public sso_scan_sessions clawith
+218; 1259 16562 TABLE public system_settings clawith
+253; 1259 17191 TABLE public task_logs clawith
+236; 1259 16842 TABLE public tasks clawith
+228; 1259 16702 TABLE public tenant_settings clawith
+217; 1259 16552 TABLE public tenants clawith
+220; 1259 16581 TABLE public tools clawith
+222; 1259 16602 TABLE public users clawith
+259; 1259 24894 TABLE public work_reports clawith
+256; 1259 24846 TABLE public workspace_edit_locks clawith
+255; 1259 24828 TABLE public workspace_file_revisions clawith
+4405; 0 17016 TABLE DATA public agent_activity_logs clawith
+4400; 0 16901 TABLE DATA public agent_agent_relationships clawith
+4413; 0 17176 TABLE DATA public agent_credentials clawith
+4396; 0 16832 TABLE DATA public agent_permissions clawith
+4399; 0 16883 TABLE DATA public agent_relationships clawith
+4407; 0 17053 TABLE DATA public agent_schedules clawith
+4390; 0 16715 TABLE DATA public agent_templates clawith
+4408; 0 17073 TABLE DATA public agent_tools clawith
+4409; 0 17091 TABLE DATA public agent_triggers clawith
+4415; 0 24812 TABLE DATA public agent_user_onboardings clawith
+4395; 0 16798 TABLE DATA public agents clawith
+4402; 0 16938 TABLE DATA public approval_requests clawith
+4401; 0 16919 TABLE DATA public audit_logs clawith
+4398; 0 16866 TABLE DATA public channel_configs clawith
+4403; 0 16956 TABLE DATA public chat_messages clawith
+4404; 0 16981 TABLE DATA public chat_sessions clawith
+4422; 0 24927 TABLE DATA public company_reports clawith
+4406; 0 17031 TABLE DATA public daily_token_usage clawith
+4392; 0 16752 TABLE DATA public enterprise_info clawith
+4411; 0 17128 TABLE DATA public gateway_messages clawith
+4375; 0 16523 TABLE DATA public identities clawith
+4376; 0 16535 TABLE DATA public identity_providers clawith
+4393; 0 16768 TABLE DATA public invitation_codes clawith
+4384; 0 16623 TABLE DATA public llm_models clawith
+4421; 0 24908 TABLE DATA public member_daily_reports clawith
+4410; 0 17107 TABLE DATA public notifications clawith
+4419; 0 24886 TABLE DATA public okr_alignments clawith
+4424; 0 24955 TABLE DATA public okr_key_results clawith
+4418; 0 24871 TABLE DATA public okr_objectives clawith
+4425; 0 24970 TABLE DATA public okr_progress_logs clawith
+4423; 0 24945 TABLE DATA public okr_settings clawith
+4385; 0 16638 TABLE DATA public org_departments clawith
+4391; 0 16728 TABLE DATA public org_members clawith
+4380; 0 16570 TABLE DATA public participants clawith
+4386; 0 16658 TABLE DATA public plaza_comments clawith
+4387; 0 16672 TABLE DATA public plaza_likes clawith
+4382; 0 16592 TABLE DATA public plaza_posts clawith
+4412; 0 17151 TABLE DATA public published_pages clawith
+4394; 0 16786 TABLE DATA public skill_files clawith
+4388; 0 16684 TABLE DATA public skills clawith
+4377; 0 16544 TABLE DATA public sso_scan_sessions clawith
+4379; 0 16562 TABLE DATA public system_settings clawith
+4414; 0 17191 TABLE DATA public task_logs clawith
+4397; 0 16842 TABLE DATA public tasks clawith
+4389; 0 16702 TABLE DATA public tenant_settings clawith
+4378; 0 16552 TABLE DATA public tenants clawith
+4381; 0 16581 TABLE DATA public tools clawith
+4383; 0 16602 TABLE DATA public users clawith
+4420; 0 24894 TABLE DATA public work_reports clawith
+4417; 0 24846 TABLE DATA public workspace_edit_locks clawith
+4416; 0 24828 TABLE DATA public workspace_file_revisions clawith
+4078; 2606 17023 CONSTRAINT public agent_activity_logs agent_activity_logs_pkey clawith
+4060; 2606 16908 CONSTRAINT public agent_agent_relationships agent_agent_relationships_pkey clawith
+4111; 2606 17184 CONSTRAINT public agent_credentials agent_credentials_pkey clawith
+4049; 2606 16836 CONSTRAINT public agent_permissions agent_permissions_pkey clawith
+4058; 2606 16890 CONSTRAINT public agent_relationships agent_relationships_pkey clawith
+4089; 2606 17060 CONSTRAINT public agent_schedules agent_schedules_pkey clawith
+4027; 2606 16722 CONSTRAINT public agent_templates agent_templates_pkey clawith
+4093; 2606 17080 CONSTRAINT public agent_tools agent_tools_pkey clawith
+4095; 2606 17098 CONSTRAINT public agent_triggers agent_triggers_pkey clawith
+4116; 2606 24817 CONSTRAINT public agent_user_onboardings agent_user_onboardings_pkey clawith
+4047; 2606 16806 CONSTRAINT public agents agents_pkey clawith
+4065; 2606 16945 CONSTRAINT public approval_requests approval_requests_pkey clawith
+4062; 2606 16926 CONSTRAINT public audit_logs audit_logs_pkey clawith
+4053; 2606 16874 CONSTRAINT public channel_configs channel_configs_pkey clawith
+4067; 2606 16963 CONSTRAINT public chat_messages chat_messages_pkey clawith
+4071; 2606 16990 CONSTRAINT public chat_sessions chat_sessions_pkey clawith
+4149; 2606 24935 CONSTRAINT public company_reports company_reports_pkey clawith
+4082; 2606 17037 CONSTRAINT public daily_token_usage daily_token_usage_pkey clawith
+4037; 2606 16762 CONSTRAINT public enterprise_info enterprise_info_info_type_key clawith
+4039; 2606 16760 CONSTRAINT public enterprise_info enterprise_info_pkey clawith
+4105; 2606 17135 CONSTRAINT public gateway_messages gateway_messages_pkey clawith
+3973; 2606 16531 CONSTRAINT public identities identities_pkey clawith
+3978; 2606 16543 CONSTRAINT public identity_providers identity_providers_pkey clawith
+4041; 2606 16773 CONSTRAINT public invitation_codes invitation_codes_pkey clawith
+4006; 2606 16631 CONSTRAINT public llm_models llm_models_pkey clawith
+4145; 2606 24916 CONSTRAINT public member_daily_reports member_daily_reports_pkey clawith
+4103; 2606 17114 CONSTRAINT public notifications notifications_pkey clawith
+4135; 2606 24891 CONSTRAINT public okr_alignments okr_alignments_pkey clawith
+4158; 2606 24963 CONSTRAINT public okr_key_results okr_key_results_pkey clawith
+4133; 2606 24879 CONSTRAINT public okr_objectives okr_objectives_pkey clawith
+4161; 2606 24977 CONSTRAINT public okr_progress_logs okr_progress_logs_pkey clawith
+4155; 2606 24949 CONSTRAINT public okr_settings okr_settings_pkey clawith
+4010; 2606 16645 CONSTRAINT public org_departments org_departments_pkey clawith
+4035; 2606 16735 CONSTRAINT public org_members org_members_pkey clawith
+3989; 2606 16577 CONSTRAINT public participants participants_pkey clawith
+4013; 2606 16665 CONSTRAINT public plaza_comments plaza_comments_pkey clawith
+4016; 2606 16677 CONSTRAINT public plaza_likes plaza_likes_pkey clawith
+3999; 2606 16599 CONSTRAINT public plaza_posts plaza_posts_pkey clawith
+4109; 2606 17158 CONSTRAINT public published_pages published_pages_pkey clawith
+4045; 2606 16792 CONSTRAINT public skill_files skill_files_pkey clawith
+4019; 2606 16695 CONSTRAINT public skills skills_folder_name_key clawith
+4021; 2606 16693 CONSTRAINT public skills skills_name_key clawith
+4023; 2606 16691 CONSTRAINT public skills skills_pkey clawith
+3980; 2606 16551 CONSTRAINT public sso_scan_sessions sso_scan_sessions_pkey clawith
+3986; 2606 16569 CONSTRAINT public system_settings system_settings_pkey clawith
+4114; 2606 17198 CONSTRAINT public task_logs task_logs_pkey clawith
+4051; 2606 16850 CONSTRAINT public tasks tasks_pkey clawith
+4025; 2606 16709 CONSTRAINT public tenant_settings tenant_settings_pkey clawith
+3984; 2606 16559 CONSTRAINT public tenants tenants_pkey clawith
+3993; 2606 16591 CONSTRAINT public tools tools_name_key clawith
+3995; 2606 16589 CONSTRAINT public tools tools_pkey clawith
+4098; 2606 17100 CONSTRAINT public agent_triggers uq_agent_trigger_name clawith
+4056; 2606 16876 CONSTRAINT public channel_configs uq_channel_configs_agent_channel clawith
+4076; 2606 16992 CONSTRAINT public chat_sessions uq_chat_sessions_agent_ext_conv clawith
+4153; 2606 24937 CONSTRAINT public company_reports uq_company_report_period clawith
+4087; 2606 17039 CONSTRAINT public daily_token_usage uq_daily_token_usage_agent_date clawith
+4147; 2606 24918 CONSTRAINT public member_daily_reports uq_member_daily_report clawith
+4137; 2606 24893 CONSTRAINT public okr_alignments uq_okr_alignment clawith
+3991; 2606 16579 CONSTRAINT public participants uq_participants_type_ref clawith
+4128; 2606 24856 CONSTRAINT public workspace_edit_locks uq_workspace_edit_locks_agent_path clawith
+4003; 2606 16610 CONSTRAINT public users users_pkey clawith
+4140; 2606 24901 CONSTRAINT public work_reports work_reports_pkey clawith
+4130; 2606 24854 CONSTRAINT public workspace_edit_locks workspace_edit_locks_pkey clawith
+4122; 2606 24836 CONSTRAINT public workspace_file_revisions workspace_file_revisions_pkey clawith
+4079; 1259 17029 INDEX public ix_agent_activity_logs_agent_id clawith
+4080; 1259 17030 INDEX public ix_agent_activity_logs_created_at clawith
+4112; 1259 17190 INDEX public ix_agent_credentials_agent_id clawith
+4090; 1259 17071 INDEX public ix_agent_schedules_agent_id clawith
+4091; 1259 17072 INDEX public ix_agent_schedules_next_run_at clawith
+4096; 1259 17106 INDEX public ix_agent_triggers_agent_id clawith
+4063; 1259 16937 INDEX public ix_audit_logs_created_at clawith
+4054; 1259 16882 INDEX public ix_channel_configs_agent_id clawith
+4068; 1259 16980 INDEX public ix_chat_messages_agent_id clawith
+4069; 1259 16979 INDEX public ix_chat_messages_created_at clawith
+4072; 1259 17013 INDEX public ix_chat_sessions_agent_id clawith
+4073; 1259 17014 INDEX public ix_chat_sessions_created_at clawith
+4074; 1259 17015 INDEX public ix_chat_sessions_user_id clawith
+4150; 1259 24943 INDEX public ix_company_reports_period_start clawith
+4151; 1259 24944 INDEX public ix_company_reports_tenant_id clawith
+4083; 1259 17052 INDEX public ix_daily_token_usage_agent_id clawith
+4084; 1259 17051 INDEX public ix_daily_token_usage_date clawith
+4085; 1259 17050 INDEX public ix_daily_token_usage_tenant_id clawith
+3974; 1259 16534 INDEX public ix_identities_email clawith
+3975; 1259 16533 INDEX public ix_identities_phone clawith
+3976; 1259 16532 INDEX public ix_identities_username clawith
+4042; 1259 16785 INDEX public ix_invitation_codes_code clawith
+4043; 1259 16784 INDEX public ix_invitation_codes_tenant_id clawith
+4004; 1259 16637 INDEX public ix_llm_models_tenant_id clawith
+4141; 1259 24926 INDEX public ix_member_daily_reports_member_id clawith
+4142; 1259 24924 INDEX public ix_member_daily_reports_report_date clawith
+4143; 1259 24925 INDEX public ix_member_daily_reports_tenant_id clawith
+4099; 1259 17127 INDEX public ix_notifications_agent_id clawith
+4100; 1259 17126 INDEX public ix_notifications_created_at clawith
+4101; 1259 17125 INDEX public ix_notifications_user_id clawith
+4156; 1259 24969 INDEX public ix_okr_key_results_objective_id clawith
+4131; 1259 24885 INDEX public ix_okr_objectives_tenant_id clawith
+4159; 1259 24983 INDEX public ix_okr_progress_logs_kr_id clawith
+4007; 1259 16656 INDEX public ix_org_departments_external_id clawith
+4008; 1259 16657 INDEX public ix_org_departments_tenant_id clawith
+4028; 1259 16746 INDEX public ix_org_members_external_id clawith
+4029; 1259 16751 INDEX public ix_org_members_name_translit_full clawith
+4030; 1259 16748 INDEX public ix_org_members_name_translit_initial clawith
+4031; 1259 16750 INDEX public ix_org_members_open_id clawith
+4032; 1259 16747 INDEX public ix_org_members_tenant_id clawith
+4033; 1259 16749 INDEX public ix_org_members_unionid clawith
+3987; 1259 16580 INDEX public ix_participants_ref_id clawith
+4011; 1259 16671 INDEX public ix_plaza_comments_post_id clawith
+4014; 1259 16683 INDEX public ix_plaza_likes_post_id clawith
+3996; 1259 16600 INDEX public ix_plaza_posts_author_id clawith
+3997; 1259 16601 INDEX public ix_plaza_posts_created_at clawith
+4106; 1259 17175 INDEX public ix_published_pages_agent_id clawith
+4107; 1259 17174 INDEX public ix_published_pages_short_id clawith
+4017; 1259 16701 INDEX public ix_skills_tenant_id clawith
+3981; 1259 16561 INDEX public ix_tenants_slug clawith
+3982; 1259 16560 INDEX public ix_tenants_sso_domain clawith
+4000; 1259 16622 INDEX public ix_users_api_key_hash clawith
+4001; 1259 16621 INDEX public ix_users_identity_id clawith
+4138; 1259 24907 INDEX public ix_work_reports_tenant_id clawith
+4123; 1259 24868 INDEX public ix_workspace_edit_locks_agent_id clawith
+4124; 1259 24867 INDEX public ix_workspace_edit_locks_expires_at clawith
+4125; 1259 24870 INDEX public ix_workspace_edit_locks_path clawith
+4126; 1259 24869 INDEX public ix_workspace_edit_locks_user_id clawith
+4117; 1259 24845 INDEX public ix_workspace_file_revisions_agent_id clawith
+4118; 1259 24843 INDEX public ix_workspace_file_revisions_created_at clawith
+4119; 1259 24842 INDEX public ix_workspace_file_revisions_group_key clawith
+4120; 1259 24844 INDEX public ix_workspace_file_revisions_path clawith
+4203; 2606 17024 FK CONSTRAINT public agent_activity_logs agent_activity_logs_agent_id_fkey clawith
+4190; 2606 16909 FK CONSTRAINT public agent_agent_relationships agent_agent_relationships_agent_id_fkey clawith
+4191; 2606 16914 FK CONSTRAINT public agent_agent_relationships agent_agent_relationships_target_agent_id_fkey clawith
+4219; 2606 17185 FK CONSTRAINT public agent_credentials agent_credentials_agent_id_fkey clawith
+4183; 2606 16837 FK CONSTRAINT public agent_permissions agent_permissions_agent_id_fkey clawith
+4188; 2606 16891 FK CONSTRAINT public agent_relationships agent_relationships_agent_id_fkey clawith
+4189; 2606 16896 FK CONSTRAINT public agent_relationships agent_relationships_member_id_fkey clawith
+4206; 2606 17061 FK CONSTRAINT public agent_schedules agent_schedules_agent_id_fkey clawith
+4207; 2606 17066 FK CONSTRAINT public agent_schedules agent_schedules_created_by_fkey clawith
+4171; 2606 16723 FK CONSTRAINT public agent_templates agent_templates_created_by_fkey clawith
+4208; 2606 17081 FK CONSTRAINT public agent_tools agent_tools_agent_id_fkey clawith
+4209; 2606 17086 FK CONSTRAINT public agent_tools agent_tools_tool_id_fkey clawith
+4210; 2606 17101 FK CONSTRAINT public agent_triggers agent_triggers_agent_id_fkey clawith
+4221; 2606 24818 FK CONSTRAINT public agent_user_onboardings agent_user_onboardings_agent_id_fkey clawith
+4222; 2606 24823 FK CONSTRAINT public agent_user_onboardings agent_user_onboardings_user_id_fkey clawith
+4178; 2606 16807 FK CONSTRAINT public agents agents_creator_id_fkey clawith
+4179; 2606 16822 FK CONSTRAINT public agents agents_fallback_model_id_fkey clawith
+4180; 2606 16817 FK CONSTRAINT public agents agents_primary_model_id_fkey clawith
+4181; 2606 16827 FK CONSTRAINT public agents agents_template_id_fkey clawith
+4182; 2606 16812 FK CONSTRAINT public agents agents_tenant_id_fkey clawith
+4194; 2606 16946 FK CONSTRAINT public approval_requests approval_requests_agent_id_fkey clawith
+4195; 2606 16951 FK CONSTRAINT public approval_requests approval_requests_resolved_by_fkey clawith
+4192; 2606 16932 FK CONSTRAINT public audit_logs audit_logs_agent_id_fkey clawith
+4193; 2606 16927 FK CONSTRAINT public audit_logs audit_logs_user_id_fkey clawith
+4187; 2606 16877 FK CONSTRAINT public channel_configs channel_configs_agent_id_fkey clawith
+4196; 2606 16964 FK CONSTRAINT public chat_messages chat_messages_agent_id_fkey clawith
+4197; 2606 16974 FK CONSTRAINT public chat_messages chat_messages_participant_id_fkey clawith
+4198; 2606 16969 FK CONSTRAINT public chat_messages chat_messages_user_id_fkey clawith
+4199; 2606 16993 FK CONSTRAINT public chat_sessions chat_sessions_agent_id_fkey clawith
+4200; 2606 17003 FK CONSTRAINT public chat_sessions chat_sessions_participant_id_fkey clawith
+4201; 2606 17008 FK CONSTRAINT public chat_sessions chat_sessions_peer_agent_id_fkey clawith
+4202; 2606 16998 FK CONSTRAINT public chat_sessions chat_sessions_user_id_fkey clawith
+4229; 2606 24938 FK CONSTRAINT public company_reports company_reports_tenant_id_fkey clawith
+4204; 2606 17045 FK CONSTRAINT public daily_token_usage daily_token_usage_agent_id_fkey clawith
+4205; 2606 17040 FK CONSTRAINT public daily_token_usage daily_token_usage_tenant_id_fkey clawith
+4174; 2606 16763 FK CONSTRAINT public enterprise_info enterprise_info_updated_by_fkey clawith
+4213; 2606 17136 FK CONSTRAINT public gateway_messages gateway_messages_agent_id_fkey clawith
+4214; 2606 17141 FK CONSTRAINT public gateway_messages gateway_messages_sender_agent_id_fkey clawith
+4215; 2606 17146 FK CONSTRAINT public gateway_messages gateway_messages_sender_user_id_fkey clawith
+4175; 2606 16779 FK CONSTRAINT public invitation_codes invitation_codes_created_by_fkey clawith
+4176; 2606 16774 FK CONSTRAINT public invitation_codes invitation_codes_tenant_id_fkey clawith
+4164; 2606 16632 FK CONSTRAINT public llm_models llm_models_tenant_id_fkey clawith
+4228; 2606 24919 FK CONSTRAINT public member_daily_reports member_daily_reports_tenant_id_fkey clawith
+4211; 2606 17120 FK CONSTRAINT public notifications notifications_agent_id_fkey clawith
+4212; 2606 17115 FK CONSTRAINT public notifications notifications_user_id_fkey clawith
+4231; 2606 24964 FK CONSTRAINT public okr_key_results okr_key_results_objective_id_fkey clawith
+4226; 2606 24880 FK CONSTRAINT public okr_objectives okr_objectives_tenant_id_fkey clawith
+4232; 2606 24978 FK CONSTRAINT public okr_progress_logs okr_progress_logs_kr_id_fkey clawith
+4230; 2606 24950 FK CONSTRAINT public okr_settings okr_settings_tenant_id_fkey clawith
+4165; 2606 16646 FK CONSTRAINT public org_departments org_departments_parent_id_fkey clawith
+4166; 2606 16651 FK CONSTRAINT public org_departments org_departments_tenant_id_fkey clawith
+4172; 2606 16736 FK CONSTRAINT public org_members org_members_department_id_fkey clawith
+4173; 2606 16741 FK CONSTRAINT public org_members org_members_tenant_id_fkey clawith
+4167; 2606 16666 FK CONSTRAINT public plaza_comments plaza_comments_post_id_fkey clawith
+4168; 2606 16678 FK CONSTRAINT public plaza_likes plaza_likes_post_id_fkey clawith
+4216; 2606 17159 FK CONSTRAINT public published_pages published_pages_agent_id_fkey clawith
+4217; 2606 17169 FK CONSTRAINT public published_pages published_pages_tenant_id_fkey clawith
+4218; 2606 17164 FK CONSTRAINT public published_pages published_pages_user_id_fkey clawith
+4177; 2606 16793 FK CONSTRAINT public skill_files skill_files_skill_id_fkey clawith
+4169; 2606 16696 FK CONSTRAINT public skills skills_tenant_id_fkey clawith
+4220; 2606 17199 FK CONSTRAINT public task_logs task_logs_task_id_fkey clawith
+4184; 2606 16851 FK CONSTRAINT public tasks tasks_agent_id_fkey clawith
+4185; 2606 16856 FK CONSTRAINT public tasks tasks_created_by_fkey clawith
+4186; 2606 16861 FK CONSTRAINT public tasks tasks_supervision_target_user_id_fkey clawith
+4170; 2606 16710 FK CONSTRAINT public tenant_settings tenant_settings_tenant_id_fkey clawith
+4162; 2606 16611 FK CONSTRAINT public users users_identity_id_fkey clawith
+4163; 2606 16616 FK CONSTRAINT public users users_tenant_id_fkey clawith
+4227; 2606 24902 FK CONSTRAINT public work_reports work_reports_tenant_id_fkey clawith
+4224; 2606 24857 FK CONSTRAINT public workspace_edit_locks workspace_edit_locks_agent_id_fkey clawith
+4225; 2606 24862 FK CONSTRAINT public workspace_edit_locks workspace_edit_locks_user_id_fkey clawith
+4223; 2606 24837 FK CONSTRAINT public workspace_file_revisions workspace_file_revisions_agent_id_fkey clawith

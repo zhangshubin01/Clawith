@@ -1,25 +1,25 @@
-# Graph Report - .  (2026-04-30)
+# Graph Report - .  (2026-05-01)
 
 ## Corpus Check
-- 368 files · ~633,581 words
+- 385 files · ~697,638 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 4831 nodes · 19937 edges · 193 communities detected
-- Extraction: 33% EXTRACTED · 67% INFERRED · 0% AMBIGUOUS · INFERRED: 13413 edges (avg confidence: 0.5)
+- 4965 nodes · 20628 edges · 204 communities detected
+- Extraction: 33% EXTRACTED · 67% INFERRED · 0% AMBIGUOUS · INFERRED: 13912 edges (avg confidence: 0.5)
 - Token cost: 0 input · 0 output
 
 ## God Nodes (most connected - your core abstractions)
-1. `User` - 977 edges
-2. `Agent` - 824 edges
-3. `IdentityProvider` - 472 edges
-4. `ChatMessage` - 448 edges
-5. `LLMModel` - 445 edges
-6. `OrgMember` - 432 edges
-7. `ChannelConfig` - 420 edges
-8. `ChatSession` - 407 edges
-9. `Tenant` - 363 edges
-10. `Participant` - 341 edges
+1. `User` - 991 edges
+2. `Agent` - 842 edges
+3. `IdentityProvider` - 478 edges
+4. `ChatMessage` - 463 edges
+5. `LLMModel` - 453 edges
+6. `OrgMember` - 438 edges
+7. `ChannelConfig` - 427 edges
+8. `ChatSession` - 414 edges
+9. `Tenant` - 375 edges
+10. `Participant` - 352 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Clawith ACP Thin Client — IDE 侧瘦客户端（JetBrains Agent Client Protocol）  通过 WebSock` --uses--> `AgentSideConnection`  [INFERRED]
@@ -37,51 +37,51 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.02
-Nodes (399): ABC, DailyTokenUsage, CompanyCreateRequest, CompanyCreateResponse, CompanyStats, create_company(), get_enhanced_metrics(), get_platform_leaderboards() (+391 more)
+Nodes (423): ABC, DailyTokenUsage, CompanyCreateRequest, CompanyCreateResponse, CompanyStats, create_company(), get_enhanced_metrics(), get_platform_leaderboards() (+415 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.05
-Nodes (464): get_agent_activity(), get_conversation_messages(), list_conversations(), Activity log API — view agent work history., Get messages for a specific conversation., Get recent activity logs for an agent., List all conversation partners for this agent (web users + other agents)., Agent (+456 more)
+Nodes (485): get_agent_activity(), get_conversation_messages(), list_conversations(), AgentActivityLog, Activity log API — view agent work history., Get messages for a specific conversation., Get recent activity logs for an agent., List all conversation partners for this agent (web users + other agents). (+477 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.02
-Nodes (297): authorize(), bind_identity(), change_password(), check_duplicate(), forgot_password(), get_email_hint(), get_me(), get_my_tenants() (+289 more)
+Nodes (357): create_template(), delegate_task(), DelegateRequest, delete_template(), get_agent_metrics(), get_template(), handover_agent(), HandoverRequest (+349 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.01
-Nodes (113): fetchJson(), handleCreate(), handleSendTestEmail(), handleToggle(), handleToggleSetting(), loadCompanies(), saveEmailConfig(), saveEmailTemplates() (+105 more)
+Nodes (132): fetchJson(), handleCreate(), handleNotificationBarToggle(), handleSendTestEmail(), handleToggle(), handleToggleSetting(), loadCompanies(), saveEmailConfig() (+124 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.02
-Nodes (133): AboutCommand, about command - display version information about Clawith ACP., AgentsCommand, AioSandboxBackend, aio-sandbox backend.      Connects to aio-sandbox (https://github.com/agent-infr, Check if aio-sandbox service is available., Execute code using aio-sandbox., Base (+125 more)
+Nodes (114): _build_lsp4j_ide_prompt(), ChatAskParam, _convert_file_paths_to_links(), _epoch_ms(), _execute_local_tool(), _fix_code_edit_block_format(), invoke_lsp4j_tool(), JSONRPCRouter (+106 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.02
-Nodes (112): _build_lsp4j_ide_prompt(), ChatAskParam, _convert_file_paths_to_links(), _epoch_ms(), _execute_local_tool(), _fix_code_edit_block_format(), invoke_lsp4j_tool(), JSONRPCRouter (+104 more)
-
-### Community 6 - "Community 6"
 Cohesion: 0.03
 Nodes (180): _agent_workspace(), build_agent_context(), _build_skills_index(), _load_skills_index(), _parse_skill_frontmatter(), Build rich system prompt context for agents.  Loads soul, memory, skills summary, Load skill index with LRU cache + mtime invalidation., Build skills index table from skills/ directory.      Supports two formats: (+172 more)
 
-### Community 7 - "Community 7"
+### Community 6 - "Community 6"
 Cohesion: 0.02
 Nodes (121): call_agent_llm(), call_agent_llm_with_tools(), call_llm(), call_llm_with_failover(), _check_tool_requires_args(), _convert_messages_for_vision(), FailoverGuard, _get_agent_config() (+113 more)
 
+### Community 7 - "Community 7"
+Cohesion: 0.03
+Nodes (182): _agent_has_any_channel(), _agent_has_feishu(), _agentbay_browser_click(), _agentbay_browser_extract(), _agentbay_browser_login(), _agentbay_browser_navigate(), _agentbay_browser_observe(), _agentbay_browser_screenshot() (+174 more)
+
 ### Community 8 - "Community 8"
 Cohesion: 0.03
-Nodes (175): _agent_has_any_channel(), _agent_has_feishu(), _agentbay_browser_click(), _agentbay_browser_extract(), _agentbay_browser_login(), _agentbay_browser_navigate(), _agentbay_browser_observe(), _agentbay_browser_screenshot() (+167 more)
+Nodes (118): AioSandboxBackend, aio-sandbox backend.      Connects to aio-sandbox (https://github.com/agent-infr, Check if aio-sandbox service is available., Execute code using aio-sandbox., BaseSandboxBackend, ExecutionResult, Result of code execution in a sandbox., Format execution result for user display. (+110 more)
 
 ### Community 9 - "Community 9"
 Cohesion: 0.02
-Nodes (126): Initial schema — create all tables for fresh deployments.  env.py already import, AgentActivityLog, Activity log model for tracking agent actions., Records every action taken by a digital employee., Rolled up token consumption per agent per day for time-series analytics., log_activity(), Activity logger — simple async function to record agent actions., Record an agent activity. Fire-and-forget, never raises. (+118 more)
+Nodes (122): Initial schema — create all tables for fresh deployments.  env.py already import, Activity log model for tracking agent actions., Records every action taken by a digital employee., Rolled up token consumption per agent per day for time-series analytics., AgentUserOnboarding, Digital Employee (Agent) models., Digital employee template for quick creation., A row exists for every (agent, user) pair the user has been onboarded to.      R (+114 more)
 
 ### Community 10 - "Community 10"
-Cohesion: 0.03
-Nodes (112): create_template(), delegate_task(), DelegateRequest, delete_template(), get_agent_metrics(), get_template(), handover_agent(), HandoverRequest (+104 more)
+Cohesion: 0.02
+Nodes (91): AboutCommand, about command - display version information about Clawith ACP., AgentsCommand, Base, AcpCommand, ClawithPlugin, CommandContext, CommandResult (+83 more)
 
 ### Community 11 - "Community 11"
 Cohesion: 0.03
-Nodes (64): AgentSideConnection, ndJson stream connection over WebSocket for ACP.  This module handles the ndJson, ACP Agent-side connection wrapping ndJson stream over WebSocket., Read one line from stdin, parse as JSON., Send one JSON message as a line., Close the connection., RPC: ask IDE to read a text file., RPC: ask IDE to write a text file. (+56 more)
+Nodes (65): AgentSideConnection, ndJson stream connection over WebSocket for ACP.  This module handles the ndJson, ACP Agent-side connection wrapping ndJson stream over WebSocket., Read one line from stdin, parse as JSON., Send one JSON message as a line., Close the connection., RPC: ask IDE to read a text file., RPC: ask IDE to write a text file. (+57 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.04
@@ -97,135 +97,135 @@ Nodes (59): _cdp_exec(), ClickRequest, control_click(), control_current_url(), c
 
 ### Community 15 - "Community 15"
 Cohesion: 0.07
-Nodes (45): BaseSettings, Config, _default_agent_data_dir(), _default_agent_template_dir(), _default_log_dir(), from_dict(), get_sandbox_config(), get_settings() (+37 more)
-
-### Community 16 - "Community 16"
-Cohesion: 0.07
 Nodes (30): _AsyncSessionCtx, _FakeAsyncSessionFactory, _FakeDb, _load_thin_server_module(), patch_acp_async_session(), Unit / integration-style tests for the clawith-acp WebSocket bridge (no real IDE, Inject a fake async_session factory; restore after test., Must not hit DB when history already present. (+22 more)
 
-### Community 17 - "Community 17"
+### Community 16 - "Community 16"
 Cohesion: 0.09
 Nodes (32): DummyResult, _make_agent(), _make_participant(), _make_tenant(), Tests for async A2A msg_type differentiation (notify/consult/task_delegate).  Va, notify msg_type should return immediately without calling LLM., task_delegate should create a focus item and an on_message trigger., consult msg_type should call LLM synchronously and return reply. (+24 more)
 
-### Community 18 - "Community 18"
-Cohesion: 0.07
-Nodes (29): LSP4J 插件上下文变量定义。  将 ContextVar 集中在独立模块中，避免 router.py 与 tool_hooks.py 之间的循环导入。 所有, _acp_await_client_permission(), _acp_verbose(), acp_websocket(), _acp_ws_envelope(), _build_acp_user_turn_from_ws(), _custom_execute_tool(), _generate_structured_diff_blocks() (+21 more)
-
-### Community 19 - "Community 19"
+### Community 17 - "Community 17"
 Cohesion: 0.07
 Nodes (41): _apply_category_filter(), broadcast_notification(), BroadcastRequest, get_unread_count(), list_notifications(), mark_all_read(), mark_read(), Notification model — notifications for users and agents. (+33 more)
 
-### Community 20 - "Community 20"
+### Community 18 - "Community 18"
 Cohesion: 0.08
 Nodes (12): client(), FakeAsyncSessionFactory, FakeQuery, FakeScalarResult, FakeSession, FakeSkill, QueryField, RaiseOnInstanceAccess (+4 more)
 
-### Community 21 - "Community 21"
+### Community 19 - "Community 19"
 Cohesion: 0.08
 Nodes (25): DingTalkStreamManager, download_dingtalk_media(), _download_file(), _fire_and_forget(), _get_media_download_url(), _handle_media_and_dispatch(), _process_media_message(), DingTalk Stream Connection Manager.  Manages WebSocket-based Stream connections (+17 more)
 
-### Community 22 - "Community 22"
+### Community 20 - "Community 20"
 Cohesion: 0.08
 Nodes (8): BaseOrgSyncAdapter, _DummyAdapter, _FakeDB, _SyncAdapterWithFailure, test_sync_org_structure_skips_reconcile_after_member_failure(), test_validate_member_identifiers_allows_wecom_without_unionid(), test_validate_member_identifiers_rejects_unionid_equal_to_external_id(), test_validate_member_identifiers_requires_unionid_for_feishu()
 
-### Community 23 - "Community 23"
+### Community 21 - "Community 21"
+Cohesion: 0.09
+Nodes (7): DummyResult, RecordingDB, test_create_session_returns_web_session_shape(), test_creator_can_list_all_sessions(), test_creator_can_view_other_users_session_messages(), test_org_admin_can_list_all_sessions(), test_org_admin_can_view_other_users_session_messages()
+
+### Community 22 - "Community 22"
 Cohesion: 0.15
 Nodes (29): _bucket_items(), _build_company_daily_content(), _build_company_rollup_content(), CompanyMember, _contains_risk(), _dedupe_preserve_order(), _default_report_headings(), _extract_section_lines() (+21 more)
 
-### Community 24 - "Community 24"
+### Community 23 - "Community 23"
 Cohesion: 0.1
 Nodes (25): _agent_headers(), _fire_extract(), _get_client(), index_all_skills(), index_enterprise_info(), index_memory_file(), _invalidate_availability_cache(), is_available() (+17 more)
 
-### Community 25 - "Community 25"
+### Community 24 - "Community 24"
 Cohesion: 0.12
 Nodes (18): DummyResult, _make_identity(), _make_login_data(), _make_user(), Unit tests for the authentication API (app/api/auth.py)., Login with a nonexistent user returns 401., Login with wrong password returns 401., Login with a disabled account returns 403. (+10 more)
 
-### Community 26 - "Community 26"
+### Community 25 - "Community 25"
 Cohesion: 0.11
 Nodes (27): create_tool(), _decrypt_sensitive_fields(), delete_agent_tool(), delete_category_config(), delete_tool(), _encrypt_sensitive_fields(), get_agent_tool_config(), get_agent_tools() (+19 more)
 
-### Community 27 - "Community 27"
+### Community 26 - "Community 26"
 Cohesion: 0.1
 Nodes (21): generate_html(), main(), Generate HTML report from loop output data. If auto_refresh is True, adds a meta, improve_description(), main(), Call Claude to improve the description based on eval results., find_project_root(), main() (+13 more)
 
-### Community 28 - "Community 28"
+### Community 27 - "Community 27"
 Cohesion: 0.09
 Nodes (23): create_access_token(), decode_access_token(), decrypt_data(), encrypt_data(), get_authenticated_user(), get_current_admin(), get_current_user(), hash_password() (+15 more)
 
-### Community 29 - "Community 29"
+### Community 28 - "Community 28"
 Cohesion: 0.11
 Nodes (22): force_ipv4(), _ipv4_getaddrinfo(), Core email utilities for SMTP operations and network compatibility., Wrapper that forces AF_INET (IPv4) to avoid IPv6 failures in Docker., Context manager that forces all socket connections to use IPv4.      Docker cont, Synchronously send an email via SMTP with IPv4 enforcement.      Three connectio, send_smtp_email(), _decode_header_value() (+14 more)
 
-### Community 30 - "Community 30"
+### Community 29 - "Community 29"
 Cohesion: 0.12
 Nodes (8): DummyResult, make_agent(), make_user(), _NestedTransaction, RecordingDB, TaskCleanupDB, test_archive_agent_task_history_writes_json_snapshot(), test_delete_agent_cleans_remaining_foreign_key_rows()
 
-### Community 31 - "Community 31"
+### Community 30 - "Community 30"
 Cohesion: 0.14
 Nodes (17): build_run(), embed_file(), find_runs(), _find_runs_recursive(), generate_html(), get_mime_type(), _kill_port(), load_previous_iteration() (+9 more)
 
-### Community 32 - "Community 32"
+### Community 31 - "Community 31"
 Cohesion: 0.12
 Nodes (10): AgentManager, Agent lifecycle manager — Docker container management for OpenClaw Gateway insta, Generate openclaw.json config for the agent container., Start an OpenClaw Gateway Docker container for the agent.          Returns conta, Stop the agent's Docker container., Manage OpenClaw Gateway Docker containers for digital employees., Stop and remove the agent's Docker container., Archive agent files to a backup location and return the archive directory. (+2 more)
+
+### Community 32 - "Community 32"
+Cohesion: 0.19
+Nodes (9): build_wechat_headers(), _extract_wechat_text(), _process_wechat_message(), random_wechat_uin(), remember_wechat_context(), send_wechat_text_message(), split_wechat_text(), update_wechat_context_cache() (+1 more)
 
 ### Community 33 - "Community 33"
 Cohesion: 0.12
 Nodes (11): FeishuWSManager, _make_no_proxy_connect(), Feishu WebSocket Long Connection Manager., Create an event dispatcher for a specific agent., Handle im.message.receive_v1 events from Feishu WebSocket asynchronously., Spawns a WebSocket client fully asynchronously inside FastAPI's loop., Return a drop-in replacement for websockets.connect that forces proxy=None., Stops an actively running WebSocket client for an agent. (+3 more)
 
 ### Community 34 - "Community 34"
+Cohesion: 0.13
+Nodes (17): configure_teams_channel(), delete_teams_channel(), _get_teams_access_token(), get_teams_channel(), get_teams_webhook_url(), Microsoft Teams Bot Channel API routes., Send an activity (message) to Microsoft Teams., Send a single chunked message to Microsoft Teams. (+9 more)
+
+### Community 35 - "Community 35"
 Cohesion: 0.18
 Nodes (17): _clean_cell(), _extract_docx(), _extract_pdf(), _extract_pptx(), extract_text(), _extract_xlsx(), _markdown_table(), needs_extraction() (+9 more)
 
-### Community 35 - "Community 35"
+### Community 36 - "Community 36"
 Cohesion: 0.12
 Nodes (9): Send a JSON-RPC request via Streamable HTTP transport., Send a JSON-RPC request via SSE transport.          Opens a fresh SSE connection, Auto-detect transport and send request.          Strategy: If transport is alrea, Fetch available tools from the MCP server., Execute a tool on the MCP server., Build request headers with proper MCP and auth headers., Parse response — handles both JSON and SSE (text/event-stream) formats., Extract the last JSON-RPC result from an SSE stream. (+1 more)
 
-### Community 36 - "Community 36"
+### Community 37 - "Community 37"
 Cohesion: 0.22
 Nodes (17): _check_new_agent_messages(), _cleanup_stale_invoke_cache(), _evaluate_trigger(), _extract_json_path(), _handle_okr_collection_trigger(), _handle_okr_report_trigger(), _invoke_agent_for_triggers(), _is_private_url() (+9 more)
-
-### Community 37 - "Community 37"
-Cohesion: 0.17
-Nodes (7): DummyResult, RecordingDB, test_create_session_returns_web_session_shape(), test_creator_can_list_all_sessions(), test_creator_can_view_other_users_session_messages(), test_org_admin_can_list_all_sessions(), test_org_admin_can_view_other_users_session_messages()
 
 ### Community 38 - "Community 38"
 Cohesion: 0.14
 Nodes (16): generate_user_api_key(), get_user_api_key_status(), _hash_user_key(), list_users(), Update a user's quota settings (admin only)., Generate or regenerate a personal API key.      The raw key is returned only onc, Revoke the current personal API key., Return whether the user has an active API key. (+8 more)
 
 ### Community 39 - "Community 39"
-Cohesion: 0.23
-Nodes (7): build_wechat_headers(), _extract_wechat_text(), _process_wechat_message(), random_wechat_uin(), send_wechat_text_message(), split_wechat_text(), WeChatPollManager
-
-### Community 40 - "Community 40"
 Cohesion: 0.17
 Nodes (15): compress_bytes_to_base64(), compress_screenshot_to_base64(), pop_temp_screenshot(), _prune_expired_cache(), Vision injection utilities for AgentBay screenshot tools.  Architecture: "Epheme, Compress raw image bytes to a base64 JPEG data URL.      Resizes to _MAX_WIDTH (, Read a screenshot file, compress it, and return a base64 data URL.      Used onl, Try to extract a screenshot from a tool result and build a vision content array. (+7 more)
 
-### Community 41 - "Community 41"
+### Community 40 - "Community 40"
 Cohesion: 0.15
 Nodes (11): configure_discord_channel(), discord_interaction_webhook(), Discord Bot Channel API routes (slash command interactions)., Register /ask global slash command with Discord API., Verify Discord ed25519 signature., Send follow-up message(s) to Discord Interactions, chunked at 2000 chars., Handle Discord Interaction webhooks (PING + slash commands)., Configure Discord bot for an agent.      Gateway mode fields: bot_token (+ conne (+3 more)
 
-### Community 42 - "Community 42"
+### Community 41 - "Community 41"
 Cohesion: 0.15
 Nodes (8): DiscordGatewayManager, Discord Gateway (WebSocket) Manager.  Maintains long-lived Gateway connections f, Process an incoming Discord message through the agent LLM., Stop a running Discord Gateway client., Start Gateway clients for all configured Discord agents., Return status of all active Gateway tasks., Manages Discord Gateway bot clients for all agents., Start a Discord Gateway client for the given agent.
 
-### Community 43 - "Community 43"
+### Community 42 - "Community 42"
 Cohesion: 0.26
 Nodes (7): DummyResult, make_channel(), make_user(), RecordingDB, test_delete_wecom_channel_stops_runtime_client(), test_get_wecom_channel_marks_webhook_mode_disconnected(), test_get_wecom_channel_reports_runtime_websocket_status()
 
-### Community 44 - "Community 44"
+### Community 43 - "Community 43"
 Cohesion: 0.2
 Nodes (4): _build_wecom_conv_id(), _disable_wecom_sdk_proxy(), _process_wecom_stream_message(), WeComStreamManager
 
-### Community 45 - "Community 45"
+### Community 44 - "Community 44"
 Cohesion: 0.19
 Nodes (13): AuditAction, Helper to write audit log entries from background services., Write audit log for role-related events.      Args:         action: Role action, Write audit log for tenant-related events.      Args:         action: Tenant act, Standard audit action types., Internal method to write audit log., Write a single audit log entry using raw SQL.      Uses raw SQL to avoid ORM for, Write audit log for identity-related events.      Args:         action: Identity (+5 more)
 
-### Community 46 - "Community 46"
+### Community 45 - "Community 45"
 Cohesion: 0.16
 Nodes (8): EmailVerificationService, Email verification token lifecycle helpers., Send an email verification code using the configured template., Email verification token lifecycle helpers., Hash a raw verification token before persistence or lookup., Create a new 6-digit email verification code and store in Redis., Build the user-facing verification URL. Note: now uses 6-digit code., Load a valid verification code from Redis and mark it used (by deleting).
 
-### Community 47 - "Community 47"
+### Community 46 - "Community 46"
 Cohesion: 0.18
 Nodes (9): configure_slack_channel(), Slack Bot Channel API routes., Verify Slack's HMAC-SHA256 request signature., Send text to Slack, splitting into SLACK_MSG_LIMIT chunks if needed., Handle Slack Event API callbacks., Configure Slack bot for an agent. Fields: bot_token, signing_secret., _send_slack_messages(), slack_event_webhook() (+1 more)
+
+### Community 47 - "Community 47"
+Cohesion: 0.19
+Nodes (4): ConnectionManager, get_chat_history(), maybe_mark_session_read_for_active_viewer(), websocket_chat()
 
 ### Community 48 - "Community 48"
 Cohesion: 0.33
@@ -268,60 +268,60 @@ Cohesion: 0.18
 Nodes (0): 
 
 ### Community 58 - "Community 58"
+Cohesion: 0.2
+Nodes (9): build_visible_agents_query(), check_agent_access(), is_agent_creator(), is_agent_expired(), RBAC permission checking utilities., Build a query for agents visible to the current user.      Visibility defaults t, Check if a user has access to a specific agent.      Returns (agent, access_leve, Check if the user is the creator (admin) of the agent. (+1 more)
+
+### Community 59 - "Community 59"
 Cohesion: 0.22
 Nodes (9): compress_image_if_needed(), compress_image_if_needed_async(), process_ide_image(), process_ide_image_async(), Vision handler for IDEA plugin integration., Async entry point for callers in asyncio contexts., Compress image if it exceeds the size threshold.          Args:         base64_d, Process Base64 image data from IDEA plugin.          Args:         base64_data: (+1 more)
 
-### Community 59 - "Community 59"
+### Community 60 - "Community 60"
 Cohesion: 0.2
 Nodes (9): cleanup_pending_calls(), Tool call handler for IDEA plugin integration., Send a tool call request to the connected IDE plugin., Wait for the IDEA plugin to return a tool result., Resolve a pending tool call with the result from the IDEA plugin., Clean up all pending tool calls (e.g., when WebSocket disconnects)., resolve_ide_tool_result(), send_ide_tool_request() (+1 more)
 
-### Community 60 - "Community 60"
+### Community 61 - "Community 61"
 Cohesion: 0.29
 Nodes (7): _completion_id(), list_models(), _oai_chunk_role(), _oai_response(), OAIMessage, openai_chat_completions(), _resolve_agent()
 
-### Community 61 - "Community 61"
+### Community 62 - "Community 62"
 Cohesion: 0.22
 Nodes (9): delete_trigger(), list_agent_triggers(), Triggers REST API — CRUD endpoints for the Aware page frontend., Delete a trigger entirely., List all triggers for an agent., Update a trigger (from frontend management UI)., TriggerResponse, TriggerUpdate (+1 more)
 
-### Community 62 - "Community 62"
+### Community 63 - "Community 63"
 Cohesion: 0.29
 Nodes (7): _build_qrcode_headers(), create_wechat_qrcode(), get_wechat_qrcode_image(), get_wechat_qrcode_status(), WeChat iLink Bot channel API routes., _route_tag(), _validate_qrcode_proxy_url()
 
-### Community 63 - "Community 63"
+### Community 64 - "Community 64"
 Cohesion: 0.2
 Nodes (6): Services for managing IDEA plugin session context., Manages IDEA plugin session context information., Update IDEA plugin session context., Get session context for building prompts., Get the latest IDE context for an agent's most recent session., SessionContextManager
 
-### Community 64 - "Community 64"
+### Community 65 - "Community 65"
 Cohesion: 0.22
 Nodes (6): EnterpriseSyncService, Enterprise information synchronization service.  Uses Redis Pub/Sub to notify on, Synchronize enterprise information to all online Agent containers., Update enterprise info in database and notify all agents., Pull enterprise info from DB and write to agent's enterprise_info/ directory., Sync enterprise info to all running agents. Returns count.
 
-### Community 65 - "Community 65"
+### Community 66 - "Community 66"
 Cohesion: 0.24
 Nodes (6): PlatformService, Platform-wide service for URL resolution and host type detection., Service to handle platform-wide settings and URL resolution., Check if a host is an IP address (IPv4)., Resolve the platform's public base URL with priority lookup.                  Pr, Generate the SSO base URL for a tenant based on IP/Domain logic.
 
-### Community 66 - "Community 66"
+### Community 67 - "Community 67"
 Cohesion: 0.24
 Nodes (9): _agent_workspace(), _load_skills_index(), _parse_skill_frontmatter(), Build rich system prompt context for agents.  Loads soul, memory, skills summary, Return the canonical persistent workspace path for an agent., Read a file, return empty string if missing. Truncate if too long., Parse YAML frontmatter from a skill .md file.      Returns (name, description)., Load skill index (name + description) from skills/ directory.      Supports two (+1 more)
 
-### Community 67 - "Community 67"
+### Community 68 - "Community 68"
 Cohesion: 0.24
 Nodes (3): _DummyAsyncClient, _DummyResponse, test_feishu_auth_provider_prefers_contact_user_id_over_open_id()
 
-### Community 68 - "Community 68"
+### Community 69 - "Community 69"
 Cohesion: 0.44
 Nodes (8): _append_seed_marker(), _ensure_okr_tool_rows_exist(), patch_existing_okr_agent(), seed_default_agents(), seed_okr_agent(), seed_okr_agent_for_tenant(), _seed_okr_triggers(), _sync_okr_triggers_with_settings()
 
-### Community 69 - "Community 69"
+### Community 70 - "Community 70"
 Cohesion: 0.28
 Nodes (7): main(), package_skill(), Check if a path should be excluded from packaging., Package a skill folder into a .skill file.      Args:         skill_path: Path t, should_exclude(), Basic validation of a skill, validate_skill()
 
-### Community 70 - "Community 70"
+### Community 71 - "Community 71"
 Cohesion: 0.29
 Nodes (7): close_redis(), get_redis(), publish_event(), Redis Pub/Sub events for enterprise info sync., Get or create the Redis client., Publish an event to a Redis Pub/Sub channel., Close the Redis connection.
-
-### Community 71 - "Community 71"
-Cohesion: 0.25
-Nodes (0): 
 
 ### Community 72 - "Community 72"
 Cohesion: 0.39
@@ -344,331 +344,331 @@ Cohesion: 0.25
 Nodes (0): 
 
 ### Community 77 - "Community 77"
+Cohesion: 0.39
+Nodes (6): _has_column(), _has_index(), _has_table(), _has_unique_constraint(), Add IDE plugin fields to chat_sessions  Revision ID: 29f3f8de3ca0 Revises: add_u, upgrade()
+
+### Community 78 - "Community 78"
 Cohesion: 0.48
 Nodes (5): cleanup(), runTests(), sleep(), startServer(), waitForServer()
 
-### Community 78 - "Community 78"
+### Community 79 - "Community 79"
 Cohesion: 0.33
 Nodes (6): _agent_base_dir(), list_pages(), Public pages API — serves published HTML without authentication., Serve a published HTML page. No authentication required., List published pages for an agent., render_page()
 
-### Community 79 - "Community 79"
+### Community 80 - "Community 80"
 Cohesion: 0.33
 Nodes (2): get_google_provider_base_url(), get_google_redirect_uri()
 
-### Community 80 - "Community 80"
+### Community 81 - "Community 81"
+Cohesion: 0.48
+Nodes (6): _execute_heartbeat(), _heartbeat_tick(), _is_in_active_hours(), _notify_oneshot_error(), run_agent_oneshot(), start_heartbeat()
+
+### Community 82 - "Community 82"
 Cohesion: 0.52
 Nodes (6): _get_agent_reply(), _is_reminder_due(), _parse_schedule(), _send_supervision_reminder(), start_supervision_reminder(), _supervision_tick()
 
-### Community 81 - "Community 81"
+### Community 83 - "Community 83"
+Cohesion: 0.43
+Nodes (5): _has_column(), _has_index(), _has_table(), add open_files column to chat_session  Revision ID: 25811072c8fd Revises: 45681b, upgrade()
+
+### Community 84 - "Community 84"
 Cohesion: 0.53
 Nodes (4): combineGraphs(), extractDotBlocks(), main(), renderToSvg()
 
-### Community 82 - "Community 82"
+### Community 85 - "Community 85"
 Cohesion: 0.33
 Nodes (5): 测试 toolCall markdown 块格式。, 测试完整的 MATCHER_PATTERN 对 toolCall 的匹配。, 验证插件的正则表达式是否能匹配 toolCall 格式。, test_full_matcher_pattern(), test_toolcall_regex_match()
 
-### Community 83 - "Community 83"
+### Community 86 - "Community 86"
 Cohesion: 0.4
 Nodes (5): extract_text(), File upload API for chat — saves files to agent workspace and extracts text., Upload a file for chat context. Saves to agent workspace/uploads/ and returns ex, Extract text content from a file., upload_file()
 
-### Community 84 - "Community 84"
+### Community 87 - "Community 87"
 Cohesion: 0.4
 Nodes (5): get_skill_creator_files(), _load_file(), Content for the skill-creator builtin skill.  Based on: https://github.com/anthr, Return list of {path, content} for all skill-creator files., Load a file from the skill_creator_files directory.
 
-### Community 85 - "Community 85"
+### Community 88 - "Community 88"
 Cohesion: 0.33
 Nodes (5): add_thinking_reaction(), DingTalk emotion reaction service — "thinking" indicator on user messages., Add "🤔思考中" reaction to a user message. Fire-and-forget, never raises., Recall "🤔思考中" reaction with retry (0ms, 1500ms, 5000ms). Fire-and-forget., recall_thinking_reaction()
 
-### Community 86 - "Community 86"
+### Community 89 - "Community 89"
 Cohesion: 0.4
 Nodes (5): get_wecom_access_token(), WeCom (Enterprise WeChat) service for sending messages via Open API., Send a text message to a WeCom user.      API: https://developer.work.weixin.qq., Get WeCom access_token using corp_id and secret.      API: https://developer.wor, send_wecom_message()
 
-### Community 87 - "Community 87"
+### Community 90 - "Community 90"
 Cohesion: 0.4
 Nodes (5): ensure_primary_platform_session(), get_primary_platform_session(), Helpers for first-party chat session selection and creation., Return the current primary first-party session for a user+agent pair, if any., Return a guaranteed primary platform session for a given user+agent pair.      T
 
-### Community 88 - "Community 88"
+### Community 91 - "Community 91"
 Cohesion: 0.33
 Nodes (0): 
 
-### Community 89 - "Community 89"
+### Community 92 - "Community 92"
 Cohesion: 0.33
 Nodes (0): 
 
-### Community 90 - "Community 90"
+### Community 93 - "Community 93"
 Cohesion: 0.5
 Nodes (4): format_lsp_message(), LSP4J 插件端到端测试脚本。  模拟通义灵码 IDE 插件的 WebSocket 连接行为， 验证 Clawith LSP4J 后端的完整功能链路。  使用, 格式化 LSP Base Protocol 消息, test_lsp4j()
 
-### Community 91 - "Community 91"
+### Community 94 - "Community 94"
 Cohesion: 0.4
 Nodes (3): list_agents_for_ide(), IDEA Plugin specific API endpoints., 获取用户可访问的智能体列表 (简化版,仅返回必要字段)
 
-### Community 92 - "Community 92"
+### Community 95 - "Community 95"
 Cohesion: 0.6
 Nodes (3): google_workspace_callback(), _handle_google_admin_sync_callback(), _handle_google_sso_callback()
 
-### Community 93 - "Community 93"
+### Community 96 - "Community 96"
 Cohesion: 0.7
 Nodes (4): _agent_request_message(), _cleanup_legacy_daily_reply_triggers(), _human_request_message(), trigger_daily_collection_for_tenant()
 
-### Community 94 - "Community 94"
+### Community 97 - "Community 97"
 Cohesion: 0.5
 Nodes (3): extract_code_diffs(), Diff handler for IDEA plugin integration., Extract code blocks with file paths from LLM response.          Matches patterns
 
-### Community 95 - "Community 95"
+### Community 98 - "Community 98"
 Cohesion: 0.5
 Nodes (0): 
 
-### Community 96 - "Community 96"
+### Community 99 - "Community 99"
 Cohesion: 0.5
 Nodes (2): 精确验证 toolCall 正则匹配行为。, TestToolCallRegex
 
-### Community 97 - "Community 97"
-Cohesion: 0.5
-Nodes (3): find_or_create_channel_session(), Shared helper: find-or-create ChatSession by external channel conv_id.  Used by, Find an existing ChatSession by (agent_id, external_conv_id), or create one.
-
-### Community 98 - "Community 98"
-Cohesion: 0.5
-Nodes (3): Notification service — unified entry point for sending in-app notifications., Create and persist a notification for a user or an agent.      Args:         db:, send_notification()
-
-### Community 99 - "Community 99"
-Cohesion: 0.83
-Nodes (3): execute_task(), _log_error(), _restore_supervision_status()
-
 ### Community 100 - "Community 100"
-Cohesion: 0.5
-Nodes (3): is_non_workday(), Business calendar helpers for scheduled OKR work.  The first layer is intentiona, Return True when a date should be skipped for business reporting.
+Cohesion: 0.83
+Nodes (3): _get_okr_agent(), hook_new_agent(), hook_new_org_member()
 
 ### Community 101 - "Community 101"
 Cohesion: 0.5
-Nodes (0): 
+Nodes (3): find_or_create_channel_session(), Shared helper: find-or-create ChatSession by external channel conv_id.  Used by, Find an existing ChatSession by (agent_id, external_conv_id), or create one.
 
 ### Community 102 - "Community 102"
 Cohesion: 0.5
-Nodes (1): Add is_system column to agents table, and agent_triggers.is_system.  Also adds i
+Nodes (3): Notification service — unified entry point for sending in-app notifications., Create and persist a notification for a user or an agent.      Args:         db:, send_notification()
 
 ### Community 103 - "Community 103"
 Cohesion: 0.5
-Nodes (1): Ensure channel_type_enum contains all channel values used by the app.  Revision
+Nodes (3): log_activity(), Activity logger — simple async function to record agent actions., Record an agent activity. Fire-and-forget, never raises.
 
 ### Community 104 - "Community 104"
-Cohesion: 0.5
-Nodes (1): Add source to tools and backfill data  Revision ID: add_tool_source Revises: add
+Cohesion: 0.83
+Nodes (3): execute_task(), _log_error(), _restore_supervision_status()
 
 ### Community 105 - "Community 105"
 Cohesion: 0.5
-Nodes (1): Unified column fix for missing fields across main tables.  Revision ID: 20260313
+Nodes (3): is_non_workday(), Business calendar helpers for scheduled OKR work.  The first layer is intentiona, Return True when a date should be skipped for business reporting.
 
 ### Community 106 - "Community 106"
 Cohesion: 0.5
-Nodes (1): Merge merge_okr_api_key and add_workspace_revisions heads.  Revision ID: merge_w
+Nodes (0): 
 
 ### Community 107 - "Community 107"
 Cohesion: 0.5
-Nodes (1): Increase api_key_encrypted column length to support Minimax API keys.  Revision
+Nodes (1): Add is_system column to agents table, and agent_triggers.is_system.  Also adds i
 
 ### Community 108 - "Community 108"
 Cohesion: 0.5
-Nodes (1): Add workspace file revision and edit lock tables.  Revision ID: add_workspace_re
+Nodes (1): Ensure channel_type_enum contains all channel values used by the app.  Revision
 
 ### Community 109 - "Community 109"
 Cohesion: 0.5
-Nodes (1): Merge heads after main merge  Revision ID: 5fe287d9d58b Revises: fd6e34661d12, r
+Nodes (1): Add source to tools and backfill data  Revision ID: add_tool_source Revises: add
 
 ### Community 110 - "Community 110"
 Cohesion: 0.5
-Nodes (1): Merge OKR tables branch with llm_request_timeout branch.  This merge migration r
+Nodes (1): Unified column fix for missing fields across main tables.  Revision ID: 20260313
 
 ### Community 111 - "Community 111"
 Cohesion: 0.5
-Nodes (1): Add chat_sessions table and update existing chat_messages conversation_ids.
+Nodes (1): Merge merge_okr_api_key and add_workspace_revisions heads.  Revision ID: merge_w
 
 ### Community 112 - "Community 112"
 Cohesion: 0.5
-Nodes (1): add llm temperature  Revision ID: add_llm_temperature Revises:  Create Date: 202
+Nodes (1): Increase api_key_encrypted column length to support Minimax API keys.  Revision
 
 ### Community 113 - "Community 113"
 Cohesion: 0.5
-Nodes (1): Add agent token usage and context fields to agents table.  Revision ID: add_agen
+Nodes (1): Add workspace file revision and edit lock tables.  Revision ID: add_workspace_re
 
 ### Community 114 - "Community 114"
 Cohesion: 0.5
-Nodes (1): Add api_key_hash column to users table for user-level API key support.  Revision
+Nodes (1): Merge heads after main merge  Revision ID: 5fe287d9d58b Revises: fd6e34661d12, r
 
 ### Community 115 - "Community 115"
 Cohesion: 0.5
-Nodes (1): Add source and installed_by_agent_id to agent_tools  Revision ID: add_agent_tool
+Nodes (1): Merge OKR tables branch with llm_request_timeout branch.  This merge migration r
 
 ### Community 116 - "Community 116"
 Cohesion: 0.5
-Nodes (1): Add usage quota fields to users, agents, and tenants tables.  Idempotent — uses
+Nodes (1): add whatsapp channel support  Revision ID: add_whatsapp_channel_support Revises:
 
 ### Community 117 - "Community 117"
 Cohesion: 0.5
-Nodes (1): Multi-tenant registration: add tenant_id to invitation_codes, delete historical
+Nodes (1): Add chat_sessions table and update existing chat_messages conversation_ids.
 
 ### Community 118 - "Community 118"
 Cohesion: 0.5
-Nodes (1): Add name_translit fields to OrgMember  Revision ID: be48e94fa052 Revises: add_da
+Nodes (1): add llm temperature  Revision ID: add_llm_temperature Revises:  Create Date: 202
 
 ### Community 119 - "Community 119"
 Cohesion: 0.5
-Nodes (1): add open_files column to chat_session  Revision ID: 25811072c8fd Revises: 45681b
+Nodes (1): Add agent token usage and context fields to agents table.  Revision ID: add_agen
 
 ### Community 120 - "Community 120"
 Cohesion: 0.5
-Nodes (1): merge heads  Revision ID: 45681b72317e Revises: 29f3f8de3ca0, f1a2b3c4d5e6 Creat
+Nodes (1): Add api_key_hash column to users table for user-level API key support.  Revision
 
 ### Community 121 - "Community 121"
 Cohesion: 0.5
-Nodes (1): Add agent_triggers table for Pulse engine.  Revision ID: add_agent_triggers
+Nodes (1): merge remaining alembic heads  Revision ID: 87ff921e8e6f Revises: 5fe287d9d58b,
 
 ### Community 122 - "Community 122"
 Cohesion: 0.5
-Nodes (1): Add wechat to channel_type_enum.  Revision ID: add_wechat_channel_support Revise
+Nodes (1): Add Tenant.default_model_id + backfill per-tenant to earliest enabled model.  Re
 
 ### Community 123 - "Community 123"
 Cohesion: 0.5
-Nodes (1): Add a2a_async_enabled column to tenants table.  Revision ID: f1a2b3c4d5e6 Revise
+Nodes (1): Add source and installed_by_agent_id to agent_tools  Revision ID: add_agent_tool
 
 ### Community 124 - "Community 124"
 Cohesion: 0.5
-Nodes (1): Add tenant_id to llm_models table for per-company model pools.  Revision ID: add
+Nodes (1): Add default_mcp_servers to agent templates.  Revision ID: add_default_mcp_server
 
 ### Community 125 - "Community 125"
 Cohesion: 0.5
-Nodes (1): Add consolidated OKR reporting and scheduling schema updates.  Revision ID: add_
+Nodes (1): Add usage quota fields to users, agents, and tenants tables.  Idempotent — uses
 
 ### Community 126 - "Community 126"
 Cohesion: 0.5
-Nodes (1): User system refactor - unified migration.  Revision ID: user_refactor_v1 Revises
+Nodes (1): Multi-tenant registration: add tenant_id to invitation_codes, delete historical
 
 ### Community 127 - "Community 127"
 Cohesion: 0.5
-Nodes (1): add_group_chat_fields_to_chat_sessions  Add is_group and group_name columns to c
+Nodes (1): Add name_translit fields to OrgMember  Revision ID: be48e94fa052 Revises: add_da
 
 ### Community 128 - "Community 128"
 Cohesion: 0.5
-Nodes (1): merge heads  Revision ID: fd6e34661d12 Revises: 25811072c8fd, increase_api_key_l
+Nodes (1): merge heads  Revision ID: 45681b72317e Revises: 29f3f8de3ca0, f1a2b3c4d5e6 Creat
 
 ### Community 129 - "Community 129"
 Cohesion: 0.5
-Nodes (1): Add tenant_id to skills table for per-company skill scoping.  Revision ID: add_s
+Nodes (1): Add agent_triggers table for Pulse engine.  Revision ID: add_agent_triggers
 
 ### Community 130 - "Community 130"
 Cohesion: 0.5
-Nodes (1): add entrypoint missing columns  Revision ID: df3da9cf3b27 Revises: multi_tenant_
+Nodes (1): Add wechat to channel_type_enum.  Revision ID: add_wechat_channel_support Revise
 
 ### Community 131 - "Community 131"
 Cohesion: 0.5
-Nodes (1): add llm request_timeout  Revision ID: d9cbd43b62e5 Revises: 440261f5594f Create
+Nodes (1): Add a2a_async_enabled column to tenants table.  Revision ID: f1a2b3c4d5e6 Revise
 
 ### Community 132 - "Community 132"
 Cohesion: 0.5
-Nodes (1): Add Microsoft Teams support to im_provider and channel_type enums.
+Nodes (1): Add tenant_id to llm_models table for per-company model pools.  Revision ID: add
 
 ### Community 133 - "Community 133"
 Cohesion: 0.5
-Nodes (1): Add participants table, extend chat_sessions and chat_messages, migrate messages
+Nodes (1): Add consolidated OKR reporting and scheduling schema updates.  Revision ID: add_
 
 ### Community 134 - "Community 134"
 Cohesion: 0.5
-Nodes (1): Refactor user system to global Identities - Phase 2 (Consolidated & Idempotent)
+Nodes (1): User system refactor - unified migration.  Revision ID: user_refactor_v1 Revises
 
 ### Community 135 - "Community 135"
 Cohesion: 0.5
-Nodes (1): add published_pages table  Revision ID: add_published_pages Revises: df3da9cf3b2
+Nodes (1): add_group_chat_fields_to_chat_sessions  Add is_group and group_name columns to c
 
 ### Community 136 - "Community 136"
 Cohesion: 0.5
-Nodes (1): Add invitation_codes table.  This is an idempotent migration — uses CREATE TABLE
+Nodes (1): merge heads  Revision ID: fd6e34661d12 Revises: 25811072c8fd, increase_api_key_l
 
 ### Community 137 - "Community 137"
 Cohesion: 0.5
-Nodes (1): Merge okr_agent_id migration and increase_api_key_length migration heads.  Revis
+Nodes (1): Per-(user, agent) onboarding junction table + drop legacy bootstrapped flag.  Re
 
 ### Community 138 - "Community 138"
 Cohesion: 0.5
-Nodes (1): Add OKR system tables.  Creates six tables for the OKR feature:   okr_objectives
+Nodes (1): Add tenant_id to skills table for per-company skill scoping.  Revision ID: add_s
 
 ### Community 139 - "Community 139"
 Cohesion: 0.5
-Nodes (1): Add primary first-party chat sessions and per-session read tracking.  Revision I
+Nodes (1): add entrypoint missing columns  Revision ID: df3da9cf3b27 Revises: multi_tenant_
 
 ### Community 140 - "Community 140"
 Cohesion: 0.5
-Nodes (1): Add okr_agent_id to okr_settings; add unique partial index on system agents.  Tw
+Nodes (1): add llm request_timeout  Revision ID: d9cbd43b62e5 Revises: 440261f5594f Create
 
 ### Community 141 - "Community 141"
 Cohesion: 0.5
-Nodes (1): Add IDE plugin fields to chat_sessions  Revision ID: 29f3f8de3ca0 Revises: add_u
+Nodes (1): Add Microsoft Teams support to im_provider and channel_type enums.
 
 ### Community 142 - "Community 142"
 Cohesion: 0.5
-Nodes (1): Add sso_login_enabled to identity_providers  Revision ID: add_sso_login_enabled
+Nodes (1): Merge remaining release heads after PR #494.  Revision ID: merge_pr494_heads Rev
 
 ### Community 143 - "Community 143"
 Cohesion: 0.5
-Nodes (1): Add agentbay and atlassian to channel_type_enum.  Revision ID: add_agentbay_enum
+Nodes (1): Add participants table, extend chat_sessions and chat_messages, migrate messages
 
 ### Community 144 - "Community 144"
 Cohesion: 0.5
-Nodes (1): Add agent_id and sender_name to notifications table.  Revision ID: add_notificat
+Nodes (1): Refactor user system to global Identities - Phase 2 (Consolidated & Idempotent)
 
 ### Community 145 - "Community 145"
+Cohesion: 0.5
+Nodes (1): add published_pages table  Revision ID: add_published_pages Revises: df3da9cf3b2
+
+### Community 146 - "Community 146"
+Cohesion: 0.5
+Nodes (1): Add invitation_codes table.  This is an idempotent migration — uses CREATE TABLE
+
+### Community 147 - "Community 147"
+Cohesion: 0.5
+Nodes (1): Merge okr_agent_id migration and increase_api_key_length migration heads.  Revis
+
+### Community 148 - "Community 148"
+Cohesion: 0.5
+Nodes (1): Add OKR system tables.  Creates six tables for the OKR feature:   okr_objectives
+
+### Community 149 - "Community 149"
+Cohesion: 0.5
+Nodes (1): Add primary first-party chat sessions and per-session read tracking.  Revision I
+
+### Community 150 - "Community 150"
+Cohesion: 0.5
+Nodes (1): Add okr_agent_id to okr_settings; add unique partial index on system agents.  Tw
+
+### Community 151 - "Community 151"
+Cohesion: 0.5
+Nodes (1): Add sso_login_enabled to identity_providers  Revision ID: add_sso_login_enabled
+
+### Community 152 - "Community 152"
+Cohesion: 0.5
+Nodes (1): Add agentbay and atlassian to channel_type_enum.  Revision ID: add_agentbay_enum
+
+### Community 153 - "Community 153"
+Cohesion: 0.5
+Nodes (1): Add agent_id and sender_name to notifications table.  Revision ID: add_notificat
+
+### Community 154 - "Community 154"
+Cohesion: 0.5
+Nodes (1): Add bootstrap_content + capability_bullets to agent templates.  Revision ID: add
+
+### Community 155 - "Community 155"
 Cohesion: 0.67
 Nodes (2): Run pytest tests in the specified directory, run_tests()
 
-### Community 146 - "Community 146"
+### Community 156 - "Community 156"
 Cohesion: 0.67
 Nodes (2): check_logs(), Check if the new logging is working correctly.
 
-### Community 147 - "Community 147"
+### Community 157 - "Community 157"
 Cohesion: 0.67
 Nodes (0): 
 
-### Community 148 - "Community 148"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 149 - "Community 149"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 150 - "Community 150"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 151 - "Community 151"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 152 - "Community 152"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 153 - "Community 153"
-Cohesion: 1.0
-Nodes (1): MCP (Model Context Protocol) Client — connects to external MCP servers.  Support
-
-### Community 154 - "Community 154"
-Cohesion: 1.0
-Nodes (1): Connect to SSE endpoint (GET /sse) and extract the messages URL.          Return
-
-### Community 155 - "Community 155"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 156 - "Community 156"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 157 - "Community 157"
-Cohesion: 1.0
-Nodes (0): 
-
 ### Community 158 - "Community 158"
-Cohesion: 1.0
+Cohesion: 0.67
 Nodes (0): 
 
 ### Community 159 - "Community 159"
@@ -693,43 +693,43 @@ Nodes (0):
 
 ### Community 164 - "Community 164"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (1): MCP (Model Context Protocol) Client — connects to external MCP servers.  Support
 
 ### Community 165 - "Community 165"
 Cohesion: 1.0
-Nodes (1): 向 FastAPI app 注册路由、启动钩子等。
+Nodes (1): Connect to SSE endpoint (GET /sse) and extract the messages URL.          Return
 
 ### Community 166 - "Community 166"
 Cohesion: 1.0
-Nodes (1): Command name (e.g., "about").
+Nodes (0): 
 
 ### Community 167 - "Community 167"
 Cohesion: 1.0
-Nodes (1): Brief description for help output.
+Nodes (0): 
 
 ### Community 168 - "Community 168"
 Cohesion: 1.0
-Nodes (1): Alternative names for this command.
+Nodes (0): 
 
 ### Community 169 - "Community 169"
 Cohesion: 1.0
-Nodes (1): Nested subcommands (for "extensions list" style).
+Nodes (0): 
 
 ### Community 170 - "Community 170"
 Cohesion: 1.0
-Nodes (1): Execute the command with given arguments.
+Nodes (0): 
 
 ### Community 171 - "Community 171"
 Cohesion: 1.0
-Nodes (1): 计算两段内容之间的 DiffInfo（行级 + 字符级）。
+Nodes (0): 
 
 ### Community 172 - "Community 172"
 Cohesion: 1.0
-Nodes (1): 将 JSON-RPC 消息格式化为 LSP Base Protocol 文本帧。          注意：Content-Length 必须是 UTF-8 编码
+Nodes (0): 
 
 ### Community 173 - "Community 173"
 Cohesion: 1.0
-Nodes (1): 从 header 块中解析 Content-Length 值。          Args:             header_block: header
+Nodes (0): 
 
 ### Community 174 - "Community 174"
 Cohesion: 1.0
@@ -737,184 +737,228 @@ Nodes (0):
 
 ### Community 175 - "Community 175"
 Cohesion: 1.0
-Nodes (1): Send a completion request and return the full response.
+Nodes (0): 
 
 ### Community 176 - "Community 176"
 Cohesion: 1.0
-Nodes (1): Send a streaming request and return the aggregated response.          Implementa
+Nodes (1): 向 FastAPI app 注册路由、启动钩子等。
 
 ### Community 177 - "Community 177"
 Cohesion: 1.0
-Nodes (1): 从 dict 构建 SandboxConfig，支持字段级 fallback。          Args:             config: 工具配置
+Nodes (1): Command name (e.g., "about").
 
 ### Community 178 - "Community 178"
 Cohesion: 1.0
-Nodes (1): Backend name for identification.
+Nodes (1): Brief description for help output.
 
 ### Community 179 - "Community 179"
 Cohesion: 1.0
-Nodes (1): Backend name for identification.
+Nodes (1): Alternative names for this command.
 
 ### Community 180 - "Community 180"
 Cohesion: 1.0
-Nodes (1): Execute code in the sandbox.
+Nodes (1): Nested subcommands (for "extensions list" style).
 
 ### Community 181 - "Community 181"
 Cohesion: 1.0
-Nodes (1): Check if the sandbox backend is healthy.
+Nodes (1): Execute the command with given arguments.
 
 ### Community 182 - "Community 182"
 Cohesion: 1.0
-Nodes (1): Get the capabilities of this sandbox backend.
+Nodes (1): 计算两段内容之间的 DiffInfo（行级 + 字符级）。
 
 ### Community 183 - "Community 183"
 Cohesion: 1.0
-Nodes (1): Enqueue a new permission request for later approval.
+Nodes (1): 将 JSON-RPC 消息格式化为 LSP Base Protocol 文本帧。          注意：Content-Length 必须是 UTF-8 编码
 
 ### Community 184 - "Community 184"
 Cohesion: 1.0
-Nodes (1): Get all pending permission requests for a session.
+Nodes (1): 从 header 块中解析 Content-Length 值。          Args:             header_block: header
 
 ### Community 185 - "Community 185"
 Cohesion: 1.0
-Nodes (1): Get a specific pending permission request by ID.
+Nodes (0): 
 
 ### Community 186 - "Community 186"
 Cohesion: 1.0
-Nodes (1): Process a permission decision (grant/deny).
+Nodes (1): Send a completion request and return the full response.
 
 ### Community 187 - "Community 187"
 Cohesion: 1.0
-Nodes (1): Wait for a decision on a permission request.          Returns True if granted, F
+Nodes (1): Send a streaming request and return the aggregated response.          Implementa
 
 ### Community 188 - "Community 188"
 Cohesion: 1.0
-Nodes (1): Clear all pending requests for a session.
+Nodes (1): 从 dict 构建 SandboxConfig，支持字段级 fallback。          Args:             config: 工具配置
 
 ### Community 189 - "Community 189"
 Cohesion: 1.0
-Nodes (1): Count pending requests for a session.
+Nodes (1): Backend name for identification.
 
 ### Community 190 - "Community 190"
 Cohesion: 1.0
-Nodes (1): Read content from a text file.
+Nodes (1): Backend name for identification.
 
 ### Community 191 - "Community 191"
 Cohesion: 1.0
-Nodes (1): Write content to a text file.
+Nodes (1): Execute code in the sandbox.
 
 ### Community 192 - "Community 192"
+Cohesion: 1.0
+Nodes (1): Check if the sandbox backend is healthy.
+
+### Community 193 - "Community 193"
+Cohesion: 1.0
+Nodes (1): Get the capabilities of this sandbox backend.
+
+### Community 194 - "Community 194"
+Cohesion: 1.0
+Nodes (1): Enqueue a new permission request for later approval.
+
+### Community 195 - "Community 195"
+Cohesion: 1.0
+Nodes (1): Get all pending permission requests for a session.
+
+### Community 196 - "Community 196"
+Cohesion: 1.0
+Nodes (1): Get a specific pending permission request by ID.
+
+### Community 197 - "Community 197"
+Cohesion: 1.0
+Nodes (1): Process a permission decision (grant/deny).
+
+### Community 198 - "Community 198"
+Cohesion: 1.0
+Nodes (1): Wait for a decision on a permission request.          Returns True if granted, F
+
+### Community 199 - "Community 199"
+Cohesion: 1.0
+Nodes (1): Clear all pending requests for a session.
+
+### Community 200 - "Community 200"
+Cohesion: 1.0
+Nodes (1): Count pending requests for a session.
+
+### Community 201 - "Community 201"
+Cohesion: 1.0
+Nodes (1): Read content from a text file.
+
+### Community 202 - "Community 202"
+Cohesion: 1.0
+Nodes (1): Write content to a text file.
+
+### Community 203 - "Community 203"
 Cohesion: 1.0
 Nodes (0): 
 
 ## Knowledge Gaps
-- **405 isolated node(s):** `Run pytest tests in the specified directory`, `LSP4J 插件端到端测试脚本。  模拟通义灵码 IDE 插件的 WebSocket 连接行为， 验证 Clawith LSP4J 后端的完整功能链路。  使用`, `格式化 LSP Base Protocol 消息`, `Check if the new logging is working correctly.`, `O3: Log IDE-provided MCP servers so we know what's available (not yet forwarded` (+400 more)
+- **414 isolated node(s):** `Run pytest tests in the specified directory`, `LSP4J 插件端到端测试脚本。  模拟通义灵码 IDE 插件的 WebSocket 连接行为， 验证 Clawith LSP4J 后端的完整功能链路。  使用`, `格式化 LSP Base Protocol 消息`, `Check if the new logging is working correctly.`, `O3: Log IDE-provided MCP servers so we know what's available (not yet forwarded` (+409 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 148`** (2 nodes): `test_async.py`, `test_manager()`
+- **Thin community `Community 159`** (2 nodes): `test_async.py`, `test_manager()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 149`** (2 nodes): `PermissionModal.tsx`, `computeDiff()`
+- **Thin community `Community 160`** (2 nodes): `PermissionModal.tsx`, `computeDiff()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 150`** (2 nodes): `update_schema.py`, `main()`
+- **Thin community `Community 161`** (2 nodes): `update_schema.py`, `main()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 151`** (2 nodes): `remove_old_tool.py`, `run()`
+- **Thin community `Community 162`** (2 nodes): `remove_old_tool.py`, `run()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 152`** (2 nodes): `ws-protocol.test.js`, `runTests()`
+- **Thin community `Community 163`** (2 nodes): `ws-protocol.test.js`, `runTests()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 153`** (2 nodes): `mcp_client.py`, `MCP (Model Context Protocol) Client — connects to external MCP servers.  Support`
+- **Thin community `Community 164`** (2 nodes): `mcp_client.py`, `MCP (Model Context Protocol) Client — connects to external MCP servers.  Support`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 154`** (2 nodes): `._sse_connect()`, `Connect to SSE endpoint (GET /sse) and extract the messages URL.          Return`
+- **Thin community `Community 165`** (2 nodes): `._sse_connect()`, `Connect to SSE endpoint (GET /sse) and extract the messages URL.          Return`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 155`** (1 nodes): `check_circular_imports.py`
+- **Thin community `Community 166`** (1 nodes): `check_circular_imports.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 156`** (1 nodes): `verify_superpowers_tests.py`
+- **Thin community `Community 167`** (1 nodes): `verify_superpowers_tests.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 157`** (1 nodes): `merge_graphify.py`
+- **Thin community `Community 168`** (1 nodes): `merge_graphify.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 158`** (1 nodes): `vite.config.ts`
+- **Thin community `Community 169`** (1 nodes): `vite.config.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 159`** (1 nodes): `vite-env.d.ts`
+- **Thin community `Community 170`** (1 nodes): `vite-env.d.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 160`** (1 nodes): `qrcode.d.ts`
+- **Thin community `Community 171`** (1 nodes): `qrcode.d.ts`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 161`** (1 nodes): `setup-win.ps1`
+- **Thin community `Community 172`** (1 nodes): `setup-win.ps1`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 162`** (1 nodes): `run-win.ps1`
+- **Thin community `Community 173`** (1 nodes): `run-win.ps1`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 163`** (1 nodes): `test_import.py`
+- **Thin community `Community 174`** (1 nodes): `test_import.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 164`** (1 nodes): `test_adapter_direct.py`
+- **Thin community `Community 175`** (1 nodes): `test_adapter_direct.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 165`** (1 nodes): `向 FastAPI app 注册路由、启动钩子等。`
+- **Thin community `Community 176`** (1 nodes): `向 FastAPI app 注册路由、启动钩子等。`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 166`** (1 nodes): `Command name (e.g., "about").`
+- **Thin community `Community 177`** (1 nodes): `Command name (e.g., "about").`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 167`** (1 nodes): `Brief description for help output.`
+- **Thin community `Community 178`** (1 nodes): `Brief description for help output.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 168`** (1 nodes): `Alternative names for this command.`
+- **Thin community `Community 179`** (1 nodes): `Alternative names for this command.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 169`** (1 nodes): `Nested subcommands (for "extensions list" style).`
+- **Thin community `Community 180`** (1 nodes): `Nested subcommands (for "extensions list" style).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 170`** (1 nodes): `Execute the command with given arguments.`
+- **Thin community `Community 181`** (1 nodes): `Execute the command with given arguments.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 171`** (1 nodes): `计算两段内容之间的 DiffInfo（行级 + 字符级）。`
+- **Thin community `Community 182`** (1 nodes): `计算两段内容之间的 DiffInfo（行级 + 字符级）。`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 172`** (1 nodes): `将 JSON-RPC 消息格式化为 LSP Base Protocol 文本帧。          注意：Content-Length 必须是 UTF-8 编码`
+- **Thin community `Community 183`** (1 nodes): `将 JSON-RPC 消息格式化为 LSP Base Protocol 文本帧。          注意：Content-Length 必须是 UTF-8 编码`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 173`** (1 nodes): `从 header 块中解析 Content-Length 值。          Args:             header_block: header`
+- **Thin community `Community 184`** (1 nodes): `从 header 块中解析 Content-Length 值。          Args:             header_block: header`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 174`** (1 nodes): `scripts____init__.py`
+- **Thin community `Community 185`** (1 nodes): `scripts____init__.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 175`** (1 nodes): `Send a completion request and return the full response.`
+- **Thin community `Community 186`** (1 nodes): `Send a completion request and return the full response.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 176`** (1 nodes): `Send a streaming request and return the aggregated response.          Implementa`
+- **Thin community `Community 187`** (1 nodes): `Send a streaming request and return the aggregated response.          Implementa`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 177`** (1 nodes): `从 dict 构建 SandboxConfig，支持字段级 fallback。          Args:             config: 工具配置`
+- **Thin community `Community 188`** (1 nodes): `从 dict 构建 SandboxConfig，支持字段级 fallback。          Args:             config: 工具配置`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 178`** (1 nodes): `Backend name for identification.`
+- **Thin community `Community 189`** (1 nodes): `Backend name for identification.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 179`** (1 nodes): `Backend name for identification.`
+- **Thin community `Community 190`** (1 nodes): `Backend name for identification.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 180`** (1 nodes): `Execute code in the sandbox.`
+- **Thin community `Community 191`** (1 nodes): `Execute code in the sandbox.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 181`** (1 nodes): `Check if the sandbox backend is healthy.`
+- **Thin community `Community 192`** (1 nodes): `Check if the sandbox backend is healthy.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 182`** (1 nodes): `Get the capabilities of this sandbox backend.`
+- **Thin community `Community 193`** (1 nodes): `Get the capabilities of this sandbox backend.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 183`** (1 nodes): `Enqueue a new permission request for later approval.`
+- **Thin community `Community 194`** (1 nodes): `Enqueue a new permission request for later approval.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 184`** (1 nodes): `Get all pending permission requests for a session.`
+- **Thin community `Community 195`** (1 nodes): `Get all pending permission requests for a session.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 185`** (1 nodes): `Get a specific pending permission request by ID.`
+- **Thin community `Community 196`** (1 nodes): `Get a specific pending permission request by ID.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 186`** (1 nodes): `Process a permission decision (grant/deny).`
+- **Thin community `Community 197`** (1 nodes): `Process a permission decision (grant/deny).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 187`** (1 nodes): `Wait for a decision on a permission request.          Returns True if granted, F`
+- **Thin community `Community 198`** (1 nodes): `Wait for a decision on a permission request.          Returns True if granted, F`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 188`** (1 nodes): `Clear all pending requests for a session.`
+- **Thin community `Community 199`** (1 nodes): `Clear all pending requests for a session.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 189`** (1 nodes): `Count pending requests for a session.`
+- **Thin community `Community 200`** (1 nodes): `Count pending requests for a session.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 190`** (1 nodes): `Read content from a text file.`
+- **Thin community `Community 201`** (1 nodes): `Read content from a text file.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 191`** (1 nodes): `Write content to a text file.`
+- **Thin community `Community 202`** (1 nodes): `Write content to a text file.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 192`** (1 nodes): `merge_semantic.py`
+- **Thin community `Community 203`** (1 nodes): `merge_semantic.py`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `User` connect `Community 0` to `Community 1`, `Community 2`, `Community 4`, `Community 6`, `Community 7`, `Community 9`, `Community 10`, `Community 12`, `Community 14`, `Community 18`, `Community 19`, `Community 23`, `Community 28`, `Community 30`, `Community 32`, `Community 38`, `Community 41`, `Community 42`, `Community 43`, `Community 47`, `Community 50`, `Community 56`, `Community 60`, `Community 62`, `Community 78`, `Community 83`, `Community 91`?**
-  _High betweenness centrality (0.215) - this node is a cross-community bridge._
-- **Why does `Agent` connect `Community 1` to `Community 0`, `Community 2`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 9`, `Community 10`, `Community 12`, `Community 18`, `Community 19`, `Community 23`, `Community 30`, `Community 32`, `Community 38`, `Community 39`, `Community 41`, `Community 42`, `Community 44`, `Community 47`, `Community 50`, `Community 56`, `Community 60`, `Community 64`, `Community 74`, `Community 91`?**
-  _High betweenness centrality (0.163) - this node is a cross-community bridge._
-- **Why does `ChannelConfig` connect `Community 1` to `Community 0`, `Community 33`, `Community 2`, `Community 4`, `Community 6`, `Community 39`, `Community 9`, `Community 10`, `Community 41`, `Community 44`, `Community 42`, `Community 13`, `Community 47`, `Community 43`, `Community 50`, `Community 21`, `Community 62`?**
-  _High betweenness centrality (0.055) - this node is a cross-community bridge._
-- **Are the 974 inferred relationships involving `User` (e.g. with `Seed data script — creates initial admin user and built-in templates.` and `Create tables and seed initial data.`) actually correct?**
-  _`User` has 974 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 821 inferred relationships involving `Agent` (e.g. with `Seed data script — creates initial admin user and built-in templates.` and `Create tables and seed initial data.`) actually correct?**
-  _`Agent` has 821 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 469 inferred relationships involving `IdentityProvider` (e.g. with `Base` and `Backfill department paths from the department tree and refresh member paths.  Us`) actually correct?**
-  _`IdentityProvider` has 469 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 445 inferred relationships involving `ChatMessage` (e.g. with `LSP4J WebSocket 端点 + 认证。  提供 WebSocket 端点供通义灵码 IDE 插件连接。 URL 格式：ws://{host}/api/` and `查找 agent by UUID 或 name，返回 (agent, model) 或 None。      复用 ACP 的 _resolve_agent_o`) actually correct?**
-  _`ChatMessage` has 445 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `User` connect `Community 0` to `Community 1`, `Community 2`, `Community 5`, `Community 6`, `Community 9`, `Community 10`, `Community 12`, `Community 14`, `Community 17`, `Community 22`, `Community 27`, `Community 29`, `Community 31`, `Community 34`, `Community 38`, `Community 40`, `Community 41`, `Community 42`, `Community 46`, `Community 47`, `Community 50`, `Community 56`, `Community 58`, `Community 61`, `Community 63`, `Community 79`, `Community 86`, `Community 94`?**
+  _High betweenness centrality (0.210) - this node is a cross-community bridge._
+- **Why does `Agent` connect `Community 1` to `Community 0`, `Community 2`, `Community 4`, `Community 5`, `Community 6`, `Community 9`, `Community 10`, `Community 12`, `Community 17`, `Community 22`, `Community 29`, `Community 31`, `Community 32`, `Community 34`, `Community 38`, `Community 40`, `Community 41`, `Community 43`, `Community 46`, `Community 47`, `Community 50`, `Community 56`, `Community 58`, `Community 61`, `Community 65`, `Community 74`, `Community 94`?**
+  _High betweenness centrality (0.158) - this node is a cross-community bridge._
+- **Why does `ChannelConfig` connect `Community 1` to `Community 0`, `Community 32`, `Community 2`, `Community 34`, `Community 33`, `Community 5`, `Community 40`, `Community 9`, `Community 10`, `Community 43`, `Community 41`, `Community 13`, `Community 46`, `Community 42`, `Community 50`, `Community 19`, `Community 63`?**
+  _High betweenness centrality (0.054) - this node is a cross-community bridge._
+- **Are the 988 inferred relationships involving `User` (e.g. with `Seed data script — creates initial admin user and built-in templates.` and `Create tables and seed initial data.`) actually correct?**
+  _`User` has 988 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 839 inferred relationships involving `Agent` (e.g. with `Seed data script — creates initial admin user and built-in templates.` and `Create tables and seed initial data.`) actually correct?**
+  _`Agent` has 839 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 475 inferred relationships involving `IdentityProvider` (e.g. with `Base` and `Backfill department paths from the department tree and refresh member paths.  Us`) actually correct?**
+  _`IdentityProvider` has 475 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 460 inferred relationships involving `ChatMessage` (e.g. with `LSP4J WebSocket 端点 + 认证。  提供 WebSocket 端点供通义灵码 IDE 插件连接。 URL 格式：ws://{host}/api/` and `查找 agent by UUID 或 name，返回 (agent, model) 或 None。      复用 ACP 的 _resolve_agent_o`) actually correct?**
+  _`ChatMessage` has 460 INFERRED edges - model-reasoned connections that need verification._
