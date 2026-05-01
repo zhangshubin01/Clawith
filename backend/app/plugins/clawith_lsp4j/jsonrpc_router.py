@@ -531,6 +531,9 @@ class JSONRPCRouter:
             "textDocument/didChange",
             "textDocument/didClose",
             "textDocument/didSave",
+            "textDocument/willChange",    # 编辑器变更前触发，无业务需求
+            "textDocument/willSave",      # 保存前触发
+            "textDocument/willSaveWaitUntil",  # 保存前等待
             # LanguageServer.java — 见 docs/plugin-analysis/15-complete-method-by-method-gap-analysis.md P0
             "window/workDoneProgress/cancel",
             "settings/change",
@@ -1561,6 +1564,7 @@ class JSONRPCRouter:
             "projectPath": self._project_path,
             "toolCallId": tool_call_id,
             "toolCallStatus": tool_call_status,
+            "name": tool_name,
             "parameters": parameters or {},
             "results": wrapped_results,
             "errorCode": error_code,
@@ -1952,6 +1956,11 @@ class JSONRPCRouter:
                     "ERROR", tool_name=original_name, parameters=arguments,
                     error_msg=f"工具 {tool_name} 执行超时（{timeout}s）",
                 )
+                await self._send_client_request("chat/filterTimeout", {
+                    "requestId": request_id,
+                    "sessionId": self._session_id or "",
+                    "statusCode": 408,
+                })
             else:
                 logger.warning(
                     "[LSP4J-TOOL] 队列未匹配，跳过 ERROR sync（避免幽灵事件）: tool={} callId={} requestId={}",
@@ -2200,13 +2209,19 @@ class JSONRPCRouter:
         - step: "start" 或 "done"（不是 thinking: true）
         - requestId（必须携带）
         - timestamp（毫秒时间戳）
+        - extra: Map<String,String>（含 sessionType）
         """
+        extra: dict[str, str] = {}
+        session_type = getattr(self, "_current_session_type", "")
+        if session_type:
+            extra["sessionType"] = session_type
         await self._send_client_request("chat/think", {
             "requestId": request_id,
             "sessionId": session_id or "",
             "text": text,
             "step": step,  # "start" 或 "done"
             "timestamp": int(time.time() * 1000),
+            "extra": extra,
         })
 
     async def _send_chat_finish(
@@ -2673,7 +2688,7 @@ class JSONRPCRouter:
         })
 
     async def _handle_chat_delete_session_by_id(self, params: dict, msg_id: Any) -> None:
-        """chat/deleteSessionById → 删除单个 IDE 会话（Clawith-only）。"""
+        """chat/deleteSessionById → 删除单个 IDE 会话 + 推送 chat/delete 通知。"""
         session_id = params.get("sessionId") or ""
         try:
             sid_uuid = uuid.UUID(session_id)
@@ -2681,6 +2696,7 @@ class JSONRPCRouter:
             await self._send_response(msg_id, None)
             return
 
+        deleted = False
         try:
             async with async_session() as db:
                 sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid))
@@ -2694,12 +2710,20 @@ class JSONRPCRouter:
                     )
                     await db.delete(sess)
                     await db.commit()
+                    deleted = True
         except Exception as e:
             logger.warning("[LSP4J] chat/deleteSessionById DB error: {}", e)
 
         if self._session_id == session_id:
             self._session_id = None
         await self._send_response(msg_id, None)
+
+        if deleted:
+            try:
+                await self._send_client_request("chat/delete", {"sessionId": session_id, "requestId": ""})
+                logger.debug("[LSP4J] chat/delete 已推送: sessionId={}", session_id)
+            except Exception as e:
+                logger.warning("[LSP4J] chat/delete 推送失败: {}", e)
 
     async def _handle_chat_clear_all_sessions(self, params: dict, msg_id: Any) -> None:
         """chat/clearAllSessions → 清空当前 agent+user 的 IDE 会话（Clawith-only）。"""
@@ -2729,7 +2753,7 @@ class JSONRPCRouter:
         await self._send_response(msg_id, None)
 
     async def _handle_chat_delete_chat_by_id(self, params: dict, msg_id: Any) -> None:
-        """chat/deleteChatById → 删除单条聊天记录（若 requestId 可映射为消息 UUID）。"""
+        """chat/deleteChatById → 删除单条聊天记录 + 推送 chat/delete 通知。"""
         session_id = params.get("sessionId") or ""
         request_id = params.get("requestId") or ""
         try:
@@ -2739,9 +2763,10 @@ class JSONRPCRouter:
             await self._send_response(msg_id, None)
             return
 
+        deleted = False
         try:
             async with async_session() as db:
-                await db.execute(
+                res = await db.execute(
                     delete(ChatMessage)
                     .where(ChatMessage.id == rid_uuid)
                     .where(ChatMessage.conversation_id == str(sid_uuid))
@@ -2749,9 +2774,46 @@ class JSONRPCRouter:
                     .where(ChatMessage.user_id == self._user_id)
                 )
                 await db.commit()
+                deleted = res.rowcount > 0
         except Exception as e:
             logger.warning("[LSP4J] chat/deleteChatById DB error: {}", e)
         await self._send_response(msg_id, None)
+
+        if deleted:
+            try:
+                await self._send_client_request("chat/delete", {
+                    "sessionId": session_id,
+                    "requestId": request_id,
+                })
+                logger.debug("[LSP4J] chat/delete 已推送: sessionId={} requestId={}", session_id, request_id)
+            except Exception as e:
+                logger.warning("[LSP4J] chat/delete 推送失败: {}", e)
+
+    # ── reasoning 模型名称模式（基于 provider + model 推断，避免 DB 迁移） ──
+    _REASONING_PATTERNS: tuple[tuple[str, str], ...] = (
+        # (provider 片段, model 片段) — 任一匹配即判定为 reasoning 模型
+        ("deepseek", "r1"),
+        ("deepseek", "reasoner"),
+        ("openai", "o1"),
+        ("openai", "o3"),
+        ("openai", "o4"),
+        ("anthropic", "opus"),
+        ("qwen", "qwq"),
+        ("qwen", "qwen3"),
+    )
+
+    @classmethod
+    def _is_reasoning_model(cls, model_name: str, provider: str) -> bool:
+        """基于模型名称模式检测 reasoning 能力。"""
+        _model_lower = model_name.lower()
+        _provider_lower = (provider or "").lower()
+        for _p, _m in cls._REASONING_PATTERNS:
+            if _p in _provider_lower and _m in _model_lower:
+                return True
+        # 通用模式：模型名含 "reasoning" / "thinking" / "thinker"
+        if any(kw in _model_lower for kw in ("reasoning", "thinking", "thinker")):
+            return True
+        return False
 
     async def _handle_config_query_models(self, params: dict, msg_id: Any) -> None:
         """config/queryModels → Map<String, List<ChatModelItem>>（Clawith-only 真数据）。"""
@@ -2780,7 +2842,7 @@ class JSONRPCRouter:
                     "displayName": label,
                     "format": m.provider or "openai",
                     "isVl": bool(m.supports_vision),
-                    "isReasoning": False,
+                    "isReasoning": self._is_reasoning_model(m.model, m.provider or ""),
                     "baseUrl": m.base_url or "",
                     "source": "tenant" if m.tenant_id else "system",
                 }
@@ -2811,9 +2873,19 @@ class JSONRPCRouter:
         })
 
     async def _handle_ping(self, params: dict, msg_id: Any) -> None:
-        """ping → PingResult（success 不可为 null，避免 IDE 端 NPE）。"""
+        """ping → PingResult（通过 SELECT 1 检查 DB 连接健康）。"""
         _ = params
-        await self._send_response(msg_id, {"success": True})
+        try:
+            from sqlalchemy import text
+            async with async_session() as db:
+                await db.execute(text("SELECT 1"))
+            await self._send_response(msg_id, {"success": True})
+        except Exception as e:
+            logger.warning("[LSP4J] ping DB health check failed: {}", e)
+            await self._send_response(msg_id, {
+                "success": False,
+                "errorMessage": f"Database health check failed: {e}",
+            })
 
     # ──────────────────────────────────────────
     # 工作区文件服务（workingSpaceFile/*）
@@ -3034,25 +3106,75 @@ class JSONRPCRouter:
     async def _handle_config_get_endpoint(self, params: dict, msg_id: Any) -> None:
         """处理 config/getEndpoint 请求。
 
+        优先从 ide_plugin_configs 表读取持久化 endpoint，回退到 PUBLIC_BASE_URL。
         返回 GlobalEndpointConfig 格式：{"endpoint": "https://..."}。
-        插件 GlobalEndpointConfig.java 只有 endpoint: String 字段。
         """
         _ = params
-        settings = get_settings()
-        endpoint = settings.PUBLIC_BASE_URL or ""
-        logger.debug("[LSP4J] config/getEndpoint: endpoint={}", endpoint)
+        endpoint = ""
+        try:
+            from app.models.plugin_config import IDEPluginConfig
+            async with async_session() as db:
+                sr = await db.execute(
+                    select(IDEPluginConfig.config_value)
+                    .where(IDEPluginConfig.scope_type == "agent")
+                    .where(IDEPluginConfig.scope_id == self._agent_id)
+                    .where(IDEPluginConfig.config_key == "lsp4j_endpoint")
+                )
+                row = sr.scalar_one_or_none()
+                if row:
+                    endpoint = row
+        except Exception as e:
+            logger.warning("[LSP4J] config/getEndpoint DB 回退: {}", e)
+
+        if not endpoint:
+            settings = get_settings()
+            endpoint = settings.PUBLIC_BASE_URL or ""
+        logger.debug("[LSP4J] config/getEndpoint: endpoint={}", endpoint[:80] if endpoint else "")
         await self._send_response(msg_id, {"endpoint": endpoint})
 
     async def _handle_config_update_endpoint(self, params: dict, msg_id: Any) -> None:
         """处理 config/updateEndpoint 请求。
 
-        接收 GlobalEndpointConfig{endpoint: String}，返回 UpdateConfigResult{success: Boolean}。
-        MVP 阶段不做持久化，仅返回成功。
+        接收 GlobalEndpointConfig{endpoint: String}，
+        持久化到 ide_plugin_configs 表（scope_type="agent", config_key="lsp4j_endpoint"）。
+        返回 UpdateConfigResult{success: Boolean}。
         """
         endpoint = params.get("endpoint", "")
-        if endpoint:
-            logger.info("[LSP4J] config/updateEndpoint: endpoint={}", endpoint)
-        await self._send_response(msg_id, {"success": True})
+        if not endpoint:
+            await self._send_response(msg_id, {"success": False, "errorMessage": "Empty endpoint"})
+            return
+
+        try:
+            from app.models.plugin_config import IDEPluginConfig
+            async with async_session() as db:
+                sr = await db.execute(
+                    select(IDEPluginConfig)
+                    .where(IDEPluginConfig.scope_type == "agent")
+                    .where(IDEPluginConfig.scope_id == self._agent_id)
+                    .where(IDEPluginConfig.config_key == "lsp4j_endpoint")
+                )
+                config = sr.scalar_one_or_none()
+                if config:
+                    config.config_value = endpoint
+                else:
+                    config = IDEPluginConfig(
+                        scope_type="agent",
+                        scope_id=self._agent_id,
+                        config_key="lsp4j_endpoint",
+                        config_value=endpoint,
+                    )
+                    db.add(config)
+                await db.commit()
+
+            logger.info("[LSP4J] config/updateEndpoint 已持久化: agent_id={} endpoint={}",
+                         self._agent_id, endpoint[:80] if endpoint else "")
+            await self._send_response(msg_id, {"success": True})
+        except Exception as e:
+            logger.warning("[LSP4J] config/updateEndpoint DB error: {}", e)
+            await self._send_response(msg_id, {
+                "success": False,
+                "errorMessage": f"Persist failed: {e}",
+            })
 
     # ──────────────────────────────────────────
     # Commit 消息生成
@@ -3085,13 +3207,33 @@ class JSONRPCRouter:
             "errorMessage": "",
         })
 
-        # 2. 构建 prompt
-        diff_text = "\n".join(str(d) for d in code_diffs) if code_diffs else ""
+        # 2. 构建 prompt（按文件粒度截断，保留所有文件路径 + 每文件前 600 字符）
+        _diff_parts: list[str] = []
+        _total_budget = 10000  # 总输入预算（字符）
+        _per_file_cap = 600    # 单文件最大字符
+        _used = 0
+        for _d in (code_diffs or []):
+            _d_str = str(_d)
+            if _used + len(_d_str) > _total_budget:
+                # 超过总预算：截断当前文件剩余部分
+                _remaining = _total_budget - _used
+                if _remaining > 80:  # 至少保留有意义的片段
+                    _d_str = _d_str[:_remaining] + "\n...\n[剩余内容已截断]"
+                else:
+                    break
+            elif len(_d_str) > _per_file_cap:
+                # 单文件超过上限：保留头尾各半
+                _half = _per_file_cap // 2
+                _d_str = _d_str[:_half] + f"\n...\n[省略 {len(_d_str) - _per_file_cap} 字符]\n...\n" + _d_str[-_half:]
+            _diff_parts.append(_d_str)
+            _used += len(_d_str)
+        diff_text = "\n".join(_diff_parts) if _diff_parts else ""
+
         existing_msgs = "\n".join(str(m) for m in commit_messages) if commit_messages else ""
         lang_hint = f"请使用{preferred_language}。" if preferred_language else "请使用中文。"
-        prompt = f"根据以下代码变更，生成简洁的 Git commit message。\n{lang_hint}\n\n代码变更:\n{diff_text[:8000]}"
+        prompt = f"根据以下代码变更，生成简洁的 Git commit message（不超过200字符）。\n{lang_hint}\n\n代码变更:\n{diff_text}"
         if existing_msgs:
-            prompt += f"\n\n已有的 commit messages:\n{existing_msgs[:2000]}"
+            prompt += f"\n\n已有的 commit messages:\n{existing_msgs[:1500]}"
 
         messages = [{"role": "user", "content": prompt}]
 
@@ -3119,19 +3261,116 @@ class JSONRPCRouter:
             logger.error("[LSP4J] commitMsg/generate call_llm error: {}", e)
             reply = f"[错误] {e}"
 
-        # 5. 非流式模式一次性返回
+        # 5. 非流式模式一次性返回（截断保护，commit message 不超过 500 字符）
         if not stream and reply:
+            _commit_reply = reply.strip()[:500]
             await self._send_client_request("commitMsg/answer", {
                 "requestId": request_id,
-                "text": reply,
+                "text": _commit_reply,
                 "timestamp": int(time.time() * 1000),
             })
 
         # 6. 发送完成通知
         await self._send_client_request("commitMsg/finish", {
             "requestId": request_id,
-            "statusCode": 0,
+            "statusCode": 200,
             "reason": "",
+        })
+
+    # ──────────────────────────────────────────
+    # 多轮追问建议列表
+    # ──────────────────────────────────────────
+
+    async def _handle_chat_reply_request(self, params: dict, msg_id: Any) -> None:
+        """处理 chat/replyRequest 请求。
+
+        参数格式（ChatReplyRequestParam）：requestId, sessionId
+        响应格式（ChatReplyListResult）：requestId, displayTasks, isSuccess
+
+        插件端通过此接口获取多轮追问的建议列表（DisplayTask）。
+        Clawith 当前不支持 DisplayTask 体系，返回空列表 + 成功。
+        实际多轮对话能力通过 chat/ask{isReply:true} 实现。
+        """
+        await self._send_response(msg_id, {
+            "requestId": params.get("requestId", ""),
+            "displayTasks": [],
+            "isSuccess": True,
+        })
+
+    # ──────────────────────────────────────────
+    # 点赞/踩反馈记录
+    # ──────────────────────────────────────────
+
+    async def _handle_chat_like(self, params: dict, msg_id: Any) -> None:
+        """处理 chat/like 请求。
+
+        参数格式（ChatLikeParam）：requestId, sessionId, like (int: 1=赞, -1=踩)
+        响应格式（ChatLikeResult）：requestId, sessionId, isSuccess
+
+        记录用户反馈到日志，后续可扩展写入数据库。
+        """
+        _like_val = params.get("like", 0)
+        _label = "赞" if _like_val == 1 else ("踩" if _like_val == -1 else f"未知({_like_val})")
+        logger.info("[LSP4J] chat/like: requestId={} sessionId={} like={} label={}",
+                    params.get("requestId", ""), params.get("sessionId", ""), _like_val, _label)
+        await self._send_response(msg_id, {
+            "requestId": params.get("requestId", ""),
+            "sessionId": params.get("sessionId", ""),
+            "isSuccess": True,
+        })
+
+    # ──────────────────────────────────────────
+    # 自定义命令查询
+    # ──────────────────────────────────────────
+
+    async def _handle_extension_query(self, params: dict, msg_id: Any) -> None:
+        """处理 extension/query 请求。
+
+        响应格式（CustomCommandGetResult）：
+        - commands: List[CustomCommand] — 自定义命令列表
+        - commandShowPosition: String — 命令显示位置
+        - contextProviders: List[CustomContext] — 上下文提供者
+
+        Clawith 当前无自定义命令体系，返回空列表。
+        """
+        _ = params
+        await self._send_response(msg_id, {
+            "commands": [],
+            "commandShowPosition": "",
+            "contextProviders": [],
+        })
+
+    # ──────────────────────────────────────────
+    # BYOK 模型配置
+    # ──────────────────────────────────────────
+
+    async def _handle_model_get_byok_config(self, params: dict, msg_id: Any) -> None:
+        """处理 model/getByokConfig 请求。
+
+        响应格式（ByokConfigResult）：enabled, providers, tags
+        Clawith 不支持 BYOK（Bring Your Own Key），返回禁用状态。
+        """
+        _ = params
+        await self._send_response(msg_id, {
+            "enabled": False,
+            "providers": [],
+            "tags": [],
+        })
+
+    async def _handle_model_check_byok_config(self, params: dict, msg_id: Any) -> None:
+        """处理 model/checkByokConfig 请求。
+
+        参数格式（CheckByokConfigParam）：provider, model, parameters
+        响应格式（CheckByokConfigResult）：errorCode, errorMsg, success
+
+        Clawith 不支持 BYOK，始终返回失败。
+        """
+        logger.info("[LSP4J] model/checkByokConfig: provider={} model={}",
+                    params.get("provider", ""), params.get("model", ""))
+        await self._send_response(msg_id, {
+            "errorCode": "BYOK_NOT_SUPPORTED",
+            "errorMsg": "Clawith 不支持 BYOK 自定义模型密钥配置",
+            "success": False,
         })
 
     async def _handle_tool_call_results(self, params: dict, msg_id: Any) -> None:
@@ -3145,25 +3384,53 @@ class JSONRPCRouter:
         })
 
     async def _handle_auth_status(self, params: dict, msg_id: Any) -> None:
-        """auth/status → AuthStatus（Clawith-only 固定为已登录可用态）。"""
+        """auth/status → AuthStatus（基于 WebSocket 认证 token 查询真实用户数据）。"""
         _ = params
+        _name = ""
+        _email = ""
+        _avatar = ""
+        _tenant_id = ""
+        _tenant_name = ""
+        try:
+            async with async_session() as db:
+                from app.models.user import User as UserModel
+                ur = await db.execute(
+                    select(UserModel).where(UserModel.id == self._user_id)
+                )
+                user_obj = ur.scalar_one_or_none()
+                if user_obj is not None:
+                    _name = user_obj.display_name or ""
+                    _avatar = user_obj.avatar_url or ""
+                    _email = getattr(user_obj, "email", None) or ""
+                    _tenant_id = str(user_obj.tenant_id) if user_obj.tenant_id else ""
+                    if user_obj.tenant_id:
+                        from app.models.tenant import Tenant
+                        tr = await db.execute(
+                            select(Tenant).where(Tenant.id == user_obj.tenant_id)
+                        )
+                        tenant_obj = tr.scalar_one_or_none()
+                        if tenant_obj is not None:
+                            _tenant_name = tenant_obj.name or ""
+        except Exception as e:
+            logger.warning("[LSP4J-AUTH] 查询用户信息失败，使用降级数据: {}", e)
+
         await self._send_response(msg_id, {
             "messageId": "",
             "status": 2,  # AuthStateEnum.LOGIN
-            "name": "Clawith User",
+            "name": _name or f"User {str(self._user_id)[:8]}",
             "id": str(self._user_id),
             "accountId": str(self._user_id),
             "token": "",
             "quota": 1,
             "whitelist": 3,  # AuthWhitelistStatusEnum.PASS
-            "orgId": "",
-            "orgName": "Clawith",
+            "orgId": _tenant_id,
+            "orgName": _tenant_name or "Clawith",
             "yxUid": str(self._user_id),
-            "avatarUrl": "",
+            "avatarUrl": _avatar,
             "userType": "clawith",
             "isSubAccount": False,
             "cloudType": "private",
-            "email": "",
+            "email": _email,
             "userTag": "clawith-only",
             "privacyPolicyAgreed": True,
             "isPrivacyPolicyModifiable": False,
@@ -3189,8 +3456,7 @@ class JSONRPCRouter:
         ChatCodeChangeApplyResult（9 个字段，源码验证）：
         - applyId, projectPath, filePath, applyCode, requestId, sessionId, extra, sessionType, mode
 
-        MVP 策略：直接将 codeEdit 作为 applyCode 返回（无 merge 逻辑）。
-        后续可增强：基于 filePath 读取当前文件内容，计算三方 merge。
+        安全守卫：空 codeEdit 直接拒绝，防止误清空用户文件。
         """
         apply_id = params.get("applyId", str(uuid.uuid4()))
         code_edit = params.get("codeEdit", "")
@@ -3201,9 +3467,28 @@ class JSONRPCRouter:
         # diff 入口日志
         logger.info("[LSP4J] codeChange/apply: applyId={} filePath={} requestId={} codeEdit_len={}", apply_id, file_path, request_id, len(code_edit))
 
-        # 空内容警告
-        if not code_edit:
-            logger.warning("[LSP4J] codeChange/apply: empty codeEdit, applyId={} filePath={}", apply_id, file_path)
+        # 空 codeEdit 安全守卫：拒绝请求，防止 IDE 端误将空内容写入文件
+        if not code_edit or not code_edit.strip():
+            logger.warning("[LSP4J] codeChange/apply REJECTED: empty codeEdit, applyId={} filePath={}", apply_id, file_path)
+            await self._send_response(msg_id, {
+                "applyId": apply_id,
+                "projectPath": params.get("projectPath", ""),
+                "filePath": file_path,
+                "applyCode": "",  # 必须为空，插件端校验后会拒绝应用
+                "requestId": request_id,
+                "sessionId": session_id,
+                "extra": params.get("extra", ""),
+                "sessionType": params.get("sessionType", ""),
+                "mode": params.get("mode", ""),
+            })
+            # 发送拒绝通知，避免插件端长时间等待 diff
+            await self._send_client_request("chat/codeChange/apply/finish", {
+                "applyId": apply_id,
+                "filePath": file_path,
+                "success": False,
+                "errorMessage": "Empty codeEdit rejected by server safety guard",
+            })
+            return
 
         # 构建响应（ChatCodeChangeApplyResult 9 个字段）
         result = {
@@ -3220,7 +3505,11 @@ class JSONRPCRouter:
         await self._send_response(msg_id, result)
 
         # 发送 apply/finish 通知（部分插件版本依赖此通知刷新 diff）
-        await self._send_client_request("chat/codeChange/apply/finish", result)
+        await self._send_client_request("chat/codeChange/apply/finish", {
+            **result,
+            "success": True,
+            "errorMessage": None,
+        })
         logger.debug("[LSP4J] codeChange/apply/finish sent: applyId={}", apply_id)
 
     # ──────────────────────────────────────────
@@ -3243,8 +3532,8 @@ class JSONRPCRouter:
         # ── chat/ 方法（ChatService.java @JsonSegment("chat")） ──
         "chat/systemEvent": _handle_stub,
         "chat/getStage": _handle_stub,
-        "chat/replyRequest": _handle_stub,
-        "chat/like": _handle_stub,
+        "chat/replyRequest": _handle_chat_reply_request,      # 多轮追问建议列表
+        "chat/like": _handle_chat_like,                       # 点赞/踩反馈记录
         "chat/codeChange/apply": _handle_code_change_apply,     # 完整实现（ChatCodeChangeApplyResult + apply/finish）
         "image/upload": _handle_image_upload,                     # 双响应模式（校验→响应→异步通知）
         "chat/stopSession": _handle_stub,
@@ -3281,13 +3570,13 @@ class JSONRPCRouter:
         "dataPolicy/cancel": _handle_stub,                    # 拒绝数据政策
         "auth/profile/getUrl": _handle_stub,                  # 获取用户资料 URL
         "auth/profile/update": _handle_stub,                  # 更新用户资料
-        "extension/query": _handle_stub,                      # 查询自定义命令
+        "extension/query": _handle_extension_query,           # 查询自定义命令（返回空列表）
         "extension/contextProvider/loadComboBoxItems": _handle_stub,  # 上下文下拉项加载
         "codebase/recommendation": _handle_stub,              # 代码库推荐
         "kb/list": _handle_stub,                              # 知识库列表
         "model/queryClasses": _handle_model_query_classes,     # 查询模型类别
-        "model/getByokConfig": _handle_stub,                  # BYOK 配置查询
-        "model/checkByokConfig": _handle_stub,                # BYOK 配置校验
+        "model/getByokConfig": _handle_model_get_byok_config,      # BYOK 配置查询（不支持，返回空）
+        "model/checkByokConfig": _handle_model_check_byok_config,  # BYOK 配置校验（不支持，返回失败）
         "user/plan": _handle_stub,                            # 用户计划查询
         "webview/command/list": _handle_stub,                 # WebView 命令列表
         # ── @JsonDelegate 服务: AuthService（6 个方法） ──
@@ -3539,3 +3828,39 @@ async def _load_lsp4j_history_from_db(
         # 历史加载成功
         logger.debug("[LSP4J] history loaded from DB: session_id={} count={}", session_id, len(rows))
         return [{"role": m.role, "content": m.content} for m in rows]
+
+
+# ──────────────────────────────────────────────
+# 模型变更广播（供模型池变更时外部调用）
+# ──────────────────────────────────────────────
+
+async def broadcast_config_refresh_models() -> int:
+    """向所有活跃的 LSP4J 客户端推送 config/refreshModels 通知。
+
+    当模型池（LLMModel）发生变更时调用，遍历所有活跃的 JsonRpcRouter 实例，
+    向每个连接的 IDE 发送通知让插件 UI 刷新模型列表。
+
+    外部调用示例（如 app/api/llm.py 模型增删改成功后）：
+        from app.plugins.clawith_lsp4j.jsonrpc_router import broadcast_config_refresh_models
+        asyncio.ensure_future(broadcast_config_refresh_models())
+
+    Returns:
+        成功推送的客户端数量
+    """
+    from .context import list_active_routers
+
+    routers = await list_active_routers()
+    if not routers:
+        logger.debug("[LSP4J] broadcast config/refreshModels: 无活跃连接")
+        return 0
+
+    count = 0
+    for _key, router in routers:
+        try:
+            await router._send_client_request("config/refreshModels", {})
+            count += 1
+        except Exception as e:
+            logger.warning("[LSP4J] broadcast config/refreshModels 失败: key={} error={}", _key, e)
+
+    logger.info("[LSP4J] broadcast config/refreshModels: 已推送 {} 个客户端", count)
+    return count
