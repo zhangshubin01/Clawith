@@ -20,6 +20,10 @@ router = APIRouter(prefix="/tools", tags=["tools"])
 # When config_schema is available, fields with type='password' are used instead.
 SENSITIVE_FIELD_KEYS = {"api_key", "private_key", "auth_code", "password", "secret"}
 
+CATEGORY_CONFIG_PRIMARY_TOOL = {
+    "agentbay": "agentbay_browser_navigate",
+}
+
 
 def _get_sensitive_keys(config_schema: dict | None = None) -> set[str]:
     """Determine which config keys are sensitive.
@@ -825,11 +829,12 @@ async def get_category_config(
     # ── 1. Load company-level (global) config from Tool.config ──────────────
     # Find a tool in this category that actually has config data.
     # We cannot just LIMIT 1 because most tools may have empty config.
+    primary_tool_name = CATEGORY_CONFIG_PRIMARY_TOOL.get(category)
     all_cat_tools = await db.execute(
         select(Tool).where(
             Tool.category == category,
             Tool.enabled == True,
-        ).order_by(Tool.name)
+        ).order_by((Tool.name != primary_tool_name) if primary_tool_name else Tool.name, Tool.name)
     )
     raw_global: dict = {}
     cat_schema: dict | None = None

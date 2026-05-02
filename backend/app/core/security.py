@@ -296,7 +296,8 @@ async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
 
 async def get_current_admin(current_user=Depends(get_current_user)):
     """Dependency to require admin role (platform_admin or org_admin)."""
-    if current_user.role not in ("platform_admin", "org_admin"):
+    identity_is_platform_admin = bool(getattr(getattr(current_user, "identity", None), "is_platform_admin", False))
+    if current_user.role not in ("platform_admin", "org_admin") and not identity_is_platform_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return current_user
 
@@ -313,11 +314,11 @@ def require_role(*allowed_roles: str):
         async def my_endpoint(...):
     """
     async def _check(current_user=Depends(get_current_user)):
-        if current_user.role not in allowed_roles:
+        identity_is_platform_admin = bool(getattr(getattr(current_user, "identity", None), "is_platform_admin", False))
+        if current_user.role not in allowed_roles and not ("platform_admin" in allowed_roles and identity_is_platform_admin):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"需要以下角色之一: {', '.join(allowed_roles)}",
             )
         return current_user
     return _check
-

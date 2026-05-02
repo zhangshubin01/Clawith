@@ -48,8 +48,10 @@ export default function AdminCompanies() {
     const user = useAuthStore((s) => s.user);
     const [activeTab, setActiveTab] = useState<'dashboard' | 'platform' | 'companies'>('dashboard');
 
-    // Guard: only platform_admin
-    if (user?.role !== 'platform_admin') {
+    const canAccessPlatformSettings = user?.role === 'platform_admin' || !!(user as any)?.is_platform_admin;
+
+    // Guard: platform admins keep access across tenant contexts.
+    if (!canAccessPlatformSettings) {
         return (
             <div style={{ padding: '60px', textAlign: 'center', color: 'var(--text-tertiary)' }}>
                 {t('common.noPermission', 'You do not have permission to access this page.')}

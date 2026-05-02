@@ -11,14 +11,15 @@ set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="$ROOT/.data"
 PID_DIR="$DATA_DIR/pid"
-LOG_DIR="$HOME/.clawith/data/log"
+LOG_DIR="$DATA_DIR/log"
 
 BACKEND_DIR="$ROOT/backend"
 FRONTEND_DIR="$ROOT/frontend"
 
 BACKEND_PORT=8008
 FRONTEND_PORT=3008
-FRONTEND_LOG="$LOG_DIR/frontend_$(date +%Y-%m-%d).log"
+FRONTEND_LOG="$LOG_DIR/frontend.log"
+BACKEND_LOG="$LOG_DIR/backend.log"
 BACKEND_PID="$PID_DIR/backend.pid"
 FRONTEND_PID="$PID_DIR/frontend.pid"
 
@@ -68,15 +69,6 @@ load_env() {
     export EXTERNAL_DB
 }
 
-# macOS ships lsof in /usr/sbin (often not on non-interactive PATH); Linux usually has it in PATH.
-_lsof_path() {
-    if command -v lsof &>/dev/null; then
-        command -v lsof
-    elif [ -x /usr/sbin/lsof ]; then
-        echo /usr/sbin/lsof
-    fi
-}
-
 # ═══════════════════════════════════════════════════════
 # 清理旧进程
 # ═══════════════════════════════════════════════════════
@@ -90,17 +82,11 @@ cleanup() {
         fi
     done
 
-    local lsf
-    lsf=$(_lsof_path)
     for port in $BACKEND_PORT $FRONTEND_PORT; do
-        if [ -n "$lsf" ]; then
-            # Prefer LISTEN sockets only so we do not touch unrelated client PIDs.
-            "$lsf" -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | xargs kill -9 2>/dev/null || true
-            # Fallback: anything still bound to the port (older lsof / edge cases)
-            "$lsf" -ti:"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
-        # macOS/BSD fuser is not Linux-style; only use fuser on Linux when lsof is missing.
-        elif [ "$(uname -s)" = "Linux" ] && command -v fuser &>/dev/null; then
-            fuser -k "$port/tcp" 2>/dev/null || true
+        if command -v lsof &>/dev/null; then
+            lsof -ti:$port | xargs kill -9 2>/dev/null || true
+        elif command -v fuser &>/dev/null; then
+            fuser -k $port/tcp 2>/dev/null || true
         fi
     done
 
@@ -121,6 +107,54 @@ wait_for_port() {
     done
     echo -e "  ${RED}❌ $name failed to start in ${max}s${NC}"
     return 1
+}
+
+# Start a command as a real detached daemon. Plain `nohup ... &` is not enough in
+# some agent/PTY runners: when the parent command finishes, descendants in the
+# same session can still be cleaned up. Double-fork + setsid detaches the service
+# from this script's session so it survives after restart.sh exits.
+start_detached() {
+    local cwd=$1 log_file=$2 pid_file=$3
+    shift 3
+    python3 - "$cwd" "$log_file" "$pid_file" "$@" <<'PY'
+import os
+import sys
+
+cwd, log_file, pid_file, *cmd = sys.argv[1:]
+if not cmd:
+    raise SystemExit("missing command")
+
+first_pid = os.fork()
+if first_pid:
+    os._exit(0)
+
+os.setsid()
+
+second_pid = os.fork()
+if second_pid:
+    os._exit(0)
+
+os.chdir(cwd)
+os.umask(0o022)
+
+os.makedirs(os.path.dirname(log_file), exist_ok=True)
+os.makedirs(os.path.dirname(pid_file), exist_ok=True)
+
+fd_in = os.open(os.devnull, os.O_RDONLY)
+fd_out = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+os.dup2(fd_in, 0)
+os.dup2(fd_out, 1)
+os.dup2(fd_out, 2)
+if fd_in > 2:
+    os.close(fd_in)
+if fd_out > 2:
+    os.close(fd_out)
+
+with open(pid_file, "w", encoding="utf-8") as f:
+    f.write(str(os.getpid()))
+
+os.execvpe(cmd[0], cmd, os.environ.copy())
+PY
 }
 
 # ═══════════════════════════════════════════════════════
@@ -187,14 +221,6 @@ start_postgres() {
 # ═══════════════════════════════════════════════════════
 # 启动后端
 # ═══════════════════════════════════════════════════════
-# Return PID that is listening on TCP port (empty if none).
-_listener_pid() {
-    local port=$1 lsf
-    lsf=$(_lsof_path)
-    [ -z "$lsf" ] && return
-    "$lsf" -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1
-}
-
 start_backend() {
     echo -e "${YELLOW}🚀 Starting backend...${NC}"
     cd "$BACKEND_DIR"
@@ -206,35 +232,12 @@ start_backend() {
     # Auto-run data migrations (idempotent)
     echo -e "${YELLOW}🔄 Running data migrations...${NC}"
     .venv/bin/python -m app.scripts.migrate_schedules_to_triggers || true
-
-    # Backend logs handled by loguru file handler → ~/.clawith/data/log/clawith_YYYY-MM-DD.log
-    nohup env PYTHONUNBUFFERED=1 \
-        PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}" \
-        DATABASE_URL="$DATABASE_URL" \
-        .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $BACKEND_PORT \
-        >> /dev/null 2>&1 &
-    echo $! > "$BACKEND_PID"
+    start_detached "$BACKEND_DIR" "$BACKEND_LOG" "$BACKEND_PID" \
+        env PYTHONUNBUFFERED=1 \
+            PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}" \
+            DATABASE_URL="$DATABASE_URL" \
+            .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port $BACKEND_PORT
     wait_for_port $BACKEND_PORT "Backend" 10
-
-    local saved listen
-    saved=$(cat "$BACKEND_PID" 2>/dev/null || true)
-    if [ -z "$saved" ] || ! kill -0 "$saved" 2>/dev/null; then
-        echo -e "${RED}❌ Backend exited immediately (pidfile invalid). See: ~/.clawith/data/log/clawith_$(date +%Y-%m-%d).log${NC}"
-        return 1
-    fi
-    listen=$(_listener_pid "$BACKEND_PORT")
-    if [ -z "$listen" ]; then
-        if [ -z "$(_lsof_path)" ]; then
-            echo -e "${YELLOW}⚠️  lsof not found; cannot verify port listener (pidfile $saved). Install lsof or use /usr/sbin/lsof on macOS.${NC}"
-        else
-            echo -e "${RED}❌ Nothing listening on port $BACKEND_PORT after start. See: ~/.clawith/data/log/clawith_$(date +%Y-%m-%d).log${NC}"
-            return 1
-        fi
-    fi
-    if [ -n "$listen" ] && [ "$listen" != "$saved" ]; then
-        echo -e "${YELLOW}⚠️  Listener PID ($listen) ≠ nohup PID ($saved); pidfile updated to match port.${NC}"
-        echo "$listen" > "$BACKEND_PID"
-    fi
 }
 
 # ═══════════════════════════════════════════════════════
@@ -243,9 +246,11 @@ start_backend() {
 start_frontend() {
     echo -e "${YELLOW}🚀 Starting frontend...${NC}"
     cd "$FRONTEND_DIR"
-    nohup node_modules/.bin/vite --host 0.0.0.0 --port $FRONTEND_PORT \
-        >> "$FRONTEND_LOG" 2>&1 &
-    echo $! > "$FRONTEND_PID"
+    # Vite 6 listens for stdin "end" and exits cleanly when a background shell
+    # closes stdin. Setting CI=true disables that stdin-end shutdown path while
+    # keeping the normal dev server behavior.
+    start_detached "$FRONTEND_DIR" "$FRONTEND_LOG" "$FRONTEND_PID" \
+        env CI=true node_modules/.bin/vite --host 0.0.0.0 --port $FRONTEND_PORT --strictPort
     wait_for_port $FRONTEND_PORT "Frontend" 8
 }
 
@@ -280,10 +285,8 @@ print_info() {
     echo -e "  ${CYAN}Network:${NC} http://${SERVER_IP}:$FRONTEND_PORT"
     echo -e "  ${CYAN}API:${NC}     http://${SERVER_IP}:$BACKEND_PORT"
     echo ""
-    echo -e "  Backend log:  tail -f ~/.clawith/data/log/clawith_$(date +%Y-%m-%d).log"
+    echo -e "  Backend log:  tail -f $BACKEND_LOG"
     echo -e "  Frontend log: tail -f $FRONTEND_LOG"
-    echo -e "  ACP traces:   tail -f ~/.clawith/data/log/clawith_$(date +%Y-%m-%d).log | rg '\\[ACP\\]'"
-    echo -e "  Backend PID:  $(cat "$BACKEND_PID" 2>/dev/null || echo '?') (port listener: $(_listener_pid "$BACKEND_PORT"))"
 }
 
 # ═══════════════════════════════════════════════════════

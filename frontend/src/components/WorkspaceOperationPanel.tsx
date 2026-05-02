@@ -1,5 +1,7 @@
 import type { MouseEvent as ReactMouseEvent } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import MarkdownRenderer from './MarkdownRenderer';
 import { fileApi, uploadFileWithProgress } from '../services/api';
 
@@ -43,17 +45,20 @@ interface Props {
     activities: WorkspaceActivity[];
     liveDraft?: WorkspaceLiveDraft | null;
     locked?: boolean;
+    canManageEnterpriseInfo?: boolean;
     onSelectPath: (path: string) => void;
     onToggleLock?: () => void;
     onEditingChange?: (editing: boolean) => void;
     onPathDeleted?: (path: string) => void;
     activityOpen?: boolean;
     onActivityToggle?: (open: boolean) => void;
+    headerActionsTargetId?: string;
 }
 
 const WORKSPACE_ROOT = 'workspace';
 const SKILLS_ROOT = 'skills';
 const MEMORY_ROOT = 'memory';
+const ENTERPRISE_ROOT = 'enterprise_info';
 const DEFAULT_UPLOAD_DIR = 'workspace/uploads';
 type TreeScope = 'workspace' | 'all';
 const EDITABLE_EXTS = new Set(['.md', '.markdown', '.csv']);
@@ -153,6 +158,10 @@ function isWritableDir(path?: string | null): boolean {
         || path === SKILLS_ROOT
         || path.startsWith(`${WORKSPACE_ROOT}/`)
         || path.startsWith(`${SKILLS_ROOT}/`);
+}
+
+function isEnterprisePath(path?: string | null): boolean {
+    return !!path && (path === ENTERPRISE_ROOT || path.startsWith(`${ENTERPRISE_ROOT}/`));
 }
 
 function normalizeWritableDir(path?: string | null): string {
@@ -381,13 +390,16 @@ export default function WorkspaceOperationPanel({
     activities,
     liveDraft,
     locked = false,
+    canManageEnterpriseInfo = false,
     onSelectPath,
     onToggleLock,
     onEditingChange,
     onPathDeleted,
     activityOpen: activityOpenProp,
     onActivityToggle,
+    headerActionsTargetId,
 }: Props) {
+    const { t } = useTranslation();
     const [preview, setPreview] = useState<any>(null);
     const [content, setContent] = useState('');
     const [draft, setDraft] = useState('');
@@ -407,22 +419,45 @@ export default function WorkspaceOperationPanel({
     const [selectedDirPath, setSelectedDirPath] = useState(WORKSPACE_ROOT);
     const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
     const [isSideResizing, setIsSideResizing] = useState(false);
+    const [headerActionsTarget, setHeaderActionsTarget] = useState<HTMLElement | null>(null);
     const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const saveStateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lockTimer = useRef<ReturnType<typeof setInterval> | null>(null);
     const prevActivePathRef = useRef<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     const resizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+    const previewScrollRef = useRef<HTMLDivElement | null>(null);
+    const previewShouldFollowRef = useRef(true);
+    const suppressNextAutoRevealRef = useRef(false);
 
     const ext = activePath ? extOf(activePath) : '';
-    const canEdit = !!activePath && EDITABLE_EXTS.has(ext);
+    const canModifyPath = (path?: string | null) => !isEnterprisePath(path) || canManageEnterpriseInfo;
+    const isWritableTreeDir = (path?: string | null) => isWritableDir(path) && canModifyPath(path);
+    const canEdit = !!activePath && EDITABLE_EXTS.has(ext) && canModifyPath(activePath);
     const isHtml = ext === '.html' || ext === '.htm';
     const isImage = IMAGE_EXTS.has(ext);
     const activityKey = activities.map((item) => `${item.action}:${item.path}`).join('|');
-    const treeTargetDir = normalizeWritableDir(selectedDirPath || directoryOf(activePath));
+    const treeTargetDir = normalizeWritableDir(canModifyPath(selectedDirPath) ? selectedDirPath : directoryOf(activePath));
     const panelSideWidth = activityOpen ? Math.max(sideWidth, DEFAULT_HISTORY_WIDTH) : sideWidth;
     const draftMatchesActiveFile = !!(liveDraft?.path && activePath && liveDraft.path === activePath);
     const shouldRenderLiveDraft = !!liveDraft && (!activePath || !liveDraft.path || draftMatchesActiveFile);
+    const liveDraftContent = liveDraft?.content || '';
+
+    useEffect(() => {
+        if (!headerActionsTargetId) {
+            setHeaderActionsTarget(null);
+            return;
+        }
+        setHeaderActionsTarget(document.getElementById(headerActionsTargetId));
+    }, [headerActionsTargetId]);
+
+    useEffect(() => {
+        if (!editing || canModifyPath(activePath)) return;
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        setDraft(content);
+        setEditing(false);
+        onEditingChange?.(false);
+    }, [activePath, canManageEnterpriseInfo, content, editing, onEditingChange]);
 
     const load = async () => {
         if (!activePath) {
@@ -482,7 +517,31 @@ export default function WorkspaceOperationPanel({
             return;
         }
         void load();
-    }, [agentId, activePath, liveDraft?.id, liveDraft?.path, onEditingChange]);
+    }, [agentId, activePath, liveDraft?.id, liveDraft?.path, liveDraft?.content, onEditingChange]);
+
+    useEffect(() => {
+        if (!shouldRenderLiveDraft) return;
+        if (!previewShouldFollowRef.current) return;
+        const scrollToLatest = () => {
+            const el = previewScrollRef.current;
+            if (!el) return;
+            el.scrollTop = el.scrollHeight;
+        };
+        requestAnimationFrame(scrollToLatest);
+        const timer = window.setTimeout(scrollToLatest, 120);
+        return () => window.clearTimeout(timer);
+    }, [shouldRenderLiveDraft, liveDraftContent]);
+
+    useEffect(() => {
+        previewShouldFollowRef.current = true;
+    }, [liveDraft?.id, liveDraft?.path]);
+
+    const handlePreviewScroll = () => {
+        const el = previewScrollRef.current;
+        if (!el || !shouldRenderLiveDraft) return;
+        const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+        previewShouldFollowRef.current = distFromBottom < 80;
+    };
 
     useEffect(() => {
         if (!activePath) return;
@@ -543,6 +602,10 @@ export default function WorkspaceOperationPanel({
 
     useEffect(() => {
         const pathToReveal = activePath || liveDraft?.path;
+        if (suppressNextAutoRevealRef.current) {
+            suppressNextAutoRevealRef.current = false;
+            return;
+        }
         const dirs = parentDirs(pathToReveal);
         setExpandedDirs((prev) => {
             const next = new Set(prev);
@@ -639,6 +702,12 @@ export default function WorkspaceOperationPanel({
 
     const finishEditing = async () => {
         if (saveTimer.current) clearTimeout(saveTimer.current);
+        if (activePath && !canModifyPath(activePath)) {
+            setDraft(content);
+            setEditing(false);
+            onEditingChange?.(false);
+            return;
+        }
         if (activePath && draft !== content) {
             await runAutosaveWithFeedback(draft);
         }
@@ -663,6 +732,7 @@ export default function WorkspaceOperationPanel({
     const switchToPath = (path: string) => {
         if (path === activePath) return;
         if (!editing) {
+            suppressNextAutoRevealRef.current = true;
             onSelectPath(path);
             return;
         }
@@ -674,6 +744,7 @@ export default function WorkspaceOperationPanel({
         const nextPath = pendingSwitchPath;
         setPendingSwitchPath(null);
         await finishEditing();
+        suppressNextAutoRevealRef.current = true;
         onSelectPath(nextPath);
     };
 
@@ -682,6 +753,7 @@ export default function WorkspaceOperationPanel({
         const nextPath = pendingSwitchPath;
         setPendingSwitchPath(null);
         await discardEditing();
+        suppressNextAutoRevealRef.current = true;
         onSelectPath(nextPath);
     };
 
@@ -751,6 +823,7 @@ export default function WorkspaceOperationPanel({
     };
 
     const handleCreateFolder = async () => {
+        if (!canModifyPath(treeTargetDir)) return;
         const name = window.prompt('Folder name');
         if (!name) return;
         const trimmed = name.trim().replace(/^\/+|\/+$/g, '');
@@ -769,6 +842,7 @@ export default function WorkspaceOperationPanel({
     };
 
     const deleteTreePath = async (path: string, label: string, selected?: boolean) => {
+        if (!canModifyPath(path)) return;
         if (!confirm(`Are you sure you want to delete ${label}?`)) return;
         try {
             await fileApi.delete(agentId, path);
@@ -1056,7 +1130,7 @@ export default function WorkspaceOperationPanel({
                             <span className="workspace-op-tree-chevron">{expanded ? '▾' : '▸'}</span>
                             <span>{node.name}</span>
                         </button>
-                        {node.path !== WORKSPACE_ROOT && node.path !== SKILLS_ROOT && node.path !== MEMORY_ROOT && (
+                        {node.path !== WORKSPACE_ROOT && node.path !== SKILLS_ROOT && node.path !== MEMORY_ROOT && node.path !== ENTERPRISE_ROOT && canModifyPath(node.path) && (
                             <button
                                 className="workspace-op-tree-file-delete"
                                 title="Delete folder"
@@ -1073,7 +1147,7 @@ export default function WorkspaceOperationPanel({
                     </div>
                     {expanded && (
                         <>
-                            {isWritableDir(node.path) && renderUploadRows(node.path, depth + 1)}
+                            {isWritableTreeDir(node.path) && renderUploadRows(node.path, depth + 1)}
                             {node.children && renderFileTreeNodes(node.children, depth + 1)}
                         </>
                     )}
@@ -1089,7 +1163,7 @@ export default function WorkspaceOperationPanel({
                 title={node.path}
             >
                 <div className="workspace-op-tree-file-name">{node.name}</div>
-                {!editing && (
+                {!editing && canModifyPath(node.path) && (
                     <button
                         className="workspace-op-tree-file-delete"
                         title="Delete file"
@@ -1107,42 +1181,87 @@ export default function WorkspaceOperationPanel({
         );
     });
 
+    const openInNewTabLabel = t('agent.workspace.openInNewTab', 'Open in new tab');
+    const focusPreviewLabel = locked
+        ? t('agent.workspace.unfocusPreview', 'Exit focus')
+        : t('agent.workspace.focusPreview', 'Focus preview');
+    const editLabel = t('agent.workspace.edit', 'Edit');
+    const doneLabel = t('agent.workspace.done', 'Done');
+
+    const headerActions = (
+        <>
+            {saveState !== 'idle' && <span className={`workspace-op-save ${saveState}`}>{saveState}</span>}
+            {activePath && isHtml && !shouldRenderLiveDraft && (
+                <a
+                    className="live-panel-icon-btn"
+                    href={htmlPreviewSrc || fileApi.downloadUrl(agentId, activePath, { inline: true })}
+                    target="_blank"
+                    rel="noreferrer"
+                    title={openInNewTabLabel}
+                    aria-label={openInNewTabLabel}
+                >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M14 4h6v6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M20 4l-9 9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M11 5H7a3 3 0 00-3 3v9a3 3 0 003 3h9a3 3 0 003-3v-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                </a>
+            )}
+            {activePath && onToggleLock && (
+                <button
+                    type="button"
+                    className={`live-panel-icon-btn ${locked ? 'active' : ''}`}
+                    onClick={onToggleLock}
+                    title={focusPreviewLabel}
+                    aria-label={focusPreviewLabel}
+                >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M4 9V6.5A2.5 2.5 0 016.5 4H9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M15 4h2.5A2.5 2.5 0 0120 6.5V9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M20 15v2.5a2.5 2.5 0 01-2.5 2.5H15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M9 20H6.5A2.5 2.5 0 014 17.5V15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                        <circle cx="12" cy="12" r="2.6" stroke="currentColor" strokeWidth="1.8" />
+                    </svg>
+                </button>
+            )}
+            {activePath && canEdit && !editing && (
+                <button
+                    type="button"
+                    className="live-panel-icon-btn"
+                    onClick={() => setEditing(true)}
+                    title={editLabel}
+                    aria-label={editLabel}
+                >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M12 20h9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                        <path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4 12.5-12.5z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                </button>
+            )}
+            {editing && (
+                <button
+                    type="button"
+                    className="live-panel-icon-btn active"
+                    onClick={finishEditing}
+                    title={doneLabel}
+                    aria-label={doneLabel}
+                >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M20 6L9 17l-5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                </button>
+            )}
+        </>
+    );
+
+    const hasHeaderActions = saveState !== 'idle' || !!(activePath && (canEdit || onToggleLock || isHtml));
+    const headerActionsPortal = headerActionsTarget && hasHeaderActions
+        ? createPortal(headerActions, headerActionsTarget)
+        : null;
+
     return (
         <div className="workspace-op">
-            {(saveState !== 'idle' || (activePath && (canEdit || locked !== undefined))) && (
-                <div className="workspace-op-inline-actions">
-                    {saveState !== 'idle' && <span className={`workspace-op-save ${saveState}`}>{saveState}</span>}
-                    {activePath && (
-                        <button
-                            className={`workspace-op-icon-btn ${locked ? 'active' : ''}`}
-                            onClick={onToggleLock}
-                            title={locked ? 'Unlock current file' : 'Lock current file'}
-                            aria-label={locked ? 'Unlock current file' : 'Lock current file'}
-                        >
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                <path d="M4 9V6.5A2.5 2.5 0 016.5 4H9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                <path d="M15 4h2.5A2.5 2.5 0 0120 6.5V9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                <path d="M20 15v2.5a2.5 2.5 0 01-2.5 2.5H15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                <path d="M9 20H6.5A2.5 2.5 0 014 17.5V15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                <circle cx="12" cy="12" r="2.6" stroke="currentColor" strokeWidth="1.8" />
-                            </svg>
-                        </button>
-                    )}
-                    {activePath && canEdit && !editing && <button className="workspace-op-icon-btn" onClick={() => setEditing(true)} title="Edit">✎</button>}
-                    {editing && <button className="workspace-op-icon-btn active" onClick={finishEditing} title="Done">✓</button>}
-                    {activePath && (
-                        <a href={fileApi.downloadUrl(agentId, activePath)} download>
-                            <button className="workspace-op-icon-btn" title="Download" aria-label="Download">
-                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                    <path d="M12 3v10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                    <path d="M8 10l4 4 4-4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                    <path d="M5 17v2h14v-2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                </svg>
-                            </button>
-                        </a>
-                    )}
-                </div>
-            )}
+            {headerActionsPortal}
 
             <div
                 className={`workspace-op-body ${activityOpen ? 'activity-open' : ''} ${treeOpen ? '' : 'tree-closed'}`}
@@ -1162,7 +1281,7 @@ export default function WorkspaceOperationPanel({
                         </svg>
                     </button>
                 )}
-                <div className="workspace-op-main">
+                <div className="workspace-op-main" ref={previewScrollRef} onScroll={handlePreviewScroll}>
                     {renderPreview()}
                 </div>
                 {(treeOpen || activityOpen) && <div className="workspace-op-side-resize" onMouseDown={startResize} />}
@@ -1220,7 +1339,7 @@ export default function WorkspaceOperationPanel({
                                         aria-selected={treeScope === 'workspace'}
                                         onClick={() => switchTreeScope('workspace')}
                                     >
-                                        工作区
+                                        {t('agent.workspace.title', 'Workspace')}
                                     </button>
                                     <button
                                         className={treeScope === 'all' ? 'active' : ''}
@@ -1229,36 +1348,10 @@ export default function WorkspaceOperationPanel({
                                         aria-selected={treeScope === 'all'}
                                         onClick={() => switchTreeScope('all')}
                                     >
-                                        全部
+                                        {t('common.all', 'All')}
                                     </button>
                                 </div>
                                 <div className="workspace-op-tree-actions">
-                                    <button
-                                        className="workspace-op-mini-btn workspace-op-mini-btn-icon"
-                                        type="button"
-                                        onClick={handleUploadClick}
-                                        title={`Upload into ${treeTargetDir}`}
-                                        aria-label={`Upload into ${treeTargetDir}`}
-                                    >
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                            <path d="M12 16V5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-                                            <path d="M8 9l4-4 4 4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-                                            <path d="M5 19h14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-                                        </svg>
-                                    </button>
-                                    <button
-                                        className="workspace-op-mini-btn workspace-op-mini-btn-icon"
-                                        type="button"
-                                        onClick={handleCreateFolder}
-                                        title={`Create folder in ${treeTargetDir}`}
-                                        aria-label={`Create folder in ${treeTargetDir}`}
-                                    >
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                            <path d="M4 8.5A2.5 2.5 0 016.5 6H10l1.4 1.6H17.5A2.5 2.5 0 0120 10.1v6.4A2.5 2.5 0 0117.5 19h-11A2.5 2.5 0 014 16.5v-8Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-                                            <path d="M12 10.5v5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                            <path d="M9.5 13h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                        </svg>
-                                    </button>
                                     <button
                                         className="workspace-op-mini-btn workspace-op-mini-btn-icon"
                                         type="button"
@@ -1276,6 +1369,49 @@ export default function WorkspaceOperationPanel({
                             </div>
                         </div>
                         <div className="workspace-op-tree-list">
+                            <div className="workspace-op-tree-primary-actions">
+                                {activePath && (
+                                    <a
+                                        className="workspace-op-tree-action-btn"
+                                        href={fileApi.downloadUrl(agentId, activePath)}
+                                        download
+                                        title={`Download ${fileName(activePath)}`}
+                                        aria-label={`Download ${fileName(activePath)}`}
+                                    >
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                            <path d="M12 3v10" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                                            <path d="M8 10l4 4 4-4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+                                            <path d="M5 18h14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                                        </svg>
+                                    </a>
+                                )}
+                                <button
+                                    className="workspace-op-tree-action-btn"
+                                    type="button"
+                                    onClick={handleUploadClick}
+                                    title={`Upload into ${treeTargetDir}`}
+                                    aria-label={`Upload into ${treeTargetDir}`}
+                                >
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                        <path d="M12 16V5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                                        <path d="M8 9l4-4 4 4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+                                        <path d="M5 19h14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                                    </svg>
+                                </button>
+                                <button
+                                    className="workspace-op-tree-action-btn"
+                                    type="button"
+                                    onClick={handleCreateFolder}
+                                    title={`Create folder in ${treeTargetDir}`}
+                                    aria-label={`Create folder in ${treeTargetDir}`}
+                                >
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                        <path d="M4 8.5A2.5 2.5 0 016.5 6H10l1.4 1.6H17.5A2.5 2.5 0 0120 10.1v6.4A2.5 2.5 0 0117.5 19h-11A2.5 2.5 0 014 16.5v-8Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+                                        <path d="M12 10.5v5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                        <path d="M9.5 13h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                    </svg>
+                                </button>
+                            </div>
                             {treeScope === 'workspace' && renderUploadRows(WORKSPACE_ROOT, -1)}
                             {fileTree.length ? renderFileTreeNodes(fileTree, 0) : <div className="workspace-op-tree-empty">No files yet.</div>}
                         </div>

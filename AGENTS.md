@@ -38,3 +38,8 @@ Rules:
 - Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
 - After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
+
+## Local Collaboration Preference
+
+- At the end of each completed task, play a short local completion sound on the user's machine (for example with `afplay` on macOS) so the user notices work has finished even when reading or working in another window.
+- This reminder should be treated as a default behavior for this repository across sessions unless the user explicitly asks to skip it for a specific task.
