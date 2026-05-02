@@ -1,6 +1,6 @@
 # LSP4J 集成综合修复规格书
 
-> **最后更新**: 2026-04-26
+> **最后更新**: 2026-05-03
 > **合并来源**: 方法适配补全 + 运行日志问题调研 + 工具调用协议修复 + 三大问题深度调研
 
 ---
@@ -123,7 +123,7 @@
 | `backend/app/plugins/clawith_lsp4j/__init__.py` | 修改 | ⑱ | 修正 docstring |
 | `backend/app/plugins/clawith_lsp4j/router.py` | 可能修改 | ③ | WebSocket 生命周期管理 |
 | `backend/app/plugins/clawith_lsp4j/context.py` | 可能修改 | ③ | 连接状态管理 |
-| `backend/app/plugins/clawith_lsp4j/tool_hooks.py` | 不修改 | — | 工具适配已完整（8 个工具：read_file, save_file, run_in_terminal, get_terminal_output, replace_text_by_path, create_file_with_text, delete_file_by_path, get_problems） |
+| `backend/app/plugins/clawith_lsp4j/tool_hooks.py` | 已修改 | — | 工具适配已完整（14 个工具：read_file, run_in_terminal, get_terminal_output, replace_text_by_path, create_file_with_text, delete_file_by_path, get_problems, add_tasks, todo_write, search_replace, list_dir, search_file, grep_code, search_codebase, search_symbol）；已移除 save_file |
 | `backend/app/services/llm/failover.py` | 不修改 | — | **原#6为误报，已验证无需修复** |
 | `backend/app/services/llm/utils.py` | 不修改 | — | Vision 转换逻辑已存在（`_convert_messages_for_vision`） |
 | `backend/app/services/heartbeat.py` | 修改 | ⑯ | 失败后不更新时间戳 |
@@ -1882,7 +1882,6 @@ LLM 返回 Markdown 代码块（如 ```java\n...\n```）
 | 工具名称 | 状态 | 说明 |
 |---------|------|------|
 | `read_file` | ✅ 已适配 | 读取文件内容 |
-| `save_file` | ✅ 已适配 | 保存文件 |
 | `run_in_terminal` | ✅ 已适配 | 执行命令行 |
 | `get_terminal_output` | ✅ 已适配 | 获取终端输出 |
 | `replace_text_by_path` | ✅ 已适配 | 替换文件文本（插件独有） |
@@ -1890,21 +1889,20 @@ LLM 返回 Markdown 代码块（如 ```java\n...\n```）
 | `delete_file_by_path` | ✅ 已适配 | 删除文件（插件独有） |
 | `get_problems` | ✅ 已适配 | 获取代码问题（插件独有） |
 
-> **重要发现**：实际 `_LSP4J_IDE_TOOL_NAMES` 只有 **8 个工具**（`tool_hooks.py:36-46`），**不是 9 个**！
+> **重要更新**：`_LSP4J_IDE_TOOL_NAMES` 现包含 **15 个工具**，已移除 `save_file`（插件无对应 ToolHandler，会导致 ToolTypeEnum.UNKNOWN）。
 > 
-> `search_in_file`、`list_dir` **不在** `_LSP4J_IDE_TOOL_NAMES` 中，虽然它们在其他地方定义，但 LSP4J 模式不会路由到这些工具。
+> **对比灵码插件 `ToolTypeEnum.java`**：
+> - ✅ 已适配（15 个）：`read_file`、`run_in_terminal`、`get_terminal_output`、`replace_text_by_path`、`create_file_with_text`、`delete_file_by_path`、`get_problems`、`add_tasks`、`todo_write`、`search_replace`、`list_dir`、`search_file`、`grep_code`、`search_codebase`、`search_symbol`
+> - ❌ 已移除：`save_file`
+> - ❌ 未适配：`search_web`、`edit_file`、`update_memory`、`search_memory`、`fetch_content`、`fetch_rules`、`update_tasks`、`mcp`、`Skill`
 > 
-> **对比灵码插件 `ToolTypeEnum.java:38-61`（**共 22 个工具**）**：
-> - ✅ 已适配（8 个）：`read_file`、`save_file`、`run_in_terminal`、`get_terminal_output`、`replace_text_by_path`、`create_file_with_text`、`delete_file_by_path`、`get_problems`
-> - ❌ 未适配（17 个）：`search_codebase`、`search_file`、`search_symbol`、`search_web`、`grep_code`、`list_dir`、`edit_file`、`update_memory`、`search_memory`、`fetch_content`、`fetch_rules`、`update_tasks`、`add_tasks`、`todo_write`、`search_replace`、`mcp`、`Skill`
+> **标准 15（任务规划）**：完整支持——`add_tasks`/`todo_write` 已适配。
 > 
-> **标准 15（任务规划）**：部分适用——灵码有原生任务规划功能（`add_tasks`/`todo_write` + `TodoViewPanel` + `TreeBuilder`），但 LSP4J 模式未适配这些工具，任务树 UI 无法渲染。**P3 级优化项**。
+> **标准 16（代码修改能力）**：完整支持——`replace_text_by_path` + `chat/codeChange/apply` 已实现。
 > 
-> **标准 16（代码修改能力）**：完整支持——`replace_text_by_path` + `chat/codeChange/apply` 已实现，插件 `InEditorDiffRenderer` 会自动检测代码块渲染 Diff。
+> **标准 17（本地工具）**：完整支持——15 个文件/终端/搜索工具已适配。
 > 
-> **标准 17（本地工具）**：完整支持——8 个文件/终端工具已完整适配（文件操作、终端执行、代码诊断）。
-> 
-> **标准 18（代码修改全面能力）**：基本支持——`replace_text_by_path` 支持文本替换，`search_replace` 工具未适配（灵码有更强大的搜索替换能力）。
+> **标准 18（代码修改全面能力）**：完整支持——`search_replace` 已适配（服务端降级为 replace_text_by_path）。
 
 ---
 

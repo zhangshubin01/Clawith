@@ -20,7 +20,7 @@
 | 14 | 能使用 diff 能力 | `chat/codeChange/apply` 缺失 + `ChatCodeChangeApplyResult` 未返回 | 实现 codeChange/apply 完整流程 + chat/codeChange/apply/finish 通知 |
 | 15 | 能使用任务规划/任务列表 | `chat/process_step_callback` 完全缺失 | 新增 step callback 通知 + stepProcessConfirm 处理 |
 | 16 | 能调用灵码改代码 | tool/invoke 8 个工具已注册（直接修改），codeChange/apply（交互式 diff）未实现 | 两套模式均需支持 |
-| 17 | 能操作本地工具 | 同上 | read_file、save_file、run_in_terminal 等正常流转 |
+| 17 | 能操作本地工具 | 同上 | read_file、run_in_terminal 等正常流转 |
 
 ---
 
@@ -91,11 +91,10 @@ _METHOD_MAP: dict[str, Any] = {
 | 工具 | Clawith 发送参数 | 灵码期望参数 | 状态 |
 |---|---|---|---|
 | read_file | `{"filePath": "..."}` | `{"filePath": "..."}` | ✅ |
-| save_file | `{"filePath": "...", "content": "..."}` | `{"filePath": "...", "content": "..."}` | ✅ |
 | run_in_terminal | `{"command": "...", "workDirectory": "..."}` | `{"command": "...", "workDirectory": "..."}` | ✅ |
 | replace_text_by_path | `{"filePath": "...", "oldText": "...", "newText": "..."}` | `{"filePath": "...", "oldText": "...", "newText": "..."}` | ✅ |
 
-**结论：** 8 个工具的参数字段名已与 `ToolInvokeProcessor.java` 源码逐一核对，完全匹配。
+**结论：** 14 个工具的参数字段名已与 `ToolInvokeProcessor.java` 源码逐一核对，完全匹配。`save_file` 已移除（插件无对应 ToolHandler）。
 
 ---
 
@@ -830,7 +829,7 @@ async def _handle_step_process_confirm(self, params: dict, msg_id: Any) -> None:
 
 | 模式 | 协议 | 场景 | 当前状态 |
 |---|---|---|---|
-| 直接修改 | `tool/invoke`（save_file, replace_text_by_path 等） | AI 自主修改代码 | ✅ 已实现 |
+| 直接修改 | `tool/invoke`（replace_text_by_path, create_file_with_text 等） | AI 自主修改代码 | ✅ 已实现 |
 | 交互式 diff | `chat/codeChange/apply` + `chat/codeChange/apply/finish` | 用户点击"Apply"按钮触发 diff 渲染 | ❌ 仅存根 |
 
 #### 6.5.2 chat/codeChange/apply 完整流程
@@ -1000,8 +999,8 @@ invoke_lsp4j_tool 返回结果 → call_llm 工具循环
 1. **能回复**：`chat/ask` 响应含 `isSuccess=true`，灵码不再显示"调用异常"
 2. **能使用 diff**：`chat/codeChange/apply` 返回 `ChatCodeChangeApplyResult` 含 `applyCode`，插件渲染 inline diff；`chat/codeChange/apply/finish` 通知推送
 3. **能使用任务规划**：`chat/process_step_callback` 实时推送步骤进度，插件渲染任务列表；`stepProcessConfirm` 支持用户确认步骤
-4. **能改代码**：双模式 — `tool/invoke`（save_file/replace_text_by_path 直接修改）+ `codeChange/apply`（交互式 diff）
-5. **能操作本地工具**：`read_file`、`run_in_terminal`、`get_problems` 等 8 个工具正常流转
+4. **能改代码**：双模式 — `tool/invoke`（replace_text_by_path/create_file_with_text 直接修改）+ `codeChange/apply`（交互式 diff）
+5. **能操作本地工具**：`read_file`、`run_in_terminal`、`get_problems` 等 14 个工具正常流转
 6. **LLM 感知 IDE 上下文**：通过 `chatTask`、`codeLanguage`、`sessionType`、`mode`、`extra.context` 等字段注入 ide_prompt
 7. **chat/stop 有效**：`cancel_event` 贯通 `call_llm` → 工具循环 → `client.stream()`，点击停止后真正中断；`chat/stop` 返回响应避免 LSP4J 超时
 8. **视觉能力可用**：`supports_vision` 正确透传，视觉模型可处理图片

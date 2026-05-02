@@ -11,6 +11,7 @@ import json
 import asyncio
 import contextlib
 import os
+import re
 import time
 from datetime import timezone as tz_
 from typing import Any
@@ -24,9 +25,12 @@ from app.models.agent import Agent as AgentModel
 from app.models.llm import LLMModel
 from sqlalchemy import select
 from app.services import agent_tools
+from app.services.llm import call_llm_with_failover
+from app.services.task_executor import execute_task as _execute_task
 import app.api.websocket as ws_module
 from app.models.chat_session import ChatSession
 from app.models.audit import ChatMessage
+from app.models.task import Task as TaskModel
 
 router = APIRouter(tags=["acp"])
 
@@ -1620,6 +1624,15 @@ async def acp_websocket(
                     _acp_cancel_registry[cancel_key] = cancel_prompt
                 _prompt_sid_token = current_acp_prompt_session_id.set(str(session_id))
                 _config_token = current_acp_session_config.set(session_config)
+                # 加载 fallback 模型
+                fallback_model = None
+                if turn_agent.fallback_model_id:
+                    async with async_session() as _fb_db:
+                        _fb_r = await _fb_db.execute(
+                            select(LLMModel).where(LLMModel.id == turn_agent.fallback_model_id)
+                        )
+                        fallback_model = _fb_r.scalar_one_or_none()
+
                 try:
                     logger.info(
                         "ACP calling LLM session_id={} agent={} history_len={}",
@@ -1628,8 +1641,9 @@ async def acp_websocket(
                         len(history),
                     )
                     t_llm = time.monotonic()
-                    reply = await ws_module.call_llm(
-                        model=turn_model,
+                    reply = await call_llm_with_failover(
+                        primary_model=turn_model,
+                        fallback_model=fallback_model,
                         messages=history,
                         agent_name=turn_agent.name,
                         role_description=(turn_agent.role_description or "") + ide_prompt,
@@ -1666,6 +1680,33 @@ async def acp_websocket(
                             stream_stats["chars"],
                         )
                     history.append({"role": "assistant", "content": reply})
+
+                    # 检测任务创建意图
+                    if not cancelled and user_content and reply:
+                        task_match = re.search(
+                            r'(?:创建|新建|添加|建一个|帮我建|create|add)(?:一个|a )?(?:任务|待办|todo|task)[，,：：:\\s]*(.+)',
+                            user_content, re.IGNORECASE
+                        )
+                        if task_match:
+                            task_title = task_match.group(1).strip()
+                            if task_title:
+                                try:
+                                    async with async_session() as _tsk_db:
+                                        task = TaskModel(
+                                            agent_id=turn_agent.id,
+                                            title=task_title,
+                                            created_by=user_id,
+                                            status="pending",
+                                            priority="medium",
+                                        )
+                                        _tsk_db.add(task)
+                                        await _tsk_db.commit()
+                                        await _tsk_db.refresh(task)
+                                        _task_id = task.id
+                                    asyncio.create_task(_execute_task(_task_id, str(turn_agent.id)))
+                                    logger.info("[ACP] Task created: id={} title={}", _task_id, task_title)
+                                except Exception as _te:
+                                    logger.warning("[ACP] Task creation failed: {}", _te)
 
                     _t = asyncio.create_task(
                         _persist_chat_turn(

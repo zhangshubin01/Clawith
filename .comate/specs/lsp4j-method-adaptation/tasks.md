@@ -1,7 +1,7 @@
 # LSP4J 集成综合修复任务计划
 
-> **最后更新**: 2026-04-26  
-> **修正说明**: 修复了 Task 编号混乱、重复内容、缺少必填参数等问题
+> **最后更新**: 2026-05-03  
+> **修正说明**: 修复了 Task 编号混乱、重复内容、缺少必填参数等问题；移除已废弃的 save_file 工具
 
 ---
 
@@ -50,7 +50,7 @@
         - 限流关键词（`rate limit`/`too many requests`）可直接匹配
     - 5.3: 验证：确认正常回复不再产生 `[Failover] Canceled` WARNING
 
-- [ ] Task 6: P1-7 提取 `projectPath`（已在 Task 2 中覆盖）
+- [x] Task 6: P1-7 提取 `projectPath`（已在 Task 2 中覆盖）
     - 6.1: 确认 Task 2.1-2.2 已完成 `_project_path` 的初始化和提取
     - 6.2: 在 `invoke_tool_on_ide()` 的 `_send_tool_call_sync` 调用中验证 `projectPath` 非空
     - 6.3: 如果 `_project_path` 为空，记录 WARNING 日志
@@ -174,7 +174,6 @@
 | 工具名称 | 状态 | 说明 |
 |---------|------|------|
 | `read_file` | ✅ 已适配 | 读取文件内容 |
-| `save_file` | ✅ 已适配 | 保存文件 |
 | `run_in_terminal` | ✅ 已适配 | 执行命令行 |
 | `get_terminal_output` | ✅ 已适配 | 获取终端输出 |
 | `replace_text_by_path` | ✅ 已适配 | 替换文件文本（插件独有） |

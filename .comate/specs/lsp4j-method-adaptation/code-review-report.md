@@ -147,7 +147,7 @@
 
 | 字段名 | 类型 | 必填 | 说明 | 代码位置 |
 |--------|------|------|------|---------|
-| `tool_name` | String | 是 | 插件原生工具名（read_file, save_file 等） | Line 880 |
+| `tool_name` | String | 是 | 插件原生工具名（read_file, replace_text_by_path 等） | Line 880 |
 | `arguments` | Object | 是 | 工具参数字典 | Line 881 |
 | `timeout` | Float | 否 | 超时秒数（默认 120s） | Line 881 |
 

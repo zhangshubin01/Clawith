@@ -41,7 +41,8 @@ from app.models.agent import Agent as AgentModel
 from app.models.llm import LLMModel
 from app.models.chat_session import ChatSession
 from app.models.audit import ChatMessage
-from app.services.llm.caller import call_llm
+from app.services.llm.caller import call_llm, call_llm_with_failover
+from app.services.task_executor import execute_task as _execute_task
 import app.api.websocket as ws_module
 
 from .context import (
@@ -1276,7 +1277,7 @@ class JSONRPCRouter:
             # 4. 调用 call_llm
             # 构建 IDE 环境提示（chatTask、codeLanguage 等注入 role_description）
             ide_prompt = _build_lsp4j_ide_prompt(ask)
-            role_desc = getattr(self._agent_obj, "system_prompt", "") or ""
+            role_desc = self._agent_obj.role_description or ""
             if ide_prompt:
                 role_desc = role_desc + ide_prompt
             # 注入工具可用性提示和项目路径
@@ -1340,11 +1341,21 @@ class JSONRPCRouter:
                 step="step_start", description="开始处理", status="doing",
             )
 
+            # 加载 fallback 模型
+            fallback_model_obj = None
+            if self._agent_obj.fallback_model_id:
+                async with async_session() as _fb_db:
+                    _fb_r = await _fb_db.execute(
+                        select(LLMModel).where(LLMModel.id == self._agent_obj.fallback_model_id)
+                    )
+                    fallback_model_obj = _fb_r.scalar_one_or_none()
+
             cancelled = False
             error_status_code = 200  # 默认成功
             try:
-                reply = await call_llm(
-                    model=model_obj,
+                reply = await call_llm_with_failover(
+                    primary_model=model_obj,
+                    fallback_model=fallback_model_obj,
                     messages=message_history,
                     agent_name=self._agent_obj.name,
                     role_description=role_desc,
@@ -1385,6 +1396,33 @@ class JSONRPCRouter:
 
             logger.info("[LSP4J] chat/ask 处理完成: requestId={} cancelled={} reply_len={} elapsed={:.1f}s",
                          request_id, cancelled, len(reply), time.monotonic() - _ask_start)
+
+            # 检测任务创建意图
+            if not cancelled and full_text and reply:
+                task_match = re.search(
+                    r'(?:创建|新建|添加|建一个|帮我建|create|add)(?:一个|a )?(?:任务|待办|todo|task)[，,：：:\\s]*(.+)',
+                    full_text, re.IGNORECASE
+                )
+                if task_match:
+                    task_title = task_match.group(1).strip()
+                    if task_title:
+                        try:
+                            async with async_session() as _tsk_db:
+                                task = TaskModel(
+                                    agent_id=self._agent_id,
+                                    title=task_title,
+                                    created_by=self._user_id,
+                                    status="pending",
+                                    priority="medium",
+                                )
+                                _tsk_db.add(task)
+                                await _tsk_db.commit()
+                                await _tsk_db.refresh(task)
+                                _task_id = task.id
+                            asyncio.create_task(_execute_task(_task_id, str(self._agent_id)))
+                            logger.info("[LSP4J] Task created: id={} title={}", _task_id, task_title)
+                        except Exception as _te:
+                            logger.warning("[LSP4J] Task creation failed: {}", _te)
 
             # 5. 后台持久化
             if session_id and reply:
