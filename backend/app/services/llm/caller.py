@@ -376,7 +376,7 @@ async def _process_tool_call(
             logger.warning(f"[LLM] on_tool_call running error: {_e}")
 
     # Execute tool
-    result = await agent_tools.execute_tool(
+    result = await execute_tool(
         tool_name, args,
         agent_id=agent_id,
         user_id=user_id or agent_id,
