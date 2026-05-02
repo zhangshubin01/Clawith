@@ -80,6 +80,12 @@ class Agent(Base):
     last_daily_reset: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_monthly_reset: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     tokens_used_total: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read_tokens_today: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read_tokens_month: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read_tokens_total: Mapped[int] = mapped_column(Integer, default=0)
+    cache_creation_tokens_today: Mapped[int] = mapped_column(Integer, default=0)
+    cache_creation_tokens_month: Mapped[int] = mapped_column(Integer, default=0)
+    cache_creation_tokens_total: Mapped[int] = mapped_column(Integer, default=0)
     context_window_size: Mapped[int] = mapped_column(Integer, default=100)
     max_tool_rounds: Mapped[int] = mapped_column(Integer, default=50)
 
@@ -98,7 +104,7 @@ class Agent(Base):
 
     # Daily LLM call limit
     llm_calls_today: Mapped[int] = mapped_column(Integer, default=0)
-    max_llm_calls_per_day: Mapped[int] = mapped_column(Integer, default=100)
+    max_llm_calls_per_day: Mapped[int] = mapped_column(Integer, default=1000)
     llm_calls_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Template
