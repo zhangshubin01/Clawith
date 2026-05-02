@@ -659,6 +659,16 @@ _AGENTBAY_SESSION_TIMEOUT = timedelta(minutes=5)
 AGENTBAY_API_URL = "https://api.agentbay.ai/v1"
 
 
+def _is_plausible_agentbay_api_key(value: str | None) -> bool:
+    """AgentBay API keys use an akm-* token format.
+
+    This keeps encrypted blobs that failed to decrypt from being treated as
+    plaintext keys and sent to AgentBay, where they surface as
+    "invalid apiKey or token".
+    """
+    return bool(isinstance(value, str) and value.strip().startswith("akm-"))
+
+
 async def get_agentbay_api_key_for_agent(agent_id: uuid.UUID, db=None) -> Optional[str]:
     """Return the configured AgentBay API key for the given agent.
 
@@ -686,9 +696,11 @@ async def get_agentbay_api_key_for_agent(agent_id: uuid.UUID, db=None) -> Option
         if config and config.app_secret:
             # Try to decrypt, fallback to plaintext if it fails
             try:
-                return decrypt_data(config.app_secret, get_settings().SECRET_KEY)
+                candidate = decrypt_data(config.app_secret, get_settings().SECRET_KEY)
             except Exception:
-                return config.app_secret
+                candidate = config.app_secret
+            if _is_plausible_agentbay_api_key(candidate):
+                return candidate
 
         # 2) Fallback: check global Tool.config.api_key for agentbay tools.
         #
@@ -699,6 +711,7 @@ async def get_agentbay_api_key_for_agent(agent_id: uuid.UUID, db=None) -> Option
         # tools — this prevents a non-deterministic .limit(1) from returning a
         # tool with an empty config (e.g. agentbay_computer_screenshot), which
         # would silently return None even when a key IS configured.
+        candidate_tools: list[Tool] = []
         tool_result = await session.execute(
             select(Tool).where(
                 Tool.name == "agentbay_browser_navigate",
@@ -706,27 +719,33 @@ async def get_agentbay_api_key_for_agent(agent_id: uuid.UUID, db=None) -> Option
             ).limit(1)
         )
         tool = tool_result.scalar_one_or_none()
+        if tool:
+            candidate_tools.append(tool)
 
-        # Also scan all agentbay tools in case the key was stored differently
-        if not (tool and tool.config and tool.config.get("api_key")):
-            all_result = await session.execute(
-                select(Tool).where(
-                    Tool.category == "agentbay",
-                    Tool.enabled == True,
-                )
-            )
-            for candidate in all_result.scalars().all():
-                if candidate.config and candidate.config.get("api_key"):
-                    tool = candidate
-                    break
+        # Also scan all agentbay tools in case the key was stored on a
+        # different category representative by an older UI.
+        all_result = await session.execute(
+            select(Tool).where(
+                Tool.category == "agentbay",
+                Tool.enabled == True,
+            ).order_by(Tool.name)
+        )
+        candidate_tools.extend(
+            candidate
+            for candidate in all_result.scalars().all()
+            if not tool or candidate.id != tool.id
+        )
 
-        if tool and tool.config and tool.config.get("api_key"):
-            api_key = tool.config["api_key"]
-            # Try to decrypt (global config is encrypted via _encrypt_sensitive_fields)
+        for candidate_tool in candidate_tools:
+            if not (candidate_tool.config and candidate_tool.config.get("api_key")):
+                continue
+            api_key = candidate_tool.config["api_key"]
             try:
-                return decrypt_data(api_key, get_settings().SECRET_KEY)
+                candidate = decrypt_data(api_key, get_settings().SECRET_KEY)
             except Exception:
-                return api_key
+                candidate = api_key
+            if _is_plausible_agentbay_api_key(candidate):
+                return candidate
 
         return None
 
@@ -800,7 +819,10 @@ async def get_agentbay_client_for_agent(agent_id: uuid.UUID, image_type: str, se
             api_key = decrypt_data(api_key, get_settings().SECRET_KEY)
         except Exception:
             pass  # Fallback if it's somehow plaintext
-    else:
+        if not _is_plausible_agentbay_api_key(api_key):
+            api_key = None
+
+    if not api_key:
         api_key = await get_agentbay_api_key_for_agent(agent_id)
 
     if not api_key:

@@ -2988,6 +2988,9 @@ export default function EnterpriseSettings() {
             ],
         },
     };
+    const GLOBAL_CATEGORY_CONFIG_PRIMARY_TOOL: Record<string, string> = {
+        agentbay: 'agentbay_browser_navigate',
+    };
 
     // Labels for tool categories (mirrors AgentDetail getCategoryLabels)
     const categoryLabels: Record<string, string> = {
@@ -4515,12 +4518,12 @@ export default function EnterpriseSettings() {
                                             <div style={{ display: 'flex', gap: '8px', marginTop: '8px', justifyContent: 'flex-end' }}>
                                                 <button className="btn btn-secondary" onClick={() => setConfigCategory(null)}>{t('common.cancel')}</button>
                                                 <button className="btn btn-primary" onClick={async () => {
-                                                    // Save config to the first tool in this category.
-                                                    // We write to one representative tool per category;
-                                                    // get_category_config endpoint reads it back.
+                                                    // Save config to the category's runtime representative tool.
                                                     const catTools = allTools.filter((tl: any) => (tl.category || 'general') === configCategory);
-                                                    if (catTools.length > 0) {
-                                                        await fetchJson(`/tools/${catTools[0].id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig }) });
+                                                    const primaryToolName = GLOBAL_CATEGORY_CONFIG_PRIMARY_TOOL[configCategory];
+                                                    const representativeTool = catTools.find((tl: any) => tl.name === primaryToolName) || catTools[0];
+                                                    if (representativeTool) {
+                                                        await fetchJson(`/tools/${representativeTool.id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig }) });
                                                     }
                                                     setConfigCategory(null);
                                                     loadAllTools();
