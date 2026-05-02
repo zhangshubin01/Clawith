@@ -5,7 +5,6 @@ Revises: add_quota_fields
 Create Date: 2026-03-06
 """
 from alembic import op
-import sqlalchemy as sa
 
 revision = "add_agent_tool_source"
 down_revision = "add_quota_fields"

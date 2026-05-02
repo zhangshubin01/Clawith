@@ -1,7 +1,6 @@
 """E2B API-based sandbox backend."""
 
 import time
-from typing import Any
 
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
@@ -147,7 +146,7 @@ class E2bBackend(BaseSandboxBackend):
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
             error_msg = str(e)
-            logger.exception(f"[E2B] Execution error")
+            logger.exception("[E2B] Execution error")
 
             # Handle timeout
             if "timeout" in error_msg.lower():

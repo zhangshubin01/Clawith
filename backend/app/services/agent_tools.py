@@ -20,7 +20,7 @@ import unicodedata
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional
 import re
 
 from loguru import logger
@@ -30,11 +30,10 @@ from app.database import async_session
 from app.models.task import Task
 from app.models.agent import Agent as AgentModel
 from app.models.org import AgentRelationship, OrgMember, AgentAgentRelationship
-from app.models.audit import ChatMessage, AuditLog
+from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.channel_config import ChannelConfig
 from app.models.user import User as UserModel
-from app.services.auth_registry import auth_provider_registry
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import get_platform_user_by_org_member
 from app.services.workspace_collaboration import (
@@ -2661,8 +2660,6 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
 
     Config resolution priority: Agent config > Company config > Defaults.
     """
-    import httpx
-    import re
 
     query = arguments.get("query", "")
     if not query:
@@ -2693,7 +2690,8 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
 
 async def _search_duckduckgo(query: str, max_results: int) -> str:
     """Search via DuckDuckGo HTML (free, no API key)."""
-    import httpx, re
+    import httpx
+    import re
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         resp = await client.get(
@@ -2790,7 +2788,6 @@ async def _jina_search(arguments: dict) -> str:
 async def _jina_read(arguments: dict) -> str:
     """Read web page via Jina AI Reader API (r.jina.ai). Returns clean structured markdown."""
     import httpx
-    from app.config import get_settings
 
     url = arguments.get("url", "").strip()
     if not url:
@@ -6677,7 +6674,6 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
                 mentions = re.findall(r'@(\S+)', content)
                 if mentions:
                     from app.services.notification_service import send_notification
-                    from app.models.user import User
                     # Load agents in tenant
                     a_q = select(AgentModel).where(AgentModel.id != agent_id)
                     if agent.tenant_id:
@@ -7175,7 +7171,7 @@ async def _handle_update_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
                 changes.append(f"config: {old_config} → {new_config}")
             if new_reason is not None:
                 trigger.reason = new_reason
-                changes.append(f"reason updated")
+                changes.append("reason updated")
 
             await db.commit()
 
@@ -7854,7 +7850,7 @@ def _parse_feishu_url(url: str) -> dict:
         result['table_id'] = table_match.group(1)
     
     # support URL with /tblxxxxxx
-    if not 'table_id' in result:
+    if 'table_id' not in result:
         tbl_match = re.search(r'/(tbl[a-zA-Z0-9_]+)', url)
         if tbl_match:
             result['table_id'] = tbl_match.group(1)
@@ -8424,7 +8420,7 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
 
     space_id = node_info["space_id"]
     if not space_id:
-        return f"❌ 无法获取知识库 space_id，请检查 token 是否正确。"
+        return "❌ 无法获取知识库 space_id，请检查 token 是否正确。"
 
     async def _list_children(parent_token: str, depth: int) -> list[dict]:
         """Return flat list of {title, node_token, obj_token, has_child, depth}."""
@@ -9020,8 +9016,8 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
                         # Feishu platform policy: you cannot add yourself as a collaborator via API.
                         # Permissions must be granted by others, or set manually in the UI.
                         results.append(
-                            f"⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
-                            f"请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
+                            "⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
+                            "请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
                         )
                     elif _c in (99991672, 99991668):
                         return (
@@ -9131,7 +9127,7 @@ async def _feishu_drive_delete(agent_id: uuid.UUID, arguments: dict) -> str:
         elif code == 1061007:
             return f"❌ 文件 `{file_token}` 已被删除。"
         elif code == 1061045:
-            return f"⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
+            return "⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
         else:
             return f"❌ 删除{type_label}失败：{msg} (code {code})"
 
@@ -9232,7 +9228,7 @@ async def _feishu_calendar_list(agent_id: uuid.UUID, arguments: dict) -> str:
                             busy_lines.append(f"  🔴 {s}–{e}")
                         except Exception:
                             busy_lines.append(f"  🔴 {slot.get('start_time')}–{slot.get('end_time')}")
-                    freebusy_section = f"\n📌 **用户真实日历（忙碌时段）**：\n" + "\n".join(busy_lines)
+                    freebusy_section = "\n📌 **用户真实日历（忙碌时段）**：\n" + "\n".join(busy_lines)
                 else:
                     freebusy_section = "\n📌 **用户真实日历**：该时段全部空闲。"
         except Exception as _fe:
@@ -9577,7 +9573,6 @@ async def _feishu_user_search(agent_id: uuid.UUID, arguments: dict) -> str:
     2. Fall back to Contact v3 GET /users/{open_id} if we find a match by email.
     The cache is populated by feishu.py each time a message sender is resolved.
     """
-    import httpx
     import json as _json
     import pathlib as _pl
 
@@ -10026,7 +10021,7 @@ async def _agentbay_browser_click(agent_id: Optional[uuid.UUID], ws: Path, argum
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Browser click failed")
+        logger.exception("[AgentBay] Browser click failed")
         return f"❌ 点击失败: {str(e)[:200]}"
 
 
@@ -10048,7 +10043,7 @@ async def _agentbay_browser_type(agent_id: Optional[uuid.UUID], ws: Path, argume
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Browser type failed")
+        logger.exception("[AgentBay] Browser type failed")
         return f"❌ 输入失败: {str(e)[:200]}"
 
 
@@ -10535,7 +10530,7 @@ async def _agentbay_computer_click(agent_id: Optional[uuid.UUID], ws: Path, argu
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer click failed")
+        logger.exception("[AgentBay] Computer click failed")
         return f"Click failed: {str(e)[:200]}"
 
 
@@ -10556,11 +10551,11 @@ async def _agentbay_computer_input_text(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_input_text(text)
         if result.get("success"):
             return f"Typed text: {text[:100]}"
-        return f"Text input failed"
+        return "Text input failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer input_text failed")
+        logger.exception("[AgentBay] Computer input_text failed")
         return f"Text input failed: {str(e)[:200]}"
 
 
@@ -10588,7 +10583,7 @@ async def _agentbay_computer_press_keys(agent_id: Optional[uuid.UUID], ws: Path,
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer press_keys failed")
+        logger.exception("[AgentBay] Computer press_keys failed")
         return f"Key press failed: {str(e)[:200]}"
 
 
@@ -10610,11 +10605,11 @@ async def _agentbay_computer_scroll(agent_id: Optional[uuid.UUID], ws: Path, arg
         result = await client.computer_scroll(x, y, direction=direction, amount=amount)
         if result.get("success"):
             return f"Scrolled {direction} by {amount} step(s) at ({x}, {y})"
-        return f"Scroll failed"
+        return "Scroll failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer scroll failed")
+        logger.exception("[AgentBay] Computer scroll failed")
         return f"Scroll failed: {str(e)[:200]}"
 
 
@@ -10634,11 +10629,11 @@ async def _agentbay_computer_move_mouse(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_move_mouse(x, y)
         if result.get("success"):
             return f"Mouse moved to ({x}, {y})"
-        return f"Mouse move failed"
+        return "Mouse move failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer move_mouse failed")
+        logger.exception("[AgentBay] Computer move_mouse failed")
         return f"Mouse move failed: {str(e)[:200]}"
 
 
@@ -10661,11 +10656,11 @@ async def _agentbay_computer_drag_mouse(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_drag_mouse(from_x, from_y, to_x, to_y, button=button)
         if result.get("success"):
             return f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})"
-        return f"Drag failed"
+        return "Drag failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer drag_mouse failed")
+        logger.exception("[AgentBay] Computer drag_mouse failed")
         return f"Drag failed: {str(e)[:200]}"
 
 
@@ -10689,7 +10684,7 @@ async def _agentbay_computer_get_screen_size(agent_id: Optional[uuid.UUID], ws: 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_screen_size failed")
+        logger.exception("[AgentBay] Computer get_screen_size failed")
         return f"Get screen size failed: {str(e)[:200]}"
 
 
@@ -10727,7 +10722,7 @@ async def _agentbay_computer_start_app(agent_id: Optional[uuid.UUID], ws: Path, 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer start_app failed")
+        logger.exception("[AgentBay] Computer start_app failed")
         return f"Start application failed: {str(e)[:200]}"
 
 
@@ -10751,7 +10746,7 @@ async def _agentbay_computer_get_cursor_position(agent_id: Optional[uuid.UUID], 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_cursor_position failed")
+        logger.exception("[AgentBay] Computer get_cursor_position failed")
         return f"Get cursor position failed: {str(e)[:200]}"
 
 
@@ -10775,7 +10770,7 @@ async def _agentbay_computer_get_active_window(agent_id: Optional[uuid.UUID], ws
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_active_window failed")
+        logger.exception("[AgentBay] Computer get_active_window failed")
         return f"Get active window failed: {str(e)[:200]}"
 
 
@@ -10800,7 +10795,7 @@ async def _agentbay_computer_activate_window(agent_id: Optional[uuid.UUID], ws: 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer activate_window failed")
+        logger.exception("[AgentBay] Computer activate_window failed")
         return f"Activate window failed: {str(e)[:200]}"
 
 
@@ -10826,7 +10821,7 @@ async def _agentbay_computer_list_visible_apps(agent_id: Optional[uuid.UUID], ws
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer list_visible_apps failed")
+        logger.exception("[AgentBay] Computer list_visible_apps failed")
         return f"List applications failed: {str(e)[:200]}"
 
 
@@ -11024,8 +11019,6 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
     Includes company-level O+KR and every member's individual O+KR.
     This is a read-only tool available to all agents.
     """
-    import json
-    import httpx
 
     # Resolve tenant_id from the calling agent
     if not agent_id:
@@ -11038,7 +11031,7 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
         from app.models.org import OrgMember
         from app.models.user import User
         from sqlalchemy import select as _select
-        from datetime import date, timedelta
+        from datetime import date
 
         async with async_session() as db:
             # Look up the agent's tenant
@@ -11204,7 +11197,6 @@ async def _get_my_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
         from app.models.agent import Agent
         from app.models.okr import OKRObjective, OKRKeyResult, OKRSettings
         from sqlalchemy import select as _select
-        from datetime import date, timedelta
 
         async with async_session() as db:
             agent_result = await db.execute(_select(Agent).where(Agent.id == agent_id))
@@ -11753,7 +11745,7 @@ async def _create_objective(agent_id: uuid.UUID | None, user_id: uuid.UUID | Non
             owner_info = f"owner={owner_name_hint or owner_id_str or 'unattributed'}"
             return f"Successfully created Objective '{obj.title}' (ID: {obj.id}, {owner_info})"
     except Exception as e:
-        logger.exception(f"[OKR] create_objective failed")
+        logger.exception("[OKR] create_objective failed")
         return f"Failed to create objective: {str(e)[:200]}"
 
 
@@ -11802,7 +11794,7 @@ async def _create_key_result(agent_id: uuid.UUID | None, user_id: uuid.UUID | No
             await db.commit()
             return f"Successfully created Key Result '{kr.title}' (ID: {kr.id})"
     except Exception as e:
-        logger.exception(f"[OKR] create_key_result failed")
+        logger.exception("[OKR] create_key_result failed")
         return f"Failed to create key result: {str(e)[:200]}"
 
 
@@ -11870,7 +11862,7 @@ async def _update_objective(agent_id: uuid.UUID | None, user_id: uuid.UUID | Non
             await db.commit()
             return f"Successfully updated Objective {obj.id}. Changed fields: {', '.join(updates)}"
     except Exception as e:
-        logger.exception(f"[OKR] update_objective failed")
+        logger.exception("[OKR] update_objective failed")
         return f"Failed to update objective: {str(e)[:200]}"
 
 
@@ -11945,7 +11937,7 @@ async def _update_any_kr_progress(agent_id: uuid.UUID | None, user_id: uuid.UUID
 
             return f"Successfully updated KR '{kr.title}'. Progress: {old_val} -> {kr.current_value} {kr.unit or ''}. Status: {kr.status}"
     except Exception as e:
-        logger.exception(f"[OKR] update_any_kr_progress failed")
+        logger.exception("[OKR] update_any_kr_progress failed")
         return f"Failed to update kr progress: {str(e)[:200]}"
 
 

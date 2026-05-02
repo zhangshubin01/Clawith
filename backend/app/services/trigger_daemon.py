@@ -466,7 +466,7 @@ async def _check_new_agent_messages(trigger: AgentTrigger) -> bool:
 
                 # Look up user by display name or username within tenant
                 from sqlalchemy import or_
-                from app.models.user import User, Identity
+                from app.models.user import Identity
                 safe_user_name = from_user_name.replace("%", "").replace("_", r"\_")
                 query = (
                     select(User)
@@ -614,7 +614,6 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
     Creates a Reflection Session and calls the LLM.
     """
     from app.services.llm import call_llm
-    from app.services.agent_context import build_agent_context
     from app.models.llm import LLMModel
     from app.models.audit import ChatMessage
     from app.models.chat_session import ChatSession
@@ -1053,7 +1052,6 @@ async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, 
         skip_dedup: If True, bypass the dedup window check.
         a2a_session_id: Optional A2A chat session ID to mirror the reply into.
     """
-    import time as _time
 
     now = datetime.now(timezone.utc)
 

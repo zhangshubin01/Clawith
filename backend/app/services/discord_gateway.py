@@ -148,10 +148,7 @@ class DiscordGatewayManager:
             from app.models.agent import Agent as AgentModel
             from app.api.feishu import _call_agent_llm
             from app.services.channel_session import find_or_create_channel_session
-            from app.models.user import User as _User
-            from app.core.security import hash_password as _hp
             from datetime import datetime, timezone
-            import uuid as _uuid
 
             sender_id = str(message.author.id)
             channel_id = str(message.channel.id)

@@ -1,8 +1,6 @@
 """Feishu WebSocket Long Connection Manager."""
 
 import asyncio
-import json
-import threading
 from typing import Any, Dict
 import uuid
 

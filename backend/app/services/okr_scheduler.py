@@ -213,7 +213,7 @@ async def collect_all_focus_updates(
                         f"  - {agent.name} / {kr.title}: {prev_value} → {value} ({kr.status})"
                     )
 
-            except Exception as exc:
+            except Exception:
                 logger.exception(f"[OKRScheduler] Failed to process focus.md for agent {agent.id}")
                 error_count += 1
 
@@ -333,7 +333,7 @@ def _format_report_body(
 
     # Health summary
     lines.append("## Health Summary\n")
-    lines.append(f"| Status | Count | % |\n|---|---|---|")
+    lines.append("| Status | Count | % |\n|---|---|---|")
     if total_krs:
         lines.append(f"| On Track / Completed | {on_track} | {on_track*100//total_krs}% |")
         lines.append(f"| At Risk | {at_risk} | {at_risk*100//total_krs}% |")
@@ -617,8 +617,8 @@ def _format_monthly_report_body(
     # ── Health summary ────────────────────────────────────────────────
     lines.append("## Monthly Health Summary\n")
     if total_krs:
-        lines.append(f"| Status | Count | Ratio |")
-        lines.append(f"|---|---|---|")
+        lines.append("| Status | Count | Ratio |")
+        lines.append("|---|---|---|")
         lines.append(f"| Completed   | {completed} | {completed*100//total_krs}% |")
         lines.append(f"| On Track    | {on_track}  | {on_track*100//total_krs}% |")
         lines.append(f"| At Risk     | {at_risk}   | {at_risk*100//total_krs}% |")

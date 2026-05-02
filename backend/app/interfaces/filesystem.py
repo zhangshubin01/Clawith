@@ -1,6 +1,5 @@
 """File system service interface."""
 from abc import ABC, abstractmethod
-from typing import Optional
 
 
 class FileSystemService(ABC):

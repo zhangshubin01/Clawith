@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.security import get_current_admin, get_current_user, require_role, encrypt_data
+from app.core.security import get_current_admin, get_current_user, encrypt_data
 from app.database import async_session, get_db
 from app.models.org import OrgDepartment, OrgMember
 from app.models.identity import IdentityProvider
@@ -322,7 +322,7 @@ async def update_llm_model(
         await db.commit()
         await db.refresh(model)
         return LLMModelOut.model_validate(model)
-    except SQLAlchemyError as e:
+    except SQLAlchemyError:
         await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update model")
 
@@ -1234,7 +1234,6 @@ async def delete_identity_provider(
 
 # ─── Org Structure ──────────────────────────────────────
 
-from app.models.org import OrgDepartment, OrgMember
 
 
 @router.get("/org/departments")

@@ -1,7 +1,7 @@
 """Router for Clawith IDE Bridge Plugin."""
 
-from fastapi import APIRouter, WebSocket, Depends, HTTPException
-from app.plugins.clawith_ide_bridge.tool_handler import resolve_ide_tool_result, send_ide_tool_request, cleanup_pending_calls
+from fastapi import APIRouter, WebSocket, Depends
+from app.plugins.clawith_ide_bridge.tool_handler import resolve_ide_tool_result, cleanup_pending_calls
 from app.core.security import get_current_user
 from app.models.user import User
 from app.models.agent import Agent

@@ -1,15 +1,14 @@
-import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.identity import SSOScanSession, IdentityProvider
-from app.schemas.schemas import TokenResponse, UserOut
+from app.schemas.schemas import UserOut
 
 router = APIRouter(tags=["sso"])
 

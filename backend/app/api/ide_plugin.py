@@ -1,9 +1,8 @@
 """IDEA Plugin specific API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Query
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from uuid import UUID
 
 from app.database import get_db
 from app.models.user import User

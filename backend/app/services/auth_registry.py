@@ -12,11 +12,6 @@ from app.models.identity import IdentityProvider
 from app.services.auth_provider import (
     PROVIDER_CLASSES,
     BaseAuthProvider,
-    DingTalkAuthProvider,
-    FeishuAuthProvider,
-    GoogleWorkspaceAuthProvider,
-    MicrosoftTeamsAuthProvider,
-    WeComAuthProvider,
 )
 
 

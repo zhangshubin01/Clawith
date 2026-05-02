@@ -5,7 +5,7 @@ Verbose backend tracing (uvicorn process):
   CLAWITH_ACP_LOG_CHUNKS=1 — log every outbound text chunk (very noisy; implies detailed streaming)
 """
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Query, Depends
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Query
 import uuid
 import json
 import asyncio

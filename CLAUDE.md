@@ -144,6 +144,33 @@ The core LLM execution in `api/websocket.py` runs up to 50 iterations. Each iter
 
 Each agent has a private file workspace under `agent_template/`. The files `soul.md` (personality) and `memory.md` (long-term memory) are injected into every LLM context via `services/agent_context.py`.
 
+## LSP4J IntelliJ Plugin Integration
+
+The `backend/app/plugins/clawith_lsp4j/` module bridges Clawith to the IntelliJ IDE plugin via WebSocket JSON-RPC (LSP4J protocol).
+
+### Architecture
+
+```
+IntelliJ Plugin (Java/Kotlin)  ←→  WebSocket JSON-RPC  ←→  clawith_lsp4j plugin  ←→  Clawith Backend
+```
+
+- **`jsonrpc_router.py`** — Main router: handles tool/invoke, tool/call/sync, chat/resolve, workspace operations
+- **`tool_hooks.py`** — Monkey-patches ACP's `_custom_execute_tool` / `_custom_get_tools` to add LSP4J routing via ContextVar
+- **`tool_constants.py`** — Tool name mappings and parameter name conventions
+- **`context.py`** — Per-request ContextVar (`current_lsp4j_ws`) for async-safe LSP4J state
+
+### Key Design Decisions
+
+1. **Plug-in native tool names**: The IntelliJ plugin's `ToolInvokeProcessor` only recognizes ~8 native tool names (`read_file`, `save_file`, `replace_text_by_path`, `create_file_with_text`, `delete_file_by_path`, `search_file`, `list_dir`, `run_in_terminal`). ACP's `ide_` prefix names are mapped to native names before sending to the plugin.
+
+2. **Parameter name conventions vary per tool**: Some handlers use `file_path` (snake_case, via `getRequestFilePathWithUnderLine`), others use `filePath` (camelCase, via `getRequestFilePath`). See `tool_hooks.py:_PARAM_NAME_MAP` for the mapping table.
+
+3. **Memory context injection takes precedence over DB**: When building LLM message history, in-memory tool call records (via `_tool_call_history_by_session`) always replace DB-injected context. This ensures the most recent tool calls (within the persistence window) are never lost — see `jsonrpc_router.py` `_handle_chat_resolve`.
+
+4. **`search_replace` is semantically correct**: The backend reads the file from IDE first, performs `str.replace(searchText, replaceText)` locally, then sends the complete new content via `replace_text_by_path`. This prevents semantic degradation where the LLM believes it's doing a localized edit but the entire file gets replaced.
+
+5. **Per-tool timeouts**: `_TOOL_TIMEOUTS` in `jsonrpc_router.py` defines differentiated timeouts — `run_in_terminal` uses a three-tier system (600s build / 30s readonly / 180s default).
+
 ## Tech Stack
 
 - **Backend**: Python 3.11+, FastAPI, SQLAlchemy 2.0 (async), PostgreSQL 15+ / SQLite (dev), Redis 7+

@@ -7,7 +7,6 @@ workspace files and composes a comprehensive system prompt.
 import uuid
 from pathlib import Path
 
-from loguru import logger
 
 from app.config import get_settings
 

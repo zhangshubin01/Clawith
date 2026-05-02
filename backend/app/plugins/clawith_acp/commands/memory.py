@@ -3,7 +3,6 @@ from .base import AcpCommand, CommandContext, CommandResult
 from sqlalchemy import select
 from app.database import async_session
 from app.models.chat_session import ChatSession
-from app.models.agent import Agent
 
 
 class MemoryCommand(AcpCommand):

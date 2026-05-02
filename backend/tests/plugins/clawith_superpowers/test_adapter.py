@@ -1,4 +1,3 @@
-import pytest
 from app.plugins.clawith_superpowers.adapter import extract_skill_metadata, to_clawith_skill
 
 

@@ -47,7 +47,11 @@ def _log_bwrap_startup_status() -> None:
 
 async def _start_ss_local() -> None:
     """Start ss-local SOCKS5 proxy for Discord API calls. Tries nodes in priority order."""
-    import asyncio, json, os, shutil, tempfile
+    import asyncio
+    import json
+    import os
+    import shutil
+    import tempfile
     if not shutil.which("ss-local"):
         logger.info("[Proxy] ss-local not found — Discord proxy disabled")
         return
@@ -112,7 +116,6 @@ async def lifespan(app: FastAPI):
         )
 
     import asyncio
-    import sys
     import os
     from app.services.trigger_daemon import start_trigger_daemon
     from app.services.tool_seeder import seed_builtin_tools
@@ -424,7 +427,7 @@ async def health_check():
 # ── Version endpoint (public, no auth required) ──
 def _load_version_info() -> dict[str, str]:
     """Read version + commit hash once at startup."""
-    import os, subprocess
+    import subprocess
     version = "unknown"
     for candidate in ["../frontend/VERSION", "frontend/VERSION", "VERSION"]:
         try:

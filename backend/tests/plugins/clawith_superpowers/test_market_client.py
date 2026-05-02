@@ -1,5 +1,3 @@
-import pytest
-from pathlib import Path
 from app.plugins.clawith_superpowers.market_client import SuperpowersMarketClient
 
 

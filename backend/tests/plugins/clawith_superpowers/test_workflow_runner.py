@@ -1,8 +1,6 @@
-import pytest
 from app.plugins.clawith_superpowers.workflow_runner import WorkflowRunner
 from pathlib import Path
 import tempfile
-import os
 
 
 def test_runner_initialization():
@@ -15,7 +13,6 @@ def test_runner_initialization():
 
 def test_artifact_operations():
     """Test saving and retrieving artifacts."""
-    from app.models.agent import Agent
 
     class MockAgent:
         def __init__(self, workspace_path=None):
@@ -67,7 +64,6 @@ def test_workflow_stages():
 
 def test_no_workspace_path_fallback():
     """Test that get_workspace_path() falls back to temporary directory when agent has no workspace_path method."""
-    from app.models.agent import Agent
 
     class AgentWithoutWorkspacePath:
         def __init__(self):

@@ -1,7 +1,6 @@
 """Add Microsoft Teams support to im_provider and channel_type enums."""
 
 from alembic import op
-import sqlalchemy as sa
 
 revision = "add_microsoft_teams_support"
 down_revision = "add_agent_usage_fields"

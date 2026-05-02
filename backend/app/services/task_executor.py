@@ -4,8 +4,6 @@ Uses the same agent context (soul, memory, skills, relationships, tools)
 as the chat dialog. Supports tool-calling loop for autonomous execution.
 """
 
-import asyncio
-import json
 import uuid
 from datetime import datetime, timezone
 
@@ -15,7 +13,6 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.database import async_session
 from app.models.agent import Agent
-from app.models.llm import LLMModel
 from app.models.task import Task, TaskLog
 
 settings = get_settings()

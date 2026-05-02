@@ -361,7 +361,7 @@ class SubprocessBackend(BaseSandboxBackend):
 
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
-            logger.exception(f"[Subprocess] Execution error")
+            logger.exception("[Subprocess] Execution error")
             return ExecutionResult(
                 success=False,
                 stdout="",

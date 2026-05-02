@@ -5,9 +5,9 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from loguru import logger
-from sqlalchemy import select, or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator, is_agent_expired
@@ -15,7 +15,6 @@ from app.core.security import get_current_user
 from app.database import get_db
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
-from app.models.identity import IdentityProvider
 from app.schemas.schemas import ChannelConfigCreate, ChannelConfigOut, TokenResponse, UserOut
 from app.services.feishu_service import feishu_service
 
@@ -259,7 +258,7 @@ async def _save_feishu_tool_call(
 
 # ─── OAuth ──────────────────────────────────────────────
 
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
 
 @router.get("/auth/feishu/callback")
 @router.post("/auth/feishu/callback", response_model=TokenResponse)
@@ -666,7 +665,6 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
             history = _build_llm_history_from_chat_messages(list(reversed(history_msgs)))
 
             # --- Resolve Feishu sender identity & find/create platform user ---
-            import uuid as _uuid
             import httpx as _httpx
 
             sender_name = ""
@@ -722,7 +720,9 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                             # Cache sender info so feishu_user_search can find them by name
                             if sender_name and sender_open_id:
                                 try:
-                                    import pathlib as _pl, json as _cj, time as _ct
+                                    import pathlib as _pl
+                                    import json as _cj
+                                    import time as _ct
                                     _safe_id = str(agent_id).replace("..", "").replace("/", "")
                                     _cache = _pl.Path(f"/data/workspaces/{_safe_id}/feishu_contacts_cache.json")
                                     _cache.parent.mkdir(parents=True, exist_ok=True)
@@ -1194,17 +1194,16 @@ async def _handle_feishu_file(
     chat_id,
 ):
     """Handle incoming file or image messages from Feishu (runs as a background task)."""
-    import asyncio, random, json
+    import asyncio
+    import random
+    import json
     from pathlib import Path
     from app.config import get_settings
     from app.models.audit import ChatMessage
     from app.models.agent import Agent as AgentModel
-    from app.models.user import User as UserModel
     from app.services.channel_session import find_or_create_channel_session
-    from app.core.security import hash_password
     from app.database import async_session as _async_session
     from datetime import datetime as _dt, timezone as _tz
-    import uuid as _uuid
     from sqlalchemy import select as _select
 
     msg_type = message.get("message_type", "file")

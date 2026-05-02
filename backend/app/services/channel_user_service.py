@@ -12,7 +12,6 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import hash_password
 from app.models.agent import Agent
 from app.models.identity import IdentityProvider
 from app.models.org import OrgMember

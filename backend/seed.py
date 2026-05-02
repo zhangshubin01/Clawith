@@ -5,7 +5,6 @@ import sys
 sys.path.insert(0, ".")
 
 from app.config import get_settings
-from app.core.security import hash_password
 from app.database import Base, engine, async_session
 # Import ALL models so Base.metadata.create_all can resolve all FKs
 from app.models.tenant import Tenant  # noqa: F401 — must be before user

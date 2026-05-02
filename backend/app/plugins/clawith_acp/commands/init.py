@@ -1,6 +1,5 @@
 """init command - initialize ACP configuration directory."""
 from .base import AcpCommand, CommandContext, CommandResult
-import os
 import pathlib
 
 

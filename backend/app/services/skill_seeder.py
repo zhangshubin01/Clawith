@@ -930,9 +930,8 @@ async def push_default_skills_to_existing_agents():
     Called at startup after seed_skills() so existing agents automatically receive new default skills
     like MCP_INSTALLER without requiring manual re-creation.
     """
-    from pathlib import Path
     from app.models.agent import Agent
-    from app.models.skill import Skill, SkillFile
+    from app.models.skill import Skill
     from sqlalchemy.orm import selectinload
     from app.services.agent_manager import agent_manager
 

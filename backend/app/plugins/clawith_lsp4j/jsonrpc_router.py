@@ -12,6 +12,13 @@
 
 ⚠️ 绝对不能使用 ACP 的字段名（content, thinking, tool, arguments），
    否则插件无法解析消息，静默丢弃。
+
+关键设计决策：
+- 内存工具调用上下文优先于 DB：会话上下文始终以 _tool_call_history_by_session 内存记录为准，
+  防止 DB 持久化窗口内的最新工具调用丢失
+- search_replace 语义正确性：先通过 read_file 获取文件内容，执行 str.replace()，
+  再将完整结果通过 replace_text_by_path 发送，避免全文替换的语义降级
+- 差异化的工具超时：_TOOL_TIMEOUTS 中 run_in_terminal 使用三级超时（编译 600s / 只读 30s / 其他 180s）
 """
 
 from __future__ import annotations
@@ -34,17 +41,12 @@ from app.models.agent import Agent as AgentModel
 from app.models.llm import LLMModel
 from app.models.chat_session import ChatSession
 from app.models.audit import ChatMessage
-from app.services import agent_tools
 from app.services.llm.caller import call_llm
 import app.api.websocket as ws_module
 
 from .context import (
-    current_lsp4j_ws,
-    current_lsp4j_pending_tools,
     current_lsp4j_message_history,
     current_lsp4j_session_id,
-    current_lsp4j_user_id,
-    current_lsp4j_agent_id,
     get_active_router,
     list_active_routers,
 )
@@ -423,6 +425,10 @@ def _build_lsp4j_ide_prompt(params: ChatAskParam) -> str:
                                 open_files = ctx_extra.get("filePaths", [])
                                 if open_files and isinstance(open_files, list):
                                     parts.append(f"用户打开的文件: {', '.join(str(f) for f in open_files[:20])}")
+                            elif context_type == "recent_tool_result":
+                                summary = ctx_extra.get("content", "")
+                                if summary:
+                                    parts.append(f"[最近工具执行结果（来自缓存，避免重复搜索）]\n{summary[:2000]}")
 
             if params.extra.get("fullFileEdit"):
                 parts.append("整文件编辑模式：请输出完整的文件内容。")
@@ -447,7 +453,9 @@ def _build_lsp4j_ide_prompt(params: ChatAskParam) -> str:
     # 1. 渲染代码块时显示 "Apply" 按钮（CodeMarkdownHighlightComponent.java:358-461）
     # 2. 用户点击 Apply 后调用 chat/codeChange/apply
     # 3. 插件渲染 InEditorDiffRenderer 显示 diff（CodeMarkdownHighlightComponent.java:527-530）
-    if params.chatTask in ("CODE_GENERATE_COMMENT", "OPTIMIZE_CODE", "INLINE_EDIT", "DESCRIPTION_GENERATE_CODE", "CODE_PROBLEM_SOLVE"):
+    if params.chatTask in ("CODE_GENERATE_COMMENT", "OPTIMIZE_CODE", "INLINE_EDIT",
+                              "DESCRIPTION_GENERATE_CODE", "CODE_PROBLEM_SOLVE",
+                              "FREE_INPUT", "PRE_CONTEXT", "CODE_REVIEW", "UNIT_TEST"):
         parts.append(
             "[代码输出格式要求] 如需生成代码，请使用以下格式让代码可交互编辑：\n"
             "```python|CODE_EDIT_BLOCK|/absolute/path/to/file.py\n"
@@ -866,14 +874,64 @@ class JSONRPCRouter:
             # 2. 从数据库回填历史消息
             message_history: list[dict] = current_lsp4j_message_history.get() or []
             if session_id and not message_history:
+                logger.info(
+                    "[LSP4J-CTX] chat/ask: message_history empty, loading from DB session={}",
+                    session_id,
+                )
                 loaded = await _load_lsp4j_history_from_db(
                     session_id, self._agent_id, self._user_id
                 )
                 if loaded:
                     message_history = loaded
                     current_lsp4j_message_history.set(message_history)
+                else:
+                    logger.info(
+                        "[LSP4J-CTX] chat/ask: DB loaded empty history for session={}",
+                        session_id,
+                    )
+            else:
+                logger.info(
+                    "[LSP4J-CTX] chat/ask: message_history already populated ({}) or no session_id ({})",
+                    len(message_history), session_id,
+                )
+            # 从内存注入工具调用上下文（始终以内存为准，覆盖 DB 可能不完整的上下文）
+            # 内存中的记录包含最新的工具调用（含 DB 尚未完成持久化的窗口），比 DB 更完整
+            if session_id and session_id in self._tool_call_history_by_session:
+                inmem_records = self._tool_call_history_by_session[session_id]
+                logger.info(
+                    "[LSP4J-CTX] chat/ask: found {} in-memory tool_call records for session={}",
+                    len(inmem_records), session_id,
+                )
+                # 移除 DB 注入的旧上下文（如有），以内存最新记录替换，避免丢失未持久化的工具调用
+                message_history = [
+                    m for m in message_history
+                    if not (m.get("role") == "system" and "[会话上下文]" in m.get("content", ""))
+                ]
+                if inmem_records:
+                    ctx_msg = _format_tool_context_message(inmem_records)
+                    if ctx_msg:
+                        message_history.insert(0, ctx_msg)
+                        logger.info("[LSP4J] tool_call context injected from memory: session_id={} tool_count={}",
+                                    session_id, len(inmem_records))
+                    else:
+                        logger.info(
+                            "[LSP4J-CTX] chat/ask: memory context NOT injected (no useful records after formatting), "
+                            "session={} tool_count={}",
+                            session_id, len(inmem_records),
+                        )
+            else:
+                logger.info(
+                    "[LSP4J-CTX] chat/ask: no in-memory tool_call records for session={}",
+                    session_id,
+                )
             # 历史消息加载完成
-            logger.debug("[LSP4J] history loaded: {} messages, session_id={}", len(message_history), session_id)
+            history_msgs = message_history or []
+            history_roles = {}
+            for m in history_msgs:
+                r = m.get("role", "unknown")
+                history_roles[r] = history_roles.get(r, 0) + 1
+            logger.info("[LSP4J] history loaded: {} messages, session_id={}, roles={}",
+                       len(history_msgs), session_id, history_roles)
 
             # 拼接用户消息
             full_text = question_text
@@ -887,7 +945,7 @@ class JSONRPCRouter:
             thinking_chunks: list[str] = []
             _thinking_started: bool = False
 
-            # ★ 流式输出缓冲：按“完整行”发送；Markdown 表格按整块发送，避免被拆成半截列。
+            # ★ 流式输出缓冲：按"完整行"发送；Markdown 表格按整块发送，避免被拆成半截列。
             _line_buffer = ""
             _ready_segments: list[str] = []
             _table_lines: list[str] = []
@@ -988,7 +1046,7 @@ class JSONRPCRouter:
                 # 思考结束标记：收到首个正文 chunk 即表示思考阶段结束
                 if _thinking_started:
                     _thinking_started = False
-                    await self._send_chat_think(session_id, "", "end", request_id)
+                    await self._send_chat_think(session_id, "", "done", request_id)
 
                 # 检查取消事件
                 if self._cancel_event and self._cancel_event.is_set():
@@ -1008,16 +1066,22 @@ class JSONRPCRouter:
                     await _flush_buffer()
 
             async def on_thinking(text: str) -> None:
-                """推理过程回调 — 推送 chat/think 通知
+                """推理过程回调 — 逐步推送 DeepSeek reasoning_content 到 IDE。
 
-                不再通过 chat/answer 发送 think markdown 块，
-                仅使用 chat/think 通知控制 UI "思考中"状态。
+                插件 ChatThinkingProcessor 监听 chat/think 通知并渲染到思考面板。
+                避免前端在 LLM 推理期间（28s-41s）完全静止。
                 """
                 nonlocal _thinking_started
                 thinking_chunks.append(text)
                 if not _thinking_started:
                     _thinking_started = True
                     await self._send_chat_think(session_id, "思考中...", "start", request_id)
+                # ★ 逐步推送推理文本：每 15 chunk 或遇换行时发送一次
+                # 避免每个 token 都发一条通知（过多 RPC 开销），同时保证前端持续有内容更新
+                if len(thinking_chunks) % 15 == 0 or "\n" in text:
+                    await self._send_chat_think(
+                        session_id, "".join(thinking_chunks), "start", request_id
+                    )
 
             async def on_tool_call(data: dict) -> None:
                 """工具调用回调 — 推送状态通知给 IDE + step callback + toolCall markdown"""
@@ -1053,13 +1117,16 @@ class JSONRPCRouter:
                         # tool/invoke 的 camelCase 转换统一在 invoke_tool_on_ide 中集中处理。
                         # 此前分散在此处的转换逻辑已全部移除。
                         params = dict(raw_args)
-                        # read_file/save_file 的链接渲染依赖 parameters["file_path"]，
+                        # read_file 的链接渲染依赖 parameters["file_path"]，
                         # 但模型常传 "path"；这里统一补齐给 ToolPanel 用。
-                        if tool_name in ("read_file", "save_file"):
+                        if tool_name == "read_file":
                             fp = params.get("file_path") or params.get("path") or params.get("filePath")
                             if fp and "file_path" not in params:
                                 params["file_path"] = fp
                         self._tool_params[tool_call_id] = params
+                        # run_in_terminal: 确保 run_mode 有默认值，避免客户端 PENDING sync 时收到 null
+                        if tool_name == "run_in_terminal" and "run_mode" not in params:
+                            params["run_mode"] = "autoRun"
                         llm_call_id = data.get("call_id", "")
                         if llm_call_id:
                             self._call_id_to_tool_id[llm_call_id] = tool_call_id
@@ -1081,7 +1148,7 @@ class JSONRPCRouter:
                         # 插件正则：```([\w#+.-]+)::([^\n]+)::([^\n]+)\n+(.*?)```
                         # group(1)=toolCall, group(2)=name, group(3)=toolCallId
                         # ⚠️ 关键：markdown 块仅用于创建工具卡片，不在这里发送 INIT/FINISHED。
-                        # 状态流转统一走 tool/call/sync，避免 UI 出现 “list_files FINISHED” 刷屏。
+                        # 状态流转统一走 tool/call/sync，避免 UI 出现 "list_files FINISHED" 刷屏。
                         # ★ 使用显示名（display_name），而非插件原生名称（tool_name）
                         # 插件 MarkdownStreamPanel 解析此块 → 构造 ToolInfo → ToolPanel 构造时调用
                         # ToolTypeEnum.getByToolName(toolName) 识别工具类型。
@@ -1103,13 +1170,10 @@ class JSONRPCRouter:
                         else:
                             logger.info("[LSP4J-TOOL] 非流式模式，跳过 toolCall markdown 块发送: callId={}", tool_call_id[:8])
 
-                        # ★ 等待插件 UI 线程处理 markdown 块、注册 toolPanel（500ms）
-                        # 问题：markdown 块（chat/answer 通道）需经 Swing UI 线程渲染后，
-                        # ToolMarkdownComponent 才调用 registerPanel。而 tool/call/sync（LSP4J
-                        # 事件通道）被 ChatToolEventProcessor 的消费线程立即处理，此时
-                        # toolPanel 若未注册，会进入 wait toolPanel 循环（每1s重试，最多60s）。
-                        # 实测 Swing UI 渲染延迟约 300-1000ms，500ms 覆盖大部分场景。
-                        await asyncio.sleep(0.5)
+                        # ★ 插件 ChatToolEventProcessor 采用 buffer+replay 机制：
+                        # 事件先于 panel 注册到达时自动缓冲，registerPanel 时 replay。
+                        # 后端无需等待，yield 控制权即可。
+                        await asyncio.sleep(0)
 
                         # 发送 PENDING sync（双通道之事件通道）
                         # 插件 ChatToolEventProcessor 收到后更新卡片参数（scopeLabel 依赖 parameters）
@@ -1216,7 +1280,7 @@ class JSONRPCRouter:
             if ide_prompt:
                 role_desc = role_desc + ide_prompt
             # 注入工具可用性提示和项目路径
-            tool_hint = "\n[工具可用性] 已连接本地 IDE 环境，可直接使用 read_file、replace_text_by_path、save_file、run_in_terminal、get_terminal_output、create_file_with_text、delete_file_by_path、get_problems 等工具访问项目文件。"
+            tool_hint = "\n[工具可用性] 已连接本地 IDE 环境，可直接使用 read_file、replace_text_by_path、run_in_terminal、get_terminal_output、create_file_with_text、delete_file_by_path、get_problems 等工具访问项目文件。"
             if self._project_path:
                 tool_hint += f"\n[项目根路径] {self._project_path}"
             
@@ -1224,7 +1288,7 @@ class JSONRPCRouter:
             # CODE_EDIT_BLOCK 仅作为兜底（当工具调用明确不可用时才允许）。
             tool_hint += (
                 "\n[执行策略] 对于读写文件、创建文件、删除文件、搜索、终端命令，必须优先使用工具调用。"
-                "\n优先使用 read_file / replace_text_by_path / create_file_with_text / save_file / delete_file_by_path / list_dir / search_file / run_in_terminal。"
+                "\n优先使用 read_file / replace_text_by_path / create_file_with_text / delete_file_by_path / list_dir / search_file / run_in_terminal。"
                 "\n不要先输出大段“开始重构/步骤说明”代码块再改文件，优先直接执行工具并回传结果。"
                 "\n目标展示应为工具卡片链路（toolCall + tool/call/sync + workingSpaceFile/sync），而不是纯 markdown 代码块。"
                 "\n仅当工具调用不可用或明确失败时，才允许输出 CODE_EDIT_BLOCK 作为兜底。"
@@ -1311,7 +1375,7 @@ class JSONRPCRouter:
             # 判断依据：_thinking_started=True 表示思考阶段未结束
             if _thinking_started:
                 _thinking_started = False
-                await self._send_chat_think(session_id, "", "end", request_id)
+                await self._send_chat_think(session_id, "", "done", request_id)
 
             # 发送步骤结束通知（chat/process_step_callback）
             await self._send_process_step_callback(
@@ -1418,7 +1482,6 @@ class JSONRPCRouter:
         # 特殊工具处理（纯 UI 工具）
         if tool_name in ("add_tasks", "todo_write"):
             # 直接返回成功响应，插件 AddTasksToolDetailPanel 会自动渲染任务树
-            import json
             result = {
                 "success": True,
                 "message": f"{tool_name} 工具调用成功",
@@ -1435,15 +1498,37 @@ class JSONRPCRouter:
             return
         
         if tool_name == "search_replace":
-            # 降级为 replace_text_by_path
-            logger.info("[LSP4J] tool/invoke: search_replace 降级为 replace_text_by_path")
+            # ★ 修复：先读取文件内容，执行真正的搜索替换，再将完整结果发送 IDE
+            # 原实现直接降级为 replace_text_by_path（全文替换），丢弃 searchText，
+            # 导致 LLM 以为在做局部替换，实际整个文件被替换为 replaceText，丢失其余内容。
+            file_path = parameters.get("filePath", "")
+            search_text = parameters.get("searchText", "")
+            replace_text = parameters.get("replaceText", "")
+            logger.info("[LSP4J] tool/invoke: search_replace path={} search_len={} replace_len={}",
+                       file_path, len(search_text), len(replace_text))
+            # 1. 尝试从缓存获取文件内容（read_file 执行后会自动缓存）
+            current_content = self._ws_file_service.get_cached_content(file_path) if file_path else None
+            if current_content is None and file_path:
+                # 2. 缓存未命中，从 IDE 读取文件
+                try:
+                    current_content = await self.invoke_tool_on_ide("read_file", {"filePath": file_path})
+                    logger.debug("[LSP4J] search_replace: read_file 获取内容, path={} len={}",
+                                file_path, len(current_content or ""))
+                except Exception:
+                    logger.warning("[LSP4J] search_replace: 无法读取文件 {}, 降级为全文替换", file_path)
+                    current_content = None
+            if current_content and search_text and search_text in current_content:
+                # 3. 执行真正的搜索替换
+                new_content = current_content.replace(search_text, replace_text)
+                logger.info("[LSP4J] search_replace: 替换成功, path={} occurrences={}",
+                           file_path, current_content.count(search_text))
+                parameters = {"filePath": file_path, "text": new_content}
+            else:
+                if current_content and search_text:
+                    logger.warning("[LSP4J] search_replace: 搜索文本未在文件中找到, path={} search_preview={}",
+                                  file_path, search_text[:80])
+                parameters = {"filePath": file_path, "text": replace_text}
             tool_name = "replace_text_by_path"
-            # 参数转换
-            if "searchText" in parameters and "replaceText" in parameters:
-                parameters = {
-                    "filePath": parameters.get("filePath", ""),
-                    "text": parameters.get("replaceText", ""),
-                }
         
         # 正常工具调用：通过 invoke_tool_on_ide 发送到 IDE
         try:
@@ -1571,10 +1656,60 @@ class JSONRPCRouter:
                 future.set_result(result_str)
             else:
                 error_msg = params.get("errorMessage", "Tool execution failed")
+                tool_name = params.get("name", "unknown")
+                request_id = str(params.get("requestId", ""))[:8]
+                logger.warning(
+                    "[LSP4J-TOOL] invokeResult FAILED: toolCallId={} tool={} requestId={} error={}",
+                    tool_call_id[:8], tool_name, request_id, error_msg)
                 future.set_result(f"[工具错误] {error_msg}")
         elif not future or future.done():
-            # 无匹配 Future（可能已超时）
-            logger.warning("[LSP4J-TOOL] invokeResult: toolCallId={} 无匹配 Future（可能已超时）", tool_call_id)
+            # 无匹配 Future（可能已超时，或插件 SearchResultCache 缓存了旧 toolCallId）
+            logger.warning(
+                "[LSP4J-TOOL] invokeResult: toolCallId={} 无匹配 Future（可能已超时或缓存旧 ID），尝试补偿匹配",
+                tool_call_id[:8],
+            )
+            request_id = str(params.get("requestId") or "")
+            tool_name = str(params.get("name") or "")
+            now = time.time()
+            candidates: list[str] = []
+            for call_id, f in self._pending_tools.items():
+                if f.done():
+                    continue
+                meta = self._pending_tool_meta.get(call_id, {})
+                if request_id and meta.get("request_id") != request_id:
+                    continue
+                if tool_name and meta.get("tool_name") != tool_name:
+                    continue
+                created_at = float(meta.get("created_at") or 0.0)
+                if created_at and now - created_at > 180:
+                    continue
+                candidates.append(call_id)
+            if len(candidates) == 1:
+                fallback_id = candidates[0]
+                logger.warning(
+                    "[LSP4J-TOOL] invokeResult 补偿命中: staleId={} → realId={} requestId={} name={}",
+                    tool_call_id[:8], fallback_id[:8], request_id[:8], tool_name,
+                )
+                if params.get("success", True):
+                    result = params.get("result", {})
+                    if isinstance(result, dict):
+                        result_str = json.dumps(result, ensure_ascii=False)
+                    else:
+                        result_str = str(result)
+                    f.set_result(result_str)
+                else:
+                    error_msg = params.get("errorMessage", "Tool execution failed")
+                    f.set_result(f"[工具错误] {error_msg}")
+            elif len(candidates) > 1:
+                logger.warning(
+                    "[LSP4J-TOOL] invokeResult 补偿匹配候选冲突: staleId={} candidates={}",
+                    tool_call_id[:8], [c[:8] for c in candidates],
+                )
+            else:
+                logger.warning(
+                    "[LSP4J-TOOL] invokeResult 补偿匹配无候选: staleId={} requestId={} name={}",
+                    tool_call_id[:8], request_id[:8], tool_name,
+                )
 
         # tool/invokeResult 是 @JsonRequest，需要返回 OperateCommonResult 格式
         # 插件 ToolService.invokeResult() 期望返回 OperateCommonResult {errorCode, errorMessage}
@@ -1697,6 +1832,20 @@ class JSONRPCRouter:
             bucket.append(payload)
             if len(bucket) > self._tool_call_history_limit:
                 del bucket[: len(bucket) - self._tool_call_history_limit]
+
+            # 持久化终态工具调用到 DB（供后续请求恢复上下文，避免 LLM 重复搜索）
+            if tool_call_id and tool_call_status in ("FINISHED", "ERROR", "CANCELLED"):
+                _t = asyncio.create_task(
+                    _persist_lsp4j_tool_call(
+                        agent_id=self._agent_id, user_id=self._user_id,
+                        session_id=session_key, tool_name=tool_name,
+                        parameters=parameters, results=results,
+                        tool_call_id=tool_call_id, request_id=request_id,
+                        status=tool_call_status,
+                    )
+                )
+                _lsp4j_background_tasks.add(_t)
+                _t.add_done_callback(_lsp4j_background_tasks.discard)
 
     async def _send_workspace_file_sync(
         self, ws_file: Any, sync_type: str = "MODIFIED"
@@ -1822,18 +1971,34 @@ class JSONRPCRouter:
         logger.info("[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={} queue_matched={}",
                     tool_name, tool_call_id[:8], request_id[:8], timeout, queue_matched)
 
-        # ★ 本地工具（list_dir, search_file）：后端本地执行，不发送到 IDE
-        if tool_name in ("list_dir", "search_file"):
+        # ★ 本地工具（list_dir, search_file, add_tasks, todo_write）：后端本地执行，不发送到 IDE
+        if tool_name in ("list_dir", "search_file", "add_tasks", "todo_write"):
             try:
-                result_str, results_list = _execute_local_tool(tool_name, arguments)
+                if tool_name in ("add_tasks", "todo_write"):
+                    # ★ 纯 UI 工具：任务数据在 arguments.tasks 中，需注入 results
+                    # 否则 ToolPanel.syncToolCall() 检查 results 为空 → 跳过任务列表渲染
+                    raw_tasks = arguments.get("tasks", [])
+                    if isinstance(raw_tasks, str):
+                        try:
+                            raw_tasks = json.loads(raw_tasks)
+                        except (json.JSONDecodeError, TypeError):
+                            raw_tasks = []
+                    if isinstance(raw_tasks, list):
+                        results_list = [{"tasks": raw_tasks}]
+                    else:
+                        results_list = [{"tasks": []}]
+                    result_str = json.dumps({"success": True, "tool_name": tool_name, "tasks": raw_tasks},
+                                            ensure_ascii=False)
+                else:
+                    result_str, results_list = _execute_local_tool(tool_name, arguments)
                 if not queue_matched:
                     # 队列未匹配 → on_tool_call 未被调用 → 没有 markdown_block → 没有 ToolPanel
                     # 发送 FINISHED sync 只会导致消费线程阻塞等待不存在的 panel
                     logger.warning("[LSP4J-TOOL] 跳过本地工具 FINISHED sync（无匹配 panel）: tool={} callId={}",
                                    tool_name, tool_call_id[:8])
                 else:
-                    # 等待插件 UI 注册 panel（on_tool_call 已发送 markdown_block + 500ms sleep + PENDING）
-                    await asyncio.sleep(1.0)
+                    # 插件采用 buffer+replay，后端无需等待 panel 注册
+                    await asyncio.sleep(0)
                     await self._send_tool_call_sync(
                         self._session_id, request_id, tool_call_id,
                         "FINISHED", tool_name=original_name, parameters=arguments,
@@ -1856,34 +2021,45 @@ class JSONRPCRouter:
         # 按插件 ToolInvokeProcessor 中每个 handler 的取参方法分类：
         #   - replace_text_by_path / create_file_with_text / delete_file_by_path
         #     → handler 调用 getRequestFilePath()，取 filePath (camelCase)
-        #   - read_file / save_file
+        #   - read_file
         #     → handler 调用 getRequestFilePathWithUnderLine()，取 file_path (snake_case)
-        # 因此前 3 个需转换 file_path→filePath，后 2 个保留 file_path 不变。
+        # 因此前 3 个需转换 file_path→filePath，read_file 保留 file_path 不变。
         # 注意：read_file 的 LLM 参数名是 "path"（非 "file_path"），仅它特殊。
         params = dict(arguments)
         invoke_tool_name = tool_name
         if tool_name == "search_replace":
-            # search_replace 需要保持逻辑名称不变（用于 toolCallId 队列匹配与前端展示），
-            # 但 IDE 端实际执行器使用 replace_text_by_path。
+            # ★ 修复：先读取文件内容，执行真正的搜索替换，再将完整结果发送 IDE
+            # IDE 端无原生 search_replace 处理器，需在服务端完成搜索替换后，
+            # 通过 replace_text_by_path 发送完整新内容。
             invoke_tool_name = "replace_text_by_path"
-            # search_replace 参数通常是 search_text/replace_text；插件 replace_text_by_path 只认 text。
-            # 这里退化为全量替换文本，至少保证 IDE 有可执行输入，不再落空文本导致“生成中+无diff”。
-            if "text" not in params:
-                replacement_text = params.get("replace_text") or params.get("replaceText")
-                if isinstance(replacement_text, str):
-                    params["text"] = replacement_text
+            file_path = params.get("filePath") or params.get("file_path") or ""
+            search_text = params.get("searchText") or params.get("search_text") or ""
+            replace_text = params.get("replaceText") or params.get("replace_text") or ""
+            # 尝试从缓存获取文件内容
+            current_content = self._ws_file_service.get_cached_content(file_path) if file_path else None
+            if current_content is None and file_path:
+                try:
+                    current_content = await self.invoke_tool_on_ide("read_file", {"filePath": file_path})
+                except Exception:
+                    logger.warning("[LSP4J-TOOL] search_replace: 无法读取文件 {}, 降级为全文替换", file_path)
+                    current_content = None
+            if current_content and search_text and search_text in current_content:
+                new_content = current_content.replace(search_text, replace_text)
+                logger.info("[LSP4J-TOOL] search_replace: 替换成功, path={} occurrences={}",
+                           file_path, current_content.count(search_text))
+                params["text"] = new_content
+            else:
+                if current_content and search_text:
+                    logger.warning("[LSP4J-TOOL] search_replace: 搜索文本未找到, path={} search_preview={}",
+                                  file_path, search_text[:80])
+                if "text" not in params:
+                    params["text"] = replace_text
         if tool_name in _LSP4J_FILE_EDIT_TOOLS:
             if "file_path" in params and "filePath" not in params:
                 params["filePath"] = params.pop("file_path")
         elif tool_name == "read_file":
             if "path" in params and "filePath" not in params:
                 params["filePath"] = params.pop("path")
-        elif tool_name == "save_file":
-            # save_file 的 ToolHandler 使用 getRequestFilePathWithUnderLine()，
-            # 读取的是 file_path (snake_case)，不需要转换。此处保留代码以消除歧义。
-            # 但若 LLM 误传 filePath，需转回 file_path。
-            if "filePath" in params and "file_path" not in params:
-                params["file_path"] = params.pop("filePath")
         elif tool_name == "run_in_terminal":
             # 插件执行处理器 RunTerminalToolHandlerV2 读取 isBackground（camelCase），
             # 而 UI 展示层使用 is_background（snake_case）。两者都补齐，避免 NPE 与展示不一致。
@@ -1905,8 +2081,8 @@ class JSONRPCRouter:
         # ToolPanel 用 toolName 判断工具类型（如 edit_file 而非 replace_text_by_path），
         # 用 parameters["file_path"] 渲染文件链接。
         sync_parameters = dict(arguments)
-        # ToolPanel 链接构建优先取 parameters["file_path"]，补齐避免“查看文件无链接”。
-        if tool_name in ("read_file", "save_file"):
+        # ToolPanel 链接构建优先取 parameters["file_path"]，补齐避免"查看文件无链接"。
+        if tool_name == "read_file":
             fp = sync_parameters.get("file_path") or sync_parameters.get("path") or sync_parameters.get("filePath")
             if fp and "file_path" not in sync_parameters:
                 sync_parameters["file_path"] = fp
@@ -2068,11 +2244,11 @@ class JSONRPCRouter:
             if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
                 ws_file = self._ws_file_service.get_file(file_path_for_id)
                 if ws_file:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.2)
                     # 插件双通道路由差异：
-                    # 1) WorkingSpacePanel 只通过 ADD notifier 把文件加入“变更文件”列表；
+                    # 1) WorkingSpacePanel 只通过 ADD notifier 把文件加入"变更文件"列表；
                     # 2) ToolPanel 内 FileItemPanel 通过 MODIFIED notifier 更新状态（GENERATING→APPLIED）。
-                    # 为保证“列表完整 + 卡片状态正确”，文件编辑工具统一双发 ADD + MODIFIED。
+                    # 为保证"列表完整 + 卡片状态正确"，文件编辑工具统一双发 ADD + MODIFIED。
                     await self._send_workspace_file_sync(ws_file, "ADD")
                     await self._send_workspace_file_sync(ws_file, "MODIFIED")
                     logger.info("[LSP4J-TRACE] WS 双发已完成 trace={} sent=ADD,MODIFIED", trace_key)
@@ -2114,8 +2290,26 @@ class JSONRPCRouter:
                     await self._send_workspace_file_sync(ws_file, "MODIFIED")
             return f"[超时] 工具 {tool_name} 执行超时（{timeout}s）"
         finally:
-            self._pending_tools.pop(tool_call_id, None)
-            self._pending_tool_meta.pop(tool_call_id, None)
+            # ★ 不立即清理 Future，保留 60s 迟到窗口
+            # 插件端可能因 SearchResultCache 或 terminal 上报链路延迟，
+            # 在超时后几秒～几十秒才发回 invokeResult。
+            # 保留期间 invokeResult 可通过补偿匹配命中，完成 UI 更新。
+            existing_future = self._pending_tools.get(tool_call_id)
+            if existing_future and existing_future.done():
+                # wait_for 超时取消了 Future → 替换为新 Future 供迟到结果匹配
+                loop = asyncio.get_running_loop()
+                late_future: asyncio.Future = loop.create_future()
+                self._pending_tools[tool_call_id] = late_future
+                # 保留 meta 供补偿匹配使用（requestId + tool_name）
+                # 60s 后清理
+                async def _cleanup_late_window(cid: str):
+                    await asyncio.sleep(60.0)
+                    self._pending_tools.pop(cid, None)
+                    self._pending_tool_meta.pop(cid, None)
+                asyncio.ensure_future(_cleanup_late_window(tool_call_id))
+            else:
+                self._pending_tools.pop(tool_call_id, None)
+                self._pending_tool_meta.pop(tool_call_id, None)
 
     # ──────────────────────────────────────────
     # 消息发送方法（严格匹配插件协议字段）
@@ -3760,7 +3954,7 @@ async def invoke_lsp4j_tool(
     通过 _active_routers 映射表查找对应 agent 的路由器实例。
 
     Args:
-        tool_name: 插件原生工具名称（read_file, save_file 等）
+        tool_name: 插件原生工具名称（read_file, replace_text_by_path 等）
         arguments: 工具参数字典
         agent_id: 智能体 UUID
         user_id: 用户 UUID
@@ -3768,19 +3962,6 @@ async def invoke_lsp4j_tool(
     Returns:
         工具执行结果字符串
     """
-    # ── 特殊工具处理（纯 UI 工具，不需要发送到 IDE） ──
-    if tool_name in ("add_tasks", "todo_write"):
-        # 任务规划工具：直接返回成功响应，插件 AddTasksToolDetailPanel 会自动从工具结果中解析 TaskResponseItem 格式 JSON
-        # LLM 会在回复中输出任务列表，插件自动渲染为任务树 UI
-        logger.info("[LSP4J-TOOL] 纯 UI 工具: tool={} 返回成功响应", tool_name)
-        import json
-        # 返回空的成功响应，让插件知道工具调用成功，实际任务内容由 LLM 在 chat/answer 中输出
-        return json.dumps({
-            "success": True,
-            "message": f"{tool_name} 工具调用成功，任务内容由 LLM 在回复中输出",
-            "tool_name": tool_name,
-        }, ensure_ascii=False)
-    
     # ── 正常 LSP4J 工具调用 ──
     # 使用 (user_id, agent_id) 复合键查找路由器，确保不同用户的连接不会互相干扰
     agent_key = (str(user_id), str(agent_id))
@@ -3801,8 +3982,37 @@ async def invoke_lsp4j_tool(
                         agent_key, active_keys)
         return f"[错误] LSP4J 连接不可用（user_id={user_id}, agent_id={agent_id}）"
 
-    # read_file 可能读取大文件，超时需更长
-    timeout = 300.0 if tool_name == "read_file" else 120.0
+    # 工具超时策略（秒）：按工具类型差异化，避免 read_file 300s 掩盖真实故障
+    _TOOL_TIMEOUTS = {
+        "read_file": 30.0,
+        "search_file": 60.0,
+        "search_codebase": 60.0,
+        "grep_code": 60.0,
+        "search_symbol": 60.0,
+        "list_dir": 30.0,
+        "replace_text_by_path": 30.0,
+        "create_file_with_text": 30.0,
+        "delete_file_by_path": 30.0,
+        "get_problems": 30.0,
+        "get_terminal_output": 30.0,
+        "search_replace": 30.0,
+        "add_tasks": 15.0,
+        "todo_write": 15.0,
+    }
+    timeout = _TOOL_TIMEOUTS.get(tool_name, 120.0)
+    # run_in_terminal: 按命令类型区分超时，避免编译命令被截断
+    if tool_name == "run_in_terminal":
+        command = str(arguments.get("command", ""))
+        _BUILD_KEYWORDS = ("gradlew", "mvn ", "npm run build", "make ", "cargo build",
+                          "xcodebuild", "bazel build", "cmake --build", "msbuild")
+        _READONLY_KEYWORDS = ("git show", "git diff", "git log", "ls ", "cat ",
+                             "head ", "tail ", "grep ", "find ", "wc ", "pwd")
+        if any(kw in command for kw in _BUILD_KEYWORDS):
+            timeout = 600.0   # 编译/构建: 10 分钟
+        elif any(kw in command for kw in _READONLY_KEYWORDS):
+            timeout = 30.0    # 读操作: 30 秒
+        else:
+            timeout = 180.0   # 其他命令: 3 分钟
     logger.info("[LSP4J-TOOL] 调用 IDE 工具: tool={} agent_key={} timeout={}", tool_name, agent_key, timeout)
     return await router_instance.invoke_tool_on_ide(tool_name, arguments, timeout=timeout)
 
@@ -3925,12 +4135,177 @@ async def _persist_lsp4j_chat_turn(
         logger.error("LSP4J: 对话持久化失败: {}", e)
 
 
+async def _persist_lsp4j_tool_call(
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    session_id: str,
+    tool_name: str,
+    parameters: dict | None,
+    results: list | str | None,
+    tool_call_id: str,
+    request_id: str,
+    status: str = "FINISHED",
+) -> None:
+    """持久化单次工具调用到 DB（fire-and-forget）。
+
+    写入 ChatMessage 表，role="tool_call"，content 为 JSON。
+    供 _load_lsp4j_history_from_db 在后续请求中恢复工具调用上下文。
+
+    内部捕获所有异常，不影响 IDE 主流程。
+    """
+    try:
+        from app.models.audit import ChatMessage
+        from datetime import datetime, timezone as tz_persist
+
+        async with async_session() as db:
+            sid_uuid = uuid.UUID(session_id)
+            payload = {
+                "tool_name": tool_name,
+                "parameters": parameters or {},
+                "results": results,
+                "tool_call_id": tool_call_id,
+                "request_id": request_id,
+                "status": status,
+            }
+            db.add(ChatMessage(
+                agent_id=agent_id,
+                user_id=user_id,
+                role="tool_call",
+                content=json.dumps(payload, ensure_ascii=False, default=str),
+                conversation_id=str(sid_uuid),
+                created_at=datetime.now(tz_persist.utc),
+            ))
+            await db.commit()
+            logger.info("[LSP4J] tool_call persisted: session={} tool={}", session_id, tool_name)
+    except Exception:
+        logger.exception("[LSP4J] tool_call persist failed: session={} tool={}", session_id, tool_name)
+
+
+def _format_tool_context_message(tool_records: list[dict]) -> dict | None:
+    """将工具调用记录格式化为 system 消息，注入 LLM 上下文。
+
+    提取搜索/文件读取/终端命令的关键信息，让 LLM 知道之前已经执行过什么，
+    避免在新一轮对话中重复搜索或读取相同文件。
+
+    Args:
+        tool_records: 工具调用记录列表，每条含 name/parameters/results 字段
+
+    Returns:
+        {"role": "system", "content": "..."} 或 None（无有效上下文时）
+    """
+    logger.info(
+        "[LSP4J-CTX] _format_tool_context_message: processing {} tool records", len(tool_records))
+    lines = ["[会话上下文] 本轮对话之前已执行的工具调用及结果：", ""]
+    skipped_old_format = 0
+    skipped_no_name = 0
+    formatted_count = 0
+    for i, tc in enumerate(tool_records, 1):
+        name = tc.get("name") or tc.get("tool_name", "")
+        params = tc.get("parameters") or tc.get("arguments") or tc.get("args") or {}
+        results = tc.get("results") or tc.get("result") or []
+        # 日志：记录每条 tool_call 的格式特征（帮助区分新旧格式）
+        record_keys = list(tc.keys())
+        has_new_format = "tool_name" in tc and "tool_call_id" in tc
+        has_old_format = "name" in tc and "args" in tc
+        logger.info(
+            "[LSP4J-CTX]   record[{}]: name={} keys=[{}] new_fmt={} old_fmt={} params_keys=[{}] results_type={}",
+            i, name, ",".join(record_keys[:8]), has_new_format, has_old_format,
+            ",".join(list(params.keys())[:5]) if params else "none",
+            type(results).__name__ if results else "none",
+        )
+        if isinstance(results, str):
+            try:
+                results = json.loads(results)
+            except (json.JSONDecodeError, TypeError):
+                results = [{"content": str(results)[:500]}]
+        elif results is None:
+            results = []
+        elif not isinstance(results, list):
+            results = [results]
+        # 日志：记录 results 结构
+        logger.info(
+            "[LSP4J-CTX]   record[{}]: results_count={} first_result_type={}",
+            i, len(results), type(results[0]).__name__ if results else "empty",
+        )
+
+        if name in ("search_file", "search_codebase", "grep_code", "search_symbol", "list_dir"):
+            line = f"{i}. {name}"
+            param_info = ""
+            if name in ("search_file",):
+                param_info = params.get("file_pattern", "") or params.get("query", "")
+            elif name in ("search_codebase", "grep_code"):
+                param_info = params.get("query", "") or params.get("regex", "")
+            elif name == "search_symbol":
+                param_info = params.get("query", "")
+            elif name == "list_dir":
+                param_info = params.get("relative_workspace_path", "")
+            if param_info:
+                line += f"({param_info[:120]})"
+            # 提取文件名列表
+            file_paths = []
+            for r in results[:15]:
+                if isinstance(r, dict):
+                    fp = r.get("filePath", "") or r.get("file_path", "") or r.get("path", "") or r.get("fileName", "")
+                    if fp:
+                        file_paths.append(fp)
+            if file_paths:
+                line += f": 找到 {len(results)} 个结果"
+                lines.append(line)
+                for fp in file_paths[:10]:
+                    lines.append(f"   - {fp}")
+                if len(file_paths) > 10:
+                    lines.append(f"   ... 还有 {len(file_paths) - 10} 个")
+            else:
+                line += f": {len(results)} 个结果"
+                lines.append(line)
+
+        elif name == "read_file":
+            fp = params.get("file_path", "") or params.get("filePath", "") or params.get("path", "")
+            if fp:
+                lines.append(f"{i}. read_file: 已读取 {fp}")
+            else:
+                lines.append(f"{i}. read_file: 已执行")
+
+        elif name == "run_in_terminal":
+            cmd = params.get("command", "")
+            lines.append(f"{i}. run_in_terminal: {cmd[:150]}")
+
+        elif name in ("replace_text_by_path", "search_replace", "create_file_with_text", "delete_file_by_path",
+                      "edit_file", "write_file"):
+            fp = params.get("filePath", "") or params.get("file_path", "")
+            lines.append(f"{i}. {name}: {fp}" if fp else f"{i}. {name}: 已执行")
+        else:
+            # 非 IDE 原生工具（如 plaza_*, duckduckgo_*），仍然记录供 LLM 参考
+            param_keys = list(params.keys())[:3] if params else []
+            lines.append(f"{i}. {name}: 已执行 (params={','.join(param_keys)})" if param_keys else f"{i}. {name}: 已执行")
+
+        formatted_count += 1
+
+    if len(lines) <= 2:
+        logger.info(
+            "[LSP4J-CTX] _format_tool_context_message: NO USEFUL CONTEXT (records={} formatted={} skipped_old={} skipped_noname={})",
+            len(tool_records), formatted_count, skipped_old_format, skipped_no_name,
+        )
+        return None
+    lines.append("")
+    lines.append("以上工具已在之前的对话轮次中执行完毕。如当前问题涉及相同文件或搜索，请优先参考上述结果，避免重复调用工具。")
+    result_content = "\n".join(lines)
+    logger.info(
+        "[LSP4J-CTX] _format_tool_context_message: produced context len={} lines={} tools_mentioned={}",
+        len(result_content), len(lines), formatted_count,
+    )
+    logger.info("[LSP4J-CTX] context preview (first 300 chars): {}", result_content[:300])
+    return {"role": "system", "content": result_content}
+
+
 async def _load_lsp4j_history_from_db(
     session_id: str, agent_id: uuid.UUID, user_id: uuid.UUID
 ) -> list[dict]:
     """从数据库加载 LSP4J 对话历史。
 
     验证 session_id UUID + 所有权后返回历史消息列表。
+    同时加载 tool_call 记录，注入为 system 上下文消息，
+    让 LLM 知晓之前会话中已执行过的搜索/文件读取结果。
 
     Args:
         session_id: 会话 ID（UUID 格式字符串）
@@ -3938,7 +4313,7 @@ async def _load_lsp4j_history_from_db(
         user_id: 用户 UUID
 
     Returns:
-        历史消息列表 [{"role": "user"/"assistant", "content": "..."}]
+        历史消息列表 [{"role": "user"/"assistant"/"system", "content": "..."}]
     """
     try:
         sid_uuid = uuid.UUID(session_id)
@@ -3965,9 +4340,66 @@ async def _load_lsp4j_history_from_db(
             .order_by(ChatMessage.created_at.asc())
         )
         rows = mr.scalars().all()
-        # 历史加载成功
-        logger.debug("[LSP4J] history loaded from DB: session_id={} count={}", session_id, len(rows))
-        return [{"role": m.role, "content": m.content} for m in rows]
+
+        # 同时加载同 session 的 tool_call 记录，注入为 system 上下文
+        history = [{"role": m.role, "content": m.content} for m in rows]
+        try:
+            tcr = await db.execute(
+                select(ChatMessage)
+                .where(ChatMessage.conversation_id == str(sid_uuid))
+                .where(ChatMessage.agent_id == agent_id)
+                .where(ChatMessage.user_id == user_id)
+                .where(ChatMessage.role == "tool_call")
+                .order_by(ChatMessage.created_at.asc())
+            )
+            tc_rows = tcr.scalars().all()
+            logger.info(
+                "[LSP4J-CTX] _load_history: session={} user_msg_count={} tool_call_db_rows={}",
+                session_id, len(history), len(tc_rows),
+            )
+            if tc_rows:
+                tool_records = []
+                parse_failures = 0
+                for tc in tc_rows:
+                    try:
+                        tool_records.append(json.loads(tc.content))
+                    except (json.JSONDecodeError, TypeError) as e:
+                        parse_failures += 1
+                        logger.warning(
+                            "[LSP4J-CTX] _load_history: JSON parse failed for tool_call id={}: {}",
+                            tc.id, e,
+                        )
+                logger.info(
+                    "[LSP4J-CTX] _load_history: parsed {} tool_records, parse_failures={}",
+                    len(tool_records), parse_failures,
+                )
+                if tool_records:
+                    ctx_msg = _format_tool_context_message(tool_records)
+                    if ctx_msg:
+                        history.insert(0, ctx_msg)
+                        logger.info("[LSP4J] tool_call context injected from DB: session_id={} tool_count={}",
+                                    session_id, len(tool_records))
+                    else:
+                        logger.info(
+                            "[LSP4J-CTX] _load_history: context NOT injected (no useful tool records after formatting), "
+                            "session={} tool_count={}",
+                            session_id, len(tool_records),
+                        )
+                else:
+                    logger.info(
+                        "[LSP4J-CTX] _load_history: no valid tool_records after parsing (all {} rows failed)",
+                        len(tc_rows),
+                    )
+            else:
+                logger.info(
+                    "[LSP4J-CTX] _load_history: no tool_call rows found for session={}",
+                    session_id,
+                )
+        except Exception:
+            logger.exception("[LSP4J] tool_call 历史加载失败（非致命）")
+
+        logger.info("[LSP4J] history loaded from DB: session_id={} count={}", session_id, len(history))
+        return history
 
 
 # ──────────────────────────────────────────────

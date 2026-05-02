@@ -6,10 +6,8 @@ Validates the branching logic in _send_message_to_agent:
 - consult:   synchronous request-response (original behaviour)
 """
 
-import json
 import uuid
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -380,7 +378,7 @@ async def test_no_relationship_returns_error():
 @pytest.mark.asyncio
 async def test_append_focus_item_creates_file(tmp_path):
     """_append_focus_item should create/append to focus.md."""
-    from app.services.agent_tools import _append_focus_item, WORKSPACE_ROOT
+    from app.services.agent_tools import _append_focus_item
 
     agent_id = uuid.uuid4()
     with patch("app.services.agent_tools.WORKSPACE_ROOT", tmp_path):

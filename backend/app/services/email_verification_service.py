@@ -20,7 +20,6 @@ class EmailVerificationService:
 
     def _hash_token(self, token: str) -> str:
         """Hash a raw verification token before persistence or lookup."""
-        import hashlib
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
     async def create_email_verification_token(self, identity_id: uuid.UUID, email: str) -> tuple[str, datetime]:
@@ -34,7 +33,6 @@ class EmailVerificationService:
             await redis.delete(f"{TOKEN_PREFIX}{old_code_hash}")
 
         # Generate a random 6-digit code
-        import secrets
         raw_code = "".join([str(secrets.randbelow(10)) for _ in range(6)])
         code_hash = self._hash_token(raw_code)
 

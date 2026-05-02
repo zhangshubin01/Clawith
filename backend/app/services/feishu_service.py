@@ -12,11 +12,11 @@ try:
 except ImportError:
     lark = None  # type: ignore
     _HAS_LARK = False
-from sqlalchemy import select, or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.security import create_access_token, hash_password
+from app.core.security import create_access_token
 from app.models.user import User, Identity
 from app.models.identity import IdentityProvider
 

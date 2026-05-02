@@ -20,7 +20,7 @@ for text, desc in test_cases:
     
     match = TOOLCALL_PATTERN.search(text)
     if match:
-        print(f"✅ 匹配成功")
+        print("✅ 匹配成功")
         print(f"  group(1) = {repr(match.group(1))}")
         print(f"  group(2) = {repr(match.group(2))}")
         print(f"  group(3) = {repr(match.group(3))}")
@@ -33,7 +33,7 @@ for text, desc in test_cases:
         
         if s1 == "toolCall":
             parts = s2.split("::")
-            print(f"\n  插件解析逻辑:")
+            print("\n  插件解析逻辑:")
             print(f"    s2.split('::') = {parts}")
             if len(parts) >= 2:
                 tool_name = parts[0]
@@ -45,10 +45,10 @@ for text, desc in test_cases:
                 
                 # 验证
                 if tool_name == "list_files" and tool_call_id == "abc-123":
-                    print(f"  ✅ 解析正确！")
+                    print("  ✅ 解析正确！")
                 else:
-                    print(f"  ❌ 解析错误！")
+                    print("  ❌ 解析错误！")
     else:
-        print(f"❌ 匹配失败")
+        print("❌ 匹配失败")
     
     print()

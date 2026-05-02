@@ -1,6 +1,5 @@
 """Agent relationship management API — human + agent-to-agent."""
 
-import json
 import uuid
 from pathlib import Path
 

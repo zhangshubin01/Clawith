@@ -6,7 +6,6 @@ import asyncio
 import json
 from typing import Any, Dict, Optional
 from uuid import UUID
-from .types import RequestError
 
 
 class AgentSideConnection:

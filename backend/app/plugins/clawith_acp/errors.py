@@ -1,5 +1,4 @@
 """Error handling and normalization for ACP."""
-from typing import Optional
 
 
 def normalize_error(err: Exception) -> None:

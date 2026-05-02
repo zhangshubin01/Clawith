@@ -4,8 +4,6 @@ Revision ID: add_daily_token_usage
 """
 
 from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 revision = "add_daily_token_usage"
 down_revision = "add_agentbay_enum_value"

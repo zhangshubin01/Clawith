@@ -5,7 +5,6 @@ Also adds is_system flag to agent_triggers so that system-created triggers
 """
 
 from alembic import op
-import sqlalchemy as sa
 
 # revision identifiers
 revision = "add_agent_is_system"

@@ -270,7 +270,6 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
         relationships = "\n".join(relationships.split("\n")[1:]).strip()
 
     # --- Compose static and dynamic system prompt blocks ---
-    from datetime import datetime, timezone as _tz
     from app.services.timezone_utils import get_agent_timezone, now_in_timezone
     agent_tz_name = await get_agent_timezone(agent_id)
     agent_local_now = now_in_timezone(agent_tz_name)

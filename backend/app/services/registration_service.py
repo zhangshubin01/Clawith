@@ -8,13 +8,11 @@ This module handles user registration including:
 
 import re
 import uuid
-from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select, or_, and_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.core.security import hash_password
 from app.models.identity import IdentityProvider
 from app.models.tenant import Tenant
@@ -382,7 +380,6 @@ class RegistrationService:
                 return None, False, "Failed to get access token from provider"
 
             # Get user info
-            from app.services.auth_provider import ExternalUserInfo
             user_info_obj = await auth_provider.get_user_info(access_token)
 
             # Convert to dict
@@ -497,7 +494,6 @@ class RegistrationService:
         if not user.tenant_id:
             return
 
-        from app.models.org import OrgMember
         member = await self._find_unbound_org_member_by_contact(db, user)
         if member:
             member.user_id = user.id

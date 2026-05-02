@@ -7,8 +7,6 @@ Create Date: 2026-03-20
 from typing import Sequence, Union
 
 from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID
 
 
 revision: str = 'add_published_pages'

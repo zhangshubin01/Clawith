@@ -1,7 +1,7 @@
 """Diff handler for IDEA plugin integration."""
 
 import re
-from typing import List, Dict, Any
+from typing import List, Dict
 
 
 def extract_code_diffs(content: str) -> List[Dict[str, str]]:

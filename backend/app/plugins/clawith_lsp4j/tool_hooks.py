@@ -4,7 +4,7 @@
 增加 LSP4J ContextVar 判断，使两条通道（ACP + LSP4J）共存。
 
 关键设计：
-1. LSP4J 工具名使用**插件原生名称**（read_file, save_file 等），
+1. LSP4J 工具名使用**插件原生名称**（read_file, run_in_terminal 等），
    不使用 ACP 的 ide_ 前缀名称（ide_read_file 等）。
    原因：插件 ToolInvokeProcessor 只识别 8 个原生名称，
    发送 ide_read_file 会触发 default 分支返回 "tool not support yet"。
@@ -35,8 +35,8 @@ from .tool_constants import LSP4J_IDE_TOOL_NAMES, TOOL_NAME_MAP
 
 # 插件识别这些工具名，不支持 ide_ 前缀
 # 参数名必须严格匹配插件 ToolHandler 的取值逻辑：
-#   read_file / save_file → file_path（snake_case，用 getRequestFilePathWithUnderLine）
-#   save_file 不读取 content/text 参数（只调用 FileDocumentManager.saveDocument 持久化）
+#   read_file → file_path（snake_case，用 getRequestFilePathWithUnderLine）
+#   read_file 不读取 content/text 参数
 #   replace_text_by_path / create_file_with_text / delete_file_by_path → filePath（camelCase，用 getRequestFilePath）
 #   replace_text_by_path → text（非 oldText/newText，插件直接替换整个文档内容）
 #   create_file_with_text → text（getRequestText 查找 "text" 键，后端定义 "content" 需映射）
@@ -49,7 +49,7 @@ _TOOL_NAME_MAP = TOOL_NAME_MAP
 
 # ★ 工具参数名映射：后端工具定义 → 插件 ToolHandler 期望的参数名
 # 插件各 ToolHandler 的参数名约定不一致：
-#   read_file / save_file → file_path（snake_case，用 getRequestFilePathWithUnderLine）
+#   read_file → file_path（snake_case，用 getRequestFilePathWithUnderLine）
 #   create_file_with_text / delete_file_by_path → filePath（camelCase，用 getRequestFilePath）
 #   create_file_with_text → text（用 getRequestText，查找 "text" 键）
 # 后端工具定义中 create_file_with_text 的内容参数命名为 "content"，需映射为 "text"
@@ -83,23 +83,6 @@ _LSP4J_IDE_TOOLS = [
                     "file_path": {
                         "type": "string",
                         "description": "文件的绝对路径",
-                    },
-                },
-                "required": ["file_path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "save_file",
-            "description": "保存 IDE 编辑器中已修改的文件到磁盘。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "要保存的文件路径",
                     },
                 },
                 "required": ["file_path"],
@@ -410,7 +393,6 @@ _LSP4J_IDE_TOOLS = [
 # ★ 涉及文件路径读取/写入的工具（需判断路径是否指向 IDE 项目）
 _LSP4J_FILE_PATH_TOOLS = frozenset({
     "read_file",
-    "save_file",
     "replace_text_by_path",
     "create_file_with_text",
     "delete_file_by_path",
@@ -422,13 +404,10 @@ def _extract_file_path(tool_name: str, args: dict) -> str | None:
 
     LLM 可能使用不同的参数名调用同一工具：
       - read_file: 基础工具用 path，IDE 工具用 file_path
-      - save_file: IDE 工具用 file_path
       - replace_text_by_path / create_file_with_text / delete_file_by_path: filePath (camelCase)
     """
     if tool_name == "read_file":
         return args.get("file_path") or args.get("path")
-    if tool_name == "save_file":
-        return args.get("file_path")
     # 编辑工具定义用 filePath (camelCase)，但 LLM 可能传 file_path (snake_case)
     return args.get("filePath") or args.get("file_path")
 
@@ -513,7 +492,7 @@ def install_lsp4j_tool_hooks() -> None:
 
         # ★ 路径判断：相对路径 → agent 工作空间文件（如 focus.md），走本地执行
         # 绝对路径 → IDE 项目文件，走 LSP4J 路由
-        # 解决 read_file/save_file 同时被注册为基础工具和 IDE 工具时，
+        # 解决 read_file 同时被注册为基础工具和 IDE 工具时，
         # LLM 用相对路径读 agent 工作空间文件却被误路由到 IDE 插件的问题
         _should_route = _should_route_to_ide(tool_name, args)
         if lsp4j_ws is not None and is_lsp4j_tool and _should_route:

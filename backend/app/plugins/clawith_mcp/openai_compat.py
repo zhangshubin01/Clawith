@@ -76,7 +76,6 @@ async def list_models(
         request.headers.get("X-Api-Key")
         or (credentials.credentials if credentials else None)
     )
-    from app.models.user import User
     result = await db.execute(select(User).where(User.id == user_id))
     current_user = result.scalar_one_or_none()
     if not current_user or not current_user.is_active:
@@ -239,7 +238,6 @@ async def openai_chat_completions(
         request.headers.get("X-Api-Key")
         or (credentials.credentials if credentials else None)
     )
-    from app.models.user import User
     result = await db.execute(select(User).where(User.id == user_id))
     current_user = result.scalar_one_or_none()
     if not current_user or not current_user.is_active:

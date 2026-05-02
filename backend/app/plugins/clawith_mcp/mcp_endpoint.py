@@ -348,7 +348,6 @@ async def mcp_sse_messages(
     db: AsyncSession = Depends(get_db),
 ):
     """SSE 传输：接收客户端 JSON-RPC 消息，处理后通过 SSE 推送响应。"""
-    import json as _json
 
     try:
         body = await request.json()

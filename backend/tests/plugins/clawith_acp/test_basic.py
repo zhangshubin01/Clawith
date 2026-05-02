@@ -2,7 +2,6 @@
 Basic smoke tests for the clawith_acp plugin.
 These tests verify that the main modules can be imported without errors.
 """
-import pytest
 
 
 def test_import_router():

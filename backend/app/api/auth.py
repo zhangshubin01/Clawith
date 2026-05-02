@@ -2,7 +2,6 @@
 
 import uuid
 from datetime import datetime, timezone
-import uuid
 
 from typing import Any
 
@@ -28,11 +27,8 @@ from app.schemas.schemas import (
     UserUpdate,
     VerifyEmailRequest,
     ResendVerificationRequest,
-    NeedsVerificationResponse,
     RegisterInitRequest,
     RegisterInitResponse,
-    RegisterCompleteRequest,
-    RegisterCompleteResponse,
     SSORegisterRequest,
     TenantChoice,
     MultiTenantResponse,
@@ -62,7 +58,7 @@ async def check_duplicate(
     db: AsyncSession = Depends(get_db),
 ):
     """Check if email or username already exists."""
-    from app.models.user import Identity, User
+    from app.models.user import Identity
     result = {"email_exists": False, "username_exists": False, "conflicts": []}
 
     if email:
@@ -775,7 +771,6 @@ async def switch_tenant(
 ):
     """Switch to a different tenant and return a new token and redirect URL."""
     from app.models.tenant import Tenant
-    from app.models.system_settings import SystemSetting
 
     # 1. Verify membership
     result = await db.execute(
@@ -879,7 +874,6 @@ async def authorize(
 ):
     """Start OAuth authorization flow for a provider."""
     from app.services.auth_registry import auth_provider_registry
-    from app.services.sso_service import sso_service
 
     # Get provider
     auth_provider = await auth_provider_registry.get_provider(db, provider)

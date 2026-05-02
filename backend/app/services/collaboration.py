@@ -1,6 +1,5 @@
 """Agent collaboration service — Agent-to-Agent communication."""
 
-import json
 import uuid
 from datetime import datetime, timezone
 

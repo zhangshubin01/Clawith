@@ -2,7 +2,7 @@
 
 import uuid
 from zoneinfo import ZoneInfo
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import select
 

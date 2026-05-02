@@ -128,7 +128,7 @@ async def list_conversations(
             # Extract sender name from [发送者: xxx] prefix
             import re
             sender_match = re.search(r'\[发送者:\s*([^\]]+?)(?:\s*\(ID:.*?\))?\]', first_msg)
-            display_name = f"📱 {sender_match.group(1)}" if sender_match else f"📱 飞书用户"
+            display_name = f"📱 {sender_match.group(1)}" if sender_match else "📱 飞书用户"
         else:
             display_name = "👥 飞书群聊"
 
@@ -256,7 +256,6 @@ async def get_conversation_messages(
     elif conv_id.startswith("agent_") or len(conv_id) == 36:
         # Agent-to-agent conversation — conv_id is the ChatSession UUID
         from app.models.audit import ChatMessage
-        from app.models.agent import Agent
         from app.models.participant import Participant
 
         result = await db.execute(

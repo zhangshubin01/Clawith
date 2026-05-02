@@ -6,7 +6,6 @@ from __future__ import annotations
 LSP4J_IDE_TOOL_NAMES = frozenset(
     {
         "read_file",
-        "save_file",
         "run_in_terminal",
         "get_terminal_output",
         "replace_text_by_path",

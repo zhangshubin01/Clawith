@@ -28,8 +28,6 @@ from .client import (
     ProviderSpec,
     PROVIDER_URLS,
     TOOL_CHOICE_PROVIDERS,
-    MAX_TOKENS_BY_PROVIDER as _MAX_TOKENS_BY_PROVIDER,
-    MAX_TOKENS_BY_MODEL as _MAX_TOKENS_BY_MODEL,
     chat_complete,
     chat_stream,
     create_llm_client,

@@ -6,13 +6,12 @@ and executes them by calling the LLM with the schedule's instruction.
 """
 
 import asyncio
-import json
 import uuid
 from datetime import datetime, timezone
 
 from croniter import croniter
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 
 def compute_next_run(cron_expr: str, after: datetime | None = None) -> datetime | None:

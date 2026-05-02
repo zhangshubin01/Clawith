@@ -4,14 +4,11 @@
 These tests use temporary directories so they never depend on the real plugins/ contents.
 Integration tests that verify specific plugins (clawith_mcp) belong in those plugins' own test files.
 """
-import importlib
 import json
 from pathlib import Path
 
-import pytest
 from fastapi import FastAPI
 
-from app.plugins.base import ClawithPlugin
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

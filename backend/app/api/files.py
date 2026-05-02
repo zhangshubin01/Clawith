@@ -4,13 +4,12 @@ import base64
 import csv
 import io
 import mimetypes
-import os
 import uuid
 from pathlib import Path
 
 import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -566,7 +565,7 @@ async def import_skill_to_agent(
     await check_agent_access(db, current_user, agent_id)
 
     from sqlalchemy.orm import selectinload
-    from app.models.skill import Skill, SkillFile
+    from app.models.skill import Skill
 
     # Load the global skill with its files
     result = await db.execute(
@@ -720,7 +719,6 @@ async def upload_enterprise_kb_file(
     current_user: User = Depends(get_current_user),
 ):
     """Upload a file to enterprise knowledge base (tenant-scoped)."""
-    from app.core.security import require_role
     # Only admin can upload to enterprise KB
     if current_user.role not in ("platform_admin", "org_admin"):
         raise HTTPException(status_code=403, detail="Only admins can upload to enterprise knowledge base")
@@ -850,7 +848,7 @@ async def agent_import_from_clawhub(
     await check_agent_access(db, current_user, agent_id)
 
     from app.api.skills import (
-        CLAWHUB_BASE, _fetch_github_directory, _parse_skill_md_frontmatter, _get_github_token,
+        CLAWHUB_BASE, _fetch_github_directory, _get_github_token,
     )
     import httpx
 

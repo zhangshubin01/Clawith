@@ -1,9 +1,5 @@
 """agents command - list available agents for current tenant/user."""
 from .base import AcpCommand, CommandContext, CommandResult
-from sqlalchemy import select
-from app.database import async_session
-from app.models.agent import Agent
-from app.models.user import User
 
 
 class AgentsCommand(AcpCommand):

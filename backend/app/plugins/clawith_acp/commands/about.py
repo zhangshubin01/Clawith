@@ -1,6 +1,5 @@
 """about command - display version information about Clawith ACP."""
 from .base import AcpCommand, CommandContext, CommandResult
-import app
 
 
 class AboutCommand(AcpCommand):
@@ -18,7 +17,6 @@ class AboutCommand(AcpCommand):
         args: list[str],
     ) -> CommandResult:
         from app import __version__
-        from .registry import CommandRegistry
         
         content = f"""\
 Clawith - Multi-agent collaboration platform

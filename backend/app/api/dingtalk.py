@@ -5,7 +5,7 @@ Provides Config CRUD and message handling for DingTalk bots using Stream mode.
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -158,7 +158,6 @@ async def process_dingtalk_message(
         sender_nick: Display name of the sender from DingTalk.
         message_id: DingTalk message ID (used for reactions).
     """
-    import json
     import httpx
     from datetime import datetime, timezone
     from sqlalchemy import select as _select
@@ -442,7 +441,7 @@ async def dingtalk_callback(
         access_token = token_data.get("access_token")
         if not access_token:
             logger.error(f"DingTalk token exchange failed: {token_data}")
-            return HTMLResponse(f"Auth failed: Token exchange error")
+            return HTMLResponse("Auth failed: Token exchange error")
 
         # Step 2: Get user info using modern v1.0 API
         user_info = await auth_provider.get_user_info(access_token)

@@ -7,12 +7,10 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.events import get_redis
-from app.models.system_settings import SystemSetting
 
 # Key prefixes for Redis
 TOKEN_PREFIX = "pwd_reset:token:"

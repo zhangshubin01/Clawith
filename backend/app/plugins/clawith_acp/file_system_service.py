@@ -5,9 +5,8 @@ Design:
 - Files outside the project root OR inside ~/.clawith → fall back to native
 - This respects IDE's permission model and triggers proper indexing
 """
-import os
 import pathlib
-from typing import Optional, Dict
+from typing import Dict
 from uuid import UUID
 from app.interfaces.filesystem import FileSystemService
 from .connection import AgentSideConnection

@@ -4,8 +4,8 @@ import uuid
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.agent import Agent, AgentPermission
-from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
+from app.models.agent import Agent
+from app.models.org import AgentRelationship, AgentAgentRelationship
 
 async def hook_new_org_member(db: AsyncSession, member_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
     """When a new OrgMember is created or bound, bind them to the system OKR Agent if it exists."""

@@ -85,7 +85,7 @@ def test_full_matcher_pattern():
     
     print(f"\n输入: {correct}")
     if match:
-        print(f"✅ 匹配成功")
+        print("✅ 匹配成功")
         print(f"  group(1) type: {match.group(1)}")  # toolCall
         print(f"  group(2) details: {match.group(2)}")  # list_files::abc-123
         
