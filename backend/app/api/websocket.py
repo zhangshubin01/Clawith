@@ -145,6 +145,7 @@ async def get_chat_history(
                 entry["toolArgs"] = data.get("args")
                 entry["toolStatus"] = data.get("status", "done")
                 entry["toolResult"] = data.get("result", "")
+                entry["toolThinking"] = data.get("reasoning_content", "")
             except Exception:
                 pass
         out.append(entry)

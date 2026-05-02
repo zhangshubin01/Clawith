@@ -3,9 +3,8 @@ access to their own structured workspace.
 
 Design principle:  ONE set of file tools covers EVERYTHING.
 The agent's workspace uses well-known paths:
-  - tasks.json          → task list (auto-synced from DB)
   - soul.md             → personality definition
-  - memory.md           → long-term memory / notes
+  - memory/memory.md    → long-term memory / notes
   - skills/             → skill definitions (markdown files)
   - workspace/          → general working files, reports, etc.
 
@@ -14,7 +13,9 @@ The agent reads/writes these files directly. No per-concept tools needed.
 
 import asyncio
 import json
+import multiprocessing as mp
 import os
+import queue
 import uuid
 import unicodedata
 from contextvars import ContextVar
@@ -56,7 +57,6 @@ _TOOL_CONFIG_CACHE_TTL_SECONDS = 60
 
 # Sensitive field keys that should be encrypted/decrypted
 SENSITIVE_FIELD_KEYS = {"api_key", "private_key", "auth_code", "password", "secret", "atlassian_api_key"}
-
 
 def _decrypt_sensitive_fields(config: dict, config_schema: dict | None = None) -> dict:
     """Decrypt sensitive fields in config dict.
@@ -197,13 +197,13 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read file contents from the workspace. Can read tasks.json for tasks, soul.md for personality, memory/memory.md for memory, skills/ for skill files, and enterprise_info/ for shared company info. Use offset and limit for reading large files in chunks.",
+            "description": "Read file contents from the workspace. Can read soul.md for personality, memory/memory.md for memory, focus.md for current focus items, skills/ for skill files, and enterprise_info/ for shared company info. Use offset and limit for reading large files in chunks.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path, e.g.: tasks.json, soul.md, memory/memory.md, skills/xxx.md, enterprise_info/company_profile.md",
+                        "description": "File path, e.g.: soul.md, focus.md, memory/memory.md, skills/xxx.md, enterprise_info/company_profile.md",
                     },
                     "offset": {
                         "type": "integer",
@@ -222,7 +222,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Create or fully overwrite a file in the workspace. Use this when writing a new file or replacing the entire content. For targeted edits to an existing file (change one section without rewriting everything), prefer edit_file instead. Before creating a new document under workspace/, first inspect the relevant directories with list_files, prefer an existing topical subfolder (for example workspace/reports/, workspace/knowledge_base/, workspace/research/) over the workspace root, and create a new subfolder when the content belongs to a new category. Avoid placing standalone document files directly in workspace/ root unless the user explicitly wants that. Can update memory/memory.md, focus.md, task_history.md, create documents in workspace/, create skills in skills/.",
+            "description": "Create or fully overwrite a file in the workspace. Use this when writing a new file or replacing the entire content. For targeted edits to an existing file (change one section without rewriting everything), prefer edit_file instead. Before creating a new document under workspace/, first inspect the relevant directories with list_files, prefer an existing topical subfolder (for example workspace/reports/, workspace/knowledge_base/, workspace/research/) over the workspace root, and create a new subfolder when the content belongs to a new category. Avoid placing standalone document files directly in workspace/ root unless the user explicitly wants that. Can update memory/memory.md, focus.md, task_history.md, create documents in workspace/, create skills in skills/. enterprise_info/ is shared company context and is read-only for agents.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -243,7 +243,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "delete_file",
-            "description": "Delete a file from the workspace. Cannot delete soul.md or tasks.json.",
+            "description": "Delete a file from the workspace. Cannot delete soul.md, tasks.json, or shared enterprise_info/ files.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -261,7 +261,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Surgically replace a specific string inside an existing file without rewriting the whole content. Prefer this over write_file when you only need to change one or more sections — it avoids accidentally overwriting content outside the edit target and is safer in multi-agent scenarios. The old_string must match exactly (including all whitespace and newlines).",
+            "description": "Surgically replace a specific string inside an existing file without rewriting the whole content. Prefer this over write_file when you only need to change one or more sections — it avoids accidentally overwriting content outside the edit target and is safer in multi-agent scenarios. enterprise_info/ is shared company context and is read-only for agents. The old_string must match exactly (including all whitespace and newlines).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1540,11 +1540,6 @@ AGENT_TOOLS = [
                 "properties": {
                     "url": {"type": "string", "description": "要访问的网址，如 https://example.com"},
                     "wait_for": {"type": "string", "description": "等待特定元素出现的选择器（可选）"},
-                    "save_to_workspace": {
-                        "type": "boolean",
-                        "description": "CRITICAL: Set to True IF AND ONLY IF the user explicitly asked you to SHOW them a screenshot or save it (e.g. \"截图给我看\", \"截图看看\", \"把截图发出来\"). If True, the image is saved to their workspace and you get a Markdown link. Default is False (internal in-memory analysis only, completely invisible to the user).",
-                        "default": False,
-                    },
                 },
                 "required": ["url"],
             }
@@ -1557,13 +1552,7 @@ AGENT_TOOLS = [
             "description": "Take a screenshot of the CURRENT browser page without navigating anywhere. Use this after clicking, typing, or submitting a form to verify the result — it preserves the current page state. Never call browser_navigate just to take a screenshot.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "save_to_workspace": {
-                        "type": "boolean",
-                        "description": "CRITICAL: Set to True IF AND ONLY IF the user explicitly asked you to SHOW them a screenshot or save it (e.g. \"截图给我看\", \"截图看看\", \"把截图发出来\"). If True, the image is saved to their workspace and you get a Markdown link. Default is False (internal in-memory analysis only, completely invisible to the user).",
-                        "default": False,
-                    },
-                },
+                "properties": {},
             }
         }
     },
@@ -1919,12 +1908,15 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
     # Check tenant-level a2a_async_enabled flag
     _a2a_async = False
+    is_system_agent = False
     try:
         from app.models.tenant import Tenant
         from app.models.agent import Agent as AgentModel
         async with async_session() as _flag_db:
-            _ag_r = await _flag_db.execute(select(AgentModel.tenant_id).where(AgentModel.id == agent_id))
-            _tid = _ag_r.scalar_one_or_none()
+            _ag_r = await _flag_db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            _agent = _ag_r.scalar_one_or_none()
+            _tid = _agent.tenant_id if _agent else None
+            is_system_agent = bool(_agent and _agent.is_system)
             if _tid:
                 _t_r = await _flag_db.execute(select(Tenant).where(Tenant.id == _tid))
                 _tenant = _t_r.scalar_one_or_none()
@@ -1959,6 +1951,14 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
                 # Skip feishu tools if the agent has no Feishu channel configured
                 if t.category == "feishu" and not has_feishu:
+                    continue
+                # Match the Agent Tools UI: regular agents must not receive
+                # OKR-system-only tools, even if the DB default says enabled.
+                if (t.config or {}).get("okr_agent_only") and not is_system_agent:
+                    continue
+                # Match the Agent Tools UI: agent-installed tools only belong
+                # to the agent that has an explicit assignment.
+                if t.source == "agent" and not at:
                     continue
 
                 # Build OpenAI function-calling format
@@ -2003,8 +2003,10 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     except Exception as e:
         logger.error(f"[Tools] DB load failed, using fallback: {e}")
 
-    # Fallback to hardcoded tools (still apply OS-aware path patching)
-    fallback = _patch_computer_tool_descriptions(AGENT_TOOLS, computer_os_type)
+    # If DB loading fails, do not expose the full hardcoded tool catalog: that
+    # can leak disabled tools (for example search tools) into the LLM. Keep only
+    # the minimal always-available core/channel tools.
+    fallback = _patch_computer_tool_descriptions(_always_tools, computer_os_type)
     if not _a2a_async:
         fallback = _strip_a2a_msg_type(fallback)
     return fallback
@@ -2061,14 +2063,19 @@ async def ensure_workspace(agent_id: uuid.UUID, tenant_id: str | None = None) ->
         except Exception:
             (ws / "soul.md").write_text("# Personality\n\n_Describe your role and responsibilities._\n", encoding="utf-8")
 
-    # Always sync tasks from DB
+    # Legacy compatibility: older workspaces may have tasks.json as a DB-backed
+    # task snapshot. Do not create it for new agents.
     await _sync_tasks_to_file(agent_id, ws)
 
     return ws
 
 
 async def _sync_tasks_to_file(agent_id: uuid.UUID, ws: Path):
-    """Sync tasks from DB to tasks.json in workspace."""
+    """Sync tasks from DB to legacy tasks.json, if the file already exists."""
+    tasks_path = ws / "tasks.json"
+    if not tasks_path.exists():
+        return
+
     try:
         async with async_session() as db:
             result = await db.execute(
@@ -2087,7 +2094,7 @@ async def _sync_tasks_to_file(agent_id: uuid.UUID, ws: Path):
                 "completed_at": t.completed_at.isoformat() if t.completed_at else "",
             })
 
-        (ws / "tasks.json").write_text(
+        tasks_path.write_text(
             json.dumps(task_list, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -2111,6 +2118,11 @@ _TOOL_AUTONOMY_MAP = {
     "execute_code": "execute_code",
     "execute_code_e2b": "execute_code",
 }
+
+
+def _is_enterprise_info_path(path: str | None) -> bool:
+    normalized = str(path or "").replace("\\", "/").strip().strip("/")
+    return normalized == "enterprise_info" or normalized.startswith("enterprise_info/")
 
 
 async def _get_agent_tenant_id(agent_id: uuid.UUID) -> str | None:
@@ -2142,12 +2154,17 @@ async def _execute_tool_direct(
     ws = await ensure_workspace(agent_id, tenant_id=_agent_tenant_id)
     try:
         if tool_name == "delete_file":
-            return _delete_file(ws, arguments.get("path", ""))
+            path = arguments.get("path", "")
+            if _is_enterprise_info_path(path):
+                return "enterprise_info is shared company context and is read-only for agents. Ask an admin to update it."
+            return _delete_file(ws, path)
         elif tool_name == "write_file":
             path = arguments.get("path")
             content = arguments.get("content", "")
             if not path:
                 return "Missing path"
+            if _is_enterprise_info_path(path):
+                return "enterprise_info is shared company context and is read-only for agents. Ask an admin to update it."
             return _write_file(ws, path, content, tenant_id=_agent_tenant_id)
         elif tool_name in ("execute_code", "execute_code_e2b"):
             logger.info(f"[DirectTool] Executing code ({tool_name}) with arguments: {arguments}")
@@ -2274,8 +2291,8 @@ async def execute_tool(
                 return "❌ Missing required argument 'path' for write_file. Please provide a file path like 'skills/my-skill/SKILL.md'"
             if content is None:
                 return "❌ Missing required argument 'content' for write_file"
-            if path.startswith("enterprise_info"):
-                result = _write_file(ws, path, content, tenant_id=_agent_tenant_id)
+            if _is_enterprise_info_path(path):
+                result = "❌ enterprise_info is shared company context and is read-only for agents. Ask an admin to update it."
             else:
                 async with async_session() as _wdb:
                     write_result = await write_workspace_file(
@@ -2298,19 +2315,22 @@ async def execute_tool(
                 )
         elif tool_name == "delete_file":
             path = arguments.get("path", "")
-            async with async_session() as _wdb:
-                delete_result = await delete_workspace_file(
-                    _wdb,
-                    agent_id=agent_id,
-                    base_dir=ws,
-                    path=path,
-                    actor_type="agent",
-                    actor_id=agent_id,
-                    session_id=session_id,
-                    enforce_human_lock=True,
-                )
-                await _wdb.commit()
-            result = f"✅ Deleted {delete_result.path}" if delete_result.ok else f"❌ {delete_result.message}"
+            if _is_enterprise_info_path(path):
+                result = "❌ enterprise_info is shared company context and is read-only for agents. Ask an admin to update it."
+            else:
+                async with async_session() as _wdb:
+                    delete_result = await delete_workspace_file(
+                        _wdb,
+                        agent_id=agent_id,
+                        base_dir=ws,
+                        path=path,
+                        actor_type="agent",
+                        actor_id=agent_id,
+                        session_id=session_id,
+                        enforce_human_lock=True,
+                    )
+                    await _wdb.commit()
+                result = f"✅ Deleted {delete_result.path}" if delete_result.ok else f"❌ {delete_result.message}"
         # --- Enhanced file management tools ---
         elif tool_name == "convert_csv_to_xlsx":
             result = await _convert_csv_to_xlsx(agent_id, ws, arguments)
@@ -2333,8 +2353,8 @@ async def execute_tool(
             if new_string is None:
                 return "❌ Missing required argument 'new_string' for edit_file"
             replace_all = arguments.get("replace_all", False)
-            if path.startswith("enterprise_info"):
-                result = _edit_file(ws, path, old_string, new_string, replace_all=replace_all, tenant_id=_agent_tenant_id)
+            if _is_enterprise_info_path(path):
+                result = "❌ enterprise_info is shared company context and is read-only for agents. Ask an admin to update it."
             else:
                 file_path = (ws / path).resolve()
                 if not str(file_path).startswith(str(ws.resolve())):
@@ -2521,6 +2541,8 @@ async def execute_tool(
             result = await _agentbay_browser_navigate(agent_id, ws, arguments)
         elif tool_name == "agentbay_browser_screenshot":
             result = await _agentbay_browser_screenshot(agent_id, ws, arguments)
+        elif tool_name == "agentbay_browser_save_screenshot":
+            result = await _agentbay_browser_save_screenshot(agent_id, ws, arguments)
         elif tool_name == "agentbay_browser_click":
             result = await _agentbay_browser_click(agent_id, ws, arguments)
         elif tool_name == "agentbay_browser_type":
@@ -2537,6 +2559,10 @@ async def execute_tool(
             result = await _agentbay_command_exec(agent_id, ws, arguments)
         elif tool_name == "agentbay_computer_screenshot":
             result = await _agentbay_computer_screenshot(agent_id, ws, arguments)
+        elif tool_name == "agentbay_computer_save_screenshot":
+            result = await _agentbay_computer_save_screenshot(agent_id, ws, arguments)
+        elif tool_name == "agentbay_computer_precision_screenshot":
+            result = await _agentbay_computer_precision_screenshot(agent_id, ws, arguments)
         elif tool_name == "agentbay_computer_click":
             result = await _agentbay_computer_click(agent_id, ws, arguments)
         elif tool_name == "agentbay_computer_input_text":
@@ -2553,12 +2579,20 @@ async def execute_tool(
             result = await _agentbay_computer_get_screen_size(agent_id, ws, arguments)
         elif tool_name == "agentbay_computer_start_app":
             result = await _agentbay_computer_start_app(agent_id, ws, arguments)
+        elif tool_name == "agentbay_computer_get_installed_apps":
+            result = await _agentbay_computer_get_installed_apps(agent_id, ws, arguments)
         elif tool_name == "agentbay_computer_get_cursor_position":
             result = await _agentbay_computer_get_cursor_position(agent_id, ws, arguments)
         elif tool_name == "agentbay_computer_get_active_window":
             result = await _agentbay_computer_get_active_window(agent_id, ws, arguments)
+        elif tool_name == "agentbay_computer_list_windows":
+            result = await _agentbay_computer_list_windows(agent_id, ws, arguments)
         elif tool_name == "agentbay_computer_activate_window":
             result = await _agentbay_computer_activate_window(agent_id, ws, arguments)
+        elif tool_name == "agentbay_computer_close_window":
+            result = await _agentbay_computer_close_window(agent_id, ws, arguments)
+        elif tool_name == "agentbay_computer_dismiss_dialog":
+            result = await _agentbay_computer_dismiss_dialog(agent_id, ws, arguments)
         elif tool_name == "agentbay_computer_list_visible_apps":
             result = await _agentbay_computer_list_visible_apps(agent_id, ws, arguments)
         elif tool_name == "agentbay_file_transfer":
@@ -3920,8 +3954,29 @@ def _read_file(ws: Path, rel_path: str, tenant_id: str | None = None, offset: in
         return f"Read failed: {e}"
 
 
-async def _read_document(ws: Path, rel_path: str, max_chars: int = 8000, tenant_id: str | None = None) -> str:
-    """Read content from office documents (PDF, DOCX, XLSX, PPTX)."""
+_READ_DOCUMENT_MAX_FILE_BYTES = 50 * 1024 * 1024
+_READ_DOCUMENT_TIMEOUT_SECONDS = 25
+_READ_DOCUMENT_FALLBACK_TIMEOUT_SECONDS = 10
+_READ_DOCUMENT_MAX_CELL_CHARS = 500
+_READ_DOCUMENT_MAX_COLUMNS = 80
+_READ_DOCUMENT_MAX_XLSX_CELLS = 20000
+
+
+def _safe_document_cell_text(value: Any) -> str:
+    """Convert spreadsheet/table values without letting pathological cells dominate CPU."""
+    if value is None:
+        return ""
+    if isinstance(value, int) and value.bit_length() > 4096:
+        return "[large integer omitted]"
+    text = str(value)
+    if len(text) > _READ_DOCUMENT_MAX_CELL_CHARS:
+        return text[:_READ_DOCUMENT_MAX_CELL_CHARS] + "...[cell truncated]"
+    return text
+
+
+def _read_document_sync(ws: Path, rel_path: str, max_chars: int = 8000, tenant_id: str | None = None) -> str:
+    """Synchronous document extraction. Must run outside the uvicorn event loop."""
+    max_chars = min(max(int(max_chars), 1), 20000)
     try:
         file_path = _resolve_tool_source_path(ws, rel_path, tenant_id=tenant_id)
     except ValueError as exc:
@@ -3929,6 +3984,17 @@ async def _read_document(ws: Path, rel_path: str, max_chars: int = 8000, tenant_
 
     if not file_path.exists():
         return f"File not found: {rel_path}"
+    if file_path.is_dir():
+        return f"Path is a directory, not a document: {rel_path}"
+    try:
+        file_size = file_path.stat().st_size
+    except OSError:
+        file_size = 0
+    if file_size > _READ_DOCUMENT_MAX_FILE_BYTES:
+        return (
+            f"Document is too large to read safely ({file_size / 1024 / 1024:.1f} MB). "
+            "Please split or convert it to a smaller text/Markdown excerpt first."
+        )
 
     ext = file_path.suffix.lower()
     try:
@@ -3940,6 +4006,8 @@ async def _read_document(ws: Path, rel_path: str, max_chars: int = 8000, tenant_
                     page_text = page.extract_text() or ""
                     if page_text:
                         text_parts.append(f"--- Page {i+1} ---\n{page_text}")
+                    if sum(len(part) for part in text_parts) >= max_chars:
+                        break
             content = "\n\n".join(text_parts) if text_parts else "(PDF is empty or text extraction failed)"
 
         elif ext == ".docx":
@@ -3955,7 +4023,9 @@ async def _read_document(ws: Path, rel_path: str, max_chars: int = 8000, tenant_
                 """Flatten a table into readable text."""
                 rows = []
                 for row in table.rows:
-                    cells = [cell.text.strip() for cell in row.cells]
+                    cells = [_safe_document_cell_text(cell.text).strip() for cell in row.cells[:_READ_DOCUMENT_MAX_COLUMNS]]
+                    if not cells:
+                        continue
                     # Remove duplicate adjacent cells (merged cells repeat)
                     deduped = [cells[0]] + [c for i, c in enumerate(cells[1:]) if c != cells[i]]
                     row_str = " | ".join(c for c in deduped if c)
@@ -3996,15 +4066,23 @@ async def _read_document(ws: Path, rel_path: str, max_chars: int = 8000, tenant_
             from openpyxl import load_workbook
             wb = load_workbook(str(file_path), read_only=True, data_only=True)
             sheets = []
+            cell_count = 0
             for ws_name in wb.sheetnames[:10]:  # Limit to 10 sheets
                 sheet = wb[ws_name]
                 rows = []
-                for row in sheet.iter_rows(max_row=200, values_only=True):
-                    row_str = "\t".join(str(c) if c is not None else "" for c in row)
+                for row in sheet.iter_rows(max_row=200, max_col=_READ_DOCUMENT_MAX_COLUMNS, values_only=True):
+                    visible = row
+                    cell_count += len(visible)
+                    if cell_count > _READ_DOCUMENT_MAX_XLSX_CELLS:
+                        rows.append("[cell limit reached; remaining cells omitted]")
+                        break
+                    row_str = "\t".join(_safe_document_cell_text(c) for c in visible)
                     if row_str.strip():
                         rows.append(row_str)
                 if rows:
                     sheets.append(f"=== Sheet: {ws_name} ===\n" + "\n".join(rows))
+                if cell_count > _READ_DOCUMENT_MAX_XLSX_CELLS or sum(len(part) for part in sheets) >= max_chars:
+                    break
             wb.close()
             content = "\n\n".join(sheets) if sheets else "(Excel is empty)"
 
@@ -4035,6 +4113,138 @@ async def _read_document(ws: Path, rel_path: str, max_chars: int = 8000, tenant_
         return f"Missing dependency: {e}. Install: pip install pdfplumber python-docx openpyxl python-pptx"
     except Exception as e:
         return f"Document read failed: {str(e)[:200]}"
+
+
+def _read_document_worker(
+    out_queue: mp.Queue,
+    ws_str: str,
+    rel_path: str,
+    max_chars: int,
+    tenant_id: str | None,
+) -> None:
+    try:
+        out_queue.put(("ok", _read_document_sync(Path(ws_str), rel_path, max_chars=max_chars, tenant_id=tenant_id)))
+    except BaseException as exc:
+        out_queue.put(("error", f"Document read failed: {str(exc)[:200]}"))
+
+
+def _read_pdf_fast_sync(ws: Path, rel_path: str, max_chars: int = 8000, tenant_id: str | None = None) -> str:
+    """Fast PDF text extraction fallback for files that make pdfplumber/pdfminer hang."""
+    max_chars = min(max(int(max_chars), 1), 20000)
+    try:
+        file_path = _resolve_tool_source_path(ws, rel_path, tenant_id=tenant_id)
+    except ValueError as exc:
+        return str(exc)
+
+    if not file_path.exists():
+        return f"File not found: {rel_path}"
+    if file_path.is_dir():
+        return f"Path is a directory, not a document: {rel_path}"
+
+    try:
+        import fitz
+
+        text_parts = []
+        with fitz.open(str(file_path)) as doc:
+            for i, page in enumerate(doc[:50]):
+                page_text = page.get_text("text") or ""
+                if page_text:
+                    text_parts.append(f"--- Page {i+1} ---\n{page_text}")
+                if sum(len(part) for part in text_parts) >= max_chars:
+                    break
+        content = "\n\n".join(text_parts) if text_parts else "(PDF is empty or text extraction failed)"
+        if len(content) > max_chars:
+            content = content[:max_chars] + f"\n\n...[truncated, {len(content)} chars total]"
+        return content
+    except ImportError as exc:
+        return f"PDF fallback extractor unavailable: {exc}. Install: pip install PyMuPDF"
+    except Exception as exc:
+        return f"PDF fallback extraction failed: {str(exc)[:200]}"
+
+
+def _read_pdf_fast_worker(
+    out_queue: mp.Queue,
+    ws_str: str,
+    rel_path: str,
+    max_chars: int,
+    tenant_id: str | None,
+) -> None:
+    try:
+        out_queue.put(("ok", _read_pdf_fast_sync(Path(ws_str), rel_path, max_chars=max_chars, tenant_id=tenant_id)))
+    except BaseException as exc:
+        out_queue.put(("error", f"PDF fallback extraction failed: {str(exc)[:200]}"))
+
+
+def _read_pdf_fast_with_timeout(ws: Path, rel_path: str, max_chars: int = 8000, tenant_id: str | None = None) -> str:
+    ctx = mp.get_context("spawn")
+    out_queue: mp.Queue = ctx.Queue(maxsize=1)
+    proc = ctx.Process(
+        target=_read_pdf_fast_worker,
+        args=(out_queue, str(ws), rel_path, max_chars, tenant_id),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(_READ_DOCUMENT_FALLBACK_TIMEOUT_SECONDS)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(2)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(1)
+        return (
+            f"Document read timed out after {_READ_DOCUMENT_TIMEOUT_SECONDS}s, "
+            f"and PDF fallback also timed out after {_READ_DOCUMENT_FALLBACK_TIMEOUT_SECONDS}s. "
+            "The file may be too large or too complex to extract safely."
+        )
+    try:
+        status, payload = out_queue.get_nowait()
+    except queue.Empty:
+        if proc.exitcode:
+            return f"PDF fallback extraction failed: extractor exited with code {proc.exitcode}"
+        return "PDF fallback extraction failed: extractor returned no content"
+    if status == "ok":
+        return payload
+    return str(payload)
+
+
+def _read_document_with_timeout(ws: Path, rel_path: str, max_chars: int = 8000, tenant_id: str | None = None) -> str:
+    """Run document parsing in a killable child process so one bad file cannot freeze the site."""
+    ctx = mp.get_context("spawn")
+    out_queue: mp.Queue = ctx.Queue(maxsize=1)
+    proc = ctx.Process(
+        target=_read_document_worker,
+        args=(out_queue, str(ws), rel_path, max_chars, tenant_id),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(_READ_DOCUMENT_TIMEOUT_SECONDS)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(2)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(1)
+        if Path(rel_path).suffix.lower() == ".pdf":
+            return _read_pdf_fast_with_timeout(ws, rel_path, max_chars=max_chars, tenant_id=tenant_id)
+        return (
+            f"Document read timed out after {_READ_DOCUMENT_TIMEOUT_SECONDS}s. "
+            "The file may be too large or too complex to extract safely. "
+            "Please split it, convert it to text/Markdown, or read a smaller excerpt."
+        )
+    try:
+        status, payload = out_queue.get_nowait()
+    except queue.Empty:
+        if proc.exitcode:
+            return f"Document read failed: extractor exited with code {proc.exitcode}"
+        return "Document read failed: extractor returned no content"
+    if status == "ok":
+        return payload
+    return str(payload)
+
+
+async def _read_document(ws: Path, rel_path: str, max_chars: int = 8000, tenant_id: str | None = None) -> str:
+    """Read content from office documents (PDF, DOCX, XLSX, PPTX)."""
+    return await asyncio.to_thread(_read_document_with_timeout, ws, rel_path, max_chars, tenant_id)
 
 
 # ─── Format Conversion Tools ────────────────────────────────────
@@ -4095,10 +4305,163 @@ async def _convert_html_to_pdf(agent_id: uuid.UUID, ws: Path, arguments: dict) -
     if not src_file.exists(): return f"❌ Source file not found: {source_path}"
     
     try:
-        from weasyprint import HTML
         tgt_file.parent.mkdir(parents=True, exist_ok=True)
+        chrome_pdf_error: Exception | None = None
+
+        async def try_chrome_pdf() -> bool:
+            import base64
+            import shutil
+            import socket
+            import subprocess
+            import tempfile
+            import time
+            import urllib.request
+            import websockets
+
+            candidates = [
+                os.environ.get("CHROME_BIN"),
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                shutil.which("google-chrome"),
+                shutil.which("chromium"),
+                shutil.which("chromium-browser"),
+            ]
+            chrome = next((str(path) for path in candidates if path and Path(path).exists()), None)
+            if not chrome:
+                return False
+
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+
+            profile_dir = tempfile.TemporaryDirectory(prefix="clawith-html-pdf-")
+            proc = subprocess.Popen(
+                [
+                    chrome,
+                    "--headless=new",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--allow-file-access-from-files",
+                    f"--remote-debugging-port={port}",
+                    f"--user-data-dir={profile_dir.name}",
+                    "about:blank",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                base = f"http://127.0.0.1:{port}"
+                deadline = time.time() + 8
+                while time.time() < deadline:
+                    try:
+                        with urllib.request.urlopen(f"{base}/json/version", timeout=0.25) as resp:
+                            json.loads(resp.read().decode("utf-8"))
+                        break
+                    except Exception:
+                        await asyncio.sleep(0.1)
+                else:
+                    return False
+
+                file_url = src_file.resolve().as_uri()
+                req = urllib.request.Request(f"{base}/json/new?{file_url}", method="PUT")
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    target = json.loads(resp.read().decode("utf-8"))
+                ws_url = target.get("webSocketDebuggerUrl")
+                if not ws_url:
+                    return False
+
+                msg_id = 0
+                async with websockets.connect(ws_url, max_size=20_000_000) as ws_conn:
+                    async def send(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+                        nonlocal msg_id
+                        msg_id += 1
+                        await ws_conn.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
+                        while True:
+                            raw = await asyncio.wait_for(ws_conn.recv(), timeout=10)
+                            message = json.loads(raw)
+                            if message.get("id") == msg_id:
+                                return message
+
+                    design_w_px = int(arguments.get("design_width") or 1280)
+                    design_h_px = int(arguments.get("design_height") or 720)
+                    await send("Page.enable")
+                    await send("Runtime.enable")
+                    await send("Emulation.setDeviceMetricsOverride", {
+                        "width": design_w_px,
+                        "height": design_h_px,
+                        "deviceScaleFactor": 1,
+                        "mobile": False,
+                    })
+                    await send("Emulation.setEmulatedMedia", {"media": "screen"})
+                    await send("Page.navigate", {"url": file_url})
+                    load_deadline = time.time() + 8
+                    while time.time() < load_deadline:
+                        raw = await asyncio.wait_for(ws_conn.recv(), timeout=10)
+                        message = json.loads(raw)
+                        if message.get("method") == "Page.loadEventFired":
+                            break
+                    await asyncio.sleep(0.25)
+
+                    page_info = await send("Runtime.evaluate", {
+                        "expression": "(() => ({w: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0, innerWidth), h: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0, innerHeight)}))()",
+                        "returnByValue": True,
+                    })
+                    dims = page_info.get("result", {}).get("result", {}).get("value") or {}
+                    scroll_w = max(1, float(dims.get("w") or design_w_px))
+                    scroll_h = max(1, float(dims.get("h") or design_h_px))
+
+                    mode = str(arguments.get("pdf_mode") or "pages").lower()
+                    pdf_params: dict[str, Any] = {
+                        "printBackground": bool(arguments.get("print_background", True)),
+                        "preferCSSPageSize": bool(arguments.get("prefer_css_page_size", False)),
+                        "marginTop": float(arguments.get("margin_top", 0)),
+                        "marginBottom": float(arguments.get("margin_bottom", 0)),
+                        "marginLeft": float(arguments.get("margin_left", 0)),
+                        "marginRight": float(arguments.get("margin_right", 0)),
+                    }
+                    if mode in ("single", "long", "fullpage"):
+                        pdf_params.update({
+                            "paperWidth": scroll_w / 96.0,
+                            "paperHeight": scroll_h / 96.0,
+                            "scale": 1,
+                        })
+                    else:
+                        pdf_params.update({
+                            "paperWidth": float(arguments.get("paper_width") or 8.27),
+                            "paperHeight": float(arguments.get("paper_height") or 11.69),
+                            "scale": float(arguments.get("scale") or 0.64),
+                        })
+
+                    pdf_result = await send("Page.printToPDF", pdf_params)
+                    data = pdf_result.get("result", {}).get("data")
+                    if not data:
+                        return False
+                    tgt_file.write_bytes(base64.b64decode(data))
+                    return True
+            finally:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                profile_dir.cleanup()
+
+        try:
+            if await try_chrome_pdf():
+                return f"✅ Successfully converted HTML to PDF with Chrome: {target_path}"
+        except Exception as exc:
+            chrome_pdf_error = exc
+            logger.warning(f"Chrome HTML to PDF failed, falling back to WeasyPrint: {exc}")
+
+        from weasyprint import HTML
         HTML(filename=str(src_file)).write_pdf(str(tgt_file))
-        return f"✅ Successfully converted HTML to PDF: {target_path}"
+        note = f" Chrome fallback reason: {chrome_pdf_error}" if chrome_pdf_error else ""
+        return f"✅ Successfully converted HTML to PDF with WeasyPrint: {target_path}.{note}"
     except Exception as e:
         logger.exception(f"Convert HTML to PDF failed: {e}")
         return f"❌ Conversion failed: {e}"
@@ -4116,38 +4479,712 @@ async def _convert_html_to_pptx(agent_id: uuid.UUID, ws: Path, arguments: dict) 
     
     try:
         from bs4 import BeautifulSoup
+        from bs4.element import Tag
         from pptx import Presentation
+        from pptx.dml.color import RGBColor
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
+        from pptx.util import Inches, Pt
         
         html_content = src_file.read_text(encoding="utf-8")
         soup = BeautifulSoup(html_content, "html.parser")
-        
+
+        design_w_px = int(arguments.get("design_width") or 1280)
+        design_h_px = int(arguments.get("design_height") or 720)
+        render_mode = str(arguments.get("render_mode") or "visual").lower()
         prs = Presentation()
-        title_slide_layout = prs.slide_layouts[0]
-        bullet_slide_layout = prs.slide_layouts[1]
-        
-        sections = soup.find_all(['h1', 'h2'])
-        if not sections:
-            slide = prs.slides.add_slide(title_slide_layout)
-            slide.shapes.title.text = "Presentation"
-        else:
-            for header in sections:
-                slide = prs.slides.add_slide(bullet_slide_layout)
-                slide.shapes.title.text = header.get_text(strip=True)
-                tf = slide.shapes.placeholders[1].text_frame
-                
-                curr = header.find_next_sibling()
-                while curr and curr.name not in ['h1', 'h2']:
-                    if curr.name in ['p', 'li']:
-                        text = curr.get_text(strip=True)
-                        if text:
-                            p = tf.add_paragraph()
-                            p.text = text
-                            p.level = 0
-                    curr = curr.find_next_sibling()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
+        blank_layout = prs.slide_layouts[6]
+
+        named_colors = {
+            "black": "000000", "white": "ffffff", "gray": "808080", "grey": "808080",
+            "red": "ff0000", "green": "008000", "blue": "0000ff", "transparent": "",
+        }
+
+        def parse_css_block(css: str) -> dict[str, dict[str, str]]:
+            rules: dict[str, dict[str, str]] = {}
+            css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+            for selector_text, body in re.findall(r"([^{}]+)\{([^{}]+)\}", css):
+                decls = parse_style(body)
+                for selector in selector_text.split(","):
+                    selector = selector.strip()
+                    if selector:
+                        rules.setdefault(selector, {}).update(decls)
+            return rules
+
+        def parse_style(style: str | None) -> dict[str, str]:
+            out: dict[str, str] = {}
+            if not style:
+                return out
+            for part in style.split(";"):
+                if ":" not in part:
+                    continue
+                key, value = part.split(":", 1)
+                key = key.strip().lower()
+                value = value.strip()
+                if key and value:
+                    out[key] = value
+            return out
+
+        css_rules: dict[str, dict[str, str]] = {}
+        for style_tag in soup.find_all("style"):
+            css_rules.update(parse_css_block(style_tag.get_text("\n")))
+
+        def element_style(el: Tag | None) -> dict[str, str]:
+            if not isinstance(el, Tag):
+                return {}
+            style: dict[str, str] = {}
+            for selector in ("html", "body"):
+                style.update(css_rules.get(selector, {}))
+            style.update(css_rules.get(el.name or "", {}))
+            for cls in el.get("class") or []:
+                style.update(css_rules.get(f".{cls}", {}))
+                style.update(css_rules.get(f"{el.name}.{cls}", {}))
+            if el.get("id"):
+                style.update(css_rules.get(f"#{el.get('id')}", {}))
+            style.update(parse_style(el.get("style")))
+            return style
+
+        def parse_color(value: str | None) -> RGBColor | None:
+            if not value:
+                return None
+            value = value.strip().lower()
+            color_match = re.search(r"#(?:[0-9a-f]{3}|[0-9a-f]{6})\b|rgba?\([^)]+\)", value)
+            if color_match:
+                value = color_match.group(0)
+            if value in named_colors:
+                value = named_colors[value]
+            if not value or value in ("none", "transparent"):
+                return None
+            alpha_match = re.match(r"rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([0-9.]+)\s*\)", value)
+            if alpha_match:
+                try:
+                    if float(alpha_match.group(1)) <= 0.01:
+                        return None
+                except ValueError:
+                    return None
+            if value.startswith("#"):
+                raw = value[1:]
+                if len(raw) == 3:
+                    raw = "".join(ch * 2 for ch in raw)
+                if len(raw) == 6:
+                    try:
+                        return RGBColor(int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16))
+                    except ValueError:
+                        return None
+            m = re.match(r"rgba?\((\d+),\s*(\d+),\s*(\d+)", value)
+            if m:
+                return RGBColor(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return None
+
+        def length_to_inches(value: str | None, axis_total_in: float, axis_px: int) -> float | None:
+            if not value:
+                return None
+            value = str(value).strip().lower()
+            try:
+                if value.endswith("%"):
+                    return axis_total_in * float(value[:-1]) / 100.0
+                if value.endswith("px"):
+                    return axis_total_in * float(value[:-2]) / axis_px
+                if value.endswith("pt"):
+                    return float(value[:-2]) / 72.0
+                if value.endswith("in"):
+                    return float(value[:-2])
+                if value.endswith("rem") or value.endswith("em"):
+                    return axis_total_in * (float(value[:-3] if value.endswith("rem") else value[:-2]) * 16) / axis_px
+                return axis_total_in * float(value) / axis_px
+            except ValueError:
+                return None
+
+        def font_size_pt(style: dict[str, str], default: int) -> float:
+            raw = style.get("font-size")
+            if not raw:
+                return float(default)
+            raw = raw.strip().lower()
+            try:
+                if raw.endswith("px"):
+                    return float(raw[:-2]) * 0.75
+                if raw.endswith("pt"):
+                    return float(raw[:-2])
+                if raw.endswith("rem") or raw.endswith("em"):
+                    return float(raw[:-3] if raw.endswith("rem") else raw[:-2]) * 12
+            except ValueError:
+                return float(default)
+            return float(default)
+
+        def text_align(style: dict[str, str]):
+            align = (style.get("text-align") or "").lower()
+            return {
+                "center": PP_ALIGN.CENTER,
+                "right": PP_ALIGN.RIGHT,
+                "justify": PP_ALIGN.JUSTIFY,
+            }.get(align, PP_ALIGN.LEFT)
+
+        def add_textbox(slide, text: str, x: float, y: float, w: float, h: float, style: dict[str, str], default_size: int, bold: bool = False):
+            shape = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+            tf = shape.text_frame
+            tf.clear()
+            tf.word_wrap = True
+            tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+            tf.vertical_anchor = MSO_ANCHOR.TOP
+            tf.margin_left = 0
+            tf.margin_right = 0
+            tf.margin_top = 0
+            tf.margin_bottom = 0
+            p = tf.paragraphs[0]
+            p.alignment = text_align(style)
+            run = p.add_run()
+            run.text = text
+            font = run.font
+            font.size = Pt(font_size_pt(style, default_size))
+            font.bold = bold or (style.get("font-weight") or "").lower() in ("bold", "600", "700", "800", "900")
+            color = parse_color(style.get("color"))
+            if color:
+                font.color.rgb = color
+            family = (style.get("font-family") or "").split(",")[0].strip().strip("\"'")
+            if family:
+                font.name = family
+            return shape
+
+        def add_background(slide, style: dict[str, str]):
+            color = parse_color(style.get("background") or style.get("background-color"))
+            if color:
+                fill = slide.background.fill
+                fill.solid()
+                fill.fore_color.rgb = color
+
+        def add_card(slide, x: float, y: float, w: float, h: float, style: dict[str, str]):
+            bg = parse_color(style.get("background") or style.get("background-color"))
+            border = parse_color(style.get("border-color") or style.get("border"))
+            has_border = "border" in style
+            try:
+                has_border = has_border or float(str(style.get("border-width") or "0").replace("px", "").strip() or 0) > 0
+            except ValueError:
+                pass
+            if not bg and has_border:
+                border = border or RGBColor(220, 224, 232)
+            if not has_border:
+                border = None
+            if not bg and not border:
+                return None
+            shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(w), Inches(h))
+            if bg:
+                shape.fill.solid()
+                shape.fill.fore_color.rgb = bg
+            else:
+                shape.fill.background()
+            if border:
+                shape.line.color.rgb = border
+            else:
+                shape.line.color.rgb = bg or RGBColor(220, 224, 232)
+            return shape
+
+        def image_path(src: str | None) -> Path | None:
+            if not src or src.startswith(("http://", "https://", "data:")):
+                return None
+            p = Path(src)
+            candidates = [src_file.parent / p, ws / p]
+            for candidate in candidates:
+                if candidate.exists():
+                    return candidate
+            return None
+
+        def element_box(style: dict[str, str]) -> tuple[float | None, float | None, float | None, float | None]:
+            sw = prs.slide_width / 914400
+            sh = prs.slide_height / 914400
+            return (
+                length_to_inches(style.get("left") or style.get("x"), sw, design_w_px),
+                length_to_inches(style.get("top") or style.get("y"), sh, design_h_px),
+                length_to_inches(style.get("width") or style.get("max-width"), sw, design_w_px),
+                length_to_inches(style.get("height") or style.get("min-height"), sh, design_h_px),
+            )
+
+        def visible_children(el: Tag) -> list[Tag]:
+            return [child for child in el.children if isinstance(child, Tag) and child.name not in ("style", "script", "meta", "link")]
+
+        def render_flow_element(slide, el: Tag, y: float, x: float = 0.75, width: float = 11.85) -> float:
+            style = element_style(el)
+            name = el.name or ""
+            left, top, box_w, box_h = element_box(style)
+            if (style.get("position") == "absolute" or left is not None or top is not None) and (left is not None or top is not None):
+                render_absolute_element(slide, el, left or x, top or y, box_w or width, box_h)
+                return y
+            if name == "img":
+                p = image_path(el.get("src"))
+                if p:
+                    h = box_h or 2.2
+                    slide.shapes.add_picture(str(p), Inches(x), Inches(y), width=Inches(box_w or min(width, 5.5)), height=Inches(h))
+                    return y + h + 0.18
+                return y
+            classes = set(el.get("class") or [])
+            looks_like_card = bool({"card", "panel", "box", "tile"} & classes) or any(k in style for k in ("background", "background-color", "border", "border-color"))
+            children = visible_children(el)
+            if children and name in ("div", "main", "section", "article", "header", "footer", "aside", "nav"):
+                if looks_like_card:
+                    text_len = len(el.get_text(" ", strip=True))
+                    h = box_h or max(1.0, min(4.8, 0.42 * max(text_len // 42 + 1, 2)))
+                    add_card(slide, x, y, box_w or width, h, style)
+                    inner_y = y + 0.18
+                    for child in children:
+                        inner_y = render_flow_element(slide, child, inner_y, x + 0.25, (box_w or width) - 0.5)
+                    return y + max(h, inner_y - y + 0.18) + 0.18
+                for child in children:
+                    y = render_flow_element(slide, child, y, x, width)
+                return y
+            text = el.get_text(" ", strip=True)
+            if not text:
+                for child in visible_children(el):
+                    y = render_flow_element(slide, child, y, x, width)
+                return y
+            if name in ("h1",):
+                add_textbox(slide, text, x, y, width, box_h or 0.85, style, 40, True)
+                return y + (box_h or 0.95)
+            if name in ("h2",):
+                add_textbox(slide, text, x, y, width, box_h or 0.62, style, 30, True)
+                return y + (box_h or 0.74)
+            if name in ("h3",):
+                add_textbox(slide, text, x, y, width, box_h or 0.45, style, 22, True)
+                return y + (box_h or 0.55)
+            if name in ("li",):
+                add_textbox(slide, f"• {text}", x + 0.2, y, width - 0.2, box_h or 0.36, style, 18)
+                return y + (box_h or 0.42)
+            if name in ("ul", "ol"):
+                for li in el.find_all("li", recursive=False):
+                    y = render_flow_element(slide, li, y, x, width)
+                return y
+
+            if looks_like_card:
+                h = box_h or max(1.0, min(3.2, 0.42 * max(len(text) // 42 + 1, 2)))
+                add_card(slide, x, y, box_w or width, h, style)
+                inner_y = y + 0.18
+                if children:
+                    for child in children:
+                        inner_y = render_flow_element(slide, child, inner_y, x + 0.25, (box_w or width) - 0.5)
+                else:
+                    add_textbox(slide, text, x + 0.25, inner_y, (box_w or width) - 0.5, h - 0.3, style, 18)
+                return y + h + 0.18
+
+            add_textbox(slide, text, x, y, width, box_h or 0.42, style, 18)
+            return y + (box_h or 0.5)
+
+        def render_absolute_element(slide, el: Tag, x: float, y: float, w: float, h: float | None):
+            style = element_style(el)
+            name = el.name or ""
+            if name == "img":
+                p = image_path(el.get("src"))
+                if p:
+                    slide.shapes.add_picture(str(p), Inches(x), Inches(y), width=Inches(w), height=Inches(h or 2.0))
+                return
+            if name in ("div", "section", "article", "main"):
+                add_card(slide, x, y, w, h or 1.5, style)
+                children = visible_children(el)
+                if children:
+                    inner_y = y + 0.15
+                    for child in children:
+                        inner_y = render_flow_element(slide, child, inner_y, x + 0.2, max(w - 0.4, 0.5))
+                    return
+            text = el.get_text(" ", strip=True)
+            if text:
+                default = 38 if name == "h1" else 28 if name == "h2" else 18
+                add_textbox(slide, text, x, y, w, h or 0.6, style, default, name in ("h1", "h2", "h3"))
+
+        def chrome_executable() -> str | None:
+            import shutil
+            candidates = [
+                os.environ.get("CHROME_BIN"),
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                shutil.which("google-chrome"),
+                shutil.which("chromium"),
+                shutil.which("chromium-browser"),
+            ]
+            return next((str(path) for path in candidates if path and Path(path).exists()), None)
+
+        async def collect_browser_layout() -> dict[str, Any] | None:
+            import socket
+            import subprocess
+            import tempfile
+            import time
+            import urllib.request
+            import websockets
+
+            chrome = chrome_executable()
+            if not chrome:
+                return None
+
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+
+            profile_dir = tempfile.TemporaryDirectory(prefix="clawith-html-pptx-")
+            proc = subprocess.Popen(
+                [
+                    chrome,
+                    "--headless=new",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--allow-file-access-from-files",
+                    f"--remote-debugging-port={port}",
+                    f"--user-data-dir={profile_dir.name}",
+                    "about:blank",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                base = f"http://127.0.0.1:{port}"
+                deadline = time.time() + 8
+                while time.time() < deadline:
+                    try:
+                        with urllib.request.urlopen(f"{base}/json/version", timeout=0.25) as resp:
+                            json.loads(resp.read().decode("utf-8"))
+                        break
+                    except Exception:
+                        await asyncio.sleep(0.1)
+                else:
+                    return None
+
+                file_url = src_file.resolve().as_uri()
+                req = urllib.request.Request(f"{base}/json/new?{file_url}", method="PUT")
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    target = json.loads(resp.read().decode("utf-8"))
+                ws_url = target.get("webSocketDebuggerUrl")
+                if not ws_url:
+                    return None
+
+                expression = r"""
+(() => {
+  const transparent = new Set(['rgba(0, 0, 0, 0)', 'transparent']);
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  const pageBg = getComputedStyle(document.body || document.documentElement).backgroundColor;
+
+  function isVisible(el) {
+    const cs = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    return cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity || 1) > 0.01 && r.width > 0.5 && r.height > 0.5;
+  }
+
+  function childElements(el) {
+    return Array.from(el.children || []).filter(isVisible);
+  }
+
+  function directText(el) {
+    return Array.from(el.childNodes || [])
+      .filter(n => n.nodeType === Node.TEXT_NODE)
+      .map(n => n.textContent || '')
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function hasPaint(cs) {
+    const bg = cs.backgroundColor;
+    const border = ['Top', 'Right', 'Bottom', 'Left'].some(side => parseFloat(cs[`border${side}Width`] || '0') > 0);
+    return (bg && !transparent.has(bg)) || border;
+  }
+
+  function itemFor(el, rootRect, kind, text) {
+    const cs = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    return {
+      kind,
+      tag: el.tagName.toLowerCase(),
+      text: text || '',
+      src: el.currentSrc || el.getAttribute('src') || '',
+      x: r.left - rootRect.left,
+      y: r.top - rootRect.top,
+      w: r.width,
+      h: r.height,
+      style: {
+        color: cs.color,
+        backgroundColor: cs.backgroundColor,
+        borderColor: cs.borderTopColor,
+        borderWidth: cs.borderTopWidth,
+        borderRadius: cs.borderTopLeftRadius,
+        fontSize: cs.fontSize,
+        fontFamily: cs.fontFamily,
+        fontWeight: cs.fontWeight,
+        textAlign: cs.textAlign,
+        lineHeight: cs.lineHeight,
+        opacity: cs.opacity,
+      },
+    };
+  }
+
+  function collectRoot(root) {
+    const rootRectRaw = root === document.body
+      ? { left: 0, top: 0, width: viewport.width, height: viewport.height }
+      : root.getBoundingClientRect();
+      const rootRect = {
+        left: rootRectRaw.left || 0,
+        top: rootRectRaw.top || 0,
+        width: rootRectRaw.width || viewport.width,
+        height: rootRectRaw.height || viewport.height,
+    };
+    const items = [];
+    const rootStyle = getComputedStyle(root);
+
+    function walk(el) {
+      if (!isVisible(el)) return;
+      const cs = getComputedStyle(el);
+      const children = childElements(el);
+      const tag = el.tagName.toLowerCase();
+      const text = directText(el);
+
+      if (el !== root && hasPaint(cs)) {
+        items.push(itemFor(el, rootRect, 'shape'));
+      }
+      if (tag === 'img') {
+        items.push(itemFor(el, rootRect, 'image'));
+        return;
+      }
+      if (text || ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'span', 'strong', 'em', 'button', 'a'].includes(tag)) {
+        const content = text || (children.length ? '' : (el.innerText || '').replace(/\s+/g, ' ').trim());
+        if (content) items.push(itemFor(el, rootRect, 'text', content));
+      }
+      children.forEach(walk);
+    }
+
+    childElements(root).forEach(walk);
+    return {
+      x: rootRect.left,
+      y: rootRect.top,
+      width: rootRect.width,
+      height: rootRect.height,
+      backgroundColor: rootStyle.backgroundColor && !transparent.has(rootStyle.backgroundColor) ? rootStyle.backgroundColor : pageBg,
+      items,
+    };
+  }
+
+  let roots = Array.from(document.querySelectorAll('.slide,[data-slide]')).filter(isVisible);
+  if (!roots.length) {
+    const body = document.body || document.documentElement;
+    roots = Array.from(body.children || [])
+      .filter(el => isVisible(el) && !['script', 'style', 'link', 'meta'].includes(el.tagName.toLowerCase()))
+      .filter(el => el.getBoundingClientRect().height >= 24);
+    if (roots.length === 1) {
+      const only = roots[0];
+      const onlyRect = only.getBoundingClientRect();
+      const children = Array.from(only.children || [])
+        .filter(el => isVisible(el) && !['script', 'style', 'link', 'meta'].includes(el.tagName.toLowerCase()))
+        .filter(el => el.getBoundingClientRect().height >= 24);
+      if (onlyRect.height > viewport.height * 1.2 && children.length > 1) {
+        roots = children;
+      }
+    }
+  }
+  if (!roots.length) roots = [document.body || document.documentElement];
+  return { viewport, slides: roots.map(collectRoot) };
+})()
+"""
+
+                msg_id = 0
+
+                async with websockets.connect(ws_url, max_size=20_000_000) as ws_conn:
+                    async def send(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+                        nonlocal msg_id
+                        msg_id += 1
+                        await ws_conn.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
+                        while True:
+                            raw = await asyncio.wait_for(ws_conn.recv(), timeout=8)
+                            message = json.loads(raw)
+                            if message.get("id") == msg_id:
+                                return message
+
+                    await send("Page.enable")
+                    await send("Runtime.enable")
+                    await send("Emulation.setDeviceMetricsOverride", {
+                        "width": design_w_px,
+                        "height": design_h_px,
+                        "deviceScaleFactor": 1,
+                        "mobile": False,
+                    })
+                    await send("Page.navigate", {"url": file_url})
+                    load_deadline = time.time() + 8
+                    while time.time() < load_deadline:
+                        raw = await asyncio.wait_for(ws_conn.recv(), timeout=8)
+                        message = json.loads(raw)
+                        if message.get("method") == "Page.loadEventFired":
+                            break
+                    await asyncio.sleep(0.25)
+                    result = await send("Runtime.evaluate", {
+                        "expression": expression,
+                        "returnByValue": True,
+                        "awaitPromise": True,
+                    })
+                    layout = result.get("result", {}).get("result", {}).get("value")
+                    if layout and render_mode in ("visual", "screenshot", "image", "hybrid"):
+                        import base64
+                        screenshots: list[str | None] = []
+                        for idx, slide_data in enumerate(layout.get("slides") or []):
+                            clip_w = max(1.0, float(slide_data.get("width") or design_w_px))
+                            clip_h = max(1.0, float(slide_data.get("height") or design_h_px))
+                            screenshot_result = await send("Page.captureScreenshot", {
+                                "format": "png",
+                                "captureBeyondViewport": True,
+                                "fromSurface": True,
+                                "clip": {
+                                    "x": max(0.0, float(slide_data.get("x") or 0)),
+                                    "y": max(0.0, float(slide_data.get("y") or 0)),
+                                    "width": clip_w,
+                                    "height": clip_h,
+                                    "scale": 1,
+                                },
+                            })
+                            data = screenshot_result.get("result", {}).get("data")
+                            if not data:
+                                screenshots.append(None)
+                                continue
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=f"-slide-{idx + 1}.png") as image_tmp:
+                                image_file = Path(image_tmp.name)
+                            image_file.write_bytes(base64.b64decode(data))
+                            screenshots.append(str(image_file))
+                        layout["screenshots"] = screenshots
+                    return layout
+            except Exception as layout_exc:
+                logger.warning(f"Browser layout extraction failed, falling back to DOM flow conversion: {layout_exc}")
+                return None
+            finally:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                profile_dir.cleanup()
+
+        def render_browser_layout(layout: dict[str, Any]) -> bool:
+            slides = layout.get("slides") or []
+            if not slides:
+                return False
+            slide_w = prs.slide_width / 914400
+            slide_h = prs.slide_height / 914400
+
+            for slide_data in slides:
+                root_w = float(slide_data.get("width") or design_w_px or 1280)
+                root_h = float(slide_data.get("height") or design_h_px or 720)
+                sx = slide_w / root_w
+                sy = slide_h / root_h
+                slide = prs.slides.add_slide(blank_layout)
+                add_background(slide, {"background-color": slide_data.get("backgroundColor") or ""})
+
+                for item in slide_data.get("items") or []:
+                    style = item.get("style") or {}
+                    x = max(0.0, float(item.get("x") or 0) * sx)
+                    y = max(0.0, float(item.get("y") or 0) * sy)
+                    w = max(0.05, float(item.get("w") or 1) * sx)
+                    h = max(0.05, float(item.get("h") or 1) * sy)
+                    ppt_style = {
+                        "background-color": style.get("backgroundColor") or "",
+                        "border-color": style.get("borderColor") or "",
+                        "border-width": style.get("borderWidth") or "",
+                        "color": style.get("color") or "",
+                        "font-size": style.get("fontSize") or "",
+                        "font-family": style.get("fontFamily") or "",
+                        "font-weight": style.get("fontWeight") or "",
+                        "text-align": style.get("textAlign") or "",
+                    }
+                    kind = item.get("kind")
+                    if kind == "shape":
+                        add_card(slide, x, y, w, h, ppt_style)
+                    elif kind == "image":
+                        src = item.get("src") or ""
+                        p = image_path(src)
+                        if p:
+                            slide.shapes.add_picture(str(p), Inches(x), Inches(y), width=Inches(w), height=Inches(h))
+                    elif kind == "text":
+                        text = str(item.get("text") or "").strip()
+                        if not text:
+                            continue
+                        tag = item.get("tag") or ""
+                        default = 38 if tag == "h1" else 28 if tag == "h2" else 22 if tag == "h3" else 18
+                        add_textbox(slide, text, x, y, w, h, ppt_style, default, tag in ("h1", "h2", "h3", "strong"))
+            return True
+
+        def render_browser_screenshots(layout: dict[str, Any]) -> bool:
+            slides = layout.get("slides") or []
+            screenshots = layout.get("screenshots") or []
+            if not slides or not screenshots:
+                return False
+            slide_w = prs.slide_width / 914400
+            slide_h = prs.slide_height / 914400
+
+            for slide_data, screenshot in zip(slides, screenshots):
+                if not screenshot or not Path(screenshot).exists():
+                    return False
+                slide = prs.slides.add_slide(blank_layout)
+                add_background(slide, {"background-color": slide_data.get("backgroundColor") or ""})
+                root_w = max(1.0, float(slide_data.get("width") or design_w_px))
+                root_h = max(1.0, float(slide_data.get("height") or design_h_px))
+                scale = min(slide_w / root_w, slide_h / root_h)
+                image_w = root_w * scale
+                image_h = root_h * scale
+                left = (slide_w - image_w) / 2
+                top = (slide_h - image_h) / 2
+                slide.shapes.add_picture(
+                    screenshot,
+                    Inches(left),
+                    Inches(top),
+                    width=Inches(image_w),
+                    height=Inches(image_h),
+                )
+            return True
+
+        browser_layout = await collect_browser_layout()
+        if browser_layout and render_mode in ("visual", "screenshot", "image", "hybrid") and render_browser_screenshots(browser_layout):
+            tgt_file.parent.mkdir(parents=True, exist_ok=True)
+            prs.save(str(tgt_file))
+            return (
+                f"✅ Successfully converted HTML to high-fidelity PPTX screenshots: {target_path}\n"
+                "Note: visual style is preserved by rendering each slide from Chrome. Text and layout are not directly editable; "
+                "use render_mode='editable' when editable PPT elements are more important than visual fidelity."
+            )
+
+        if browser_layout and render_browser_layout(browser_layout):
+            tgt_file.parent.mkdir(parents=True, exist_ok=True)
+            prs.save(str(tgt_file))
+            return (
+                f"✅ Successfully converted HTML to editable PPTX with browser layout: {target_path}\n"
+                "Note: positions, sizes, colors, typography, cards, lists, and local images are sampled from a real browser. "
+                "Effects such as shadows, filters, gradients, and complex text wrapping may still differ from HTML."
+            )
+
+        body = soup.body or soup
+        slide_nodes = soup.select(".slide")
+        if not slide_nodes:
+            slide_nodes = [node for node in body.find_all(["section", "article"], recursive=False)]
+        if not slide_nodes:
+            slide_nodes = [body]
+
+        for slide_node in slide_nodes:
+            if not isinstance(slide_node, Tag):
+                continue
+            slide = prs.slides.add_slide(blank_layout)
+            add_background(slide, element_style(slide_node) or element_style(body))
+            current_y = 0.65
+            children = visible_children(slide_node)
+            if not children and slide_node is not body:
+                text = slide_node.get_text(" ", strip=True)
+                if text:
+                    add_textbox(slide, text, 0.85, current_y, 11.6, 5.8, element_style(slide_node), 24)
+                continue
+            for child in children:
+                current_y = render_flow_element(slide, child, current_y)
+                if current_y > 7.0:
+                    break
                     
         tgt_file.parent.mkdir(parents=True, exist_ok=True)
         prs.save(str(tgt_file))
-        return f"✅ Successfully converted HTML to PPTX: {target_path}"
+        return (
+            f"✅ Successfully converted HTML to editable PPTX: {target_path}\n"
+            "Note: common typography, colors, cards, lists, images, and simple absolute positioning are preserved; "
+            "complex CSS such as flex/grid effects, shadows, filters, and animations may still need manual adjustment."
+        )
     except Exception as e:
         logger.exception(f"Convert HTML to PPTX failed: {e}")
         return f"❌ Conversion failed: {e}"
@@ -4369,9 +5406,12 @@ async def _convert_markdown_to_pdf(agent_id: uuid.UUID, ws: Path, arguments: dic
 
 
 def _write_file(ws: Path, rel_path: str, content: str, tenant_id: str | None = None) -> str:
-    # Protect tasks.json from direct writes
+    # Protect legacy DB-backed tasks.json from direct writes
     if rel_path.strip("/") == "tasks.json":
-        return "tasks.json is read-only. Use manage_tasks tool to manage tasks."
+        return "tasks.json is a legacy read-only snapshot. Use the task APIs/UI to manage tasks."
+
+    if _is_enterprise_info_path(rel_path):
+        return "enterprise_info is shared company context and is read-only for agents. Ask an admin to update it."
 
     # Handle enterprise_info/ as shared directory (tenant-scoped)
     if rel_path and rel_path.startswith("enterprise_info"):
@@ -4402,6 +5442,8 @@ def _delete_file(ws: Path, rel_path: str) -> str:
     protected = {"tasks.json", "soul.md"}
     if rel_path.strip("/") in protected:
         return f"{rel_path} cannot be deleted (protected)"
+    if _is_enterprise_info_path(rel_path):
+        return "enterprise_info is shared company context and is read-only for agents. Ask an admin to update it."
 
     file_path = (ws / rel_path).resolve()
     if not str(file_path).startswith(str(ws.resolve())):
@@ -4435,6 +5477,9 @@ def _edit_file(ws: Path, rel_path: str, old_string: str, new_string: str, replac
     Returns:
         Success message or error
     """
+    if _is_enterprise_info_path(rel_path):
+        return "enterprise_info is shared company context and is read-only for agents. Ask an admin to update it."
+
     # Handle enterprise_info/ as shared directory (tenant-scoped)
     if rel_path and rel_path.startswith("enterprise_info"):
         if tenant_id:
@@ -6168,9 +7213,15 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
 
             max_tool_rounds = target.max_tool_rounds or 50
             target_reply = ""
-            _a2a_accumulated_tokens = 0
+            _a2a_accumulated_usage = None
 
-            from app.services.token_tracker import record_token_usage, extract_usage_tokens, estimate_tokens_from_chars
+            from app.services.token_tracker import (
+                TokenUsage,
+                record_token_usage,
+                extract_token_usage,
+                estimate_token_usage_from_chars,
+            )
+            _a2a_accumulated_usage = TokenUsage()
 
             llm_client = create_llm_client(
                 provider=target_model.provider,
@@ -6224,12 +7275,12 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                         raise RuntimeError("A2A LLM response is unexpectedly empty after retries")
 
                     # Track tokens from API response
-                    real_tokens = extract_usage_tokens(response.usage)
-                    if real_tokens:
-                        _a2a_accumulated_tokens += real_tokens
+                    usage = extract_token_usage(response.usage)
+                    if usage:
+                        _a2a_accumulated_usage.add(usage)
                     else:
                         round_chars = sum(len(m.content or '') for m in full_msgs if isinstance(m.content, str))
-                        _a2a_accumulated_tokens += estimate_tokens_from_chars(round_chars)
+                        _a2a_accumulated_usage.add(estimate_token_usage_from_chars(round_chars))
 
                     # Check for tool calls
                     if response.tool_calls:
@@ -6304,8 +7355,8 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 await llm_client.close()
 
             # Record accumulated A2A tokens for the target agent
-            if _a2a_accumulated_tokens > 0:
-                await record_token_usage(target.id, _a2a_accumulated_tokens)
+            if _a2a_accumulated_usage and _a2a_accumulated_usage.total_tokens > 0:
+                await record_token_usage(target.id, _a2a_accumulated_usage)
 
             if not target_reply:
                 return f"⚠️ {target.name} did not respond (LLM returned empty)"
@@ -9819,16 +10870,46 @@ async def _list_published_pages(agent_id: uuid.UUID) -> str:
 
 # ─── AgentBay Tool Handlers ─────────────────────────────────────
 
+def _agentbay_normalize_image_bytes(data) -> bytes | None:
+    """Normalize AgentBay image payloads to raw bytes."""
+    import base64 as _base64
+
+    if isinstance(data, str):
+        if data.startswith("data:image"):
+            data = data.split(",", 1)[1]
+        return _base64.b64decode(data)
+    if isinstance(data, bytes):
+        return data
+    return None
+
+
+def _agentbay_save_image_to_workspace(
+    *,
+    agent_id: uuid.UUID,
+    ws: Path,
+    raw_bytes: bytes,
+    prefix: str,
+    label: str,
+) -> str:
+    """Save an explicitly requested screenshot under workspace/screenshots/."""
+    import time as _time
+
+    rel_path = f"workspace/screenshots/{prefix}-{int(_time.time())}.png"
+    screenshot_path = ws / rel_path
+    screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+    screenshot_path.write_bytes(raw_bytes)
+    logger.info(f"[AgentBay] Explicit screenshot saved to workspace: {rel_path}")
+    return (
+        f"Screenshot saved to `{rel_path}`.\n"
+        f"![{label}](/api/agents/{agent_id}/files/download?path={rel_path})"
+    )
+
 async def _agentbay_browser_navigate(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
     """AgentBay browser navigation.
 
-    After navigating, always captures a screenshot.  Whether that screenshot is
-    stored to disk or kept only in memory depends on save_to_workspace:
-      - False (default): bytes are held in the process-level memory cache;
-        the returned sentinel [ImageID: ...] is consumed by vision_inject.py
-        in the same request cycle and then discarded — zero disk writes.
-      - True: screenshot is written to workspace/ so the user can see it in
-        their file manager, and a Markdown link is included in the return value.
+    After navigating, always captures an internal screenshot for LLM vision.
+    The screenshot is held in memory and consumed by vision_inject.py in the
+    same request cycle; it is not persisted to the user's workspace.
     """
     if not agent_id:
         return "❌ AgentBay 工具需要 agent 上下文"
@@ -9837,7 +10918,6 @@ async def _agentbay_browser_navigate(agent_id: Optional[uuid.UUID], ws: Path, ar
 
     url = arguments.get("url", "")
     wait_for = arguments.get("wait_for", "")
-    save_to_workspace = arguments.get("save_to_workspace", False)
 
     try:
         _session_id = arguments.pop("_session_id", "")
@@ -9856,41 +10936,17 @@ async def _agentbay_browser_navigate(agent_id: Optional[uuid.UUID], ws: Path, ar
 
         screenshot_data = result.get("screenshot")
         if screenshot_data:
-            import base64 as _base64
-            # Normalise to raw bytes regardless of whether it's a data URL or plain b64
-            if isinstance(screenshot_data, str):
-                if screenshot_data.startswith("data:image"):
-                    screenshot_data = screenshot_data.split(",", 1)[1]
-                raw_bytes = _base64.b64decode(screenshot_data)
-            elif isinstance(screenshot_data, bytes):
-                raw_bytes = screenshot_data
-            else:
-                raw_bytes = None
+            raw_bytes = _agentbay_normalize_image_bytes(screenshot_data)
 
             if raw_bytes:
-                if save_to_workspace:
-                    # Persist to workspace/ so the user can see the file
-                    import time as _time
-                    rel_path = f"workspace/screenshot_{int(_time.time())}.png"
-                    screenshot_path = ws / rel_path
-                    screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-                    screenshot_path.write_bytes(raw_bytes)
-                    parts.append(
-                        f"截图已保存至 `{rel_path}`。\n"
-                        f"![Browser Navigation Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})\n"
-                        f"CRITICAL: Do NOT call 'send_channel_file' or 'upload_image'. Just print the Markdown above exactly as shown."
-                    )
-                    logger.info(f"[AgentBay] Browser navigate screenshot saved to {rel_path}")
-                else:
-                    # Store in memory only — vision_inject.py will consume it
-                    from app.services.vision_inject import store_temp_screenshot
-                    img_id = store_temp_screenshot(raw_bytes)
-                    parts.append(
-                        f"Internal screenshot captured for analysis. [ImageID: {img_id}]\n"
-                        f"NOTE: This screenshot is for YOUR eyes only (LLM vision). The user CANNOT see it. "
-                        f"If the user asked to SEE a screenshot, call this tool again with save_to_workspace=true."
-                    )
-                    logger.info(f"[AgentBay] Browser navigate screenshot stored in memory (id={img_id})")
+                # Store in memory only — vision_inject.py will consume it.
+                from app.services.vision_inject import store_temp_screenshot
+                img_id = store_temp_screenshot(raw_bytes)
+                parts.append(
+                    f"Internal screenshot captured for analysis. [ImageID: {img_id}]\n"
+                    f"NOTE: This screenshot is for LLM vision only and is not saved to the user's workspace."
+                )
+                logger.info(f"[AgentBay] Browser navigate screenshot stored in memory (id={img_id})")
 
         return "\n\n".join(parts)
 
@@ -9907,17 +10963,14 @@ async def _agentbay_browser_screenshot(agent_id: Optional[uuid.UUID], ws: Path, 
     Correct way to observe the result of a click, type, or form submit — never
     call browser_navigate again just to screenshot, that refreshes the page.
 
-    By default (save_to_workspace=False) the image is held in the process-level
-    memory cache and consumed once by the LLM vision pipeline — no disk write,
-    nothing shown in the user's file manager or chat history.
-    Set save_to_workspace=True to persist and display the image.
+    The image is held in the process-level memory cache and consumed once by
+    the LLM vision pipeline — no disk write, nothing shown in the user's file
+    manager or chat history.
     """
     if not agent_id:
         return "❌ AgentBay 工具需要 agent 上下文"
 
     from app.services.agentbay_client import get_agentbay_client_for_agent
-
-    save_to_workspace = arguments.get("save_to_workspace", False)
 
     try:
         _session_id = arguments.pop("_session_id", "")
@@ -9928,46 +10981,52 @@ async def _agentbay_browser_screenshot(agent_id: Optional[uuid.UUID], ws: Path, 
         if not screenshot_data:
             return "❌ 截图失败：未返回图像数据"
 
-        import base64 as _base64
-        # Normalise to raw bytes
-        if isinstance(screenshot_data, str):
-            if screenshot_data.startswith("data:image"):
-                screenshot_data = screenshot_data.split(",", 1)[1]
-            raw_bytes = _base64.b64decode(screenshot_data)
-        elif isinstance(screenshot_data, bytes):
-            raw_bytes = screenshot_data
-        else:
+        raw_bytes = _agentbay_normalize_image_bytes(screenshot_data)
+        if raw_bytes is None:
             return "❌ 截图失败：未知数据格式"
 
-        if save_to_workspace:
-            # Persist to workspace/ so the user can see the file
-            import time as _time
-            rel_path = f"workspace/screenshot_{int(_time.time())}.png"
-            screenshot_path = ws / rel_path
-            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-            screenshot_path.write_bytes(raw_bytes)
-            logger.info(f"[AgentBay] Browser screenshot saved to workspace: {rel_path}")
-            return (
-                f"✅ 截图已保存至 `{rel_path}`。\n"
-                f"![Browser Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})\n"
-                f"CRITICAL: Do NOT call 'send_channel_file' or 'upload_image'. Just print the Markdown above exactly as shown."
-            )
-        else:
-            # Store in memory only — vision_inject.py will consume it for LLM vision
-            from app.services.vision_inject import store_temp_screenshot
-            img_id = store_temp_screenshot(raw_bytes)
-            logger.info(f"[AgentBay] Browser screenshot stored in memory (id={img_id})")
-            return (
-                f"Internal screenshot captured for analysis. [ImageID: {img_id}]\n"
-                f"NOTE: This screenshot is for YOUR eyes only (LLM vision). The user CANNOT see it. "
-                f"If the user asked to SEE a screenshot, call this tool again with save_to_workspace=true."
-            )
+        # Store in memory only — vision_inject.py will consume it for LLM vision
+        from app.services.vision_inject import store_temp_screenshot
+        img_id = store_temp_screenshot(raw_bytes)
+        logger.info(f"[AgentBay] Browser screenshot stored in memory (id={img_id})")
+        return (
+            f"Internal screenshot captured for analysis. [ImageID: {img_id}]\n"
+            f"NOTE: This screenshot is for LLM vision only and is not saved to the user's workspace."
+        )
 
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
         logger.exception(f"[AgentBay] Browser screenshot failed for agent {agent_id}")
         return f"❌ 截图失败: {str(e)[:200]}"
+
+
+async def _agentbay_browser_save_screenshot(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """Save the current AgentBay browser screenshot to workspace/screenshots/."""
+    if not agent_id:
+        return "❌ AgentBay 工具需要 agent 上下文"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    try:
+        _session_id = arguments.pop("_session_id", "")
+        client = await get_agentbay_client_for_agent(agent_id, "browser", session_id=_session_id)
+        result = await client.browser_screenshot()
+        raw_bytes = _agentbay_normalize_image_bytes(result.get("screenshot"))
+        if raw_bytes is None:
+            return "❌ 截图保存失败：未返回可保存的图像数据"
+        return _agentbay_save_image_to_workspace(
+            agent_id=agent_id,
+            ws=ws,
+            raw_bytes=raw_bytes,
+            prefix="browser-screenshot",
+            label="Browser Screenshot",
+        )
+    except RuntimeError as e:
+        return f"❌ {str(e)}"
+    except Exception as e:
+        logger.exception(f"[AgentBay] Browser save screenshot failed for agent {agent_id}")
+        return f"❌ 截图保存失败: {str(e)[:200]}"
 
 
 async def _agentbay_browser_click(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
@@ -10378,50 +11437,215 @@ async def _agentbay_command_exec(agent_id: Optional[uuid.UUID], ws: Path, argume
 
 # ─── AgentBay: Computer Use Handlers ────────────────────────────────────
 
-def _save_screenshot_to_workspace(agent_id: uuid.UUID, ws: Path, data) -> str:
-    """Save screenshot data to workspace and return markdown image link.
+def _agentbay_extract_screen_dimensions(screen_data) -> tuple[int | None, int | None, str]:
+    """Return width/height/dpi text from AgentBay get_screen_size payload."""
+    if not isinstance(screen_data, dict):
+        return None, None, ""
+    width = screen_data.get("width")
+    height = screen_data.get("height")
+    dpi = screen_data.get("dpiScalingFactor")
+    try:
+        width = int(width) if width is not None else None
+        height = int(height) if height is not None else None
+    except (TypeError, ValueError):
+        width, height = None, None
+    parts = []
+    if width and height:
+        parts.append(f"width={width}, height={height}")
+    if dpi is not None:
+        parts.append(f"dpiScalingFactor={dpi}")
+    return width, height, ", ".join(parts)
 
-    Common helper for computer_screenshot and browser screenshot data.
-    """
-    import time
-    import base64
 
-    rel_path = f"workspace/desktop-screenshot-{int(time.time())}.png"
-    screenshot_path = ws / rel_path
-    screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+async def _agentbay_get_screen_metadata(client) -> tuple[int | None, int | None, str]:
+    try:
+        size_result = await client.computer_get_screen_size()
+        if size_result.get("success"):
+            return _agentbay_extract_screen_dimensions(size_result.get("data"))
+    except Exception as e:
+        logger.debug(f"[AgentBay] Could not fetch computer screen size: {e}")
+    return None, None, ""
 
-    # Handle various data formats from the SDK
-    if isinstance(data, str):
-        if data.startswith("data:image"):
-            data = data.split(",", 1)[1]
-        raw_bytes = base64.b64decode(data)
-    elif isinstance(data, bytes):
-        raw_bytes = data
-    else:
-        return ""
 
-    screenshot_path.write_bytes(raw_bytes)
-    return (
-        f"Screenshot saved to `{rel_path}`.\n\n"
-        f"![Desktop Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})\n"
-        f"CRITICAL: Do NOT call 'send_channel_file' or 'upload_image'. Just print the Markdown above exactly as shown."
-    )
+def _agentbay_image_dimensions(raw_bytes: bytes) -> tuple[int | None, int | None]:
+    try:
+        from io import BytesIO
+        from PIL import Image
+
+        with Image.open(BytesIO(raw_bytes)) as img:
+            return img.width, img.height
+    except Exception:
+        return None, None
+
+
+def _agentbay_crop_image_bytes(
+    raw_bytes: bytes,
+    *,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+) -> tuple[bytes, tuple[int, int, int, int], int] | None:
+    try:
+        from io import BytesIO
+        from PIL import Image
+
+        with Image.open(BytesIO(raw_bytes)) as img:
+            img_width, img_height = img.width, img.height
+            left = max(0, min(int(x), img_width - 1))
+            top = max(0, min(int(y), img_height - 1))
+            right = max(left + 1, min(left + int(width), img_width))
+            bottom = max(top + 1, min(top + int(height), img_height))
+            cropped = img.crop((left, top, right, bottom))
+
+            # Enlarge precision crops before vision injection so small controls
+            # occupy more pixels without changing the absolute coordinate labels.
+            max_side = max(cropped.width, cropped.height)
+            scale = 1
+            if max_side <= 260:
+                scale = 3
+            elif max_side <= 520:
+                scale = 2
+            if scale > 1:
+                cropped = cropped.resize((cropped.width * scale, cropped.height * scale), Image.Resampling.LANCZOS)
+
+            buf = BytesIO()
+            cropped.save(buf, format="PNG")
+            return buf.getvalue(), (left, top, right - left, bottom - top), scale
+    except Exception as e:
+        logger.debug(f"[AgentBay] Could not crop desktop screenshot: {e}")
+        return None
+
+
+def _agentbay_desktop_coordinate_note(
+    screen_note: str,
+    image_width: int | None = None,
+    image_height: int | None = None,
+    crop: tuple[int, int, int, int] | None = None,
+) -> str:
+    parts = []
+    if screen_note:
+        parts.append(f"Cloud Desktop coordinate system for mouse tools: {screen_note}.")
+    if image_width and image_height:
+        parts.append(f"Latest screenshot pixel size: width={image_width}, height={image_height}.")
+    if crop:
+        x, y, width, height = crop
+        parts.append(
+            f"Precision crop shown to vision: absolute origin=({x}, {y}), size={width}x{height}. "
+            "Grid labels in the crop are absolute Cloud Desktop coordinates, not crop-local coordinates."
+        )
+    if parts:
+        parts.append(
+            "The injected analysis image includes a coordinate grid; use the grid labels to choose the center of the target. "
+            "For tiny controls under about 30px, take a focused screenshot around that area before clicking. "
+            "Use absolute desktop pixels from the top-left corner (0, 0); do not use the size of the right-side preview panel."
+        )
+    return "\n".join(parts)
+
+
+def _agentbay_normalize_text(value) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _agentbay_app_field(app: dict, *keys: str) -> str:
+    for key in keys:
+        value = app.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _agentbay_format_apps(apps: list, limit: int = 40) -> str:
+    import json
+
+    if not apps:
+        return "[]"
+    compact_apps = []
+    for app in apps[:limit]:
+        if isinstance(app, dict):
+            compact_apps.append(
+                {
+                    key: app.get(key)
+                    for key in ("name", "start_cmd", "startCmd", "work_directory", "workDirectory", "stop_cmd", "stopCmd")
+                    if app.get(key)
+                }
+            )
+        else:
+            compact_apps.append(str(app))
+    rendered = json.dumps(compact_apps, ensure_ascii=False, indent=2)
+    if len(apps) > limit:
+        rendered += f"\n... {len(apps) - limit} more app(s) omitted"
+    return rendered[:5000]
+
+
+def _agentbay_find_installed_app_match(query: str, apps: list) -> tuple[dict | None, float]:
+    from difflib import SequenceMatcher
+
+    query_norm = _agentbay_normalize_text(query.split()[0] if query else query)
+    if not query_norm:
+        return None, 0.0
+
+    best_app = None
+    best_score = 0.0
+    for app in apps:
+        if not isinstance(app, dict):
+            continue
+        fields = [
+            _agentbay_app_field(app, "name"),
+            _agentbay_app_field(app, "start_cmd", "startCmd"),
+            _agentbay_app_field(app, "work_directory", "workDirectory"),
+        ]
+        for field in fields:
+            field_norm = _agentbay_normalize_text(field)
+            if not field_norm:
+                continue
+            if query_norm == field_norm:
+                score = 1.0
+            elif query_norm in field_norm or field_norm in query_norm:
+                score = 0.9
+            else:
+                score = SequenceMatcher(None, query_norm, field_norm).ratio()
+            if score > best_score:
+                best_app, best_score = app, score
+
+    return best_app, best_score
+
+
+def _agentbay_uncertain_start_error(error_message: str) -> bool:
+    text = (error_message or "").lower()
+    return "may have launched" in text or "no processes found" in text
+
+
+async def _agentbay_visible_apps_note(client) -> str:
+    try:
+        visible = await client.computer_list_visible_apps()
+        if visible.get("success"):
+            apps = visible.get("apps", [])
+            return f"Visible applications after the launch attempt ({len(apps)}):\n{_agentbay_format_apps(apps, limit=20)}"
+        return f"Could not verify visible applications: {visible.get('error_message', 'Unknown error')}"
+    except Exception as e:
+        logger.debug(f"[AgentBay] Could not list visible apps after start_app: {e}")
+        return f"Could not verify visible applications: {str(e)[:200]}"
 
 
 async def _agentbay_computer_screenshot(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
     """Take a screenshot of the AgentBay cloud desktop.
 
-    By default (save_to_workspace=False) the image is held in the process-level
-    memory cache for LLM vision analysis only — no disk write, nothing shown in
-    the user's file manager or chat history.
-    Set save_to_workspace=True to persist and display the image.
+    The image is held in the process-level memory cache for LLM vision analysis
+    only — no disk write, nothing shown in the user's file manager or chat
+    history.
     """
     if not agent_id:
         return "AgentBay tools require agent context"
 
     from app.services.agentbay_client import get_agentbay_client_for_agent
 
-    save_to_workspace = arguments.get("save_to_workspace", False)
+    focus_x = arguments.get("focus_x")
+    focus_y = arguments.get("focus_y")
+    focus_width = arguments.get("focus_width")
+    focus_height = arguments.get("focus_height")
 
     try:
         _session_id = arguments.pop("_session_id", "")
@@ -10433,46 +11657,123 @@ async def _agentbay_computer_screenshot(agent_id: Optional[uuid.UUID], ws: Path,
 
         raw_data = result["data"]
 
-        # Normalise to raw bytes regardless of SDK return format
-        import base64 as _base64
-        if isinstance(raw_data, str):
-            if raw_data.startswith("data:image"):
-                raw_data = raw_data.split(",", 1)[1]
-            raw_bytes = _base64.b64decode(raw_data)
-        elif isinstance(raw_data, bytes):
-            raw_bytes = raw_data
-        else:
+        raw_bytes = _agentbay_normalize_image_bytes(raw_data)
+        if raw_bytes is None:
             return "Screenshot captured but data format is unrecognised."
 
-        if save_to_workspace:
-            # Persist to workspace/ for user visibility
-            import time as _time
-            rel_path = f"workspace/desktop-screenshot-{int(_time.time())}.png"
-            screenshot_path = ws / rel_path
-            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-            screenshot_path.write_bytes(raw_bytes)
-            logger.info(f"[AgentBay] Desktop screenshot saved to workspace: {rel_path}")
-            return (
-                f"Desktop screenshot saved to `{rel_path}`.\n"
-                f"![Desktop Screenshot](/api/agents/{agent_id}/files/download?path={rel_path})\n"
-                f"CRITICAL: Do NOT call 'send_channel_file' or 'upload_image'. Just print the Markdown above exactly as shown."
-            )
-        else:
-            # Store in memory only — vision_inject.py will consume it for LLM vision
-            from app.services.vision_inject import store_temp_screenshot
-            img_id = store_temp_screenshot(raw_bytes)
-            logger.info(f"[AgentBay] Desktop screenshot stored in memory (id={img_id})")
-            return (
-                f"Internal desktop screenshot captured for analysis. [ImageID: {img_id}]\n"
-                f"NOTE: This screenshot is for YOUR eyes only (LLM vision). The user CANNOT see it. "
-                f"If the user asked to SEE a screenshot, call this tool again with save_to_workspace=true."
-            )
+        crop_bounds: tuple[int, int, int, int] | None = None
+        crop_scale = 1
+        analysis_bytes = raw_bytes
+        if (
+            focus_x is not None
+            and focus_y is not None
+            and focus_width is not None
+            and focus_height is not None
+        ):
+            try:
+                crop_result = _agentbay_crop_image_bytes(
+                    raw_bytes,
+                    x=int(round(float(focus_x))),
+                    y=int(round(float(focus_y))),
+                    width=int(round(float(focus_width))),
+                    height=int(round(float(focus_height))),
+                )
+                if crop_result:
+                    analysis_bytes, crop_bounds, crop_scale = crop_result
+            except (TypeError, ValueError):
+                crop_bounds = None
+
+        # Store in memory only — vision_inject.py will consume it for LLM vision
+        from app.services.vision_inject import store_temp_screenshot
+        grid_options = {}
+        if crop_bounds:
+            crop_x, crop_y, crop_width, crop_height = crop_bounds
+            grid_options = {
+                "origin_x": crop_x,
+                "origin_y": crop_y,
+                "minor_step": 10,
+                "major_step": 50,
+                "pixel_scale": crop_scale,
+            }
+        img_id = store_temp_screenshot(analysis_bytes, grid_options=grid_options)
+        logger.info(f"[AgentBay] Desktop screenshot stored in memory (id={img_id})")
+        screen_width, screen_height, screen_note = await _agentbay_get_screen_metadata(client)
+        image_width, image_height = _agentbay_image_dimensions(raw_bytes)
+        coordinate_note = _agentbay_desktop_coordinate_note(
+            screen_note,
+            image_width or screen_width,
+            image_height or screen_height,
+            crop=crop_bounds,
+        )
+        return (
+            f"Internal desktop screenshot captured for analysis. [ImageID: {img_id}]\n"
+            f"{coordinate_note}\n"
+            f"NOTE: This screenshot is for LLM vision only and is not saved to the user's workspace."
+        )
 
     except RuntimeError as e:
         return f"{str(e)}. Please configure AgentBay in Agent settings."
     except Exception as e:
         logger.exception(f"[AgentBay] Computer screenshot failed for agent {agent_id}")
         return f"Desktop screenshot failed: {str(e)[:200]}"
+
+
+async def _agentbay_computer_save_screenshot(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """Save the current AgentBay cloud desktop screenshot to workspace/screenshots/."""
+    if not agent_id:
+        return "AgentBay tools require agent context"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    try:
+        _session_id = arguments.pop("_session_id", "")
+        client = await get_agentbay_client_for_agent(agent_id, "computer", session_id=_session_id)
+        result = await client.computer_screenshot()
+        if not (result.get("success") and result.get("data")):
+            return f"Screenshot save failed: {result.get('error_message', 'Unknown error')}"
+        raw_bytes = _agentbay_normalize_image_bytes(result.get("data"))
+        if raw_bytes is None:
+            return "Screenshot save failed: captured data format is unrecognised."
+        screen_width, screen_height, screen_note = await _agentbay_get_screen_metadata(client)
+        image_width, image_height = _agentbay_image_dimensions(raw_bytes)
+        coordinate_note = _agentbay_desktop_coordinate_note(
+            screen_note,
+            image_width or screen_width,
+            image_height or screen_height,
+        )
+        saved = _agentbay_save_image_to_workspace(
+            agent_id=agent_id,
+            ws=ws,
+            raw_bytes=raw_bytes,
+            prefix="desktop-screenshot",
+            label="Desktop Screenshot",
+        )
+        return f"{saved}\n{coordinate_note}"
+    except RuntimeError as e:
+        return f"{str(e)}. Please configure AgentBay in Agent settings."
+    except Exception as e:
+        logger.exception(f"[AgentBay] Computer save screenshot failed for agent {agent_id}")
+        return f"Desktop screenshot save failed: {str(e)[:200]}"
+
+
+async def _agentbay_computer_precision_screenshot(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """Take an enlarged precision crop for tiny desktop controls."""
+    required = ("x", "y", "width", "height")
+    missing = [key for key in required if arguments.get(key) is None]
+    if missing:
+        return f"Missing required precision crop argument(s): {', '.join(missing)}"
+
+    precision_args = dict(arguments)
+    precision_args["focus_x"] = precision_args.pop("x")
+    precision_args["focus_y"] = precision_args.pop("y")
+    precision_args["focus_width"] = precision_args.pop("width")
+    precision_args["focus_height"] = precision_args.pop("height")
+    result = await _agentbay_computer_screenshot(agent_id, ws, precision_args)
+    return (
+        "Precision desktop crop captured for tiny-control targeting. "
+        "Use the absolute coordinate labels in this enlarged crop for the next click.\n"
+        f"{result}"
+    )
 
 
 async def _agentbay_computer_click(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
@@ -10489,10 +11790,27 @@ async def _agentbay_computer_click(agent_id: Optional[uuid.UUID], ws: Path, argu
     try:
         _session_id = arguments.pop("_session_id", "")
         client = await get_agentbay_client_for_agent(agent_id, "computer", session_id=_session_id)
+        try:
+            x = int(round(float(x)))
+            y = int(round(float(y)))
+        except (TypeError, ValueError):
+            return f"Click failed: x and y must be numeric desktop pixel coordinates, got x={x!r}, y={y!r}."
+
+        screen_width, screen_height, screen_note = await _agentbay_get_screen_metadata(client)
+        if screen_width and screen_height and not (0 <= x < screen_width and 0 <= y < screen_height):
+            return (
+                f"Click refused: ({x}, {y}) is outside the Cloud Desktop coordinate system "
+                f"({screen_note}). Use coordinates from the latest full desktop screenshot."
+            )
         result = await client.computer_click(x, y, button=button)
         if result.get("success"):
-            return f"Clicked at ({x}, {y}) with {button} button"
-        return f"Click failed at ({x}, {y})"
+            note = f" within {screen_note}" if screen_note else ""
+            return (
+                f"Clicked at ({x}, {y}) with {button} button{note}. "
+                f"This only confirms the mouse event was sent; call agentbay_computer_screenshot to verify the UI changed."
+            )
+        note = f" Coordinate system: {screen_note}." if screen_note else ""
+        return f"Click failed at ({x}, {y}).{note}"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
@@ -10684,12 +12002,107 @@ async def _agentbay_computer_start_app(agent_id: Optional[uuid.UUID], ws: Path, 
             else:
                 data_str = ""
             return f"Application started: {cmd}" + (f"\n\n{data_str[:1000]}" if data_str else "")
-        return f"Failed to start application: {result.get('error_message', 'Unknown error')}"
+
+        direct_error = result.get("error_message", "Unknown error")
+        installed_note = ""
+        try:
+            installed_result = await client.computer_get_installed_apps()
+            if installed_result.get("success"):
+                apps = installed_result.get("apps", [])
+                matched_app, score = _agentbay_find_installed_app_match(cmd, apps)
+                if matched_app and score >= 0.58:
+                    matched_name = _agentbay_app_field(matched_app, "name") or "(unnamed app)"
+                    matched_cmd = _agentbay_app_field(matched_app, "start_cmd", "startCmd")
+                    matched_work_dir = _agentbay_app_field(matched_app, "work_directory", "workDirectory") or work_dir
+                    if matched_cmd and matched_cmd.strip() != cmd.strip():
+                        retry = await client.computer_start_app(matched_cmd, work_dir=matched_work_dir)
+                        if retry.get("success"):
+                            retry_data = retry.get("data")
+                            retry_data_str = str(retry_data)[:1000] if retry_data is not None else ""
+                            return (
+                                f"Direct start command failed: {cmd}\n"
+                                f"Matched installed app: {matched_name} (score={score:.2f})\n"
+                                f"Retried with start_cmd: {matched_cmd}\n"
+                                f"Application started." + (f"\n\n{retry_data_str}" if retry_data_str else "")
+                            )
+
+                        retry_error = retry.get("error_message", "Unknown error")
+                        if _agentbay_uncertain_start_error(retry_error):
+                            visible_note = await _agentbay_visible_apps_note(client)
+                            return (
+                                f"Direct start command failed: {cmd}\n"
+                                f"Matched installed app: {matched_name} (score={score:.2f})\n"
+                                f"Retried with start_cmd: {matched_cmd}\n"
+                                f"Retry reported an uncertain launch result: {retry_error}\n\n"
+                                f"{visible_note}"
+                            )
+                        return (
+                            f"Direct start command failed: {cmd}\n"
+                            f"Matched installed app: {matched_name} (score={score:.2f})\n"
+                            f"Retried with start_cmd: {matched_cmd}\n"
+                            f"Retry failed: {retry_error}"
+                        )
+
+                installed_note = (
+                    f"\n\nInstalled apps were checked, but no confident match was found for `{cmd}`. "
+                    f"Use agentbay_computer_get_installed_apps and then pass the returned start_cmd to this tool."
+                )
+            else:
+                installed_note = f"\n\nCould not check installed apps: {installed_result.get('error_message', 'Unknown error')}"
+        except Exception as e:
+            logger.debug(f"[AgentBay] Installed app fallback failed: {e}")
+            installed_note = f"\n\nCould not check installed apps: {str(e)[:200]}"
+
+        if _agentbay_uncertain_start_error(direct_error):
+            visible_note = await _agentbay_visible_apps_note(client)
+            return (
+                f"Start command reported an uncertain launch result: {direct_error}\n\n"
+                f"{visible_note}"
+                f"{installed_note}"
+            )
+
+        return f"Failed to start application: {direct_error}{installed_note}"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
         logger.exception(f"[AgentBay] Computer start_app failed")
         return f"Start application failed: {str(e)[:200]}"
+
+
+async def _agentbay_computer_get_installed_apps(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """List installed desktop applications and launch commands."""
+    if not agent_id:
+        return "AgentBay tools require agent context"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    start_menu = arguments.get("start_menu", True)
+    desktop = arguments.get("desktop", True)
+    ignore_system_apps = arguments.get("ignore_system_apps", True)
+
+    try:
+        _session_id = arguments.pop("_session_id", "")
+        client = await get_agentbay_client_for_agent(agent_id, "computer", session_id=_session_id)
+        result = await client.computer_get_installed_apps(
+            start_menu=bool(start_menu),
+            desktop=bool(desktop),
+            ignore_system_apps=bool(ignore_system_apps),
+        )
+        if result.get("success"):
+            apps = result.get("apps", [])
+            if not apps:
+                return "No installed applications found."
+            return (
+                f"Installed applications ({len(apps)}). Use the returned start_cmd exactly with "
+                f"agentbay_computer_start_app; do not guess app launch commands.\n\n"
+                f"{_agentbay_format_apps(apps, limit=80)}"
+            )
+        return f"Failed to get installed applications: {result.get('error_message', 'Unknown error')}"
+    except RuntimeError as e:
+        return f"{str(e)}"
+    except Exception as e:
+        logger.exception(f"[AgentBay] Computer get_installed_apps failed")
+        return f"Get installed applications failed: {str(e)[:200]}"
 
 
 async def _agentbay_computer_get_cursor_position(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
@@ -10763,6 +12176,150 @@ async def _agentbay_computer_activate_window(agent_id: Optional[uuid.UUID], ws: 
     except Exception as e:
         logger.exception(f"[AgentBay] Computer activate_window failed")
         return f"Activate window failed: {str(e)[:200]}"
+
+
+async def _agentbay_computer_list_windows(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """List root windows with IDs and geometry for deterministic window operations."""
+    if not agent_id:
+        return "AgentBay tools require agent context"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    timeout_ms = arguments.get("timeout_ms", 3000)
+
+    try:
+        _session_id = arguments.pop("_session_id", "")
+        client = await get_agentbay_client_for_agent(agent_id, "computer", session_id=_session_id)
+        result = await client.computer_list_windows(timeout_ms=int(timeout_ms))
+        if result.get("success"):
+            import json
+            windows = result.get("windows", [])
+            if not windows:
+                return "No root windows found."
+            windows_str = json.dumps(windows, ensure_ascii=False, indent=2)
+            return (
+                f"Root windows ({len(windows)}). Prefer these window_id values for closing, activating, "
+                f"or managing windows instead of clicking title-bar controls by coordinates.\n\n"
+                f"{windows_str[:5000]}"
+            )
+        return f"Failed to list windows: {result.get('error_message', 'Unknown error')}"
+    except RuntimeError as e:
+        return f"{str(e)}"
+    except Exception as e:
+        logger.exception(f"[AgentBay] Computer list_windows failed")
+        return f"List windows failed: {str(e)[:200]}"
+
+
+async def _agentbay_computer_close_window(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """Close a root desktop window by explicit ID."""
+    if not agent_id:
+        return "AgentBay tools require agent context"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    window_id = arguments.get("window_id")
+    title = str(arguments.get("title") or "").strip()
+
+    if window_id is None:
+        if not title:
+            return (
+                "Missing required argument `window_id`. Call agentbay_computer_list_windows first, "
+                "then pass the exact window_id to close a whole desktop window."
+            )
+
+        try:
+            _session_id = arguments.pop("_session_id", "")
+            client = await get_agentbay_client_for_agent(agent_id, "computer", session_id=_session_id)
+            windows_result = await client.computer_list_windows()
+            if not windows_result.get("success"):
+                return f"Failed to list windows before closing: {windows_result.get('error_message', 'Unknown error')}"
+
+            from difflib import SequenceMatcher
+            import json
+
+            title_norm = _agentbay_normalize_text(title)
+            candidates: list[dict] = []
+            for window in windows_result.get("windows", []):
+                if not isinstance(window, dict):
+                    continue
+                candidate = str(window.get("title") or window.get("window_title") or "")
+                candidate_norm = _agentbay_normalize_text(candidate)
+                if not candidate_norm:
+                    continue
+                if title_norm in candidate_norm or candidate_norm in title_norm:
+                    score = 0.95
+                else:
+                    score = SequenceMatcher(None, title_norm, candidate_norm).ratio()
+                if score >= 0.35:
+                    item = dict(window)
+                    item["match_score"] = round(score, 3)
+                    candidates.append(item)
+            candidates.sort(key=lambda item: item.get("match_score", 0), reverse=True)
+            return (
+                f"Refusing to close by title-only match for `{title}` because it can close the wrong application. "
+                f"Choose the intended root window_id from these candidates, then call agentbay_computer_close_window "
+                f"with that window_id.\n\n{json.dumps(candidates[:8], ensure_ascii=False, indent=2)[:3000]}"
+            )
+        except RuntimeError as e:
+            return f"{str(e)}"
+        except Exception as e:
+            logger.exception(f"[AgentBay] Computer close_window candidate lookup failed")
+            return f"Close window requires window_id. Candidate lookup failed: {str(e)[:200]}"
+
+    try:
+        _session_id = arguments.pop("_session_id", "")
+        client = await get_agentbay_client_for_agent(agent_id, "computer", session_id=_session_id)
+        result = await client.computer_close_window(int(window_id))
+        if result.get("success"):
+            return f"Closed root desktop window {window_id}. Call agentbay_computer_screenshot to verify."
+        return f"Failed to close window {window_id}: {result.get('error_message', 'Unknown error')}"
+    except RuntimeError as e:
+        return f"{str(e)}"
+    except Exception as e:
+        logger.exception(f"[AgentBay] Computer close_window failed")
+        return f"Close window failed: {str(e)[:200]}"
+
+
+async def _agentbay_computer_dismiss_dialog(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """Safely dismiss the current in-app popup/dialog without closing root windows."""
+    if not agent_id:
+        return "AgentBay tools require agent context"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    title = str(arguments.get("title") or "").strip()
+    window_id = arguments.get("window_id")
+
+    try:
+        _session_id = arguments.pop("_session_id", "")
+        client = await get_agentbay_client_for_agent(agent_id, "computer", session_id=_session_id)
+
+        if window_id is not None:
+            return (
+                "agentbay_computer_dismiss_dialog does not close root desktop windows. "
+                "It only sends Escape to the active in-app popup/dialog. "
+                "If the user explicitly wants to close a whole desktop window or app, call "
+                "agentbay_computer_close_window with a window_id returned by agentbay_computer_list_windows."
+            )
+
+        esc_result = await client.computer_press_keys(["esc"])
+        if esc_result.get("success"):
+            title_note = f" Target hint: `{title}`." if title else ""
+            return (
+                f"Sent Escape to safely dismiss the active in-app popup/dialog.{title_note} "
+                f"Call agentbay_computer_screenshot to verify. This tool never closes the root application window."
+            )
+
+        return (
+            f"Could not send Escape to dismiss the active popup/dialog: "
+            f"{esc_result.get('error_message', 'Unknown error')}. "
+            f"Do not use this tool to close root application windows."
+        )
+    except RuntimeError as e:
+        return f"{str(e)}"
+    except Exception as e:
+        logger.exception(f"[AgentBay] Computer dismiss_dialog failed")
+        return f"Dismiss dialog failed: {str(e)[:200]}"
 
 
 async def _agentbay_computer_list_visible_apps(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
@@ -11123,7 +12680,7 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
                 pct = 0
                 if krs:
                     pct = int(sum(min(k.current_value / k.target_value, 1) for k in krs) / len(krs) * 100)
-                lines.append(f"\n**O: {o.title}** [{pct}%]")
+                lines.append(f"\n**O: {o.title}** [{pct}%]  objective_id={o.id}")
                 for kr in krs:
                     lines.append(
                         f"  - KR ({kr.status}): {kr.title}  "
@@ -11136,7 +12693,7 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
             for o in member_objs:
                 owner_label = _resolve_owner_label(o)
                 krs = krs_by_obj.get(str(o.id), [])
-                lines.append(f"\n**{owner_label}** | O: {o.title}")
+                lines.append(f"\n**{owner_label}** | O: {o.title}  objective_id={o.id}")
                 for kr in krs:
                     lines.append(
                         f"  - KR ({kr.status}): {kr.title}  "

@@ -59,7 +59,7 @@ export default function UserManagement() {
         quota_message_limit: 50,
         quota_message_period: 'permanent',
         quota_max_agents: 2,
-        quota_agent_ttl_hours: 48,
+        quota_agent_ttl_hours: 0,
     });
     const [saving, setSaving] = useState(false);
     const [toast, setToast] = useState('');
@@ -359,7 +359,9 @@ export default function UserManagement() {
                                     <span style={{ fontSize: '13px', fontWeight: 500 }}>{user.agents_count}</span>
                                     <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}> / {user.quota_max_agents}</span>
                                 </div>
-                                <div style={{ fontSize: '12px' }}>{user.quota_agent_ttl_hours}h</div>
+                                <div style={{ fontSize: '12px' }}>
+                                    {user.quota_agent_ttl_hours > 0 ? `${user.quota_agent_ttl_hours}h` : t('enterprise.quotas.permanent', 'Permanent')}
+                                </div>
                                 <div>
                                     <button
                                         className="btn btn-secondary"
@@ -421,10 +423,13 @@ export default function UserManagement() {
                                             </label>
                                             <input
                                                 className="form-input"
-                                                type="number" min={1}
+                                                type="number" min={0}
                                                 value={editForm.quota_agent_ttl_hours}
                                                 onChange={e => setEditForm({ ...editForm, quota_agent_ttl_hours: Number(e.target.value) })}
                                             />
+                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
+                                                {t('enterprise.quotas.agentAutoExpiry')}
+                                            </div>
                                         </div>
                                     </div>
                                     <div style={{ marginTop: '12px', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>

@@ -252,8 +252,12 @@ async def seed_default_agents():
             if template_dir.exists():
                 # Copy the full agent template so Morty/Meeseeks get EVERY file
                 # defined in the template: MEMORY_INDEX.md, curiosity_journal.md,
-                # state.json, todo.json, daily_reports/, enterprise_info/, etc.
-                shutil.copytree(str(template_dir), str(agent_dir))
+                # state.json, daily_reports/, enterprise_info/, etc.
+                shutil.copytree(
+                    str(template_dir),
+                    str(agent_dir),
+                    ignore=shutil.ignore_patterns("tasks.json", "todo.json", "enterprise_info"),
+                )
             else:
                 # Fallback for local dev (no Docker template mount)
                 agent_dir.mkdir(parents=True, exist_ok=True)
@@ -478,7 +482,11 @@ async def seed_okr_agent():
         agent_dir = Path(settings.AGENT_DATA_DIR) / str(okr_agent.id)
 
         if template_dir.exists():
-            shutil.copytree(str(template_dir), str(agent_dir))
+            shutil.copytree(
+                str(template_dir),
+                str(agent_dir),
+                ignore=shutil.ignore_patterns("tasks.json", "todo.json", "enterprise_info"),
+            )
         else:
             agent_dir.mkdir(parents=True, exist_ok=True)
             (agent_dir / "skills").mkdir(exist_ok=True)
@@ -962,7 +970,11 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
         agent_dir = Path(settings.AGENT_DATA_DIR) / str(okr_agent.id)
 
         if template_dir.exists():
-            shutil.copytree(str(template_dir), str(agent_dir))
+            shutil.copytree(
+                str(template_dir),
+                str(agent_dir),
+                ignore=shutil.ignore_patterns("tasks.json", "todo.json", "enterprise_info"),
+            )
         else:
             agent_dir.mkdir(parents=True, exist_ok=True)
             for sub in ("skills", "workspace", "workspace/reports", "memory"):
