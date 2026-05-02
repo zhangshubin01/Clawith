@@ -29,6 +29,7 @@ from app.services.workspace_collaboration import (
     release_edit_lock,
     write_workspace_file,
 )
+from app.services.workspace_paths import WorkspacePathError, resolve_agent_visible_path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,6 +79,20 @@ def _safe_path(agent_id: uuid.UUID, rel_path: str) -> Path:
     return full
 
 
+def _visible_path(agent_id: uuid.UUID, rel_path: str, tenant_id: uuid.UUID | None) -> tuple[Path, Path, bool]:
+    """Resolve an agent-visible path, including virtual enterprise_info/."""
+    try:
+        resolved = resolve_agent_visible_path(
+            _agent_base_dir(agent_id),
+            rel_path,
+            workspace_root=Path(settings.AGENT_DATA_DIR),
+            tenant_id=str(tenant_id) if tenant_id else None,
+        )
+    except WorkspacePathError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    return resolved.path, resolved.relative_root, resolved.is_enterprise
+
+
 @router.get("/", response_model=list[FileInfo])
 async def list_files(
     agent_id: uuid.UUID,
@@ -87,7 +102,9 @@ async def list_files(
 ):
     """List files and directories in an agent's file system."""
     await check_agent_access(db, current_user, agent_id)
-    target = _safe_path(agent_id, path)
+    target, base_abs, is_enterprise = _visible_path(agent_id, path, current_user.tenant_id)
+    if is_enterprise:
+        target.mkdir(parents=True, exist_ok=True)
 
     if not target.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Path not found")
@@ -95,11 +112,26 @@ async def list_files(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Path is not a directory")
 
     items = []
-    base_abs = _agent_base_dir(agent_id).resolve()
+    base_abs = base_abs.resolve()
+    if not path and current_user.tenant_id:
+        enterprise_root = (Path(settings.AGENT_DATA_DIR) / f"enterprise_info_{current_user.tenant_id}").resolve()
+        enterprise_root.mkdir(parents=True, exist_ok=True)
+        items.append(FileInfo(
+            name="enterprise_info",
+            path="enterprise_info",
+            is_dir=True,
+            size=0,
+            modified_at=str(enterprise_root.stat().st_mtime),
+            url=None,
+        ))
     for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name)):
         if entry.name == '.gitkeep':
             continue
+        if not path and entry.name == "enterprise_info":
+            continue
         rel = str(entry.resolve().relative_to(base_abs))
+        if is_enterprise:
+            rel = f"enterprise_info/{rel}" if rel != "." else "enterprise_info"
         stat = entry.stat()
         items.append(FileInfo(
             name=entry.name,
@@ -121,7 +153,7 @@ async def read_file(
 ):
     """Read the content of a file."""
     await check_agent_access(db, current_user, agent_id)
-    target = _safe_path(agent_id, path)
+    target, _, _ = _visible_path(agent_id, path, current_user.tenant_id)
 
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
@@ -237,7 +269,7 @@ async def preview_file(
 ):
     """Return a browser-friendly preview payload for Workspace files."""
     await check_agent_access(db, current_user, agent_id)
-    target = _safe_path(agent_id, path)
+    target, _, _ = _visible_path(agent_id, path, current_user.tenant_id)
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 
@@ -319,7 +351,7 @@ async def preview_file(
             "kind": kind,
             "mime_type": mime_type,
             "text": companion_content or extracted_text,
-            "companion_path": str(companion.resolve().relative_to(_agent_base_dir(agent_id).resolve())) if companion is not None else None,
+            "companion_path": str(companion.resolve().relative_to(_agent_base_dir(agent_id).resolve())) if companion is not None and not path.startswith("enterprise_info") else None,
             "download_url": download_url,
         }
 
@@ -332,7 +364,7 @@ async def preview_file(
             "mime_type": "text/markdown" if companion.suffix.lower() == ".md" else "text/plain",
             "content": content or "",
             "content_hash": content_hash(content or ""),
-            "companion_path": str(companion.resolve().relative_to(_agent_base_dir(agent_id).resolve())),
+            "companion_path": str(companion.resolve().relative_to(_agent_base_dir(agent_id).resolve())) if not path.startswith("enterprise_info") else None,
             "download_url": download_url,
         }
 
@@ -384,7 +416,7 @@ async def download_file(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
 
     await check_agent_access(db, user, agent_id)
-    target = _safe_path(agent_id, path)
+    target, _, _ = _visible_path(agent_id, path, user.tenant_id)
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
     return FileResponse(
@@ -404,6 +436,17 @@ async def write_file(
 ):
     """Write content to a file (create or overwrite)."""
     await check_agent_access(db, current_user, agent_id)
+    if path.startswith("enterprise_info"):
+        if current_user.role not in ("platform_admin", "org_admin"):
+            raise HTTPException(status_code=403, detail="Only admins can edit enterprise knowledge base")
+        if path.strip("/") == "enterprise_info":
+            raise HTTPException(status_code=400, detail="Cannot overwrite enterprise_info root")
+        target, _, _ = _visible_path(agent_id, path, current_user.tenant_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        async with aiofiles.open(target, "w", encoding="utf-8") as f:
+            await f.write(data.content)
+        return {"status": "ok", "path": path, "revision_id": None}
+
     result = await write_workspace_file(
         db,
         agent_id=agent_id,
@@ -466,6 +509,8 @@ async def get_file_revisions(
 ):
     """List version history for the currently opened Workspace file."""
     await check_agent_access(db, current_user, agent_id)
+    if path.startswith("enterprise_info"):
+        return []
     revisions = await list_revisions(db, agent_id=agent_id, path=path)
     return [
         {
@@ -533,7 +578,11 @@ async def delete_file(
 ):
     """Delete a file."""
     await check_agent_access(db, current_user, agent_id)
-    target = _safe_path(agent_id, path)
+    if path.startswith("enterprise_info") and current_user.role not in ("platform_admin", "org_admin"):
+        raise HTTPException(status_code=403, detail="Only admins can delete enterprise knowledge base files")
+    if path.strip("/") == "enterprise_info":
+        raise HTTPException(status_code=400, detail="Cannot delete enterprise_info root")
+    target, _, _ = _visible_path(agent_id, path, current_user.tenant_id)
 
     if not target.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")

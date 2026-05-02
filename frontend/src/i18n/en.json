@@ -7,7 +7,7 @@
     "hero": {
       "badge": "Open Source · Multi-Agent Collaboration",
       "title": "Clawith",
-      "subtitle": "OpenClaw for Teams",
+      "subtitle": "Your Agent Company.",
       "description": "OpenClaw empowers individuals.<br>Clawith scales it to frontier organizations.",
       "features": {
         "multiAgent": {
@@ -385,7 +385,12 @@
       "delete": "Delete",
       "save": "Save",
       "edit": "Edit",
-      "cancel": "Cancel"
+      "cancel": "Cancel",
+      "done": "Done",
+      "openInNewTab": "Open in new tab",
+      "focusPreview": "Focus preview",
+      "unfocusPreview": "Exit focus",
+      "versionHistory": "Version history"
     },
     "chat": {
       "sessionListTitle": "Session list",
@@ -419,7 +424,19 @@
       "collapseSessions": "Collapse sessions",
       "showSessions": "Show chat sessions",
       "toolCallChain": "Tools Used",
-      "analysing": "Analysing"
+      "analysing": "Analysing",
+      "thoughtProcess": "Thought process",
+      "createdFiles": "Created {{count}} files",
+      "updatedFiles": "Updated {{count}} files",
+      "deletedFiles": "Deleted {{count}} files",
+      "ranCommands": "Ran {{count}} tools",
+      "ranAgents": "Contacted {{count}} agents",
+      "showMore": "Show more",
+      "viewDetails": "View details",
+      "provider": "Provider",
+      "toolName": "Tool",
+      "inProgress": "In progress",
+      "done": "Done"
     },
     "activityLog": {
       "title": "Activity Log",
@@ -489,8 +506,7 @@
         "websocketConnected": "Connected via WebSocket (No callback URL needed)",
         "websocketDisconnected": "Configured for WebSocket, but currently disconnected",
         "websocketDisconnectedHint": "Reconnect by saving the WeCom WebSocket configuration again.",
-        "saveChannel": "Save Config",
-        "syncHint": "Before configuring the Feishu bot, please sync your organization structure in Enterprise Settings → Org Structure first. This ensures the bot can identify message senders."
+        "saveChannel": "Save Config"
       },
       "danger": {
         "title": "Danger Zone",
@@ -988,7 +1004,8 @@
       "maxAgents": "Max Agents",
       "agentsUserCanCreate": "Agents a user can create",
       "agentTTL": "Agent TTL (hours)",
-      "agentAutoExpiry": "Agent auto-expiry time from creation",
+      "agentAutoExpiry": "Agent auto-expiry time from creation. Permanent means no auto-expiry.",
+      "customHours": "Custom hours",
       "dailyLLMCalls": "Daily LLM Calls / Agent",
       "maxLLMCallsPerDay": "Max LLM calls per agent per day",
       "system": "System",
@@ -1155,6 +1172,7 @@
         "agentbay_code_execute": "AgentBay: Code Execute",
         "agentbay_command_exec": "AgentBay: Shell Command",
         "agentbay_computer_screenshot": "AgentBay: Desktop Screenshot",
+        "agentbay_computer_precision_screenshot": "AgentBay: Precision Screenshot",
         "agentbay_computer_click": "AgentBay: Mouse Click",
         "agentbay_computer_input_text": "AgentBay: Keyboard Input",
         "agentbay_computer_press_keys": "AgentBay: Keyboard Shortcut",
@@ -1163,9 +1181,13 @@
         "agentbay_computer_drag_mouse": "AgentBay: Mouse Drag",
         "agentbay_computer_get_screen_size": "AgentBay: Get Screen Size",
         "agentbay_computer_start_app": "AgentBay: Start Application",
+        "agentbay_computer_get_installed_apps": "AgentBay: Get Installed Apps",
         "agentbay_computer_get_cursor_position": "AgentBay: Get Cursor Position",
         "agentbay_computer_get_active_window": "AgentBay: Get Active Window",
         "agentbay_computer_activate_window": "AgentBay: Activate Window",
+        "agentbay_computer_list_windows": "AgentBay: List Windows",
+        "agentbay_computer_close_window": "AgentBay: Close Window",
+        "agentbay_computer_dismiss_dialog": "AgentBay: Dismiss Dialog",
         "agentbay_computer_list_visible_apps": "AgentBay: List Running Apps",
         "atlassian_rovo": "Atlassian Rovo (Jira / Confluence / Compass)"
       },
@@ -1214,18 +1236,23 @@
         "agentbay_browser_login": "[ENV: Browser] Handle login flow in the headless browser.",
         "agentbay_code_execute": "[ENV: Code Sandbox] Execute code (Python, Bash, Node.js) in the AgentBay Code Sandbox.",
         "agentbay_command_exec": "[ENV: Code Sandbox] Execute a shell command in the AgentBay Code Sandbox.",
-        "agentbay_computer_screenshot": "[ENV: Cloud Desktop] Take a screenshot of the cloud desktop.",
-        "agentbay_computer_click": "[ENV: Cloud Desktop] Click at coordinates in the cloud desktop.",
+        "agentbay_computer_screenshot": "[ENV: Cloud Desktop] Take a screenshot of the cloud desktop and return its coordinate system. Supports focused precision crops for tiny controls.",
+        "agentbay_computer_precision_screenshot": "[ENV: Cloud Desktop] Take an enlarged focused crop for tiny controls and near-miss clicks.",
+        "agentbay_computer_click": "[ENV: Cloud Desktop] Click at absolute desktop pixel coordinates from the latest screenshot; use Precision Screenshot first for tiny controls.",
         "agentbay_computer_input_text": "[ENV: Cloud Desktop] Type text in the cloud desktop.",
         "agentbay_computer_press_keys": "[ENV: Cloud Desktop] Press keyboard shortcut in the cloud desktop.",
         "agentbay_computer_scroll": "[ENV: Cloud Desktop] Scroll in the cloud desktop.",
         "agentbay_computer_move_mouse": "[ENV: Cloud Desktop] Move mouse to coordinates in the cloud desktop.",
         "agentbay_computer_drag_mouse": "[ENV: Cloud Desktop] Drag mouse in the cloud desktop.",
         "agentbay_computer_get_screen_size": "[ENV: Cloud Desktop] Get the screen size of the cloud desktop.",
-        "agentbay_computer_start_app": "[ENV: Cloud Desktop] Start an application in the cloud desktop.",
+        "agentbay_computer_start_app": "[ENV: Cloud Desktop] Start an application using a launch command, preferably a start_cmd returned by Get Installed Apps.",
+        "agentbay_computer_get_installed_apps": "[ENV: Cloud Desktop] List installed applications and their real start_cmd launch commands.",
         "agentbay_computer_get_cursor_position": "[ENV: Cloud Desktop] Get the current cursor position in the cloud desktop.",
         "agentbay_computer_get_active_window": "[ENV: Cloud Desktop] Get the active window in the cloud desktop.",
         "agentbay_computer_activate_window": "[ENV: Cloud Desktop] Bring a specific window to the foreground on the Cloud Desktop.",
+        "agentbay_computer_list_windows": "[ENV: Cloud Desktop] List root desktop windows with IDs and geometry.",
+        "agentbay_computer_close_window": "[ENV: Cloud Desktop] Close an entire desktop window by explicit window ID.",
+        "agentbay_computer_dismiss_dialog": "[ENV: Cloud Desktop] Safely dismiss the active in-app popup/dialog with Escape only.",
         "agentbay_computer_list_visible_apps": "[ENV: Cloud Desktop] List running applications in the cloud desktop.",
         "atlassian_rovo": "Connect to Atlassian Rovo MCP Server to access Jira, Confluence, and Compass."
       }

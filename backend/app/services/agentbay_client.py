@@ -359,8 +359,15 @@ class AgentBayClient:
     async def computer_click(self, x: int, y: int, button: str = "left") -> dict:
         """Click the mouse at coordinates (x, y)."""
         await self._ensure_computer_session()
+        move_result = await asyncio.to_thread(self._session.computer.move_mouse, x, y)
         result = await asyncio.to_thread(self._session.computer.click_mouse, x, y, button)
-        return {"success": result.success, "x": x, "y": y, "button": button}
+        return {
+            "success": result.success,
+            "moved": getattr(move_result, "success", False),
+            "x": x,
+            "y": y,
+            "button": button,
+        }
 
     async def computer_input_text(self, text: str) -> dict:
         """Input text at the current cursor position."""
@@ -420,6 +427,29 @@ class AgentBayClient:
             "error_message": result.error_message or "",
         }
 
+    async def computer_get_installed_apps(
+        self,
+        start_menu: bool = True,
+        desktop: bool = True,
+        ignore_system_apps: bool = True,
+    ) -> dict:
+        """List installed applications and their launch commands."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(
+            self._session.computer.get_installed_apps,
+            start_menu,
+            desktop,
+            ignore_system_apps,
+        )
+        apps = []
+        for app in (getattr(result, "data", None) or []):
+            apps.append(vars(app) if hasattr(app, "__dict__") else str(app))
+        return {
+            "success": result.success,
+            "apps": apps,
+            "error_message": result.error_message or "",
+        }
+
     async def computer_get_cursor_position(self) -> dict:
         """Get current cursor position."""
         await self._ensure_computer_session()
@@ -441,11 +471,34 @@ class AgentBayClient:
             "error_message": result.error_message or "",
         }
 
+    async def computer_list_windows(self, timeout_ms: int = 3000) -> dict:
+        """List root desktop windows with IDs and geometry."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.list_root_windows, timeout_ms)
+        windows = []
+        for window in (getattr(result, "windows", None) or []):
+            windows.append(vars(window) if hasattr(window, "__dict__") else str(window))
+        return {
+            "success": result.success,
+            "windows": windows,
+            "error_message": result.error_message or "",
+        }
+
     async def computer_activate_window(self, window_id: int) -> dict:
         """Activate (bring to front) a window by its ID."""
         await self._ensure_computer_session()
         result = await asyncio.to_thread(self._session.computer.activate_window, window_id)
         return {"success": result.success, "window_id": window_id}
+
+    async def computer_close_window(self, window_id: int) -> dict:
+        """Close a desktop window by its ID."""
+        await self._ensure_computer_session()
+        result = await asyncio.to_thread(self._session.computer.close_window, window_id)
+        return {
+            "success": result.success,
+            "window_id": window_id,
+            "error_message": result.error_message or "",
+        }
 
     async def computer_list_visible_apps(self) -> dict:
         """List currently visible/running applications."""

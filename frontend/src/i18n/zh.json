@@ -7,7 +7,7 @@
     "hero": {
       "badge": "开源 · 多智能体协作",
       "title": "Clawith",
-      "subtitle": "OpenClaw for Teams",
+      "subtitle": "Your Agent Company.",
       "description": "OpenClaw 赋能个人。<br>Clawith 将其扩展到前沿组织。",
       "features": {
         "multiAgent": {
@@ -392,7 +392,12 @@
       "delete": "删除",
       "save": "保存",
       "edit": "编辑",
-      "cancel": "取消"
+      "cancel": "取消",
+      "done": "完成",
+      "openInNewTab": "在新标签页打开",
+      "focusPreview": "聚焦预览",
+      "unfocusPreview": "退出聚焦",
+      "versionHistory": "历史版本"
     },
     "chat": {
       "sessionListTitle": "会话列表",
@@ -426,7 +431,19 @@
       "collapseSessions": "折叠会话列表",
       "showSessions": "显示聊天会话",
       "toolCallChain": "使用工具",
-      "analysing": "分析中"
+      "analysing": "分析中",
+      "thoughtProcess": "思考过程",
+      "createdFiles": "创建了 {{count}} 个文件",
+      "updatedFiles": "更新了 {{count}} 个文件",
+      "deletedFiles": "删除了 {{count}} 个文件",
+      "ranCommands": "运行了 {{count}} 个工具",
+      "ranAgents": "联系了 {{count}} 个数字员工",
+      "showMore": "显示更多",
+      "viewDetails": "查看细节",
+      "provider": "来源",
+      "toolName": "工具名",
+      "inProgress": "进行中",
+      "done": "完成"
     },
     "activityLog": {
       "title": "工作日志",
@@ -501,8 +518,7 @@
         "websocketConnected": "已通过 WebSocket 连接（无需回调 URL）",
         "websocketDisconnected": "已配置为 WebSocket，但当前未连接",
         "websocketDisconnectedHint": "重新保存一次企业微信 WebSocket 配置即可重新连接。",
-        "saveChannel": "保存配置",
-        "syncHint": "在配置飞书机器人之前，请先在企业设置 → 组织架构中同步您的组织结构。这确保机器人能够识别消息发送者。"
+        "saveChannel": "保存配置"
       },
       "danger": {
         "title": "危险操作",
@@ -1060,7 +1076,8 @@
       "maxAgents": "最大数字员工数",
       "agentsUserCanCreate": "用户可创建的数字员工数量",
       "agentTTL": "数字员工生命周期（小时）",
-      "agentAutoExpiry": "数字员工从创建开始的自动过期时间",
+      "agentAutoExpiry": "数字员工从创建开始的自动过期时间。永久表示不自动过期。",
+      "customHours": "自定义小时数",
       "dailyLLMCalls": "每日 LLM 调用/数字员工",
       "maxLLMCallsPerDay": "每个数字员工每天的最大 LLM 调用次数",
       "system": "系统",
@@ -1269,6 +1286,7 @@
         "agentbay_code_execute": "AgentBay: 代码执行",
         "agentbay_command_exec": "AgentBay: Shell 命令",
         "agentbay_computer_screenshot": "AgentBay: 桌面截图",
+        "agentbay_computer_precision_screenshot": "AgentBay: 精细截图",
         "agentbay_computer_click": "AgentBay: 鼠标点击",
         "agentbay_computer_input_text": "AgentBay: 键盘输入",
         "agentbay_computer_press_keys": "AgentBay: 快捷键",
@@ -1277,9 +1295,13 @@
         "agentbay_computer_drag_mouse": "AgentBay: 鼠标拖拽",
         "agentbay_computer_get_screen_size": "AgentBay: 获取屏幕尺寸",
         "agentbay_computer_start_app": "AgentBay: 启动应用",
+        "agentbay_computer_get_installed_apps": "AgentBay: 获取已安装应用",
         "agentbay_computer_get_cursor_position": "AgentBay: 获取光标位置",
         "agentbay_computer_get_active_window": "AgentBay: 获取活动窗口",
         "agentbay_computer_activate_window": "AgentBay: 激活窗口",
+        "agentbay_computer_list_windows": "AgentBay: 列出窗口",
+        "agentbay_computer_close_window": "AgentBay: 关闭窗口",
+        "agentbay_computer_dismiss_dialog": "AgentBay: 关闭弹窗",
         "agentbay_computer_list_visible_apps": "AgentBay: 列出运行应用",
         "atlassian_rovo": "Atlassian Rovo (Jira / Confluence / Compass)"
       },
@@ -1328,18 +1350,23 @@
         "agentbay_browser_login": "[ENV: Browser] 在无头浏览器中处理登录流程。",
         "agentbay_code_execute": "[ENV: Code Sandbox] 在 AgentBay 代码沙箱中执行代码（Python、Bash、Node.js）。",
         "agentbay_command_exec": "[ENV: Code Sandbox] 在 AgentBay 代码沙箱中执行 Shell 命令。",
-        "agentbay_computer_screenshot": "[ENV: Cloud Desktop] 对云桌面进行截图。",
-        "agentbay_computer_click": "[ENV: Cloud Desktop] 在云桌面指定坐标点击。",
+        "agentbay_computer_screenshot": "[ENV: Cloud Desktop] 对云桌面进行截图，并返回坐标系。支持用于小控件的局部精细截图。",
+        "agentbay_computer_precision_screenshot": "[ENV: Cloud Desktop] 针对小控件和点击偏移场景获取放大的局部精细截图。",
+        "agentbay_computer_click": "[ENV: Cloud Desktop] 基于最近一次截图的云桌面绝对像素坐标点击；点击小控件前优先使用精细截图。",
         "agentbay_computer_input_text": "[ENV: Cloud Desktop] 在云桌面中输入文本。",
         "agentbay_computer_press_keys": "[ENV: Cloud Desktop] 在云桌面中按下快捷键。",
         "agentbay_computer_scroll": "[ENV: Cloud Desktop] 在云桌面中滚动。",
         "agentbay_computer_move_mouse": "[ENV: Cloud Desktop] 将鼠标移动到云桌面指定坐标。",
         "agentbay_computer_drag_mouse": "[ENV: Cloud Desktop] 在云桌面中拖拽鼠标。",
         "agentbay_computer_get_screen_size": "[ENV: Cloud Desktop] 获取云桌面的屏幕尺寸。",
-        "agentbay_computer_start_app": "[ENV: Cloud Desktop] 在云桌面中启动应用程序。",
+        "agentbay_computer_start_app": "[ENV: Cloud Desktop] 使用启动命令启动应用，优先使用“获取已安装应用”返回的 start_cmd。",
+        "agentbay_computer_get_installed_apps": "[ENV: Cloud Desktop] 列出云桌面已安装应用及其真实 start_cmd 启动命令。",
         "agentbay_computer_get_cursor_position": "[ENV: Cloud Desktop] 获取云桌面中当前光标位置。",
         "agentbay_computer_get_active_window": "[ENV: Cloud Desktop] 获取云桌面中的活动窗口。",
         "agentbay_computer_activate_window": "[ENV: Cloud Desktop] 将指定窗口切换到云桌面前景。",
+        "agentbay_computer_list_windows": "[ENV: Cloud Desktop] 列出云桌面顶层窗口及其 ID 和几何信息。",
+        "agentbay_computer_close_window": "[ENV: Cloud Desktop] 通过明确窗口 ID 关闭整个云桌面窗口。",
+        "agentbay_computer_dismiss_dialog": "[ENV: Cloud Desktop] 仅通过 Escape 安全关闭当前应用内弹窗或对话框。",
         "agentbay_computer_list_visible_apps": "[ENV: Cloud Desktop] 列出云桌面中正在运行的应用程序。",
         "atlassian_rovo": "连接到 Atlassian Rovo MCP 服务器以访问 Jira、Confluence 和 Compass。"
       }
