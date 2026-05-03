@@ -158,7 +158,7 @@ _TOOL_DISPLAY_NAME_MAP = TOOL_DISPLAY_NAME_MAP
 # 本地工具执行（不在 IDE 端，由后端直接执行）
 # ──────────────────────────────────────────────
 
-def _execute_local_tool(tool_name: str, arguments: dict) -> tuple[str, list[dict]]:
+def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "") -> tuple[str, list[dict]]:
     """本地执行搜索工具，返回 (result_json_str, results_list).
 
     results_list 格式匹配插件期望：
@@ -167,11 +167,15 @@ def _execute_local_tool(tool_name: str, arguments: dict) -> tuple[str, list[dict
     - grep_code → [{fileName, path, startLine, endLine}]
     - search_codebase → [{fileName, path, startLine, endLine}]
     - search_symbol → [{fileName, path}]
+
+    Args:
+        project_path: IDE 项目根路径。传入时所有相对路径以此为基准，
+                      否则回退到 Path.cwd()（兼容 Web UI 路径）。
     """
     from pathlib import Path
     import re as _re
 
-    cwd = Path.cwd()
+    cwd = Path(project_path) if project_path else Path.cwd()
 
     def _is_searchable(file_path: Path) -> bool:
         parts = set(file_path.parts)
@@ -1338,6 +1342,8 @@ class JSONRPCRouter:
 
             # 5. 后台持久化
             if session_id and reply:
+                # 提取本轮工具调用历史
+                _session_tool_calls = self._tool_call_history_by_session.get(session_id, [])
                 _t = asyncio.create_task(
                     _persist_lsp4j_chat_turn(
                         agent_id=self._agent_id,
@@ -1346,6 +1352,7 @@ class JSONRPCRouter:
                         reply_text=reply,
                         user_id=self._user_id,
                         thinking_text="".join(thinking_chunks) if thinking_chunks else None,
+                        tool_calls=_session_tool_calls if _session_tool_calls else None,
                     )
                 )
                 _lsp4j_background_tasks.add(_t)
@@ -1974,7 +1981,9 @@ class JSONRPCRouter:
                     result_str = json.dumps({"success": True, "tool_name": tool_name, "tasks": raw_tasks},
                                             ensure_ascii=False)
                 else:
-                    result_str, results_list = _execute_local_tool(tool_name, arguments)
+                    result_str, results_list = _execute_local_tool(
+                        tool_name, arguments, project_path=self._project_path or ""
+                    )
                 if not queue_matched:
                     # 队列未匹配 → on_tool_call 未被调用 → 没有 markdown_block → 没有 ToolPanel
                     # 发送 FINISHED sync 只会导致消费线程阻塞等待不存在的 panel
@@ -4036,11 +4045,15 @@ async def _persist_lsp4j_chat_turn(
     reply_text: str,
     user_id: uuid.UUID,
     thinking_text: str | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
 ) -> None:
     """持久化一轮 LSP4J 对话到数据库（fire-and-forget 后台任务）。
 
     参考 ACP 的 _persist_chat_turn（router.py:1724-1784），
     source_channel 使用 "ide_lsp4j" 以区分来源。
+
+    tool_calls: 工具调用历史记录，每条包含 name, parameters, results, toolCallStatus 等字段。
+    以 role="tool_call" 的 ChatMessage 行存储，使会话历史可从 DB 完整恢复。
 
     ⚠️ 边界条件：session_id 应为 UUID 格式（通义灵码使用 UUID.randomUUID().toString()），
     但某些代码路径可能传 null。uuid.UUID() 抛 ValueError 时静默返回。
@@ -4107,6 +4120,35 @@ async def _persist_lsp4j_chat_turn(
                     thinking=thinking_text,  # 构造时传入，非事后更新
                     created_at=now,  # 助手消息时间戳
                 ))
+
+            # 持久化工具调用记录（role="tool_call"），使会话历史可从 DB 完整恢复
+            if tool_calls:
+                import json
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    _tc_name = tc.get("name", "unknown")
+                    _tc_status = tc.get("toolCallStatus", "")
+                    # 仅持久化终态工具调用
+                    if _tc_status not in ("FINISHED", "ERROR", "CANCELLED"):
+                        continue
+                    _tc_content = json.dumps({
+                        "toolCallId": tc.get("toolCallId", ""),
+                        "name": _tc_name,
+                        "status": _tc_status,
+                        "parameters": tc.get("parameters", {}),
+                        "results": tc.get("results", []),
+                        "errorCode": tc.get("errorCode"),
+                        "errorMsg": tc.get("errorMsg"),
+                    }, ensure_ascii=False)
+                    db.add(ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="tool_call",
+                        content=_tc_content,
+                        conversation_id=str(sid_uuid),
+                        created_at=now + timedelta(milliseconds=1),
+                    ))
 
             await db.commit()
             # 持久化成功

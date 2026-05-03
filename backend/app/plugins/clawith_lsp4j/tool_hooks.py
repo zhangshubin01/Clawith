@@ -439,6 +439,7 @@ _LSP4J_FILE_PATH_TOOLS = frozenset({
     "replace_text_by_path",
     "create_file_with_text",
     "delete_file_by_path",
+    "save_file",
 })
 
 
