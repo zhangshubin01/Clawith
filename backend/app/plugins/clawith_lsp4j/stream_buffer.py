@@ -7,13 +7,17 @@
 抽取为独立类以提高可测试性和可维护性。
 """
 
+import asyncio
 import re
 from typing import Callable, Awaitable
 
 from loguru import logger
 
-# 非表格文本累计阈值（字符数）
-BUFFER_THRESHOLD = 200
+# 非表格文本累计阈值（字符数），降低阈值以减少流式卡顿感知
+BUFFER_THRESHOLD = 80
+# 无换行符时的强制 flush 间隔（秒），防止长时间无换行导致前端无输出
+FORCE_FLUSH_INTERVAL = 0.2
+
 _TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|\s*[:\-\| ]+\|\s*$")
 _CODE_FENCE_RE = re.compile(r"^\s*`{3,}[^`]*$|^\s*~{3,}[^~]*$")
@@ -30,6 +34,7 @@ class StreamBufferManager:
         self._table_lines: list[str] = []
         self._table_mode = False
         self._code_fence_mode = False
+        self._flush_timer_task: asyncio.Task | None = None
 
     @staticmethod
     def _is_table_line(line: str) -> bool:
@@ -70,12 +75,26 @@ class StreamBufferManager:
                 self._ready_segments.append(f"{ln}\n")
         self._table_lines = []
 
+    def _cancel_timer(self) -> None:
+        if self._flush_timer_task and not self._flush_timer_task.done():
+            self._flush_timer_task.cancel()
+        self._flush_timer_task = None
+
+    async def _force_flush_after(self, delay: float) -> None:
+        """定时器：超过 delay 秒无换行符时强制发送缓冲内容。"""
+        try:
+            await asyncio.sleep(delay)
+            await self.flush(force=False)
+        except asyncio.CancelledError:
+            pass
+
     async def flush(self, force: bool = False) -> None:
         """发送缓冲区中的就绪文本。
 
         Args:
             force: True 时强制清空所有缓冲（如流式结束时），包括未换行的残片。
         """
+        self._cancel_timer()
         if force:
             if self._line_buffer:
                 if self._table_mode:
@@ -141,7 +160,13 @@ class StreamBufferManager:
             True 需要调用 flush(), False 不需要。
         """
         self._line_buffer += text
-        return "\n" in text or len(self._line_buffer) >= self._buffer_threshold
+        needs_flush = "\n" in text or len(self._line_buffer) >= self._buffer_threshold
+
+        # 无换行符且未达阈值时启动 200ms 强制 flush 定时器
+        if text and not needs_flush and self._flush_timer_task is None:
+            self._flush_timer_task = asyncio.create_task(self._force_flush_after(FORCE_FLUSH_INTERVAL))
+
+        return needs_flush
 
     @property
     def pending_length(self) -> int:

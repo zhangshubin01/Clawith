@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -41,7 +42,8 @@ from app.models.agent import Agent as AgentModel
 from app.models.llm import LLMModel
 from app.models.chat_session import ChatSession
 from app.models.audit import ChatMessage
-from app.services.llm.caller import call_llm, call_llm_with_failover
+from app.models.task import Task as TaskModel
+from app.services.llm.caller import call_llm_with_failover
 from app.services.task_executor import execute_task as _execute_task
 import app.api.websocket as ws_module
 
@@ -334,8 +336,6 @@ _CHAT_TASK_HINTS = {
     "INLINE_EDIT": "用户进行行内编辑，请生成精确的代码修改。",
 }
 
-
-import re
 
 def _sanitize_lang(lang: str) -> str:
     """清洗编程语言标识符，防止 Markdown 代码围栏注入。
@@ -1445,6 +1445,40 @@ class JSONRPCRouter:
                 "result": result,
             })
             logger.info("[LSP4J] tool/invoke: {} 纯 UI 工具，返回成功响应", tool_name)
+            return
+
+        if tool_name == "update_tasks":
+            # 更新任务状态/标题到数据库
+            task_id = parameters.get("taskId", "")
+            new_status = parameters.get("status")
+            new_title = parameters.get("title")
+            try:
+                from app.models.task import Task as TaskModel
+                async with async_session() as _ut_db:
+                    _ut_r = await _ut_db.execute(
+                        select(TaskModel).where(TaskModel.id == task_id)
+                    )
+                    task = _ut_r.scalar_one_or_none()
+                    if task:
+                        if new_status:
+                            task.status = new_status
+                        if new_title:
+                            task.title = new_title
+                        await _ut_db.commit()
+                        result = {"success": True, "taskId": task_id, "status": task.status}
+                        logger.info("[LSP4J] tool/invoke: update_tasks success id={} status={}", task_id, task.status)
+                    else:
+                        result = {"success": False, "error": f"Task not found: {task_id}"}
+                        logger.warning("[LSP4J] tool/invoke: update_tasks not found id={}", task_id)
+            except Exception as _ute:
+                logger.exception("[LSP4J] tool/invoke: update_tasks error")
+                result = {"success": False, "error": str(_ute)[:200]}
+            await self._send_response(msg_id, {
+                "requestId": request_id,
+                "errorCode": None,
+                "errorMessage": None,
+                "result": result,
+            })
             return
         
         if tool_name == "search_replace":
@@ -3542,10 +3576,20 @@ class JSONRPCRouter:
                     "timestamp": int(time.time() * 1000),
                 })
 
-        # 4. 调用 call_llm
+        # 4. 加载 fallback 模型
+        fallback_model_obj = None
+        if self._agent_obj.fallback_model_id:
+            async with async_session() as _fb_db:
+                _fb_r = await _fb_db.execute(
+                    select(LLMModel).where(LLMModel.id == self._agent_obj.fallback_model_id)
+                )
+                fallback_model_obj = _fb_r.scalar_one_or_none()
+
+        # 5. 调用 call_llm_with_failover
         try:
-            reply = await call_llm(
-                model=self._model_obj,
+            reply = await call_llm_with_failover(
+                primary_model=self._model_obj,
+                fallback_model=fallback_model_obj,
                 messages=messages,
                 agent_name="CommitMessageGenerator",
                 role_description="Git commit message generator",

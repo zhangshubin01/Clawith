@@ -1371,17 +1371,12 @@ async def acp_websocket(
                         agent_obj.id,
                     )
                 # Get available enabled models from database
-                from app.models.llm import LLMModel
-                from app.database import async_session
-                
                 models_out: list[dict[str, str | None]] = []
                 current_model_id: str = ""
 
                 async with async_session() as db:
-                    from sqlalchemy import select
-                    
                     # If agent has specific enabled models configured, filter to those
-                    query = select(LLMModel).where(LLMModel.enabled == True)
+                    query = select(LLMModel).where(LLMModel.enabled)
                     
                     # Check if agent_obj has public_enabled_models attribute and it's not empty
                     if (hasattr(agent_obj, 'public_enabled_models') and 
@@ -1518,6 +1513,22 @@ async def acp_websocket(
                             name,
                             tid or "-",
                         )
+                    # Persist tool call to DB (fire-and-forget, before IDE bridge filter)
+                    if status in ("done", "error") and tid and session_id:
+                        _pt = asyncio.create_task(
+                            _persist_acp_tool_call(
+                                agent_id=turn_agent.id,
+                                user_id=user_id,
+                                session_id=session_id,
+                                tool_name=name,
+                                parameters=tdata.get("args"),
+                                results=tdata.get("result"),
+                                tool_call_id=tid,
+                                status=status.upper(),
+                            )
+                        )
+                        _acp_background_tasks.add(_pt)
+                        _pt.add_done_callback(_acp_background_tasks.discard)
                     # Only send tool UI updates to IDE for actual IDE bridge tools
                     # Internal Clawith tools (like send_message_to_agent) should not be shown in IDE
                     if name not in _IDE_BRIDGE_TOOL_NAMES:
@@ -1761,6 +1772,43 @@ async def acp_websocket(
         with contextlib.suppress(asyncio.CancelledError):
             await recv_task
         current_acp_ws.set(None)
+
+async def _persist_acp_tool_call(
+    agent_id, user_id, session_id: str,
+    tool_name: str, parameters: dict | None,
+    results: Any, tool_call_id: str, status: str = "FINISHED",
+) -> None:
+    """持久化单次工具调用到 DB（fire-and-forget）。
+
+    写入 ChatMessage 表，role="tool_call"，content 为 JSON。
+    供 _load_acp_history_from_db 在后续请求中恢复工具调用上下文。
+    """
+    try:
+        from app.models.audit import ChatMessage
+        from datetime import datetime, timezone as tz_persist
+
+        async with async_session() as db:
+            sid_uuid = uuid.UUID(session_id)
+            payload = {
+                "tool_name": tool_name,
+                "parameters": parameters or {},
+                "results": results,
+                "tool_call_id": tool_call_id,
+                "status": status,
+            }
+            db.add(ChatMessage(
+                agent_id=agent_id,
+                user_id=user_id,
+                role="tool_call",
+                content=json.dumps(payload, ensure_ascii=False, default=str),
+                conversation_id=str(sid_uuid),
+                created_at=datetime.now(tz_persist.utc),
+            ))
+            await db.commit()
+            logger.info("[ACP] tool_call persisted: session={} tool={}", session_id, tool_name)
+    except Exception:
+        logger.exception("[ACP] tool_call persist failed: session={} tool={}", session_id, tool_name)
+
 
 async def _persist_chat_turn(agent_id, session_id: str, user_text: str, reply_text: str, user_id):
     try:

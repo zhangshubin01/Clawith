@@ -20,6 +20,8 @@ LSP4J_IDE_TOOL_NAMES = frozenset(
         "grep_code",
         "search_codebase",
         "search_symbol",
+        "save_file",
+        "update_tasks",
     }
 )
 

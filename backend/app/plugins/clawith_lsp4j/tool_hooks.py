@@ -384,6 +384,49 @@ _LSP4J_IDE_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_file",
+            "description": "保存当前在 IDE 中打开的文件到磁盘。请在确认编辑内容无误后调用此工具，以便 IDE 将缓冲区内容写入文件系统。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filePath": {
+                        "type": "string",
+                        "description": "要保存的文件路径（绝对路径）",
+                    },
+                },
+                "required": ["filePath"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_tasks",
+            "description": "更新 IDE 任务面板中的任务状态（标记完成、修改标题等）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "taskId": {
+                        "type": "string",
+                        "description": "要更新的任务 ID",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed", "cancelled"],
+                        "description": "新状态",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "新标题（可选，不传则保持原标题）",
+                    },
+                },
+                "required": ["taskId"],
+            },
+        },
+    },
 ]
 
 # ──────────────────────────────────────────────
