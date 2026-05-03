@@ -1022,11 +1022,19 @@ class JSONRPCRouter:
                     # 当 LLM 直接调用插件原生名（如 replace_text_by_path）时，反向映射为显示名。
                     display_name = _TOOL_DISPLAY_NAME_MAP.get(original_name, original_name)
 
-                    # ★ 只对 LSP4J IDE 工具生成 toolCallId 并入队（供后续 invoke_tool_on_ide 按序匹配）
-                    # 非IDE 工具不需要 toolCallId，因为不走 tool/call/sync 通道
+                    # ★ 只对实际会路由到 IDE 执行的工具生成 toolCallId（供后续 invoke_tool_on_ide 按序匹配）
+                    # 相对路径（如 soul.md, workspace/xxx）回退到本地执行，不创建 IDE 工具卡片
                     is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
                     tool_call_id = ""
+                    _should_create_ide_card = False
                     if is_lsp4j_tool:
+                        from .tool_hooks import _should_route_to_ide as _route_check
+                        raw_args = data.get("args", {})
+                        _should_create_ide_card = _route_check(tool_name, raw_args)
+                        if not _should_create_ide_card:
+                            logger.info("[LSP4J-TOOL] 跳过 IDE 工具卡片（相对路径回退本地）: tool={} args={}",
+                                        tool_name, {k: v for k, v in raw_args.items() if k in ("path", "file_path", "filePath", "relative_workspace_path")})
+                    if _should_create_ide_card:
                         tool_call_id = str(uuid.uuid4())
                         # ★ 队列存储 3 元组：(显示名, 插件原生名称, UUID)
                         # display_name 供 markdown 块使用（ToolPanel 需要 LLM 侧名称识别文件工具）
@@ -1063,7 +1071,7 @@ class JSONRPCRouter:
                             tool_name,
                         )
 
-                    if is_lsp4j_tool:
+                    if _should_create_ide_card:
                         # ★ 发送 toolCall markdown 块（双通道之 markdown 通道）
                         # 插件 MarkdownStreamPanel 解析此格式创建工具卡片 UI
                         # 插件正则：```([\w#+.-]+)::([^\n]+)::([^\n]+)\n+(.*?)```

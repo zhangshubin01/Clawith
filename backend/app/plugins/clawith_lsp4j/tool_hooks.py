@@ -57,12 +57,22 @@ _PARAM_NAME_MAP = {
     "create_file_with_text": {"content": "text"},
 }
 
+# ★ 本地回退参数名映射：IDE 工具参数名 → 基础工具参数名
+# 当 LSP4J 工具因路径为相对路径而回退到本地执行时，
+# 需要将 IDE 工具定义的参数名映射为基础工具期望的参数名。
+# 例如：IDE read_file 用 file_path，但本地 read_file 用 path。
+_LOCAL_FALLBACK_PARAM_MAP = {
+    "read_file": {"file_path": "path"},
+    "list_dir": {"relative_workspace_path": "path"},
+}
+
 # ★ 基础工具中与 IDE 工具重名/重叠的名称，LSP4J 活跃时需过滤
 # 避免向 LLM 注册两套同名工具（基础版 + IDE 版），只保留 IDE 版
 _LSP4J_OVERLAP_BASE_TOOL_NAMES = frozenset({
     "edit_file", "write_file", "delete_file",
     "search_files", "find_files",
     "create_file",
+    "read_file", "list_files",
 })
 
 # ──────────────────────────────────────────────
@@ -76,13 +86,21 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "读取 IDE 本地文件系统中的文件内容。",
+            "description": "读取文件内容。支持两种路径：绝对路径（如 /Users/xxx/project/src/Main.java）读取 IDE 项目文件；相对路径（如 soul.md, memory/memory.md, workspace/xxx）读取 Agent 工作空间文件。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "文件的绝对路径",
+                        "description": "文件路径。绝对路径（/开头）读取 IDE 项目文件；相对路径读取 Agent 工作空间文件（如 soul.md, focus.md, memory/memory.md, workspace/xxx, skills/xxx）",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "起始行号（0-indexed，默认 0），用于分页读取大文件",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最大读取行数（默认 2000），用于分页读取大文件",
                     },
                 },
                 "required": ["file_path"],
@@ -208,13 +226,13 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "list_dir",
-            "description": "列出指定目录的内容（文件和子目录）。用于查看项目目录结构。",
+            "description": "列出指定目录的内容（文件和子目录）。支持两种路径：绝对路径（如 /Users/xxx/project/src/）列出 IDE 项目目录；相对路径（如 workspace/、空字符串表示根目录）列出 Agent 工作空间目录。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "relative_workspace_path": {
                         "type": "string",
-                        "description": "要列出的目录路径（相对于工作区的路径，或绝对路径）",
+                        "description": "目录路径。绝对路径（/开头）列出 IDE 项目目录；相对路径或空字符串列出 Agent 工作空间目录",
                     },
                 },
                 "required": ["relative_workspace_path"],
@@ -540,6 +558,17 @@ def install_lsp4j_tool_hooks() -> None:
         # LLM 用相对路径读 agent 工作空间文件却被误路由到 IDE 插件的问题
         _should_route = _should_route_to_ide(tool_name, args)
         if lsp4j_ws is not None and is_lsp4j_tool and _should_route:
+            # ★ 参数校验：read_file 的 file_path 不能为空
+            if tool_name == "read_file":
+                file_path = args.get("file_path") or args.get("filePath")
+                if not file_path or not str(file_path).strip():
+                    logger.warning("[LSP4J-TOOL][read_file] file_path is blank, args={}, tool_name={}", args, tool_name)
+                    return '{"success": false, "error": "file_path parameter is required and cannot be blank", "errorCode": "INVALID_PARAMETER"}'
+                # 清理路径前后空格
+                if isinstance(file_path, str):
+                    args["file_path"] = file_path.strip()
+                    logger.info("[LSP4J-TOOL][read_file] file_path trimmed: {}", args["file_path"])
+
             # ★ 参数名映射：后端工具定义 → 插件 ToolHandler 期望的参数名
             if tool_name in _PARAM_NAME_MAP:
                 name_map = _PARAM_NAME_MAP[tool_name]
@@ -560,7 +589,13 @@ def install_lsp4j_tool_hooks() -> None:
                 logger.exception("[LSP4J-TOOL] LSP4J 工具调用异常: tool={} error={}", tool_name, e)
                 raise
 
-        # ACP 原路径
+        # ACP 原路径（或 LSP4J 工具回退到本地执行）
+        # ★ 本地回退参数名映射：IDE 工具参数名 → 基础工具参数名
+        # 例如 read_file 的 file_path → path，list_dir 的 relative_workspace_path → path
+        if is_lsp4j_tool and tool_name in _LOCAL_FALLBACK_PARAM_MAP:
+            fallback_map = _LOCAL_FALLBACK_PARAM_MAP[tool_name]
+            args = {fallback_map.get(k, k): v for k, v in args.items()}
+            logger.debug("[LSP4J-TOOL] 本地回退参数映射: tool={} map={}", tool_name, fallback_map)
         logger.debug("[LSP4J-TOOL] 走 ACP 路径: tool={}", tool_name)
         return await acp_execute_tool(tool_name, args, agent_id, user_id, session_id)
 
