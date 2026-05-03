@@ -4,7 +4,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
@@ -23,6 +23,57 @@ SENSITIVE_FIELD_KEYS = {"api_key", "private_key", "auth_code", "password", "secr
 CATEGORY_CONFIG_PRIMARY_TOOL = {
     "agentbay": "agentbay_browser_navigate",
 }
+
+
+async def _load_agent_for_tool_scope(db: AsyncSession, agent_id: uuid.UUID):
+    """Load the agent whose tenant boundary determines tool visibility."""
+    from app.models.agent import Agent as AgentModel
+
+    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+    agent = agent_r.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent
+
+
+async def _load_agent_tool_assignments(db: AsyncSession, agent_id: uuid.UUID) -> dict[str, AgentTool]:
+    """Return explicit tool assignments for one agent keyed by tool ID string."""
+    agent_tools_r = await db.execute(select(AgentTool).where(AgentTool.agent_id == agent_id))
+    return {str(at.tool_id): at for at in agent_tools_r.scalars().all()}
+
+
+def _agent_visible_tool_clause(agent_tenant_id: uuid.UUID | None, assignments: dict[str, AgentTool]):
+    """Build the DB filter for tools visible to an agent.
+
+    Visibility rules:
+    - builtin tools are global platform capabilities
+    - admin tools belong only to the agent's company
+    - agent-installed tools are visible only when explicitly assigned
+    """
+    clauses = [Tool.source == "builtin"]
+    if agent_tenant_id:
+        clauses.append((Tool.source == "admin") & (Tool.tenant_id == agent_tenant_id))
+
+    assigned_tool_ids = [uuid.UUID(tool_id) for tool_id in assignments]
+    if assigned_tool_ids:
+        clauses.append((Tool.source == "agent") & Tool.id.in_(assigned_tool_ids))
+
+    return or_(*clauses)
+
+
+def _tool_record_visible_to_agent(
+    tool: Tool,
+    agent_tenant_id: uuid.UUID | None,
+    assignments: dict[str, AgentTool],
+) -> bool:
+    """Pure visibility check mirroring _agent_visible_tool_clause."""
+    if tool.source == "builtin":
+        return True
+    if tool.source == "admin":
+        return bool(agent_tenant_id and tool.tenant_id == agent_tenant_id)
+    if tool.source == "agent":
+        return str(tool.id) in assignments
+    return False
 
 
 def _get_sensitive_keys(config_schema: dict | None = None) -> set[str]:
@@ -336,22 +387,23 @@ async def get_agent_tools(
 ):
     """Get tools for a specific agent with their enabled status."""
     from app.services.agent_tools import _agent_has_feishu
-    from app.models.agent import Agent as AgentModel
     has_feishu = await _agent_has_feishu(agent_id)
 
     # Determine if this is a system agent (e.g. OKR Agent).
     # System agents can see all tools; regular agents cannot see okr_agent_only tools.
-    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-    agent_obj = agent_r.scalar_one_or_none()
+    agent_obj = await _load_agent_for_tool_scope(db, agent_id)
     is_system_agent = bool(agent_obj and agent_obj.is_system)
 
-    # All available tools
-    all_tools_r = await db.execute(select(Tool).where(Tool.enabled == True).order_by(Tool.category, Tool.name))
-    all_tools = all_tools_r.scalars().all()
-
     # Agent-specific assignments
-    agent_tools_r = await db.execute(select(AgentTool).where(AgentTool.agent_id == agent_id))
-    assignments = {str(at.tool_id): at for at in agent_tools_r.scalars().all()}
+    assignments = await _load_agent_tool_assignments(db, agent_id)
+
+    # All tools visible within this agent's tenant boundary
+    all_tools_r = await db.execute(
+        select(Tool)
+        .where(Tool.enabled == True, _agent_visible_tool_clause(agent_obj.tenant_id, assignments))
+        .order_by(Tool.category, Tool.name)
+    )
+    all_tools = all_tools_r.scalars().all()
 
     result = []
     for t in all_tools:
@@ -365,9 +417,7 @@ async def get_agent_tools(
             continue
         tid = str(t.id)
         at = assignments.get(tid)
-        # MCP tools installed by agents only show for that agent.
-        # MCP admin tools show for all agents (default disabled).
-        if t.source == "agent" and not at:
+        if not _tool_record_visible_to_agent(t, agent_obj.tenant_id, assignments):
             continue
         # If no explicit assignment, use is_default
         enabled = at.enabled if at else t.is_default
@@ -394,8 +444,19 @@ async def update_agent_tools(
     db: AsyncSession = Depends(get_db),
 ):
     """Update tool assignments for an agent."""
+    agent_obj = await _load_agent_for_tool_scope(db, agent_id)
+    assignments = await _load_agent_tool_assignments(db, agent_id)
     for u in updates:
         tool_id = uuid.UUID(u.tool_id)
+        tool_r = await db.execute(
+            select(Tool).where(
+                Tool.id == tool_id,
+                _agent_visible_tool_clause(agent_obj.tenant_id, assignments),
+            )
+        )
+        if not tool_r.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Tool not found")
+
         # Upsert
         result = await db.execute(
             select(AgentTool).where(AgentTool.agent_id == agent_id, AgentTool.tool_id == tool_id)
@@ -676,18 +737,19 @@ async def get_agent_tools_with_config(
     the agent-level UI can show the inherited key hint.
     """
     from app.services.agent_tools import _agent_has_feishu
-    from app.models.agent import Agent as AgentModel
     has_feishu = await _agent_has_feishu(agent_id)
 
     # Determine if this is a system agent (e.g. OKR Agent).
-    agent_r2 = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-    agent_obj2 = agent_r2.scalar_one_or_none()
+    agent_obj2 = await _load_agent_for_tool_scope(db, agent_id)
     is_system_agent2 = bool(agent_obj2 and agent_obj2.is_system)
 
-    all_tools_r = await db.execute(select(Tool).where(Tool.enabled == True).order_by(Tool.category, Tool.name))
+    assignments = await _load_agent_tool_assignments(db, agent_id)
+    all_tools_r = await db.execute(
+        select(Tool)
+        .where(Tool.enabled == True, _agent_visible_tool_clause(agent_obj2.tenant_id, assignments))
+        .order_by(Tool.category, Tool.name)
+    )
     all_tools = all_tools_r.scalars().all()
-    agent_tools_r = await db.execute(select(AgentTool).where(AgentTool.agent_id == agent_id))
-    assignments = {str(at.tool_id): at for at in agent_tools_r.scalars().all()}
 
     # Pre-fetch system_settings keys that some tools use as an alternative
     # config storage (e.g. Jina stores its API key in system_settings.jina_api_key)
@@ -708,9 +770,7 @@ async def get_agent_tools_with_config(
             continue
         tid = str(t.id)
         at = assignments.get(tid)
-        # MCP tools installed by agents only show for that agent.
-        # MCP admin tools show for all agents (default disabled).
-        if t.source == "agent" and not at:
+        if not _tool_record_visible_to_agent(t, agent_obj2.tenant_id, assignments):
             continue
         enabled = at.enabled if at else t.is_default
 
