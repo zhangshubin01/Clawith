@@ -52,6 +52,7 @@ from .context import (
     list_active_routers,
 )
 from .lsp_protocol import LSPBaseProtocolParser, ParseError
+from .stream_buffer import StreamBufferManager
 from .tool_constants import (
     LSP4J_IDE_TOOL_NAMES,
     TOOL_DISPLAY_NAME_MAP,
@@ -676,8 +677,11 @@ class JSONRPCRouter:
             # 通知类型，无需响应
             return
 
-        # 4. 未知方法：如果有 id 则返回 method-not-found 错误
+        # 4. 未知方法：如果有 id 则返回 method-not-found 错误（标准 JSON-RPC 2.0 错误码）
+        # 这涵盖了 LSP 标准方法中尚未显式适配的约 30 个 TextDocumentService 方法
+        # （completionItem/resolve, hover, definition, references, codeAction, etc.）
         if msg_id is not None:
+            logger.info("LSP4J: 未适配方法, 返回 -32601 method={} id={}", method, msg_id)
             await self._send_error_response(
                 msg_id, -32601, f"Method not found: {method}"
             )
@@ -947,95 +951,9 @@ class JSONRPCRouter:
             _thinking_started: bool = False
 
             # ★ 流式输出缓冲：按"完整行"发送；Markdown 表格按整块发送，避免被拆成半截列。
-            _line_buffer = ""
-            _ready_segments: list[str] = []
-            _table_lines: list[str] = []
-            _table_mode = False
-            _BUFFER_THRESHOLD = 200  # 非表格文本累计阈值
-            _TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
-            _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|\s*[:\-\| ]+\|\s*$")
-
-            def _is_table_line(line: str) -> bool:
-                return bool(_TABLE_LINE_RE.match(line))
-
-            def _is_valid_table_block(lines: list[str]) -> bool:
-                return len(lines) >= 2 and any(_TABLE_SEPARATOR_RE.match(ln) for ln in lines[1:])
-
-            def _drain_ready_text(max_len_only: bool = False) -> str:
-                if not _ready_segments:
-                    return ""
-                if max_len_only:
-                    acc = []
-                    total = 0
-                    while _ready_segments and total < _BUFFER_THRESHOLD:
-                        seg = _ready_segments[0]
-                        if total > 0 and total + len(seg) > _BUFFER_THRESHOLD:
-                            break
-                        acc.append(_ready_segments.pop(0))
-                        total += len(seg)
-                    return "".join(acc)
-                text = "".join(_ready_segments)
-                _ready_segments.clear()
-                return text
-
-            def _flush_table_lines() -> None:
-                nonlocal _table_lines
-                if not _table_lines:
-                    return
-                if _is_valid_table_block(_table_lines):
-                    _ready_segments.append("".join(f"{ln}\n" for ln in _table_lines))
-                else:
-                    for ln in _table_lines:
-                        _ready_segments.append(f"{ln}\n")
-                _table_lines = []
-
-            async def _flush_buffer(force: bool = False) -> None:
-                nonlocal _line_buffer, _table_mode, _table_lines
-                if force:
-                    if _line_buffer:
-                        # 结束阶段若尾部是未换行的残片，也要一并送出。
-                        if _table_mode:
-                            _table_lines.append(_line_buffer)
-                            _flush_table_lines()
-                            _table_mode = False
-                        else:
-                            _ready_segments.append(_line_buffer)
-                        _line_buffer = ""
-                    if _table_mode:
-                        _flush_table_lines()
-                        _table_mode = False
-                    payload = _drain_ready_text(max_len_only=False)
-                    if payload:
-                        await self._send_chat_answer(session_id, payload, request_id)
-                        logger.debug("[LSP4J] buffer flushed (force): text_len={}", len(payload))
-                    return
-
-                while "\n" in _line_buffer:
-                    line, _line_buffer = _line_buffer.split("\n", 1)
-                    if _table_mode:
-                        if _is_table_line(line):
-                            _table_lines.append(line)
-                            continue
-                        _flush_table_lines()
-                        _table_mode = False
-                        if line == "":
-                            _ready_segments.append("\n")
-                        elif _is_table_line(line):
-                            _table_mode = True
-                            _table_lines = [line]
-                        else:
-                            _ready_segments.append(f"{line}\n")
-                    else:
-                        if _is_table_line(line):
-                            _table_mode = True
-                            _table_lines = [line]
-                        else:
-                            _ready_segments.append(f"{line}\n")
-
-                payload = _drain_ready_text(max_len_only=True)
-                if payload:
-                    await self._send_chat_answer(session_id, payload, request_id)
-                    logger.debug("[LSP4J] buffer flushed: text_len={}", len(payload))
+            buffer = StreamBufferManager(
+                send_fn=lambda payload: self._send_chat_answer(session_id, payload, request_id)
+            )
 
             async def on_chunk(text: str) -> None:
                 """流式文本回调 — 推送 chat/answer（ChatAnswerParams 格式）
@@ -1043,7 +961,7 @@ class JSONRPCRouter:
                 使用缓冲区累积小 chunk，按行或阈值发送，避免 markdown 表格被拆分成单个字符，
                 导致 MarkdownStreamPanel 无法正确解析。
                 """
-                nonlocal _thinking_started, _line_buffer
+                nonlocal _thinking_started
                 # 思考结束标记：收到首个正文 chunk 即表示思考阶段结束
                 if _thinking_started:
                     _thinking_started = False
@@ -1061,10 +979,8 @@ class JSONRPCRouter:
                     # 非流式模式：不发送，在 finish 中一次性返回
                     return
 
-                _line_buffer += text
-                # 仅在形成完整行时切分发送；表格由 _table_mode 聚合成整块再发。
-                if "\n" in text or len(_line_buffer) >= _BUFFER_THRESHOLD:
-                    await _flush_buffer()
+                if buffer.feed(text):
+                    await buffer.flush()
 
             async def on_thinking(text: str) -> None:
                 """推理过程回调 — 逐步推送 DeepSeek reasoning_content 到 IDE。
@@ -1377,13 +1293,9 @@ class JSONRPCRouter:
                 error_status_code = 500
                 reply = f"[错误] {type(e).__name__}: {str(e)[:200]}"
 
-            # 发送思考完成状态
-            await self._send_chat_think(session_id, "", "done", request_id)
-
-            # ★ 兜底发送思考结束通知（修复：只输出 thinking 不输出正文时思考状态不结束）
-            # 场景：某些模型（如 DeepSeek-R1）纯思考拒绝回答、工具调用后直接结束、无正文输出
-            # 原因：若 on_chunk 永不调用则思考结束通知永远不会发送
-            # 判断依据：_thinking_started=True 表示思考阶段未结束
+            # ★ 发送思考完成状态
+            # 若 on_chunk 已被调用（_thinking_started=False），已在 on_chunk 中发送过 done，
+            # 此处仅兜底处理纯思考无正文的场景（_thinking_started=True）。
             if _thinking_started:
                 _thinking_started = False
                 await self._send_chat_think(session_id, "", "done", request_id)
@@ -1444,7 +1356,7 @@ class JSONRPCRouter:
             current_lsp4j_message_history.set(message_history)
 
             # ★ 刷新缓冲区，确保所有累积的文本都已发送
-            await _flush_buffer(force=True)
+            await buffer.flush(force=True)
 
             # 6. 发送完成信号（ChatFinishParams 格式）
             # statusCode 映射：200=成功, 200=取消(非错误), 500=异常
@@ -2185,6 +2097,16 @@ class JSONRPCRouter:
 
         # 等待异步结果
         file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
+        # ★ 检查取消事件：chat/stop 可能已设置 _cancel_event，在等待前检测一次
+        if self._cancel_event and self._cancel_event.is_set():
+            logger.info("[LSP4J-TOOL] 工具调用前检测到取消信号: tool={} callId={}", tool_name, tool_call_id[:8])
+            if queue_matched:
+                await self._send_tool_call_sync(
+                    self._session_id, request_id, tool_call_id,
+                    "CANCELLED", tool_name=original_name, parameters=arguments,
+                )
+            self._cancelled_requests[rpc_id] = None
+            return "[已取消] 用户停止了聊天"
         try:
             result = await asyncio.wait_for(tool_future, timeout=timeout)
             # ★ IDE 搜索工具（grep_code/search_codebase/search_symbol）：插件返回
@@ -2701,7 +2623,11 @@ class JSONRPCRouter:
             frame = LSPBaseProtocolParser.format_message(message)
             await self._ws.send_text(frame)
         except Exception as e:
-            logger.error("LSP4J: WebSocket 发送失败: {}", e)
+            # WebSocket 发送失败意味着连接已不可用，标记关闭防止后续调用继续失败
+            _method = message.get("method", "unknown")
+            _id = message.get("id", "none")
+            logger.warning("LSP4J: WebSocket 发送失败, method={} id={} error={}", _method, _id, e)
+            self._closed = True
 
     async def _send_response(self, msg_id: Any, result: Any) -> None:
         """发送 JSON-RPC 成功响应。"""
@@ -4148,7 +4074,7 @@ async def _persist_lsp4j_chat_turn(
                 await ws_module.manager.send_to_session(
                     str(agent_id),
                     sid_normalized,
-                    {"type": "done", "role": "assistant", "content": reply_text},
+                    {"type": "done", "role": "assistant", "content": reply_text, "source": "lsp4j"},
                 )
                 # 前端通知已发送
                 logger.debug("[LSP4J] 前端通知已发送: session_id={}", sid_normalized)
