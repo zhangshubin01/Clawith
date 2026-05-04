@@ -1939,6 +1939,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     # Check tenant-level a2a_async_enabled flag
     _a2a_async = False
     is_system_agent = False
+    agent_tenant_id = None
     try:
         from app.models.tenant import Tenant
         from app.models.agent import Agent as AgentModel
@@ -1946,6 +1947,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             _ag_r = await _flag_db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             _agent = _ag_r.scalar_one_or_none()
             _tid = _agent.tenant_id if _agent else None
+            agent_tenant_id = _tid
             is_system_agent = bool(_agent and _agent.is_system)
             if _tid:
                 _t_r = await _flag_db.execute(select(Tenant).where(Tenant.id == _tid))
@@ -1962,13 +1964,22 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
         from app.models.tool import Tool, AgentTool
 
         async with async_session() as db:
-            # Get all globally enabled tools
-            all_tools_r = await db.execute(select(Tool).where(Tool.enabled == True))
-            all_tools = all_tools_r.scalars().all()
-
             # Get agent-specific assignments
             agent_tools_r = await db.execute(select(AgentTool).where(AgentTool.agent_id == agent_id))
             assignments = {str(at.tool_id): at for at in agent_tools_r.scalars().all()}
+            assigned_tool_ids = [uuid.UUID(tool_id) for tool_id in assignments]
+
+            visible_clauses = [Tool.source == "builtin"]
+            if agent_tenant_id:
+                visible_clauses.append((Tool.source == "admin") & (Tool.tenant_id == agent_tenant_id))
+            if assigned_tool_ids:
+                visible_clauses.append((Tool.source == "agent") & Tool.id.in_(assigned_tool_ids))
+
+            # Get all tools visible within this agent's tenant boundary.
+            all_tools_r = await db.execute(
+                select(Tool).where(Tool.enabled == True, or_(*visible_clauses))
+            )
+            all_tools = all_tools_r.scalars().all()
 
             result = []
             db_tool_names = set()
@@ -1986,11 +1997,6 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 # OKR-system-only tools, even if the DB default says enabled.
                 if (t.config or {}).get("okr_agent_only") and not is_system_agent:
                     continue
-                # Match the Agent Tools UI: agent-installed tools only belong
-                # to the agent that has an explicit assignment.
-                if t.source == "agent" and not at:
-                    continue
-
                 # Build OpenAI function-calling format
                 tool_def = {
                     "type": "function",
