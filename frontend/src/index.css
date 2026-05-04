@@ -95,9 +95,14 @@
   --header-height: 52px;
 
   /* Notification bar */
+  --notification-bar-height: 0px;
   --notification-bar-bg: var(--accent-primary);
   --notification-bar-text: var(--bg-primary);
   --notification-bar-close-hover: rgba(0, 0, 0, 0.1);
+}
+
+body.has-notification-bar {
+  --notification-bar-height: 32px;
 }
 
 /* ─── Notification Bar ──────────────────────────────── */
@@ -169,16 +174,6 @@
 .notification-bar-close:hover {
   opacity: 1;
   background: var(--notification-bar-close-hover);
-}
-
-/* Adjust sidebar and main content when notification bar is present */
-.has-notification-bar .sidebar {
-  top: 32px;
-  bottom: 0;
-}
-
-.has-notification-bar .main-content {
-  min-height: calc(100vh - 32px);
 }
 
 [data-theme="light"] {
@@ -273,7 +268,7 @@ body {
   background: var(--bg-primary);
   color: var(--text-primary);
   line-height: 1.5;
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 a {
@@ -344,7 +339,7 @@ select:focus {
 
 .app-layout {
   display: flex;
-  min-height: 100vh;
+  min-height: calc(100dvh - var(--notification-bar-height));
 }
 
 .app-layout.sidebar-collapsed {
@@ -358,11 +353,11 @@ select:focus {
   display: flex;
   flex-direction: column;
   position: fixed;
-  top: 0;
+  top: var(--notification-bar-height);
   left: 0;
   bottom: 0;
-  height: 100vh;
-  max-height: 100vh;
+  height: calc(100dvh - var(--notification-bar-height));
+  max-height: calc(100dvh - var(--notification-bar-height));
   z-index: 10;
   transition: width var(--transition-default);
   /* Allow account language submenu to extend to the right; vertical scroll stays in .sidebar-scrollable */
@@ -1494,7 +1489,7 @@ select:focus {
 .main-content {
   margin-left: var(--sidebar-width);
   flex: 1;
-  min-height: 100vh;
+  min-height: calc(100dvh - var(--notification-bar-height));
   padding: var(--space-8);
   width: calc(100vw - var(--sidebar-width));
   max-width: calc(100vw - var(--sidebar-width));
@@ -1507,7 +1502,7 @@ select:focus {
    can scroll independently. Without this, .main-content grows with content
    (min-height: 100vh) and overflow-y: auto on .chat-messages never fires. */
 .main-content.chat-page {
-  height: 100vh;
+  height: calc(100dvh - var(--notification-bar-height));
   min-height: 0;
   overflow: hidden;
   display: flex;
@@ -2204,7 +2199,7 @@ select:focus {
 /* Login page — premium split-screen */
 .login-page {
   display: flex;
-  min-height: 100vh;
+  min-height: calc(100dvh - var(--notification-bar-height));
   background: #08080b;
   color: #f7f7f4;
 }
@@ -2217,7 +2212,7 @@ select:focus {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  min-height: 100vh;
+  min-height: calc(100dvh - var(--notification-bar-height));
   background: #09090d;
 }
 
@@ -2575,7 +2570,7 @@ select:focus {
 
 /* ─── Company Setup Page ───────────────────────────── */
 .company-setup-page {
-  min-height: 100vh;
+  min-height: calc(100dvh - var(--notification-bar-height));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4197,26 +4192,30 @@ select:focus {
 
 .workspace-op-tree-tools-full {
   width: 100%;
-  justify-content: flex-start;
+  justify-content: space-between;
+  min-width: 0;
 }
 
 .workspace-op-tree-actions {
   margin-left: auto;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .workspace-op-tree-primary-actions {
-  display: flex;
+  display: inline-flex;
+  align-items: center;
   justify-content: flex-end;
-  gap: 6px;
-  margin: -2px 0 8px;
+  gap: 4px;
+  margin: 0;
+  flex-shrink: 0;
 }
 
 .workspace-op-tree-action-btn {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4249,11 +4248,13 @@ select:focus {
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
   background: color-mix(in srgb, var(--bg-tertiary) 80%, transparent);
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .workspace-op-tree-scope button {
   height: 20px;
-  padding: 0 7px;
+  padding: 0 6px;
   border: none;
   border-radius: 5px;
   background: transparent;
@@ -4750,7 +4751,8 @@ select:focus {
 }
 
 .workspace-op-live {
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -4764,8 +4766,10 @@ select:focus {
 
 .workspace-op-html-fit {
   width: 100%;
-  min-height: 100%;
-  overflow: auto;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
   background: var(--bg-secondary);
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
@@ -4774,6 +4778,10 @@ select:focus {
 
 .workspace-op-html-fit iframe {
   display: block;
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   border: none;
   background: #fff;
   border-radius: 8px;

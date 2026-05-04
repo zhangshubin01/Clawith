@@ -6,7 +6,7 @@ import MarkdownRenderer from './MarkdownRenderer';
 import { fileApi, uploadFileWithProgress } from '../services/api';
 
 export interface WorkspaceActivity {
-    action: 'write' | 'edit' | 'convert' | 'delete';
+    action: 'write' | 'edit' | 'move' | 'convert' | 'delete';
     path: string;
     tool?: string;
     ok?: boolean;
@@ -15,7 +15,7 @@ export interface WorkspaceActivity {
 
 export interface WorkspaceLiveDraft {
     id: string;
-    action: 'write' | 'edit' | 'convert' | 'delete';
+    action: 'write' | 'edit' | 'move' | 'convert' | 'delete';
     tool: string;
     path?: string;
     content?: string;
@@ -140,6 +140,18 @@ function parentDirs(path?: string | null): string[] {
     return dirs;
 }
 
+function isWorkspacePath(path?: string | null): boolean {
+    return !!path && (path === WORKSPACE_ROOT || path.startsWith(`${WORKSPACE_ROOT}/`));
+}
+
+function removeWorkspaceExpansion(dirs: Set<string>): Set<string> {
+    const next = new Set(dirs);
+    Array.from(next).forEach((dir) => {
+        if (isWorkspacePath(dir)) next.delete(dir);
+    });
+    return next;
+}
+
 function parentDir(path?: string | null): string {
     if (!path || !path.startsWith(`${WORKSPACE_ROOT}/`)) return WORKSPACE_ROOT;
     const parts = path.split('/');
@@ -247,84 +259,83 @@ function HtmlPreviewFrame({
     content,
     title,
     src,
-    suspendAutoFit = false,
 }: {
     content: string;
     title: string;
     src?: string;
     suspendAutoFit?: boolean;
 }) {
-    const viewportRef = useRef<HTMLDivElement>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
     const frameRef = useRef<HTMLIFrameElement>(null);
     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const [renderContent, setRenderContent] = useState(content);
-    const [frameHeight, setFrameHeight] = useState(720);
-    const observersRef = useRef<{ resize?: ResizeObserver; mutation?: MutationObserver } | null>(null);
+    const observersRef = useRef<{ frame?: ResizeObserver; document?: ResizeObserver; mutation?: MutationObserver } | null>(null);
     const fitRafRef = useRef<number | null>(null);
 
-    const fitFrame = () => {
-        if (suspendAutoFit) return;
+    const fitFixedWidthContent = () => {
         const frame = frameRef.current;
         const doc = frame?.contentDocument;
-        if (!frame || !doc?.body) return;
+        const root = doc?.documentElement;
+        const body = doc?.body;
+        if (!frame || !doc || !root || !body) return;
 
-        const body = doc.body;
-        const root = doc.documentElement;
-        body.style.margin = body.style.margin || '0';
-        root.style.margin = root.style.margin || '0';
-
-        const contentHeight = Math.max(root.scrollHeight, body.scrollHeight, body.offsetHeight, 480);
-        setFrameHeight(contentHeight);
+        root.style.zoom = '1';
+        const viewportWidth = Math.max(frame.clientWidth, 1);
+        const contentWidth = Math.max(
+            root.scrollWidth,
+            body.scrollWidth,
+            root.offsetWidth,
+            body.offsetWidth,
+            viewportWidth,
+        );
+        const nextZoom = Math.min(1, viewportWidth / contentWidth);
+        root.style.zoom = nextZoom < 0.995 ? String(nextZoom) : '1';
     };
 
-    const requestFitFrame = () => {
-        if (suspendAutoFit) return;
+    const requestFitFixedWidthContent = () => {
         if (fitRafRef.current != null) cancelAnimationFrame(fitRafRef.current);
         fitRafRef.current = requestAnimationFrame(() => {
             fitRafRef.current = null;
-            fitFrame();
+            fitFixedWidthContent();
         });
     };
 
-    const bindFrameObservers = () => {
+    const bindFrameFitObservers = () => {
         const frame = frameRef.current;
         const doc = frame?.contentDocument;
-        const body = doc?.body;
-        if (!doc || !body) return;
+        if (!frame || !doc?.documentElement || !doc.body) return;
 
-        observersRef.current?.resize?.disconnect();
+        observersRef.current?.frame?.disconnect();
+        observersRef.current?.document?.disconnect();
         observersRef.current?.mutation?.disconnect();
+        observersRef.current = {};
 
         if (typeof ResizeObserver !== 'undefined') {
-            const resize = new ResizeObserver(() => requestFitFrame());
-            resize.observe(body);
-            resize.observe(doc.documentElement);
-            observersRef.current = { ...(observersRef.current || {}), resize };
+            const frameResize = new ResizeObserver(() => requestFitFixedWidthContent());
+            frameResize.observe(frame);
+            if (containerRef.current) frameResize.observe(containerRef.current);
+
+            const documentResize = new ResizeObserver(() => requestFitFixedWidthContent());
+            documentResize.observe(doc.documentElement);
+            documentResize.observe(doc.body);
+
+            observersRef.current.frame = frameResize;
+            observersRef.current.document = documentResize;
         }
 
         if (typeof MutationObserver !== 'undefined') {
-            const mutation = new MutationObserver(() => {
-                requestFitFrame();
-            });
-            mutation.observe(body, {
+            const mutation = new MutationObserver(() => requestFitFixedWidthContent());
+            mutation.observe(doc.documentElement, {
                 subtree: true,
                 childList: true,
                 characterData: true,
                 attributes: true,
             });
-            observersRef.current = { ...(observersRef.current || {}), mutation };
+            observersRef.current.mutation = mutation;
         }
-    };
 
-    useEffect(() => {
-        const viewport = viewportRef.current;
-        if (!viewport || typeof ResizeObserver === 'undefined') return;
-        const observer = new ResizeObserver(() => {
-            requestFitFrame();
-        });
-        observer.observe(viewport);
-        return () => observer.disconnect();
-    }, [suspendAutoFit]);
+        requestFitFixedWidthContent();
+    };
 
     useEffect(() => {
         if (src) return;
@@ -347,19 +358,15 @@ function HtmlPreviewFrame({
     }, [content, renderContent]);
 
     useEffect(() => () => {
-        observersRef.current?.resize?.disconnect();
+        if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+        observersRef.current?.frame?.disconnect();
+        observersRef.current?.document?.disconnect();
         observersRef.current?.mutation?.disconnect();
         if (fitRafRef.current != null) cancelAnimationFrame(fitRafRef.current);
     }, []);
 
-    useEffect(() => {
-        if (!suspendAutoFit) {
-            requestFitFrame();
-        }
-    }, [suspendAutoFit, renderContent, src]);
-
     return (
-        <div className="workspace-op-html-fit" ref={viewportRef}>
+        <div className="workspace-op-html-fit" ref={containerRef}>
             <iframe
                 ref={frameRef}
                 sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation"
@@ -368,15 +375,9 @@ function HtmlPreviewFrame({
                 title={title}
                 onLoad={() => {
                     requestAnimationFrame(() => {
-                        fitFrame();
-                        bindFrameObservers();
-                        requestFitFrame();
+                        bindFrameFitObservers();
+                        requestFitFixedWidthContent();
                     });
-                }}
-                style={{
-                    width: '100%',
-                    minHeight: '480px',
-                    height: `${frameHeight}px`,
                 }}
             />
         </div>
@@ -429,6 +430,7 @@ export default function WorkspaceOperationPanel({
     const previewScrollRef = useRef<HTMLDivElement | null>(null);
     const previewShouldFollowRef = useRef(true);
     const suppressNextAutoRevealRef = useRef(false);
+    const manualTreeScopeRef = useRef<TreeScope | null>(null);
 
     const ext = activePath ? extOf(activePath) : '';
     const canModifyPath = (path?: string | null) => !isEnterprisePath(path) || canManageEnterpriseInfo;
@@ -498,6 +500,7 @@ export default function WorkspaceOperationPanel({
     useEffect(() => {
         if (activePath !== prevActivePathRef.current) {
             prevActivePathRef.current = activePath ?? null;
+            manualTreeScopeRef.current = null;
             setEditing(false);
             onEditingChange?.(false);
         }
@@ -596,12 +599,14 @@ export default function WorkspaceOperationPanel({
 
     useEffect(() => {
         if (!activePath || treeScope !== 'workspace') return;
-        if (activePath === WORKSPACE_ROOT || activePath.startsWith(`${WORKSPACE_ROOT}/`)) return;
+        if (isWorkspacePath(activePath)) return;
+        if (manualTreeScopeRef.current === 'workspace') return;
         setTreeScope('all');
     }, [activePath, treeScope]);
 
     useEffect(() => {
         const pathToReveal = activePath || liveDraft?.path;
+        if (treeScope === 'workspace' && pathToReveal && !isWorkspacePath(pathToReveal)) return;
         if (suppressNextAutoRevealRef.current) {
             suppressNextAutoRevealRef.current = false;
             return;
@@ -612,7 +617,16 @@ export default function WorkspaceOperationPanel({
             dirs.forEach((dir) => next.add(dir));
             return next;
         });
-    }, [activePath, liveDraft?.path]);
+    }, [activePath, liveDraft?.path, treeScope]);
+
+    useEffect(() => {
+        if (treeScope !== 'all') return;
+        if (isWorkspacePath(activePath || liveDraft?.path)) return;
+        setExpandedDirs((prev) => {
+            if (!Array.from(prev).some((dir) => isWorkspacePath(dir))) return prev;
+            return removeWorkspaceExpansion(prev);
+        });
+    }, [activePath, liveDraft?.path, treeScope]);
 
     useEffect(() => {
         if (activePath) {
@@ -768,9 +782,14 @@ export default function WorkspaceOperationPanel({
     };
 
     const switchTreeScope = (scope: TreeScope) => {
+        manualTreeScopeRef.current = scope;
         setTreeScope(scope);
         if (scope === 'workspace') {
             setSelectedDirPath(WORKSPACE_ROOT);
+            setExpandedDirs((prev) => {
+                if (isWorkspacePath(activePath || liveDraft?.path)) return prev;
+                return removeWorkspaceExpansion(prev);
+            });
         }
     };
 
@@ -1187,6 +1206,51 @@ export default function WorkspaceOperationPanel({
         : t('agent.workspace.focusPreview', 'Focus preview');
     const editLabel = t('agent.workspace.edit', 'Edit');
     const doneLabel = t('agent.workspace.done', 'Done');
+    const fileTreeActions = (
+        <div className="workspace-op-tree-primary-actions">
+            {activePath && (
+                <a
+                    className="workspace-op-tree-action-btn"
+                    href={fileApi.downloadUrl(agentId, activePath)}
+                    download
+                    title={`Download ${fileName(activePath)}`}
+                    aria-label={`Download ${fileName(activePath)}`}
+                >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M12 3v10" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                        <path d="M8 10l4 4 4-4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M5 18h14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                    </svg>
+                </a>
+            )}
+            <button
+                className="workspace-op-tree-action-btn"
+                type="button"
+                onClick={handleUploadClick}
+                title={`Upload into ${treeTargetDir}`}
+                aria-label={`Upload into ${treeTargetDir}`}
+            >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M12 16V5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                    <path d="M8 9l4-4 4 4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M5 19h14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+                </svg>
+            </button>
+            <button
+                className="workspace-op-tree-action-btn"
+                type="button"
+                onClick={handleCreateFolder}
+                title={`Create folder in ${treeTargetDir}`}
+                aria-label={`Create folder in ${treeTargetDir}`}
+            >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M4 8.5A2.5 2.5 0 016.5 6H10l1.4 1.6H17.5A2.5 2.5 0 0120 10.1v6.4A2.5 2.5 0 0117.5 19h-11A2.5 2.5 0 014 16.5v-8Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+                    <path d="M12 10.5v5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                    <path d="M9.5 13h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                </svg>
+            </button>
+        </div>
+    );
 
     const headerActions = (
         <>
@@ -1352,6 +1416,7 @@ export default function WorkspaceOperationPanel({
                                     </button>
                                 </div>
                                 <div className="workspace-op-tree-actions">
+                                    {fileTreeActions}
                                     <button
                                         className="workspace-op-mini-btn workspace-op-mini-btn-icon"
                                         type="button"
@@ -1369,49 +1434,6 @@ export default function WorkspaceOperationPanel({
                             </div>
                         </div>
                         <div className="workspace-op-tree-list">
-                            <div className="workspace-op-tree-primary-actions">
-                                {activePath && (
-                                    <a
-                                        className="workspace-op-tree-action-btn"
-                                        href={fileApi.downloadUrl(agentId, activePath)}
-                                        download
-                                        title={`Download ${fileName(activePath)}`}
-                                        aria-label={`Download ${fileName(activePath)}`}
-                                    >
-                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                            <path d="M12 3v10" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-                                            <path d="M8 10l4 4 4-4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-                                            <path d="M5 18h14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-                                        </svg>
-                                    </a>
-                                )}
-                                <button
-                                    className="workspace-op-tree-action-btn"
-                                    type="button"
-                                    onClick={handleUploadClick}
-                                    title={`Upload into ${treeTargetDir}`}
-                                    aria-label={`Upload into ${treeTargetDir}`}
-                                >
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                        <path d="M12 16V5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-                                        <path d="M8 9l4-4 4 4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-                                        <path d="M5 19h14" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-                                    </svg>
-                                </button>
-                                <button
-                                    className="workspace-op-tree-action-btn"
-                                    type="button"
-                                    onClick={handleCreateFolder}
-                                    title={`Create folder in ${treeTargetDir}`}
-                                    aria-label={`Create folder in ${treeTargetDir}`}
-                                >
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                                        <path d="M4 8.5A2.5 2.5 0 016.5 6H10l1.4 1.6H17.5A2.5 2.5 0 0120 10.1v6.4A2.5 2.5 0 0117.5 19h-11A2.5 2.5 0 014 16.5v-8Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
-                                        <path d="M12 10.5v5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                        <path d="M9.5 13h5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                                    </svg>
-                                </button>
-                            </div>
                             {treeScope === 'workspace' && renderUploadRows(WORKSPACE_ROOT, -1)}
                             {fileTree.length ? renderFileTreeNodes(fileTree, 0) : <div className="workspace-op-tree-empty">No files yet.</div>}
                         </div>

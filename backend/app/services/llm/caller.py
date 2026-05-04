@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 
 TOOLS_REQUIRING_ARGS = frozenset({
-    "write_file", "read_file", "delete_file", "read_document",
+    "write_file", "read_file", "move_file", "delete_file", "read_document",
     "send_message_to_agent", "send_feishu_message", "send_email"
 })
 

@@ -45,6 +45,7 @@ const TABS = ['status', 'aware', 'mind', 'tools', 'skills', 'relationships', 'wo
 const WORKSPACE_TOOLS = new Set([
     'write_file',
     'edit_file',
+    'move_file',
     'delete_file',
     'convert_markdown_to_docx',
     'convert_csv_to_xlsx',
@@ -55,6 +56,7 @@ const WORKSPACE_TOOLS = new Set([
 
 function workspaceActionForTool(tool: string): WorkspaceLiveDraft['action'] {
     if (tool === 'edit_file') return 'edit';
+    if (tool === 'move_file') return 'move';
     if (tool === 'delete_file') return 'delete';
     if (tool.startsWith('convert_')) return 'convert';
     return 'write';
@@ -108,7 +110,8 @@ function parseWorkspaceDraftArgs(tool: string, raw: string): Pick<WorkspaceLiveD
         return readPartialJsonString(raw || '', key);
     };
     const sourcePath = getString('source_path');
-    const path = getString('path') || getString('target_path') || sourcePath;
+    const destinationPath = getString('destination_path');
+    const path = destinationPath || getString('path') || getString('target_path') || sourcePath;
     let content = getString('content');
     if (tool === 'edit_file') content = getString('new_string') || content;
     return { path, content };
@@ -1201,6 +1204,12 @@ function getToolMeta(item: Extract<AnalysisItem, { type: 'tool' }>): AnalysisToo
     if (lower.includes('edit_file') || lower.includes('update_file')) {
         return { title: path ? `Updated ${basename(path)}` : 'Updated a file', label: 'Workspace', target: path, kind: 'file' };
     }
+    if (lower.includes('move_file')) {
+        const destinationPath = firstString(args.destination_path, args.to_path, args.target_path);
+        const sourcePath = firstString(args.source_path, args.from_path, args.path);
+        const titlePath = destinationPath || sourcePath;
+        return { title: titlePath ? `Moved ${basename(titlePath)}` : 'Moved a file', label: 'Workspace', target: titlePath, kind: 'file' };
+    }
     if (lower.includes('delete_file')) {
         return { title: path ? `Deleted ${basename(path)}` : 'Deleted a file', label: 'Workspace', target: path, kind: 'file' };
     }
@@ -1259,7 +1268,7 @@ function describeAnalysis(items: AnalysisItem[], t: (k: string, opts?: any) => s
     for (const item of toolItems) {
         const name = item.name.toLowerCase();
         if (name.includes('write_file') || name.includes('create_file')) created += 1;
-        else if (name.includes('edit_file') || name.includes('update_file') || name.startsWith('convert_')) updated += 1;
+        else if (name.includes('edit_file') || name.includes('update_file') || name.includes('move_file') || name.startsWith('convert_')) updated += 1;
         else if (name.includes('delete_file')) deleted += 1;
         else if (agentMessageTools.has(name)) agents += 1;
         else commands += 1;
@@ -3398,6 +3407,9 @@ function AgentDetailInner() {
     const pendingHistoryInitialScrollRef = useRef(false);
     const liveAutoFollowUntilRef = useRef(0);
     const userPinnedAwayFromBottomRef = useRef(false);
+    const liveScrollJobRef = useRef(0);
+    const liveScrollTimersRef = useRef<number[]>([]);
+    const chatTouchStartYRef = useRef<number | null>(null);
     const [showScrollBtn, setShowScrollBtn] = useState(false);
     const [chatScrollBtnBottom, setChatScrollBtnBottom] = useState(96);
     // Read-only history scroll-to-bottom
@@ -3419,24 +3431,41 @@ function AgentDetailInner() {
         };
         requestAnimationFrame(focusWhenReady);
     }, [activeTab]);
+    const cancelLiveAutoFollow = useCallback(() => {
+        liveAutoFollowUntilRef.current = 0;
+        liveScrollJobRef.current += 1;
+        liveScrollTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+        liveScrollTimersRef.current = [];
+    }, []);
+    const pinChatAwayFromBottom = useCallback(() => {
+        cancelLiveAutoFollow();
+        userPinnedAwayFromBottomRef.current = true;
+        isNearBottom.current = false;
+        setShowScrollBtn(true);
+    }, [cancelLiveAutoFollow]);
     const scheduleLiveScrollToBottom = useCallback(() => {
         if (userPinnedAwayFromBottomRef.current) return;
+        cancelLiveAutoFollow();
+        const jobId = liveScrollJobRef.current;
         liveAutoFollowUntilRef.current = Date.now() + 1500;
         let attempts = 0;
         const scroll = () => {
+            if (jobId !== liveScrollJobRef.current) return;
             if (userPinnedAwayFromBottomRef.current) return;
             const el = chatContainerRef.current;
             if (el) el.scrollTop = el.scrollHeight;
-            chatEndRef.current?.scrollIntoView({ behavior: 'instant' as ScrollBehavior, block: 'end' });
             setShowScrollBtn(false);
-            if (attempts++ < 12) requestAnimationFrame(scroll);
+            if (attempts++ < 2) requestAnimationFrame(scroll);
         };
         requestAnimationFrame(scroll);
-        window.setTimeout(scroll, 0);
-        window.setTimeout(scroll, 120);
-        window.setTimeout(scroll, 360);
-        window.setTimeout(scroll, 800);
-    }, []);
+        liveScrollTimersRef.current = [
+            window.setTimeout(scroll, 80),
+            window.setTimeout(scroll, 220),
+        ];
+    }, [cancelLiveAutoFollow]);
+    useEffect(() => {
+        return () => cancelLiveAutoFollow();
+    }, [cancelLiveAutoFollow]);
     const scheduleHistoryScrollToBottom = useCallback(() => {
         let attempts = 0;
         const scroll = () => {
@@ -3592,9 +3621,28 @@ function AgentDetailInner() {
         isNearBottom.current = distFromBottom < 160;
         userPinnedAwayFromBottomRef.current = distFromBottom > 260;
         if (userPinnedAwayFromBottomRef.current) {
-            liveAutoFollowUntilRef.current = 0;
+            cancelLiveAutoFollow();
         }
         setShowScrollBtn(distFromBottom > 200);
+    };
+    const handleChatWheelCapture = (event: React.WheelEvent<HTMLDivElement>) => {
+        const el = chatContainerRef.current;
+        if (!el) return;
+        if (event.deltaY < 0 && el.scrollTop > 0) {
+            pinChatAwayFromBottom();
+        }
+    };
+    const handleChatTouchStartCapture = (event: React.TouchEvent<HTMLDivElement>) => {
+        chatTouchStartYRef.current = event.touches[0]?.clientY ?? null;
+    };
+    const handleChatTouchMoveCapture = (event: React.TouchEvent<HTMLDivElement>) => {
+        const startY = chatTouchStartYRef.current;
+        const currentY = event.touches[0]?.clientY;
+        const el = chatContainerRef.current;
+        if (startY == null || currentY == null || !el) return;
+        if (currentY - startY > 6 && el.scrollTop > 0) {
+            pinChatAwayFromBottom();
+        }
     };
     const scrollToBottom = () => {
         userPinnedAwayFromBottomRef.current = false;
@@ -3716,6 +3764,8 @@ function AgentDetailInner() {
         };
 
         setChatInput('');
+        userPinnedAwayFromBottomRef.current = false;
+        isNearBottom.current = true;
         // Reset textarea height after clearing content
         if (chatInputRef.current) {
             chatInputRef.current.style.height = 'auto';
@@ -6044,7 +6094,14 @@ function AgentDetailInner() {
                                                 <div className="drop-zone-overlay__text">{t('agent.upload.dropToAttach', 'Drop files to attach (max 10)')}</div>
                                             </div>
                                         )}
-                                        <div ref={chatContainerRef} onScroll={handleChatScroll} style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}>
+                                        <div
+                                            ref={chatContainerRef}
+                                            onScroll={handleChatScroll}
+                                            onWheelCapture={handleChatWheelCapture}
+                                            onTouchStartCapture={handleChatTouchStartCapture}
+                                            onTouchMoveCapture={handleChatTouchMoveCapture}
+                                            style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}
+                                        >
                                             {chatMessages.length === 0 && (
                                                 <div className="chat-empty-state">
                                                     <div className="chat-empty-state__title">{activeSession?.title || t('agent.chat.startChat')}</div>

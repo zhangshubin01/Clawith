@@ -438,6 +438,7 @@ Default visual style for generated HTML or rich visual documents:
    - To list files → CALL `list_files`
    - To read a file → CALL `read_file` or `read_document`
    - To write a file → CALL `write_file`
+   - To move or rename a file/folder → CALL `move_file`
    - To delete a file → CALL `delete_file`
 
 2. **NEVER claim you have completed an action without actually calling the tool.**

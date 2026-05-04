@@ -130,8 +130,8 @@ def _draw_coordinate_grid(
     draw = ImageDraw.Draw(overlay)
     width, height = grid_img.size
 
-    minor_line = (17, 24, 39, 34)
-    major_line = (17, 24, 39, 82)
+    minor_line = (17, 24, 39, 40)
+    major_line = (17, 24, 39, 112)
     label_bg = (255, 255, 255, 210)
     label_fg = (17, 24, 39, 230)
     label_border = (148, 163, 184, 140)
@@ -158,21 +158,29 @@ def _draw_coordinate_grid(
     for x in range(0, width + 1, minor_pixel_step):
         absolute_x = int(round(origin_x + (x / pixel_scale)))
         fill = major_line if absolute_x % major_step == 0 else minor_line
-        draw.line((x, 0, x, height), fill=fill, width=1)
+        is_major = absolute_x % major_step == 0
+        draw.line((x, 0, x, height), fill=fill, width=2 if is_major else 1)
         if x > 0 and absolute_x % major_step == 0:
             label(str(absolute_x), (min(x + 3, width - 44), 4))
             label(str(absolute_x), (min(x + 3, width - 44), max(height - 18, 4)))
+            if width >= 500 and height >= 360:
+                label(f"x={absolute_x}", (min(x + 3, width - 54), max((height // 2) - 9, 4)))
 
     for y in range(0, height + 1, minor_pixel_step):
         absolute_y = int(round(origin_y + (y / pixel_scale)))
         fill = major_line if absolute_y % major_step == 0 else minor_line
-        draw.line((0, y, width, y), fill=fill, width=1)
+        is_major = absolute_y % major_step == 0
+        draw.line((0, y, width, y), fill=fill, width=2 if is_major else 1)
         if y > 0 and absolute_y % major_step == 0:
             label(str(absolute_y), (4, min(y + 3, height - 18)))
             label(str(absolute_y), (max(width - 48, 4), min(y + 3, height - 18)))
+            if width >= 500 and height >= 360:
+                label(f"y={absolute_y}", (max((width // 2) - 22, 4), min(y + 3, height - 18)))
 
     if origin_x or origin_y:
-        label(f"crop origin {origin_x},{origin_y} size {width}x{height}", (8, 8))
+        desktop_width = int(round(width / pixel_scale))
+        desktop_height = int(round(height / pixel_scale))
+        label(f"crop x={origin_x}-{origin_x + desktop_width} y={origin_y}-{origin_y + desktop_height}", (8, 8))
     else:
         label(f"desktop {width}x{height}", (8, 8))
     return Image.alpha_composite(grid_img, overlay)
@@ -284,7 +292,10 @@ def try_inject_screenshot_vision(
     if tool_name not in SCREENSHOT_TOOL_NAMES:
         return None
 
-    add_coordinate_grid = tool_name == "agentbay_computer_screenshot"
+    add_coordinate_grid = tool_name in {
+        "agentbay_computer_screenshot",
+        "agentbay_computer_precision_screenshot",
+    }
 
     # ── Mode 1: In-memory ephemeral screenshot (preferred path) ──
     id_match = _IMAGE_ID_RE.search(result_text)

@@ -89,6 +89,25 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
+    {
+        "name": "move_file",
+        "display_name": "Move File",
+        "description": "Move or rename a file or folder within the workspace. Use this instead of execute_code for reorganizing workspace files, moving generated documents into subfolders, or renaming files. Cannot move soul.md, tasks.json, or enterprise_info/. If destination_path is an existing folder or ends with '/', the original filename is preserved inside that folder. Does not overwrite by default.",
+        "category": "file",
+        "icon": "↪",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "source_path": {"type": "string", "description": "Current file or folder path, e.g.: workspace/report.md"},
+                "destination_path": {"type": "string", "description": "Destination file/folder path, e.g.: workspace/archive/report.md or workspace/presentations/PPT/"},
+                "overwrite": {"type": "boolean", "description": "Replace the destination if it already exists. Default false."},
+            },
+            "required": ["source_path", "destination_path"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
     # --- Enhanced file management tools ---
     {
         "name": "edit_file",
@@ -210,7 +229,7 @@ BUILTIN_TOOLS = [
     {
         "name": "convert_html_to_pptx",
         "display_name": "HTML to PowerPoint",
-        "description": "Convert an HTML source file into a PowerPoint .pptx file. By default, render_mode='visual' opens the HTML in headless Chrome and places high-fidelity screenshots of explicit .slide/data-slide nodes or top-level page sections into PPT slides. Use render_mode='editable' for best-effort editable PPT elements when editability is more important than exact visual fidelity.",
+        "description": "Convert an HTML source file into a PowerPoint .pptx file. By default, render_mode='editable' opens the HTML in headless Chrome, samples real element positions/styles, and maps explicit .slide/data-slide nodes or top-level page sections into editable PPT elements. Use render_mode='visual' as a high-fidelity screenshot fallback when exact visual preservation is more important than editability.",
         "category": "file",
         "icon": "📽️",
         "is_default": True,
@@ -221,7 +240,8 @@ BUILTIN_TOOLS = [
                 "target_path": {"type": "string", "description": "Path for the output PowerPoint file (.pptx)"},
                 "design_width": {"type": "number", "description": "Optional source design width in pixels, default 1280"},
                 "design_height": {"type": "number", "description": "Optional source design height in pixels, default 720"},
-                "render_mode": {"type": "string", "enum": ["visual", "editable"], "description": "visual preserves styling with Chrome-rendered screenshots; editable maps HTML/CSS into editable PPT elements with lower fidelity. Default: visual"},
+                "render_mode": {"type": "string", "enum": ["editable", "visual"], "description": "editable maps HTML/CSS into editable PPT elements using Chrome layout sampling; visual preserves styling with Chrome-rendered screenshots as a fallback. Default: editable"},
+                "render_scale": {"type": "number", "description": "Optional Chrome raster scale for screenshots and complex CSS captures. Higher values improve sharpness but increase PPTX size. Default: 2, clamped between 1 and 4"},
             },
             "required": ["source_path", "target_path"],
         },
@@ -2513,7 +2533,7 @@ AGENTBAY_TOOLS = [
     {
         "name": "agentbay_computer_click",
         "display_name": "AgentBay: Mouse Click",
-        "description": "[ENV: Cloud Desktop] Click the mouse at absolute desktop pixel coordinates on the Cloud Desktop (ISOLATED from Browser and Code Sandbox). Take agentbay_computer_screenshot first and use the coordinate grid/coordinate system returned by that screenshot. Click the center of the target. For small targets under about 30px, do not repeatedly guess coordinates; first call agentbay_computer_precision_screenshot around the target area, then click using the absolute coordinate labels in that enlarged crop. Coordinates are from the full desktop top-left corner (0, 0), not from the right-side preview panel. For closing, activating, or managing root windows, prefer agentbay_computer_list_windows and agentbay_computer_close_window instead of clicking tiny title-bar controls.",
+        "description": "[ENV: Cloud Desktop] Click the mouse at absolute desktop pixel coordinates on the Cloud Desktop (ISOLATED from Browser and Code Sandbox). Always inspect the desktop first with agentbay_computer_screenshot. Before clicking dialog buttons, text buttons, tabs, menus, checkboxes, close buttons, small controls, or any target whose center is not unambiguous from the full screenshot, call agentbay_computer_precision_screenshot around the target area and use the absolute coordinate labels in that enlarged crop. Do not repeatedly guess from the full screenshot after a miss. For login prompts, software popups, cancel/no-thanks/not-now/skip/no-login flows, prefer agentbay_computer_dismiss_dialog before coordinate clicking. Click the visual center of the target. Coordinates are from the full desktop top-left corner (0, 0), not from the right-side preview panel. For in-app popups, embedded panels, marketplace/store windows, browser/app tabs, document tabs, and software-internal close buttons, use the app UI with click, Escape, or shortcuts such as Ctrl+W; do not escalate to root-window close tools. Use agentbay_computer_list_windows/close_window only when the user explicitly wants to close or quit an entire OS-level window/application.",
         "category": "agentbay",
         "icon": "🖱️",
         "is_default": False,
@@ -2532,7 +2552,7 @@ AGENTBAY_TOOLS = [
     {
         "name": "agentbay_computer_precision_screenshot",
         "display_name": "AgentBay: Precision Screenshot",
-        "description": "[ENV: Cloud Desktop] Take an enlarged focused crop of the Cloud Desktop for tiny controls and near-miss clicks. Use this before clicking small targets such as close buttons, menus, checkboxes, icon buttons, or text buttons that are close to other controls. Provide an approximate absolute desktop rectangle around the target; the returned vision image is enlarged and its grid labels remain absolute desktop coordinates for agentbay_computer_click.",
+        "description": "[ENV: Cloud Desktop] Take an enlarged focused crop of the Cloud Desktop for accurate mouse targeting. Use this before clicking dialog buttons, text buttons, tabs, menus, checkboxes, close buttons, small controls, or after any near-miss. Provide an approximate absolute desktop rectangle around the target; small rectangles are automatically expanded to include surrounding context, so prefer a region around the target instead of an ultra-tight crop. The returned vision image is enlarged and its grid labels remain absolute desktop coordinates for agentbay_computer_click. The next click should use the center coordinate read from this precision crop, not a guessed coordinate from the full screenshot.",
         "category": "agentbay",
         "icon": "A",
         "is_default": False,
@@ -2541,8 +2561,8 @@ AGENTBAY_TOOLS = [
             "properties": {
                 "x": {"type": "integer", "description": "Absolute desktop X coordinate of the crop top-left"},
                 "y": {"type": "integer", "description": "Absolute desktop Y coordinate of the crop top-left"},
-                "width": {"type": "integer", "description": "Crop width in desktop pixels, usually 120-300 for tiny controls"},
-                "height": {"type": "integer", "description": "Crop height in desktop pixels, usually 80-220 for tiny controls"},
+                "width": {"type": "integer", "description": "Approximate crop width in desktop pixels. Small crops are automatically expanded for context."},
+                "height": {"type": "integer", "description": "Approximate crop height in desktop pixels. Small crops are automatically expanded for context."},
             },
             "required": ["x", "y", "width", "height"],
         },
@@ -2732,7 +2752,7 @@ AGENTBAY_TOOLS = [
     {
         "name": "agentbay_computer_list_windows",
         "display_name": "AgentBay: List Windows",
-        "description": "[ENV: Cloud Desktop] List root desktop windows with window_id, title, process, and geometry. Use this before closing or activating windows; prefer window_id operations over clicking title-bar controls by coordinates.",
+        "description": "[ENV: Cloud Desktop] List OS-level root desktop windows with window_id, title, process, and geometry. These IDs are for whole application windows only. Use this for activation, or before closing only when the user explicitly wants to close/quit an entire desktop window or app. Do NOT use root window IDs for in-app popups, modals, embedded marketplace/store panels, browser/app tabs, document tabs, or software-internal dialogs; close those with the app UI, Escape, Ctrl+W, or agentbay_computer_dismiss_dialog.",
         "category": "agentbay",
         "icon": "A",
         "is_default": False,
@@ -2748,7 +2768,7 @@ AGENTBAY_TOOLS = [
     {
         "name": "agentbay_computer_close_window",
         "display_name": "AgentBay: Close Window",
-        "description": "[ENV: Cloud Desktop] Close an entire root desktop window by explicit window_id returned by agentbay_computer_list_windows. This may close the whole application. Use only when the user explicitly asks to close a window/app; do not use this for in-app popups or dialogs.",
+        "description": "[ENV: Cloud Desktop] HIGH-RISK: close an entire OS-level root desktop window by explicit window_id returned by agentbay_computer_list_windows. This can quit the whole application and lose context. Use only when the user explicitly asks to close/quit a whole desktop window or app. Never use this for in-app popups, modals, embedded marketplace/store panels, browser/app tabs, document tabs, login prompts, or software-internal dialogs; use app UI clicks, Escape, Ctrl+W, or agentbay_computer_dismiss_dialog instead.",
         "category": "agentbay",
         "icon": "A",
         "is_default": False,
@@ -2766,7 +2786,7 @@ AGENTBAY_TOOLS = [
     {
         "name": "agentbay_computer_dismiss_dialog",
         "display_name": "AgentBay: Dismiss Dialog",
-        "description": "[ENV: Cloud Desktop] Safely dismiss the active in-app popup/dialog by sending Escape only. It never closes root desktop windows or applications. Use this for modals, login prompts, and software-internal dialogs; use agentbay_computer_close_window only when the user explicitly wants to close an entire window/app.",
+        "description": "[ENV: Cloud Desktop] Safely dismiss the active in-app popup/dialog by sending Escape only. It never closes root desktop windows or applications. Prefer this over coordinate clicking for modals, login prompts, no-login/not-now/skip/cancel prompts, and software-internal dialogs. For in-app tabs, embedded panels, marketplace/store windows, or document tabs, prefer app UI controls or shortcuts such as Ctrl+W. Use agentbay_computer_close_window only when the user explicitly wants to close/quit an entire OS-level window/app.",
         "category": "agentbay",
         "icon": "A",
         "is_default": False,

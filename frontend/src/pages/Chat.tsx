@@ -284,6 +284,9 @@ export default function Chat() {
     const [wsSessionId, setWsSessionId] = useState<string>('');
     const wsRef = useRef<WebSocket | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const messagesContainerRef = useRef<HTMLDivElement>(null);
+    const isNearBottomRef = useRef(true);
+    const userPinnedAwayFromBottomRef = useRef(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     // Ref to the chat textarea for direct DOM height manipulation
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -682,8 +685,31 @@ export default function Chat() {
         }
     }, [connected]);
 
+    const handleMessagesScroll = () => {
+        const el = messagesContainerRef.current;
+        if (!el) return;
+        const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+        isNearBottomRef.current = distFromBottom < 120;
+        userPinnedAwayFromBottomRef.current = distFromBottom > 220;
+    };
+
+    const handleMessagesWheelCapture = (event: React.WheelEvent<HTMLDivElement>) => {
+        const el = messagesContainerRef.current;
+        if (!el) return;
+        if (event.deltaY < 0 && el.scrollTop > 0) {
+            userPinnedAwayFromBottomRef.current = true;
+            isNearBottomRef.current = false;
+        }
+    };
+
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        if (userPinnedAwayFromBottomRef.current || !isNearBottomRef.current) return;
+        const el = messagesContainerRef.current;
+        if (!el) return;
+        requestAnimationFrame(() => {
+            if (userPinnedAwayFromBottomRef.current) return;
+            el.scrollTop = el.scrollHeight;
+        });
     }, [messages]);
 
     const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -730,6 +756,8 @@ export default function Chat() {
         pendingToolCalls.current = [];
         streamContent.current = '';
         thinkingContent.current = '';
+        userPinnedAwayFromBottomRef.current = false;
+        isNearBottomRef.current = true;
         setIsWaiting(true);
         setStreaming(true);
 
@@ -857,7 +885,12 @@ export default function Chat() {
                 )}
                 {/* Wrap chat area in a column so it coexists with the live panel in flex-row */}
                 <div className="chat-main">
-                <div className="chat-messages">
+                <div
+                    ref={messagesContainerRef}
+                    className="chat-messages"
+                    onScroll={handleMessagesScroll}
+                    onWheelCapture={handleMessagesWheelCapture}
+                >
                     {messages.length === 0 && (
                         <div style={{ textAlign: 'center', padding: '60px', color: 'var(--text-tertiary)' }}>
                             <div style={{ marginBottom: '12px', display: 'flex', justifyContent: 'center' }}>{Icons.chat}</div>
