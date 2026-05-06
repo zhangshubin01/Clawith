@@ -879,7 +879,7 @@ export default function Chat() {
                 {/* Drop overlay */}
                 {isChatDragging && (
                     <div className="drop-zone-overlay">
-                        <div className="drop-zone-overlay__icon">📎</div>
+                        <div className="drop-zone-overlay__icon"><IconPaperclip size={28} stroke={1.8} /></div>
                         <div className="drop-zone-overlay__text">{t('agent.upload.dropToAttach', 'Drop file to attach')}</div>
                     </div>
                 )}
@@ -924,8 +924,7 @@ export default function Chat() {
                                             <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '240px', maxHeight: '180px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} />
                                         </div>);
                                     }
-                                    const fi = fe === 'pdf' ? '\uD83D\uDCC4' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '\uD83D\uDCCA' : (fe === 'docx' || fe === 'doc') ? '\uD83D\uDCDD' : '\uD83D\uDCCE';
-                                    return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><span>{fi}</span><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
+                                    return (<div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', background: 'rgba(0,0,0,0.08)', borderRadius: '6px', padding: '4px 8px', marginBottom: msg.content ? '4px' : '0', fontSize: '11px', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}><IconPaperclip size={13} stroke={1.8} /><span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span></div>);
                                 })()}
                                 {msg.thinking && (
                                     <details className="thinking-panel">
@@ -955,7 +954,7 @@ export default function Chat() {
                                         <MarkdownRenderer content={msg.content} />
                                     )
                                 ) : (
-                                    <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
+                                    <MarkdownRenderer content={msg.content} />
                                 )}
                                 {msg.timestamp && (
                                     <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '4px', opacity: 0.7 }}>

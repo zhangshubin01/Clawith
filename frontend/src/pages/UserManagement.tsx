@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../stores';
 import LinearCopyButton from '../components/LinearCopyButton';
 import { useDialog } from '../components/Dialog/DialogProvider';
+import { IconEdit } from '@tabler/icons-react';
 
 interface UserInfo {
     id: string;
@@ -109,12 +110,12 @@ export default function UserManagement() {
                 method: 'PATCH',
                 body: JSON.stringify(editForm),
             });
-            setToast(isChinese ? '✅ 配额已更新' : '✅ Quota updated');
+            setToast(isChinese ? '配额已更新' : 'Quota updated');
             setTimeout(() => setToast(''), 2000);
             setEditingUserId(null);
             loadUsers();
         } catch (e: any) {
-            setToast(`❌ ${e.message}`);
+            setToast(`Error: ${e.message}`);
             setTimeout(() => setToast(''), 3000);
         }
         setSaving(false);
@@ -226,7 +227,7 @@ export default function UserManagement() {
             {toast && (
                 <div style={{
                     position: 'fixed', top: '20px', right: '20px', padding: '10px 20px',
-                    borderRadius: '8px', background: toast.startsWith('✅') ? 'var(--success)' : 'var(--error)',
+                    borderRadius: '8px', background: toast.startsWith('Error:') ? 'var(--error)' : 'var(--success)',
                     color: '#fff', fontSize: '13px', zIndex: 9999, transition: 'all 0.3s',
                 }}>
                     {toast}
@@ -365,10 +366,10 @@ export default function UserManagement() {
                                 <div>
                                     <button
                                         className="btn btn-secondary"
-                                        style={{ padding: '4px 10px', fontSize: '11px' }}
+                                        style={{ padding: '4px 10px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                                         onClick={() => editingUserId === user.id ? setEditingUserId(null) : startEdit(user)}
                                     >
-                                        {editingUserId === user.id ? t('common.cancel') : `✏️ ${t('common.edit')}`}
+                                        {editingUserId === user.id ? t('common.cancel') : <><IconEdit size={13} stroke={1.8} /> {t('common.edit')}</>}
                                     </button>
                                 </div>
                             </div>

@@ -4,7 +4,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, delete, or_
+from sqlalchemy import String, cast, select, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
@@ -247,6 +247,7 @@ async def list_tools(
             "mcp_tool_name": t.mcp_tool_name,
             "enabled": t.enabled,
             "is_default": t.is_default,
+            "source": t.source,
             # Decrypt config for the admin UI so saved values are readable
             "config": _decrypt_sensitive_fields(t.config or {}, t.config_schema),
             "config_schema": t.config_schema or {},
@@ -432,6 +433,8 @@ async def get_agent_tools(
             "enabled": enabled,
             "is_default": t.is_default,
             "mcp_server_name": t.mcp_server_name,
+            "mcp_server_url": t.mcp_server_url,
+            "source": t.source,
         })
     return result
 
@@ -577,17 +580,20 @@ async def list_agent_installed_tools(
     from app.models.agent import Agent
     query = (
         select(AgentTool, Tool, Agent)
-        .join(Tool, AgentTool.tool_id == Tool.id)
-        .outerjoin(Agent, AgentTool.installed_by_agent_id == Agent.id)
-        .where(AgentTool.source == "user_installed")
+        .join(Tool, cast(AgentTool.tool_id, String) == cast(Tool.id, String))
+        .outerjoin(Agent, cast(AgentTool.installed_by_agent_id, String) == cast(Agent.id, String))
+        .where(or_(AgentTool.source == "user_installed", Tool.source == "agent"))
         .order_by(AgentTool.created_at.desc())
     )
     # Scope by tenant: only show tools installed by agents in this tenant
     tid = tenant_id or (str(current_user.tenant_id) if current_user.tenant_id else None)
     if tid:
         from app.models.agent import Agent as Ag
-        tenant_agent_ids = select(Ag.id).where(Ag.tenant_id == tid)
-        query = query.where(AgentTool.agent_id.in_(tenant_agent_ids))
+        # Some local/prod databases still have agents.tenant_id as varchar from
+        # older migrations, while newer models bind tenant_id as UUID. Cast the
+        # column to text so this admin listing works across both schemas.
+        tenant_agent_ids = select(cast(Ag.id, String)).where(cast(Ag.tenant_id, String) == str(tid))
+        query = query.where(cast(AgentTool.agent_id, String).in_(tenant_agent_ids))
     result = await db.execute(query)
     rows = result.all()
     return [
@@ -597,10 +603,17 @@ async def list_agent_installed_tools(
             "tool_id": str(t.id),
             "tool_name": t.name,
             "tool_display_name": t.display_name,
+            "description": t.description,
+            "type": t.type,
+            "category": t.category,
+            "source": t.source,
             "mcp_server_name": t.mcp_server_name,
+            "mcp_server_url": t.mcp_server_url,
+            "mcp_tool_name": t.mcp_tool_name,
             "installed_by_agent_id": str(at.installed_by_agent_id) if at.installed_by_agent_id else None,
             "installed_by_agent_name": a.name if a else None,
             "enabled": at.enabled,
+            "configured": bool(at.config and len(at.config) > 0),
             "installed_at": at.created_at.isoformat() if at.created_at else None,
         }
         for at, t, a in rows
@@ -821,6 +834,7 @@ async def get_agent_tools_with_config(
             "enabled": enabled,
             "is_default": t.is_default,
             "mcp_server_name": t.mcp_server_name,
+            "mcp_server_url": t.mcp_server_url,
             "config_schema": t.config_schema or {},
             "global_config": masked_global,
             "agent_config": raw_agent,

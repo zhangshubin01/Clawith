@@ -10381,27 +10381,21 @@ async def _handle_email_tool(tool_name: str, agent_id: uuid.UUID, ws: Path, argu
 
 async def _search_clawhub(agent_id: uuid.UUID, arguments: dict) -> str:
     """Search the ClawHub skill registry."""
-    import httpx
     query = arguments.get("query", "").strip()
     if not query:
         return "Missing required argument 'query'"
 
     # Resolve tenant ClawHub API key
-    from app.api.skills import _get_clawhub_key
+    from app.api.skills import _clawhub_search_endpoint, _fetch_clawhub_json, _get_clawhub_key
     tenant_id = await _get_agent_tenant_id(agent_id)
     api_key = await _get_clawhub_key(tenant_id)
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                "https://clawhub.ai/api/search",
-                params={"q": query},
-                headers=headers,
-            )
-            if resp.status_code != 200:
-                return f"ClawHub search failed (HTTP {resp.status_code})"
-            data = resp.json()
+        data, _ = await _fetch_clawhub_json(
+            _clawhub_search_endpoint,
+            api_key=api_key,
+            params={"q": query},
+        )
     except Exception as e:
         return f"❌ ClawHub search error: {str(e)[:200]}"
 
@@ -10431,7 +10425,6 @@ async def _search_clawhub(agent_id: uuid.UUID, arguments: dict) -> str:
 
 async def _install_skill(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
     """Install a skill from ClawHub slug or GitHub URL into the agent's workspace."""
-    import httpx
     source = arguments.get("source", "").strip()
     if not source:
         return "❌ Missing required argument 'source'. Provide a ClawHub slug (e.g. 'market-research') or a GitHub URL."
@@ -10459,34 +10452,20 @@ async def _install_skill(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
         else:
             # ── ClawHub slug path ──
             slug = source
-            from app.api.skills import _fetch_github_directory, _get_github_token, _get_clawhub_key
+            from app.api.skills import _fetch_clawhub_skill_archive, _fetch_clawhub_skill_meta, _get_clawhub_key
 
             # 1. Fetch metadata from ClawHub (with tenant API key)
             tenant_id = await _get_agent_tenant_id(agent_id)
             api_key = await _get_clawhub_key(tenant_id)
-            ch_headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             try:
-                async with httpx.AsyncClient(timeout=15) as client:
-                    resp = await client.get(f"https://clawhub.ai/api/v1/skills/{slug}", headers=ch_headers)
-                    if resp.status_code == 404:
-                        return f"Skill '{slug}' not found on ClawHub. Use search_clawhub to find available skills."
-                    if resp.status_code != 200:
-                        return f"ClawHub API error (HTTP {resp.status_code})"
-                    meta = resp.json()
+                _meta, meta_base = await _fetch_clawhub_skill_meta(slug, api_key=api_key)
             except Exception as e:
                 return f"Failed to connect to ClawHub: {str(e)[:200]}"
 
-            owner_info = meta.get("owner", {})
-            handle = owner_info.get("handle", "").lower()
-            if not handle:
-                return "❌ Could not determine skill owner from ClawHub metadata."
-
-            # 2. Fetch files from GitHub
-            github_path = f"skills/{handle}/{slug}"
-            token = await _get_github_token(tenant_id)
-            files = await _fetch_github_directory("openclaw", "skills", github_path, "main", token)
+            # 2. Fetch files from the ClawHub archive
+            files, _ = await _fetch_clawhub_skill_archive(slug, api_key=api_key, preferred_base=meta_base)
             if not files:
-                return f"❌ No files found for skill '{slug}' in GitHub archive."
+                return f"❌ No files found for skill '{slug}' in the ClawHub archive."
 
             folder_name = slug
 

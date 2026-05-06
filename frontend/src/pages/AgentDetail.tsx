@@ -25,18 +25,31 @@ import { formatFileSize } from '../utils/formatFileSize';
 import {
     IconBrain,
     IconBrowser,
+    IconBuilding,
     IconCheck,
     IconChevronDown,
     IconClock,
+    IconDna,
+    IconDownload,
+    IconEye,
     IconFileText,
     IconFolder,
+    IconHeartbeat,
+    IconLock,
+    IconMailForward,
     IconMessageCircle,
     IconPaperclip,
+    IconPlugConnected,
+    IconRobot,
     IconSearch,
     IconSend,
     IconSettings,
     IconTerminal2,
     IconTools,
+    IconUser,
+    IconWorld,
+    IconBolt,
+    IconAlertTriangle,
 } from '@tabler/icons-react';
 import { useDropZone } from '../hooks/useDropZone';
 
@@ -53,6 +66,24 @@ const WORKSPACE_TOOLS = new Set([
     'convert_html_to_pdf',
     'convert_html_to_pptx',
 ]);
+
+const AWARE_TOOLS = new Set(['set_trigger', 'update_trigger', 'cancel_trigger', 'list_triggers']);
+const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
+const trimLeadingPictograph = (value: string) => value.replace(/^\p{Extended_Pictographic}\s*/u, '');
+const safeDisplayIcon = (icon?: string | null, fallback: React.ReactNode = <IconTools size={18} stroke={1.8} />) =>
+    icon && !EMOJI_RE.test(icon) ? icon : fallback;
+
+type FocusItem = {
+    id: string;
+    name: string;
+    description: string;
+    done: boolean;
+    inProgress: boolean;
+};
+
+function isFocusPath(path?: string | null): boolean {
+    return !!path && path.replace(/^\/+/, '').toLowerCase() === 'focus.md';
+}
 
 function workspaceActionForTool(tool: string): WorkspaceLiveDraft['action'] {
     if (tool === 'edit_file') return 'edit';
@@ -115,6 +146,36 @@ function parseWorkspaceDraftArgs(tool: string, raw: string): Pick<WorkspaceLiveD
     let content = getString('content');
     if (tool === 'edit_file') content = getString('new_string') || content;
     return { path, content };
+}
+
+function parseFocusItems(raw: string): FocusItem[] {
+    const lines = raw.split('\n');
+    const focusItems: FocusItem[] = [];
+    let currentItem: FocusItem | null = null;
+    for (const line of lines) {
+        const match = line.match(/^\s*-\s*\[([ x/])\]\s*(.+)/i);
+        if (match) {
+            if (currentItem) focusItems.push(currentItem);
+            const marker = match[1];
+            const fullText = match[2].trim();
+            const colonIdx = fullText.indexOf(':');
+            const itemName = colonIdx > 0 ? fullText.substring(0, colonIdx).trim() : fullText;
+            const itemDesc = colonIdx > 0 ? fullText.substring(colonIdx + 1).trim() : '';
+            currentItem = {
+                id: itemName,
+                name: itemName,
+                description: itemDesc,
+                done: marker.toLowerCase() === 'x',
+                inProgress: marker === '/',
+            };
+        } else if (currentItem && line.trim() && /^\s{2,}/.test(line)) {
+            currentItem.description = currentItem.description
+                ? `${currentItem.description} ${line.trim()}`
+                : line.trim();
+        }
+    }
+    if (currentItem) focusItems.push(currentItem);
+    return focusItems;
 }
 
 function parseAgentBayTransferArgs(rawArgs: any): NonNullable<LivePreviewState['transfer']> {
@@ -351,9 +412,34 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
     const companyTools = tools.filter(t => t.source === 'builtin' || t.source === 'admin');
     const agentInstalledTools = tools.filter(t => t.source === 'agent');
 
+    const mcpGroupKey = (tool: any) => {
+        const serverName = String(tool.mcp_server_name || '').trim();
+        return tool.type === 'mcp' && serverName
+            ? `mcp:${serverName.toLowerCase()}`
+            : (tool.category || 'general');
+    };
+
+    const getToolGroupMeta = (groupKey: string, toolsInGroup: any[]) => {
+        const first = toolsInGroup.find((tool) => tool.type === 'mcp' && tool.mcp_server_name) || toolsInGroup[0];
+        if (groupKey.startsWith('mcp:') && first?.mcp_server_name) {
+            return {
+                label: first.mcp_server_name,
+                description: t('agent.tools.mcpGroupDescription', 'Tools from {{name}}', { name: first.mcp_server_name }),
+                iconCategory: 'custom',
+                configCategory: first.category || 'custom',
+            };
+        }
+        return {
+            label: categoryLabels[groupKey] || groupKey,
+            description: categoryDescriptions[groupKey] || 'Tools in this category',
+            iconCategory: groupKey,
+            configCategory: groupKey,
+        };
+    };
+
     const groupByCategory = (toolList: any[]) =>
         toolList.reduce((acc: Record<string, any[]>, t) => {
-            const cat = t.category || 'general';
+            const cat = mcpGroupKey(t);
             (acc[cat] = acc[cat] || []).push(t);
             return acc;
         }, {});
@@ -476,9 +562,9 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                     {canManage && hasConfig && !isGlobalCategoryConfig && (
                         <button
                             onClick={() => openConfig(tool)}
-                            style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
+                            style={{ background: 'none', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                             title={t('agent.tools.configurePerAgent', 'Configure per-agent settings')}
-                        >⚙️ {t('agent.tools.config', 'Config').replace('️ ', '')}</button>
+                        ><IconSettings size={12} stroke={1.8} /> {t('agent.tools.config', 'Config')}</button>
                     )}
                     {canManage && tool.source === 'agent' && tool.agent_tool_id && (
                         <button
@@ -529,10 +615,15 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
 
     const renderToolGroup = (groupedTools: Record<string, any[]>, allGroupedTools: Record<string, any[]>) =>
         Object.entries(groupedTools)
-            .sort(([a], [b]) => (categoryLabels[a] || a).localeCompare(categoryLabels[b] || b))
+            .sort(([a, aTools], [b, bTools]) => {
+                const aMeta = getToolGroupMeta(a, allGroupedTools[a] || aTools);
+                const bMeta = getToolGroupMeta(b, allGroupedTools[b] || bTools);
+                return aMeta.label.localeCompare(bMeta.label);
+            })
             .map(([category, catTools]) => {
                 const allCatTools = allGroupedTools[category] || catTools;
-                const label = categoryLabels[category] || category;
+                const meta = getToolGroupMeta(category, allCatTools);
+                const label = meta.label;
                 const enabledCount = allCatTools.filter((tool: any) => tool.enabled).length;
                 const configuredCount = allCatTools.filter((tool: any) => tool.agent_config && Object.keys(tool.agent_config).length > 0).length;
                 const allEnabled = allCatTools.length > 0 && enabledCount === allCatTools.length;
@@ -589,7 +680,7 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                                     alignItems: 'center',
                                     justifyContent: 'center',
                                     flexShrink: 0,
-                                }}>{renderCategoryIcon(category, 16)}</span>
+                                }}>{renderCategoryIcon(meta.iconCategory, 16)}</span>
                                 <div style={{ minWidth: 0 }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                                         <span style={{ fontSize: '13px', fontWeight: 650, color: 'var(--text-primary)' }}>{label}</span>
@@ -604,18 +695,18 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                                         )}
                                     </div>
                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                        {categoryDescriptions[category] || 'Tools in this category'}
+                                        {meta.description}
                                     </div>
                                 </div>
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} onClick={(e) => e.stopPropagation()}>
-                                {CATEGORY_CONFIG_SCHEMAS[category] && canManage && (
+                                {CATEGORY_CONFIG_SCHEMAS[meta.configCategory] && canManage && (
                                     <button
                                         type="button"
-                                        onClick={() => openCategoryConfig(category)}
-                                        style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '4px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }}
+                                        onClick={() => openCategoryConfig(meta.configCategory)}
+                                        style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '4px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
                                         title={t('agent.tools.configureCategory', 'Configure {{category}}', { category: label })}
-                                    >⚙️ {t('agent.tools.config', 'Config').replace('️ ', '')}</button>
+                                    ><IconSettings size={12} stroke={1.8} /> {t('agent.tools.config', 'Config')}</button>
                                 )}
                                 {canManage && (
                                     <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', cursor: 'pointer', flexShrink: 0 }} title={t('agent.tools.enableDisableAll', 'Enable/Disable all {{category}} tools', { category: label })}>
@@ -668,30 +759,26 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
     return (
         <>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <div style={{ display: 'flex', gap: '4px', padding: '4px', background: 'var(--bg-secondary)', borderRadius: '8px', marginBottom: '12px' }}>
+                <div className="tool-source-tabs" role="tablist" aria-label={t('agent.tools.sourceTabs', 'Tool sources')}>
                     <button
+                        type="button"
+                        role="tab"
+                        aria-selected={toolTab === 'company'}
+                        className={toolTab === 'company' ? 'active' : ''}
                         onClick={() => setToolTab('company')}
-                        style={{
-                            flex: 1, padding: '7px 12px', border: 'none', borderRadius: '6px', cursor: 'pointer',
-                            fontSize: '12px', fontWeight: 600, transition: 'all 0.2s',
-                            background: toolTab === 'company' ? 'var(--bg-primary)' : 'transparent',
-                            color: toolTab === 'company' ? 'var(--text-primary)' : 'var(--text-tertiary)',
-                            boxShadow: toolTab === 'company' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
-                        }}
                     >
-                        {t('agent.tools.companyTools', 'Company Tools')} ({companyTools.length})
+                        <span>{t('agent.tools.companyTools', 'Company Tools')}</span>
+                        <span className="tool-source-tab-count">{companyTools.length}</span>
                     </button>
                     <button
+                        type="button"
+                        role="tab"
+                        aria-selected={toolTab === 'installed'}
+                        className={toolTab === 'installed' ? 'active' : ''}
                         onClick={() => setToolTab('installed')}
-                        style={{
-                            flex: 1, padding: '7px 12px', border: 'none', borderRadius: '6px', cursor: 'pointer',
-                            fontSize: '12px', fontWeight: 600, transition: 'all 0.2s',
-                            background: toolTab === 'installed' ? 'var(--bg-primary)' : 'transparent',
-                            color: toolTab === 'installed' ? 'var(--text-primary)' : 'var(--text-tertiary)',
-                            boxShadow: toolTab === 'installed' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
-                        }}
                     >
-                        {t('agent.tools.agentInstalled', 'Agent Self-Installed Tools')} ({agentInstalledTools.length})
+                        <span>{t('agent.tools.agentInstalled', 'Agent Self-Installed Tools')}</span>
+                        <span className="tool-source-tab-count">{agentInstalledTools.length}</span>
                     </button>
                 </div>
 
@@ -783,7 +870,7 @@ function ToolsManager({ agentId, canManage = false }: { agentId: string; canMana
                         <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', width: '480px', maxWidth: '95vw', maxHeight: '80vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                                 <div>
-                                    <h3 style={{ margin: 0 }}>⚙️ {title}</h3>
+                                    <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}><IconSettings size={20} stroke={1.8} /> {title}</h3>
                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{isCat ? 'Shared category configuration (affects all tools in this category)' : 'Per-agent configuration (overrides global defaults)'}</div>
                                 </div>
                                 <button onClick={() => { setConfigTool(null); setConfigCategory(null); }} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)' }}>✕</button>
@@ -2302,6 +2389,22 @@ function AgentDetailInner() {
     const REFLECTIONS_PAGE_SIZE = 10;
     const SECTION_PAGE_SIZE = 5;
 
+    const loadReflectionMessages = async (sessionId: string) => {
+        if (!id || reflectionMessages[sessionId]) return;
+        try {
+            const tkn = localStorage.getItem('token');
+            const res = await fetch(`/api/agents/${id}/sessions/${sessionId}/messages`, {
+                headers: { Authorization: `Bearer ${tkn}` },
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setReflectionMessages(prev => ({ ...prev, [sessionId]: data }));
+            }
+        } catch {
+            // Reflection details are informational; keep the list usable if loading fails.
+        }
+    };
+
     const { data: soulContent } = useQuery({
         queryKey: ['file', id, 'soul.md'],
         queryFn: () => fileApi.read(id!, 'soul.md'),
@@ -2871,6 +2974,13 @@ function AgentDetailInner() {
         });
     }, [collapseSidebarsForLivePanel, sidePanelTab]);
 
+    const openAwarePanel = useCallback(() => {
+        if (!allowLivePanelAutoFocus()) return;
+        setSidePanelTab('aware');
+        setLivePanelVisible(true);
+        collapseSidebarsForLivePanel();
+    }, [allowLivePanelAutoFocus, collapseSidebarsForLivePanel]);
+
     // Settings form local state
     const [settingsForm, setSettingsForm] = useState({
         primary_model_id: '',
@@ -3150,7 +3260,9 @@ function AgentDetailInner() {
                     if (allowWorkspaceAutoSwitch(draft.path)) {
                         setWorkspaceActivePath(draft.path!);
                     }
-                    if (allowLivePanelAutoFocus()) {
+                    if (isFocusPath(draft.path)) {
+                        openAwarePanel();
+                    } else if (allowLivePanelAutoFocus()) {
                         setSidePanelTab('workspace');
                         setLivePanelVisible(true);
                         collapseSidebarsForLivePanel();
@@ -3171,6 +3283,13 @@ function AgentDetailInner() {
                     });
                 }
             } else if (d.type === 'tool_call') {
+                if (AWARE_TOOLS.has(d.name)) {
+                    openAwarePanel();
+                    if (d.status === 'done') {
+                        refetchTriggers();
+                        queryClient.invalidateQueries({ queryKey: ['file', id, 'focus.md'] });
+                    }
+                }
                 if (d.name === 'agentbay_file_transfer') {
                     const transfer = parseAgentBayTransferArgs(d.args);
                     setLiveState(prev => ({
@@ -3204,7 +3323,9 @@ function AgentDetailInner() {
                         if (allowWorkspaceAutoSwitch(draft.path)) {
                             setWorkspaceActivePath(draft.path!);
                         }
-                        if (allowLivePanelAutoFocus()) {
+                        if (isFocusPath(draft.path)) {
+                            openAwarePanel();
+                        } else if (allowLivePanelAutoFocus()) {
                             setSidePanelTab('workspace');
                             setLivePanelVisible(true);
                             collapseSidebarsForLivePanel();
@@ -3243,7 +3364,10 @@ function AgentDetailInner() {
                         if (activity.action !== 'delete' && activity.ok !== false && allowWorkspaceAutoSwitch(activity.path)) {
                             setWorkspaceActivePath(activity.path);
                         }
-                    if (allowLivePanelAutoFocus()) {
+                    if (isFocusPath(activity.path)) {
+                        openAwarePanel();
+                        queryClient.invalidateQueries({ queryKey: ['file', id, 'focus.md'] });
+                    } else if (allowLivePanelAutoFocus()) {
                         setSidePanelTab('workspace');
                         setLivePanelVisible(true);
                         collapseSidebarsForLivePanel();
@@ -3289,8 +3413,9 @@ function AgentDetailInner() {
                 const msg = d.content || d.detail || d.message || 'Request denied';
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
-                    if (last && last.role === 'assistant' && last.content === `⚠️ ${msg}`) return prev;
-                    return [...prev, parseChatMsg({ role: 'assistant', content: `⚠️ ${msg}` })];
+                    const warningText = `Warning: ${msg}`;
+                    if (last && last.role === 'assistant' && last.content === warningText) return prev;
+                    return [...prev, parseChatMsg({ role: 'assistant', content: warningText })];
                 });
                 if (msg.includes('expired') || msg.includes('Setup failed') || msg.includes('no LLM model') || msg.includes('No model')) {
                     reconnectDisabledRef.current[key] = true;
@@ -3522,7 +3647,6 @@ function AgentDetailInner() {
         hideAvatar?: boolean;
     }) => {
         const fe = msg.fileName?.split('.').pop()?.toLowerCase() ?? '';
-        const fi = fe === 'pdf' ? '📄' : (fe === 'csv' || fe === 'xlsx' || fe === 'xls') ? '📊' : (fe === 'docx' || fe === 'doc') ? '📝' : '📎';
         const isImage = msg.imageUrl && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
         const resolvedSenderLabel = msg.sender_name || senderLabel;
         const resolvedAvatarText = avatarText || (resolvedSenderLabel ? resolvedSenderLabel[0] : (isLeft ? 'A' : 'U'));
@@ -3581,7 +3705,7 @@ function AgentDetailInner() {
                                 </div>
                             ) : (msg.fileName && (
                                 <div className="chat-msg-file-chip" style={{ marginBottom: msg.content ? '4px' : '0' }}>
-                                    <span>{fi}</span>
+                                    <IconPaperclip size={14} stroke={1.8} />
                                     <span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span>
                                 </div>
                             ))}
@@ -3605,7 +3729,7 @@ function AgentDetailInner() {
                                         <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
                                     </div>
                                 ) : <MarkdownRenderer content={displayContent} />
-                            ) : <div style={{ whiteSpace: 'pre-wrap' }}>{displayContent}</div>}
+                            ) : <MarkdownRenderer content={displayContent} />}
                         </div>
                     </div>
                     {timestampHtml}
@@ -3727,7 +3851,7 @@ function AgentDetailInner() {
             let filesDisplay = '';
 
             attachedFiles.forEach(file => {
-                filesDisplay += `[📎 ${file.name}] `;
+                filesDisplay += `[Attachment: ${file.name}] `;
                 if (file.imageUrl && supportsVision) {
                     filesPrompt += `[image_data:${file.imageUrl}]\n`;
                 } else if (file.imageUrl) {
@@ -4018,7 +4142,7 @@ function AgentDetailInner() {
         },
         onSuccess: () => {
             queryClient.invalidateQueries({ queryKey: ['schedules', id] });
-            showToast('✅ Schedule triggered — executing in background', 'success');
+            showToast('Schedule triggered — executing in background', 'success');
         },
         onError: (err: any) => {
             const msg = err?.response?.data?.detail || err?.message || 'Failed to trigger schedule';
@@ -4304,20 +4428,7 @@ function AgentDetailInner() {
     );
     const renderAwarePreview = () => {
         const raw = focusFile?.content || '';
-        const focusItems = raw
-            .split('\n')
-            .map((line: string) => {
-                const match = line.match(/^\s*-\s*\[([ x/])\]\s*(.+)/i);
-                if (!match) return null;
-                const text = match[2].trim();
-                const colonIdx = text.indexOf(':');
-                return {
-                    marker: match[1],
-                    title: colonIdx > 0 ? text.slice(colonIdx + 1).trim() : text,
-                    key: colonIdx > 0 ? text.slice(0, colonIdx).trim() : text,
-                };
-            })
-            .filter(Boolean) as Array<{ marker: string; title: string; key: string }>;
+        const focusItems = parseFocusItems(raw);
         const isZh = i18n.language?.startsWith('zh');
         const formatTrigger = (trig: any) => {
             if (trig.type === 'cron' && trig.config?.expr) return `Cron ${trig.config.expr}`;
@@ -4325,28 +4436,85 @@ function AgentDetailInner() {
             if (trig.type === 'once' && trig.config?.at) return new Date(trig.config.at).toLocaleString();
             return trig.name || trig.type;
         };
+        const triggersByFocus: Record<string, any[]> = {};
+        const standaloneTriggers: any[] = [];
+        const focusNames = new Set(focusItems.map((item) => item.name));
+        for (const trig of awareTriggers as any[]) {
+            if (trig.focus_ref && focusNames.has(trig.focus_ref)) {
+                if (!triggersByFocus[trig.focus_ref]) triggersByFocus[trig.focus_ref] = [];
+                triggersByFocus[trig.focus_ref].push(trig);
+            } else {
+                standaloneTriggers.push(trig);
+            }
+        }
+        const renderCheck = (state: 'todo' | 'active' | 'done', label: string) => (
+            <span className={`aware-side-check ${state}`} aria-label={label}>
+                {state === 'done' ? '✓' : state === 'active' ? '•' : ''}
+            </span>
+        );
+        const reflectionPreview = (msg: any) => {
+            if (!msg) return '';
+            if (msg.role === 'tool_call') {
+                const name = msg.toolName || (() => { try { return JSON.parse(msg.content || '{}').name; } catch { return ''; } })() || 'tool';
+                return isZh ? `调用工具：${name}` : `Tool call: ${name}`;
+            }
+            if (msg.role === 'tool_result') {
+                const name = msg.toolName || (() => { try { return JSON.parse(msg.content || '{}').name; } catch { return ''; } })() || 'result';
+                return isZh ? `工具结果：${name}` : `Tool result: ${name}`;
+            }
+            return String(msg.content || '').replace(/\s+/g, ' ').trim();
+        };
         return (
             <div className="aware-side-preview">
                 <div className="aware-side-section">
                     <div className="aware-side-section-title">{t('agent.aware.focus')}</div>
                     {focusItems.length === 0 ? (
                         <div className="aware-side-empty">{t('agent.aware.focusEmpty')}</div>
-                    ) : focusItems.slice(0, 12).map((item) => (
-                        <div key={item.key} className="aware-side-item">
-                            <span className={`aware-side-dot ${item.marker.toLowerCase() === 'x' ? 'done' : item.marker === '/' ? 'active' : ''}`} />
-                            <div>
-                                <div className="aware-side-item-title">{item.title || item.key}</div>
-                                {item.title !== item.key && <div className="aware-side-item-meta">{item.key}</div>}
+                    ) : focusItems.slice(0, 12).map((item) => {
+                        const isExpanded = expandedFocus === item.id;
+                        const itemTriggers = triggersByFocus[item.name] || [];
+                        return (
+                            <div key={item.id} className={`aware-side-focus ${item.done ? 'done' : ''}`}>
+                                <button className="aware-side-focus-head" type="button" onClick={() => setExpandedFocus(isExpanded ? null : item.id)}>
+                                    <span
+                                        className={`aware-side-focus-marker ${item.done ? 'done' : item.inProgress ? 'active' : 'todo'}`}
+                                        aria-label={item.done ? t('agent.aware.completed') : item.inProgress ? t('agent.aware.inProgress') : t('agent.aware.focus')}
+                                    />
+                                    <div className="aware-side-trigger-main">
+                                        <div className="aware-side-item-title">{item.description || item.name}</div>
+                                        {item.description && <div className="aware-side-item-meta">{item.name}</div>}
+                                    </div>
+                                    <span className="aware-side-count">
+                                        {isZh ? `${itemTriggers.length} 个` : itemTriggers.length}
+                                    </span>
+                                    <span className={`aware-side-chevron ${isExpanded ? 'open' : ''}`}>▶</span>
+                                </button>
+                                {isExpanded && (
+                                    <div className="aware-side-nested">
+                                        {itemTriggers.length === 0 ? (
+                                            <div className="aware-side-empty compact">{t('agent.aware.noTriggers')}</div>
+                                        ) : itemTriggers.map((trig: any) => (
+                                            <div key={trig.id} className={`aware-side-trigger ${trig.is_enabled ? '' : 'done'}`}>
+                                                {renderCheck(trig.is_enabled ? 'todo' : 'done', trig.is_enabled ? t('agent.aware.inProgress') : t('agent.aware.completed'))}
+                                                <div className="aware-side-trigger-main">
+                                                    <div className="aware-side-item-title">{formatTrigger(trig)}</div>
+                                                    <div className="aware-side-item-meta">{trig.reason || trig.type}</div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
                 <div className="aware-side-section">
                     <div className="aware-side-section-title">{t('agent.aware.standaloneTriggers')}</div>
-                    {(awareTriggers as any[]).length === 0 ? (
+                    {standaloneTriggers.length === 0 ? (
                         <div className="aware-side-empty">{t('agent.aware.noTriggers')}</div>
-                    ) : (awareTriggers as any[]).slice(0, 16).map((trig: any) => (
-                        <div key={trig.id} className="aware-side-trigger">
+                    ) : standaloneTriggers.slice(0, 16).map((trig: any) => (
+                        <div key={trig.id} className={`aware-side-trigger ${trig.is_enabled ? '' : 'done'}`}>
+                            {renderCheck(trig.is_enabled ? 'todo' : 'done', trig.is_enabled ? t('agent.aware.inProgress') : t('agent.aware.completed'))}
                             <div className="aware-side-trigger-main">
                                 <div className="aware-side-item-title">{formatTrigger(trig)}</div>
                                 <div className="aware-side-item-meta">{trig.reason || trig.type}</div>
@@ -4368,18 +4536,51 @@ function AgentDetailInner() {
                     <div className="aware-side-section-title">{t('agent.aware.reflections')}</div>
                     {(reflectionSessions as any[]).length === 0 ? (
                         <div className="aware-side-empty">{isZh ? '暂无自主思考记录' : 'No reflections yet'}</div>
-                    ) : (reflectionSessions as any[]).slice(0, 10).map((session: any) => (
-                        <div key={session.id} className="aware-side-item">
-                            <span className="aware-side-dot active" />
-                            <div>
-                                <div className="aware-side-item-title">{(session.title || 'Trigger execution').replace(/^🤖\s*/, '')}</div>
-                                <div className="aware-side-item-meta">
-                                    {new Date(session.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                                    {session.message_count > 0 ? ` · ${session.message_count}` : ''}
-                                </div>
+                    ) : (reflectionSessions as any[]).slice(0, 10).map((session: any) => {
+                        const isExpanded = expandedReflection === session.id;
+                        const msgs = reflectionMessages[session.id] || [];
+                        return (
+                            <div key={session.id} className="aware-side-reflection">
+                                <button
+                                    type="button"
+                                    className="aware-side-reflection-head"
+                                    onClick={async () => {
+                                        if (isExpanded) {
+                                            setExpandedReflection(null);
+                                            return;
+                                        }
+                                        setExpandedReflection(session.id);
+                                        await loadReflectionMessages(session.id);
+                                    }}
+                                >
+                                    <span className="aware-side-dot active" />
+                                    <div className="aware-side-trigger-main">
+                                        <div className="aware-side-item-title">{trimLeadingPictograph(session.title || 'Trigger execution')}</div>
+                                        <div className="aware-side-item-meta">
+                                            {new Date(session.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                            {session.message_count > 0 ? ` · ${session.message_count}` : ''}
+                                        </div>
+                                    </div>
+                                    <span className={`aware-side-chevron ${isExpanded ? 'open' : ''}`}>▶</span>
+                                </button>
+                                {isExpanded && (
+                                    <div className="aware-side-reflection-detail">
+                                        {msgs.length === 0 ? (
+                                            <div className="aware-side-empty compact">{isZh ? '正在加载...' : 'Loading...'}</div>
+                                        ) : msgs.slice(0, 6).map((msg: any, index: number) => (
+                                            <div key={index} className={`aware-side-reflection-message role-${msg.role}`}>
+                                                <span className="aware-side-reflection-role">{msg.role}</span>
+                                                <span className="aware-side-reflection-text">{reflectionPreview(msg).slice(0, 180)}</span>
+                                            </div>
+                                        ))}
+                                        {msgs.length > 6 && (
+                                            <div className="aware-side-empty compact">{isZh ? `还有 ${msgs.length - 6} 条消息` : `${msgs.length - 6} more messages`}</div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
             </div>
         );
@@ -4709,34 +4910,7 @@ function AgentDetailInner() {
                 {activeTab === 'aware' && (() => {
                     // Parse focus.md into focus items with multi-line descriptions
                     const raw = focusFile?.content || '';
-                    const lines = raw.split('\n');
-                    const focusItems: { id: string; name: string; description: string; done: boolean; inProgress: boolean }[] = [];
-                    let currentItem: any = null;
-                    for (const line of lines) {
-                        const match = line.match(/^\s*-\s*\[([ x/])\]\s*(.+)/i);
-                        if (match) {
-                            if (currentItem) focusItems.push(currentItem);
-                            const marker = match[1];
-                            const fullText = match[2].trim();
-                            // Split on first colon: "identifier: description"
-                            const colonIdx = fullText.indexOf(':');
-                            const itemName = colonIdx > 0 ? fullText.substring(0, colonIdx).trim() : fullText;
-                            const itemDesc = colonIdx > 0 ? fullText.substring(colonIdx + 1).trim() : '';
-                            currentItem = {
-                                id: itemName,
-                                name: itemName,
-                                description: itemDesc,
-                                done: marker.toLowerCase() === 'x',
-                                inProgress: marker === '/',
-                            };
-                        } else if (currentItem && line.trim() && /^\s{2,}/.test(line)) {
-                            // Indented continuation line = description
-                            currentItem.description = currentItem.description
-                                ? currentItem.description + ' ' + line.trim()
-                                : line.trim();
-                        }
-                    }
-                    if (currentItem) focusItems.push(currentItem);
+                    const focusItems = parseFocusItems(raw);
 
                     // Helper: convert trigger config to natural language
                     const triggerToHuman = (trig: any): string => {
@@ -4861,6 +5035,7 @@ function AgentDetailInner() {
                         const itemLogs = triggerLogsByFocus[item.name] || [];
                         const displayTitle = item.description || item.name;
                         const displaySubtitle = item.description ? item.name : null;
+                        const focusState = item.done ? 'done' : item.inProgress ? 'active' : 'todo';
 
                         return (
                             <div key={item.id} style={{
@@ -4869,6 +5044,7 @@ function AgentDetailInner() {
                                 overflow: 'hidden',
                                 marginBottom: '6px',
                                 background: 'var(--bg-primary)',
+                                opacity: item.done ? 0.74 : 1,
                             }}>
                                 {/* Focus Item Header */}
                                 <div
@@ -4884,11 +5060,11 @@ function AgentDetailInner() {
                                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-secondary)')}
                                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                                 >
-                                    {/* Status indicator */}
-                                    <div style={{
-                                        width: '8px', height: '8px', borderRadius: '50%', marginTop: '5px', flexShrink: 0,
-                                        background: item.done ? 'var(--success, #10b981)' : item.inProgress ? 'var(--accent-primary)' : 'var(--border-subtle)',
-                                    }} />
+                                    <span
+                                        className={`aware-side-focus-marker ${focusState}`}
+                                        style={{ marginTop: '2px' }}
+                                        aria-label={focusState === 'done' ? t('agent.aware.completed') : focusState === 'active' ? t('agent.aware.inProgress') : t('agent.aware.focus')}
+                                    />
                                     <div style={{ flex: 1, minWidth: 0 }}>
                                         <div style={{
                                             fontSize: '13px', fontWeight: 500, lineHeight: '20px',
@@ -4902,18 +5078,16 @@ function AgentDetailInner() {
                                         )}
                                     </div>
                                     {/* Trigger count badge */}
-                                    {itemTriggers.length > 0 && (
-                                        <span style={{
-                                            fontSize: '11px', color: 'var(--text-tertiary)',
-                                            padding: '2px 8px', borderRadius: '10px',
-                                            background: 'var(--bg-secondary)',
-                                            whiteSpace: 'nowrap',
-                                        }}>
-                                            {i18n.language?.startsWith('zh')
-                                                ? `${itemTriggers.length} 个触发器`
-                                                : `${itemTriggers.length} trigger${itemTriggers.length > 1 ? 's' : ''}`}
-                                        </span>
-                                    )}
+                                    <span style={{
+                                        fontSize: '11px', color: 'var(--text-tertiary)',
+                                        padding: '2px 8px', borderRadius: '10px',
+                                        background: 'var(--bg-secondary)',
+                                        whiteSpace: 'nowrap',
+                                    }}>
+                                        {i18n.language?.startsWith('zh')
+                                            ? `${itemTriggers.length} 个触发器`
+                                            : `${itemTriggers.length} trigger${itemTriggers.length > 1 ? 's' : ''}`}
+                                    </span>
                                     {/* Expand arrow */}
                                     <span style={{
                                         fontSize: '11px', color: 'var(--text-tertiary)',
@@ -4936,6 +5110,9 @@ function AgentDetailInner() {
                                                         borderRadius: '6px', background: 'var(--bg-secondary)',
                                                         opacity: trig.is_enabled ? 1 : 0.5,
                                                     }}>
+                                                        <span className={`aware-side-check ${trig.is_enabled ? 'todo' : 'done'}`}>
+                                                            {trig.is_enabled ? '' : '✓'}
+                                                        </span>
                                                         <div style={{ flex: 1 }}>
                                                             <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text-primary)' }}>
                                                                 {triggerToHuman(trig)}
@@ -5114,6 +5291,9 @@ function AgentDetailInner() {
                                                 opacity: trig.is_enabled ? 1 : 0.5,
                                                 background: 'var(--bg-primary)',
                                             }}>
+                                                <span className={`aware-side-check ${trig.is_enabled ? 'todo' : 'done'}`}>
+                                                    {trig.is_enabled ? '' : '✓'}
+                                                </span>
                                                 <div style={{ flex: 1 }}>
                                                     <div style={{ fontSize: '13px', fontWeight: 500 }}>{triggerToHuman(trig)}</div>
                                                     {triggerReasonText(trig) && <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{triggerReasonText(trig)}</div>}
@@ -5205,18 +5385,7 @@ function AgentDetailInner() {
                                                                     return;
                                                                 }
                                                                 setExpandedReflection(session.id);
-                                                                if (!reflectionMessages[session.id]) {
-                                                                    try {
-                                                                        const tkn = localStorage.getItem('token');
-                                                                        const res = await fetch(`/api/agents/${id}/sessions/${session.id}/messages`, {
-                                                                            headers: { Authorization: `Bearer ${tkn}` },
-                                                                        });
-                                                                        if (res.ok) {
-                                                                            const data = await res.json();
-                                                                            setReflectionMessages(prev => ({ ...prev, [session.id]: data }));
-                                                                        }
-                                                                    } catch { /* ignore */ }
-                                                                }
+                                                                await loadReflectionMessages(session.id);
                                                             }}
                                                             style={{
                                                                 padding: '10px 16px',
@@ -5232,7 +5401,7 @@ function AgentDetailInner() {
                                                             }} />
                                                             <div style={{ flex: 1, minWidth: 0 }}>
                                                                 <div style={{ fontSize: '12px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                                    {(session.title || 'Trigger execution').replace(/^🤖\s*/, '')}
+                                                                    {trimLeadingPictograph(session.title || 'Trigger execution')}
                                                                 </div>
                                                                 <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '1px' }}>
                                                                     {new Date(session.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
@@ -5425,7 +5594,7 @@ function AgentDetailInner() {
                                 {/* Soul Section */}
                                 <div>
                                     <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                        🧬 {t('agent.soul.title')}
+                                        <IconDna size={18} stroke={1.8} /> {t('agent.soul.title')}
                                     </h3>
                                     <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
                                         {t('agent.mind.soulDesc', 'Core identity, personality, and behavior boundaries.')}
@@ -5436,7 +5605,7 @@ function AgentDetailInner() {
                                 {/* Memory Section */}
                                 <div>
                                     <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                        🧠 {t('agent.memory.title')}
+                                        <IconBrain size={18} stroke={1.8} /> {t('agent.memory.title')}
                                     </h3>
                                     <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
                                         {t('agent.mind.memoryDesc', 'Persistent memory accumulated through conversations and experiences.')}
@@ -5447,7 +5616,7 @@ function AgentDetailInner() {
                                 {/* Heartbeat Section */}
                                 <div>
                                     <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                        💓 {t('agent.mind.heartbeatTitle', 'Heartbeat')}
+                                        <IconHeartbeat size={18} stroke={1.8} /> {t('agent.mind.heartbeatTitle', 'Heartbeat')}
                                     </h3>
                                     <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
                                         {t('agent.mind.heartbeatDesc', 'Instructions for periodic awareness checks. The agent reads this file during each heartbeat.')}
@@ -5673,21 +5842,21 @@ function AgentDetailInner() {
                                                             onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border-subtle)')}
                                                         >
                                                             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }}>
-                                                                <span style={{ fontSize: '20px' }}>{skill.icon || '📋'}</span>
+                                                                <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)' }}>{safeDisplayIcon(skill.icon, <IconTools size={20} stroke={1.8} />)}</span>
                                                                 <div>
                                                                     <div style={{ fontWeight: 600, fontSize: '14px' }}>{skill.name}</div>
                                                                     <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
                                                                         {skill.description?.substring(0, 100)}{skill.description?.length > 100 ? '...' : ''}
                                                                     </div>
                                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                                                                        📁 {skill.folder_name}
+                                                                        <IconFolder size={12} stroke={1.8} /> {skill.folder_name}
                                                                         {skill.is_default && <span style={{ marginLeft: '8px', color: 'var(--accent-primary)', fontWeight: 600 }}>✓ Default</span>}
                                                                     </div>
                                                                 </div>
                                                             </div>
                                                             <button
                                                                 className="btn btn-secondary"
-                                                                style={{ whiteSpace: 'nowrap', fontSize: '12px', padding: '6px 14px' }}
+                                                                style={{ whiteSpace: 'nowrap', fontSize: '12px', padding: '6px 14px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
                                                                 disabled={importingSkillId === skill.id}
                                                                 onClick={async () => {
                                                                     setImportingSkillId(skill.id);
@@ -5703,7 +5872,7 @@ function AgentDetailInner() {
                                                                     }
                                                                 }}
                                                             >
-                                                                {importingSkillId === skill.id ? '⏳ ...' : '⬇️ Import'}
+                                                                {importingSkillId === skill.id ? 'Importing...' : <><IconDownload size={13} stroke={1.8} /> Import</>}
                                                             </button>
                                                         </div>
                                                     ))
@@ -6015,7 +6184,11 @@ function AgentDetailInner() {
                                                 pointerEvents: 'none',
                                             }}
                                         >
-                                            {activeSession.source_channel === 'agent' ? `🤖 Agent Conversation · ${activeSession.username || 'Agents'}` : `Read-only · ${activeSession.username || 'User'}`}
+                                            {activeSession.source_channel === 'agent' ? (
+                                                <><IconRobot size={13} stroke={1.8} /> Agent Conversation · {activeSession.username || 'Agents'}</>
+                                            ) : (
+                                                <>Read-only · {activeSession.username || 'User'}</>
+                                            )}
                                         </div>
                                         <div ref={historyContainerRef} onScroll={handleHistoryScroll} style={{ flex: 1, overflowY: 'auto', padding: '48px 16px 12px' }}>
                                             {(() => {
@@ -6042,7 +6215,7 @@ function AgentDetailInner() {
                                                             <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '36px', minWidth: 0 }}>
                                                                 <details style={{ flex: 1, minWidth: 0, borderRadius: '8px', background: 'var(--accent-subtle)', border: '1px solid var(--accent-subtle)', fontSize: '12px', overflow: 'hidden' }}>
                                                                     <summary style={{ padding: '6px 10px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', userSelect: 'none', listStyle: 'none', overflow: 'hidden' }}>
-                                                                        <span style={{ fontSize: '13px' }}>⚡</span>
+                                                                        <IconBolt size={13} stroke={1.8} />
                                                                         <span style={{ fontWeight: 600, color: 'var(--accent-text)' }}>{tName}</span>
                                                                         {tArgs && typeof tArgs === 'object' && Object.keys(tArgs).length > 0 && <span style={{ color: 'var(--text-tertiary)', fontSize: '11px', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{`(${Object.entries(tArgs).map(([k, v]) => `${k}: ${typeof v === 'string' ? v.slice(0, 30) : JSON.stringify(v)}`).join(', ')})`}</span>}
                                                                     </summary>
@@ -6090,7 +6263,7 @@ function AgentDetailInner() {
                                         {/* Drop overlay */}
                                         {isChatDragging && (
                                             <div className="drop-zone-overlay">
-                                                <div className="drop-zone-overlay__icon">📎</div>
+                                                <div className="drop-zone-overlay__icon"><IconPaperclip size={28} stroke={1.8} /></div>
                                                 <div className="drop-zone-overlay__text">{t('agent.upload.dropToAttach', 'Drop files to attach (max 10)')}</div>
                                             </div>
                                         )}
@@ -6530,7 +6703,7 @@ function AgentDetailInner() {
                             filteredLogs = activityLogs.filter((l: any) => messageTypes.includes(l.action_type));
                         }
 
-                        const filterBtn = (key: string, label: string, indent = false) => (
+                        const filterBtn = (key: string, label: React.ReactNode, indent = false) => (
                             <button
                                 key={key}
                                 onClick={() => setLogFilter(key)}
@@ -6545,6 +6718,9 @@ function AgentDetailInner() {
                                     cursor: 'pointer',
                                     transition: 'all 0.15s',
                                     whiteSpace: 'nowrap' as const,
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '5px',
                                 }}
                             >
                                 {label}
@@ -6557,15 +6733,15 @@ function AgentDetailInner() {
 
                                 {/* Filter tabs */}
                                 <div style={{ display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap', alignItems: 'center' }}>
-                                    {filterBtn('user', '👤 ' + t('agent.activityLog.userActions', 'User Actions'))}
+                                    {filterBtn('user', <><IconUser size={13} stroke={1.8} /> {t('agent.activityLog.userActions', 'User Actions')}</>)}
                                     {(agent as any)?.agent_type !== 'openclaw' && (<>
-                                        {filterBtn('backend', '⚙️ ' + t('agent.activityLog.backendServices', 'Backend Services'))}
+                                        {filterBtn('backend', <><IconSettings size={13} stroke={1.8} /> {t('agent.activityLog.backendServices', 'Backend Services')}</>)}
                                         {(logFilter === 'backend' || logFilter === 'heartbeat' || logFilter === 'schedule' || logFilter === 'messages') && (
                                             <>
                                                 <span style={{ color: 'var(--text-tertiary)', fontSize: '11px' }}>│</span>
-                                                {filterBtn('heartbeat', '💓 ' + t('agent.mind.heartbeatTitle'))}
-                                                {filterBtn('schedule', '⏰ ' + t('agent.activityLog.scheduleCron'), true)}
-                                                {filterBtn('messages', '📨 ' + t('agent.activityLog.messages'), true)}
+                                                {filterBtn('heartbeat', <><IconHeartbeat size={13} stroke={1.8} /> {t('agent.mind.heartbeatTitle')}</>)}
+                                                {filterBtn('schedule', <><IconClock size={13} stroke={1.8} /> {t('agent.activityLog.scheduleCron')}</>, true)}
+                                                {filterBtn('messages', <><IconMailForward size={13} stroke={1.8} /> {t('agent.activityLog.messages')}</>, true)}
                                             </>
                                         )}
                                     </>)}
@@ -6574,11 +6750,19 @@ function AgentDetailInner() {
                                 {filteredLogs.length > 0 ? (
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                         {filteredLogs.map((log: any) => {
-                                            const icons: Record<string, string> = {
-                                                chat_reply: '💬', tool_call: '⚡', feishu_msg_sent: '📤',
-                                                agent_msg_sent: '🤖', web_msg_sent: '🌐', task_created: '📋',
-                                                task_updated: '✅', file_written: '📝', error: '❌',
-                                                schedule_run: '⏰', heartbeat: '💓', plaza_post: '🏛️',
+                                            const icons: Record<string, React.ReactNode> = {
+                                                chat_reply: <IconMessageCircle size={16} stroke={1.8} />,
+                                                tool_call: <IconBolt size={16} stroke={1.8} />,
+                                                feishu_msg_sent: <IconSend size={16} stroke={1.8} />,
+                                                agent_msg_sent: <IconRobot size={16} stroke={1.8} />,
+                                                web_msg_sent: <IconWorld size={16} stroke={1.8} />,
+                                                task_created: <IconFileText size={16} stroke={1.8} />,
+                                                task_updated: <IconCheck size={16} stroke={1.8} />,
+                                                file_written: <IconFileText size={16} stroke={1.8} />,
+                                                error: <IconAlertTriangle size={16} stroke={1.8} />,
+                                                schedule_run: <IconClock size={16} stroke={1.8} />,
+                                                heartbeat: <IconHeartbeat size={16} stroke={1.8} />,
+                                                plaza_post: <IconBuilding size={16} stroke={1.8} />,
                                             };
                                             const time = log.created_at ? new Date(log.created_at).toLocaleString('zh-CN', {
                                                 month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -6595,7 +6779,7 @@ function AgentDetailInner() {
                                                     }}
                                                 >
                                                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
-                                                        <span style={{ fontSize: '16px', flexShrink: 0, marginTop: '1px' }}>
+                                                        <span style={{ width: '18px', height: '18px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: '1px', color: 'var(--text-tertiary)' }}>
                                                             {icons[log.action_type] || '·'}
                                                         </span>
                                                         <div style={{ flex: 1, minWidth: 0 }}>
@@ -6905,7 +7089,7 @@ function AgentDetailInner() {
 
                                     {/* Max Tool Call Rounds */}
                                     <div className="card" style={{ marginBottom: '12px' }}>
-                                        <h4 style={{ marginBottom: '12px' }}>🔧 {t('agent.settings.maxToolRounds', 'Max Tool Call Rounds')}</h4>
+                                        <h4 style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}><IconTools size={16} stroke={1.8} /> {t('agent.settings.maxToolRounds', 'Max Tool Call Rounds')}</h4>
                                         <div>
                                             <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.maxToolRoundsLabel', 'Maximum rounds per message')}</label>
                                             <input
@@ -7118,9 +7302,9 @@ function AgentDetailInner() {
 
                                 {/* Permission Management */}
                                 {(() => {
-                                    const scopeLabels: Record<string, string> = {
-                                        company: '🏢 ' + t('agent.settings.perm.companyWide', 'Company-wide'),
-                                        user: '👤 ' + t('agent.settings.perm.onlyMe', 'Only Me'),
+                                    const scopeLabels: Record<string, React.ReactNode> = {
+                                        company: <><IconBuilding size={14} stroke={1.8} /> {t('agent.settings.perm.companyWide', 'Company-wide')}</>,
+                                        user: <><IconUser size={14} stroke={1.8} /> {t('agent.settings.perm.onlyMe', 'Only Me')}</>,
                                     };
 
                                     const handleScopeChange = async (newScope: string) => {
@@ -7157,7 +7341,7 @@ function AgentDetailInner() {
 
                                     return (
                                         <div className="card" style={{ marginBottom: '12px' }}>
-                                            <h4 style={{ marginBottom: '12px' }}>🔒 {t('agent.settings.perm.title', 'Access Permissions')}</h4>
+                                            <h4 style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}><IconLock size={16} stroke={1.8} /> {t('agent.settings.perm.title', 'Access Permissions')}</h4>
                                             <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
                                                 {t('agent.settings.perm.description', 'Control who can see and interact with this agent. Only the creator or admin can change this.')}
                                             </p>
@@ -7193,7 +7377,7 @@ function AgentDetailInner() {
                                                             style={{ accentColor: 'var(--accent-primary)' }}
                                                         />
                                                         <div>
-                                                            <div style={{ fontWeight: 500, fontSize: '13px' }}>{scopeLabels[scope]}</div>
+                                                            <div style={{ fontWeight: 500, fontSize: '13px', display: 'flex', alignItems: 'center', gap: '5px' }}>{scopeLabels[scope]}</div>
                                                             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
                                                                 {scope === 'company' && t('agent.settings.perm.companyWideDesc', 'All users in the organization can use this agent')}
                                                                 {scope === 'user' && t('agent.settings.perm.onlyMeDesc', 'Only the creator can use this agent')}
@@ -7210,8 +7394,8 @@ function AgentDetailInner() {
                                                         {t('agent.settings.perm.defaultAccess', 'Default Access Level')}
                                                     </label>
                                                     <div style={{ display: 'flex', gap: '8px' }}>
-                                                        {[{ val: 'use', label: '👁️ ' + t('agent.settings.perm.useAccess', 'Use'), desc: t('agent.settings.perm.useAccessDesc', 'Task, Chat, Tools, Skills, Workspace') },
-                                                        { val: 'manage', label: '⚙️ ' + t('agent.settings.perm.manageAccess', 'Manage'), desc: t('agent.settings.perm.manageAccessDesc', 'Full access including Settings, Mind, Relationships') }].map(opt => (
+                                                        {[{ val: 'use', label: <><IconEye size={13} stroke={1.8} /> {t('agent.settings.perm.useAccess', 'Use')}</>, desc: t('agent.settings.perm.useAccessDesc', 'Task, Chat, Tools, Skills, Workspace') },
+                                                        { val: 'manage', label: <><IconSettings size={13} stroke={1.8} /> {t('agent.settings.perm.manageAccess', 'Manage')}</>, desc: t('agent.settings.perm.manageAccessDesc', 'Full access including Settings, Mind, Relationships') }].map(opt => (
                                                             <label key={opt.val}
                                                                 style={{
                                                                     flex: 1,
@@ -7231,7 +7415,7 @@ function AgentDetailInner() {
                                                                     <input type="radio" name="access_level" checked={currentAccessLevel === opt.val}
                                                                         onChange={() => handleAccessLevelChange(opt.val)}
                                                                         style={{ accentColor: 'var(--accent-primary)' }} />
-                                                                    <span style={{ fontWeight: 500, fontSize: '13px' }}>{opt.label}</span>
+                                                                    <span style={{ fontWeight: 500, fontSize: '13px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}>{opt.label}</span>
                                                                 </div>
                                                                 <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px', marginLeft: '20px' }}>{opt.desc}</div>
                                                             </label>
@@ -7259,7 +7443,7 @@ function AgentDetailInner() {
                                 {/* Timezone */}
                                 <div className="card" style={{ marginBottom: '12px' }}>
                                     <h4 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                        {t('agent.settings.timezone.title', '🌐 Timezone')}
+                                        <IconWorld size={16} stroke={1.8} /> {t('agent.settings.timezone.title', 'Timezone')}
                                     </h4>
                                     <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
                                         {t('agent.settings.timezone.description', 'The timezone used for this agent\'s scheduling, active hours, and time awareness. Defaults to the company timezone if not set.')}

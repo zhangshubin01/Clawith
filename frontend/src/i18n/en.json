@@ -955,7 +955,7 @@
       "disabled": "Disabled",
       "enabledHint": "Agents can use notify, task_delegate, and consult modes.",
       "disabledHint": "All agent messages use synchronous consult mode.",
-      "enableWarning": "⚠️ You are about to enable the A2A Async Communication feature (Beta).\n\nThis feature allows agents to communicate asynchronously via notify and task_delegate modes.\n\nKnown potential issues:\n• Agent replies may contain internal technical terms (trigger names, focus items, etc.)\n• task_delegate callbacks may occasionally be delayed or dropped due to rate limiting\n• Token consumption will increase because each async message triggers a separate agent session\n• Agent loops may occur if triggers are not properly configured\n\nIf you encounter any issues, please return to this page and disable the toggle to restore stable synchronous behavior.\n\nAre you sure you want to enable this feature?"
+      "enableWarning": "You are about to enable the A2A Async Communication feature (Beta).\n\nThis feature allows agents to communicate asynchronously via notify and task_delegate modes.\n\nKnown potential issues:\n• Agent replies may contain internal technical terms (trigger names, focus items, etc.)\n• task_delegate callbacks may occasionally be delayed or dropped due to rate limiting\n• Token consumption will increase because each async message triggers a separate agent session\n• Agent loops may occur if triggers are not properly configured\n\nIf you encounter any issues, please return to this page and disable the toggle to restore stable synchronous behavior.\n\nAre you sure you want to enable this feature?"
     },
     "invites": {
       "pageTitle": "Invitation Codes",
@@ -1047,7 +1047,7 @@
       "delete": "Delete",
       "edit": "Edit",
       "cancel": "Cancel",
-      "supportsVision": "👁 Supports Vision (Multimodal)",
+      "supportsVision": "Supports Vision (Multimodal)",
       "supportsVisionDesc": "— Enable for models that can analyze images (GPT-4o, Claude, Qwen-VL, etc.)",
       "test": "Test",
       "testing": "Testing...",
@@ -1102,7 +1102,7 @@
       "save": "Save",
       "clear": "Clear",
       "clawhubApiKey": "ClawHub API Key",
-      "clawhubApiKeyDesc": "Authenticate ClawHub API calls to avoid rate limiting when browsing and installing skills from ClawHub.",
+      "clawhubApiKeyDesc": "Authenticate official ClawHub API calls to raise the rate limit from 60 requests/hour to 1,000 requests/hour when browsing and installing skills.",
       "authenticatedRequestsGetHigherRateLimits": "Authenticated requests get higher rate limits for ClawHub skill browsing and installation.",
       "currentKey": "Current key:",
       "githubTokenSaved": "GitHub token saved",
@@ -1352,7 +1352,7 @@
       "title": "Notification Bar",
       "enabled": "Enable notification bar",
       "text": "Notification text",
-      "textPlaceholder": "e.g. 🎉 v2.1 released with new features!",
+      "textPlaceholder": "e.g. v2.1 released with new features!",
       "description": "Display a notification bar at the top of the page, visible to all users.",
       "preview": "Preview"
     },

@@ -899,37 +899,25 @@ async def agent_import_from_clawhub(
     await check_agent_access(db, current_user, agent_id)
 
     from app.api.skills import (
-        CLAWHUB_BASE, _fetch_github_directory, _parse_skill_md_frontmatter, _get_github_token,
+        _fetch_clawhub_skill_archive, _fetch_clawhub_skill_meta, _get_clawhub_key,
     )
-    import httpx
 
     slug = body.slug
+    tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
+    api_key = await _get_clawhub_key(tenant_id)
 
     # 1. Fetch metadata from ClawHub
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(f"{CLAWHUB_BASE}/v1/skills/{slug}")
-            if resp.status_code == 429:
-                raise HTTPException(429, "ClawHub rate limit exceeded. Please wait and try again.")
-            if resp.status_code != 200:
-                raise HTTPException(502, f"ClawHub API error: {resp.status_code}")
-            meta = resp.json()
+        meta, meta_base = await _fetch_clawhub_skill_meta(slug, api_key=api_key)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(502, f"Failed to connect to ClawHub: {e}")
 
     skill_info = meta.get("skill", {})
-    owner_info = meta.get("owner", {})
-    handle = owner_info.get("handle", "").lower()
-    if not handle:
-        raise HTTPException(400, "Could not determine skill owner from ClawHub metadata")
 
-    # 2. Fetch files from GitHub
-    github_path = f"skills/{handle}/{slug}"
-    tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
-    token = await _get_github_token(tenant_id)
-    files = await _fetch_github_directory("openclaw", "skills", github_path, "main", token)
+    # 2. Fetch files from the ClawHub archive
+    files, _ = await _fetch_clawhub_skill_archive(slug, api_key=api_key, preferred_base=meta_base)
 
     # 3. Write to agent workspace: skills/<slug>/
     base = _agent_base_dir(agent_id)

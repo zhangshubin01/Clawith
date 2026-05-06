@@ -508,8 +508,8 @@
         "encryptKey": "Encrypt Key",
         "webhookUrl": "Webhook URL",
         "configured": "已配置",
-        "usingCompanyKey": "🏢 使用公司主密钥 ({{val}})",
-        "usingCompanyConfig": "🏢 使用公司默认配置 ({{val}})",
+        "usingCompanyKey": "使用公司主密钥 ({{val}})",
+        "usingCompanyConfig": "使用公司默认配置 ({{val}})",
         "notConfigured": "未配置",
         "saveSuccess": "渠道配置已保存。",
         "saveFailed": "渠道配置保存失败。",
@@ -540,7 +540,7 @@
         "saving": "保存中..."
       },
       "timezone": {
-        "title": "🌐 时区",
+        "title": "时区",
         "description": "此数字员工的调度、活跃时间和时间感知使用的时区。如果未设置，默认为公司时区。",
         "current": "数字员工时区",
         "override": "此数字员工的自定义时区",
@@ -678,8 +678,8 @@
       "noInstalled": "暂无自行安装的工具",
       "noCompany": "暂无公司统一配置的工具",
       "configured": "已配置",
-      "usingCompanyKey": "🏢 使用公司主密钥 ({{val}})",
-      "usingCompanyConfig": "🏢 使用公司默认配置 ({{val}})",
+      "usingCompanyKey": "使用公司主密钥 ({{val}})",
+      "usingCompanyConfig": "使用公司默认配置 ({{val}})",
       "config": "️ 配置",
       "testConnection": "测试连接",
       "testing": "测试中...",
@@ -1113,7 +1113,7 @@
       "disabled": "已关闭",
       "enabledHint": "数字员工可使用 notify、task_delegate 和 consult 三种通信模式。",
       "disabledHint": "所有数字员工消息使用同步 consult 模式。",
-      "enableWarning": "⚠️ 您即将开启数字员工间异步通信功能（测试版）。\n\n此功能允许数字员工通过 notify 和 task_delegate 模式进行异步通信。\n\n已知可能的问题：\n• 数字员工的回复中可能包含内部技术术语（触发器名称、关注项等）\n• task_delegate 回调可能因速率限制而偶尔延迟或丢失\n• Token 消耗将增加，因为每条异步消息都会触发一个独立的数字员工会话\n• 如果触发器配置不当，可能出现数字员工循环调用\n\n如遇到任何问题，请返回此页面关闭开关，即可恢复稳定的同步通信行为。\n\n确定要开启此功能吗？"
+      "enableWarning": "您即将开启数字员工间异步通信功能（测试版）。\n\n此功能允许数字员工通过 notify 和 task_delegate 模式进行异步通信。\n\n已知可能的问题：\n• 数字员工的回复中可能包含内部技术术语（触发器名称、关注项等）\n• task_delegate 回调可能因速率限制而偶尔延迟或丢失\n• Token 消耗将增加，因为每条异步消息都会触发一个独立的数字员工会话\n• 如果触发器配置不当，可能出现数字员工循环调用\n\n如遇到任何问题，请返回此页面关闭开关，即可恢复稳定的同步通信行为。\n\n确定要开启此功能吗？"
     },
     "invites": {
       "pageTitle": "邀请码",
@@ -1161,7 +1161,7 @@
       "delete": "删除",
       "edit": "编辑",
       "cancel": "取消",
-      "supportsVision": "👁 支持视觉（多模态）",
+      "supportsVision": "支持视觉（多模态）",
       "supportsVisionDesc": "— 为能够分析图像的模型启用（GPT-4o、Claude、Qwen-VL 等）",
       "test": "测试",
       "testing": "测试中...",
@@ -1216,7 +1216,7 @@
       "save": "保存",
       "clear": "清除",
       "clawhubApiKey": "ClawHub API Key",
-      "clawhubApiKeyDesc": "验证 ClawHub API 调用，以避免在浏览和安装 ClawHub 工具时遇到速率限制。",
+      "clawhubApiKeyDesc": "验证官方 ClawHub API 调用，在浏览和安装 ClawHub 技能时将速率限制从每小时 60 次提高到每小时 1,000 次。",
       "authenticatedRequestsGetHigherRateLimits": "经过身份验证的请求在 ClawHub 工具浏览和安装时获得更高的速率限制。",
       "currentKey": "当前密钥：",
       "githubTokenSaved": "GitHub Token 已保存",
@@ -1491,7 +1491,7 @@
       "title": "顶部通知条",
       "enabled": "启用通知条",
       "text": "通知文案",
-      "textPlaceholder": "输入通知条文案，如：🎉 v2.1 已发布！",
+      "textPlaceholder": "输入通知条文案，如：v2.1 已发布！",
       "description": "在页面顶部显示一行通知条，所有用户（含未登录用户）可见。",
       "preview": "预览"
     },

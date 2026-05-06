@@ -3,6 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import MarkdownRenderer from './MarkdownRenderer';
+import PromptModal from './PromptModal';
+import { useDialog } from './Dialog/DialogProvider';
 import { fileApi, uploadFileWithProgress } from '../services/api';
 
 export interface WorkspaceActivity {
@@ -401,6 +403,7 @@ export default function WorkspaceOperationPanel({
     headerActionsTargetId,
 }: Props) {
     const { t } = useTranslation();
+    const dialog = useDialog();
     const [preview, setPreview] = useState<any>(null);
     const [content, setContent] = useState('');
     const [draft, setDraft] = useState('');
@@ -418,6 +421,7 @@ export default function WorkspaceOperationPanel({
     const [pendingSwitchPath, setPendingSwitchPath] = useState<string | null>(null);
     const [sideWidth, setSideWidth] = useState(DEFAULT_TREE_WIDTH);
     const [selectedDirPath, setSelectedDirPath] = useState(WORKSPACE_ROOT);
+    const [createFolderModalOpen, setCreateFolderModalOpen] = useState(false);
     const [uploadItems, setUploadItems] = useState<UploadItem[]>([]);
     const [isSideResizing, setIsSideResizing] = useState(false);
     const [headerActionsTarget, setHeaderActionsTarget] = useState<HTMLElement | null>(null);
@@ -843,9 +847,12 @@ export default function WorkspaceOperationPanel({
 
     const handleCreateFolder = async () => {
         if (!canModifyPath(treeTargetDir)) return;
-        const name = window.prompt('Folder name');
-        if (!name) return;
+        setCreateFolderModalOpen(true);
+    };
+
+    const confirmCreateFolder = async (name: string) => {
         const trimmed = name.trim().replace(/^\/+|\/+$/g, '');
+        setCreateFolderModalOpen(false);
         if (!trimmed) return;
         const folderPath = `${treeTargetDir}/${trimmed}`;
         await fileApi.write(agentId, `${folderPath}/.gitkeep`, '');
@@ -862,7 +869,11 @@ export default function WorkspaceOperationPanel({
 
     const deleteTreePath = async (path: string, label: string, selected?: boolean) => {
         if (!canModifyPath(path)) return;
-        if (!confirm(`Are you sure you want to delete ${label}?`)) return;
+        const ok = await dialog.confirm(
+            t('agent.workspace.confirmDelete', 'Are you sure you want to delete {{name}}?', { name: label }),
+            { title: t('common.delete', 'Delete'), danger: true, confirmLabel: t('common.delete', 'Delete') },
+        );
+        if (!ok) return;
         try {
             await fileApi.delete(agentId, path);
             if (selected) {
@@ -880,7 +891,10 @@ export default function WorkspaceOperationPanel({
             onPathDeleted?.(path);
             await loadFileTree();
         } catch (err: any) {
-            alert(`Failed to delete: ${err.message}`);
+            await dialog.alert(t('agent.workspace.deleteFailed', 'Failed to delete'), {
+                type: 'error',
+                details: String(err?.message || err),
+            });
         }
     };
 
@@ -1466,6 +1480,13 @@ export default function WorkspaceOperationPanel({
                     </div>
                 </div>
             )}
+            <PromptModal
+                open={createFolderModalOpen}
+                title={t('agent.workspace.newFolder', 'New Folder')}
+                placeholder={t('agent.workspace.newFolderName', 'Folder name')}
+                onCancel={() => setCreateFolderModalOpen(false)}
+                onConfirm={(name) => void confirmCreateFolder(name)}
+            />
         </div>
     );
 }
