@@ -15,14 +15,18 @@ import { useToast } from '../components/Toast/ToastProvider';
 import { buildCompanyRegions, type CompanyRegion } from '../utils/companyRegions';
 import {
     IconBrowser,
+    IconBulb,
     IconChevronDown,
     IconClock,
+    IconCheck,
+    IconEdit,
     IconFileText,
     IconMessageCircle,
     IconSearch,
     IconSettings,
     IconTerminal2,
     IconTools,
+    IconUser,
 } from '@tabler/icons-react';
 // API helpers for enterprise endpoints
 async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
@@ -627,8 +631,8 @@ function OrgTab({ tenant }: { tenant: any }) {
                 {/* Setup Guide moved to the top */}
                 {['feishu', 'dingtalk', 'google_workspace'].includes(type) && (
                     <div style={{ background: 'var(--bg-primary)', padding: '16px', borderRadius: '8px', border: '1px solid var(--border-subtle)', marginBottom: '20px', fontSize: '12px' }}>
-                        <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '8px', color: 'var(--text-primary)' }}>
-                            👉 {t('enterprise.org.syncSetupGuide', 'Setup Guide & Required Permissions')}
+                        <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '8px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <IconSettings size={15} stroke={1.8} /> {t('enterprise.org.syncSetupGuide', 'Setup Guide & Required Permissions')}
                         </div>
                         <div style={{ color: 'var(--text-secondary)', lineHeight: 1.6 }}>
                             {type === 'feishu' && (
@@ -1968,7 +1972,7 @@ function CompanyNameEditor() {
                 <button className="btn btn-primary" onClick={handleSave} disabled={saving || !name.trim()}>
                     {saving ? t('common.loading') : t('common.save', 'Save')}
                 </button>
-                {saved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅</span>}
+                {saved && <IconCheck size={15} stroke={2} style={{ color: 'var(--success)' }} />}
             </div>
         </div>
     );
@@ -2440,6 +2444,7 @@ function BroadcastSection() {
 // ─── OKR Tab ──────────────────────────────────────────
 function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
     const qc = useQueryClient();
+    const dialog = useDialog();
     const { i18n } = useTranslation();
     // Derive language from i18n — same pattern as OKR.tsx
     const zh = i18n.language?.startsWith('zh');
@@ -2712,14 +2717,23 @@ function OkrTab({ tenantId, t }: { tenantId: string; t: any }) {
                                             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                                         });
                                         if (res.ok) {
-                                            alert(zh ? '关系网络同步成功！' : 'Relationships synced successfully!');
+                                            await dialog.alert(zh ? '关系网络同步成功！' : 'Relationships synced successfully!', {
+                                                type: 'success',
+                                                title: zh ? '同步完成' : 'Sync Complete',
+                                            });
                                             qc.invalidateQueries({ queryKey: ['okr-members-without-okr-settings'] });
                                         } else {
                                             const err = await res.json().catch(() => ({}));
-                                            alert(`Error: ${err.detail || res.status}`);
+                                            await dialog.alert(zh ? '关系网络同步失败' : 'Relationship sync failed', {
+                                                type: 'error',
+                                                details: String(err.detail || res.status),
+                                            });
                                         }
                                     } catch (e) {
-                                        alert(zh ? '同步失败，请重试' : 'Sync failed, please retry');
+                                        await dialog.alert(zh ? '同步失败，请重试' : 'Sync failed, please retry', {
+                                            type: 'error',
+                                            details: String((e as any)?.message || e),
+                                        });
                                     }
                                 }}
                                 style={{
@@ -3042,6 +3056,29 @@ export default function EnterpriseSettings() {
             default: return <IconTools size={size} stroke={1.8} style={style} />;
         }
     };
+    const mcpToolGroupKey = (tool: any) => {
+        const serverName = String(tool.mcp_server_name || '').trim();
+        return tool.type === 'mcp' && serverName
+            ? `mcp:${serverName.toLowerCase()}`
+            : (tool.category || 'general');
+    };
+    const getToolGroupMeta = (groupKey: string, toolsInGroup: any[]) => {
+        const first = toolsInGroup.find((tool: any) => tool.type === 'mcp' && tool.mcp_server_name) || toolsInGroup[0];
+        if (groupKey.startsWith('mcp:') && first?.mcp_server_name) {
+            return {
+                label: first.mcp_server_name,
+                description: t('agent.tools.mcpGroupDescription', 'Tools from {{name}}', { name: first.mcp_server_name }),
+                iconCategory: 'custom',
+                configCategory: first.category || 'custom',
+            };
+        }
+        return {
+            label: categoryLabels[groupKey] || groupKey,
+            description: categoryDescriptions[groupKey] || 'Tools in this category',
+            iconCategory: groupKey,
+            configCategory: groupKey,
+        };
+    };
     const switchTrack = (enabled: boolean, mixed = false) => ({
         position: 'absolute' as const,
         inset: 0,
@@ -3065,6 +3102,7 @@ export default function EnterpriseSettings() {
     const [toolSearch, setToolSearch] = useState('');
     const [toolStatusFilter, setToolStatusFilter] = useState<'all' | 'enabled' | 'disabled' | 'default' | 'configured'>('all');
     const [expandedToolCategories, setExpandedToolCategories] = useState<Set<string>>(() => new Set());
+    const [expandedAgentInstalledGroups, setExpandedAgentInstalledGroups] = useState<Set<string>>(() => new Set());
     const loadAllTools = async () => {
         const tid = selectedTenantId;
         const data = await fetchJson<any[]>(`/tools${tid ? `?tenant_id=${tid}` : ''}`);
@@ -3075,7 +3113,10 @@ export default function EnterpriseSettings() {
             const tid = selectedTenantId;
             const data = await fetchJson<any[]>(`/tools/agent-installed${tid ? `?tenant_id=${tid}` : ''}`);
             setAgentInstalledTools(data);
-        } catch { }
+        } catch (error) {
+            console.warn('[EnterpriseTools] Failed to load agent-installed tools', error);
+            setAgentInstalledTools([]);
+        }
     };
     useEffect(() => { if (activeTab === 'tools') { loadAllTools(); loadAgentInstalledTools(); } }, [activeTab, selectedTenantId]);
 
@@ -3540,7 +3581,7 @@ export default function EnterpriseSettings() {
                                                     setEditingModelId(m.id);
                                                     setModelForm({ provider: m.provider, model: m.model, label: m.label, base_url: m.base_url || '', api_key: m.api_key_masked || '', supports_vision: m.supports_vision || false, max_output_tokens: m.max_output_tokens ? String(m.max_output_tokens) : '', request_timeout: m.request_timeout ? String(m.request_timeout) : '', temperature: m.temperature !== null && m.temperature !== undefined ? String(m.temperature) : '' });
                                                     setShowAddModel(true);
-                                                }} style={{ fontSize: '12px' }}>✏️ {t('enterprise.tools.edit')}</button>
+                                                }} style={{ fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><IconEdit size={13} stroke={1.8} /> {t('enterprise.tools.edit')}</button>
                                                 <button className="btn btn-ghost" onClick={() => deleteModel.mutate({ id: m.id })} style={{ color: 'var(--error)' }}>{t('common.delete')}</button>
                                             </div>
                                         </div>
@@ -3619,9 +3660,10 @@ export default function EnterpriseSettings() {
                                         </span>
                                         <span style={{
                                             padding: '1px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 500,
+                                            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                                             background: isBg ? 'rgba(99,102,241,0.12)' : 'rgba(34,197,94,0.12)',
                                             color: isBg ? 'var(--accent-color)' : 'rgb(34,197,94)',
-                                        }}>{isBg ? '⚙️' : '👤'}</span>
+                                        }}>{isBg ? <IconSettings size={12} stroke={1.8} /> : <IconUser size={12} stroke={1.8} />}</span>
                                         <span style={{ flex: 1, fontWeight: 500 }}>{log.action}</span>
                                         <span style={{ color: 'var(--text-tertiary)', fontSize: '11px' }}>{log.agent_id?.slice(0, 8) || '-'}</span>
                                     </div>
@@ -3667,9 +3709,9 @@ export default function EnterpriseSettings() {
                                 <button className="btn btn-primary" onClick={saveCompanyIntro} disabled={companyIntroSaving}>
                                     {companyIntroSaving ? t('common.loading') : t('common.save', 'Save')}
                                 </button>
-                                {companyIntroSaved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅ {t('enterprise.config.saved', 'Saved')}</span>}
-                                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>
-                                    💡 {t('enterprise.companyIntro.hint', 'This content appears in every agent\'s system prompt')}
+                                {companyIntroSaved && <span style={{ color: 'var(--success)', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><IconCheck size={13} stroke={2} /> {t('enterprise.config.saved', 'Saved')}</span>}
+                                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                    <IconBulb size={13} stroke={1.8} /> {t('enterprise.companyIntro.hint', 'This content appears in every agent\'s system prompt')}
                                 </span>
                             </div>
                         </div>
@@ -3837,7 +3879,7 @@ export default function EnterpriseSettings() {
                                 <button className="btn btn-primary" onClick={saveQuotas} disabled={quotaSaving}>
                                     {quotaSaving ? t('common.loading') : t('common.save', 'Save')}
                                 </button>
-                                {quotaSaved && <span style={{ color: 'var(--success)', fontSize: '12px' }}>✅ Saved</span>}
+                                {quotaSaved && <span style={{ color: 'var(--success)', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}><IconCheck size={13} stroke={2} /> Saved</span>}
                             </div>
                         </div>
                     </div>
@@ -3853,13 +3895,19 @@ export default function EnterpriseSettings() {
                 {activeTab === 'tools' && (
                     <div>
                         {/* Sub-tab pills */}
-                        <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '8px' }}>
+                        <div className="tool-source-tabs enterprise-tool-source-tabs" role="tablist" aria-label={t('enterprise.tools.sourceTabs', 'Tool sources')}>
                             {([['global', t('enterprise.tools.globalTools')], ['agent-installed', t('enterprise.tools.agentInstalled')]] as const).map(([key, label]) => (
-                                <button key={key} onClick={() => { setToolsView(key as any); if (key === 'agent-installed') loadAgentInstalledTools(); }} style={{
-                                    padding: '4px 14px', borderRadius: '12px', fontSize: '12px', fontWeight: 500, cursor: 'pointer', border: 'none',
-                                    background: toolsView === key ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
-                                    color: toolsView === key ? '#fff' : 'var(--text-secondary)', transition: 'all 0.15s',
-                                }}>{label}</button>
+                                <button
+                                    key={key}
+                                    type="button"
+                                    role="tab"
+                                    aria-selected={toolsView === key}
+                                    className={toolsView === key ? 'active' : ''}
+                                    onClick={() => { setToolsView(key as any); if (key === 'agent-installed') loadAgentInstalledTools(); }}
+                                >
+                                    <span>{label}</span>
+                                    <span className="tool-source-tab-count">{key === 'global' ? allTools.length : agentInstalledTools.length}</span>
+                                </button>
                             ))}
                         </div>
 
@@ -3870,32 +3918,97 @@ export default function EnterpriseSettings() {
                                 {agentInstalledTools.length === 0 ? (
                                     <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)' }}>{t('enterprise.tools.noAgentInstalledTools')}</div>
                                 ) : (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                                        {agentInstalledTools.map((row: any) => (
-                                            <div key={row.agent_tool_id} className="card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px' }}>
-                                                <div style={{ flex: 1, minWidth: 0 }}>
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                        <span style={{ fontWeight: 500, fontSize: '13px' }}>🔌 {row.tool_display_name}</span>
-                                                        {row.mcp_server_name && <span style={{ fontSize: '10px', background: 'var(--primary)', color: '#fff', borderRadius: '4px', padding: '1px 5px' }}>MCP</span>}
-                                                    </div>
-                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                                                        🤖 {row.installed_by_agent_name || 'Unknown Agent'}
-                                                        {row.installed_at && <span> · {new Date(row.installed_at).toLocaleString()}</span>}
-                                                    </div>
-                                                </div>
-                                                <button className="btn btn-ghost" style={{ color: 'var(--error)', fontSize: '12px' }} onClick={async () => {
-                                                    const ok = await dialog.confirm(t('enterprise.tools.removeFromAgent', { name: row.tool_display_name }), { title: '移除工具', danger: true, confirmLabel: '移除' });
-                                                    if (!ok) return;
-                                                    try {
-                                                        await fetchJson(`/tools/agent-tool/${row.agent_tool_id}`, { method: 'DELETE' });
-                                                    } catch {
-                                                        // Already deleted (e.g. removed via Global Tools) — just refresh
-                                                    }
-                                                    loadAgentInstalledTools();
-                                                }}>🗑️ {t('enterprise.tools.delete')}</button>
+                                    (() => {
+                                        const grouped = agentInstalledTools.reduce((acc: Record<string, any[]>, row: any) => {
+                                            const groupKey = mcpToolGroupKey(row);
+                                            (acc[groupKey] = acc[groupKey] || []).push(row);
+                                            return acc;
+                                        }, {});
+                                        const toggleAgentInstalledGroup = (groupKey: string) => {
+                                            setExpandedAgentInstalledGroups(prev => {
+                                                const next = new Set(prev);
+                                                if (next.has(groupKey)) next.delete(groupKey);
+                                                else next.add(groupKey);
+                                                return next;
+                                            });
+                                        };
+                                        return (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                                {Object.entries(grouped)
+                                                    .sort(([a, aRows], [b, bRows]) => {
+                                                        const aMeta = getToolGroupMeta(a, aRows as any[]);
+                                                        const bMeta = getToolGroupMeta(b, bRows as any[]);
+                                                        return aMeta.label.localeCompare(bMeta.label);
+                                                    })
+                                                    .map(([groupKey, rows]) => {
+                                                        const groupRows = rows as any[];
+                                                        const meta = getToolGroupMeta(groupKey, groupRows);
+                                                        const expanded = expandedAgentInstalledGroups.has(groupKey);
+                                                        return (
+                                                            <div key={groupKey} style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', overflow: 'hidden', background: 'var(--bg-primary)' }}>
+                                                                <div
+                                                                    role="button"
+                                                                    tabIndex={0}
+                                                                    onClick={() => toggleAgentInstalledGroup(groupKey)}
+                                                                    onKeyDown={(e) => {
+                                                                        if (e.key === 'Enter' || e.key === ' ') {
+                                                                            e.preventDefault();
+                                                                            toggleAgentInstalledGroup(groupKey);
+                                                                        }
+                                                                    }}
+                                                                    style={{ background: 'var(--bg-secondary)', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', userSelect: 'none' }}
+                                                                >
+                                                                    <IconChevronDown size={14} stroke={1.8} style={{ color: 'var(--text-tertiary)', transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s ease', flexShrink: 0 }} />
+                                                                    <span style={{ width: '26px', height: '26px', borderRadius: '7px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{renderCategoryIcon(meta.iconCategory, 15)}</span>
+                                                                    <div style={{ minWidth: 0 }}>
+                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                                                            <span style={{ fontSize: '13px', fontWeight: 650, color: 'var(--text-primary)' }}>{meta.label}</span>
+                                                                            <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                                                                                {groupRows.length} {groupRows.length === 1 ? 'tool' : 'tools'}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{meta.description}</div>
+                                                                    </div>
+                                                                </div>
+                                                                {expanded && groupRows.map((row: any, idx: number) => (
+                                                                    <div key={row.agent_tool_id} style={{
+                                                                        display: 'grid',
+                                                                        gridTemplateColumns: 'minmax(0, 1fr) auto',
+                                                                        gap: '12px',
+                                                                        alignItems: 'center',
+                                                                        padding: '10px 14px',
+                                                                        borderTop: idx === 0 ? '1px solid var(--border-subtle)' : 'none',
+                                                                        borderBottom: idx < groupRows.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+                                                                    }}>
+                                                                        <div style={{ minWidth: 0 }}>
+                                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flexWrap: 'wrap' }}>
+                                                                                <span style={{ fontWeight: 500, fontSize: '13px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.tool_display_name}</span>
+                                                                                {row.type === 'mcp' && <span style={{ fontSize: '10px', background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', borderRadius: '4px', padding: '1px 5px' }}>MCP</span>}
+                                                                                {row.configured && <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>{t('enterprise.tools.configured', 'Configured')}</span>}
+                                                                            </div>
+                                                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                                                {row.installed_by_agent_name || 'Unknown Agent'}
+                                                                                {row.installed_at && <span> · {new Date(row.installed_at).toLocaleString()}</span>}
+                                                                            </div>
+                                                                        </div>
+                                                                        <button className="btn btn-ghost" style={{ color: 'var(--error)', fontSize: '12px' }} onClick={async () => {
+                                                                            const ok = await dialog.confirm(t('enterprise.tools.removeFromAgent', { name: row.tool_display_name }), { title: '移除工具', danger: true, confirmLabel: '移除' });
+                                                                            if (!ok) return;
+                                                                            try {
+                                                                                await fetchJson(`/tools/agent-tool/${row.agent_tool_id}`, { method: 'DELETE' });
+                                                                            } catch {
+                                                                                // Already deleted (e.g. removed via Global Tools) — just refresh
+                                                                            }
+                                                                            loadAgentInstalledTools();
+                                                                        }}>{t('enterprise.tools.delete')}</button>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        );
+                                                    })}
                                             </div>
-                                        ))}
-                                    </div>
+                                        );
+                                    })()
                                 )}
                             </div>
                         )}
@@ -4097,7 +4210,7 @@ export default function EnterpriseSettings() {
                                 };
                                 const filteredTools = allTools.filter(tool => matchesSearch(tool) && matchesStatus(tool));
                                 const groupTools = (toolList: any[]) => toolList.reduce((acc: Record<string, any[]>, tool: any) => {
-                                    const cat = tool.category || 'general';
+                                    const cat = mcpToolGroupKey(tool);
                                     (acc[cat] = acc[cat] || []).push(tool);
                                     return acc;
                                 }, {} as Record<string, any[]>);
@@ -4252,11 +4365,16 @@ export default function EnterpriseSettings() {
                                         </div>
 
                                         {Object.entries(grouped)
-                                            .sort(([a], [b]) => (categoryLabels[a] || a).localeCompare(categoryLabels[b] || b))
+                                            .sort(([a, aTools], [b, bTools]) => {
+                                                const aMeta = getToolGroupMeta(a, allGrouped[a] || aTools as any[]);
+                                                const bMeta = getToolGroupMeta(b, allGrouped[b] || bTools as any[]);
+                                                return aMeta.label.localeCompare(bMeta.label);
+                                            })
                                             .map(([category, catTools]) => {
-                                            const hasCategoryConfig = !!GLOBAL_CATEGORY_CONFIG_SCHEMAS[category];
                                             const allCatTools = allGrouped[category] || catTools;
-                                            const label = categoryLabels[category] || category;
+                                            const meta = getToolGroupMeta(category, allCatTools);
+                                            const hasCategoryConfig = !!GLOBAL_CATEGORY_CONFIG_SCHEMAS[meta.configCategory];
+                                            const label = meta.label;
                                             const enabledCount = allCatTools.filter((tool: any) => tool.enabled).length;
                                             const defaultCount = allCatTools.filter((tool: any) => tool.is_default).length;
                                             const configuredCount = allCatTools.filter((tool: any) => tool.config && Object.keys(tool.config).length > 0).length;
@@ -4275,7 +4393,7 @@ export default function EnterpriseSettings() {
                                                     }} style={{ width: '100%', background: 'var(--bg-secondary)', padding: '13px 16px', display: 'grid', gridTemplateColumns: '1fr auto', gap: '14px', alignItems: 'center', cursor: 'pointer', textAlign: 'left', boxSizing: 'border-box' }}>
                                                         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
                                                             <IconChevronDown size={16} style={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 120ms ease', color: 'var(--text-tertiary)', flexShrink: 0 }} />
-                                                            <span style={{ width: '28px', height: '28px', borderRadius: '7px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{renderCategoryIcon(category, 16)}</span>
+                                                            <span style={{ width: '28px', height: '28px', borderRadius: '7px', border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{renderCategoryIcon(meta.iconCategory, 16)}</span>
                                                             <div style={{ minWidth: 0 }}>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                                                                     <span style={{ fontSize: '13px', fontWeight: 650, color: 'var(--text-primary)' }}>{label}</span>
@@ -4286,17 +4404,17 @@ export default function EnterpriseSettings() {
                                                                     </span>
                                                                     {configuredCount > 0 && <span style={{ fontSize: '10px', background: 'rgba(99,102,241,0.15)', color: 'var(--accent-color)', borderRadius: '4px', padding: '1px 5px' }}>{configuredCount} configured</span>}
                                                                 </div>
-                                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{categoryDescriptions[category] || 'Tools in this category'}</div>
+                                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{meta.description}</div>
                                                             </div>
                                                         </div>
                                                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }} onClick={(e) => e.stopPropagation()}>
                                                             {hasCategoryConfig && (
                                                                 <button onClick={() => {
-                                                                    setConfigCategory(category);
+                                                                    setConfigCategory(meta.configCategory);
                                                                     setEditingConfig({});
-                                                                    const firstToolWithConfig = (allCatTools as any[]).find((tl: any) => tl.config && Object.keys(tl.config).length > 0);
+                                                                    const firstToolWithConfig = (allCatTools as any[]).find((tl: any) => tl.category === meta.configCategory && tl.config && Object.keys(tl.config).length > 0);
                                                                     if (firstToolWithConfig?.config) setEditingConfig({ ...firstToolWithConfig.config });
-                                                                }} style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '4px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }} title={`Configure ${category}`}>
+                                                                }} style={{ background: 'var(--bg-primary)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '4px 8px', fontSize: '11px', cursor: 'pointer', color: 'var(--text-secondary)' }} title={`Configure ${label}`}>
                                                                     {t('enterprise.tools.configure', 'Configure')}
                                                                 </button>
                                                             )}
@@ -4405,7 +4523,7 @@ export default function EnterpriseSettings() {
                                         <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', width: '480px', maxWidth: '95vw', maxHeight: '80vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}>
                                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                                                 <div>
-                                                    <h3 style={{ margin: 0 }}>⚙️ {tool.display_name}</h3>
+                                                    <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}><IconSettings size={20} stroke={1.8} /> {tool.display_name}</h3>
                                                     <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>Global configuration used by all agents</div>
                                                 </div>
                                                 <button onClick={() => setEditingToolId(null)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)' }}>✕</button>
