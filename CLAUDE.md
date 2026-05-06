@@ -165,7 +165,7 @@ IntelliJ Plugin (Java/Kotlin)  ←→  WebSocket JSON-RPC  ←→  clawith_lsp4j
 
 2. **Parameter name conventions vary per tool**: Some handlers use `file_path` (snake_case, via `getRequestFilePathWithUnderLine`), others use `filePath` (camelCase, via `getRequestFilePath`). See `tool_hooks.py:_PARAM_NAME_MAP` for the mapping table.
 
-3. **Memory context injection takes precedence over DB**: When building LLM message history, in-memory tool call records (via `_tool_call_history_by_session`) always replace DB-injected context. This ensures the most recent tool calls (within the persistence window) are never lost — see `jsonrpc_router.py` `_handle_chat_resolve`.
+3. **Memory context injection takes precedence over DB**: When building LLM message history, in-memory tool call records (via `_tool_call_history_by_session`) always replace DB-injected context. This ensures the most recent tool calls (within the persistence window) are never lost — see `jsonrpc_router.py` `_handle_chat_ask`.
 
 4. **`search_replace` is semantically correct**: The backend reads the file from IDE first, performs `str.replace(searchText, replaceText)` locally, then sends the complete new content via `replace_text_by_path`. This prevents semantic degradation where the LLM believes it's doing a localized edit but the entire file gets replaced.
 

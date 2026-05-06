@@ -1784,8 +1784,7 @@ async def _persist_acp_tool_call(
     供 _load_acp_history_from_db 在后续请求中恢复工具调用上下文。
     """
     try:
-        from app.models.audit import ChatMessage
-        from datetime import datetime, timezone as tz_persist
+        from datetime import datetime
 
         async with async_session() as db:
             sid_uuid = uuid.UUID(session_id)
@@ -1802,7 +1801,7 @@ async def _persist_acp_tool_call(
                 role="tool_call",
                 content=json.dumps(payload, ensure_ascii=False, default=str),
                 conversation_id=str(sid_uuid),
-                created_at=datetime.now(tz_persist.utc),
+                created_at=datetime.now(tz_.utc),
             ))
             await db.commit()
             logger.info("[ACP] tool_call persisted: session={} tool={}", session_id, tool_name)
@@ -1812,10 +1811,8 @@ async def _persist_acp_tool_call(
 
 async def _persist_chat_turn(agent_id, session_id: str, user_text: str, reply_text: str, user_id):
     try:
-        from app.models.chat_session import ChatSession
-        from app.models.audit import ChatMessage
         from app.models.participant import Participant  # noqa
-        from datetime import datetime, timezone as tz_persist
+        from datetime import datetime
 
         async with async_session() as db:
             try:
@@ -1825,7 +1822,7 @@ async def _persist_chat_turn(agent_id, session_id: str, user_text: str, reply_te
 
             sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid))
             sess = sr.scalar_one_or_none()
-            now = datetime.now(tz_persist.utc)
+            now = datetime.now(tz_.utc)
             local_now = datetime.now()
             
             if not sess:

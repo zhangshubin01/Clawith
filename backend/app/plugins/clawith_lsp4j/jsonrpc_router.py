@@ -63,9 +63,8 @@ from .tool_constants import (
 from .workspace_file_service import WorkspaceFileService
 
 # ──────────────────────────────────────────────
-# LSP4J IDE 工具名称（与 tool_hooks._LSP4J_IDE_TOOL_NAMES 保持一致）
+# LSP4J IDE 工具名称（直接导入自 tool_constants，与 tool_hooks 保持一致）
 # ──────────────────────────────────────────────
-_LSP4J_IDE_TOOL_NAMES = LSP4J_IDE_TOOL_NAMES
 
 # LSP4J 文件编辑工具（需要 filePath 转换 + fileId 注入）
 # 这些工具在 invoke_tool_on_ide 中统一处理参数转换和 results 注入
@@ -74,6 +73,8 @@ _LSP4J_FILE_EDIT_TOOLS = frozenset({
     "search_replace",
     "create_file_with_text",
     "delete_file_by_path",
+    "apply_patch",
+    "save_file",
 })
 
 # ──────────────────────────────────────────────
@@ -144,15 +145,7 @@ _lsp4j_background_tasks: set[asyncio.Task] = set()
 # 严格模式：tool/invokeResult 缺失 toolCallId 时直接失败，禁止多路并发下的降级误匹配。
 _LSP4J_STRICT_TOOLCALL_ID = os.getenv("LSP4J_STRICT_TOOLCALL_ID", "1").strip() != "0"
 
-# ★ 基础工具名 → 插件原生名的映射（与 tool_hooks._TOOL_NAME_MAP 保持同步）
-# LLM 可能调用基础工具名（如 edit_file），需映射为插件 ToolInvokeProcessor 识别的名称
-_TOOL_NAME_MAP = TOOL_NAME_MAP
-
-# ★ 插件原生名 → 用户友好名（反向映射，用于 markdown 块显示）
-# 当 LLM 直接调用插件原生名称（如 replace_text_by_path）时，
-# 插件 ToolTypeEnum.getByToolName() 不识别插件原生名，返回 UNKNOWN，
-# 导致文件工具分支不进入、无 diff 卡片。因此 markdown 块必须使用 LLM 侧名称。
-_TOOL_DISPLAY_NAME_MAP = TOOL_DISPLAY_NAME_MAP
+# 基础工具名映射直接使用导入的常量（tool_constants.TOOL_NAME_MAP / TOOL_DISPLAY_NAME_MAP）
 
 # ──────────────────────────────────────────────
 # 本地工具执行（不在 IDE 端，由后端直接执行）
@@ -604,6 +597,7 @@ class JSONRPCRouter:
         # tool/call/results 历史缓存（按 sessionId 分桶，Clawith-only 内存实现）。
         self._tool_call_history_by_session: dict[str, list[dict[str, Any]]] = {}
         self._tool_call_history_limit: int = 200
+        self._MAX_TOOL_CALL_HISTORY_SESSIONS: int = 100
 
         # 已取消请求的 RPC ID 集合（防止超时后迟达响应干扰，OrderedDict 保证 FIFO）
         self._cancelled_requests: dict[int, None] = {}
@@ -636,11 +630,10 @@ class JSONRPCRouter:
         """分发单条 JSON-RPC 消息。"""
         # 1. 判断是否为 JSON-RPC 响应（client 响应 server 的请求如 tool/invoke）
         if "id" in msg and "method" not in msg and ("result" in msg or "error" in msg):
-            if "method" not in msg:
-                logger.info("[LSP4J ←] response: id={} has_result={} has_error={}",
-                             msg.get("id"), "result" in msg, "error" in msg)
-                await self._handle_response(msg)
-                return
+            logger.info("[LSP4J ←] response: id={} has_result={} has_error={}",
+                         msg.get("id"), "result" in msg, "error" in msg)
+            await self._handle_response(msg)
+            return
 
         method = msg.get("method", "")
         params = msg.get("params", {})
@@ -894,12 +887,12 @@ class JSONRPCRouter:
                     message_history = loaded
                     current_lsp4j_message_history.set(message_history)
                 else:
-                    logger.info(
+                    logger.debug(
                         "[LSP4J-CTX] chat/ask: DB loaded empty history for session={}",
                         session_id,
                     )
             else:
-                logger.info(
+                logger.debug(
                     "[LSP4J-CTX] chat/ask: message_history already populated ({}) or no session_id ({})",
                     len(message_history), session_id,
                 )
@@ -929,7 +922,7 @@ class JSONRPCRouter:
                             session_id, len(inmem_records),
                         )
             else:
-                logger.info(
+                logger.debug(
                     "[LSP4J-CTX] chat/ask: no in-memory tool_call records for session={}",
                     session_id,
                 )
@@ -939,7 +932,7 @@ class JSONRPCRouter:
             for m in history_msgs:
                 r = m.get("role", "unknown")
                 history_roles[r] = history_roles.get(r, 0) + 1
-            logger.info("[LSP4J] history loaded: {} messages, session_id={}, roles={}",
+            logger.debug("[LSP4J] history loaded: {} messages, session_id={}, roles={}",
                        len(history_msgs), session_id, history_roles)
 
             # 拼接用户消息
@@ -1009,22 +1002,22 @@ class JSONRPCRouter:
                 status = data.get("status", "running")
                 tool_name = data.get("name", "unknown")
                 if status == "running":
-                    # ★ 应用工具名映射（与 tool_hooks._TOOL_NAME_MAP 保持一致）
+                    # ★ 应用工具名映射（与 tool_hooks.TOOL_NAME_MAP 保持一致）
                     # LLM 可能调用基础工具名（如 edit_file），需映射为插件原生名称（如 replace_text_by_path）
                     # 映射后队列中的名称与 invoke_tool_on_ide 收到的一致，保证匹配
                     original_name = tool_name
-                    tool_name = _TOOL_NAME_MAP.get(tool_name, tool_name)
+                    tool_name = TOOL_NAME_MAP.get(tool_name, tool_name)
                     if tool_name != original_name:
                         logger.debug("[LSP4J] on_tool_call 工具名映射: {} → {}", original_name, tool_name)
 
                     # ★ 显示名映射：插件 ToolTypeEnum.getByToolName() 不识别插件原生名称，
                     # 只识别 LLM 侧名称（如 edit_file）。markdown 块必须用 LLM 侧名称。
                     # 当 LLM 直接调用插件原生名（如 replace_text_by_path）时，反向映射为显示名。
-                    display_name = _TOOL_DISPLAY_NAME_MAP.get(original_name, original_name)
+                    display_name = TOOL_DISPLAY_NAME_MAP.get(original_name, original_name)
 
                     # ★ 只对实际会路由到 IDE 执行的工具生成 toolCallId（供后续 invoke_tool_on_ide 按序匹配）
                     # 相对路径（如 soul.md, workspace/xxx）回退到本地执行，不创建 IDE 工具卡片
-                    is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
+                    is_lsp4j_tool = tool_name in LSP4J_IDE_TOOL_NAMES
                     tool_call_id = ""
                     _should_create_ide_card = False
                     if is_lsp4j_tool:
@@ -1128,14 +1121,14 @@ class JSONRPCRouter:
                 elif status == "done":
                     # ★ 应用工具名映射（与 running 分支一致）
                     original_name = tool_name
-                    tool_name = _TOOL_NAME_MAP.get(tool_name, tool_name)
+                    tool_name = TOOL_NAME_MAP.get(tool_name, tool_name)
                     if tool_name != original_name:
                         logger.debug("[LSP4J] on_tool_call done 工具名映射: {} → {}", original_name, tool_name)
 
                     # ★ IDE 工具：FINISHED sync 已由 invoke_tool_on_ide 发送（携带实际执行结果和 fileId），
                     # 跳过此处的重复 FINISHED，避免：1) 空结果覆盖 invoke_tool_on_ide 的真实结果；
                     # 2) invoke_tool_on_ide 已从队列 pop 后此处匹配失败导致新建兜底 UUID（两个不同 callId）。
-                    is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
+                    is_lsp4j_tool = tool_name in LSP4J_IDE_TOOL_NAMES
                     if is_lsp4j_tool:
                         logger.debug("[LSP4J] on_tool_call done: 跳过 IDE 工具的 FINISHED sync, "
                                      "已由 invoke_tool_on_ide 发送, original={} mapped={}",
@@ -1247,6 +1240,8 @@ class JSONRPCRouter:
                         api_key_encrypted="",  # 占位，实际密钥通过运行时属性注入
                     )
                     # ⚠️ 密钥仅当次请求有效，不入库、不写日志
+                    # TODO: 改用 LLMModel 正式字段传递 API key，避免依赖私有属性 _runtime_api_key
+                    # 当前依赖 call_llm_with_failover 内部检查此私有属性的约定，若 LLMModel 重构可能静默失效
                     transient_model._runtime_api_key = _params.get("api_key", "")
                     model_obj = transient_model
                     supports_vision = bool(cm.get("isVl"))
@@ -1509,6 +1504,8 @@ class JSONRPCRouter:
             current_content = self._ws_file_service.get_cached_content(file_path) if file_path else None
             if current_content is None and file_path:
                 # 2. 缓存未命中，从 IDE 读取文件
+                # 注意：此处为嵌套工具调用（外层 search_replace 内嵌套 read_file），
+                # 会增加 30s 超时延迟。优先依赖 _ws_file_service 缓存减少嵌套调用。
                 try:
                     current_content = await self.invoke_tool_on_ide("read_file", {"filePath": file_path})
                     logger.debug("[LSP4J] search_replace: read_file 获取内容, path={} len={}",
@@ -1831,6 +1828,10 @@ class JSONRPCRouter:
             bucket.append(payload)
             if len(bucket) > self._tool_call_history_limit:
                 del bucket[: len(bucket) - self._tool_call_history_limit]
+            # 防止 session 条目无限累积：超过上限时删除最旧的 session
+            if len(self._tool_call_history_by_session) > self._MAX_TOOL_CALL_HISTORY_SESSIONS:
+                oldest = next(iter(self._tool_call_history_by_session))
+                self._tool_call_history_by_session.pop(oldest, None)
 
             # 持久化终态工具调用到 DB（供后续请求恢复上下文，避免 LLM 重复搜索）
             if tool_call_id and tool_call_status in ("FINISHED", "ERROR", "CANCELLED"):
@@ -2039,6 +2040,7 @@ class JSONRPCRouter:
             # 尝试从缓存获取文件内容
             current_content = self._ws_file_service.get_cached_content(file_path) if file_path else None
             if current_content is None and file_path:
+                # 嵌套工具调用：优先使用缓存避免增加 read_file 的 30s 超时延迟
                 try:
                     current_content = await self.invoke_tool_on_ide("read_file", {"filePath": file_path})
                 except Exception:
@@ -2146,130 +2148,141 @@ class JSONRPCRouter:
             },
         })
 
-        # 等待异步结果
+        # 等待异步结果（同时监听取消事件，避免 cancel 在 wait_for 期间触发时无法及时响应）
         file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
-        # ★ 检查取消事件：chat/stop 可能已设置 _cancel_event，在等待前检测一次
-        if self._cancel_event and self._cancel_event.is_set():
-            logger.info("[LSP4J-TOOL] 工具调用前检测到取消信号: tool={} callId={}", tool_name, tool_call_id[:8])
-            if queue_matched:
-                await self._send_tool_call_sync(
-                    self._session_id, request_id, tool_call_id,
-                    "CANCELLED", tool_name=original_name, parameters=arguments,
-                )
-            self._cancelled_requests[rpc_id] = None
-            return "[已取消] 用户停止了聊天"
         try:
-            result = await asyncio.wait_for(tool_future, timeout=timeout)
-            # ★ IDE 搜索工具（grep_code/search_codebase/search_symbol）：插件返回
-            # {"results": [{fileName, path, ...}]} JSON 字符串，需解析提取内层列表
-            # 否则 _wrap_results 会将整个 JSON 串包装为 [{"content": "..."}]
-            # 导致插件端 CodeItem 反序列化时拿到 content 而非 fileName → truncateFirst null
-            if tool_name in ("grep_code", "search_codebase", "search_symbol") and result:
-                try:
-                    parsed = json.loads(result) if isinstance(result, str) else result
-                    if isinstance(parsed, dict) and "results" in parsed:
-                        results = parsed["results"]
-                    else:
+            cancel_future = asyncio.ensure_future(self._cancel_event.wait()) if self._cancel_event else None
+            try:
+                waitables = [tool_future]
+                if cancel_future:
+                    waitables.append(cancel_future)
+                done, _ = await asyncio.wait(waitables, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+                if cancel_future and cancel_future in done:
+                    logger.info("[LSP4J-TOOL] 工具执行期间检测到取消信号: tool={} callId={}", tool_name, tool_call_id[:8])
+                    if queue_matched:
+                        await self._send_tool_call_sync(
+                            self._session_id, request_id, tool_call_id,
+                            "CANCELLED", tool_name=original_name, parameters=arguments,
+                        )
+                    self._cancelled_requests[rpc_id] = None
+                    return "[已取消] 用户停止了聊天"
+                if tool_future not in done:
+                    raise asyncio.TimeoutError()
+                result = tool_future.result()
+
+                # ★ IDE 搜索工具（grep_code/search_codebase/search_symbol）：插件返回
+                # {"results": [{fileName, path, ...}]} JSON 字符串，需解析提取内层列表
+                # 否则 _wrap_results 会将整个 JSON 串包装为 [{"content": "..."}]
+                # 导致插件端 CodeItem 反序列化时拿到 content 而非 fileName → truncateFirst null
+                if tool_name in ("grep_code", "search_codebase", "search_symbol") and result:
+                    try:
+                        parsed = json.loads(result) if isinstance(result, str) else result
+                        if isinstance(parsed, dict) and "results" in parsed:
+                            results = parsed["results"]
+                        else:
+                            results = [{"raw": str(result)[:500]}]
+                    except (json.JSONDecodeError, TypeError):
                         results = [{"raw": str(result)[:500]}]
-                except (json.JSONDecodeError, TypeError):
-                    results = [{"raw": str(result)[:500]}]
-            else:
-                results = result[:500] if result else None
-            finished_backfilled = False
-            if tool_name == "read_file":
-                path = arguments.get("path") or arguments.get("file_path") or arguments.get("filePath") or ""
-                content = result if result else ""
-                results = [{"path": path, "content": content[:500]}]
-                if path and "file_path" not in arguments:
-                    arguments["file_path"] = path
-                # ★ 缓存 read_file 内容，供后续编辑工具的 diff 计算使用
-                if path and content:
-                    self._ws_file_service.cache_file_content(path, content)
-                logger.info("[LSP4J-TOOL] read_file FINISHED results 注入 path: path={}", path)
-            elif tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
-                # ★ 文件编辑工具：创建工作区文件 + 计算 diff + 发送 workingSpaceFile/sync
-                ws_file = await self._handle_file_edit_finished(
-                    tool_name, file_path_for_id, arguments, tool_call_id, request_id)
+                else:
+                    results = result[:500] if result else None
+                finished_backfilled = False
+                if tool_name == "read_file":
+                    path = arguments.get("path") or arguments.get("file_path") or arguments.get("filePath") or ""
+                    content = result if result else ""
+                    results = [{"path": path, "content": content[:500]}]
+                    if path and "file_path" not in arguments:
+                        arguments["file_path"] = path
+                    # ★ 缓存 read_file 内容，供后续编辑工具的 diff 计算使用
+                    if path and content:
+                        self._ws_file_service.cache_file_content(path, content)
+                    logger.info("[LSP4J-TOOL] read_file FINISHED results 注入 path: path={}", path)
+                elif tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
+                    # ★ 文件编辑工具：创建工作区文件 + 计算 diff + 发送 workingSpaceFile/sync
+                    ws_file = await self._handle_file_edit_finished(
+                        tool_name, file_path_for_id, arguments, tool_call_id, request_id)
 
-                # ★ 注入工作区文件 UUID 作为 fileId（而非文件路径）
-                # ToolPanel.constructFileItem 用 results[0]["fileId"] 设置 FileItem.id，
-                # 后续 workingSpaceFile/sync 的 WorkingSpaceFileInfo.id 需与此一致，
-                # AIDevFilePanel.syncWorkspaceFile 才能通过 id 匹配更新。
-                ws_id = ws_file.id if ws_file else file_path_for_id
-                results = [{"path": file_path_for_id, "fileId": ws_id,
-                            "message": result[:500] if result else ""}]
-                if "file_path" not in arguments:
-                    arguments["file_path"] = file_path_for_id
-                logger.info("[LSP4J-TOOL] FINISHED results 注入 path+fileId: path={} wsId={} tool={}",
-                            file_path_for_id, ws_id[:8], tool_name)
-
-            # P1 兜底：文件工具 FINISHED 结果为空/缺 fileId 时，按 file_path 回填一次，避免 ToolPanel 早退。
-            if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
-                first_result = results[0] if isinstance(results, list) and results else {}
-                has_file_id = isinstance(first_result, dict) and bool(first_result.get("fileId"))
-                has_path = isinstance(first_result, dict) and bool(first_result.get("path"))
-                if not (has_file_id and has_path):
-                    ws_file_fallback = self._ws_file_service.get_file(file_path_for_id)
-                    fallback_ws_id = ws_file_fallback.id if ws_file_fallback else file_path_for_id
-                    results = [{
-                        "path": file_path_for_id,
-                        "fileId": fallback_ws_id,
-                        "message": result[:500] if isinstance(result, str) else "",
-                    }]
+                    # ★ 注入工作区文件 UUID 作为 fileId（而非文件路径）
+                    # ToolPanel.constructFileItem 用 results[0]["fileId"] 设置 FileItem.id，
+                    # 后续 workingSpaceFile/sync 的 WorkingSpaceFileInfo.id 需与此一致，
+                    # AIDevFilePanel.syncWorkspaceFile 才能通过 id 匹配更新。
+                    ws_id = ws_file.id if ws_file else file_path_for_id
+                    results = [{"path": file_path_for_id, "fileId": ws_id,
+                                "message": result[:500] if result else ""}]
                     if "file_path" not in arguments:
                         arguments["file_path"] = file_path_for_id
-                    finished_backfilled = True
-                    logger.warning(
-                        "[LSP4J-TRACE] FINISHED 回填 fileId trace={} path={} wsId={} reason=missing_result_fields",
+                    logger.info("[LSP4J-TOOL] FINISHED results 注入 path+fileId: path={} wsId={} tool={}",
+                                file_path_for_id, ws_id[:8], tool_name)
+
+                # P1 兜底：文件工具 FINISHED 结果为空/缺 fileId 时，按 file_path 回填一次，避免 ToolPanel 早退。
+                if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
+                    first_result = results[0] if isinstance(results, list) and results else {}
+                    has_file_id = isinstance(first_result, dict) and bool(first_result.get("fileId"))
+                    has_path = isinstance(first_result, dict) and bool(first_result.get("path"))
+                    if not (has_file_id and has_path):
+                        ws_file_fallback = self._ws_file_service.get_file(file_path_for_id)
+                        fallback_ws_id = ws_file_fallback.id if ws_file_fallback else file_path_for_id
+                        results = [{
+                            "path": file_path_for_id,
+                            "fileId": fallback_ws_id,
+                            "message": result[:500] if isinstance(result, str) else "",
+                        }]
+                        if "file_path" not in arguments:
+                            arguments["file_path"] = file_path_for_id
+                        finished_backfilled = True
+                        logger.warning(
+                            "[LSP4J-TRACE] FINISHED 回填 fileId trace={} path={} wsId={} reason=missing_result_fields",
+                            trace_key,
+                            file_path_for_id,
+                            str(fallback_ws_id)[:8],
+                        )
+                    else:
+                        logger.info(
+                            "[LSP4J-TRACE] FINISHED 结果完整 trace={} hasFileId=true hasPath=true",
+                            trace_key,
+                        )
+
+                if queue_matched:
+                    await self._send_tool_call_sync(
+                        self._session_id, request_id, tool_call_id,
+                        "FINISHED", tool_name=original_name, parameters=arguments,
+                        results=results,
+                    )
+                    logger.info(
+                        "[LSP4J-TRACE] FINISHED 已发送 trace={} backfilled={}",
                         trace_key,
-                        file_path_for_id,
-                        str(fallback_ws_id)[:8],
+                        finished_backfilled,
                     )
                 else:
-                    logger.info(
-                        "[LSP4J-TRACE] FINISHED 结果完整 trace={} hasFileId=true hasPath=true",
-                        trace_key,
+                    logger.warning(
+                        "[LSP4J-TOOL] 队列未匹配，跳过 FINISHED sync（避免幽灵事件）: tool={} callId={} requestId={}",
+                        tool_name,
+                        tool_call_id[:8],
+                        request_id[:8],
                     )
 
-            if queue_matched:
-                await self._send_tool_call_sync(
-                    self._session_id, request_id, tool_call_id,
-                    "FINISHED", tool_name=original_name, parameters=arguments,
-                    results=results,
-                )
-                logger.info(
-                    "[LSP4J-TRACE] FINISHED 已发送 trace={} backfilled={}",
-                    trace_key,
-                    finished_backfilled,
-                )
-            else:
-                logger.warning(
-                    "[LSP4J-TOOL] 队列未匹配，跳过 FINISHED sync（避免幽灵事件）: tool={} callId={} requestId={}",
-                    tool_name,
-                    tool_call_id[:8],
-                    request_id[:8],
-                )
+                # ★ 文件编辑工具完成后发送 workingSpaceFile/sync 通知（APPLIED 状态）
+                # 必须在 toolCallSync FINISHED 之后发送，确保 ToolPanel 已创建 AIDevFilePanel
+                if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
+                    ws_file = self._ws_file_service.get_file(file_path_for_id)
+                    if ws_file:
+                        await asyncio.sleep(0.2)
+                        # 插件双通道路由差异：
+                        # 1) WorkingSpacePanel 只通过 ADD notifier 把文件加入"变更文件"列表；
+                        # 2) ToolPanel 内 FileItemPanel 通过 MODIFIED notifier 更新状态（GENERATING→APPLIED）。
+                        # 为保证"列表完整 + 卡片状态正确"，文件编辑工具统一双发 ADD + MODIFIED。
+                        await self._send_workspace_file_sync(ws_file, "ADD")
+                        await self._send_workspace_file_sync(ws_file, "MODIFIED")
+                        logger.info("[LSP4J-TRACE] WS 双发已完成 trace={} sent=ADD,MODIFIED", trace_key)
+                        if self._session_id:
+                            try:
+                                await self._send_snapshot_sync_all(self._session_id)
+                            except Exception as e:
+                                logger.warning("[WS-FILE] 工具编辑后 snapshot/syncAll 失败（非致命）: {}", e)
 
-            # ★ 文件编辑工具完成后发送 workingSpaceFile/sync 通知（APPLIED 状态）
-            # 必须在 toolCallSync FINISHED 之后发送，确保 ToolPanel 已创建 AIDevFilePanel
-            if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
-                ws_file = self._ws_file_service.get_file(file_path_for_id)
-                if ws_file:
-                    await asyncio.sleep(0.2)
-                    # 插件双通道路由差异：
-                    # 1) WorkingSpacePanel 只通过 ADD notifier 把文件加入"变更文件"列表；
-                    # 2) ToolPanel 内 FileItemPanel 通过 MODIFIED notifier 更新状态（GENERATING→APPLIED）。
-                    # 为保证"列表完整 + 卡片状态正确"，文件编辑工具统一双发 ADD + MODIFIED。
-                    await self._send_workspace_file_sync(ws_file, "ADD")
-                    await self._send_workspace_file_sync(ws_file, "MODIFIED")
-                    logger.info("[LSP4J-TRACE] WS 双发已完成 trace={} sent=ADD,MODIFIED", trace_key)
-                    if self._session_id:
-                        try:
-                            await self._send_snapshot_sync_all(self._session_id)
-                        except Exception as e:
-                            logger.warning("[WS-FILE] 工具编辑后 snapshot/syncAll 失败（非致命）: {}", e)
-
-            return result
+                return result
+            finally:
+                if cancel_future:
+                    cancel_future.cancel()
         except asyncio.TimeoutError:
             logger.warning("LSP4J: 工具调用超时 tool={} callId={}", tool_name, tool_call_id)
             self._cancelled_requests[rpc_id] = None
@@ -2317,7 +2330,9 @@ class JSONRPCRouter:
                     await asyncio.sleep(60.0)
                     self._pending_tools.pop(cid, None)
                     self._pending_tool_meta.pop(cid, None)
-                asyncio.ensure_future(_cleanup_late_window(tool_call_id))
+                _t = asyncio.ensure_future(_cleanup_late_window(tool_call_id))
+                _lsp4j_background_tasks.add(_t)
+                _t.add_done_callback(_lsp4j_background_tasks.discard)
             else:
                 self._pending_tools.pop(tool_call_id, None)
                 self._pending_tool_meta.pop(tool_call_id, None)
@@ -2816,6 +2831,7 @@ class JSONRPCRouter:
 
     async def _handle_stub(self, params: dict, msg_id: Any) -> None:
         """通用存根处理器 — 返回空成功响应，避免 Method not found 错误。"""
+        logger.debug("[LSP4J-STUB] method not implemented, returning empty response")
         await self._send_response(msg_id, {})
 
     @staticmethod
@@ -3063,6 +3079,7 @@ class JSONRPCRouter:
 
         if self._session_id == session_id:
             self._session_id = None
+        self._tool_call_history_by_session.pop(session_id, None)
         await self._send_response(msg_id, None)
 
         if deleted:
@@ -3097,6 +3114,8 @@ class JSONRPCRouter:
             logger.warning("[LSP4J] chat/clearAllSessions DB error: {}", e)
 
         self._session_id = None
+        self._tool_call_history_by_session.clear()
+        self._ws_file_service.clear()
         await self._send_response(msg_id, None)
 
     async def _handle_chat_delete_chat_by_id(self, params: dict, msg_id: Any) -> None:
@@ -4140,14 +4159,14 @@ async def _persist_lsp4j_chat_turn(
                     # 仅持久化终态工具调用
                     if _tc_status not in ("FINISHED", "ERROR", "CANCELLED"):
                         continue
+                    _status_map = {"FINISHED": "done", "ERROR": "error", "CANCELLED": "cancelled"}
                     _tc_content = json.dumps({
                         "toolCallId": tc.get("toolCallId", ""),
                         "name": _tc_name,
-                        "status": _tc_status,
-                        "parameters": tc.get("parameters", {}),
-                        "results": tc.get("results", []),
-                        "errorCode": tc.get("errorCode"),
-                        "errorMsg": tc.get("errorMsg"),
+                        "status": _status_map.get(_tc_status, _tc_status.lower() if _tc_status else "done"),
+                        "args": tc.get("parameters", {}),
+                        "result": str(tc.get("results", ""))[:500],
+                        "reasoning_content": tc.get("errorMsg") if tc.get("errorCode") else "",
                     }, ensure_ascii=False)
                     db.add(ChatMessage(
                         agent_id=agent_id,
@@ -4218,12 +4237,13 @@ async def _persist_lsp4j_tool_call(
         async with async_session() as db:
             sid_uuid = uuid.UUID(session_id)
             payload = {
-                "tool_name": tool_name,
-                "parameters": parameters or {},
-                "results": results,
-                "tool_call_id": tool_call_id,
-                "request_id": request_id,
-                "status": status,
+                "toolCallId": tool_call_id,
+                "requestId": request_id,
+                "name": tool_name,
+                "status": status.lower() if status else "done",
+                "args": parameters or {},
+                "result": str(results or "")[:500],
+                "reasoning_content": "",
             }
             db.add(ChatMessage(
                 agent_id=agent_id,
@@ -4394,23 +4414,15 @@ async def _load_lsp4j_history_from_db(
             .where(ChatMessage.conversation_id == str(sid_uuid))
             .where(ChatMessage.agent_id == agent_id)
             .where(ChatMessage.user_id == user_id)
-            .where(ChatMessage.role.in_(("user", "assistant")))
+            .where(ChatMessage.role.in_(("user", "assistant", "tool_call")))
             .order_by(ChatMessage.created_at.asc())
         )
         rows = mr.scalars().all()
 
-        # 同时加载同 session 的 tool_call 记录，注入为 system 上下文
-        history = [{"role": m.role, "content": m.content} for m in rows]
+        # 在内存中分为聊天消息和工具调用记录
+        history = [{"role": m.role, "content": m.content} for m in rows if m.role in ("user", "assistant")]
         try:
-            tcr = await db.execute(
-                select(ChatMessage)
-                .where(ChatMessage.conversation_id == str(sid_uuid))
-                .where(ChatMessage.agent_id == agent_id)
-                .where(ChatMessage.user_id == user_id)
-                .where(ChatMessage.role == "tool_call")
-                .order_by(ChatMessage.created_at.asc())
-            )
-            tc_rows = tcr.scalars().all()
+            tc_rows = [m for m in rows if m.role == "tool_call"]
             logger.info(
                 "[LSP4J-CTX] _load_history: session={} user_msg_count={} tool_call_db_rows={}",
                 session_id, len(history), len(tc_rows),

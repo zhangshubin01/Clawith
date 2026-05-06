@@ -40,12 +40,7 @@ from .tool_constants import LSP4J_IDE_TOOL_NAMES, TOOL_NAME_MAP
 #   replace_text_by_path / create_file_with_text / delete_file_by_path → filePath（camelCase，用 getRequestFilePath）
 #   replace_text_by_path → text（非 oldText/newText，插件直接替换整个文档内容）
 #   create_file_with_text → text（getRequestText 查找 "text" 键，后端定义 "content" 需映射）
-_LSP4J_IDE_TOOL_NAMES = LSP4J_IDE_TOOL_NAMES
-
-# ★ 基础工具名 → 插件原生名的映射
-# LLM 可能调用基础工具名（如 edit_file），需映射为插件 ToolInvokeProcessor 识别的名称
-# 反向映射不存在：插件原生名称（如 replace_text_by_path）不需要映射回来
-_TOOL_NAME_MAP = TOOL_NAME_MAP
+# 工具名称映射直接使用导入的常量（tool_constants.LSP4J_IDE_TOOL_NAMES / TOOL_NAME_MAP）
 
 # ★ 工具参数名映射：后端工具定义 → 插件 ToolHandler 期望的参数名
 # 插件各 ToolHandler 的参数名约定不一致：
@@ -405,6 +400,27 @@ _LSP4J_IDE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "apply_patch",
+            "description": "将 unified diff patch 应用到 IDE 项目文件中。用于精确的代码修改操作。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filePath": {
+                        "type": "string",
+                        "description": "要修改的文件路径（绝对路径）",
+                    },
+                    "patch": {
+                        "type": "string",
+                        "description": "unified diff 格式的 patch 内容",
+                    },
+                },
+                "required": ["filePath", "patch"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "save_file",
             "description": "保存当前在 IDE 中打开的文件到磁盘。请在确认编辑内容无误后调用此工具，以便 IDE 将缓冲区内容写入文件系统。",
             "parameters": {
@@ -535,19 +551,19 @@ def install_lsp4j_tool_hooks() -> None:
         """LSP4J 感知的工具执行路由。
 
         优先级：
-        1. 若 current_lsp4j_ws 活跃 且 tool_name 在 _LSP4J_IDE_TOOL_NAMES 中 → 走 LSP4J 路径
+        1. 若 current_lsp4j_ws 活跃 且 tool_name 在 LSP4J_IDE_TOOL_NAMES 中 → 走 LSP4J 路径
         2. 否则走 ACP 原路径（ACP 的降级处理兜底：双 ContextVar 均 None 时返回中文提示）
         """
         lsp4j_ws = current_lsp4j_ws.get()
-        is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
+        is_lsp4j_tool = tool_name in LSP4J_IDE_TOOL_NAMES
 
         # ★ 工具名映射：基础工具名 → 插件原生名（如 edit_file → replace_text_by_path）
         # LSP4J 活跃时，LLM 可能调用基础工具名，需映射后才能被插件识别
-        if lsp4j_ws is not None and tool_name in _TOOL_NAME_MAP:
-            mapped_name = _TOOL_NAME_MAP[tool_name]
+        if lsp4j_ws is not None and tool_name in TOOL_NAME_MAP:
+            mapped_name = TOOL_NAME_MAP[tool_name]
             logger.info("[LSP4J-TOOL] 工具名映射: {} → {}", tool_name, mapped_name)
             tool_name = mapped_name
-            is_lsp4j_tool = tool_name in _LSP4J_IDE_TOOL_NAMES
+            is_lsp4j_tool = tool_name in LSP4J_IDE_TOOL_NAMES
 
         logger.info("[LSP4J-TOOL] execute_tool: name={} lsp4j_ws={} is_lsp4j_tool={}",
                      tool_name, lsp4j_ws is not None, is_lsp4j_tool)

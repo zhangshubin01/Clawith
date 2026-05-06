@@ -14,6 +14,7 @@ URL 格式：ws://{host}/api/plugins/clawith-lsp4j/ws?agent_id={}&token={}
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Query
@@ -50,39 +51,43 @@ async def _resolve_agent_override(
     复用 ACP 的 _resolve_agent_override 逻辑（ACP router.py:912-936），
     但在 LSP4J 模块内独立定义，避免跨插件导入内部函数。
     """
-    async with async_session() as db:
-        agent = None
-        try:
-            aid = uuid.UUID(override)
-            ar = await db.execute(select(AgentModel).where(AgentModel.id == aid))
-            agent = ar.scalar_one_or_none()
-        except ValueError:
-            pass
-        if agent is None:
-            ar = await db.execute(select(AgentModel).where(AgentModel.name == override))
-            agent = ar.scalar_one_or_none()
-        if agent is None:
-            logger.warning("[LSP4J-LIFE] agent_override %r not found", override)
-            return None
+    try:
+        async with async_session() as db:
+            agent = None
+            try:
+                aid = uuid.UUID(override)
+                ar = await db.execute(select(AgentModel).where(AgentModel.id == aid))
+                agent = ar.scalar_one_or_none()
+            except ValueError:
+                pass
+            if agent is None:
+                ar = await db.execute(select(AgentModel).where(AgentModel.name == override))
+                agent = ar.scalar_one_or_none()
+            if agent is None:
+                logger.warning("[LSP4J-LIFE] agent_override %r not found", override)
+                return None
 
-        # 权限校验：复用 check_agent_access，检查用户是否有权访问该 agent
-        ur = await db.execute(select(User).where(User.id == user_id))
-        user_obj = ur.scalar_one_or_none()
-        if user_obj is None:
-            logger.warning("[LSP4J-LIFE] user_id={} not found in DB", user_id)
-            return None
-        try:
-            await check_agent_access(db, user_obj, agent.id)
-        except HTTPException as e:
-            logger.warning("[LSP4J-LIFE] user_id={} 无权访问 agent_id={}: {}", user_id, agent.id, e.detail)
-            return None
+            # 权限校验：复用 check_agent_access，检查用户是否有权访问该 agent
+            ur = await db.execute(select(User).where(User.id == user_id))
+            user_obj = ur.scalar_one_or_none()
+            if user_obj is None:
+                logger.warning("[LSP4J-LIFE] user_id={} not found in DB", user_id)
+                return None
+            try:
+                await check_agent_access(db, user_obj, agent.id)
+            except HTTPException as e:
+                logger.warning("[LSP4J-LIFE] user_id={} 无权访问 agent_id={}: {}", user_id, agent.id, e.detail)
+                return None
 
-        mr = await db.execute(select(LLMModel).where(LLMModel.id == agent.primary_model_id))
-        model = mr.scalar_one_or_none()
-        if model is None:
-            logger.warning("[LSP4J-LIFE] agent_override %r has no model", override)
-            return None
-        return agent, model
+            mr = await db.execute(select(LLMModel).where(LLMModel.id == agent.primary_model_id))
+            model = mr.scalar_one_or_none()
+            if model is None:
+                logger.warning("[LSP4J-LIFE] agent_override %r has no model", override)
+                return None
+            return agent, model
+    except Exception as e:
+        logger.error("[LSP4J-LIFE] DB error during agent resolution: {} (override={})", e, override)
+        return None
 
 
 @router.websocket("/ws")
@@ -157,7 +162,35 @@ async def lsp4j_websocket_endpoint(
     jsonrpc._agent_key = agent_key  # 保存到实例变量，cleanup 时使用
 
     try:
-        # 4. 消息循环
+        # 4. 消息循环 + WebSocket 保活机制
+        # ★ 保活任务：每30秒发送一次 LSP ping，防止网络中间件（nginx/云负载均衡）断开空闲连接
+        async def keep_alive():
+            """
+            WebSocket 保活协程
+            - 每30秒发送一次 LSP ping 消息
+            - 保持连接活跃，避免被网络中间件判定为空闲而断开
+            - 使用 LSP 标准 ping 方法，插件端会自动响应
+            """
+            try:
+                while True:
+                    await asyncio.sleep(30)  # 30秒保活间隔
+                    # 检查连接状态
+                    if websocket.client_state.name == 'CONNECTED':
+                        try:
+                            await websocket.send_ping()
+                            logger.debug("[LSP4J-KEEPALIVE] Sent keep-alive ping to agent_id={}", agent_obj.id)
+                        except Exception:
+                            logger.debug("[LSP4J-KEEPALIVE] Ping failed, connection may be dead, agent_id={}", agent_obj.id)
+                            break
+            except asyncio.CancelledError:
+                logger.info("[LSP4J-KEEPALIVE] Keep-alive task cancelled for agent_id={}", agent_obj.id)
+            except Exception as e:
+                logger.warning("[LSP4J-KEEPALIVE] Keep-alive error for agent_id={}: {}", agent_obj.id, e)
+
+        # 启动保活任务
+        keepalive_task = asyncio.create_task(keep_alive())
+        logger.info("[LSP4J-KEEPALIVE] Keep-alive task started, interval=30s, agent_id={}", agent_obj.id)
+
         # ★ 使用 create_task 并发处理每条消息，避免串行等待导致死锁：
         #    chat/ask 的 call_llm 会 await tool_future，而 tool/invokeResult
         #    需要消息循环读取才能 resolve Future。如果串行 await route()，
@@ -173,6 +206,15 @@ async def lsp4j_websocket_endpoint(
     except Exception as e:
         logger.error("[LSP4J-LIFE] WS error: {}", e)
     finally:
+        # 清理保活任务
+        if 'keepalive_task' in locals():
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("[LSP4J-KEEPALIVE] Keep-alive task cleaned up for agent_id={}", agent_obj.id)
+
         # 5. 清理（按顺序）
         # 5.1 重置 ContextVar
         current_lsp4j_ws.set(None)
@@ -182,10 +224,10 @@ async def lsp4j_websocket_endpoint(
         current_lsp4j_message_history.set([])
         current_lsp4j_session_id.set(None)
 
-        # 5.2 从 _active_routers 移除（使用实例变量中的复合键）
-        await unregister_active_router(getattr(jsonrpc, "_agent_key", None))
-
-        # 5.3 resolve 所有 pending Futures（防止协程挂起）
+        # 5.2 resolve 所有 pending Futures（防止协程挂起，先于 unregister 避免竞态）
         await jsonrpc.cleanup()
+
+        # 5.3 从 _active_routers 移除（使用实例变量中的复合键）
+        await unregister_active_router(getattr(jsonrpc, "_agent_key", None))
 
         logger.info("[LSP4J-LIFE] WS cleanup done agent_id={}", agent_obj.id)

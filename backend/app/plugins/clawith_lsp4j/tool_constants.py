@@ -22,6 +22,7 @@ LSP4J_IDE_TOOL_NAMES = frozenset(
         "search_symbol",
         "save_file",
         "update_tasks",
+        "apply_patch",
     }
 )
 
@@ -45,4 +46,5 @@ TOOL_DISPLAY_NAME_MAP = {
     "delete_file_by_path": "delete_file",
     "list_files": "list_dir",
     "search_files": "search_file",
+    "search_replace": "search_replace",
 }

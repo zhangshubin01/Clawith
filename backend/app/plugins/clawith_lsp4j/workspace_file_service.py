@@ -101,7 +101,11 @@ class WorkspaceFileService:
     """工作区文件服务（per-router 实例，与 LSP4JRouter 生命周期一致）。"""
 
     def __init__(self) -> None:
-        # 与 jsonrpc_router 的 create_task 并发配合：保护 _files / snapshot 等可变状态
+        # TODO: 将 threading.RLock() 替换为 asyncio.Lock()，并将所有使用此锁的方法改为 async。
+        # 当前 RLock 在 asyncio 事件循环中会阻塞线程，在高并发文件操作下可能导致性能下降。
+        # 需要将本类所有方法签名改为 async def，所有 with self._lock: 改为 async with self._lock:，
+        # 并更新 jsonrpc_router.py 中所有调用点添加 await。
+        # 详见：问题文档.md P1-7
         self._lock = threading.RLock()
         # file_id(=file_path) → WorkspaceFile
         self._files: dict[str, WorkspaceFile] = {}
@@ -117,6 +121,17 @@ class WorkspaceFileService:
         self._file_content_cache: dict[str, str] = {}
         # snapshot_id → request_id（反向索引）
         self._snapshot_to_request: dict[str, str] = {}
+
+    def clear(self) -> None:
+        """清除所有工作区文件状态，用于 clearAllSessions 等操作。"""
+        with self._lock:
+            self._files.clear()
+            self._files_by_id.clear()
+            self._snapshots.clear()
+            self._current_snapshot_id = None
+            self._current_snapshot_by_session.clear()
+            self._file_content_cache.clear()
+            self._snapshot_to_request.clear()
 
     def cache_file_content(self, file_path: str, content: str) -> None:
         """缓存 read_file 结果，供后续编辑工具使用。"""

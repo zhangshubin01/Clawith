@@ -87,6 +87,8 @@ class StreamBufferManager:
             await self.flush(force=False)
         except asyncio.CancelledError:
             pass
+        except Exception:
+            pass
 
     async def flush(self, force: bool = False) -> None:
         """发送缓冲区中的就绪文本。
@@ -113,40 +115,43 @@ class StreamBufferManager:
                 logger.debug("[StreamBuffer] flushed (force): text_len=%d", len(payload))
             return
 
-        while "\n" in self._line_buffer:
-            line, self._line_buffer = self._line_buffer.split("\n", 1)
+        # O(n) 一次性分割所有完整行，避免逐行 find+slice 导致的 O(n²) 复杂度
+        if "\n" not in self._line_buffer:
+            pass
+        else:
+            *complete_lines, self._line_buffer = self._line_buffer.split("\n")
+            for line in complete_lines:
+                if self._is_code_fence_line(line):
+                    if self._table_mode:
+                        self._flush_table_lines()
+                        self._table_mode = False
+                    self._code_fence_mode = not self._code_fence_mode
+                    self._ready_segments.append(f"{line}\n")
+                    continue
 
-            if self._is_code_fence_line(line):
+                if self._code_fence_mode:
+                    self._ready_segments.append(f"{line}\n")
+                    continue
+
                 if self._table_mode:
+                    if self._is_table_line(line):
+                        self._table_lines.append(line)
+                        continue
                     self._flush_table_lines()
                     self._table_mode = False
-                self._code_fence_mode = not self._code_fence_mode
-                self._ready_segments.append(f"{line}\n")
-                continue
-
-            if self._code_fence_mode:
-                self._ready_segments.append(f"{line}\n")
-                continue
-
-            if self._table_mode:
-                if self._is_table_line(line):
-                    self._table_lines.append(line)
-                    continue
-                self._flush_table_lines()
-                self._table_mode = False
-                if line == "":
-                    self._ready_segments.append("\n")
-                elif self._is_table_line(line):
-                    self._table_mode = True
-                    self._table_lines = [line]
+                    if line == "":
+                        self._ready_segments.append("\n")
+                    elif self._is_table_line(line):
+                        self._table_mode = True
+                        self._table_lines = [line]
+                    else:
+                        self._ready_segments.append(f"{line}\n")
                 else:
-                    self._ready_segments.append(f"{line}\n")
-            else:
-                if self._is_table_line(line):
-                    self._table_mode = True
-                    self._table_lines = [line]
-                else:
-                    self._ready_segments.append(f"{line}\n")
+                    if self._is_table_line(line):
+                        self._table_mode = True
+                        self._table_lines = [line]
+                    else:
+                        self._ready_segments.append(f"{line}\n")
 
         payload = self._drain_ready_text(max_len_only=True)
         if payload:

@@ -26,6 +26,7 @@ backend/agent_data/
 ss-nodes.json
 .data/
 .pgdata/
+db_backups/
 
 # Ignore Antigravity / Claude Code agent configurations
 .agent/
