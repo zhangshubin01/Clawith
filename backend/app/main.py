@@ -145,6 +145,7 @@ async def lifespan(app: FastAPI):
         import app.models.participant    # noqa
         import app.models.chat_session   # noqa
         import app.models.trigger        # noqa
+        import app.models.focus          # noqa
         import app.models.notification   # noqa
         import app.models.gateway_message # noqa
         import app.models.agent_credential  # noqa
@@ -342,6 +343,7 @@ from app.api.wecom import router as wecom_router
 from app.api.wechat import router as wechat_router
 from app.api.teams import router as teams_router
 from app.api.triggers import router as triggers_router
+from app.api.focus import router as focus_router
 
 from app.api.atlassian import router as atlassian_router
 
@@ -385,6 +387,7 @@ app.include_router(teams_router, prefix=settings.API_PREFIX)
 app.include_router(atlassian_router, prefix=settings.API_PREFIX)
 
 app.include_router(triggers_router)
+app.include_router(focus_router, prefix=settings.API_PREFIX)
 app.include_router(chat_sessions_router)
 app.include_router(plaza_router)
 app.include_router(notification_router, prefix=settings.API_PREFIX)
