@@ -6,11 +6,15 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="ترخيص Apache 2.0" />
-  <img src="https://img.shields.io/badge/Python-3.12+-blue.svg" alt="Python" />
-  <img src="https://img.shields.io/badge/React-19-61DAFB.svg" alt="React" />
-  <img src="https://img.shields.io/badge/FastAPI-0.115+-009688.svg" alt="FastAPI" />
-  <a href="https://discord.gg/3AKMBM2G"><img src="https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
+  <a href="https://www.clawith.ai/blog/clawith-technical-whitepaper"><img src="https://img.shields.io/badge/Technical%20Whitepaper-Read-8A2BE2" alt="Technical Whitepaper" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache 2.0 License" /></a>
+  <a href="https://github.com/dataelement/Clawith/stargazers"><img src="https://img.shields.io/github/stars/dataelement/Clawith?style=flat&color=gold" alt="GitHub Stars" /></a>
+  <a href="https://github.com/dataelement/Clawith/network/members"><img src="https://img.shields.io/github/forks/dataelement/Clawith?style=flat&color=slateblue" alt="GitHub Forks" /></a>
+  <a href="https://github.com/dataelement/Clawith/commits/main"><img src="https://img.shields.io/github/last-commit/dataelement/Clawith?style=flat&color=green" alt="Last Commit" /></a>
+  <a href="https://github.com/dataelement/Clawith/graphs/contributors"><img src="https://img.shields.io/github/contributors/dataelement/Clawith?style=flat&color=orange" alt="Contributors" /></a>
+  <a href="https://github.com/dataelement/Clawith/issues"><img src="https://img.shields.io/github/issues/dataelement/Clawith?style=flat" alt="Issues" /></a>
+  <a href="https://x.com/ClawithHQ"><img src="https://img.shields.io/badge/𝕏-Follow-000000?logo=x&logoColor=white" alt="Follow on X" /></a>
+  <a href="https://discord.gg/NRNHZkyDcG"><img src="https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
 </p>
 
 <p align="center">
@@ -239,7 +243,7 @@ docker compose up -d --build
 
 ## 💬 المجتمع
 
-انضم إلى [خادم Discord](https://discord.gg/3AKMBM2G) للدردشة مع الفريق، وطرح الأسئلة، ومشاركة الملاحظات، أو قضاء بعض الوقت معنا.
+انضم إلى [خادم Discord](https://discord.gg/NRNHZkyDcG) للدردشة مع الفريق، وطرح الأسئلة، ومشاركة الملاحظات، أو قضاء بعض الوقت معنا.
 
 يمكنك أيضا مسح رمز QR أدناه للانضمام إلى مجتمعنا عبر الهاتف:
 
