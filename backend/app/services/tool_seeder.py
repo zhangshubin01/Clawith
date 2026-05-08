@@ -3,7 +3,10 @@
 from loguru import logger
 from sqlalchemy import select
 from app.database import async_session
+from app.models.tenant import Tenant
+from app.models.tenant_setting import TenantSetting
 from app.models.tool import Tool
+from app.services.tool_config import meaningful_config, tenant_tool_config_key
 
 SYNC_IS_DEFAULT_TOOL_NAMES = {
     "read_webpage",
@@ -12,6 +15,19 @@ SYNC_IS_DEFAULT_TOOL_NAMES = {
     "jina_read",
     "update_objective",
 }
+
+LEGACY_IMAGE_TOOL_MODEL_DEFAULTS = {
+    "generate_image_siliconflow": "black-forest-labs/FLUX.1-schnell",
+    "generate_image_openai": "dall-e-3",
+    "generate_image_google": "gemini-2.5-flash-image",
+}
+
+
+def _global_builtin_config(tool_data: dict) -> dict:
+    """Return config safe to store on the global builtin Tool row."""
+    if (tool_data.get("config_schema") or {}).get("fields"):
+        return {}
+    return tool_data.get("config", {})
 
 # Builtin tool definitions — these map to the hardcoded AGENT_TOOLS
 BUILTIN_TOOLS = [
@@ -1030,7 +1046,7 @@ BUILTIN_TOOLS = [
             "required": ["prompt"],
         },
         "config": {
-            "model": "black-forest-labs/FLUX.1-schnell",
+            "model": "",
             "api_key": "",
             "base_url": "",
         },
@@ -1040,7 +1056,7 @@ BUILTIN_TOOLS = [
                     "key": "model",
                     "label": "Model",
                     "type": "text",
-                    "default": "black-forest-labs/FLUX.1-schnell",
+                    "default": "",
                     "placeholder": "e.g. black-forest-labs/FLUX.1-schnell",
                 },
                 {
@@ -1077,7 +1093,7 @@ BUILTIN_TOOLS = [
             "required": ["prompt"],
         },
         "config": {
-            "model": "dall-e-3",
+            "model": "",
             "api_key": "",
             "base_url": "",
         },
@@ -1087,7 +1103,7 @@ BUILTIN_TOOLS = [
                     "key": "model",
                     "label": "Model",
                     "type": "text",
-                    "default": "dall-e-3",
+                    "default": "",
                     "placeholder": "e.g. dall-e-3 or dall-e-2",
                 },
                 {
@@ -1124,7 +1140,7 @@ BUILTIN_TOOLS = [
             "required": ["prompt"],
         },
         "config": {
-            "model": "gemini-2.5-flash-image",
+            "model": "",
             "api_key": "",
             "base_url": "",
         },
@@ -1134,7 +1150,7 @@ BUILTIN_TOOLS = [
                     "key": "model",
                     "label": "Model",
                     "type": "text",
-                    "default": "gemini-2.5-flash-image",
+                    "default": "",
                     "placeholder": "e.g. gemini-2.5-flash-image",
                 },
                 {
@@ -3036,6 +3052,7 @@ async def seed_builtin_tools():
 
         new_tool_ids = []
         for t in BUILTIN_TOOLS:
+            seed_config = _global_builtin_config(t)
             result = await db.execute(select(Tool).where(Tool.name == t["name"]))
             existing = result.scalar_one_or_none()
             if not existing:
@@ -3048,7 +3065,7 @@ async def seed_builtin_tools():
                     icon=t["icon"],
                     is_default=t["is_default"],
                     parameters_schema=t.get("parameters_schema", {"type": "object", "properties": {}}),
-                    config=t.get("config", {}),
+                    config=seed_config,
                     config_schema=t.get("config_schema", {}),
                     source="builtin",
                 )
@@ -3079,20 +3096,32 @@ async def seed_builtin_tools():
                     existing.config_schema = t["config_schema"]
                     updated_fields.append("config_schema")
                     # Merge new config defaults when config_schema changes
-                    if t.get("config"):
-                        existing.config = {**t["config"], **(existing.config or {})}
+                    if seed_config:
+                        existing.config = {**seed_config, **(existing.config or {})}
                         updated_fields.append("config")
-                if not existing.config and t.get("config"):
-                    existing.config = t["config"]
+                if not existing.config and seed_config:
+                    existing.config = seed_config
                     updated_fields.append("config")
-                elif t.get("config") and existing.config != t["config"]:
+                elif seed_config and existing.config != seed_config:
                     # Merge new config keys into existing config so that flags like
                     # okr_agent_only are propagated to already-created tool records.
                     # Existing keys take precedence (agent-specific overrides are preserved).
-                    merged = {**t["config"], **(existing.config or {})}
+                    merged = {**seed_config, **(existing.config or {})}
                     if merged != existing.config:
                         existing.config = merged
                         updated_fields.append("config")
+                legacy_model = LEGACY_IMAGE_TOOL_MODEL_DEFAULTS.get(t["name"])
+                if legacy_model and existing.config == {
+                    "model": legacy_model,
+                    "api_key": "",
+                    "base_url": "",
+                }:
+                    existing.config = {
+                        "model": "",
+                        "api_key": "",
+                        "base_url": "",
+                    }
+                    updated_fields.append("config")
                 if existing.parameters_schema != t["parameters_schema"]:
                     existing.parameters_schema = t["parameters_schema"]
                     updated_fields.append("parameters_schema")
@@ -3204,6 +3233,43 @@ async def seed_builtin_tools():
             if obsolete:
                 await db.delete(obsolete)
                 logger.info(f"[ToolSeeder] Removed obsolete tool: {obsolete_name}")
+
+        # Legacy deployments stored company credentials for builtin tools in
+        # the global tools.config row. Move those values into the first tenant's
+        # tenant_settings once, then clear the global row so new companies do
+        # not inherit another company's keys.
+        first_tenant_r = await db.execute(select(Tenant).order_by(Tenant.created_at).limit(1))
+        first_tenant = first_tenant_r.scalar_one_or_none()
+        if first_tenant:
+            builtin_config_tools_r = await db.execute(select(Tool).where(Tool.source == "builtin"))
+            migrated = 0
+            for tool in builtin_config_tools_r.scalars().all():
+                if not (tool.config_schema or {}).get("fields"):
+                    continue
+                legacy_config = meaningful_config(tool.config or {})
+                if not legacy_config:
+                    tool.config = {}
+                    continue
+                setting_key = tenant_tool_config_key(tool.name)
+                existing_setting_r = await db.execute(
+                    select(TenantSetting).where(
+                        TenantSetting.tenant_id == first_tenant.id,
+                        TenantSetting.key == setting_key,
+                    )
+                )
+                if not existing_setting_r.scalar_one_or_none():
+                    db.add(TenantSetting(
+                        tenant_id=first_tenant.id,
+                        key=setting_key,
+                        value={"config": legacy_config},
+                    ))
+                    migrated += 1
+                tool.config = {}
+            if migrated:
+                logger.info(
+                    f"[ToolSeeder] Migrated {migrated} legacy builtin tool config(s) "
+                    f"to tenant_settings for tenant {first_tenant.id}"
+                )
 
         await db.commit()
         logger.info("[ToolSeeder] Builtin tools seeded")

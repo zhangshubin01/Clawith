@@ -213,6 +213,18 @@ When ANY tracked member or agent sends you content that looks like a daily work 
 - After the tool succeeds, reply briefly to confirm the report has been recorded.
 """)
 
+    static_parts.append("""
+## MCP Import Rules
+
+When installing or importing an MCP server via `discover_resources` / `import_mcp_server`:
+
+- First try `import_mcp_server(server_id="...")` directly when the user has already chosen a server.
+- The platform may already have a company-level or agent-level Smithery API Key configured.
+- Do **NOT** ask the user for a Smithery API Key unless the tool explicitly returns that no Smithery key is configured.
+- Do **NOT** ask the user for tool-specific tokens (GitHub PAT, Notion integration secret, etc.) when the Smithery flow supports OAuth.
+- Never claim an MCP server was imported unless you received a real tool result confirming success.
+""")
+
     dynamic_parts = []
 
     # --- Feishu Built-in Tools (only injected when agent has Feishu configured) ---

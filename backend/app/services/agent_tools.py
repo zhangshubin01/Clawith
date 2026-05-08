@@ -134,7 +134,8 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
 
     Priority:
     1. agent_tools.config (per-agent override)
-    2. tools.config (company/global config)
+    2. tenant_settings tool_config:<tool_name> for builtin company config
+    3. tools.config (tenant-specific/admin tool config or non-secret defaults)
 
     Both configs are decrypted using the tool's config_schema for
     schema-aware field detection (e.g. smithery_api_key with type=password).
@@ -146,20 +147,32 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
         return cached
 
     from app.models.tool import Tool, AgentTool
+    from app.models.agent import Agent as AgentModel
+    from app.services.tool_config import get_tenant_tool_config
 
     async with async_session() as db:
+        agent_tenant_id = None
+        if agent_id:
+            tenant_r = await db.execute(select(AgentModel.tenant_id).where(AgentModel.id == agent_id))
+            agent_tenant_id = tenant_r.scalar_one_or_none()
+
         # 1. Try per-agent + global config together
         if agent_id:
             result = await db.execute(
-                select(AgentTool.config, Tool.config, Tool.config_schema)
+                select(AgentTool.config, Tool.config, Tool.config_schema, Tool.source, Tool.name)
                 .join(Tool, AgentTool.tool_id == Tool.id)
                 .where(AgentTool.agent_id == agent_id, Tool.name == tool_name)
             )
             row = result.first()
             if row:
-                agent_config, global_config, config_schema = row
+                agent_config, global_config, config_schema, tool_source, db_tool_name = row
+                base_config = global_config or {}
+                tenant_config = {}
+                if tool_source == "builtin":
+                    base_config = {}
+                    tenant_config = await get_tenant_tool_config(db, agent_tenant_id, db_tool_name, config_schema)
                 # Merge: agent overrides global
-                merged = {**(global_config or {}), **(agent_config or {})}
+                merged = {**base_config, **tenant_config, **(agent_config or {})}
                 if merged:
                     # Decrypt with schema awareness
                     merged = _decrypt_sensitive_fields(merged, config_schema)
@@ -170,9 +183,17 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
         # 2. Fallback to global config only
         result = await db.execute(select(Tool).where(Tool.name == tool_name))
         tool = result.scalar_one_or_none()
-        if tool and tool.config:
+        if tool:
+            tenant_config = {}
+            if tool.source == "builtin":
+                tenant_config = await get_tenant_tool_config(db, agent_tenant_id, tool.name, tool.config_schema)
+            base_config = {} if tool.source == "builtin" else (tool.config or {})
+            merged = {**base_config, **tenant_config}
+        else:
+            merged = {}
+        if tool and merged:
             # Decrypt with schema awareness
-            decrypted = _decrypt_sensitive_fields(tool.config, tool.config_schema)
+            decrypted = _decrypt_sensitive_fields(merged, tool.config_schema)
             logger.info(f"[ToolConfig] DB global config for {tool_name}")
             _set_cached_tool_config(agent_id, tool_name, decrypted)
             return decrypted
@@ -2684,7 +2705,7 @@ async def execute_tool(
         elif tool_name == "generate_image_google":
             result = await _generate_image(agent_id, ws, arguments, "google")
         elif tool_name == "discover_resources":
-            result = await _discover_resources(arguments)
+            result = await _discover_resources(agent_id, arguments)
         elif tool_name == "import_mcp_server":
             result = await _import_mcp_server(agent_id, arguments)
         # ── Feishu Bitable Tools ──
@@ -7305,7 +7326,7 @@ async def _execute_code_legacy(ws: Path, arguments: dict) -> str:
 
 # ─── Resource Discovery Executors ───────────────────────────────
 
-async def _discover_resources(arguments: dict) -> str:
+async def _discover_resources(agent_id: uuid.UUID, arguments: dict) -> str:
     """Search Smithery registry for MCP servers."""
     query = arguments.get("query", "")
     if not query:
@@ -7313,7 +7334,7 @@ async def _discover_resources(arguments: dict) -> str:
     max_results = min(arguments.get("max_results", 5), 10)
 
     from app.services.resource_discovery import search_smithery
-    return await search_smithery(query, max_results)
+    return await search_smithery(query, max_results, agent_id=agent_id)
 
 
 async def _import_mcp_server(agent_id: uuid.UUID, arguments: dict) -> str:
@@ -7972,7 +7993,7 @@ async def _generate_image_google(
     import httpx
     import base64
 
-    url = f"{base_url.rstrip('/')}/models/{model}:generateContent?key={api_key}"
+    url = f"{base_url.rstrip('/')}/models/{model}:generateContent"
 
     # Convert WxH size to aspect ratio for Gemini API
     # Supported: 1:1, 3:4, 4:3, 9:16, 16:9
@@ -7992,7 +8013,6 @@ async def _generate_image_google(
         "generationConfig": {
             "responseModalities": ["IMAGE"],
             "imageConfig": {
-                "numberOfImages": 1,
                 "aspectRatio": aspect_ratio,
             },
         },
@@ -8000,7 +8020,12 @@ async def _generate_image_google(
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
-            url, json=payload, headers={"Content-Type": "application/json"}
+            url,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
         )
         if resp.status_code != 200:
             try:

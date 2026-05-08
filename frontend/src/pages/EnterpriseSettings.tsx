@@ -3217,7 +3217,12 @@ export default function EnterpriseSettings() {
     });
     const setDefaultModel = useMutation({
         mutationFn: (modelId: string) => fetchJson(`/enterprise/llm-models/${modelId}/set-default`, { method: 'POST' }),
-        onSuccess: () => { refetchTenantForDefault(); },
+        onSuccess: () => {
+            refetchTenantForDefault();
+            qc.invalidateQueries({ queryKey: ['tenant', 'me'] });
+            qc.invalidateQueries({ queryKey: ['agents'] });
+            qc.invalidateQueries({ queryKey: ['agent'] });
+        },
     });
     const deleteModel = useMutation({
         mutationFn: async ({ id, force = false }: { id: string; force?: boolean }) => {
@@ -4609,7 +4614,7 @@ export default function EnterpriseSettings() {
                                                                 });
                                                             }
                                                         } else {
-                                                            await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig }) });
+                                                            await fetchJson(`/tools/${tool.id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig, tenant_id: selectedTenantId || undefined }) });
                                                         }
                                                         setEditingToolId(null);
                                                         loadAllTools();
@@ -4658,7 +4663,7 @@ export default function EnterpriseSettings() {
                                                     const primaryToolName = GLOBAL_CATEGORY_CONFIG_PRIMARY_TOOL[configCategory];
                                                     const representativeTool = catTools.find((tl: any) => tl.name === primaryToolName) || catTools[0];
                                                     if (representativeTool) {
-                                                        await fetchJson(`/tools/${representativeTool.id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig }) });
+                                                        await fetchJson(`/tools/${representativeTool.id}`, { method: 'PUT', body: JSON.stringify({ config: editingConfig, tenant_id: selectedTenantId || undefined }) });
                                                     }
                                                     setConfigCategory(null);
                                                     loadAllTools();

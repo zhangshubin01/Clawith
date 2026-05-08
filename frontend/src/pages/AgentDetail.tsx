@@ -2918,7 +2918,8 @@ function AgentDetailInner() {
         enabled: !!id,
     });
 
-    // Tenant default model — used to render a "默认" tag in ModelSwitcher.
+    // Tenant default model — used to render the "默认" tag and as a visual
+    // fallback when an agent has no explicit primary model.
     const { data: myTenant } = useQuery({
         queryKey: ['tenant', 'me'],
         queryFn: () => tenantApi.me(),
@@ -7366,9 +7367,7 @@ function AgentDetailInner() {
                                                 <ModelSwitcher
                                                     value={overrideModelId}
                                                     onChange={handleModelChange}
-                                                    /* "默认" badge tracks the
-                                                       agent's saved default. */
-                                                    tenantDefaultId={agent?.primary_model_id || null}
+                                                    tenantDefaultId={myTenant?.default_model_id || null}
                                                     disabled={!wsConnected}
                                                 />
                                                 <div style={{ flex: 1 }} />

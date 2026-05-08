@@ -1147,7 +1147,7 @@ export default function Layout() {
             )}
 
             <main className={`main-content${isChatPage ? ' chat-page' : ''}${isAgentSettingsPage ? ' agent-settings-page' : ''}`}>
-                <Outlet />
+                <Outlet context={{ openTalentMarket: () => setShowTalentMarket(true) }} />
             </main>
 
             {showAccountSettings && (
