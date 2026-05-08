@@ -1,15 +1,5 @@
 {
   "mcpServers": {
-    "openviking": {
-      "command": "/opt/homebrew/bin/node",
-      "args": [
-        "/Users/shubinzhang/Documents/UGit/OpenViking/examples/claude-code-memory-plugin/scripts/start-memory-server.mjs"
-      ],
-      "env": {
-        "OPENVIKING_CONFIG_FILE": "/Users/shubinzhang/.openviking/ov.conf",
-        "CLAUDE_PLUGIN_ROOT": "/Users/shubinzhang/Documents/UGit/OpenViking/examples/claude-code-memory-plugin"
-      }
-    },
     "clawith": {
       "command": "/Users/shubinzhang/Documents/UGit/Clawith/clawith_mcp/.venv/bin/python",
       "args": ["/Users/shubinzhang/Documents/UGit/Clawith/clawith_mcp/server.py"],

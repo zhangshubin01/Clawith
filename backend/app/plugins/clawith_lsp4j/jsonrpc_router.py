@@ -28,6 +28,7 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone as tz_utc
@@ -44,6 +45,7 @@ from app.models.chat_session import ChatSession
 from app.models.audit import ChatMessage
 from app.models.task import Task as TaskModel
 from app.services.llm.caller import call_llm_with_failover
+from app.services.agent_context import _is_ide_session
 from app.services.task_executor import execute_task as _execute_task
 import app.api.websocket as ws_module
 
@@ -151,6 +153,45 @@ _LSP4J_STRICT_TOOLCALL_ID = os.getenv("LSP4J_STRICT_TOOLCALL_ID", "1").strip() !
 # 本地工具执行（不在 IDE 端，由后端直接执行）
 # ──────────────────────────────────────────────
 
+# Agent 内部目录前缀 — 解析到后端工作空间，不解析到 IDE 项目路径
+# ⚠️ "workspace/" 不在此列表：LLM 常用 workspace/xxx 路径操作项目文件，
+# Agent 内部文件（soul.md 等）由 _AGENT_WS_BASE_NAMES 单独保护。
+_AGENT_WS_PREFIXES = ("memory/", "skills/", "enterprise_info/")
+_AGENT_WS_BASE_NAMES = frozenset({"soul.md", "focus.md", "tasks.json", "memory.md"})
+
+
+def _resolve_search_path(rel_path: str, project_path: str | None = None) -> Path:
+    """解析搜索路径：Agent 内部路径 → 后端 CWD，其余 → IDE project_path。
+
+    ★ LLM 常用 workspace/xxx 作为虚拟路径。当 project_path 已知时，
+    自动剥离 workspace/ 前缀，使搜索落在用户项目目录中。
+    """
+    from pathlib import Path
+
+    # 绝对路径直接使用
+    p = Path(rel_path)
+    if p.is_absolute():
+        return p
+
+    # Agent 内部文件 → 后端工作空间（由文件名保护，不依赖路径前缀）
+    basename = rel_path.split("/")[-1]
+    if basename in _AGENT_WS_BASE_NAMES:
+        return Path.cwd() / rel_path
+    for prefix in _AGENT_WS_PREFIXES:
+        if rel_path.startswith(prefix):
+            return Path.cwd() / rel_path
+
+    # ★ 剥离 LLM 常用的 workspace/ 前缀
+    _clean_path = rel_path
+    if _clean_path.startswith("workspace/"):
+        _clean_path = _clean_path[len("workspace/"):]
+
+    # 其余相对路径 → IDE 项目路径
+    if project_path:
+        return Path(project_path) / _clean_path
+    return Path.cwd() / _clean_path
+
+
 def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "") -> tuple[str, list[dict]]:
     """本地执行搜索工具，返回 (result_json_str, results_list).
 
@@ -162,7 +203,7 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
     - search_symbol → [{fileName, path}]
 
     Args:
-        project_path: IDE 项目根路径。传入时所有相对路径以此为基准，
+        project_path: IDE 项目根路径。传入时非 Agent 内部的相对路径以此为基准，
                       否则回退到 Path.cwd()（兼容 Web UI 路径）。
     """
     from pathlib import Path
@@ -192,9 +233,7 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
 
     if tool_name == "list_dir":
         rel_path = arguments.get("relative_workspace_path") or arguments.get("path") or "."
-        ws_path = Path(rel_path)
-        if not ws_path.is_absolute():
-            ws_path = cwd / rel_path
+        ws_path = _resolve_search_path(rel_path, project_path or None)
         items: list[dict] = []
         try:
             if ws_path.exists() and ws_path.is_dir():
@@ -221,9 +260,7 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
     elif tool_name == "search_file":
         pattern = arguments.get("file_pattern", "") or arguments.get("query", "") or "*"
         search_path = arguments.get("path", ".")
-        search_dir = Path(search_path)
-        if not search_dir.is_absolute():
-            search_dir = cwd / search_path
+        search_dir = _resolve_search_path(search_path, project_path or None)
         items: list[dict] = []
         try:
             if search_dir.exists() and search_dir.is_dir():
@@ -854,7 +891,7 @@ class JSONRPCRouter:
             self._tool_call_id_queue = []
 
             # ★ 创建 snapshot 并发送 snapshot/syncAll（diff 卡片支持）
-            self._ws_file_service.get_or_create_snapshot(session_id, request_id)
+            await self._ws_file_service.get_or_create_snapshot(session_id, request_id)
             try:
                 await self._send_snapshot_sync_all(session_id)
             except Exception as e:
@@ -1211,9 +1248,12 @@ class JSONRPCRouter:
             tool_hint += (
                 "\n[执行策略] 对于读写文件、创建文件、删除文件、搜索、终端命令，必须优先使用工具调用。"
                 "\n优先使用 read_file / replace_text_by_path / create_file_with_text / delete_file_by_path / list_dir / search_file / run_in_terminal。"
-                "\n不要先输出大段“开始重构/步骤说明”代码块再改文件，优先直接执行工具并回传结果。"
+                "\n不要先输出大段'开始重构/步骤说明'代码块再改文件，优先直接执行工具并回传结果。"
                 "\n目标展示应为工具卡片链路（toolCall + tool/call/sync + workingSpaceFile/sync），而不是纯 markdown 代码块。"
                 "\n仅当工具调用不可用或明确失败时，才允许输出 CODE_EDIT_BLOCK 作为兜底。"
+                "\n[路径规则] 修改代码时必须使用绝对路径或项目相对路径（如 app/src/main/Main.kt），禁止使用 workspace/ 前缀。"
+                "\nlist_dir/search_file 返回的路径可直接用于后续 read_file/replace_text_by_path 调用。"
+                "\n相对路径仅用于 Agent 自身文件（soul.md, memory.md, focus.md, skills/）。"
             )
             
             role_desc = role_desc + tool_hint
@@ -1275,6 +1315,8 @@ class JSONRPCRouter:
 
             cancelled = False
             error_status_code = 200  # 默认成功
+            # ★ 设置 IDE 会话标记，使 build_agent_context 注入项目优先指令
+            _ide_token = _is_ide_session.set(True)
             try:
                 reply = await call_llm_with_failover(
                     primary_model=model_obj,
@@ -1299,6 +1341,8 @@ class JSONRPCRouter:
                 logger.exception("LSP4J call_llm error")
                 error_status_code = 500
                 reply = f"[错误] {type(e).__name__}: {str(e)[:200]}"
+            finally:
+                _is_ide_session.reset(_ide_token)
 
             # ★ 发送思考完成状态
             # 若 on_chunk 已被调用（_thinking_started=False），已在 on_chunk 中发送过 done，
@@ -1501,7 +1545,7 @@ class JSONRPCRouter:
             logger.info("[LSP4J] tool/invoke: search_replace path={} search_len={} replace_len={}",
                        file_path, len(search_text), len(replace_text))
             # 1. 尝试从缓存获取文件内容（read_file 执行后会自动缓存）
-            current_content = self._ws_file_service.get_cached_content(file_path) if file_path else None
+            current_content = await self._ws_file_service.get_cached_content(file_path) if file_path else None
             if current_content is None and file_path:
                 # 2. 缓存未命中，从 IDE 读取文件
                 # 注意：此处为嵌套工具调用（外层 search_replace 内嵌套 read_file），
@@ -1583,7 +1627,16 @@ class JSONRPCRouter:
         - errorMessage: 错误信息
         - result: 执行结果
         """
+        # ★ 入口日志：记录收到的完整 invokeResult 关键信息
         tool_call_id = params.get("toolCallId")
+        logger.info(
+            "[LSP4J-RESULT] ← 收到 invokeResult: toolCallId={} name={} success={} requestId={} result_type={}",
+            str(tool_call_id)[:8] if tool_call_id else "(缺失)",
+            params.get("name"),
+            params.get("success"),
+            str(params.get("requestId", ""))[:8],
+            type(params.get("result")).__name__,
+        )
         if not tool_call_id:
             if _LSP4J_STRICT_TOOLCALL_ID:
                 logger.warning(
@@ -1638,31 +1691,46 @@ class JSONRPCRouter:
         # 查找 pending Future
         future = self._pending_tools.get(str(tool_call_id))
         if future and not future.done():
-            # 异步工具结果日志
-            logger.info("[LSP4J-TOOL] invokeResult matched: toolCallId={} success={} name={} pending_count={}",
-                         tool_call_id[:8], params.get("success", True), params.get("name"),
-                         len(self._pending_tools))
+            # ★ 正常匹配成功日志
+            logger.info(
+                "[LSP4J-RESULT] ✅ 正常匹配: toolCallId={} name={} success={} pending_count={}",
+                str(tool_call_id)[:8],
+                params.get("name"),
+                params.get("success", True),
+                len(self._pending_tools),
+            )
             if params.get("success", True):
                 result = params.get("result", {})
-                # result 可能是 dict，需要转为 JSON 字符串
                 if isinstance(result, dict):
                     result_str = json.dumps(result, ensure_ascii=False)
                 else:
                     result_str = str(result)
                 future.set_result(result_str)
+                logger.info(
+                    "[LSP4J-RESULT] ✅ Future 已设置结果: toolCallId={} result_len={}",
+                    str(tool_call_id)[:8],
+                    len(result_str),
+                )
             else:
                 error_msg = params.get("errorMessage", "Tool execution failed")
                 tool_name = params.get("name", "unknown")
                 request_id = str(params.get("requestId", ""))[:8]
                 logger.warning(
-                    "[LSP4J-TOOL] invokeResult FAILED: toolCallId={} tool={} requestId={} error={}",
-                    tool_call_id[:8], tool_name, request_id, error_msg)
+                    "[LSP4J-RESULT] ❌ 工具失败: toolCallId={} tool={} requestId={} error={}",
+                    str(tool_call_id)[:8], tool_name, request_id, error_msg)
                 future.set_result(f"[工具错误] {error_msg}")
         elif not future or future.done():
+            # ★ 无匹配 Future 详细日志
+            logger.warning(
+                "[LSP4J-RESULT] ❌ 无匹配 Future: toolCallId={} future_exists={} future_done={} 尝试补偿匹配",
+                str(tool_call_id)[:8] if tool_call_id else "",
+                future is not None,
+                future.done() if future else "N/A",
+            )
             # 无匹配 Future（可能已超时，或插件 SearchResultCache 缓存了旧 toolCallId）
             logger.warning(
                 "[LSP4J-TOOL] invokeResult: toolCallId={} 无匹配 Future（可能已超时或缓存旧 ID），尝试补偿匹配",
-                tool_call_id[:8],
+                tool_call_id[:8] if tool_call_id else "",
             )
             request_id = str(params.get("requestId") or "")
             tool_name = str(params.get("name") or "")
@@ -1682,10 +1750,14 @@ class JSONRPCRouter:
                 candidates.append(call_id)
             if len(candidates) == 1:
                 fallback_id = candidates[0]
-                logger.warning(
-                    "[LSP4J-TOOL] invokeResult 补偿命中: staleId={} → realId={} requestId={} name={}",
-                    tool_call_id[:8], fallback_id[:8], request_id[:8], tool_name,
+                logger.info(
+                    "[LSP4J-RESULT] ✅ 补偿命中: staleId={} → realId={} name={} pending_count={}",
+                    str(tool_call_id)[:8] if tool_call_id else "",
+                    fallback_id[:8],
+                    tool_name,
+                    len(self._pending_tools),
                 )
+                f = self._pending_tools[fallback_id]
                 if params.get("success", True):
                     result = params.get("result", {})
                     if isinstance(result, dict):
@@ -1693,18 +1765,22 @@ class JSONRPCRouter:
                     else:
                         result_str = str(result)
                     f.set_result(result_str)
+                    logger.info("[LSP4J-RESULT] ✅ 补偿 Future 已设置结果: realId={} result_len={}", fallback_id[:8], len(result_str))
                 else:
                     error_msg = params.get("errorMessage", "Tool execution failed")
                     f.set_result(f"[工具错误] {error_msg}")
             elif len(candidates) > 1:
                 logger.warning(
-                    "[LSP4J-TOOL] invokeResult 补偿匹配候选冲突: staleId={} candidates={}",
-                    tool_call_id[:8], [c[:8] for c in candidates],
+                    "[LSP4J-RESULT] ❌ 补偿匹配候选冲突: staleId={} candidates={}",
+                    str(tool_call_id)[:8] if tool_call_id else "",
+                    [c[:8] for c in candidates],
                 )
             else:
                 logger.warning(
-                    "[LSP4J-TOOL] invokeResult 补偿匹配无候选: staleId={} requestId={} name={}",
-                    tool_call_id[:8], request_id[:8], tool_name,
+                    "[LSP4J-RESULT] ❌ 补偿匹配无候选: staleId={} requestId={} name={}",
+                    str(tool_call_id)[:8] if tool_call_id else "",
+                    request_id[:8],
+                    tool_name,
                 )
 
         # tool/invokeResult 是 @JsonRequest，需要返回 OperateCommonResult 格式
@@ -1715,6 +1791,10 @@ class JSONRPCRouter:
             "errorCode": None,  # 成功时必须为 null，不能是 ""
             "errorMessage": None,
         })
+        logger.info(
+            "[LSP4J-RESULT] ✅ 已返回 invokeResult 响应: toolCallId={} errorCode=null",
+            str(tool_call_id)[:8] if tool_call_id else "",
+        )
 
     async def _handle_response(self, msg: dict) -> None:
         """处理 JSON-RPC 响应 — 同步工具执行结果回传。
@@ -1857,7 +1937,7 @@ class JSONRPCRouter:
         - type=MODIFIED → WorkspaceFileModifiedNotifier（更新状态/diff/showNewDiff）
         - type=FRUSH → VFS 刷新
         """
-        payload = self._ws_file_service.build_sync_result(
+        payload = await self._ws_file_service.build_sync_result(
             ws_file, self._project_path, sync_type)
         logger.info("[WS-FILE] 发送 workingSpaceFile/sync: type={} fileId={} status={} +{} -{}",
                     sync_type, ws_file.file_id, ws_file.status,
@@ -1866,7 +1946,7 @@ class JSONRPCRouter:
 
     async def _send_snapshot_sync_all(self, session_id: str, sync_type: str = "ADD") -> None:
         """发送 snapshot/syncAll 通知（SnapshotSyncAllResult 格式）。"""
-        payload = self._ws_file_service.build_snapshot_sync_all(
+        payload = await self._ws_file_service.build_snapshot_sync_all(
             session_id, self._project_path, sync_type)
         logger.info("[WS-FILE] 发送 snapshot/syncAll: type={} snapshot_count={} file_count={}",
                     sync_type, len(payload["snapshots"]), len(payload["workingSpaceFiles"]))
@@ -1887,7 +1967,7 @@ class JSONRPCRouter:
         session_id = self._session_id or ""
 
         # 获取或创建 snapshot
-        snap = self._ws_file_service.get_or_create_snapshot(session_id, request_id)
+        snap = await self._ws_file_service.get_or_create_snapshot(session_id, request_id)
 
         # 确定变更类型
         if tool_name == "create_file_with_text":
@@ -1898,7 +1978,7 @@ class JSONRPCRouter:
             mode = "MODIFIED"
 
         # 创建或更新工作区文件
-        ws_file = self._ws_file_service.create_or_update_file(
+        ws_file = await self._ws_file_service.create_or_update_file(
             session_id, snap.id, file_path, mode, tool_call_id)
 
         # 获取编辑前后内容
@@ -1906,20 +1986,18 @@ class JSONRPCRouter:
             last_stable = ""
             full_content = arguments.get("text") or arguments.get("content") or ""
         elif tool_name == "delete_file_by_path":
-            last_stable = self._ws_file_service.get_cached_content(file_path) or ""
+            last_stable = await self._ws_file_service.get_cached_content(file_path) or ""
             full_content = ""
         else:
             # replace_text_by_path: 全文替换，新内容就是 text 参数
-            last_stable = self._ws_file_service.get_cached_content(file_path) or ""
+            last_stable = await self._ws_file_service.get_cached_content(file_path) or ""
             full_content = arguments.get("text") or ""
 
         # 计算 DiffInfo 并存储（大文件 difflib 可能较慢，避免阻塞事件循环）
-        await asyncio.to_thread(
-            self._ws_file_service.set_content, file_path, last_stable, full_content
-        )
+        await self._ws_file_service.set_content(file_path, last_stable, full_content)
 
         # 设置状态为 APPLIED
-        self._ws_file_service.update_status(file_path, "APPLIED")
+        await self._ws_file_service.update_status(file_path, "APPLIED")
 
         logger.info("[WS-FILE] 文件编辑完成: tool={} path={} mode={} wsId={} +{} -{}",
                     tool_name, file_path, mode, ws_file.id[:8],
@@ -2038,7 +2116,7 @@ class JSONRPCRouter:
             search_text = params.get("searchText") or params.get("search_text") or ""
             replace_text = params.get("replaceText") or params.get("replace_text") or ""
             # 尝试从缓存获取文件内容
-            current_content = self._ws_file_service.get_cached_content(file_path) if file_path else None
+            current_content = await self._ws_file_service.get_cached_content(file_path) if file_path else None
             if current_content is None and file_path:
                 # 嵌套工具调用：优先使用缓存避免增加 read_file 的 30s 超时延迟
                 try:
@@ -2074,6 +2152,18 @@ class JSONRPCRouter:
                 params["isBackground"] = False
             if "is_background" not in params:
                 params["is_background"] = params["isBackground"]
+
+        # 相对路径解析：将非绝对路径拼接到 IDE 项目根路径
+        # ★ 剥离 LLM 常用的 workspace/ 前缀，避免在项目根下创建多余的 workspace/ 目录
+        if (tool_name in _LSP4J_FILE_EDIT_TOOLS or tool_name == "read_file") and self._project_path:
+            fp = params.get("filePath") or params.get("path") or params.get("file_path")
+            if fp and not fp.startswith("/"):
+                _stripped = fp
+                if _stripped.startswith("workspace/"):
+                    _stripped = _stripped[len("workspace/"):]
+                resolved = str(Path(self._project_path) / _stripped)
+                params["filePath"] = resolved
+                logger.info("[LSP4J-TOOL] 相对路径已解析: {} -> {}", fp, resolved)
         trace_key = (
             f"req={request_id[:8]} call={tool_call_id[:8]} "
             f"logical={original_name} invoke={invoke_tool_name}"
@@ -2147,6 +2237,10 @@ class JSONRPCRouter:
                 "async": True,             # 异步执行，结果通过 invokeResult 回传
             },
         })
+        logger.info(
+            "[LSP4J-TOOL] → 已发送 tool/invoke 到 IDE: rpcId={} tool={} callId={} invokeName={}",
+            rpc_id, tool_name, tool_call_id[:8], invoke_tool_name,
+        )
 
         # 等待异步结果（同时监听取消事件，避免 cancel 在 wait_for 期间触发时无法及时响应）
         file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
@@ -2194,7 +2288,7 @@ class JSONRPCRouter:
                         arguments["file_path"] = path
                     # ★ 缓存 read_file 内容，供后续编辑工具的 diff 计算使用
                     if path and content:
-                        self._ws_file_service.cache_file_content(path, content)
+                        await self._ws_file_service.cache_file_content(path, content)
                     logger.info("[LSP4J-TOOL] read_file FINISHED results 注入 path: path={}", path)
                 elif tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
                     # ★ 文件编辑工具：创建工作区文件 + 计算 diff + 发送 workingSpaceFile/sync
@@ -2219,7 +2313,7 @@ class JSONRPCRouter:
                     has_file_id = isinstance(first_result, dict) and bool(first_result.get("fileId"))
                     has_path = isinstance(first_result, dict) and bool(first_result.get("path"))
                     if not (has_file_id and has_path):
-                        ws_file_fallback = self._ws_file_service.get_file(file_path_for_id)
+                        ws_file_fallback = await self._ws_file_service.get_file(file_path_for_id)
                         fallback_ws_id = ws_file_fallback.id if ws_file_fallback else file_path_for_id
                         results = [{
                             "path": file_path_for_id,
@@ -2242,29 +2336,44 @@ class JSONRPCRouter:
                         )
 
                 if queue_matched:
+                    logger.info(
+                        "[LSP4J-TOOL] ✅ 准备发送 FINISHED sync: tool={} callId={} results_count={}",
+                        tool_name, tool_call_id[:8], len(results) if results else 0,
+                    )
                     await self._send_tool_call_sync(
                         self._session_id, request_id, tool_call_id,
                         "FINISHED", tool_name=original_name, parameters=arguments,
                         results=results,
                     )
                     logger.info(
-                        "[LSP4J-TRACE] FINISHED 已发送 trace={} backfilled={}",
+                        "[LSP4J-TRACE] FINISHED 已发送 trace={} backfilled={} results={}",
                         trace_key,
                         finished_backfilled,
+                        json.dumps(results, ensure_ascii=False)[:200] if results else "None",
                     )
                 else:
                     logger.warning(
-                        "[LSP4J-TOOL] 队列未匹配，跳过 FINISHED sync（避免幽灵事件）: tool={} callId={} requestId={}",
+                        "[LSP4J-TOOL] ❌ 队列未匹配，跳过 FINISHED sync（避免幽灵事件）: tool={} callId={} requestId={} queue_size={}",
                         tool_name,
                         tool_call_id[:8],
                         request_id[:8],
+                        len(self._tool_call_id_queue),
                     )
 
                 # ★ 文件编辑工具完成后发送 workingSpaceFile/sync 通知（APPLIED 状态）
                 # 必须在 toolCallSync FINISHED 之后发送，确保 ToolPanel 已创建 AIDevFilePanel
                 if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
-                    ws_file = self._ws_file_service.get_file(file_path_for_id)
+                    logger.info(
+                        "[WS-FILE] 🔍 检查文件编辑后 sync: tool={} file_path_for_id={}",
+                        tool_name, file_path_for_id,
+                    )
+                    ws_file = await self._ws_file_service.get_file(file_path_for_id)
                     if ws_file:
+                        logger.info(
+                            "[WS-FILE] ✅ ws_file 找到: path={} wsId={} mode={} status={} +{} -{}",
+                            file_path_for_id, ws_file.id[:8], ws_file.mode, ws_file.status,
+                            ws_file.diff_info.add, ws_file.diff_info.delete,
+                        )
                         await asyncio.sleep(0.2)
                         # 插件双通道路由差异：
                         # 1) WorkingSpacePanel 只通过 ADD notifier 把文件加入"变更文件"列表；
@@ -2278,6 +2387,11 @@ class JSONRPCRouter:
                                 await self._send_snapshot_sync_all(self._session_id)
                             except Exception as e:
                                 logger.warning("[WS-FILE] 工具编辑后 snapshot/syncAll 失败（非致命）: {}", e)
+                    else:
+                        logger.warning(
+                            "[WS-FILE] ❌ ws_file 未找到，无法发送 sync: file_path_for_id={}",
+                            file_path_for_id,
+                        )
 
                 return result
             finally:
@@ -2308,7 +2422,7 @@ class JSONRPCRouter:
                 )
             # 文件编辑超时也更新状态
             if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
-                ws_file = self._ws_file_service.update_status(
+                ws_file = await self._ws_file_service.update_status(
                     file_path_for_id, "APPLYING_FAILED", f"超时（{timeout}s）")
                 if ws_file:
                     await self._send_workspace_file_sync(ws_file, "MODIFIED")
@@ -2845,7 +2959,7 @@ class JSONRPCRouter:
     async def _handle_snapshot_list_by_session(self, params: dict, msg_id: Any) -> None:
         """snapshot/listBySession → ListSnapshotsResult（与 SnapshotService.java 一致）。"""
         session_id = params.get("sessionId") or ""
-        snaps = self._ws_file_service.list_snapshots_for_session(session_id)
+        snaps = await self._ws_file_service.list_snapshots_for_session(session_id)
         await self._send_response(msg_id, {
             "snapshots": [s.to_dict() for s in snaps],
             "errorCode": None,
@@ -2864,11 +2978,11 @@ class JSONRPCRouter:
         err: str | None = None
         try:
             if op_type in ("ACCEPT_ALL",):
-                self._ws_file_service.apply_snapshot_accept_all(snap_id)
+                await self._ws_file_service.apply_snapshot_accept_all(snap_id)
             elif op_type in ("REJECT_ALL",):
-                self._ws_file_service.apply_snapshot_reject_all(snap_id)
+                await self._ws_file_service.apply_snapshot_reject_all(snap_id)
             elif op_type in ("SWITCH", "ACTIVATE") and target_snap:
-                if not self._ws_file_service.set_current_snapshot(target_snap):
+                if not await self._ws_file_service.set_current_snapshot(target_snap):
                     err = "snapshot_not_found"
             elif op_type in ("ACCEPT", "APPLY"):
                 for item in ws_items:
@@ -2876,14 +2990,14 @@ class JSONRPCRouter:
                         continue
                     wid = item.get("id") or ""
                     if wid:
-                        self._ws_file_service.operate(wid, "ACCEPT", item.get("content"))
+                        await self._ws_file_service.operate(wid, "ACCEPT", item.get("content"))
             elif op_type in ("REJECT",):
                 for item in ws_items:
                     if not isinstance(item, dict):
                         continue
                     wid = item.get("id") or ""
                     if wid:
-                        self._ws_file_service.operate(wid, "REJECT", None)
+                        await self._ws_file_service.operate(wid, "REJECT", None)
             elif op_type in ("CANCEL", "UPDATE_CHAT_RECORD"):
                 pass
             else:
@@ -2891,10 +3005,10 @@ class JSONRPCRouter:
 
             sess_for_sync = ""
             if target_snap and op_type in ("SWITCH", "ACTIVATE"):
-                sinfo = self._ws_file_service.find_snapshot_by_id(target_snap)
+                sinfo = await self._ws_file_service.find_snapshot_by_id(target_snap)
                 sess_for_sync = sinfo.session_id if sinfo else ""
             elif snap_id:
-                sinfo = self._ws_file_service.find_snapshot_by_id(snap_id)
+                sinfo = await self._ws_file_service.find_snapshot_by_id(snap_id)
                 sess_for_sync = sinfo.session_id if sinfo else (self._session_id or "")
             else:
                 sess_for_sync = self._session_id or ""
@@ -3115,7 +3229,7 @@ class JSONRPCRouter:
 
         self._session_id = None
         self._tool_call_history_by_session.clear()
-        self._ws_file_service.clear()
+        await self._ws_file_service.clear()
         await self._send_response(msg_id, None)
 
     async def _handle_chat_delete_chat_by_id(self, params: dict, msg_id: Any) -> None:
@@ -3265,7 +3379,7 @@ class JSONRPCRouter:
         返回：WorkingSpaceFileContent { content, version, errorCode?, errorMessage? }
         """
         ws_id = params.get("id", "")
-        ws_file = self._ws_file_service.get_file_by_id(ws_id)
+        ws_file = await self._ws_file_service.get_file_by_id(ws_id)
         if ws_file:
             logger.info("[WS-FILE] getLastStableContent: id={} len={}",
                         ws_id[:8], len(ws_file.last_stable_content))
@@ -3290,7 +3404,7 @@ class JSONRPCRouter:
         插件 InlineDiffManager.showSingleDiff 调用此方法获取 diff 右侧内容。
         """
         ws_id = params.get("id", "")
-        ws_file = self._ws_file_service.get_file_by_id(ws_id)
+        ws_file = await self._ws_file_service.get_file_by_id(ws_id)
         if ws_file:
             logger.info("[WS-FILE] getFullContent: id={} len={}",
                         ws_id[:8], len(ws_file.content))
@@ -3316,7 +3430,7 @@ class JSONRPCRouter:
         返回：ListWorkingSpaceFileResult { workingSpaceFiles, errorCode, errorMessage }
         """
         snapshot_id = params.get("snapshotId", "")
-        files = self._ws_file_service.list_by_snapshot(snapshot_id)
+        files = await self._ws_file_service.list_by_snapshot(snapshot_id)
         logger.info("[WS-FILE] listBySnapshot: snapshotId={} count={}",
                     snapshot_id[:8] if snapshot_id else "?", len(files))
         await self._send_response(msg_id, {
@@ -3333,7 +3447,7 @@ class JSONRPCRouter:
         ws_id = params.get("id", "")
         op_type = params.get("opType", "")
         content = params.get("content")
-        success = self._ws_file_service.operate(ws_id, op_type, content)
+        success = await self._ws_file_service.operate(ws_id, op_type, content)
         logger.info("[WS-FILE] operate: id={} op={} success={}", ws_id[:8], op_type, success)
         await self._send_response(msg_id, {
             "errorCode": None,
@@ -3341,7 +3455,7 @@ class JSONRPCRouter:
         })
         # 操作后发送状态更新通知
         if success:
-            ws_file = self._ws_file_service.get_file_by_id(ws_id)
+            ws_file = await self._ws_file_service.get_file_by_id(ws_id)
             if ws_file:
                 try:
                     await self._send_workspace_file_sync(ws_file, "MODIFIED")
@@ -3356,9 +3470,7 @@ class JSONRPCRouter:
         ws_id = params.get("id", "")
         content = params.get("content")
         local_content = params.get("localContent")
-        success = await asyncio.to_thread(
-            self._ws_file_service.update_content, ws_id, content, local_content
-        )
+        success = await self._ws_file_service.update_content(ws_id, content, local_content)
         logger.info("[WS-FILE] updateContent: id={} success={}", ws_id[:8], success)
         await self._send_response(msg_id, {
             "errorCode": None,

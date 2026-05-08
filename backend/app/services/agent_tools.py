@@ -2228,17 +2228,7 @@ async def _execute_tool_direct(
                 return "Missing path"
             if _is_enterprise_info_path(path):
                 return "enterprise_info is shared company context and is read-only for agents. Ask an admin to update it."
-            result = _write_file(ws, path, content, tenant_id=_agent_tenant_id)
-            # 写入 memory.md 后异步触发 OpenViking 索引（失败不影响写入结果）
-            if "memory" in path and path.endswith(".md"):
-                try:
-                    import asyncio
-                    from app.services.openviking_client import index_memory_file
-                    file_path = (ws / path).resolve()
-                    asyncio.create_task(index_memory_file(str(agent_id), file_path))
-                except Exception:
-                    pass
-            return result
+            return _write_file(ws, path, content, tenant_id=_agent_tenant_id)
         elif tool_name == "move_file":
             source_path = arguments.get("source_path")
             destination_path = arguments.get("destination_path")

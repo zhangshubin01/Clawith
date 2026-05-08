@@ -14,8 +14,8 @@
 
 from __future__ import annotations
 
+import asyncio
 import difflib
-import threading
 import uuid
 from dataclasses import dataclass, field
 
@@ -98,15 +98,14 @@ class SnapshotInfo:
 
 
 class WorkspaceFileService:
-    """工作区文件服务（per-router 实例，与 LSP4JRouter 生命周期一致）。"""
+    """工作区文件服务（per-router 实例，与 LSP4JRouter 生命周期一致）。
+
+    所有公开方法均为 async，内部使用 asyncio.Lock 保护共享状态，
+    避免 threading.RLock 在 asyncio 事件循环中阻塞线程。
+    """
 
     def __init__(self) -> None:
-        # TODO: 将 threading.RLock() 替换为 asyncio.Lock()，并将所有使用此锁的方法改为 async。
-        # 当前 RLock 在 asyncio 事件循环中会阻塞线程，在高并发文件操作下可能导致性能下降。
-        # 需要将本类所有方法签名改为 async def，所有 with self._lock: 改为 async with self._lock:，
-        # 并更新 jsonrpc_router.py 中所有调用点添加 await。
-        # 详见：问题文档.md P1-7
-        self._lock = threading.RLock()
+        self._lock = asyncio.Lock()
         # file_id(=file_path) → WorkspaceFile
         self._files: dict[str, WorkspaceFile] = {}
         # workspace_file_id → WorkspaceFile（按 UUID 索引，用于 getLastStableContent 等）
@@ -122,9 +121,9 @@ class WorkspaceFileService:
         # snapshot_id → request_id（反向索引）
         self._snapshot_to_request: dict[str, str] = {}
 
-    def clear(self) -> None:
+    async def clear(self) -> None:
         """清除所有工作区文件状态，用于 clearAllSessions 等操作。"""
-        with self._lock:
+        async with self._lock:
             self._files.clear()
             self._files_by_id.clear()
             self._snapshots.clear()
@@ -133,21 +132,21 @@ class WorkspaceFileService:
             self._file_content_cache.clear()
             self._snapshot_to_request.clear()
 
-    def cache_file_content(self, file_path: str, content: str) -> None:
+    async def cache_file_content(self, file_path: str, content: str) -> None:
         """缓存 read_file 结果，供后续编辑工具使用。"""
-        with self._lock:
+        async with self._lock:
             if file_path and content is not None:
                 self._file_content_cache[file_path] = content
                 logger.debug("[WS-FILE] 缓存文件内容: path={} len={}", file_path, len(content))
 
-    def get_cached_content(self, file_path: str) -> str | None:
+    async def get_cached_content(self, file_path: str) -> str | None:
         """获取缓存的文件内容。"""
-        with self._lock:
+        async with self._lock:
             return self._file_content_cache.get(file_path)
 
-    def get_or_create_snapshot(self, session_id: str, request_id: str) -> SnapshotInfo:
+    async def get_or_create_snapshot(self, session_id: str, request_id: str) -> SnapshotInfo:
         """获取或创建与 request 关联的 snapshot。"""
-        with self._lock:
+        async with self._lock:
             if request_id in self._snapshots:
                 snap = self._snapshots[request_id]
                 self._current_snapshot_by_session[session_id] = snap.id
@@ -170,7 +169,7 @@ class WorkspaceFileService:
                         snapshot_id[:8], request_id[:8], idx)
             return snap
 
-    def create_or_update_file(
+    async def create_or_update_file(
         self,
         session_id: str,
         snapshot_id: str,
@@ -179,7 +178,7 @@ class WorkspaceFileService:
         tool_call_id: str = "",
     ) -> WorkspaceFile:
         """创建或更新工作区文件记录。"""
-        with self._lock:
+        async with self._lock:
             existing = self._files.get(file_id)
             if existing and existing.snapshot_id == snapshot_id:
                 # 同一 snapshot 内多次编辑同一文件：更新版本
@@ -210,14 +209,14 @@ class WorkspaceFileService:
                         ws_file.id[:8], file_id, mode, snapshot_id[:8])
             return ws_file
 
-    def set_content(
+    async def set_content(
         self,
         file_id: str,
         last_stable_content: str,
         full_content: str,
     ) -> DiffInfo:
         """设置文件的编辑前后内容，并计算 DiffInfo。"""
-        with self._lock:
+        async with self._lock:
             ws_file = self._files.get(file_id)
             if not ws_file:
                 logger.warning("[WS-FILE] set_content: 文件不存在 fileId={}", file_id)
@@ -225,15 +224,16 @@ class WorkspaceFileService:
 
             ws_file.last_stable_content = last_stable_content
             ws_file.content = full_content
+            # compute_diff_info 是纯计算，不访问共享状态，可在锁内调用
             ws_file.diff_info = self.compute_diff_info(last_stable_content, full_content)
             logger.info("[WS-FILE] 设置内容: fileId={} old_len={} new_len={} +{} -{}",
                         file_id, len(last_stable_content), len(full_content),
                         ws_file.diff_info.add, ws_file.diff_info.delete)
             return ws_file.diff_info
 
-    def update_status(self, file_id: str, status: str, message: str = "") -> WorkspaceFile | None:
+    async def update_status(self, file_id: str, status: str, message: str = "") -> WorkspaceFile | None:
         """更新文件状态。"""
-        with self._lock:
+        async with self._lock:
             ws_file = self._files.get(file_id)
             if not ws_file:
                 ws_file_by_uuid = self._files_by_id.get(file_id)
@@ -248,24 +248,24 @@ class WorkspaceFileService:
             logger.info("[WS-FILE] 状态更新: fileId={} status={}", ws_file.file_id, status)
             return ws_file
 
-    def get_file(self, file_id: str) -> WorkspaceFile | None:
+    async def get_file(self, file_id: str) -> WorkspaceFile | None:
         """按 file_id（文件路径）查找。"""
-        with self._lock:
+        async with self._lock:
             return self._files.get(file_id)
 
-    def get_file_by_id(self, ws_id: str) -> WorkspaceFile | None:
+    async def get_file_by_id(self, ws_id: str) -> WorkspaceFile | None:
         """按工作区文件 UUID 查找。"""
-        with self._lock:
+        async with self._lock:
             return self._files_by_id.get(ws_id)
 
-    def list_by_snapshot(self, snapshot_id: str) -> list[WorkspaceFile]:
+    async def list_by_snapshot(self, snapshot_id: str) -> list[WorkspaceFile]:
         """列出某个 snapshot 下的所有文件。"""
-        with self._lock:
+        async with self._lock:
             return [f for f in self._files.values() if f.snapshot_id == snapshot_id]
 
-    def operate(self, ws_id: str, op_type: str, content: str | None = None) -> bool:
+    async def operate(self, ws_id: str, op_type: str, content: str | None = None) -> bool:
         """执行 accept/reject 操作。"""
-        with self._lock:
+        async with self._lock:
             ws_file = self._files_by_id.get(ws_id)
             if not ws_file:
                 logger.warning("[WS-FILE] operate: 文件不存在 id={}", ws_id)
@@ -285,9 +285,9 @@ class WorkspaceFileService:
                         ws_id[:8], op_type, ws_file.status)
             return True
 
-    def update_content(self, ws_id: str, content: str | None, local_content: str | None) -> bool:
+    async def update_content(self, ws_id: str, content: str | None, local_content: str | None) -> bool:
         """更新文件内容（UpdateWorkingSpaceFileContentRequest）。"""
-        with self._lock:
+        async with self._lock:
             ws_file = self._files_by_id.get(ws_id)
             if not ws_file:
                 logger.warning("[WS-FILE] update_content: 文件不存在 id={}", ws_id)
@@ -304,21 +304,21 @@ class WorkspaceFileService:
                         ws_file.diff_info.add, ws_file.diff_info.delete)
             return True
 
-    def get_all_snapshots(self) -> list[SnapshotInfo]:
+    async def get_all_snapshots(self) -> list[SnapshotInfo]:
         """获取所有 snapshot。"""
-        with self._lock:
+        async with self._lock:
             return list(self._snapshots.values())
 
-    def list_snapshots_for_session(self, session_id: str) -> list[SnapshotInfo]:
+    async def list_snapshots_for_session(self, session_id: str) -> list[SnapshotInfo]:
         """按会话 ID 列出快照（snapshot/listBySession）。"""
-        with self._lock:
+        async with self._lock:
             if not session_id:
                 return []
             return [s for s in self._snapshots.values() if s.session_id == session_id]
 
-    def find_snapshot_by_id(self, snapshot_id: str) -> SnapshotInfo | None:
+    async def find_snapshot_by_id(self, snapshot_id: str) -> SnapshotInfo | None:
         """按快照 UUID 查找。"""
-        with self._lock:
+        async with self._lock:
             if not snapshot_id:
                 return None
             for s in self._snapshots.values():
@@ -326,9 +326,9 @@ class WorkspaceFileService:
                     return s
             return None
 
-    def set_current_snapshot(self, snapshot_id: str) -> bool:
+    async def set_current_snapshot(self, snapshot_id: str) -> bool:
         """将给定快照设为当前会话的快照（SWITCH / ACTIVATE）。"""
-        with self._lock:
+        async with self._lock:
             if not snapshot_id:
                 return False
             for s in self._snapshots.values():
@@ -338,9 +338,9 @@ class WorkspaceFileService:
                     return True
             return False
 
-    def apply_snapshot_accept_all(self, snapshot_id: str) -> int:
+    async def apply_snapshot_accept_all(self, snapshot_id: str) -> int:
         """快照下全部工作区文件标为已接受。"""
-        with self._lock:
+        async with self._lock:
             n = 0
             for f in self._files.values():
                 if f.snapshot_id != snapshot_id:
@@ -350,9 +350,9 @@ class WorkspaceFileService:
                 n += 1
             return n
 
-    def apply_snapshot_reject_all(self, snapshot_id: str) -> int:
+    async def apply_snapshot_reject_all(self, snapshot_id: str) -> int:
         """快照下全部工作区文件标为已拒绝。"""
-        with self._lock:
+        async with self._lock:
             n = 0
             for f in self._files.values():
                 if f.snapshot_id != snapshot_id:
@@ -362,14 +362,14 @@ class WorkspaceFileService:
                 n += 1
             return n
 
-    def build_sync_result(
+    async def build_sync_result(
         self,
         ws_file: WorkspaceFile,
         project_path: str,
         sync_type: str = "MODIFIED",
     ) -> dict:
         """构建 WorkspaceFileSyncResult 格式（匹配插件模型）。"""
-        with self._lock:
+        async with self._lock:
             return {
                 "type": sync_type,
                 "projectPath": project_path,
@@ -377,14 +377,14 @@ class WorkspaceFileService:
                 "workingSpaceFile": ws_file.to_wire_format(),
             }
 
-    def build_snapshot_sync_all(
+    async def build_snapshot_sync_all(
         self,
         session_id: str,
         project_path: str,
         sync_type: str = "ADD",
     ) -> dict:
         """构建 SnapshotSyncAllResult 格式。"""
-        with self._lock:
+        async with self._lock:
             snapshots = [s for s in self._snapshots.values() if s.session_id == session_id]
             current = self._current_snapshot_by_session.get(session_id) or ""
             if current:
@@ -414,7 +414,10 @@ class WorkspaceFileService:
             }
 
     def _derive_snapshot_status(self, snapshot_id: str, default_status: str | None) -> str:
-        """根据快照下文件状态推导插件可识别的快照状态。"""
+        """根据快照下文件状态推导插件可识别的快照状态。
+
+        注意：调用方必须持有 self._lock。
+        """
         files = [f for f in self._files.values() if f.snapshot_id == snapshot_id]
         status_set = {(f.status or "").upper() for f in files if f.status}
 
@@ -449,7 +452,10 @@ class WorkspaceFileService:
 
     @staticmethod
     def compute_diff_info(old_content: str, new_content: str) -> DiffInfo:
-        """计算两段内容之间的 DiffInfo（行级 + 字符级）。"""
+        """计算两段内容之间的 DiffInfo（行级 + 字符级）。
+
+        纯计算函数，不访问共享状态，可在锁内外安全调用。
+        """
         old_lines = old_content.splitlines(keepends=True) if old_content else []
         new_lines = new_content.splitlines(keepends=True) if new_content else []
 

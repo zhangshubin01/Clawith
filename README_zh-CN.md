@@ -257,25 +257,6 @@ cd clawith_mcp
 
 ---
 
-### 🔍 语义记忆（OpenViking）
-
-Clawith 集成 [OpenViking](https://github.com/OpenViking/OpenViking) 实现基于向量的语义记忆检索。智能体回复时，Clawith 会自动检索相关记忆片段并注入系统提示词。
-
-**工作原理：**
-- 智能体 `memory.md` 通过 OpenViking session/extract 管道建立索引
-- 每轮对话时，检索语义最相关的 Top-K 片段，前置注入提示词
-- 通过 `X-OpenViking-Agent` 请求头按智能体隔离作用域
-
-**配置** — 在 `.env` 中添加：
-
-```bash
-OPENVIKING_URL=http://127.0.0.1:1933
-```
-
-无需额外设置，索引和检索全自动触发。
-
----
-
 ### ⚡ 流式聊天 API
 
 通过流式接口实现实时输出：

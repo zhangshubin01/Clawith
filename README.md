@@ -279,25 +279,6 @@ cd clawith_mcp
 
 ---
 
-### 🔍 Semantic Memory (OpenViking)
-
-Clawith integrates with [OpenViking](https://github.com/OpenViking/OpenViking) for vector-based semantic memory retrieval. When an agent responds, Clawith automatically searches the agent's indexed memory for relevant context and injects it into the prompt.
-
-**How it works:**
-- Agent `memory.md` is indexed via OpenViking's session/extract pipeline
-- On each chat turn, the top-K semantically relevant snippets are retrieved and prepended to the system prompt
-- Scope is isolated per-agent via the `X-OpenViking-Agent` header
-
-**Configure** — add to `.env`:
-
-```bash
-OPENVIKING_URL=http://127.0.0.1:1933
-```
-
-No additional setup needed — indexing and retrieval happen automatically.
-
----
-
 ### ⚡ Streaming Chat API
 
 For programmatic access with real-time output, use the streaming endpoint:

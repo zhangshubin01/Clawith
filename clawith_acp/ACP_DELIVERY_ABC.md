@@ -71,6 +71,3 @@
 | 云端 WS + IDE 工具 + 权限                    | `backend/app/plugins/clawith_acp/router.py`                         |
 | `call_llm` 取消 + `stream(cancel_event)` | `backend/app/api/websocket.py`、`backend/app/services/llm_client.py` |
 | 瘦客户端                                   | `integrations/clawith-ide-acp/server.py`                            |
-
-
-OpenViking retrieval unavailable in this turn（未调用 MCP recall；以仓库内代码与 pytest 结果为准）。

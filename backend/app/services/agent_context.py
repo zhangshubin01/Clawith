@@ -7,6 +7,7 @@ workspace files and composes a comprehensive system prompt.
 import asyncio
 import uuid
 from collections import OrderedDict
+from contextvars import ContextVar
 from pathlib import Path
 
 from app.config import get_settings
@@ -14,6 +15,11 @@ from app.config import get_settings
 settings = get_settings()
 
 PERSISTENT_DATA = Path(settings.AGENT_DATA_DIR)
+
+# ─── IDE 会话标记 ContextVar ───────────────────────────────────────────────
+# 由 LSP4J router 在 _handle_chat_ask 中设置，build_agent_context 检测此标记
+# 以区分 IDE 插件模式（需项目优先）和 Web UI 模式（Agent 自主模式）。
+_is_ide_session: ContextVar[bool] = ContextVar("_is_ide_session", default=False)
 
 # ─── Context File Cache (LRU + mtime invalidation) ───────────────────────────────
 _MAX_CONTEXT_CACHE_SIZE = 100
@@ -231,9 +237,14 @@ def _build_skills_index(agent_id: uuid.UUID) -> str:
 
     lines.append("")
     lines.append("⚠️ SKILL USAGE RULES:")
-    lines.append("1. When a user request matches a skill, FIRST call `read_file` with the File path above to load the full instructions.")
-    lines.append("2. Follow the loaded instructions to complete the task.")
-    lines.append("3. Do NOT guess what the skill contains — always read it first.")
+    if _is_ide_session.get():
+        lines.append("1. Skills are reference material — work on the user's project directly first.")
+        lines.append("2. Load a skill's full instructions ONLY when you specifically need its guidance.")
+        lines.append("3. Do NOT load all skills upfront — only load those relevant to the current task.")
+    else:
+        lines.append("1. When a user request matches a skill, FIRST call `read_file` with the File path above to load the full instructions.")
+        lines.append("2. Follow the loaded instructions to complete the task.")
+        lines.append("3. Do NOT guess what the skill contains — always read it first.")
     lines.append("4. Folder-based skills may contain auxiliary files (scripts/, references/, examples/). Use `list_files` on the skill folder to discover them.")
 
     return "\n".join(lines)
@@ -491,6 +502,20 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
                 static_parts.append(f"\n## Company Information\n{company_intro}")
     except Exception:
         pass  # Don't break agent if DB is unavailable
+
+    if _is_ide_session.get():
+        static_parts.append("""
+
+## ⚡ IDE 连接模式
+
+你当前通过 IDE 插件与用户的本地项目交互。项目根路径已在 Role 段中标注。
+- **项目文件操作优先**：收到任务后，直接使用 IDE 工具（read_file、replace_text_by_path 等）操作项目文件。
+- **不要在任务开始时加载 Agent 内部文件**：memory/、skills/、workspace/ 是你的内部资源。先处理项目任务，按需查阅内部文件。
+- **修改项目文件时**必须使用 Role 段中标注的项目根路径或绝对路径，不要使用 workspace/ 前缀。
+- **🔴 禁止使用 execute_code 加载索引脚本**：不要运行 Python 脚本去加载项目索引器。IDE 工具直接访问项目文件，无需索引。
+- **🔴 禁止使用 search_codebase**：这是 Agent 内部索引搜索工具，对 IDE 项目无效。请用 search_file（文件名匹配）、grep_code（代码内容搜索）、list_dir（目录浏览）替代。
+
+""")
 
     static_parts.append("""
 

@@ -81,13 +81,13 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "读取文件内容。支持两种路径：绝对路径（如 /Users/xxx/project/src/Main.java）读取 IDE 项目文件；相对路径（如 soul.md, memory/memory.md, workspace/xxx）读取 Agent 工作空间文件。",
+            "description": "读取文件内容。支持两种路径：绝对路径（如 /Users/xxx/project/src/Main.java）读取 IDE 项目文件；相对路径（如 soul.md, memory/memory.md）读取 Agent 自身文件。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "文件路径。绝对路径（/开头）读取 IDE 项目文件；相对路径读取 Agent 工作空间文件（如 soul.md, focus.md, memory/memory.md, workspace/xxx, skills/xxx）",
+                        "description": "文件路径。绝对路径（/开头）读取 IDE 项目文件；相对路径仅用于 Agent 自身文件（如 soul.md, focus.md, memory/memory.md, skills/xxx）",
                     },
                     "offset": {
                         "type": "integer",
@@ -221,13 +221,13 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "list_dir",
-            "description": "列出指定目录的内容（文件和子目录）。支持两种路径：绝对路径（如 /Users/xxx/project/src/）列出 IDE 项目目录；相对路径（如 workspace/、空字符串表示根目录）列出 Agent 工作空间目录。",
+            "description": "列出指定目录的内容（文件和子目录）。支持两种路径：绝对路径（如 /Users/xxx/project/src/）列出 IDE 项目目录；相对路径或空字符串列出 Agent 自身目录。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "relative_workspace_path": {
                         "type": "string",
-                        "description": "目录路径。绝对路径（/开头）列出 IDE 项目目录；相对路径或空字符串列出 Agent 工作空间目录",
+                        "description": "目录路径。绝对路径（/开头）列出 IDE 项目目录；相对路径或空字符串列出 Agent 自身目录",
                     },
                 },
                 "required": ["relative_workspace_path"],
@@ -476,42 +476,71 @@ _LSP4J_FILE_PATH_TOOLS = frozenset({
     "save_file",
 })
 
+# Agent 内部文件 — 始终在本地后端执行，不路由到 IDE
+_AGENT_INTERNAL_FILE_NAMES = frozenset({
+    "soul.md", "focus.md", "tasks.json", "memory.md",
+})
+
+# Agent 内部目录前缀 — 始终在本地后端执行
+# ⚠️ "workspace/" 不在此列表：LLM 常用 workspace/xxx 路径操作项目文件，
+# 此时应路由到 IDE 以便文件变更直接体现在用户项目中。
+# Agent 内部文件（soul.md 等）由 _AGENT_INTERNAL_FILE_NAMES 单独保护。
+_AGENT_INTERNAL_DIR_PREFIXES = ("memory/", "skills/", "enterprise_info/")
+
 
 def _extract_file_path(tool_name: str, args: dict) -> str | None:
     """从工具参数中提取文件路径。
 
     LLM 可能使用不同的参数名调用同一工具：
-      - read_file: 基础工具用 path，IDE 工具用 file_path
-      - replace_text_by_path / create_file_with_text / delete_file_by_path: filePath (camelCase)
+      - filePath  (camelCase) — 插件原生协议
+      - file_path (snake_case) — ACP 基础工具
+      - path                  — LLM 常用，最终兜底
     """
-    if tool_name == "read_file":
-        return args.get("file_path") or args.get("path")
-    # 编辑工具定义用 filePath (camelCase)，但 LLM 可能传 file_path (snake_case)
-    return args.get("filePath") or args.get("file_path")
+    return args.get("filePath") or args.get("file_path") or args.get("path")
+
+
+def _is_agent_internal_path(file_path: str) -> bool:
+    """判断路径是否属于 Agent 内部文件（应在本地执行，不路由到 IDE）。"""
+    basename = file_path.split("/")[-1]
+    if basename in _AGENT_INTERNAL_FILE_NAMES:
+        return True
+    for prefix in _AGENT_INTERNAL_DIR_PREFIXES:
+        if file_path.startswith(prefix):
+            return True
+    return False
 
 
 def _should_route_to_ide(tool_name: str, args: dict) -> bool:
     """判断文件工具调用是否应路由到 IDE 插件。
 
-    规则：非文件工具始终路由；文件工具仅当路径为绝对路径时才路由。
-    相对路径（如 focus.md、skills/.../SKILL.md）是 agent 工作空间文件，
-    应由本地工具执行，不应发送到 IDE 插件。
+    规则：
+    1. 非文件工具始终路由
+    2. 绝对路径（/ 开头）→ IDE
+    3. Agent 内部文件（soul.md, memory.md, workspace/xxx, skills/xxx）→ 本地
+    4. 其余相对路径 → IDE（由 invoke_tool_on_ide 解析为绝对路径）
     """
     if tool_name not in _LSP4J_FILE_PATH_TOOLS:
         return True
 
     file_path = _extract_file_path(tool_name, args)
     if not file_path:
-        # 无路径参数（如 read_file 不带参数），不路由到 IDE
         logger.debug("[LSP4J-TOOL] {} 未提供文件路径，回退到本地执行", tool_name)
         return False
 
-    # 绝对路径 → IDE；相对路径 → 本地
-    is_absolute = file_path.startswith("/")
-    if not is_absolute:
-        logger.info("[LSP4J-TOOL] {} 路径为相对路径，回退到本地执行: path={}",
+    # 绝对路径 → IDE
+    if file_path.startswith("/"):
+        return True
+
+    # Agent 内部文件 → 本地
+    if _is_agent_internal_path(file_path):
+        logger.info("[LSP4J-TOOL] {} Agent 内部路径，本地执行: path={}",
                     tool_name, file_path)
-    return is_absolute
+        return False
+
+    # 其余相对路径 → IDE（由 invoke_tool_on_ide 拼接 project_path）
+    logger.info("[LSP4J-TOOL] {} 相对路径路由到 IDE: path={}",
+                tool_name, file_path)
+    return True
 
 
 # ──────────────────────────────────────────────
@@ -639,6 +668,16 @@ def install_lsp4j_tool_hooks() -> None:
     # 替换 agent_tools 中的引用
     agent_tools.execute_tool = _lsp4j_aware_execute_tool
     agent_tools.get_agent_tools_for_llm = _lsp4j_aware_get_tools
+
+    # ★ 关键修复：caller.py 使用了 from import 本地引用，模块加载时已绑定旧函数。
+    # agent_tools 模块属性替换不影响 caller.py 的本地引用，需显式修补。
+    try:
+        import app.services.llm.caller as _caller_mod
+        _caller_mod.execute_tool = _lsp4j_aware_execute_tool  # type: ignore[attr-defined]
+        _caller_mod.get_agent_tools_for_llm = _lsp4j_aware_get_tools  # type: ignore[attr-defined]
+        logger.info("[LSP4J-TOOL] patched caller module local references")
+    except Exception as _patch_e:
+        logger.warning("[LSP4J-TOOL] failed to patch caller module: {}", _patch_e)
 
     _installed = True
     logger.info("[LSP4J-TOOL] tool hooks installed (wrapping ACP hooks)")
