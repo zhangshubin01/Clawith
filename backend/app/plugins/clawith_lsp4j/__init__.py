@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from loguru import logger
 from fastapi import FastAPI
 from app.plugins.base import ClawithPlugin
 
@@ -58,11 +59,14 @@ class ClawithLsp4jPlugin(ClawithPlugin):
         工具钩子必须在 register() 中安装（晚于 ACP 的模块级导入安装），
         以保证获取到 ACP 已安装的 _custom_execute_tool / _custom_get_tools 引用。
         """
+        logger.info("[LSP4J-INIT] 插件注册中: version={}", self.version)
+
         # 安装 LSP4J 工具钩子（扩展 ACP 的执行路径和注册路径）
         install_lsp4j_tool_hooks()
 
         # 注册 WebSocket 路由
         app.include_router(router, prefix="/api/plugins/clawith-lsp4j", tags=["lsp4j"])
+        logger.info("[LSP4J-INIT] 插件注册完成")
 
 
 plugin = ClawithLsp4jPlugin()

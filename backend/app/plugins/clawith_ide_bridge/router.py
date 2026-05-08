@@ -1,4 +1,15 @@
-"""Router for Clawith IDE Bridge Plugin."""
+"""Clawith IDE Bridge 路由模块 — WebSocket + REST 端点。
+
+提供 IDEA 插件与 Clawith 后端之间的双向通信桥梁：
+- /api/ide-bridge/ws        WebSocket 双向实时通信
+- /api/ide-bridge/status     健康检查
+- /api/ide-bridge/agents     当前用户可访问的智能体列表
+
+WebSocket 消息协议：
+- tool_call_result: IDE 端工具执行结果回传
+- ping/pong: 连接保活
+- ack: 其他消息确认
+"""
 
 from fastapi import APIRouter, WebSocket, Depends
 from app.plugins.clawith_ide_bridge.tool_handler import resolve_ide_tool_result, cleanup_pending_calls
@@ -11,21 +22,30 @@ from loguru import logger
 
 router = APIRouter(prefix="/api/ide-bridge", tags=["ide-bridge"])
 
-# Store active IDE connections: { session_id: WebSocket }
-_active_ide_connections = {}
-# Store active chat connections for tool forwarding: { agent_id_str: [ (websocket, conv_id) ] }
-_active_chat_connections = {}
+# 活跃 IDE 连接池: { session_id: WebSocket }
+_active_ide_connections: dict[str, WebSocket] = {}
+# 活跃 chat 连接池（用于工具转发）: { agent_id_str: [ (websocket, conv_id) ] }
+_active_chat_connections: dict[str, list[tuple[WebSocket, str]]] = {}
 
-def register_chat_connection(agent_id_str: str, websocket: WebSocket, conv_id: str):
+def register_chat_connection(agent_id_str: str, websocket: WebSocket, conv_id: str) -> None:
+    """注册 chat WebSocket 连接，用于工具调用结果转发。
+    
+    当后端 LLM 触发工具调用时，通过此连接将工具请求发送到 IDE 插件执行。
+    """
     if agent_id_str not in _active_chat_connections:
         _active_chat_connections[agent_id_str] = []
     _active_chat_connections[agent_id_str].append((websocket, conv_id))
+    logger.info("[IDE-Bridge] chat 连接已注册: agent_id={} conv_id={} total={}",
+                agent_id_str[:8], conv_id[:8], len(_active_chat_connections[agent_id_str]))
 
-def unregister_chat_connection(agent_id_str: str, websocket: WebSocket):
+def unregister_chat_connection(agent_id_str: str, websocket: WebSocket) -> None:
+    """注销 chat WebSocket 连接。"""
     if agent_id_str in _active_chat_connections:
         _active_chat_connections[agent_id_str] = [
             (ws, cid) for ws, cid in _active_chat_connections[agent_id_str] if ws != websocket
         ]
+        logger.info("[IDE-Bridge] chat 连接已注销: agent_id={} remaining={}",
+                    agent_id_str[:8], len(_active_chat_connections[agent_id_str]))
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

@@ -79,6 +79,21 @@ _LSP4J_FILE_EDIT_TOOLS = frozenset({
     "save_file",
 })
 
+# 高频搜索类工具：在同一请求内会被连续调用很多次。
+# 为避免插件 UI（EDT）被中间态事件风暴淹没，对其 PENDING/RUNNING 做降噪处理。
+_UI_HEAVY_SEARCH_TOOLS = frozenset({
+    "search_codebase",
+    "search_file",
+    "list_dir",
+    "grep_code",
+    "search_symbol",
+})
+
+# 高频工具步骤回调节流窗口（秒）。
+# 同一 request 内重复的 (step,status,description) 在窗口内仅发送一次，
+# 避免 process_step_callback 事件风暴压垮插件 EDT。
+_PROCESS_STEP_THROTTLE_WINDOW_SEC = 0.35
+
 # ──────────────────────────────────────────────
 # 本地搜索工具配置（Android 项目优化）
 # ──────────────────────────────────────────────
@@ -624,6 +639,8 @@ class JSONRPCRouter:
 
         # 连接关闭标记（防止断开后继续发送消息）
         self._closed: bool = False
+        # WebSocket 连接状态标志（主动标记，cleanup 时立即设为 False，比 _closed 更早阻止发送）
+        self._ws_connected: bool = True
 
         # 图片上传缓存: request_id → (image_url, base64_data, timestamp)
         self._image_cache: dict[str, tuple[str, str, float]] = {}
@@ -642,6 +659,10 @@ class JSONRPCRouter:
 
         # 工作区文件服务（diff 卡片支持）
         self._ws_file_service = WorkspaceFileService()
+
+        # process_step_callback 去重节流缓存：
+        # request_id -> {"sig": (step, status, description), "ts": monotonic_ts}
+        self._process_step_last_emit: dict[str, dict[str, Any]] = {}
 
     # ──────────────────────────────────────────
     # 主路由入口
@@ -667,8 +688,9 @@ class JSONRPCRouter:
         """分发单条 JSON-RPC 消息。"""
         # 1. 判断是否为 JSON-RPC 响应（client 响应 server 的请求如 tool/invoke）
         if "id" in msg and "method" not in msg and ("result" in msg or "error" in msg):
-            logger.info("[LSP4J ←] response: id={} has_result={} has_error={}",
-                         msg.get("id"), "result" in msg, "error" in msg)
+            error_detail = msg.get("error", {}).get("message", "") if "error" in msg else ""
+            logger.info("[LSP4J ←] response: id={} has_result={} has_error={} error_detail={}",
+                         msg.get("id"), "result" in msg, "error" in msg, error_detail)
             await self._handle_response(msg)
             return
 
@@ -1139,10 +1161,18 @@ class JSONRPCRouter:
                         # ★ 使用 LLM 侧名称 + snake_case 参数
                         # ToolPanel 存储 sync 中的 toolName 用于后续 FINISHED 时判断是否为文件工具，
                         # 同时 parameters["file_path"] 用于 constructFileItem() 渲染文件链接。
-                        await self._send_tool_call_sync(
-                            session_id, request_id, tool_call_id,
-                            "PENDING", tool_name=original_name, parameters=params,
-                        )
+                        if tool_name in _UI_HEAVY_SEARCH_TOOLS:
+                            logger.info(
+                                "[LSP4J-TRACE] 跳过 PENDING（高频搜索降噪）: req={} call={} tool={}",
+                                request_id[:8],
+                                tool_call_id[:8],
+                                tool_name,
+                            )
+                        else:
+                            await self._send_tool_call_sync(
+                                session_id, request_id, tool_call_id,
+                                "PENDING", tool_name=original_name, parameters=params,
+                            )
 
                     await self._send_process_step_callback(
                         session_id, request_id,
@@ -2194,10 +2224,18 @@ class JSONRPCRouter:
                 arguments["run_mode"] = "autoRun"
 
         if queue_matched:
-            await self._send_tool_call_sync(
-                self._session_id, request_id, tool_call_id,
-                "RUNNING", tool_name=original_name, parameters=sync_parameters,
-            )
+            if tool_name in _UI_HEAVY_SEARCH_TOOLS:
+                logger.info(
+                    "[LSP4J-TRACE] 跳过 RUNNING（高频搜索降噪）: req={} call={} tool={}",
+                    request_id[:8],
+                    tool_call_id[:8],
+                    tool_name,
+                )
+            else:
+                await self._send_tool_call_sync(
+                    self._session_id, request_id, tool_call_id,
+                    "RUNNING", tool_name=original_name, parameters=sync_parameters,
+                )
         else:
             # 未匹配到 markdown 注册的 ToolPanel 时，禁止把兜底 UUID 发给前端事件流，
             # 否则 ChatToolEventProcessor 会持续等待不存在的 panel 并阻塞后续事件。
@@ -2755,6 +2793,21 @@ class JSONRPCRouter:
         status 取值：doing / done / error / manual_confirm
         step 取值参考 ChatStepEnum：step_start, step_end, step_refine_query 等
         """
+        # 高频步骤节流：同一 request 短时间内重复相同步骤签名时跳过
+        now = time.monotonic()
+        signature = (step, status, description)
+        last_emit = self._process_step_last_emit.get(request_id)
+        if last_emit:
+            last_sig = last_emit.get("sig")
+            last_ts = float(last_emit.get("ts") or 0.0)
+            if last_sig == signature and (now - last_ts) < _PROCESS_STEP_THROTTLE_WINDOW_SEC:
+                logger.info(
+                    "[LSP4J-TRACE] process_step 节流跳过: req={} step={} status={} delta={:.3f}s",
+                    request_id[:8], step, status, now - last_ts,
+                )
+                return
+        self._process_step_last_emit[request_id] = {"sig": signature, "ts": now}
+
         # 步骤推送日志
         logger.info("[LSP4J] process_step_callback: requestId={} step={} status={} desc={}", request_id, step, status, description[:80])
         await self._send_client_request("chat/process_step_callback", {
@@ -2769,8 +2822,8 @@ class JSONRPCRouter:
 
     async def _send_message(self, message: dict[str, Any]) -> None:
         """发送 LSP Base Protocol 格式的消息到 WebSocket。"""
-        # 连接已关闭，不再发送
-        if self._closed:
+        # 连接已断开或不活跃，不再发送（_ws_connected 用于快速判断，_closed 用于兜底）
+        if not self._ws_connected or self._closed:
             return
         try:
             # 协议追踪日志：记录发出的每条响应/通知/请求
@@ -2891,6 +2944,7 @@ class JSONRPCRouter:
         3. resolve 所有 pending response Futures
         """
         self._closed = True
+        self._ws_connected = False  # 主动标记连接已断开，阻止后续 _send_message 调用
         tool_count = len(self._pending_tools)
         resp_count = len(self._pending_responses)
         # 连接断开清理

@@ -50,4 +50,4 @@ else
 fi
 
 echo "[entrypoint] Step 2: Starting uvicorn..."
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --ws-ping-interval 30 --ws-ping-timeout 60
