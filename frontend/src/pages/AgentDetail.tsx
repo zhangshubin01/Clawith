@@ -3016,14 +3016,11 @@ function AgentDetailInner() {
         staleTime: 5 * 60 * 1000,
     });
 
-    // Chat-side picker. Source-of-truth is agent.primary_model_id; the
-    // picker mirrors it bidirectionally:
-    //   - User picks model in chat → handleModelChange PATCHes the agent.
-    //   - Agent's saved default changes elsewhere (settings page, tenant
-    //     default migration) → useEffect below pulls the new value in.
-    // Earlier draft only synced on first mount (`overrideModelId === null`)
-    // which left the chat picker stuck on a stale value when the agent
-    // default was updated by another path.
+    // Chat-side picker. The saved agent model is still the default source,
+    // but ordinary collaborators must be able to pick a per-chat override
+    // without needing permission to edit agent settings. Users with manage
+    // access keep the previous behavior: picking here also updates the saved
+    // agent default.
     const [overrideModelId, setOverrideModelId] = useState<string | null>(null);
     useEffect(() => {
         if (agent?.primary_model_id && agent.primary_model_id !== overrideModelId) {
@@ -3035,13 +3032,14 @@ function AgentDetailInner() {
     const handleModelChange = useCallback(async (newModelId: string | null) => {
         setOverrideModelId(newModelId);
         if (!id || !newModelId || newModelId === agent?.primary_model_id) return;
+        if ((agent as any)?.access_level !== 'manage') return;
         try {
             await agentApi.update(id, { primary_model_id: newModelId });
             queryClient.invalidateQueries({ queryKey: ['agent', id] });
         } catch {
             setOverrideModelId(agent?.primary_model_id || null);
         }
-    }, [id, agent?.primary_model_id]);
+    }, [id, agent?.primary_model_id, (agent as any)?.access_level, queryClient]);
 
     // Track onboarding kickoff per (agent, session) so the agent only greets
     // once per session. The agent opens the conversation itself — no visible
