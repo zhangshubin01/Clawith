@@ -34,14 +34,14 @@ BUILTIN_TOOLS = [
     {
         "name": "read_file",
         "display_name": "Read File",
-        "description": "Read file contents from the workspace. Can read soul.md, focus.md, memory/memory.md, skills/, and enterprise_info/. Use offset and limit for reading large files in chunks.",
+        "description": "Read file contents from the workspace. Can read soul.md, memory/memory.md, skills/, and enterprise_info/. Focus is stored in system tools, not focus.md. Use offset and limit for reading large files in chunks.",
         "category": "file",
         "icon": "📄",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "File path, e.g.: soul.md, focus.md, memory/memory.md"},
+                "path": {"type": "string", "description": "File path, e.g.: soul.md, memory/memory.md"},
                 "offset": {"type": "integer", "description": "Starting line number (0-indexed, default 0). Use with limit for pagination."},
                 "limit": {"type": "integer", "description": "Maximum number of lines to read (default 2000). Use with offset for pagination."},
             },
@@ -53,6 +53,59 @@ BUILTIN_TOOLS = [
                 {"key": "max_file_size_kb", "label": "Max file size (KB)", "type": "number", "default": 500},
             ]
         },
+    },
+    {
+        "name": "list_focus_items",
+        "display_name": "List Focus Items",
+        "description": "List structured Focus items from the system database.",
+        "category": "file",
+        "icon": "◎",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "include_completed": {"type": "boolean", "description": "Whether to include completed Focus items. Default true."},
+            },
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "upsert_focus_item",
+        "display_name": "Upsert Focus Item",
+        "description": "Create or update a structured Focus item in the system database.",
+        "category": "file",
+        "icon": "◎",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "Stable short identifier, snake_case preferred."},
+                "description": {"type": "string", "description": "Human-readable description of what is being tracked."},
+                "kind": {"type": "string", "enum": ["normal", "system"], "description": "normal or system"},
+                "source": {"type": "string", "description": "Optional origin label, e.g. user, trigger, a2a, okr."},
+            },
+            "required": ["description"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "complete_focus_item",
+        "display_name": "Complete Focus Item",
+        "description": "Mark a structured Focus item completed.",
+        "category": "file",
+        "icon": "◎",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "Focus item identifier to complete."},
+            },
+            "required": ["key"],
+        },
+        "config": {},
+        "config_schema": {},
     },
     {
         "name": "write_file",
@@ -288,7 +341,7 @@ BUILTIN_TOOLS = [
     {
         "name": "set_trigger",
         "display_name": "Set Trigger",
-        "description": "Set a new trigger to wake yourself up at a specific time or condition. Trigger types: 'cron' (recurring schedule), 'once' (fire once at a time), 'interval' (every N minutes), 'poll' (HTTP monitoring), 'on_message' (when another agent or human user replies).",
+        "description": "Set a new trigger to wake yourself up at a specific time or condition. Every trigger is attached to a focus item; if focus_ref is omitted, the system creates a focus item from the reason. Trigger types: 'cron' (recurring schedule), 'once' (fire once at a time), 'interval' (every N minutes), 'poll' (HTTP monitoring), 'on_message' (when another agent or human user replies).",
         "category": "aware",
         "icon": "⚡",
         "is_default": True,
@@ -299,7 +352,7 @@ BUILTIN_TOOLS = [
                 "type": {"type": "string", "enum": ["cron", "once", "interval", "poll", "on_message"], "description": "Trigger type"},
                 "config": {"type": "object", "description": "Type-specific config. cron: {\"expr\": \"0 9 * * *\"}. once: {\"at\": \"2026-03-10T09:00:00+08:00\"}. interval: {\"minutes\": 30}. poll: {\"url\": \"...\", \"json_path\": \"$.status\"}. on_message: {\"from_agent_name\": \"Morty\"} or {\"from_user_name\": \"张三\"}"},
                 "reason": {"type": "string", "description": "What to do when this trigger fires"},
-                "focus_ref": {"type": "string", "description": "Optional: which focus item this relates to"},
+                "focus_ref": {"type": "string", "description": "Optional: which focus item this relates to. If omitted, one is created automatically."},
             },
             "required": ["name", "type", "config", "reason"],
         },
@@ -1116,7 +1169,7 @@ BUILTIN_TOOLS = [
             },
             "required": ["query"],
         },
-        "config": {"smithery_api_key": "", "modelscope_api_token": ""},
+        "config": {},
         "config_schema": {
             "fields": [
                 {
@@ -1151,7 +1204,7 @@ BUILTIN_TOOLS = [
             },
             "required": ["server_id"],
         },
-        "config": {"smithery_api_key": "", "modelscope_api_token": ""},
+        "config": {},
         "config_schema": {
             "fields": [
                 {
@@ -1437,17 +1490,14 @@ BUILTIN_TOOLS = [
         "config_schema": {},
     },
     {
-        # collect_okr_progress — OKR Agent uses this during heartbeat to batch-read
-        # all team members' focus.md files and sync KR values to the database.
+        # collect_okr_progress — legacy OKR Agent heartbeat collection path.
         # This replaces the need to contact each member individually.
         "name": "collect_okr_progress",
         "display_name": "Collect OKR Progress",
         "description": (
-            "Scan all team members' focus.md files and sync their reported KR progress "
-            "to the OKR database. For each Agent workspace that has a focus.md, the tool "
-            "reads current KR values and creates progress log entries. Returns a summary "
-            "of how many KRs were updated. Use this during your heartbeat cycle before "
-            "generating a report to ensure you have the latest data."
+            "Legacy batch sync for reported KR progress. Prefer direct OKR tools such as "
+            "get_my_okr and update_kr_progress for new work. Returns a summary of how many "
+            "KRs were updated."
         ),
         "category": "okr",
         "icon": "📊",

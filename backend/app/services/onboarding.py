@@ -120,7 +120,7 @@ You MUST persist the onboarding result:
 responsibilities, and boundaries.
 3. Write `memory/user_profile.md` with how to address and collaborate with \
 {user_name}.
-4. Write or update `focus.md` with the first focus item or next concrete task.
+4. Use `upsert_focus_item` to record the first focus item or next concrete task.
 
 After writing, reply with a short confirmation:
 - who you now understand yourself to be;
@@ -172,7 +172,7 @@ with sensible defaults.
 You MUST persist the calibration:
 1. Write `memory/onboarding.md` with the confirmed role, user-specific \
 adjustments, communication preferences, boundaries, and first focus.
-2. Write or update `focus.md` with the first concrete task or a clear \
+2. Use `upsert_focus_item` to record the first concrete task or a clear \
 "ready to start" focus if no task was given.
 3. Only edit `soul.md` if the user explicitly changed your role, style, or \
 boundaries; in that case read it first and preserve the template's core role.

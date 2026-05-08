@@ -33,7 +33,7 @@ interface Props {
     onDone?: () => void;
 }
 
-type Visibility = 'company' | 'only_me';
+type Visibility = 'company' | 'only_me' | 'custom';
 
 export default function PostHireSettingsModal({ template, open, onClose, onDone }: Props) {
     const { t, i18n } = useTranslation();
@@ -108,13 +108,12 @@ export default function PostHireSettingsModal({ template, open, onClose, onDone 
                 primary_model_id: modelId || undefined,
                 permission_access_level: 'manage',
             };
-            if (visibility === 'company') {
-                payload.permission_scope_type = 'company';
-                payload.permission_scope_ids = [];
-            } else {
-                payload.permission_scope_type = 'user';
-                payload.permission_scope_ids = [];
-            }
+            payload.permission_scope_type = visibility === 'company'
+                ? 'company'
+                : visibility === 'custom'
+                    ? 'custom'
+                    : 'user';
+            payload.permission_scope_ids = [];
             return agentApi.create(payload).then((agent: any) => ({ agent, navigateAfter }));
         },
         onSuccess: ({ agent, navigateAfter }) => {
@@ -185,6 +184,12 @@ export default function PostHireSettingsModal({ template, open, onClose, onDone 
                                 onClick={() => !busy && setVisibility('only_me')}
                                 title={t('postHire.visibilityOnlyMeTitle', isChinese ? '仅自己' : 'Only me')}
                                 hint={t('postHire.visibilityOnlyMeHint', isChinese ? '只有你能使用，可以之后在设置里分享' : 'Only you can use it; you can share later in Settings')}
+                            />
+                            <RadioRow
+                                selected={visibility === 'custom'}
+                                onClick={() => !busy && setVisibility('custom')}
+                                title={t('postHire.visibilityCustomTitle', isChinese ? '指定成员' : 'Custom')}
+                                hint={t('postHire.visibilityCustomHint', isChinese ? '先仅创建者可管理，之后在设置里指定可使用的平台用户' : 'Start with creator access, then choose platform users in Settings')}
                             />
                         </div>
                     </section>

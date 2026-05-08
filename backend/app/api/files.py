@@ -19,6 +19,7 @@ from app.core.security import get_current_user
 from app.database import get_db
 from app.models.user import User
 from app.models.workspace import WorkspaceFileRevision
+from app.services.focus_service import is_focus_file_path
 from app.services.workspace_collaboration import (
     acquire_edit_lock,
     content_hash,
@@ -126,6 +127,8 @@ async def list_files(
     for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name)):
         if entry.name == '.gitkeep':
             continue
+        if not path and entry.name.lower() in {"focus.md", "agenda.md"}:
+            continue
         if not path and entry.name == "enterprise_info":
             continue
         rel = str(entry.resolve().relative_to(base_abs))
@@ -152,6 +155,11 @@ async def read_file(
 ):
     """Read the content of a file."""
     await check_agent_access(db, current_user, agent_id)
+    if is_focus_file_path(path):
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Focus is stored in the system database. Use the Focus API.",
+        )
     target, _, _ = _visible_path(agent_id, path, current_user.tenant_id)
 
     if not target.exists() or not target.is_file():
@@ -435,6 +443,11 @@ async def write_file(
 ):
     """Write content to a file (create or overwrite)."""
     await check_agent_access(db, current_user, agent_id)
+    if is_focus_file_path(path):
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Focus is stored in the system database. Use the Focus API.",
+        )
     if path.startswith("enterprise_info"):
         if current_user.role not in ("platform_admin", "org_admin"):
             raise HTTPException(status_code=403, detail="Only admins can edit enterprise knowledge base")
@@ -474,6 +487,8 @@ async def lock_file(
 ):
     """Acquire or refresh a short-lived human editing lock for a file."""
     await check_agent_access(db, current_user, agent_id)
+    if is_focus_file_path(data.path):
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Focus is stored in the system database.")
     lock = await acquire_edit_lock(
         db,
         agent_id=agent_id,
@@ -508,6 +523,8 @@ async def get_file_revisions(
 ):
     """List version history for the currently opened Workspace file."""
     await check_agent_access(db, current_user, agent_id)
+    if is_focus_file_path(path):
+        return []
     if path.startswith("enterprise_info"):
         return []
     revisions = await list_revisions(db, agent_id=agent_id, path=path)
@@ -577,6 +594,11 @@ async def delete_file(
 ):
     """Delete a file."""
     await check_agent_access(db, current_user, agent_id)
+    if is_focus_file_path(path):
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Focus is stored in the system database. Use the Focus API.",
+        )
     if path.startswith("enterprise_info") and current_user.role not in ("platform_admin", "org_admin"):
         raise HTTPException(status_code=403, detail="Only admins can delete enterprise knowledge base files")
     if path.strip("/") == "enterprise_info":
