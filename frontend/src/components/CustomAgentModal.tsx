@@ -3,14 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
+    IconAlertTriangle,
     IconCheck,
     IconCpu,
     IconPlugConnected,
+    IconSettings,
     IconSparkles,
     IconUser,
     IconX,
 } from '@tabler/icons-react';
-import { agentApi, enterpriseApi, tenantApi } from '../services/api';
+import { agentApi, authApi, enterpriseApi, tenantApi } from '../services/api';
 import { useDialog } from './Dialog/DialogProvider';
 import LinearCopyButton from './LinearCopyButton';
 
@@ -57,6 +59,13 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
         staleTime: 5 * 60 * 1000,
     });
 
+    const { data: currentUser } = useQuery({
+        queryKey: ['auth', 'me'],
+        queryFn: authApi.me,
+        enabled: open,
+        staleTime: 5 * 60 * 1000,
+    });
+
     const { data: models = [] } = useQuery({
         queryKey: ['llm-models'],
         queryFn: enterpriseApi.llmModels,
@@ -67,6 +76,23 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
         () => (models as Model[]).filter((m) => m.enabled !== false),
         [models],
     );
+
+    const canManageModels = currentUser?.role === 'platform_admin'
+        || currentUser?.role === 'org_admin'
+        || !!currentUser?.is_platform_admin;
+    const nativeHasNoModel = mode === 'native' && enabledModels.length === 0;
+    const disabledByNoModel = nativeHasNoModel
+        ? t(
+            'customAgentModal.noModelButtonHint',
+            isChinese
+                ? '需要先在公司设置中启用至少一个模型，才能创建平台托管成员。'
+                : 'Enable at least one model in company settings before creating a platform-hosted teammate.',
+        )
+        : undefined;
+    const openModelSettings = () => {
+        (onDone || onClose)();
+        navigate('/enterprise#llm');
+    };
 
     useEffect(() => {
         if (!open) return;
@@ -108,7 +134,17 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
             if (!trimmedName) {
                 throw new Error(t('customAgentModal.nameRequired', isChinese ? '请填写名称' : 'Name is required'));
             }
-            if (mode === 'native' && enabledModels.length > 0 && !modelId) {
+            if (mode === 'native' && enabledModels.length === 0) {
+                throw new Error(
+                    t(
+                        'customAgentModal.noModelError',
+                        isChinese
+                            ? '公司还没有启用可用模型，请先配置模型或切换为外部 Agent。'
+                            : 'No company model is enabled yet. Configure a model or switch to External agent.',
+                    ),
+                );
+            }
+            if (mode === 'native' && !modelId) {
                 throw new Error(t('customAgentModal.modelRequired', isChinese ? '请选择模型' : 'Choose a model'));
             }
 
@@ -298,9 +334,13 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
                                 {mode === 'native' && (
                                     <Field label={t('customAgentModal.model', isChinese ? '首选模型' : 'Preferred model')} required>
                                         {enabledModels.length === 0 ? (
-                                            <div style={{ fontSize: '12.5px', color: 'var(--text-tertiary)' }}>
-                                                {t('customAgentModal.noModels', isChinese ? '暂无可用模型，请管理员先添加。' : 'No enabled models. Ask an admin to add one.')}
-                                            </div>
+                                            <NoModelsNotice
+                                                isChinese={isChinese}
+                                                canManageModels={canManageModels}
+                                                onConfigure={openModelSettings}
+                                                t={t}
+                                                allowExternalHint
+                                            />
                                         ) : (
                                             <select
                                                 className="form-input"
@@ -330,14 +370,16 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
                                 <>
                                     <button
                                         className="btn btn-secondary"
-                                        disabled={busy || enabledModels.length === 0}
+                                        disabled={busy || nativeHasNoModel}
+                                        title={disabledByNoModel}
                                         onClick={() => createAgent.mutate({ chatNow: false })}
                                     >
                                         {t('customAgentModal.createOnly', isChinese ? '仅创建' : 'Just create')}
                                     </button>
                                     <button
                                         className="btn btn-primary"
-                                        disabled={busy || enabledModels.length === 0}
+                                        disabled={busy || nativeHasNoModel}
+                                        title={disabledByNoModel}
                                         onClick={() => createAgent.mutate({ chatNow: true })}
                                     >
                                         {busy ? t('customAgentModal.creating', isChinese ? '创建中...' : 'Creating...') : t('customAgentModal.chatNow', isChinese ? '立即对话' : 'Chat now')}
@@ -355,6 +397,79 @@ export default function CustomAgentModal({ open, initialMode = 'native', onClose
                         </div>
                     </>
                 )}
+            </div>
+        </div>
+    );
+}
+
+function NoModelsNotice({
+    isChinese,
+    canManageModels,
+    onConfigure,
+    t,
+    allowExternalHint,
+}: {
+    isChinese: boolean;
+    canManageModels: boolean;
+    onConfigure: () => void;
+    t: (key: string, fallback: string) => string;
+    allowExternalHint?: boolean;
+}) {
+    return (
+        <div
+            role="status"
+            style={{
+                display: 'flex',
+                gap: '10px',
+                alignItems: 'flex-start',
+                padding: '10px 12px',
+                borderRadius: '9px',
+                border: '1px solid rgba(217,119,6,0.28)',
+                background: 'rgba(245,158,11,0.08)',
+            }}
+        >
+            <IconAlertTriangle size={17} stroke={1.8} style={{ marginTop: '1px', color: '#b45309', flexShrink: 0 }} />
+            <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: '13px', fontWeight: 650, color: 'var(--text-primary)' }}>
+                    {t('customAgentModal.noModelsTitle', isChinese ? '还没有可用模型' : 'No enabled model yet')}
+                </div>
+                <div style={{ marginTop: '3px', fontSize: '12px', lineHeight: 1.5, color: 'var(--text-secondary)' }}>
+                    {canManageModels
+                        ? t(
+                            'customAgentModal.noModelsAdminHint',
+                            isChinese
+                                ? '启用至少一个公司模型后，才能创建平台托管的数字员工。'
+                                : 'Enable at least one company model before creating a platform-hosted teammate.',
+                        )
+                        : t(
+                            'customAgentModal.noModelsMemberHint',
+                            isChinese
+                                ? '请联系公司管理员先启用模型。'
+                                : 'Ask a company admin to enable a model first.',
+                        )}
+                    {!canManageModels && allowExternalHint ? (
+                        <span>
+                            {' '}
+                            {t(
+                                'customAgentModal.noModelsExternalHint',
+                                isChinese
+                                    ? '如果你只是接入外部运行的 Agent，可以切换到“外部 Agent”。'
+                                    : 'If you are linking an externally running agent, switch to External agent.',
+                            )}
+                        </span>
+                    ) : null}
+                </div>
+                {canManageModels ? (
+                    <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={onConfigure}
+                        style={{ marginTop: '9px', height: '30px', padding: '0 10px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                    >
+                        <IconSettings size={14} stroke={1.7} />
+                        {t('customAgentModal.configureModels', isChinese ? '配置模型' : 'Configure models')}
+                    </button>
+                ) : null}
             </div>
         </div>
     );

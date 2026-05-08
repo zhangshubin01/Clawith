@@ -142,7 +142,8 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
 
     Priority:
     1. agent_tools.config (per-agent override)
-    2. tools.config (company/global config)
+    2. tenant_settings tool_config:<tool_name> for builtin company config
+    3. tools.config (tenant-specific/admin tool config or non-secret defaults)
 
     Both configs are decrypted using the tool's config_schema for
     schema-aware field detection (e.g. smithery_api_key with type=password).
@@ -154,20 +155,32 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
         return cached
 
     from app.models.tool import Tool, AgentTool
+    from app.models.agent import Agent as AgentModel
+    from app.services.tool_config import get_tenant_tool_config
 
     async with async_session() as db:
+        agent_tenant_id = None
+        if agent_id:
+            tenant_r = await db.execute(select(AgentModel.tenant_id).where(AgentModel.id == agent_id))
+            agent_tenant_id = tenant_r.scalar_one_or_none()
+
         # 1. Try per-agent + global config together
         if agent_id:
             result = await db.execute(
-                select(AgentTool.config, Tool.config, Tool.config_schema)
+                select(AgentTool.config, Tool.config, Tool.config_schema, Tool.source, Tool.name)
                 .join(Tool, AgentTool.tool_id == Tool.id)
                 .where(AgentTool.agent_id == agent_id, Tool.name == tool_name)
             )
             row = result.first()
             if row:
-                agent_config, global_config, config_schema = row
+                agent_config, global_config, config_schema, tool_source, db_tool_name = row
+                base_config = global_config or {}
+                tenant_config = {}
+                if tool_source == "builtin":
+                    base_config = {}
+                    tenant_config = await get_tenant_tool_config(db, agent_tenant_id, db_tool_name, config_schema)
                 # Merge: agent overrides global
-                merged = {**(global_config or {}), **(agent_config or {})}
+                merged = {**base_config, **tenant_config, **(agent_config or {})}
                 if merged:
                     # Decrypt with schema awareness
                     merged = _decrypt_sensitive_fields(merged, config_schema)
@@ -178,9 +191,17 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
         # 2. Fallback to global config only
         result = await db.execute(select(Tool).where(Tool.name == tool_name))
         tool = result.scalar_one_or_none()
-        if tool and tool.config:
+        if tool:
+            tenant_config = {}
+            if tool.source == "builtin":
+                tenant_config = await get_tenant_tool_config(db, agent_tenant_id, tool.name, tool.config_schema)
+            base_config = {} if tool.source == "builtin" else (tool.config or {})
+            merged = {**base_config, **tenant_config}
+        else:
+            merged = {}
+        if tool and merged:
             # Decrypt with schema awareness
-            decrypted = _decrypt_sensitive_fields(tool.config, tool.config_schema)
+            decrypted = _decrypt_sensitive_fields(merged, tool.config_schema)
             logger.info(f"[ToolConfig] DB global config for {tool_name}")
             _set_cached_tool_config(agent_id, tool_name, decrypted)
             return decrypted
@@ -915,6 +936,31 @@ AGENT_TOOLS = [
         "function": {
             "name": "generate_image_google",
             "description": "Generate an image via Google Gemini Image (Nano Banana) or Vertex AI. Save to workspace.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Detailed image description in English.",
+                    },
+                    "size": {
+                        "type": "string",
+                        "description": "Image size. Default: 1024x1024.",
+                    },
+                    "save_path": {
+                        "type": "string",
+                        "description": "Workspace path to save the image.",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image_custom",
+            "description": "Generate an image via the company-configured custom image API. Save to workspace.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1727,6 +1773,81 @@ AGENT_TOOLS = [
                     "timeout": {"type": "integer", "description": "超时时间（秒，默认 30）", "default": 30},
                 },
                 "required": ["language", "code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agentbay_code_write_file",
+            "description": "[ENV: Code Sandbox] Write a text file inside the AgentBay Code Sandbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "remote_path": {
+                        "type": "string",
+                        "description": "Absolute path inside the code sandbox, e.g. /home/wuying/main.py",
+                    },
+                    "content": {"type": "string", "description": "File content to write."},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["overwrite", "append"],
+                        "description": "Write mode. Default: overwrite.",
+                        "default": "overwrite",
+                    },
+                },
+                "required": ["remote_path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agentbay_code_read_file",
+            "description": "[ENV: Code Sandbox] Read a text file from the AgentBay Code Sandbox.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "remote_path": {
+                        "type": "string",
+                        "description": "Absolute path inside the code sandbox, e.g. /home/wuying/main.py",
+                    },
+                },
+                "required": ["remote_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agentbay_code_edit_file",
+            "description": "[ENV: Code Sandbox] Edit a text file inside the AgentBay Code Sandbox by replacing exact text.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "remote_path": {
+                        "type": "string",
+                        "description": "Absolute path inside the code sandbox, e.g. /home/wuying/main.py",
+                    },
+                    "edits": {
+                        "type": "array",
+                        "description": "List of exact text replacements.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "oldText": {"type": "string", "description": "Exact text to replace."},
+                                "newText": {"type": "string", "description": "Replacement text."},
+                            },
+                            "required": ["oldText", "newText"],
+                        },
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Preview changes without applying them. Default: false.",
+                        "default": False,
+                    },
+                },
+                "required": ["remote_path", "edits"],
             },
         },
     },
@@ -2709,8 +2830,10 @@ async def execute_tool(
             result = await _generate_image(agent_id, ws, arguments, "openai")
         elif tool_name == "generate_image_google":
             result = await _generate_image(agent_id, ws, arguments, "google")
+        elif tool_name == "generate_image_custom":
+            result = await _generate_image(agent_id, ws, arguments, "custom")
         elif tool_name == "discover_resources":
-            result = await _discover_resources(arguments)
+            result = await _discover_resources(agent_id, arguments)
         elif tool_name == "import_mcp_server":
             result = await _import_mcp_server(agent_id, arguments)
         # ── Feishu Bitable Tools ──
@@ -2781,6 +2904,12 @@ async def execute_tool(
             result = await _agentbay_browser_type(agent_id, ws, arguments)
         elif tool_name == "agentbay_code_execute":
             result = await _agentbay_code_execute(agent_id, ws, arguments)
+        elif tool_name == "agentbay_code_write_file":
+            result = await _agentbay_code_write_file(agent_id, ws, arguments)
+        elif tool_name == "agentbay_code_read_file":
+            result = await _agentbay_code_read_file(agent_id, ws, arguments)
+        elif tool_name == "agentbay_code_edit_file":
+            result = await _agentbay_code_edit_file(agent_id, ws, arguments)
         elif tool_name == "agentbay_browser_extract":
             result = await _agentbay_browser_extract(agent_id, ws, arguments)
         elif tool_name == "agentbay_browser_observe":
@@ -3984,6 +4113,18 @@ async def _smithery_auto_recover(api_key: str, mcp_url: str, namespace: str, con
                 f"💡 Please re-authorize by telling me: `import_mcp_server(server_id=\"...\", reauthorize=true)`"
             )
 
+        if conn_result.get("auth_url"):
+            # A newly-created Smithery connection is not usable until the user
+            # completes OAuth. Keep the existing stored connection in place so
+            # a still-valid old connection is not overwritten by an unauthenticated
+            # replacement. The user-facing auth URL is enough for recovery.
+            return (
+                f"🔐 MCP tool connection expired. Re-authorization needed.\n\n"
+                f"Please visit the following URL to re-authorize:\n"
+                f"{conn_result['auth_url']}\n\n"
+                f"After completing authorization, the tools will work again automatically."
+            )
+
         # Update stored config with new connection info
         new_config = {
             "smithery_namespace": conn_result["namespace"],
@@ -4010,14 +4151,6 @@ async def _smithery_auto_recover(api_key: str, mcp_url: str, namespace: str, con
                     await db.commit()
             except Exception:
                 pass  # Non-critical — connection may still work
-
-        if conn_result.get("auth_url"):
-            return (
-                f"🔐 MCP tool connection expired. Re-authorization needed.\n\n"
-                f"Please visit the following URL to re-authorize:\n"
-                f"{conn_result['auth_url']}\n\n"
-                f"After completing authorization, the tools will work again automatically."
-            )
 
         # Connection re-created without OAuth — should work now
         return None  # Signal caller to retry (but we don't retry here to avoid loops)
@@ -7324,7 +7457,7 @@ async def _execute_code_legacy(ws: Path, arguments: dict) -> str:
 
 # ─── Resource Discovery Executors ───────────────────────────────
 
-async def _discover_resources(arguments: dict) -> str:
+async def _discover_resources(agent_id: uuid.UUID, arguments: dict) -> str:
     """Search Smithery registry for MCP servers."""
     query = arguments.get("query", "")
     if not query:
@@ -7332,7 +7465,7 @@ async def _discover_resources(arguments: dict) -> str:
     max_results = min(arguments.get("max_results", 5), 10)
 
     from app.services.resource_discovery import search_smithery
-    return await search_smithery(query, max_results)
+    return await search_smithery(query, max_results, agent_id=agent_id)
 
 
 async def _import_mcp_server(agent_id: uuid.UUID, arguments: dict) -> str:
@@ -7790,6 +7923,7 @@ async def _generate_image(agent_id: uuid.UUID, ws: Path, arguments: dict, provid
     - siliconflow: OpenAI-compatible API (FLUX models, China-friendly)
     - openai: Native OpenAI API (GPT Image)
     - google: Google Gemini Native Image API (Nano Banana)
+    - custom: Configurable HTTP API for gateways such as TokenRouter/OpenRouter
 
     The tool config is resolved via the standard _get_tool_config() hierarchy:
     global tool config (admin-set) -> per-agent tool config override.
@@ -7853,8 +7987,21 @@ async def _generate_image(agent_id: uuid.UUID, ws: Path, arguments: dict, provid
                 base_url or "https://generativelanguage.googleapis.com/v1beta",
                 prompt, size,
             )
+        elif provider == "custom":
+            image_bytes = await _generate_image_custom_api(
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                endpoint_path=config.get("endpoint_path") or "/chat/completions",
+                request_body_template_json=config.get("request_body_template_json") or "",
+                response_image_path=config.get("response_image_path") or "choices.0.message.images.0.image_url.url",
+                extra_headers_json=config.get("extra_headers_json") or "",
+                timeout_seconds=config.get("timeout_seconds") or 120,
+                prompt=prompt,
+                size=size,
+            )
         else:
-            return f"❌ Unknown image generation provider: {provider}. Supported: siliconflow, openai, google"
+            return f"❌ Unknown image generation provider: {provider}. Supported: siliconflow, openai, google, custom"
 
         if not image_bytes:
             return "❌ Image generation returned empty result. Please try a different prompt."
@@ -7979,6 +8126,267 @@ async def _generate_image_openai(
         raise ValueError(f"No b64_json or URL in OpenAI response: {data}")
 
 
+def _json_path_get(data: Any, path: str) -> Any:
+    """Read a simple dotted JSON path, with numeric list indexes."""
+    if not path:
+        return None
+
+    current: Any = data
+    for raw_part in path.split("."):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if isinstance(current, list):
+            if not part.isdigit():
+                return None
+            index = int(part)
+            if index >= len(current):
+                return None
+            current = current[index]
+        elif isinstance(current, dict):
+            if part not in current:
+                return None
+            current = current[part]
+        else:
+            return None
+    return current
+
+
+def _render_json_template(template_json: str, variables: dict[str, str]) -> dict:
+    """Parse JSON first, then replace placeholders inside string values.
+
+    This avoids corrupting JSON when a prompt contains quotes, newlines, or
+    other characters that need escaping.
+    """
+    template_text = template_json.strip()
+    parse_errors: list[str] = []
+
+    candidates = [template_text]
+    normalized_quotes = (
+        template_text
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+    )
+    if normalized_quotes != template_text:
+        candidates.append(normalized_quotes)
+
+    # Users often paste a JSON example copied from a string literal, leaving
+    # escaped quotes like { \"model\": \"{model}\" }. Treat that as JSON too.
+    for text in list(candidates):
+        if '\\"' in text:
+            candidates.append(text.replace('\\"', '"'))
+
+    template = None
+    for text in candidates:
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, str):
+                parsed = json.loads(parsed)
+            template = parsed
+            break
+        except Exception as e:
+            parse_errors.append(str(e))
+
+    if template is None:
+        detail = parse_errors[-1] if parse_errors else "unknown parse error"
+        raise ValueError(detail)
+
+    def render(value: Any) -> Any:
+        if isinstance(value, str):
+            rendered = value
+            for key, replacement in variables.items():
+                rendered = rendered.replace("{" + key + "}", replacement)
+            return rendered
+        if isinstance(value, list):
+            return [render(item) for item in value]
+        if isinstance(value, dict):
+            return {key: render(item) for key, item in value.items()}
+        return value
+
+    rendered = render(template)
+    if not isinstance(rendered, dict):
+        raise ValueError("Request body template must be a JSON object.")
+    return rendered
+
+
+def _json_structure_preview(data: Any, depth: int = 0) -> Any:
+    if depth > 4:
+        return "..."
+    if isinstance(data, dict):
+        return {k: _json_structure_preview(v, depth + 1) for k, v in list(data.items())[:12]}
+    if isinstance(data, list):
+        preview = [_json_structure_preview(item, depth + 1) for item in data[:2]]
+        if len(data) > 2:
+            preview.append(f"... {len(data)} items total")
+        return preview
+    if isinstance(data, str):
+        if data.startswith("data:image"):
+            return f"data:image... len={len(data)}"
+        if len(data) > 160:
+            return data[:160] + "..."
+    return data
+
+
+def _find_first_image_reference(data: Any) -> Any:
+    common_paths = [
+        "choices.0.message.images.0.image_url.url",
+        "choices.0.message.images.0.image_url",
+        "data.0.b64_json",
+        "data.0.url",
+        "output.0.content.0.image_url",
+        "output.0.content.0.image_base64",
+    ]
+    for path in common_paths:
+        value = _json_path_get(data, path)
+        if value:
+            return value
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, dict):
+            for key in ("url", "b64_json", "image_url", "image_base64"):
+                nested = value.get(key)
+                if isinstance(nested, str) and nested:
+                    return nested
+                if isinstance(nested, dict):
+                    found = walk(nested)
+                    if found:
+                        return found
+            for nested in value.values():
+                found = walk(nested)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = walk(item)
+                if found:
+                    return found
+        elif isinstance(value, str) and (
+            value.startswith("data:image")
+            or value.startswith("http://")
+            or value.startswith("https://")
+        ):
+            return value
+        return None
+
+    return walk(data)
+
+
+async def _custom_image_reference_to_bytes(image_ref: Any, client: Any) -> bytes:
+    import base64
+
+    if isinstance(image_ref, dict):
+        image_ref = image_ref.get("url") or image_ref.get("b64_json") or image_ref.get("image_base64")
+
+    if not isinstance(image_ref, str) or not image_ref:
+        raise ValueError("Response image path did not resolve to a URL, data URL, or base64 string.")
+
+    if image_ref.startswith("data:image"):
+        _, _, encoded = image_ref.partition(",")
+        if not encoded:
+            raise ValueError("Image data URL did not contain base64 payload.")
+        return base64.b64decode(encoded)
+
+    if image_ref.startswith("http://") or image_ref.startswith("https://"):
+        img_resp = await client.get(image_ref, timeout=60)
+        img_resp.raise_for_status()
+        return img_resp.content
+
+    return base64.b64decode(image_ref)
+
+
+async def _generate_image_custom_api(
+    api_key: str,
+    model: str,
+    base_url: str,
+    endpoint_path: str,
+    request_body_template_json: str,
+    response_image_path: str,
+    extra_headers_json: str,
+    timeout_seconds: int | str,
+    prompt: str,
+    size: str,
+) -> bytes:
+    """Generate image via a configurable gateway API.
+
+    The default request/response shape supports TokenRouter and OpenRouter:
+    POST /chat/completions with image/text modalities, image returned in
+    choices.0.message.images.0.image_url.url as a data URL.
+    """
+    import httpx
+
+    if not base_url:
+        raise ValueError("Custom image API base_url is not configured.")
+    if not model:
+        raise ValueError("Custom image API model is not configured.")
+
+    timeout = int(timeout_seconds or 120)
+    endpoint = endpoint_path or "/chat/completions"
+    if endpoint.startswith("http://") or endpoint.startswith("https://"):
+        url = endpoint
+    else:
+        url = f"{base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+
+    variables = {"prompt": prompt, "size": size, "model": model}
+    if request_body_template_json.strip():
+        try:
+            payload = _render_json_template(request_body_template_json, variables)
+        except Exception as e:
+            raise ValueError(f"Invalid request_body_template_json: {e}")
+    else:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "modalities": ["image", "text"],
+            "stream": False,
+        }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if extra_headers_json.strip():
+        try:
+            extra_headers = json.loads(extra_headers_json)
+        except Exception as e:
+            raise ValueError(f"Invalid extra_headers_json: {e}")
+        if not isinstance(extra_headers, dict):
+            raise ValueError("extra_headers_json must be a JSON object.")
+        headers.update({str(k): str(v) for k, v in extra_headers.items() if v is not None})
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        if resp.status_code < 200 or resp.status_code >= 300:
+            try:
+                err_body = resp.json()
+                err_msg = (
+                    err_body.get("error", {}).get("message")
+                    if isinstance(err_body.get("error"), dict)
+                    else err_body.get("message")
+                ) or resp.text[:300]
+            except Exception:
+                err_msg = resp.text[:300]
+            raise ValueError(f"Custom image API error ({resp.status_code}): {err_msg}")
+
+        try:
+            data = resp.json()
+        except Exception:
+            raise ValueError("Custom image API returned non-JSON response.")
+
+        image_ref = _json_path_get(data, response_image_path) if response_image_path else None
+        if not image_ref:
+            image_ref = _find_first_image_reference(data)
+        if not image_ref:
+            preview = json.dumps(_json_structure_preview(data), ensure_ascii=False)
+            raise ValueError(
+                "No image found in custom image API response. "
+                f"Check response_image_path. Response structure: {preview[:800]}"
+            )
+
+        return await _custom_image_reference_to_bytes(image_ref, client)
+
+
 async def _generate_image_google(
     api_key: str, model: str, base_url: str, prompt: str, size: str
 ) -> bytes:
@@ -7991,7 +8399,7 @@ async def _generate_image_google(
     import httpx
     import base64
 
-    url = f"{base_url.rstrip('/')}/models/{model}:generateContent?key={api_key}"
+    url = f"{base_url.rstrip('/')}/models/{model}:generateContent"
 
     # Convert WxH size to aspect ratio for Gemini API
     # Supported: 1:1, 3:4, 4:3, 9:16, 16:9
@@ -8011,7 +8419,6 @@ async def _generate_image_google(
         "generationConfig": {
             "responseModalities": ["IMAGE"],
             "imageConfig": {
-                "numberOfImages": 1,
                 "aspectRatio": aspect_ratio,
             },
         },
@@ -8019,7 +8426,12 @@ async def _generate_image_google(
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
-            url, json=payload, headers={"Content-Type": "application/json"}
+            url,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key,
+            },
         )
         if resp.status_code != 200:
             try:
@@ -10500,6 +10912,119 @@ async def _agentbay_code_execute(agent_id: Optional[uuid.UUID], ws: Path, argume
     except Exception as e:
         logger.exception(f"[AgentBay] Code execution failed for agent {agent_id}")
         return f"❌ 代码执行失败: {str(e)[:200]}"
+
+
+async def _agentbay_code_write_file(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """Write a text file in the AgentBay Code Sandbox."""
+    if not agent_id:
+        return "AgentBay tools require agent context"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    remote_path = arguments.get("remote_path") or arguments.get("path") or ""
+    content = arguments.get("content")
+    mode = arguments.get("mode", "overwrite")
+
+    if not remote_path.strip():
+        return "Missing required argument 'remote_path'"
+    if content is None:
+        return "Missing required argument 'content'"
+    if mode not in ("overwrite", "append"):
+        return "Invalid mode. Use 'overwrite' or 'append'."
+
+    try:
+        _session_id = arguments.pop("_session_id", "")
+        client = await get_agentbay_client_for_agent(agent_id, "code", session_id=_session_id)
+        result = await asyncio.to_thread(
+            client._session.file_system.write_file,
+            remote_path,
+            str(content),
+            mode,
+        )
+        if result.success:
+            byte_count = len(str(content).encode("utf-8"))
+            return f"File written in AgentBay Code Sandbox: {remote_path} ({byte_count} bytes, mode={mode})"
+        return f"Write failed: {result.error_message}"
+    except RuntimeError as e:
+        return f"{str(e)}. Please configure AgentBay in Agent settings."
+    except Exception as e:
+        logger.exception(f"[AgentBay] Code write file failed for agent {agent_id}")
+        return f"Write file failed: {str(e)[:200]}"
+
+
+async def _agentbay_code_read_file(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """Read a text file from the AgentBay Code Sandbox."""
+    if not agent_id:
+        return "AgentBay tools require agent context"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    remote_path = arguments.get("remote_path") or arguments.get("path") or ""
+    if not remote_path.strip():
+        return "Missing required argument 'remote_path'"
+
+    try:
+        _session_id = arguments.pop("_session_id", "")
+        client = await get_agentbay_client_for_agent(agent_id, "code", session_id=_session_id)
+        result = await asyncio.to_thread(
+            client._session.file_system.read_file,
+            remote_path,
+        )
+        if result.success:
+            content = getattr(result, "content", "") or ""
+            return f"File read from AgentBay Code Sandbox: {remote_path}\n\n{content[:12000]}"
+        return f"Read failed: {result.error_message}"
+    except RuntimeError as e:
+        return f"{str(e)}. Please configure AgentBay in Agent settings."
+    except Exception as e:
+        logger.exception(f"[AgentBay] Code read file failed for agent {agent_id}")
+        return f"Read file failed: {str(e)[:200]}"
+
+
+async def _agentbay_code_edit_file(agent_id: Optional[uuid.UUID], ws: Path, arguments: dict) -> str:
+    """Edit a text file in the AgentBay Code Sandbox."""
+    if not agent_id:
+        return "AgentBay tools require agent context"
+
+    from app.services.agentbay_client import get_agentbay_client_for_agent
+
+    remote_path = arguments.get("remote_path") or arguments.get("path") or ""
+    edits = arguments.get("edits")
+    dry_run = bool(arguments.get("dry_run", False))
+
+    if not remote_path.strip():
+        return "Missing required argument 'remote_path'"
+    if not isinstance(edits, list) or not edits:
+        return "Missing required argument 'edits'"
+
+    normalized_edits = []
+    for edit in edits:
+        if not isinstance(edit, dict):
+            return "Each edit must be an object with oldText and newText."
+        old_text = edit.get("oldText")
+        new_text = edit.get("newText")
+        if old_text is None or new_text is None:
+            return "Each edit must include oldText and newText."
+        normalized_edits.append({"oldText": str(old_text), "newText": str(new_text)})
+
+    try:
+        _session_id = arguments.pop("_session_id", "")
+        client = await get_agentbay_client_for_agent(agent_id, "code", session_id=_session_id)
+        result = await asyncio.to_thread(
+            client._session.file_system.edit_file,
+            remote_path,
+            normalized_edits,
+            dry_run,
+        )
+        if result.success:
+            action = "Previewed edits for" if dry_run else "Edited"
+            return f"{action} AgentBay Code Sandbox file: {remote_path} ({len(normalized_edits)} replacement(s))"
+        return f"Edit failed: {result.error_message}"
+    except RuntimeError as e:
+        return f"{str(e)}. Please configure AgentBay in Agent settings."
+    except Exception as e:
+        logger.exception(f"[AgentBay] Code edit file failed for agent {agent_id}")
+        return f"Edit file failed: {str(e)[:200]}"
 
 
 async def _handle_email_tool(tool_name: str, agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
