@@ -3960,6 +3960,18 @@ async def _smithery_auto_recover(api_key: str, mcp_url: str, namespace: str, con
                 f"💡 Please re-authorize by telling me: `import_mcp_server(server_id=\"...\", reauthorize=true)`"
             )
 
+        if conn_result.get("auth_url"):
+            # A newly-created Smithery connection is not usable until the user
+            # completes OAuth. Keep the existing stored connection in place so
+            # a still-valid old connection is not overwritten by an unauthenticated
+            # replacement. The user-facing auth URL is enough for recovery.
+            return (
+                f"🔐 MCP tool connection expired. Re-authorization needed.\n\n"
+                f"Please visit the following URL to re-authorize:\n"
+                f"{conn_result['auth_url']}\n\n"
+                f"After completing authorization, the tools will work again automatically."
+            )
+
         # Update stored config with new connection info
         new_config = {
             "smithery_namespace": conn_result["namespace"],
@@ -3986,14 +3998,6 @@ async def _smithery_auto_recover(api_key: str, mcp_url: str, namespace: str, con
                     await db.commit()
             except Exception:
                 pass  # Non-critical — connection may still work
-
-        if conn_result.get("auth_url"):
-            return (
-                f"🔐 MCP tool connection expired. Re-authorization needed.\n\n"
-                f"Please visit the following URL to re-authorize:\n"
-                f"{conn_result['auth_url']}\n\n"
-                f"After completing authorization, the tools will work again automatically."
-            )
 
         # Connection re-created without OAuth — should work now
         return None  # Signal caller to retry (but we don't retry here to avoid loops)
