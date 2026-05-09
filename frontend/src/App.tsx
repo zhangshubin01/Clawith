@@ -17,6 +17,7 @@ import Messages from './pages/Messages';
 import EnterpriseSettings from './pages/EnterpriseSettings';
 import InvitationCodes from './pages/InvitationCodes';
 import AdminCompanies from './pages/AdminCompanies';
+import OAuthCallback from './pages/OAuthCallback';
 import SSOEntry from './pages/SSOEntry';
 import OKR from './pages/OKR';
 
@@ -272,6 +273,7 @@ export default function App() {
                 <Route path="/forgot-password" element={<ForgotPassword />} />
                 <Route path="/reset-password" element={<ResetPassword />} />
                 <Route path="/verify-email" element={<VerifyEmail />} />
+                <Route path="/oauth/callback/:provider" element={<OAuthCallback />} />
                 <Route path="/sso/entry" element={<SSOEntry />} />
                 <Route path="/setup-company" element={<CompanySetup />} />
                 <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
