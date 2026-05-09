@@ -700,10 +700,10 @@ select:focus {
 
 .tenant-switcher-popover {
   position: fixed;
-  top: 82px;
+  top: calc(82px + var(--notification-bar-height));
   left: var(--space-4);
   width: 304px;
-  max-height: min(520px, calc(100vh - 96px));
+  max-height: min(520px, calc(100vh - 96px - var(--notification-bar-height)));
   overflow: hidden;
   z-index: 10020;
   padding: 10px;
@@ -1316,11 +1316,11 @@ select:focus {
 
 .sidebar-agent-drawer {
   position: fixed;
-  top: 10px;
+  top: calc(10px + var(--notification-bar-height));
   left: calc(var(--sidebar-width-collapsed) + 8px);
   z-index: 9400;
   width: 278px;
-  height: calc(100vh - 20px);
+  height: calc(100vh - 20px - var(--notification-bar-height));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1929,7 +1929,7 @@ select:focus {
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: var(--space-6);
   position: sticky;
-  top: 0;
+  top: var(--notification-bar-height);
   background: var(--bg-primary);
   z-index: 5;
   padding-top: var(--space-2);
