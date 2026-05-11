@@ -59,6 +59,13 @@ from app.services.workspace_collaboration import (
 from app.core.permissions import evaluate_agent_relationship_status, evaluate_human_relationship_status
 from app.services.access_relationships import ensure_access_granted_platform_relationships
 from app.config import get_settings
+from app.services.llm.finish import (
+    FINISH_PROTOCOL_REMINDER,
+    FINISH_TOOL_DEFINITION,
+    FINISH_TOOL_NAME,
+    find_finish_call,
+    parse_tool_arguments,
+)
 
 
 _settings = get_settings()
@@ -213,6 +220,7 @@ channel_feishu_sender_open_id: ContextVar = ContextVar('channel_feishu_sender_op
 # ─── Tool Definitions (OpenAI function-calling format) ──────────
 
 AGENT_TOOLS = [
+    FINISH_TOOL_DEFINITION,
     {
         "type": "function",
         "function": {
@@ -1901,6 +1909,7 @@ AGENT_TOOLS = [
 # to avoid sending duplicate tool definitions to the LLM.
 _ALWAYS_INCLUDE_CORE = {
     "complete_focus_item",
+    FINISH_TOOL_NAME,
     "list_focus_items",
     "send_channel_file",
     "send_file_to_agent",
@@ -2480,6 +2489,9 @@ async def execute_tool(
         .replace("\ufeff", "")
         .strip()
     )
+    if tool_name == FINISH_TOOL_NAME:
+        content = arguments.get("content", "")
+        return content if isinstance(content, str) else str(content)
 
     _agent_tenant_id = await _get_agent_tenant_id(agent_id)
 
@@ -6819,18 +6831,27 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                             reasoning_content=response.reasoning_content,
                         ))
 
+                        finish_call = find_finish_call(response.tool_calls)
+                        if finish_call:
+                            if finish_call.valid:
+                                target_reply = finish_call.content
+                                break
+                            full_msgs.append(LLMMessage(
+                                role="tool",
+                                tool_call_id=finish_call.call_id,
+                                content=finish_call.error or "`finish` was invalid.",
+                            ))
+                            continue
+
                         # Execute each tool call
                         for tc in response.tool_calls:
                             fn = tc.get("function", {})
                             tool_name = fn.get("name", "")
                             raw_args = fn.get("arguments", "{}")
-                            if isinstance(raw_args, dict):
-                                tool_args = raw_args
-                            else:
-                                try:
-                                    tool_args = json.loads(raw_args) if raw_args else {}
-                                except Exception:
-                                    tool_args = {}
+                            try:
+                                tool_args = parse_tool_arguments(raw_args)
+                            except Exception:
+                                tool_args = {}
 
                             tool_result = await execute_tool(tool_name, tool_args, target.id, owner_id)
 
@@ -6871,9 +6892,9 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                             ))
                         continue  # Next LLM round
 
-                    # No tool calls — this is the final text response
-                    target_reply = response.content or ""
-                    break
+                    if response.content:
+                        full_msgs.append(LLMMessage(role="assistant", content=response.content))
+                    full_msgs.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
             finally:
                 await llm_client.close()
 

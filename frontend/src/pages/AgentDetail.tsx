@@ -4134,13 +4134,18 @@ function AgentDetailInner() {
                 queryClient.invalidateQueries({ queryKey: ['agents'] });
             } else if (d.type === 'error' || d.type === 'quota_exceeded') {
                 const msg = d.content || d.detail || d.message || 'Request denied';
+                const isNoModelError = msg.includes('no LLM model') || msg.includes('No model');
+                if (isNoModelError) {
+                    reconnectDisabledRef.current[key] = true;
+                    return;
+                }
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
                     const warningText = `Warning: ${msg}`;
                     if (last && last.role === 'assistant' && last.content === warningText) return prev;
                     return [...prev, parseChatMsg({ role: 'assistant', content: warningText })];
                 });
-                if (msg.includes('expired') || msg.includes('Setup failed') || msg.includes('no LLM model') || msg.includes('No model')) {
+                if (msg.includes('expired') || msg.includes('Setup failed')) {
                     reconnectDisabledRef.current[key] = true;
                     if (msg.includes('expired')) setAgentExpired(true);
                 }
@@ -4561,6 +4566,7 @@ function AgentDetailInner() {
 
     const sendChatMsg = () => {
         if (!id || !activeSession?.id) return;
+        if (showNoModelState) return;
         const activeRuntimeKey = buildSessionRuntimeKey(id, String(activeSession.id));
         const activeSocket = wsMapRef.current[activeRuntimeKey];
         if (!chatInput.trim() && attachedFiles.length === 0) return;
@@ -4893,7 +4899,7 @@ function AgentDetailInner() {
         enabled: !!id && activeTab === 'settings',
     });
 
-    const { data: llmModels = [] } = useQuery({
+    const { data: llmModels = [], isLoading: llmModelsLoading } = useQuery({
         queryKey: ['llm-models'],
         queryFn: () => enterpriseApi.llmModels(),
         enabled: activeTab === 'settings' || activeTab === 'status' || activeTab === 'chat',
@@ -5010,6 +5016,27 @@ function AgentDetailInner() {
         try { return new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return d; }
     };
     const primaryModel = llmModels.find((m: any) => m.id === agent.primary_model_id);
+    const enabledModelCount = (llmModels as any[]).filter((m: any) => m.enabled).length;
+    const agentModelReady = !!agent.primary_model_id && (llmModels as any[]).some((m: any) => m.id === agent.primary_model_id && m.enabled);
+    const showNoModelState = !llmModelsLoading && (agent as any).agent_type !== 'openclaw' && (!agent.primary_model_id || enabledModelCount === 0 || !agentModelReady);
+    const canConfigureModels = currentUser?.role === 'platform_admin' || currentUser?.role === 'org_admin' || !!(currentUser as any)?.is_platform_admin;
+    const renderNoModelGuide = (variant: 'empty' | 'floating' = 'empty') => (
+        <div className={`chat-no-model-state${variant === 'floating' ? ' chat-no-model-state--floating' : ''}`}>
+            <div className="chat-no-model-state__icon"><IconAlertTriangle size={20} stroke={1.8} /></div>
+            <div className="chat-no-model-state__title">{t('agent.chat.noModelTitle', 'No company model configured')}</div>
+            <div className="chat-no-model-state__text">
+                {canConfigureModels
+                    ? t('agent.chat.noModelAdmin', 'Configure a company model before chatting with this assistant.')
+                    : t('agent.chat.noModelMember', 'This company has not configured a model yet. Please contact an administrator.')}
+            </div>
+            {canConfigureModels && (
+                <button className="btn btn-primary" onClick={() => navigate('/enterprise#llm')}>
+                    <IconSettings size={15} stroke={1.75} />
+                    {t('agent.chat.goModelSettings', 'Go to model management')}
+                </button>
+            )}
+        </div>
+    );
     const modelLabel = primaryModel ? (primaryModel.label || primaryModel.model) : '—';
     const modelProvider = primaryModel ? primaryModel.provider : '—';
     const todayParts = formatTokensParts(agent.tokens_used_today || 0);
@@ -7114,6 +7141,7 @@ function AgentDetailInner() {
                                                 <div className="drop-zone-overlay__text">{t('agent.upload.dropToAttach', 'Drop files to attach (max 10)')}</div>
                                             </div>
                                         )}
+                                        {showNoModelState && renderNoModelGuide('floating')}
                                         <div
                                             ref={chatContainerRef}
                                             onScroll={handleChatScroll}
@@ -7122,7 +7150,7 @@ function AgentDetailInner() {
                                             onTouchMoveCapture={handleChatTouchMoveCapture}
                                             style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}
                                         >
-                                            {chatMessages.length === 0 && (
+                                            {chatMessages.length === 0 && !showNoModelState && (
                                                 <div className="chat-empty-state">
                                                     <div className="chat-empty-state__title">{activeSession?.title || t('agent.chat.startChat')}</div>
                                                     <div className="chat-empty-state__subtitle">{t('agent.chat.startConversation', { name: agent.name })}</div>
@@ -7130,6 +7158,12 @@ function AgentDetailInner() {
                                                 </div>
                                             )}
                                             {(() => {
+                                                const visibleChatMessages = showNoModelState
+                                                    ? chatMessages.filter((msg: any) => {
+                                                        const content = String(msg?.content || msg?.message || '');
+                                                        return !(msg?.role === 'assistant' && (content.includes('no LLM model') || content.includes('No model')));
+                                                    })
+                                                    : chatMessages;
                                                 // ── Grouping Algorithm (lookahead-based) ──
                                                 //
                                                 // Goal: merge all "analysis" steps (thinking + tool calls +
@@ -7152,14 +7186,14 @@ function AgentDetailInner() {
                                                 //   Pass 2: build GroupedEntry[] based on classifications.
 
                                                 // Pass 1: mark each index as 'analysis' or 'final'
-                                                const msgClass: ('analysis' | 'final')[] = new Array(chatMessages.length).fill('final');
+                                                const msgClass: ('analysis' | 'final')[] = new Array(visibleChatMessages.length).fill('final');
 
                                                 // Walk backwards: once we see a tool_call, all preceding
                                                 // assistant messages (until the previous user turn or start)
                                                 // are reclassified as 'analysis'.
                                                 let hasFutureTool = false;
-                                                for (let i = chatMessages.length - 1; i >= 0; i--) {
-                                                    const msg = chatMessages[i];
+                                                for (let i = visibleChatMessages.length - 1; i >= 0; i--) {
+                                                    const msg = visibleChatMessages[i];
                                                     if (msg.role === 'tool_call') {
                                                         msgClass[i] = 'analysis';
                                                         hasFutureTool = true;
@@ -7189,9 +7223,9 @@ function AgentDetailInner() {
                                                         currentGroup = null;
                                                     }
                                                 };
-                                                for (let i = 0; i < chatMessages.length; i++) {
+                                                for (let i = 0; i < visibleChatMessages.length; i++) {
 
-                                                    const msg = chatMessages[i];
+                                                    const msg = visibleChatMessages[i];
                                                     if (msgClass[i] === 'analysis') {
                                                         // Open a new group if needed
                                                         if (!currentGroup) { currentGroup = []; groupStartKey = i; }
@@ -7421,6 +7455,7 @@ function AgentDetailInner() {
                                                 <textarea
                                                     ref={chatInputRef}
                                                     className="chat-input"
+                                                    disabled={showNoModelState}
                                                     value={chatInput}
                                                     onChange={e => {
                                                         setChatInput(e.target.value);
@@ -7437,7 +7472,7 @@ function AgentDetailInner() {
                                                         }
                                                     }}
                                                     onPaste={handlePaste}
-                                                    placeholder={!wsConnected && !!currentUser && sessionUserIdStr(activeSession) === viewerUserIdStr() ? 'Connecting...' : t('chat.placeholder')}
+                                                    placeholder={showNoModelState ? t('agent.chat.noModelPlaceholder', 'Configure a company model to start chatting') : (!wsConnected && !!currentUser && sessionUserIdStr(activeSession) === viewerUserIdStr() ? 'Connecting...' : t('chat.placeholder'))}
                                                     rows={1}
                                                 />
                                             </div>
@@ -7447,7 +7482,7 @@ function AgentDetailInner() {
                                                     type="button"
                                                     className="chat-composer-btn"
                                                     onClick={() => fileInputRef.current?.click()}
-                                                    disabled={!wsConnected || chatUploadDrafts.length > 0 || isWaiting || isStreaming || attachedFiles.length >= 10}
+                                                    disabled={showNoModelState || !wsConnected || chatUploadDrafts.length > 0 || isWaiting || isStreaming || attachedFiles.length >= 10}
                                                     title={t('agent.workspace.uploadFile')}
                                                 >
                                                     <IconPaperclip size={16} stroke={1.75} />
@@ -7456,7 +7491,7 @@ function AgentDetailInner() {
                                                     value={overrideModelId}
                                                     onChange={handleModelChange}
                                                     tenantDefaultId={myTenant?.default_model_id || null}
-                                                    disabled={!wsConnected}
+                                                    disabled={showNoModelState || !wsConnected}
                                                 />
                                                 <div style={{ flex: 1 }} />
                                                 {(isStreaming || isWaiting) ? (
@@ -7483,7 +7518,7 @@ function AgentDetailInner() {
                                                         type="button"
                                                         className="btn btn-primary chat-composer-send"
                                                         onClick={sendChatMsg}
-                                                        disabled={!wsConnected || (!chatInput.trim() && attachedFiles.length === 0)}
+                                                        disabled={showNoModelState || !wsConnected || (!chatInput.trim() && attachedFiles.length === 0)}
                                                         title={t('chat.send')}
                                                     >
                                                         <IconSend size={16} stroke={1.75} />
