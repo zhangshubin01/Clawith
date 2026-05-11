@@ -33,6 +33,7 @@ from app.services.token_tracker import (
 
 from .client import LLMError
 from .failover import classify_error, FailoverErrorType
+from .finish import FINISH_PROTOCOL_REMINDER, FINISH_TOOL_DEFINITION, find_finish_call, parse_tool_arguments
 from .utils import LLMMessage, create_llm_client, get_max_tokens, get_model_api_key
 
 if TYPE_CHECKING:
@@ -496,9 +497,11 @@ async def call_llm(
     # Look up current user's display name so the agent knows who it's talking to
     static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_user_name)
 
-    # Load tools dynamically from DB
+    # Load tools dynamically from DB. `skip_tools=True` is set by the WS
+    # handler on the onboarding greeting turn; keep the runtime-level `finish`
+    # tool available so every turn still has an explicit stop signal.
     if skip_tools:
-        tools_for_llm = []
+        tools_for_llm = [FINISH_TOOL_DEFINITION]
     else:
         tools_for_llm = await get_agent_tools_for_llm(agent_id) if agent_id else AGENT_TOOLS
     allowed_tool_names = _allowed_tool_names(tools_for_llm)
@@ -570,12 +573,16 @@ async def call_llm(
                          round_i + 1, model.model, _msg_count, _msg_total_chars, bool(_thinking_kwargs))
 
             # Use streaming API for real-time responses
+            async def _buffer_chunk(_text: str) -> None:
+                # Final user-facing text must come through finish(content=...).
+                return None
+
             response = await client.stream(
                 messages=api_messages,
                 tools=tools_for_llm if tools_for_llm else None,
                 temperature=model.temperature,
                 max_tokens=max_tokens,
-                on_chunk=on_chunk,
+                on_chunk=_buffer_chunk,
                 on_tool_delta=on_tool_delta,
                 on_thinking=on_thinking,
                 cancel_event=cancel_event,
@@ -600,18 +607,40 @@ async def call_llm(
         # Track tokens for this round
         _accumulated_usage.add(_usage_from_response_or_estimate(response, api_messages))
 
-        # If no tool calls, return the final content
+        # Plain assistant text is not a stop condition. The model must finish
+        # explicitly via finish(content=...).
         if not response.tool_calls:
-            if agent_id and _accumulated_usage.total_tokens > 0:
-                await record_token_usage(agent_id, _accumulated_usage)
-            await client.close()
-            return response.content or "[LLM returned empty content]"
+            if response.content:
+                api_messages.append(LLMMessage(role="assistant", content=response.content))
+            api_messages.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
+            continue
 
         # Execute tool calls
         logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
         sanitized_tool_calls, retry_instruction = _sanitize_tool_calls_for_context(response.tool_calls)
         if retry_instruction:
             api_messages.append(LLMMessage(role="user", content=retry_instruction))
+            continue
+
+        finish_call = find_finish_call(sanitized_tool_calls)
+        if finish_call:
+            if finish_call.valid:
+                if agent_id and _accumulated_usage.total_tokens > 0:
+                    await record_token_usage(agent_id, _accumulated_usage)
+                await client.close()
+                return finish_call.content
+
+            api_messages.append(LLMMessage(
+                role="assistant",
+                content=response.content or None,
+                tool_calls=sanitized_tool_calls,
+                reasoning_content=response.reasoning_content,
+            ))
+            api_messages.append(LLMMessage(
+                role="tool",
+                content=finish_call.error or "`finish` was invalid.",
+                tool_call_id=finish_call.call_id,
+            ))
             continue
 
         # Add assistant message with tool calls
@@ -992,15 +1021,35 @@ async def call_agent_llm_with_tools(
                 _accumulated_usage.add(_usage_from_response_or_estimate(response, api_messages))
 
                 if not response.tool_calls:
-                    if agent_id and _accumulated_usage.total_tokens > 0:
-                        await record_token_usage(agent_id, _accumulated_usage)
-                    await client.close()
-                    return response.content or "[Empty response]", True
+                    if response.content:
+                        api_messages.append(LLMMessage(role="assistant", content=response.content))
+                    api_messages.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
+                    continue
 
                 # Execute tool calls
                 sanitized_tool_calls, retry_instruction = _sanitize_tool_calls_for_context(response.tool_calls)
                 if retry_instruction:
                     api_messages.append(LLMMessage(role="user", content=retry_instruction))
+                    continue
+
+                finish_call = find_finish_call(sanitized_tool_calls)
+                if finish_call:
+                    if finish_call.valid:
+                        if agent_id and _accumulated_usage.total_tokens > 0:
+                            await record_token_usage(agent_id, _accumulated_usage)
+                        await client.close()
+                        return finish_call.content, True, tool_executed
+                    api_messages.append(LLMMessage(
+                        role="assistant",
+                        content=response.content or None,
+                        tool_calls=sanitized_tool_calls,
+                        reasoning_content=response.reasoning_content,
+                    ))
+                    api_messages.append(LLMMessage(
+                        role="tool",
+                        tool_call_id=finish_call.call_id,
+                        content=finish_call.error or "`finish` was invalid.",
+                    ))
                     continue
 
                 api_messages.append(LLMMessage(
@@ -1015,7 +1064,7 @@ async def call_agent_llm_with_tools(
                     tool_name = fn["name"]
                     raw_args = fn.get("arguments", "{}")
                     try:
-                        args = json.loads(raw_args) if raw_args else {}
+                        args = parse_tool_arguments(raw_args)
                     except json.JSONDecodeError:
                         args = {}
 

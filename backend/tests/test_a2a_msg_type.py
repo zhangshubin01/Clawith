@@ -228,8 +228,15 @@ async def test_consult_calls_llm_synchronously():
     model.request_timeout = 60
 
     response = MagicMock()
-    response.content = "Here is the answer"
-    response.tool_calls = None
+    response.content = ""
+    response.tool_calls = [{
+        "id": "call_finish",
+        "type": "function",
+        "function": {
+            "name": "finish",
+            "arguments": json.dumps({"content": "Here is the answer"}),
+        },
+    }]
     response.usage = None
 
     mock_llm_client = AsyncMock()
@@ -544,8 +551,15 @@ async def test_feature_flag_off_falls_back_to_consult():
     model.request_timeout = 60
 
     response = MagicMock()
-    response.content = "Got it"
-    response.tool_calls = None
+    response.content = ""
+    response.tool_calls = [{
+        "id": "call_finish",
+        "type": "function",
+        "function": {
+            "name": "finish",
+            "arguments": json.dumps({"content": "Got it"}),
+        },
+    }]
     response.usage = None
 
     mock_llm_client = AsyncMock()

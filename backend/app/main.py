@@ -154,6 +154,7 @@ async def lifespan(app: FastAPI):
         import app.models.gateway_message # noqa
         import app.models.agent_credential  # noqa
         import app.models.okr            # noqa  OKR system tables
+        import app.models.onboarding     # noqa
 
         import app.models.identity       # noqa
         async with engine.begin() as conn:
@@ -360,6 +361,7 @@ from app.api.agent_credentials import router as credentials_router
 from app.api.agentbay_control import router as agentbay_control_router
 from app.api.ide_plugin import router as ide_plugin_router
 from app.api.okr import router as okr_router
+from app.api.onboarding import router as onboarding_router
 
 # ★ LSP4J 插件路由
 from app.plugins.clawith_lsp4j.router import router as lsp4j_router
@@ -408,6 +410,7 @@ app.include_router(pages_public_router)  # Public endpoint for /p/{short_id}, no
 app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
 app.include_router(okr_router)  # OKR — self-prefixed at /api/okr
+app.include_router(onboarding_router, prefix=settings.API_PREFIX)
 
 # Register IDE Plugin API (used by Tongyi Lingma IDE plugin for agent listing)
 app.include_router(ide_plugin_router)

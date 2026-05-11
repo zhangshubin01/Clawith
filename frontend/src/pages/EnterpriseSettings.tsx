@@ -2880,6 +2880,7 @@ export default function EnterpriseSettings() {
     const dialog = useDialog();
     const toast = useToast();
     const qc = useQueryClient();
+    const currentUser = useAuthStore((s) => s.user);
     type TabKey = 'llm' | 'org' | 'info' | 'approvals' | 'audit' | 'tools' | 'skills' | 'quotas' | 'users' | 'invites' | 'okr';
     const VALID_TABS: TabKey[] = ['info', 'llm', 'tools', 'skills', 'okr', 'invites', 'quotas', 'users', 'org', 'approvals', 'audit'];
     const getTabFromHash = (): TabKey => {
@@ -3222,17 +3223,32 @@ export default function EnterpriseSettings() {
     const { data: tenantForDefault, refetch: refetchTenantForDefault } = useQuery({
         queryKey: ['tenant-default-model', selectedTenantId],
         queryFn: () => fetchJson<{ default_model_id: string | null }>(
-            selectedTenantId ? `/tenants/${selectedTenantId}` : '/tenants/me'
+            !selectedTenantId || selectedTenantId === currentUser?.tenant_id
+                ? '/tenants/me'
+                : `/tenants/${selectedTenantId}`
         ),
         enabled: activeTab === 'llm',
     });
     const setDefaultModel = useMutation({
         mutationFn: (modelId: string) => fetchJson(`/enterprise/llm-models/${modelId}/set-default`, { method: 'POST' }),
-        onSuccess: () => {
+        onSuccess: (_data, modelId) => {
+            qc.setQueryData(['tenant-default-model', selectedTenantId], (old: any) => ({
+                ...(old || {}),
+                default_model_id: modelId,
+            }));
             refetchTenantForDefault();
+            qc.invalidateQueries({ queryKey: ['tenant-default-model', selectedTenantId] });
+            qc.invalidateQueries({ queryKey: ['tenant', selectedTenantId] });
             qc.invalidateQueries({ queryKey: ['tenant', 'me'] });
+            qc.invalidateQueries({ queryKey: ['llm-models', selectedTenantId] });
             qc.invalidateQueries({ queryKey: ['agents'] });
             qc.invalidateQueries({ queryKey: ['agent'] });
+            toast.success(t('enterprise.llm.defaultSaved', 'Default model updated'));
+        },
+        onError: (err: any) => {
+            toast.error(t('enterprise.llm.defaultSaveFailed', 'Failed to update default model'), {
+                details: String(err?.message || err),
+            });
         },
     });
     const deleteModel = useMutation({
