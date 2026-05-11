@@ -3014,6 +3014,7 @@ function AgentDetailInner() {
         queryKey: ['tenant', 'me'],
         queryFn: () => tenantApi.me(),
         staleTime: 5 * 60 * 1000,
+        refetchOnMount: 'always',
     });
 
     // Chat-side picker. The saved agent model is still the default source,
@@ -3618,30 +3619,6 @@ function AgentDetailInner() {
     const dismissedWorkspaceRefPath = useRef<string | null>(null);
     const pendingChatSendRef = useRef<PendingChatMessage | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
-
-    // Onboarding kickoff: once WS is connected and the session is empty, and
-    // this viewer has never been onboarded to this agent, fire a tagged trigger
-    // exactly once per (agent, session). Backend swallows the user turn and
-    // streams the assistant greeting. Founding vs welcoming content is decided
-    // server-side based on whether anyone else has been onboarded to this
-    // agent before.
-    useEffect(() => {
-        if (!wsConnected || !id || !activeSession?.id) return;
-        if (!agent || agent.onboarded_for_me !== false) return;
-        if (chatMessages.length > 0) return;
-        const runtimeKey = buildSessionRuntimeKey(id, String(activeSession.id));
-        if (onboardingKickoffRef.current.has(runtimeKey)) return;
-        const socket = wsMapRef.current[runtimeKey];
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        onboardingKickoffRef.current.add(runtimeKey);
-        setIsWaiting(true);
-        setIsStreaming(false);
-        socket.send(JSON.stringify({
-            content: '',
-            kind: 'onboarding_trigger',
-            model_id: overrideModelId,
-        }));
-    }, [wsConnected, id, activeSession?.id, agent?.onboarded_for_me, chatMessages.length, overrideModelId]);
 
     const chatEndRef = useRef<HTMLDivElement>(null);
     const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -4613,7 +4590,7 @@ function AgentDetailInner() {
             userMsg,
             fileName: attachedFiles.map(f => f.name).join(', '),
             imageUrl: attachedFiles.length === 1 ? attachedFiles[0].imageUrl : undefined,
-            modelId: overrideModelId,
+            modelId: effectiveChatModelId,
         };
 
         setChatInput('');
@@ -4903,11 +4880,52 @@ function AgentDetailInner() {
         queryKey: ['llm-models'],
         queryFn: () => enterpriseApi.llmModels(),
         enabled: activeTab === 'settings' || activeTab === 'status' || activeTab === 'chat',
+        refetchOnMount: 'always',
     });
 
-    const supportsVision = !!agent?.primary_model_id && llmModels.some(
-        (m: any) => m.id === agent.primary_model_id && m.supports_vision
+    useEffect(() => {
+        if (activeTab !== 'chat') return;
+        queryClient.refetchQueries({ queryKey: ['llm-models'] });
+        queryClient.refetchQueries({ queryKey: ['tenant', 'me'] });
+    }, [activeTab, location.key, queryClient]);
+
+    const enabledLlmModels = useMemo(
+        () => (llmModels as any[]).filter((m: any) => m.enabled),
+        [llmModels],
     );
+    const effectiveChatModelId = overrideModelId
+        || agent?.primary_model_id
+        || myTenant?.default_model_id
+        || enabledLlmModels[0]?.id
+        || null;
+
+    const supportsVision = !!effectiveChatModelId && llmModels.some(
+        (m: any) => m.id === effectiveChatModelId && m.supports_vision
+    );
+    const enabledModelCount = enabledLlmModels.length;
+    const effectiveModelReady = !!effectiveChatModelId && enabledLlmModels.some((m: any) => m.id === effectiveChatModelId);
+
+    // Onboarding kickoff: wait until a usable model is available before
+    // sending the invisible trigger. Otherwise the empty session would be
+    // marked as already kicked off while the user is still configuring models.
+    useEffect(() => {
+        if (!wsConnected || !id || !activeSession?.id) return;
+        if (!agent || agent.onboarded_for_me !== false) return;
+        if (llmModelsLoading || !effectiveModelReady || !effectiveChatModelId) return;
+        if (chatMessages.length > 0) return;
+        const runtimeKey = buildSessionRuntimeKey(id, String(activeSession.id));
+        if (onboardingKickoffRef.current.has(runtimeKey)) return;
+        const socket = wsMapRef.current[runtimeKey];
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        onboardingKickoffRef.current.add(runtimeKey);
+        setIsWaiting(true);
+        setIsStreaming(false);
+        socket.send(JSON.stringify({
+            content: '',
+            kind: 'onboarding_trigger',
+            model_id: effectiveChatModelId,
+        }));
+    }, [wsConnected, id, activeSession?.id, agent?.onboarded_for_me, llmModelsLoading, effectiveModelReady, effectiveChatModelId, chatMessages.length]);
 
     const { data: permData } = useQuery({
         queryKey: ['agent-permissions', id],
@@ -5016,9 +5034,7 @@ function AgentDetailInner() {
         try { return new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return d; }
     };
     const primaryModel = llmModels.find((m: any) => m.id === agent.primary_model_id);
-    const enabledModelCount = (llmModels as any[]).filter((m: any) => m.enabled).length;
-    const agentModelReady = !!agent.primary_model_id && (llmModels as any[]).some((m: any) => m.id === agent.primary_model_id && m.enabled);
-    const showNoModelState = !llmModelsLoading && (agent as any).agent_type !== 'openclaw' && (!agent.primary_model_id || enabledModelCount === 0 || !agentModelReady);
+    const showNoModelState = !llmModelsLoading && (agent as any).agent_type !== 'openclaw' && (enabledModelCount === 0 || !effectiveModelReady);
     const canConfigureModels = currentUser?.role === 'platform_admin' || currentUser?.role === 'org_admin' || !!(currentUser as any)?.is_platform_admin;
     const renderNoModelGuide = (variant: 'empty' | 'floating' = 'empty') => (
         <div className={`chat-no-model-state${variant === 'floating' ? ' chat-no-model-state--floating' : ''}`}>

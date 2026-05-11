@@ -310,6 +310,7 @@ export default function Chat() {
         queryKey: ['tenant', 'me'],
         queryFn: () => tenantApi.me(),
         staleTime: 5 * 60 * 1000,
+        refetchOnMount: 'always',
     });
 
     // Chat-side selected model is a per-session override. It is sent with each
@@ -328,14 +329,22 @@ export default function Chat() {
         setOverrideModelId(newModelId);
     }, []);
 
-    const { data: llmModels = [] } = useQuery({
+    const { data: llmModels = [], isLoading: llmModelsLoading } = useQuery({
         queryKey: ['llm-models'],
         queryFn: () => enterpriseApi.llmModels(),
         enabled: !!agent,
+        refetchOnMount: 'always',
     });
 
-    const supportsVision = !!agent?.primary_model_id && llmModels.some(
-        (m: any) => m.id === agent.primary_model_id && m.supports_vision
+    const enabledLlmModels = (llmModels as any[]).filter((m: any) => m.enabled);
+    const effectiveChatModelId = overrideModelId
+        || agent?.primary_model_id
+        || myTenant?.default_model_id
+        || enabledLlmModels[0]?.id
+        || null;
+    const effectiveModelReady = !!effectiveChatModelId && enabledLlmModels.some((m: any) => m.id === effectiveChatModelId);
+    const supportsVision = !!effectiveChatModelId && llmModels.some(
+        (m: any) => m.id === effectiveChatModelId && m.supports_vision
     );
 
     const parseMessage = (msg: Message): Message => {
@@ -444,6 +453,7 @@ export default function Chat() {
         if (!connected || !wsRef.current) return;
         if (!agent || agent.onboarded_for_me !== false) return;
         if (!historyLoaded.current) return;
+        if (llmModelsLoading || !effectiveModelReady || !effectiveChatModelId) return;
         if (messages.length > 0) return;
         onboardingKickoffSent.current = true;
         setIsWaiting(true);
@@ -451,9 +461,9 @@ export default function Chat() {
         wsRef.current.send(JSON.stringify({
             content: '',
             kind: 'onboarding_trigger',
-            model_id: overrideModelId,
+            model_id: effectiveChatModelId,
         }));
-    }, [connected, agent, messages.length, overrideModelId]);
+    }, [connected, agent, messages.length, llmModelsLoading, effectiveModelReady, effectiveChatModelId]);
 
     useEffect(() => {
         if (!id || !token) return;
@@ -784,7 +794,7 @@ export default function Chat() {
             imageUrl: attachedFile?.imageUrl,
             timestamp: new Date().toISOString(),
         }]);
-        wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg, file_name: attachedFile?.name || '', model_id: overrideModelId }));
+        wsRef.current.send(JSON.stringify({ content: contentForLLM, display_content: userMsg, file_name: attachedFile?.name || '', model_id: effectiveChatModelId }));
         setInput('');
         setAttachedFile(null);
     };
