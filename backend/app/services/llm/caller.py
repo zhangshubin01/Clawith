@@ -323,6 +323,7 @@ async def _process_tool_call(
     on_tool_call,
     full_reasoning_content: str,
     allowed_tool_names: set[str],
+    tool_result_cache: dict[str, str | list] | None = None,
 ) -> str:
     """Process a single tool call and return result."""
     fn = tc["function"]
@@ -361,6 +362,36 @@ async def _process_tool_call(
             content=result,
         ))
         return ""
+
+    cache_key = None
+    if tool_result_cache is not None:
+        # Canonicalize args for stable dedupe key.
+        try:
+            args_key = json.dumps(args, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            args_key = str(args)
+        cache_key = f"{tool_name}:{args_key}"
+        if cache_key in tool_result_cache:
+            cached_result = tool_result_cache[cache_key]
+            logger.info("[LLM-OPT] Skip duplicate tool call: {}", tool_name)
+            if on_tool_call:
+                try:
+                    await on_tool_call({
+                        "name": tool_name,
+                        "call_id": tc.get("id", ""),
+                        "args": args,
+                        "status": "done",
+                        "result": cached_result if isinstance(cached_result, str) else str(cached_result),
+                        "reasoning_content": full_reasoning_content
+                    })
+                except Exception as _e:
+                    logger.warning(f"[LLM] on_tool_call dedupe error: {_e}")
+            api_messages.append(LLMMessage(
+                role="tool",
+                tool_call_id=tc["id"],
+                content=cached_result,
+            ))
+            return ""
 
     # Notify client about tool call (in-progress)
     if on_tool_call:
@@ -418,6 +449,8 @@ async def _process_tool_call(
         tool_call_id=tc["id"],
         content=tool_content,
     ))
+    if tool_result_cache is not None and cache_key:
+        tool_result_cache[cache_key] = tool_content
     return ""
 
 
@@ -500,6 +533,8 @@ async def call_llm(
     _accumulated_usage = TokenUsage()
 
     # Tool-calling loop
+    # Cache identical tool calls within one request to avoid repeated search/read churn.
+    tool_result_cache: dict[str, str | list] = {}
     for round_i in range(_max_tool_rounds):
         # 取消检查：若 cancel_event 已设置，立即中断工具循环
         if cancel_event and cancel_event.is_set():
@@ -527,6 +562,13 @@ async def call_llm(
             # DeepSeek V4 思考模式参数
             _thinking_kwargs = _get_thinking_kwargs(model)
 
+            # ★ Timing: measure LLM stream round latency
+            _llm_round_start = asyncio.get_event_loop().time()
+            _msg_count = len(api_messages)
+            _msg_total_chars = sum(len(m.content or '') if isinstance(m.content, str) else 0 for m in api_messages)
+            logger.info("[LLM-TIMING] Round {} START: model={} messages={} chars={} thinking={}",
+                         round_i + 1, model.model, _msg_count, _msg_total_chars, bool(_thinking_kwargs))
+
             # Use streaming API for real-time responses
             response = await client.stream(
                 messages=api_messages,
@@ -539,6 +581,9 @@ async def call_llm(
                 cancel_event=cancel_event,
                 **_thinking_kwargs,
             )
+            _llm_round_elapsed = asyncio.get_event_loop().time() - _llm_round_start
+            logger.info("[LLM-TIMING] Round {} END: elapsed={:.1f}s tools={} content_len={}",
+                         round_i + 1, _llm_round_elapsed, len(response.tool_calls or []), len(response.content or ''))
         except LLMError as e:
             logger.error(f"[LLM] LLMError: provider={getattr(model, 'provider', '?')} model={getattr(model, 'model', '?')} {e}")
             if agent_id and _accumulated_usage.total_tokens > 0:
@@ -596,6 +641,7 @@ async def call_llm(
                 session_id=session_id, supports_vision=supports_vision,
                 on_tool_call=on_tool_call, full_reasoning_content=full_reasoning_content,
                 allowed_tool_names=allowed_tool_names,
+                tool_result_cache=tool_result_cache,
             )
 
         # Execute read-only tools in parallel
@@ -623,6 +669,7 @@ async def call_llm(
                 on_tool_call=on_tool_call,
                 full_reasoning_content=full_reasoning_content,
                 allowed_tool_names=allowed_tool_names,
+                tool_result_cache=tool_result_cache,
             )
             if tool_error:
                 api_messages.append(LLMMessage(

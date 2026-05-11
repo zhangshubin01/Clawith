@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch as _fnmatch
 import json
 import os
 import re
@@ -63,6 +64,17 @@ from .tool_constants import (
     TOOL_NAME_MAP,
 )
 from .workspace_file_service import WorkspaceFileService
+from .search_input_utils import (
+    android_module_tier,
+    collect_android_values_xml_hits,
+    extract_android_resource_name as _extract_android_resource_name,
+    filename_keyword_for_search_file,
+    infer_implicit_file_pattern_from_description,
+    is_android_resource_path as _is_android_resource_path,
+    is_android_resource_query as _is_android_resource_query,
+    is_unusable_natural_language_file_query,
+    sanitize_search_input as _sanitize_search_input,
+)
 
 # ──────────────────────────────────────────────
 # LSP4J IDE 工具名称（直接导入自 tool_constants，与 tool_hooks 保持一致）
@@ -116,13 +128,21 @@ _SEARCHABLE_EXTENSIONS = frozenset({
 _EXCLUDED_DIRS = frozenset({
     'build', '.gradle', '.idea', '.git', '.comate',
     '__pycache__', 'node_modules', '.claude', 'logs',
-    'generated', '.kotlin',
+    'generated', '.kotlin', 'intermediates', 'ksp', 'kapt',
 })
 
 # 最大扫描文件数（防止大项目超时）
 _MAX_FILES_TO_SCAN = 500
 # 最大结果数
 _MAX_RESULTS = 30
+
+# Android 场景下优先目录（召回排序 + 分层扫描）
+_ANDROID_PRIORITY_SEGMENTS = (
+    "/app/src/main/",
+    "/src/main/java/",
+    "/src/main/kotlin/",
+    "/feature/",
+)
 
 # ──────────────────────────────────────────────
 # 数据类定义（基于灵码插件 ChatAskParam.java 17 字段）
@@ -207,6 +227,25 @@ def _resolve_search_path(rel_path: str, project_path: str | None = None) -> Path
     return Path.cwd() / _clean_path
 
 
+def _dynamic_scan_budget(project_root: Path, query: str, tool_name: str) -> int:
+    """按项目规模和 query 类型动态分配扫描预算，避免固定 500 导致 Android 多模块截断。"""
+    budget = _MAX_FILES_TO_SCAN
+    root_text = str(project_root).lower()
+    is_android_like = any(seg in root_text for seg in ("/app", "/android", "/feature"))
+    if is_android_like:
+        budget = max(budget, 1600)
+    if tool_name in {"search_symbol", "search_file"} and len(query) >= 8:
+        budget = max(budget, 2400)
+    if tool_name in {"grep_code", "search_codebase"}:
+        budget = max(budget, 1800)
+    return min(budget, 5000)
+
+
+def _is_android_priority_path(path_text: str) -> bool:
+    normalized = path_text.replace("\\", "/")
+    return any(seg in normalized for seg in _ANDROID_PRIORITY_SEGMENTS)
+
+
 def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "") -> tuple[str, list[dict]]:
     """本地执行搜索工具，返回 (result_json_str, results_list).
 
@@ -225,6 +264,8 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
     import re as _re
 
     cwd = Path(project_path) if project_path else Path.cwd()
+    search_query = _sanitize_search_input(arguments.get("query", ""))
+    scan_budget = _dynamic_scan_budget(cwd, search_query, tool_name)
 
     def _is_searchable(file_path: Path) -> bool:
         parts = set(file_path.parts)
@@ -235,16 +276,24 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         return True
 
     def _iter_project_files():
+        """按 Android 优先目录分两轮流式扫描，避免一次性加载全量文件列表。"""
         count = 0
-        for p in cwd.rglob("*"):
-            if count >= _MAX_FILES_TO_SCAN:
-                break
-            if not p.is_file():
-                continue
-            if not _is_searchable(p):
-                continue
-            count += 1
-            yield p
+        seen: set[str] = set()
+        for prefer_priority in (True, False):
+            for p in cwd.rglob("*"):
+                if count >= scan_budget:
+                    return
+                if not p.is_file() or not _is_searchable(p):
+                    continue
+                is_priority = _is_android_priority_path(str(p))
+                if prefer_priority != is_priority:
+                    continue
+                p_text = str(p)
+                if p_text in seen:
+                    continue
+                seen.add(p_text)
+                count += 1
+                yield p
 
     if tool_name == "list_dir":
         rel_path = arguments.get("relative_workspace_path") or arguments.get("path") or "."
@@ -260,6 +309,9 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                     except OSError:
                         is_dir = False
                         file_size = ""
+                    # ★ #5 修复：过滤排除目录（构建产物、IDE 配置等）
+                    if not is_dir and not _is_searchable(entry):
+                        continue
                     items.append({
                         "fileName": entry.name,
                         "fileCount": "",
@@ -273,25 +325,115 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         return result_str, items
 
     elif tool_name == "search_file":
-        pattern = arguments.get("file_pattern", "") or arguments.get("query", "") or "*"
-        search_path = arguments.get("path", ".")
+        # ★ #1 + #5 修复：file_pattern 做 glob 初筛 + query 做文件名二次过滤 + _is_searchable 过滤排除目录
+        pattern = _sanitize_search_input(arguments.get("file_pattern", "") or "*")
+        query = _sanitize_search_input(arguments.get("query", ""))
+        pattern = infer_implicit_file_pattern_from_description(query, pattern)
+        filename_kw = filename_keyword_for_search_file(query, pattern)
+        search_path = _sanitize_search_input(arguments.get("path", "."))
+        is_resource_query = _is_android_resource_query(query)
+        resource_name = _extract_android_resource_name(query)
         search_dir = _resolve_search_path(search_path, project_path or None)
         items: list[dict] = []
+        scanned_count = 0
+        path_filtered = 0
+        pattern_filtered = 0
+        query_filtered = 0
+        skip_scan = is_unusable_natural_language_file_query(query, pattern, is_resource_query)
         try:
-            if search_dir.exists() and search_dir.is_dir():
-                matched = list(search_dir.rglob(pattern)) if pattern else []
-                matched = matched[:50]
-                for p in sorted(matched):
-                    try:
-                        if p.is_file():
-                            items.append({
-                                "fileName": p.name,
-                                "path": str(p.absolute()),
-                            })
-                    except OSError:
-                        pass
+            if skip_scan:
+                pass
+            elif search_dir.exists() and search_dir.is_dir():
+                for p in search_dir.rglob("*"):
+                    if scanned_count >= scan_budget:
+                        break
+                    if not p.is_file():
+                        continue
+                    scanned_count += 1
+                    # 过滤排除目录和不可搜索扩展名
+                    if not _is_searchable(p):
+                        path_filtered += 1
+                        continue
+                    # glob 初筛（仅当 pattern 不是 "*" 时）
+                    if pattern != "*":
+                        try:
+                            if not p.match(pattern) and not _fnmatch.fnmatch(p.name, pattern):
+                                pattern_filtered += 1
+                                continue
+                        except (ValueError, TypeError):
+                            pattern_filtered += 1
+                            continue
+                    # 二次过滤：文件名包含关键词（混中文描述时已提炼为拉丁词干）；
+                    # Android 资源语义 query 允许通过资源名命中 xml。
+                    if filename_kw:
+                        file_name_lower = p.name.lower()
+                        query_lower = filename_kw.lower()
+                        base_name_lower = p.stem.lower()
+                        resource_hit = (
+                            is_resource_query
+                            and resource_name
+                            and _is_android_resource_path(str(p))
+                            and base_name_lower == resource_name.lower()
+                        )
+                        if query_lower not in file_name_lower and not resource_hit:
+                            query_filtered += 1
+                            continue
+                    items.append({
+                        "fileName": p.name,
+                        "path": str(p.absolute()),
+                    })
+                    if len(items) >= 50:
+                        break
         except PermissionError:
             logger.warning("[LSP4J-TOOL] search_file 权限不足: path={}", search_dir)
+        if is_resource_query and resource_name:
+            seen_paths = {str(x.get("path")) for x in items}
+            for hit in collect_android_values_xml_hits(cwd, resource_name):
+                if len(items) >= 50:
+                    break
+                pth = hit.get("path", "")
+                if pth and pth not in seen_paths:
+                    seen_paths.add(pth)
+                    items.append({"fileName": hit["fileName"], "path": pth})
+        zero_result_reason = "none"
+        if not items:
+            if skip_scan:
+                zero_result_reason = "natural_language_filename_query"
+            elif scanned_count >= scan_budget:
+                zero_result_reason = "scope_truncated"
+            elif pattern_filtered > 0 and query_filtered == 0:
+                zero_result_reason = "pattern_filtered_all"
+            elif query_filtered > 0:
+                zero_result_reason = "no_text_match"
+            elif path_filtered > 0:
+                zero_result_reason = "path_filtered_all"
+            else:
+                zero_result_reason = "index_empty"
+        logger.info(
+            "[LSP4J-TOOL] local_search_file strategy=strict budget={} scanned={} results={} zero_result_reason={} "
+            "path_filtered={} pattern_filtered={} query_filtered={} query={} pattern={} path={}",
+            scan_budget, scanned_count, len(items), zero_result_reason, path_filtered, pattern_filtered, query_filtered,
+            query, pattern, search_path,
+        )
+        if items:
+            # Android 资源联动排序：模块层级（app/feature/src-main）→ 资源匹配 → 文件名命中。
+            def _rank(item: dict) -> tuple[int, int, str]:
+                file_name = str(item.get("fileName", ""))
+                path = str(item.get("path", ""))
+                tier = android_module_tier(path)
+                base_name = file_name.rsplit(".", 1)[0].lower() if "." in file_name else file_name.lower()
+                if is_resource_query and resource_name and _is_android_resource_path(path) and base_name == resource_name.lower():
+                    group = 0
+                elif (filename_kw and filename_kw.lower() in file_name.lower()) or (
+                    query and query.lower() in file_name.lower()
+                ):
+                    group = 1
+                elif is_resource_query and _is_android_resource_path(path):
+                    group = 2
+                else:
+                    group = 3
+                return (tier, group, path)
+            items.sort(key=_rank)
         result_str = json.dumps(items, ensure_ascii=False, default=str)
         return result_str, items
 
@@ -348,9 +490,17 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         return result_str, items
 
     elif tool_name == "search_symbol":
-        query = arguments.get("query", "")
+        query = _sanitize_search_input(arguments.get("query", ""))
         query_lower = query.lower()
         items = []
+        is_resource_query = _is_android_resource_query(query)
+        resource_name = _extract_android_resource_name(query)
+        declaration_pattern = _re.compile(
+            rf"(?i)\b(object|class|interface|typealias)\s+{_re.escape(query)}\b"
+        ) if query else None
+        resource_ref_pattern = _re.compile(rf"(?i)\bR\.(layout|string|id|drawable|color|menu|anim|mipmap)\s*\.\s*{_re.escape(resource_name)}\b") if resource_name else None
+        declaration_hits = 0
+        resource_ref_hits = 0
         for p in _iter_project_files():
             if len(items) >= _MAX_RESULTS:
                 break
@@ -359,6 +509,82 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                     "fileName": p.name,
                     "path": str(p.absolute()),
                 })
+                continue
+            if declaration_pattern is None:
+                if not (is_resource_query and resource_ref_pattern):
+                    continue
+            try:
+                text = p.read_text(errors='ignore')
+            except (OSError, UnicodeDecodeError):
+                continue
+            if declaration_pattern and declaration_pattern.search(text):
+                declaration_hits += 1
+                items.append({
+                    "fileName": p.name,
+                    "path": str(p.absolute()),
+                })
+                continue
+            if is_resource_query and resource_name and _is_android_resource_path(str(p)) and p.stem.lower() == resource_name.lower():
+                items.append({
+                    "fileName": p.name,
+                    "path": str(p.absolute()),
+                })
+                continue
+            if resource_ref_pattern and resource_ref_pattern.search(text):
+                resource_ref_hits += 1
+                items.append({
+                    "fileName": p.name,
+                    "path": str(p.absolute()),
+                })
+        seen_paths_sym = {str(x.get("path")) for x in items}
+        if is_resource_query and resource_name and len(items) < _MAX_RESULTS:
+            for hit in collect_android_values_xml_hits(cwd, resource_name):
+                if len(items) >= _MAX_RESULTS:
+                    break
+                pth = hit.get("path", "")
+                if pth and pth not in seen_paths_sym:
+                    seen_paths_sym.add(pth)
+                    items.append({"fileName": hit["fileName"], "path": pth})
+        if not items and resource_name:
+            probe = resource_name.lower()
+            for p in _iter_project_files():
+                if len(items) >= _MAX_RESULTS:
+                    break
+                npath = str(p).replace("\\", "/").lower()
+                if any(seg in npath for seg in ("/build/", "/.gradle/", "/generated/", "/intermediates/", "/ksp/", "/kapt/")):
+                    continue
+                if p.suffix.lower() not in {".kt", ".java", ".xml"}:
+                    continue
+                try:
+                    txt = p.read_text(errors="ignore").lower()
+                except OSError:
+                    continue
+                if probe in txt:
+                    items.append({
+                        "fileName": p.name,
+                        "path": str(p.absolute()),
+                    })
+        # Android 噪声符号下沉排序（不丢弃，保证召回完整）
+        def _android_noise(name: str) -> bool:
+            base = name.rsplit(".", 1)[0]
+            return base == "R" or base.startswith("R$") or base == "BuildConfig" or base.endswith("Binding") or base.endswith("Directions")
+        items.sort(key=lambda item: (
+            android_module_tier(str(item.get("path", ""))),
+            0 if is_resource_query and resource_name and _is_android_resource_path(str(item.get("path", "")))
+                 and str(item.get("fileName", "")).rsplit(".", 1)[0].lower() == resource_name.lower() else 1,
+            1 if _android_noise(str(item.get("fileName", ""))) else 0,
+            str(item.get("path", "")),
+        ))
+        zero_result_reason = "none"
+        if not items:
+            zero_result_reason = "no_symbol_match"
+        elif declaration_hits > 0:
+            zero_result_reason = "symbol_exact_miss_fallback_hit"
+        logger.info(
+            "[LSP4J-TOOL] local_search_symbol budget={} results={} declaration_hits={} resource_ref_hits={} "
+            "zero_result_reason={} query={}",
+            scan_budget, len(items), declaration_hits, resource_ref_hits, zero_result_reason, query,
+        )
         result_str = json.dumps(items, ensure_ascii=False, default=str)
         return result_str, items
 
@@ -664,9 +890,30 @@ class JSONRPCRouter:
         # request_id -> {"sig": (step, status, description), "ts": monotonic_ts}
         self._process_step_last_emit: dict[str, dict[str, Any]] = {}
 
+        # ★ 性能计时: 当前请求的基准时间戳（在 _handle_chat_ask 中设置）
+        self._perf_start: float = 0.0
+
     # ──────────────────────────────────────────
-    # 主路由入口
+    # 性能计时工具
     # ──────────────────────────────────────────
+
+    def _log_perf(self, label: str, start: float, last_t: float) -> float:
+        """记录阶段性耗时，返回当前时间供下次调用。
+
+        Args:
+            label: 阶段名称标签
+            start: 请求起始时间戳（monotonic）
+            last_t: 上一个阶段结束的时间戳
+
+        Returns:
+            当前时间戳（monotonic），用于下次调用时传入
+        """
+        now = time.monotonic()
+        elapsed = now - start
+        delta = now - last_t
+        self._perf_start = start
+        logger.info("[LSP4J-PERF] {} delta={:.3f}s total={:.3f}s", label, delta, elapsed)
+        return now
 
     async def route(self, raw_data: str) -> None:
         """路由一条 WebSocket 消息。
@@ -699,8 +946,13 @@ class JSONRPCRouter:
         msg_id = msg.get("id")
 
         # 协议追踪日志：记录收到的每条请求/通知
-        logger.info("[LSP4J ←] method={} id={} params_keys={}", method, msg_id,
-                     list(params.keys()) if isinstance(params, dict) else type(params).__name__)
+        # 心跳/探活消息降级为 DEBUG，避免污染 INFO 日志（#2 修复）
+        if method == "ping":
+            logger.debug("[LSP4J ←] method={} id={} params_keys={}", method, msg_id,
+                         list(params.keys()) if isinstance(params, dict) else type(params).__name__)
+        else:
+            logger.info("[LSP4J ←] method={} id={} params_keys={}", method, msg_id,
+                         list(params.keys()) if isinstance(params, dict) else type(params).__name__)
 
         # 2. 核心方法路由
         handler = self._METHOD_MAP.get(method)
@@ -896,6 +1148,9 @@ class JSONRPCRouter:
             self._current_request_id = request_id
             _ask_start = time.monotonic()  # 计时起点
 
+            # ★ 性能计时: 请求进入锁
+            _t0 = _ask_start
+
             # 设置 session_id
             if session_id:
                 self._session_id = session_id
@@ -905,6 +1160,9 @@ class JSONRPCRouter:
                 auto_title = question_text[:40].replace("\n", " ").strip()
                 if auto_title:
                     await self._send_session_title_update(session_id, auto_title)
+
+            # ★ 性能计时: 会话初始化
+            _t0 = self._log_perf("SESSION_INIT", _ask_start, _t0)
 
             # 创建 cancel 事件
             self._cancel_event = asyncio.Event()
@@ -919,6 +1177,9 @@ class JSONRPCRouter:
             except Exception as e:
                 logger.warning("[WS-FILE] snapshot/syncAll 发送失败（非致命）: {}", e)
 
+            # ★ 性能计时: snapshot 操作
+            _t0 = self._log_perf("SNAPSHOT", _ask_start, _t0)
+
             # ★ 立即返回 JSON-RPC 响应，避免 IDE 端 LSP4J 框架请求超时
             # chat/ask 是 @JsonRequest，LSP4J 框架会等待响应；但 call_llm 可能运行数分钟，
             # 所以必须先返回响应确认收到请求，后续内容通过通知推送。
@@ -929,8 +1190,14 @@ class JSONRPCRouter:
                 "status": "processing",
             })
 
+            # ★ 性能计时: JSON-RPC 响应发送
+            _t0 = self._log_perf("JSONRPC_RESPONSE", _ask_start, _t0)
+
             # 1. 发送思考状态（ChatThinkingParams 格式）
             await self._send_chat_think(session_id, "思考中...", "start", request_id)
+
+            # ★ 性能计时: 发送 think start
+            _t0 = self._log_perf("THINK_START", _ask_start, _t0)
 
             # 2. 从数据库回填历史消息
             message_history: list[dict] = current_lsp4j_message_history.get() or []
@@ -939,17 +1206,19 @@ class JSONRPCRouter:
                     "[LSP4J-CTX] chat/ask: message_history empty, loading from DB session={}",
                     session_id,
                 )
+                _t_hist_start = time.monotonic()
                 loaded = await _load_lsp4j_history_from_db(
                     session_id, self._agent_id, self._user_id
                 )
+                _t_hist_elapsed = time.monotonic() - _t_hist_start
                 if loaded:
                     message_history = loaded
                     current_lsp4j_message_history.set(message_history)
+                    logger.info("[LSP4J-PERF] DB history loaded: session={} elapsed={:.3f}s rows={}",
+                                session_id, _t_hist_elapsed, len(loaded))
                 else:
-                    logger.debug(
-                        "[LSP4J-CTX] chat/ask: DB loaded empty history for session={}",
-                        session_id,
-                    )
+                    logger.info("[LSP4J-PERF] DB history loaded (empty): session={} elapsed={:.3f}s",
+                                session_id, _t_hist_elapsed)
             else:
                 logger.debug(
                     "[LSP4J-CTX] chat/ask: message_history already populated ({}) or no session_id ({})",
@@ -969,11 +1238,15 @@ class JSONRPCRouter:
                     if not (m.get("role") == "system" and "[会话上下文]" in m.get("content", ""))
                 ]
                 if inmem_records:
+                    _t_ctx_start = time.monotonic()
                     ctx_msg = _format_tool_context_message(inmem_records)
+                    _t_ctx_elapsed = time.monotonic() - _t_ctx_start
                     if ctx_msg:
                         message_history.insert(0, ctx_msg)
                         logger.info("[LSP4J] tool_call context injected from memory: session_id={} tool_count={}",
                                     session_id, len(inmem_records))
+                        logger.info("[LSP4J-PERF] Memory context format: session={} elapsed={:.3f}s ctx_len={}",
+                                    session_id, _t_ctx_elapsed, len(ctx_msg.get("content", "")))
                     else:
                         logger.info(
                             "[LSP4J-CTX] chat/ask: memory context NOT injected (no useful records after formatting), "
@@ -991,8 +1264,9 @@ class JSONRPCRouter:
             for m in history_msgs:
                 r = m.get("role", "unknown")
                 history_roles[r] = history_roles.get(r, 0) + 1
-            logger.debug("[LSP4J] history loaded: {} messages, session_id={}, roles={}",
-                       len(history_msgs), session_id, history_roles)
+            _history_total_chars = sum(len(m.get("content", "")) for m in history_msgs)
+            logger.info("[LSP4J-PERF] History summary: session={} messages={} roles={} total_chars={}",
+                       session_id, len(history_msgs), history_roles, _history_total_chars)
 
             # 拼接用户消息
             full_text = question_text
@@ -1277,6 +1551,10 @@ class JSONRPCRouter:
             # CODE_EDIT_BLOCK 仅作为兜底（当工具调用明确不可用时才允许）。
             tool_hint += (
                 "\n[执行策略] 对于读写文件、创建文件、删除文件、搜索、终端命令，必须优先使用工具调用。"
+                "\n优先级：先按意图选择工具（符号类优先 search_symbol，文件类优先 search_file，文本类优先 search_codebase/grep_code），"
+                "若 0 结果则按回退链路自动放宽。"
+                "\n先给出'读取清单'（3-8 个关键文件）再批量读取，不要边搜边读反复循环。"
+                "\n同一轮禁止重复调用相同工具+相同参数；已有结果优先复用。"
                 "\n优先使用 read_file / replace_text_by_path / create_file_with_text / delete_file_by_path / list_dir / search_file / run_in_terminal。"
                 "\n不要先输出大段'开始重构/步骤说明'代码块再改文件，优先直接执行工具并回传结果。"
                 "\n目标展示应为工具卡片链路（toolCall + tool/call/sync + workingSpaceFile/sync），而不是纯 markdown 代码块。"
@@ -1347,6 +1625,13 @@ class JSONRPCRouter:
             error_status_code = 200  # 默认成功
             # ★ 设置 IDE 会话标记，使 build_agent_context 注入项目优先指令
             _ide_token = _is_ide_session.set(True)
+
+            # ★ 性能计时: 准备进入 call_llm
+            _t_call_llm_start = time.monotonic()
+            _context_chars = sum(len(m.get("content", "")) for m in message_history if isinstance(m.get("content"), str))
+            logger.info("[LSP4J-PERF] PRE_CALL_LLM session={} model={} messages={} context_chars={}",
+                        session_id, model_obj.model if hasattr(model_obj, 'model') else 'unknown',
+                        len(message_history), _context_chars)
             try:
                 reply = await call_llm_with_failover(
                     primary_model=model_obj,
@@ -1374,6 +1659,14 @@ class JSONRPCRouter:
             finally:
                 _is_ide_session.reset(_ide_token)
 
+            # ★ 性能计时: call_llm 完成
+            _t_call_llm_elapsed = time.monotonic() - _t_call_llm_start
+            logger.info("[LSP4J-PERF] CALL_LLM_DONE session={} elapsed={:.1f}s cancelled={} reply_len={}",
+                        session_id, _t_call_llm_elapsed, cancelled, len(reply))
+
+            # ★ 性能计时: 思考完成
+            _t0 = self._log_perf("THINK_DONE", _ask_start, _t0)
+
             # ★ 发送思考完成状态
             # 若 on_chunk 已被调用（_thinking_started=False），已在 on_chunk 中发送过 done，
             # 此处仅兜底处理纯思考无正文的场景（_thinking_started=True）。
@@ -1387,11 +1680,15 @@ class JSONRPCRouter:
                 step="step_end", description="处理完成", status="done",
             )
 
+            # ★ 性能计时: 后置操作完成
+            _t0 = self._log_perf("POST_CALLBACKS", _ask_start, _t0)
+
             logger.info("[LSP4J] chat/ask 处理完成: requestId={} cancelled={} reply_len={} elapsed={:.1f}s",
                          request_id, cancelled, len(reply), time.monotonic() - _ask_start)
 
             # 检测任务创建意图
             if not cancelled and full_text and reply:
+                _t_task_start = time.monotonic()
                 task_match = re.search(
                     r'(?:创建|新建|添加|建一个|帮我建|create|add)(?:一个|a )?(?:任务|待办|todo|task)[，,：：:\\s]*(.+)',
                     full_text, re.IGNORECASE
@@ -1416,11 +1713,16 @@ class JSONRPCRouter:
                             logger.info("[LSP4J] Task created: id={} title={}", _task_id, task_title)
                         except Exception as _te:
                             logger.warning("[LSP4J] Task creation failed: {}", _te)
+                _t_task_elapsed = time.monotonic() - _t_task_start
+                if _t_task_elapsed > 0.05:  # 只记录超过50ms的操作
+                    logger.info("[LSP4J-PERF] TASK_DETECTION session={} elapsed={:.3f}s matched={}",
+                                session_id, _t_task_elapsed, bool(task_match))
 
             # 5. 后台持久化
             if session_id and reply:
                 # 提取本轮工具调用历史
                 _session_tool_calls = self._tool_call_history_by_session.get(session_id, [])
+                _t_persist_start = time.monotonic()
                 _t = asyncio.create_task(
                     _persist_lsp4j_chat_turn(
                         agent_id=self._agent_id,
@@ -1432,6 +1734,9 @@ class JSONRPCRouter:
                         tool_calls=_session_tool_calls if _session_tool_calls else None,
                     )
                 )
+                _t_persist_elapsed = time.monotonic() - _t_persist_start
+                logger.info("[LSP4J-PERF] PERSIST_TASK_CREATED session={} create_elapsed={:.3f}s",
+                            session_id, _t_persist_elapsed)
                 _lsp4j_background_tasks.add(_t)
                 _t.add_done_callback(_lsp4j_background_tasks.discard)
 
@@ -1440,10 +1745,13 @@ class JSONRPCRouter:
             current_lsp4j_message_history.set(message_history)
 
             # ★ 刷新缓冲区，确保所有累积的文本都已发送
+            _t_flush_start = time.monotonic()
             await buffer.flush(force=True)
+            _t_flush_elapsed = time.monotonic() - _t_flush_start
 
             # 6. 发送完成信号（ChatFinishParams 格式）
             # statusCode 映射：200=成功, 200=取消(非错误), 500=异常
+            _t_finish_start = time.monotonic()
             finish_reason = "cancelled" if cancelled else ("success" if error_status_code == 200 else "error")
             await self._send_chat_finish(session_id, finish_reason, reply, request_id, status_code=error_status_code)
 
@@ -1452,6 +1760,15 @@ class JSONRPCRouter:
                 session_id, request_id, "",
                 "REQUEST_FINISHED",
             )
+            _t_finish_elapsed = time.monotonic() - _t_finish_start
+            logger.info("[LSP4J-PERF] FINISH_NOTIFICATIONS session={} elapsed={:.3f}s",
+                        session_id, _t_finish_elapsed)
+
+            # ★ 最终性能汇总
+            _total_elapsed = time.monotonic() - _ask_start
+            logger.info("[LSP4J-PERF] TOTAL session={} elapsed={:.1f}s reply_len={} cancelled={} model={}",
+                        session_id, _total_elapsed, len(reply), cancelled,
+                        model_obj.model if hasattr(model_obj, 'model') else 'unknown')
 
             # 7. JSON-RPC 响应已在 call_llm 之前发送（避免 IDE 超时）
             # 完成状态通过 chat/finish 通知传递
@@ -1731,8 +2048,14 @@ class JSONRPCRouter:
             )
             if params.get("success", True):
                 result = params.get("result", {})
+                tool_name = params.get("name", "")
                 if isinstance(result, dict):
-                    result_str = json.dumps(result, ensure_ascii=False)
+                    # ★ #4 修复：read_file 的 IDE 返回结果是 {"content": "文件内容"}，
+                    # 直接提取纯文本，避免 json.dumps 后形成 '{"content": "..."}' 双重嵌套
+                    if tool_name == "read_file" and "content" in result:
+                        result_str = result["content"]
+                    else:
+                        result_str = json.dumps(result, ensure_ascii=False)
                 else:
                     result_str = str(result)
                 future.set_result(result_str)
@@ -1791,7 +2114,11 @@ class JSONRPCRouter:
                 if params.get("success", True):
                     result = params.get("result", {})
                     if isinstance(result, dict):
-                        result_str = json.dumps(result, ensure_ascii=False)
+                        # ★ #4 修复：read_file 补偿分支同样需要提取纯文本
+                        if tool_name == "read_file" and "content" in result:
+                            result_str = result["content"]
+                        else:
+                            result_str = json.dumps(result, ensure_ascii=False)
                     else:
                         result_str = str(result)
                     f.set_result(result_str)
@@ -2078,6 +2405,7 @@ class JSONRPCRouter:
 
         logger.info("[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={} queue_matched={}",
                     tool_name, tool_call_id[:8], request_id[:8], timeout, queue_matched)
+        _tool_invoke_start = time.monotonic()
 
         # ★ 本地工具（list_dir, search_file, add_tasks, todo_write）：后端本地执行，不发送到 IDE
         if tool_name in ("list_dir", "search_file", "add_tasks", "todo_write"):
@@ -2136,6 +2464,18 @@ class JSONRPCRouter:
         # 因此前 3 个需转换 file_path→filePath，read_file 保留 file_path 不变。
         # 注意：read_file 的 LLM 参数名是 "path"（非 "file_path"），仅它特殊。
         params = dict(arguments)
+        # update_tasks：LLM 常输出 task_id 或数字 taskId；插件 UpdateTasksToolHandler 只认 taskId 且曾强制 String 转型。
+        # 在此统一写入 arguments（FINISHED sync 用）与 params（tool/invoke 用），避免 invoke 失败导致侧栏也不更新。
+        if tool_name == "update_tasks":
+            _raw_tid = params.get("taskId")
+            if _raw_tid is None:
+                _raw_tid = params.get("task_id")
+            if _raw_tid is not None:
+                _tid_str = str(_raw_tid).strip()
+                if _tid_str:
+                    params["taskId"] = _tid_str
+                    arguments["taskId"] = _tid_str
+                    logger.info("[LSP4J-TOOL] update_tasks 参数规范化 taskId={}", _tid_str[:32])
         invoke_tool_name = tool_name
         if tool_name == "search_replace":
             # ★ 修复：先读取文件内容，执行真正的搜索替换，再将完整结果发送 IDE
@@ -2431,12 +2771,18 @@ class JSONRPCRouter:
                             file_path_for_id,
                         )
 
+                _tool_invoke_elapsed = time.monotonic() - _tool_invoke_start
+                logger.info("[LSP4J-PERF] TOOL_SUCCESS tool={} callId={} elapsed={:.1f}s result_len={}",
+                            tool_name, tool_call_id[:8], _tool_invoke_elapsed,
+                            len(result) if result else 0)
                 return result
             finally:
                 if cancel_future:
                     cancel_future.cancel()
         except asyncio.TimeoutError:
-            logger.warning("LSP4J: 工具调用超时 tool={} callId={}", tool_name, tool_call_id)
+            _tool_invoke_elapsed = time.monotonic() - _tool_invoke_start
+            logger.warning("[LSP4J-PERF] TOOL_TIMEOUT tool={} callId={} elapsed={:.1f}s timeout={}",
+                           tool_name, tool_call_id[:8], _tool_invoke_elapsed, timeout)
             self._cancelled_requests[rpc_id] = None
             if len(self._cancelled_requests) > self._MAX_CANCELLED_REQUESTS_SIZE:
                 self._cancelled_requests.pop(next(iter(self._cancelled_requests)))

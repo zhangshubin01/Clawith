@@ -43,7 +43,7 @@ import json
 import time
 import uuid as _uuid
 from datetime import datetime, timezone as tz_
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -115,6 +115,10 @@ class OAIMessage(BaseModel):
     role: str
     # content 可以是字符串、list（vision/multipart）或 null
     content: Optional[str | list] = None
+    # OpenAI tool 消息要求携带 tool_call_id（部分 provider 严格校验）
+    tool_call_id: Optional[str] = None
+    # assistant 消息可能携带 tool_calls（严格 provider 需要它与 tool 消息配对）
+    tool_calls: Optional[list[dict]] = None
 
     def text(self) -> str:
         """提取纯文本内容，兼容多模态 list 格式。"""
@@ -255,7 +259,7 @@ async def openai_chat_completions(
     from app.models.chat_session import ChatSession
     from app.models.audit import ChatMessage
     from app.core.permissions import check_agent_access, is_agent_expired
-    from app.api.websocket import call_llm
+    from app.services.llm.caller import call_llm
 
     model_ref = (body.model or "").strip()
     if not model_ref:
@@ -295,12 +299,62 @@ async def openai_chat_completions(
 
     # 将 OAI messages 转为 dict 列表（call_llm 直接接受 OpenAI 格式）
     # role 映射：developer(新版 OpenAI) → system；过滤空消息
+    # 兼容 strict provider: tool 消息必须和前序 assistant.tool_calls 成对出现。
     _ROLE_MAP = {"developer": "system"}
-    messages = [
-        {"role": _ROLE_MAP.get(m.role, m.role), "content": m.text()}
-        for m in body.messages
-        if m.text().strip()
-    ]
+    messages: list[dict] = []
+    pending_tool_call_ids: set[str] = set()
+    for m in body.messages:
+        role = _ROLE_MAP.get(m.role, m.role)
+        text = m.text()
+
+        if role == "assistant":
+            msg: dict[str, Any] = {"role": "assistant", "content": text}
+            raw_tool_calls = m.tool_calls or []
+            normalized_tool_calls: list[dict] = []
+            for tc in raw_tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                tcid = str(tc.get("id", "")).strip()
+                tctype = str(tc.get("type", "")).strip()
+                fn = tc.get("function")
+                if not tcid or tctype != "function" or not isinstance(fn, dict):
+                    continue
+                fn_name = str(fn.get("name", "")).strip()
+                fn_args = fn.get("arguments", "")
+                if not fn_name:
+                    continue
+                normalized_tool_calls.append(
+                    {"id": tcid, "type": "function", "function": {"name": fn_name, "arguments": str(fn_args)}}
+                )
+                pending_tool_call_ids.add(tcid)
+
+            # assistant 普通文本 or assistant 带 tool_calls（二者任一即可保留）
+            if text.strip() or normalized_tool_calls:
+                if normalized_tool_calls:
+                    msg["tool_calls"] = normalized_tool_calls
+                messages.append(msg)
+            continue
+
+        if role == "tool":
+            # DeepSeek 等严格要求 tool 消息必须附带 tool_call_id。
+            # 且必须能匹配到前序 assistant.tool_calls，否则请求会被拒绝。
+            tool_call_id = (m.tool_call_id or "").strip()
+            if not tool_call_id:
+                continue
+            if tool_call_id not in pending_tool_call_ids:
+                continue
+            if not text.strip():
+                continue
+            messages.append({"role": "tool", "content": text, "tool_call_id": tool_call_id})
+            pending_tool_call_ids.discard(tool_call_id)
+            continue
+
+        # 仅透传常见对话角色，避免非标准角色被上游 provider 拒绝。
+        if role not in {"system", "user", "assistant"}:
+            continue
+        if not text.strip():
+            continue
+        messages.append({"role": role, "content": text})
 
     # 查找或创建会话
     sess_r = await db.execute(

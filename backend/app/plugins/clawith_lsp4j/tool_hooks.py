@@ -345,7 +345,10 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "todo_write",
-            "description": "在 IDE 中写入待办事项列表。与 add_tasks 类似，将任务内容渲染为可折叠的树形 UI。",
+            "description": (
+                "在 IDE 中写入待办事项列表。与 add_tasks 类似，将任务内容渲染为可折叠的树形 UI。"
+                "每完成一项后必须调用 update_tasks：taskId 与列表顺序一致时为字符串 \"1\"..\"N\"（与未显式 id 的条目对应），status 如 completed/in_progress。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
