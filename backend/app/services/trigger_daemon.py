@@ -234,6 +234,8 @@ async def _evaluate_trigger(trigger: AgentTrigger, now: datetime) -> bool:
             return False
 
     cfg = trigger.config or {}
+    if not isinstance(cfg, dict):
+        return False
     t = trigger.type
 
     if t == "cron":
@@ -311,6 +313,8 @@ async def _poll_check(trigger: AgentTrigger) -> bool:
     """
     import httpx
     cfg = trigger.config or {}
+    if not isinstance(cfg, dict):
+        return False
     url = cfg.get("url")
     if not url:
         return False
@@ -394,6 +398,8 @@ async def _check_new_agent_messages(trigger: AgentTrigger) -> bool:
     from app.models.chat_session import ChatSession
 
     cfg = trigger.config or {}
+    if not isinstance(cfg, dict):
+        return False
     from_agent_name = cfg.get("from_agent_name")
     from_user_name = cfg.get("from_user_name")
 
@@ -674,7 +680,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
                 if t.focus_ref:
                     part += f"\nRelated Focus: {t.focus_ref}"
                 # Include matched message for on_message triggers
-                cfg = t.config or {}
+                cfg = t.config if isinstance(t.config, dict) else {}
                 if t.type == "on_message" and cfg.get("_matched_message"):
                     part += f"\nMatched message from {cfg.get('_matched_from', '?')}:\n\"{cfg['_matched_message'][:500]}\""
                 if t.type == "on_message" and cfg.get("okr_member_id") and cfg.get("okr_report_date"):
@@ -1022,7 +1028,7 @@ async def _tick():
                         # Auto-disable single-shot types only
                         if trigger.type == "once":
                             trigger.is_enabled = False
-                        if trigger.type == "webhook" and trigger.config:
+                        if trigger.type == "webhook" and isinstance(trigger.config, dict):
                             trigger.config = {
                                 **trigger.config,
                                 "_webhook_pending": False,

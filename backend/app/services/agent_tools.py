@@ -7551,7 +7551,15 @@ async def _handle_set_trigger(
 
     name = arguments.get("name", "").strip()
     ttype = arguments.get("type", "").strip()
-    config = dict(arguments.get("config", {}) or {})
+    raw_config = arguments.get("config", {})
+    if isinstance(raw_config, str):
+        try:
+            raw_config = json.loads(raw_config)
+        except (json.JSONDecodeError, Exception):
+            return "❌ 'config' must be a valid JSON object"
+    if not isinstance(raw_config, dict):
+        raw_config = {}
+    config = raw_config
     reason = arguments.get("reason", "").strip()
     focus_ref = arguments.get("focus_ref", "") or arguments.get("agenda_ref", "")  # backward compat
 
@@ -7751,6 +7759,8 @@ async def _handle_update_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
 
             changes = []
             if new_config is not None:
+                if not isinstance(new_config, dict):
+                    return "❌ 'config' must be a JSON object (dict), not a string or other type"
                 old_config = trigger.config
                 trigger.config = new_config
                 changes.append(f"config: {old_config} → {new_config}")
