@@ -7446,19 +7446,25 @@ async def _execute_code_legacy(ws: Path, arguments: dict, allow_network: bool = 
 
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            is_timeout = False
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.communicate()
-            return f"❌ Code execution timed out after {timeout}s"
+            stdout, stderr = await proc.communicate()
+            is_timeout = True
 
-        stdout_str = stdout.decode("utf-8", errors="replace")[:10000]
-        stderr_str = stderr.decode("utf-8", errors="replace")[:5000]
+        stdout_str = stdout.decode("utf-8", errors="replace")[:10000] if stdout else ""
+        stderr_str = stderr.decode("utf-8", errors="replace")[:5000] if stderr else ""
 
         result_parts = []
         if stdout_str.strip():
             result_parts.append(f"📤 Output:\n{stdout_str}")
         if stderr_str.strip():
             result_parts.append(f"⚠️ Stderr:\n{stderr_str}")
+
+        if is_timeout:
+            result_parts.append(f"❌ Code execution timed out after {timeout}s")
+            return "\n\n".join(result_parts)
+
         if proc.returncode != 0:
             result_parts.append(f"Exit code: {proc.returncode}")
 

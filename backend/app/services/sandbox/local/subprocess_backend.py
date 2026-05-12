@@ -395,22 +395,26 @@ class SubprocessBackend(BaseSandboxBackend):
                     proc.communicate(),
                     timeout=timeout
                 )
+                is_timeout = False
             except asyncio.TimeoutError:
                 proc.kill()
-                await proc.communicate()
-                return ExecutionResult(
-                    success=False,
-                    stdout="",
-                    stderr="",
-                    exit_code=124,
-                    duration_ms=int((time.time() - start_time) * 1000),
-                    error=f"Code execution timed out after {timeout}s"
-                )
+                stdout, stderr = await proc.communicate()
+                is_timeout = True
 
-            stdout_str = stdout.decode("utf-8", errors="replace")[:10000]
-            stderr_str = stderr.decode("utf-8", errors="replace")[:5000]
+            stdout_str = stdout.decode("utf-8", errors="replace")[:10000] if stdout else ""
+            stderr_str = stderr.decode("utf-8", errors="replace")[:5000] if stderr else ""
 
             duration_ms = int((time.time() - start_time) * 1000)
+
+            if is_timeout:
+                return ExecutionResult(
+                    success=False,
+                    stdout=stdout_str,
+                    stderr=stderr_str,
+                    exit_code=124,
+                    duration_ms=duration_ms,
+                    error=f"Code execution timed out after {timeout}s"
+                )
 
             return ExecutionResult(
                 success=proc.returncode == 0,
