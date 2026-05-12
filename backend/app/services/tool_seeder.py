@@ -931,7 +931,7 @@ BUILTIN_TOOLS = [
                     "type": "number",
                     "default": 30,
                     "min": 5,
-                    "max": 300,
+                    "max": 3600,
                 },
                 {
                     "key": "max_timeout",
@@ -939,7 +939,7 @@ BUILTIN_TOOLS = [
                     "type": "number",
                     "default": 60,
                     "min": 10,
-                    "max": 300,
+                    "max": 3600,
                 },
             ]
         },
@@ -982,7 +982,7 @@ BUILTIN_TOOLS = [
                     "type": "number",
                     "default": 30,
                     "min": 5,
-                    "max": 300,
+                    "max": 3600,
                 },
                 {
                     "key": "max_timeout",
@@ -990,7 +990,7 @@ BUILTIN_TOOLS = [
                     "type": "number",
                     "default": 60,
                     "min": 10,
-                    "max": 300,
+                    "max": 3600,
                 },
             ]
         },

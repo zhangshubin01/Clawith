@@ -182,7 +182,7 @@ class SubprocessBackend(BaseSandboxBackend):
                 import resource
 
                 memory_bytes = int(self.config.memory_limit.rstrip("mM")) * 1024 * 1024
-                cpu_limit = max(1, min(timeout, self.config.max_timeout, 60))
+                cpu_limit = max(1, min(timeout, self.config.max_timeout))
                 resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
                 resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
                 resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))

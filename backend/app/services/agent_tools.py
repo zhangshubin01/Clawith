@@ -802,7 +802,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "execute_code",
-            "description": "Execute code (Python, Bash, or Node.js) in a local sandboxed subprocess within the agent's root directory. Useful for data processing, calculations, file transformations, and automation scripts. Code runs with the agent root as the working directory, so you can access skills/, workspace/, memory/ etc. directly. Security restrictions apply: no network access commands, no system-level operations, 30-second timeout.",
+            "description": "Execute code (Python, Bash, or Node.js) in a local sandboxed subprocess within the agent's root directory. Useful for data processing, calculations, file transformations, and automation scripts. Code runs with the agent root as the working directory, so you can access skills/, workspace/, memory/ etc. directly. Security restrictions apply: no system-level operations, 30-second default timeout.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -813,7 +813,7 @@ AGENT_TOOLS = [
                     },
                     "code": {
                         "type": "string",
-                        "description": "Code to execute. For Python, you can import standard libraries (json, csv, math, re, collections, etc.). Working directory is the agent root (skills/, workspace/, memory/ are accessible).",
+                        "description": "Code to execute. If a Python import fails due to a missing package, install it first via execute_code with language='bash' and code='pip install <package>'. Working directory is the agent root (skills/, workspace/, memory/ are accessible).",
                     },
                     "timeout": {
                         "type": "integer",
@@ -7319,7 +7319,7 @@ async def _execute_code(
     """
     language = arguments.get("language", "python")
     code = arguments.get("code", "")
-    timeout = min(arguments.get("timeout", 30), 60)  # Max 60 seconds
+    requested_timeout = arguments.get("timeout", 30)
 
     if not code.strip():
         return "❌ No code provided"
@@ -7353,8 +7353,11 @@ async def _execute_code(
             sandbox_config = fallback_config
             logger.info(f"[Sandbox] No per-agent config found for '{tool_name}', using fallback")
 
+        # Clamp timeout by configured max_timeout (default 60s, up to 3600s)
+        timeout = min(requested_timeout, sandbox_config.max_timeout)
+
         backend = get_sandbox_backend(sandbox_config)
-        logger.info(f"[Sandbox] Executing code with backend: {backend.__class__.__name__} (tool={tool_name})")
+        logger.info(f"[Sandbox] Executing code with backend: {backend.__class__.__name__} (tool={tool_name}, timeout={timeout}s)")
         result = await backend.execute(
             code=code,
             language=language,
@@ -7371,7 +7374,7 @@ async def _execute_code(
             # Do not silently fall back — surface the config error to the user
             return f"❌ E2B sandbox configuration error: {str(e)[:300]}\nPlease check the API key in the tool settings."
         logger.warning(f"[Sandbox] Config issue, falling back to legacy subprocess: {e}")
-        return await _execute_code_legacy(ws, arguments, allow_network=fallback_config.allow_network)
+        return await _execute_code_legacy(ws, arguments, allow_network=fallback_config.allow_network, max_timeout=fallback_config.max_timeout)
 
     except Exception as e:
         logger.exception(f"[Sandbox] Execution failed for agent {agent_id} (tool={tool_name})")
@@ -7380,19 +7383,19 @@ async def _execute_code(
             return f"❌ E2B execution error: {str(e)[:200]}"
         # For local tool: try legacy subprocess as last resort
         try:
-            return await _execute_code_legacy(ws, arguments, allow_network=sandbox_config.allow_network)
+            return await _execute_code_legacy(ws, arguments, allow_network=sandbox_config.allow_network, max_timeout=sandbox_config.max_timeout)
         except Exception:
             logger.exception(f"[Sandbox] Fallback also failed for agent {agent_id}")
             return f"❌ Execution error: {str(e)[:200]}"
 
 
-async def _execute_code_legacy(ws: Path, arguments: dict, allow_network: bool = False) -> str:
+async def _execute_code_legacy(ws: Path, arguments: dict, allow_network: bool = False, max_timeout: int = 60) -> str:
     """Legacy subprocess-based code execution (fallback)."""
     import asyncio
 
     language = arguments.get("language", "python")
     code = arguments.get("code", "")
-    timeout = min(arguments.get("timeout", 30), 60)
+    timeout = min(arguments.get("timeout", 30), max_timeout)
 
     if not code.strip():
         return "❌ No code provided"
