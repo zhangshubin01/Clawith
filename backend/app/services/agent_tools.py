@@ -817,7 +817,7 @@ AGENT_TOOLS = [
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "Max execution time in seconds (default 30, max 60)",
+                        "description": "Max execution time in seconds (default 60, max 3600)",
                     },
                 },
                 "required": ["language", "code"],
