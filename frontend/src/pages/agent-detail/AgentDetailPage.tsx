@@ -8,14 +8,11 @@ import { useDialog } from '../../components/Dialog/DialogProvider';
 import { useToast } from '../../components/Toast/ToastProvider';
 import type { FileBrowserApi } from '../../components/FileBrowser';
 import FileBrowser from '../../components/FileBrowser';
-import ChannelConfig from '../../components/ChannelConfig';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
 import PromptModal from '../../components/PromptModal';
-import OpenClawSettings from '../OpenClawSettings';
 import type { LivePreviewState } from '../../components/AgentBayLivePanel';
 import AgentSidePanel, { SidePanelTab } from '../../components/AgentSidePanel';
 import type { WorkspaceActivity, WorkspaceLiveDraft } from '../../components/WorkspaceOperationPanel';
-import AgentCredentials from '../../components/AgentCredentials';
 import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, focusApi, scheduleApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress } from '../../services/api';
 import type { FocusApiItem } from '../../services/api';
 import ModelSwitcher from '../../components/ModelSwitcher';
@@ -55,7 +52,10 @@ import {
 import { useDropZone } from '../../hooks/useDropZone';
 import ApprovalsTab from './tabs/ApprovalsTab';
 import { AGENT_DETAIL_TABS } from './agentDetailTabs';
-import ToolsManager from './components/ToolsManager';
+import MindTab from './tabs/MindTab';
+import SettingsTab from './tabs/SettingsTab';
+import SkillsTab from './tabs/SkillsTab';
+import ToolsTab from './tabs/ToolsTab';
 import { useAgentDetailRoute } from './hooks/useAgentDetailRoute';
 import { fetchAuth } from './utils/fetchAuth';
 
@@ -2688,6 +2688,70 @@ export default function AgentDetailPage() {
     const [wmDraft, setWmDraft] = useState('');
     const [wmSaved, setWmSaved] = useState(false);
     useEffect(() => { setWmDraft((agent as any)?.welcome_message || ''); }, [(agent as any)?.welcome_message]);
+
+    const hasSettingsChanges = (
+        settingsForm.primary_model_id !== (agent?.primary_model_id || '') ||
+        settingsForm.fallback_model_id !== (agent?.fallback_model_id || '') ||
+        settingsForm.context_window_size !== (agent?.context_window_size ?? 100) ||
+        settingsForm.max_tool_rounds !== ((agent as any)?.max_tool_rounds ?? 50) ||
+        String(settingsForm.max_tokens_per_day) !== String(agent?.max_tokens_per_day || '') ||
+        String(settingsForm.max_tokens_per_month) !== String(agent?.max_tokens_per_month || '') ||
+        settingsForm.max_triggers !== ((agent as any)?.max_triggers ?? 20) ||
+        settingsForm.min_poll_interval_min !== ((agent as any)?.min_poll_interval_min ?? 5) ||
+        settingsForm.webhook_rate_limit !== ((agent as any)?.webhook_rate_limit ?? 5)
+    );
+
+    const handleSaveSettings = async () => {
+        setSettingsSaving(true);
+        setSettingsError('');
+        try {
+            const result: any = await agentApi.update(id!, {
+                primary_model_id: settingsForm.primary_model_id || null,
+                fallback_model_id: settingsForm.fallback_model_id || null,
+                context_window_size: settingsForm.context_window_size,
+                max_tool_rounds: settingsForm.max_tool_rounds,
+                max_tokens_per_day: settingsForm.max_tokens_per_day ? Number(settingsForm.max_tokens_per_day) : null,
+                max_tokens_per_month: settingsForm.max_tokens_per_month ? Number(settingsForm.max_tokens_per_month) : null,
+                max_triggers: settingsForm.max_triggers,
+                min_poll_interval_min: settingsForm.min_poll_interval_min,
+                webhook_rate_limit: settingsForm.webhook_rate_limit,
+            } as any);
+            queryClient.invalidateQueries({ queryKey: ['agent', id] });
+            settingsInitRef.current = false;
+            const clamped = result?._clamped_fields;
+            if (clamped && clamped.length > 0) {
+                const isCh = i18n.language?.startsWith('zh');
+                const fieldNames: Record<string, string> = isCh
+                    ? { min_poll_interval_min: 'Poll 最短间隔', webhook_rate_limit: 'Webhook 频率限制', heartbeat_interval_minutes: '心跳间隔' }
+                    : { min_poll_interval_min: 'Min Poll Interval', webhook_rate_limit: 'Webhook Rate Limit', heartbeat_interval_minutes: 'Heartbeat Interval' };
+                const msgs = clamped.map((c: any) => {
+                    const name = fieldNames[c.field] || c.field;
+                    return isCh
+                        ? `${name}: ${c.requested} -> ${c.applied} (公司策略限制)`
+                        : `${name}: ${c.requested} -> ${c.applied} (company policy)`;
+                });
+                setSettingsError((isCh ? 'Some values were adjusted:\n' : 'Some values were adjusted:\n') + msgs.join('\n'));
+                setTimeout(() => setSettingsError(''), 5000);
+            }
+            setSettingsSaved(true);
+            setTimeout(() => setSettingsSaved(false), 2000);
+        } catch (e: any) {
+            setSettingsError(e?.message || 'Failed to save');
+        } finally {
+            setSettingsSaving(false);
+        }
+    };
+
+    const handleSaveWelcomeMessage = async () => {
+        try {
+            await agentApi.update(id!, { welcome_message: wmDraft } as any);
+            queryClient.invalidateQueries({ queryKey: ['agent', id] });
+            setWmSaved(true);
+            setTimeout(() => setWmSaved(false), 2000);
+        } catch {
+            // Keep current editor state when welcome message save fails.
+        }
+    };
 
     // Reset cached state when switching to a different agent
     const prevIdRef = useRef(id);
@@ -5441,309 +5505,45 @@ export default function AgentDetailPage() {
 
                 {/* ── Mind Tab (Soul + Memory + Heartbeat) ── */}
                 {
-                    activeTab === 'mind' && (() => {
-                        const adapter: FileBrowserApi = {
-                            list: (p) => fileApi.list(id!, p),
-                            read: (p) => fileApi.read(id!, p),
-                            write: (p, c) => fileApi.write(id!, p, c),
-                            delete: (p) => fileApi.delete(id!, p),
-                            downloadUrl: (p) => fileApi.downloadUrl(id!, p),
-                        };
-                        return (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                                {/* Soul Section */}
-                                <div>
-                                    <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                        <IconDna size={18} stroke={1.8} /> {t('agent.soul.title')}
-                                    </h3>
-                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                                        {t('agent.mind.soulDesc', 'Core identity, personality, and behavior boundaries.')}
-                                    </p>
-                                    <FileBrowser api={adapter} singleFile="soul.md" title="" features={{ edit: (agent as any)?.access_level !== 'use' }} />
-                                </div>
-
-                                {/* Memory Section */}
-                                <div>
-                                    <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                        <IconBrain size={18} stroke={1.8} /> {t('agent.memory.title')}
-                                    </h3>
-                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                                        {t('agent.mind.memoryDesc', 'Persistent memory accumulated through conversations and experiences.')}
-                                    </p>
-                                    <FileBrowser api={adapter} rootPath="memory" readOnly features={{}} />
-                                </div>
-
-                                {/* Heartbeat Section */}
-                                <div>
-                                    <h3 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                        <IconHeartbeat size={18} stroke={1.8} /> {t('agent.mind.heartbeatTitle', 'Heartbeat')}
-                                    </h3>
-                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                                        {t('agent.mind.heartbeatDesc', 'Instructions for periodic awareness checks. The agent reads this file during each heartbeat.')}
-                                    </p>
-                                    <FileBrowser api={adapter} singleFile="HEARTBEAT.md" title="" features={{ edit: (agent as any)?.access_level !== 'use' }} />
-                                </div>
-                            </div>
-                        );
-                    })()
+                    activeTab === 'mind' && id && (
+                        <MindTab agentId={id} canEdit={(agent as any)?.access_level !== 'use'} />
+                    )
                 }
 
                 {/* ── Tools Tab ── */}
                 {
-                    activeTab === 'tools' && (
-                        <div>
-                            <div style={{ marginBottom: '16px' }}>
-                                <h3 style={{ marginBottom: '4px' }}>{t('agent.toolMgmt.title')}</h3>
-                                <p style={{ fontSize: '13px', color: 'var(--text-tertiary)' }}>{t('agent.toolMgmt.description')}</p>
-                            </div>
-                            <ToolsManager agentId={id!} canManage={canManage} />
-                        </div>
-                    )
+                    activeTab === 'tools' && id && <ToolsTab agentId={id} canManage={canManage} />
                 }
 
                 {/* ── Skills Tab ── */}
                 {
-                    activeTab === 'skills' && (() => {
-                        const adapter: FileBrowserApi = {
-                            list: (p) => fileApi.list(id!, p),
-                            read: (p) => fileApi.read(id!, p),
-                            write: (p, c) => fileApi.write(id!, p, c),
-                            delete: (p) => fileApi.delete(id!, p),
-                            upload: (file, path, onProgress) => fileApi.upload(id!, file, path, onProgress),
-                            downloadUrl: (p) => fileApi.downloadUrl(id!, p),
-                        };
-                        return (
-                            <div>
-                                <div style={{ marginBottom: '16px' }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                        <div>
-                                            <h3 style={{ marginBottom: '4px' }}>{t('agent.skills.title')}</h3>
-                                            <p style={{ fontSize: '13px', color: 'var(--text-tertiary)' }}>{t('agent.skills.description')}</p>
-                                        </div>
-                                        <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
-                                            <button
-                                                className="btn btn-secondary"
-                                                style={{ fontSize: '13px' }}
-                                                onClick={() => { setShowAgentUrlImport(true); setAgentUrlInput(''); }}
-                                            >
-                                                Import from URL
-                                            </button>
-                                            <button
-                                                className="btn btn-secondary"
-                                                style={{ fontSize: '13px' }}
-                                                onClick={() => { setShowAgentClawhub(true); setAgentClawhubQuery(''); setAgentClawhubResults([]); }}
-                                            >
-                                                Browse ClawHub
-                                            </button>
-                                            <button
-                                                className="btn btn-primary"
-                                                style={{ display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
-                                                onClick={() => setShowImportSkillModal(true)}
-                                            >
-                                                Import from Presets
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div style={{ marginTop: '8px', padding: '10px 14px', background: 'var(--bg-secondary)', borderRadius: '8px', fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                                        <strong>Skill Format:</strong><br />
-                                        • <code>skills/my-skill/SKILL.md</code> — {t('agent.skills.folderFormat', 'Each skill is a folder with a SKILL.md file and optional auxiliary files (scripts/, examples/)')}
-                                    </div>
-                                </div>
-                                <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: true, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} />
-
-                                {/* Browse ClawHub Modal */}
-                                {showAgentClawhub && (
-                                    <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowAgentClawhub(false)}>
-                                        <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', maxWidth: '600px', width: '90%', maxHeight: '70vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                                                <h3>Browse ClawHub</h3>
-                                                <button onClick={() => setShowAgentClawhub(false)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px 8px' }}>x</button>
-                                            </div>
-                                            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 12px' }}>
-                                                Search and install skills from ClawHub directly into this agent's workspace.
-                                            </p>
-                                            <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-                                                <input
-                                                    className="input"
-                                                    placeholder="Search skills..."
-                                                    value={agentClawhubQuery}
-                                                    onChange={e => setAgentClawhubQuery(e.target.value)}
-                                                    onKeyDown={e => {
-                                                        if (e.key === 'Enter' && agentClawhubQuery.trim()) {
-                                                            setAgentClawhubSearching(true);
-                                                            skillApi.clawhub.search(agentClawhubQuery).then(r => { setAgentClawhubResults(r); setAgentClawhubSearching(false); }).catch(() => setAgentClawhubSearching(false));
-                                                        }
-                                                    }}
-                                                    style={{ flex: 1, fontSize: '13px' }}
-                                                />
-                                                <button
-                                                    className="btn btn-primary"
-                                                    style={{ fontSize: '13px' }}
-                                                    disabled={!agentClawhubQuery.trim() || agentClawhubSearching}
-                                                    onClick={() => {
-                                                        setAgentClawhubSearching(true);
-                                                        skillApi.clawhub.search(agentClawhubQuery).then(r => { setAgentClawhubResults(r); setAgentClawhubSearching(false); }).catch(() => setAgentClawhubSearching(false));
-                                                    }}
-                                                >
-                                                    {agentClawhubSearching ? 'Searching...' : 'Search'}
-                                                </button>
-                                            </div>
-                                            <div style={{ flex: 1, overflowY: 'auto' }}>
-                                                {agentClawhubResults.length === 0 && !agentClawhubSearching && (
-                                                    <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-tertiary)', fontSize: '13px' }}>Search ClawHub to find skills</div>
-                                                )}
-                                                {agentClawhubResults.map((r: any) => (
-                                                    <div key={r.slug} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', borderRadius: '8px', marginBottom: '6px', border: '1px solid var(--border-subtle)', background: 'var(--bg-secondary)' }}>
-                                                        <div style={{ flex: 1 }}>
-                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                                <span style={{ fontWeight: 600, fontSize: '13px' }}>{r.displayName || r.slug}</span>
-                                                                {r.version && <span style={{ fontSize: '10px', color: 'var(--accent-text)', background: 'var(--accent-subtle)', padding: '1px 5px', borderRadius: '4px' }}>v{r.version}</span>}
-                                                            </div>
-                                                            <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '2px' }}>{r.summary?.substring(0, 100)}{r.summary?.length > 100 ? '...' : ''}</div>
-                                                            {r.updatedAt && <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px', opacity: 0.7 }}>Updated {new Date(r.updatedAt).toLocaleDateString()}</div>}
-                                                        </div>
-                                                        <button
-                                                            className="btn btn-secondary"
-                                                            style={{ fontSize: '12px', padding: '5px 12px', marginLeft: '12px' }}
-                                                            disabled={agentClawhubInstalling === r.slug}
-                                                            onClick={async () => {
-                                                                setAgentClawhubInstalling(r.slug);
-                                                                try {
-                                                                    const res = await skillApi.agentImport.fromClawhub(id!, r.slug);
-                                                                    toast.success(`已安装 "${r.displayName || r.slug}"（${res.files_written} 个文件）`);
-                                                                    queryClient.invalidateQueries({ queryKey: ['files', id, 'skills'] });
-                                                                } catch (err: any) {
-                                                                    await dialog.alert('安装失败', { type: 'error', details: String(err?.message || err) });
-                                                                } finally {
-                                                                    setAgentClawhubInstalling(null);
-                                                                }
-                                                            }}
-                                                        >
-                                                            {agentClawhubInstalling === r.slug ? 'Installing...' : 'Install'}
-                                                        </button>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* Import from URL Modal */}
-                                {showAgentUrlImport && (
-                                    <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowAgentUrlImport(false)}>
-                                        <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', maxWidth: '500px', width: '90%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                                                <h3>Import from GitHub URL</h3>
-                                                <button onClick={() => setShowAgentUrlImport(false)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px 8px' }}>x</button>
-                                            </div>
-                                            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 12px' }}>
-                                                Paste a GitHub URL pointing to a skill directory (must contain SKILL.md).
-                                            </p>
-                                            <input
-                                                className="input"
-                                                placeholder="https://github.com/owner/repo/tree/main/path/to/skill"
-                                                value={agentUrlInput}
-                                                onChange={e => setAgentUrlInput(e.target.value)}
-                                                style={{ width: '100%', fontSize: '13px', marginBottom: '12px', boxSizing: 'border-box' }}
-                                            />
-                                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                                                <button className="btn btn-secondary" onClick={() => setShowAgentUrlImport(false)}>Cancel</button>
-                                                <button
-                                                    className="btn btn-primary"
-                                                    disabled={!agentUrlInput.trim() || agentUrlImporting}
-                                                    onClick={async () => {
-                                                        setAgentUrlImporting(true);
-                                                        try {
-                                                            const res = await skillApi.agentImport.fromUrl(id!, agentUrlInput.trim());
-                                                            toast.success(`已导入 ${res.files_written} 个文件`);
-                                                            queryClient.invalidateQueries({ queryKey: ['files', id, 'skills'] });
-                                                            setShowAgentUrlImport(false);
-                                                        } catch (err: any) {
-                                                            await dialog.alert('导入失败', { type: 'error', details: String(err?.message || err) });
-                                                        } finally {
-                                                            setAgentUrlImporting(false);
-                                                        }
-                                                    }}
-                                                >
-                                                    {agentUrlImporting ? 'Importing...' : 'Import'}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* Import from Presets Modal */}
-                                {showImportSkillModal && (
-                                    <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowImportSkillModal(false)}>
-                                        <div onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', maxWidth: '600px', width: '90%', maxHeight: '70vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
-                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                                                <h3>{t('agent.skills.importPreset', 'Import from Presets')}</h3>
-                                                <button onClick={() => setShowImportSkillModal(false)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px 8px' }}>✕</button>
-                                            </div>
-                                            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px' }}>
-                                                {t('agent.skills.importDesc', 'Select a preset skill to import into this agent. All skill files will be copied to the agent\'s skills folder.')}
-                                            </p>
-                                            <div style={{ flex: 1, overflowY: 'auto' }}>
-                                                {!globalSkillsForImport ? (
-                                                    <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-tertiary)' }}>Loading...</div>
-                                                ) : globalSkillsForImport.length === 0 ? (
-                                                    <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-tertiary)' }}>No preset skills available</div>
-                                                ) : (
-                                                    globalSkillsForImport.map((skill: any) => (
-                                                        <div
-                                                            key={skill.id}
-                                                            style={{
-                                                                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                                                padding: '12px 14px', borderRadius: '8px', marginBottom: '8px',
-                                                                border: '1px solid var(--border-subtle)', background: 'var(--bg-secondary)',
-                                                                transition: 'border-color 0.15s',
-                                                            }}
-                                                            onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--accent-primary)')}
-                                                            onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border-subtle)')}
-                                                        >
-                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }}>
-                                                                <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)' }}>{safeDisplayIcon(skill.icon, <IconTools size={20} stroke={1.8} />)}</span>
-                                                                <div>
-                                                                    <div style={{ fontWeight: 600, fontSize: '14px' }}>{skill.name}</div>
-                                                                    <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                                                                        {skill.description?.substring(0, 100)}{skill.description?.length > 100 ? '...' : ''}
-                                                                    </div>
-                                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                                                                        <IconFolder size={12} stroke={1.8} /> {skill.folder_name}
-                                                                        {skill.is_default && <span style={{ marginLeft: '8px', color: 'var(--accent-primary)', fontWeight: 600 }}>✓ Default</span>}
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                            <button
-                                                                className="btn btn-secondary"
-                                                                style={{ whiteSpace: 'nowrap', fontSize: '12px', padding: '6px 14px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
-                                                                disabled={importingSkillId === skill.id}
-                                                                onClick={async () => {
-                                                                    setImportingSkillId(skill.id);
-                                                                    try {
-                                                                        const res = await fileApi.importSkill(id!, skill.id);
-                                                                        toast.success(`已导入 "${skill.name}"（${res.files_written} 个文件）`);
-                                                                        queryClient.invalidateQueries({ queryKey: ['files', id, 'skills'] });
-                                                                        setShowImportSkillModal(false);
-                                                                    } catch (err: any) {
-                                                                        await dialog.alert('导入失败', { type: 'error', details: String(err?.message || err) });
-                                                                    } finally {
-                                                                        setImportingSkillId(null);
-                                                                    }
-                                                                }}
-                                                            >
-                                                                {importingSkillId === skill.id ? 'Importing...' : <><IconDownload size={13} stroke={1.8} /> Import</>}
-                                                            </button>
-                                                        </div>
-                                                    ))
-                                                )}
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })()
+                    activeTab === 'skills' && id && (
+                        <SkillsTab
+                            agentId={id}
+                            safeDisplayIcon={safeDisplayIcon}
+                            showAgentClawhub={showAgentClawhub}
+                            setShowAgentClawhub={setShowAgentClawhub}
+                            agentClawhubQuery={agentClawhubQuery}
+                            setAgentClawhubQuery={setAgentClawhubQuery}
+                            agentClawhubResults={agentClawhubResults}
+                            setAgentClawhubResults={setAgentClawhubResults}
+                            agentClawhubSearching={agentClawhubSearching}
+                            setAgentClawhubSearching={setAgentClawhubSearching}
+                            agentClawhubInstalling={agentClawhubInstalling}
+                            setAgentClawhubInstalling={setAgentClawhubInstalling}
+                            showAgentUrlImport={showAgentUrlImport}
+                            setShowAgentUrlImport={setShowAgentUrlImport}
+                            agentUrlInput={agentUrlInput}
+                            setAgentUrlInput={setAgentUrlInput}
+                            agentUrlImporting={agentUrlImporting}
+                            setAgentUrlImporting={setAgentUrlImporting}
+                            showImportSkillModal={showImportSkillModal}
+                            setShowImportSkillModal={setShowImportSkillModal}
+                            globalSkillsForImport={globalSkillsForImport}
+                            importingSkillId={importingSkillId}
+                            setImportingSkillId={setImportingSkillId}
+                        />
+                    )
                 }
 
                 {/* ── Relationships Tab ── */}
@@ -6689,575 +6489,46 @@ export default function AgentDetailPage() {
 
                 {/* ── Settings Tab ── */}
                 {
-                    activeTab === 'settings' && (agent as any)?.agent_type === 'openclaw' && (
-                        <OpenClawSettings agent={agent} agentId={id!} />
-                    )
-                }
-                {
-                    activeTab === 'settings' && (agent as any)?.agent_type !== 'openclaw' && (() => {
-                        // Check if form has unsaved changes
-                        const hasChanges = (
-                            settingsForm.primary_model_id !== (agent?.primary_model_id || '') ||
-                            settingsForm.fallback_model_id !== (agent?.fallback_model_id || '') ||
-                            settingsForm.context_window_size !== (agent?.context_window_size ?? 100) ||
-                            settingsForm.max_tool_rounds !== ((agent as any)?.max_tool_rounds ?? 50) ||
-                            String(settingsForm.max_tokens_per_day) !== String(agent?.max_tokens_per_day || '') ||
-                            String(settingsForm.max_tokens_per_month) !== String(agent?.max_tokens_per_month || '') ||
-                            settingsForm.max_triggers !== ((agent as any)?.max_triggers ?? 20) ||
-                            settingsForm.min_poll_interval_min !== ((agent as any)?.min_poll_interval_min ?? 5) ||
-                            settingsForm.webhook_rate_limit !== ((agent as any)?.webhook_rate_limit ?? 5)
-                        );
-
-                        const handleSaveSettings = async () => {
-                            setSettingsSaving(true);
-                            setSettingsError('');
-                            try {
-                                const result: any = await agentApi.update(id!, {
-                                    primary_model_id: settingsForm.primary_model_id || null,
-                                    fallback_model_id: settingsForm.fallback_model_id || null,
-                                    context_window_size: settingsForm.context_window_size,
-                                    max_tool_rounds: settingsForm.max_tool_rounds,
-                                    max_tokens_per_day: settingsForm.max_tokens_per_day ? Number(settingsForm.max_tokens_per_day) : null,
-                                    max_tokens_per_month: settingsForm.max_tokens_per_month ? Number(settingsForm.max_tokens_per_month) : null,
-                                    max_triggers: settingsForm.max_triggers,
-                                    min_poll_interval_min: settingsForm.min_poll_interval_min,
-                                    webhook_rate_limit: settingsForm.webhook_rate_limit,
-                                } as any);
-                                queryClient.invalidateQueries({ queryKey: ['agent', id] });
-                                settingsInitRef.current = false;
-
-                                // Check if any values were clamped by company policy
-                                const clamped = result?._clamped_fields;
-                                if (clamped && clamped.length > 0) {
-                                    const isCh = i18n.language?.startsWith('zh');
-                                    const fieldNames: Record<string, string> = isCh
-                                        ? { min_poll_interval_min: 'Poll 最短间隔', webhook_rate_limit: 'Webhook 频率限制', heartbeat_interval_minutes: '心跳间隔' }
-                                        : { min_poll_interval_min: 'Min Poll Interval', webhook_rate_limit: 'Webhook Rate Limit', heartbeat_interval_minutes: 'Heartbeat Interval' };
-                                    const msgs = clamped.map((c: any) => {
-                                        const name = fieldNames[c.field] || c.field;
-                                        return isCh
-                                            ? `${name}: ${c.requested} -> ${c.applied} (公司策略限制)`
-                                            : `${name}: ${c.requested} -> ${c.applied} (company policy)`;
-                                    });
-                                    setSettingsError((isCh ? 'Some values were adjusted:\n' : 'Some values were adjusted:\n') + msgs.join('\n'));
-                                    setTimeout(() => setSettingsError(''), 5000);
-                                }
-
-                                setSettingsSaved(true);
-                                setTimeout(() => setSettingsSaved(false), 2000);
-                            } catch (e: any) {
-                                setSettingsError(e?.message || 'Failed to save');
-                            } finally {
-                                setSettingsSaving(false);
-                            }
-                        };
-
-                        return (
-                            <div>
-                                <div className="agent-settings-savebar">
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                        {settingsSaved && <span style={{ fontSize: '12px', color: 'var(--success)' }}>{t('agent.settings.saved', 'Saved')}</span>}
-                                        {settingsError && <span style={{ fontSize: '12px', color: settingsError.includes('adjusted') ? 'var(--warning)' : 'var(--error)', whiteSpace: 'pre-line' }}>{settingsError}</span>}
-                                        <button
-                                            className="btn btn-primary"
-                                            disabled={!hasChanges || settingsSaving}
-                                            onClick={handleSaveSettings}
-                                            style={{
-                                                opacity: hasChanges ? 1 : 0.5,
-                                                cursor: hasChanges ? 'pointer' : 'default',
-                                                padding: '6px 20px',
-                                                fontSize: '13px',
-                                            }}
-                                        >
-                                            {settingsSaving ? t('agent.settings.saving', 'Saving...') : t('agent.settings.save', 'Save')}
-                                        </button>
-                                    </div>
-                                </div>
-
-                                {/* Model Selection — native agents only */}
-                                {(agent as any)?.agent_type !== 'openclaw' && (
-                                    <div className="card" style={{ marginBottom: '12px' }}>
-                                        <h4 style={{ marginBottom: '12px' }}>{t('agent.settings.modelConfig')}</h4>
-                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                                            <div>
-                                                <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.primaryModel')}</label>
-                                                <select
-                                                    className="input"
-                                                    value={settingsForm.primary_model_id}
-                                                    onChange={(e) => setSettingsForm(f => ({ ...f, primary_model_id: e.target.value }))}
-                                                >
-                                                    <option value="">--</option>
-                                                    {llmModels.filter((m: any) => m.enabled || m.id === settingsForm.primary_model_id).map((m: any) => (
-                                                        <option key={m.id} value={m.id}>
-                                                            {m.label || m.model}
-                                                        </option>
-                                                    ))}
-                                                </select>
-                                                {/* Warning if selected model is disabled */}
-                                                {settingsForm.primary_model_id && llmModels.some((m: any) => m.id === settingsForm.primary_model_id && !m.enabled) && (
-                                                    <div style={{ fontSize: '11px', color: 'var(--error)', marginTop: '4px' }}>
-                                                        {t('agent.settings.modelDisabledWarning', 'This model has been disabled by admin. The agent will automatically use the fallback model.')}
-                                                    </div>
-                                                )}
-                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.primaryModel')}</div>
-                                            </div>
-                                            <div>
-                                                <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.fallbackModel')}</label>
-                                                <select
-                                                    className="input"
-                                                    value={settingsForm.fallback_model_id}
-                                                    onChange={(e) => setSettingsForm(f => ({ ...f, fallback_model_id: e.target.value }))}
-                                                >
-                                                    <option value="">--</option>
-                                                    {llmModels.filter((m: any) => m.enabled || m.id === settingsForm.fallback_model_id).map((m: any) => (
-                                                        <option key={m.id} value={m.id}>
-                                                            {m.label || m.model}
-                                                        </option>
-                                                    ))}
-                                                </select>
-                                                {/* Warning if selected fallback model is disabled */}
-                                                {settingsForm.fallback_model_id && llmModels.some((m: any) => m.id === settingsForm.fallback_model_id && !m.enabled) && (
-                                                    <div style={{ fontSize: '11px', color: 'var(--error)', marginTop: '4px' }}>
-                                                        {t('agent.settings.modelDisabledWarning', 'This model has been disabled by admin. The agent will automatically use the fallback model.')}
-                                                    </div>
-                                                )}
-                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.fallbackModel')}</div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* Context Window — native agents only */}
-                                {(agent as any)?.agent_type !== 'openclaw' && (<>
-                                    <div className="card" style={{ marginBottom: '12px' }}>
-                                        <h4 style={{ marginBottom: '12px' }}>{t('agent.settings.conversationContext')}</h4>
-                                        <div>
-                                            <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.maxRounds')}</label>
-                                            <input
-                                                className="input"
-                                                type="number"
-                                                min={10}
-                                                max={500}
-                                                value={settingsForm.context_window_size}
-                                                onChange={(e) => setSettingsForm(f => ({ ...f, context_window_size: Math.max(10, Math.min(500, parseInt(e.target.value) || 100)) }))}
-                                                style={{ width: '120px' }}
-                                            />
-                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.roundsDesc')}</div>
-                                        </div>
-                                    </div>
-
-                                    {/* Max Tool Call Rounds */}
-                                    <div className="card" style={{ marginBottom: '12px' }}>
-                                        <h4 style={{ marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}><IconTools size={16} stroke={1.8} /> {t('agent.settings.maxToolRounds', 'Max Tool Call Rounds')}</h4>
-                                        <div>
-                                            <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.maxToolRoundsLabel', 'Maximum rounds per message')}</label>
-                                            <input
-                                                className="input"
-                                                type="number"
-                                                min={5}
-                                                max={200}
-                                                value={settingsForm.max_tool_rounds}
-                                                onChange={(e) => setSettingsForm(f => ({ ...f, max_tool_rounds: Math.max(5, Math.min(200, parseInt(e.target.value) || 50)) }))}
-                                                style={{ width: '120px' }}
-                                            />
-                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>{t('agent.settings.maxToolRoundsDesc', 'How many tool-calling rounds the agent can perform per message (search, write, etc). Default: 50')}</div>
-                                        </div>
-                                    </div>
-                                </>)}
-
-                                {/* Token Limits */}
-                                <div className="card" style={{ marginBottom: '12px' }}>
-                                    <h4 style={{ marginBottom: '12px' }}>{t('agent.settings.tokenLimits')}</h4>
-                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                                        <div>
-                                            <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.dailyLimit')}</label>
-                                            <input
-                                                className="input"
-                                                type="number"
-                                                value={settingsForm.max_tokens_per_day}
-                                                onChange={(e) => setSettingsForm(f => ({ ...f, max_tokens_per_day: e.target.value }))}
-                                                placeholder={t("agent.settings.noLimit")}
-                                            />
-                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                                                {t('agent.settings.today')}: {formatTokens(agent?.tokens_used_today || 0)}
-                                            </div>
-                                        </div>
-                                        <div>
-                                            <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>{t('agent.settings.monthlyLimit')}</label>
-                                            <input
-                                                className="input"
-                                                type="number"
-                                                value={settingsForm.max_tokens_per_month}
-                                                onChange={(e) => setSettingsForm(f => ({ ...f, max_tokens_per_month: e.target.value }))}
-                                                placeholder={t("agent.settings.noLimit")}
-                                            />
-                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                                                {t('agent.settings.month')}: {formatTokens(agent?.tokens_used_month || 0)}
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                {/* Trigger Limits — native agents only */}
-                                {(agent as any)?.agent_type !== 'openclaw' && (() => {
-                                    const isChinese = i18n.language?.startsWith('zh');
-                                    return (
-                                        <div className="card" style={{ marginBottom: '12px' }}>
-                                            <h4 style={{ marginBottom: '4px' }}>{isChinese ? '触发器限制' : 'Trigger Limits'}</h4>
-                                            <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                                                {isChinese
-                                                    ? '控制该 Agent 可以创建的触发器数量和行为限制'
-                                                    : 'Limit how many triggers this agent can create and their behavior'}
-                                            </p>
-                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
-                                                <div>
-                                                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>
-                                                        {isChinese ? '最大触发器数' : 'Max Triggers'}
-                                                    </label>
-                                                    <input
-                                                        className="input"
-                                                        type="number"
-                                                        min={1}
-                                                        max={100}
-                                                        value={settingsForm.max_triggers}
-                                                        onChange={(e) => setSettingsForm(f => ({ ...f, max_triggers: Math.max(1, Math.min(100, parseInt(e.target.value) || 20)) }))}
-                                                        style={{ width: '100%' }}
-                                                    />
-                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                                                        {isChinese ? 'Agent 最多可同时拥有的触发器数量' : 'Max active triggers the agent can have'}
-                                                    </div>
-                                                </div>
-                                                <div>
-                                                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>
-                                                        {isChinese ? 'Poll 最短间隔 (分钟)' : 'Min Poll Interval (min)'}
-                                                    </label>
-                                                    <input
-                                                        className="input"
-                                                        type="number"
-                                                        min={1}
-                                                        max={60}
-                                                        value={settingsForm.min_poll_interval_min}
-                                                        onChange={(e) => setSettingsForm(f => ({ ...f, min_poll_interval_min: Math.max(1, Math.min(60, parseInt(e.target.value) || 5)) }))}
-                                                        style={{ width: '100%' }}
-                                                    />
-                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                                                        {isChinese ? '定时轮询外部接口的最短间隔' : 'Minimum interval for polling external URLs'}
-                                                    </div>
-                                                </div>
-                                                <div>
-                                                    <label style={{ display: 'block', fontSize: '13px', fontWeight: 500, marginBottom: '6px' }}>
-                                                        {isChinese ? 'Webhook 频率限制 (次/分钟)' : 'Webhook Rate Limit (/min)'}
-                                                    </label>
-                                                    <input
-                                                        className="input"
-                                                        type="number"
-                                                        min={1}
-                                                        max={60}
-                                                        value={settingsForm.webhook_rate_limit}
-                                                        onChange={(e) => setSettingsForm(f => ({ ...f, webhook_rate_limit: Math.max(1, Math.min(60, parseInt(e.target.value) || 5)) }))}
-                                                        style={{ width: '100%' }}
-                                                    />
-                                                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '4px' }}>
-                                                        {isChinese ? '外部系统每分钟最多可调用的 Webhook 次数' : 'Max webhook calls per minute from external services'}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    );
-                                })()}
-
-                                {/* Credentials Management — for AgentBay cookie injection */}
-                                <div style={{ marginBottom: '12px' }}>
-                                    <AgentCredentials agentId={id!} />
-                                </div>
-
-                                {/* Welcome Message */}
-                                {(() => {
-                                    const isChinese = i18n.language?.startsWith('zh');
-                                    const saveWm = async () => {
-                                        try {
-                                            await agentApi.update(id!, { welcome_message: wmDraft } as any);
-                                            queryClient.invalidateQueries({ queryKey: ['agent', id] });
-                                            setWmSaved(true);
-                                            setTimeout(() => setWmSaved(false), 2000);
-                                        } catch { }
-                                    };
-                                    return (
-                                        <div className="card" style={{ marginBottom: '12px' }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-                                                <h4 style={{ margin: 0 }}>{isChinese ? '欢迎语' : 'Welcome Message'}</h4>
-                                                {wmSaved && <span style={{ fontSize: '12px', color: 'var(--success)' }}>✓ {isChinese ? '已保存' : 'Saved'}</span>}
-                                            </div>
-                                            <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                                                {isChinese
-                                                    ? '当用户在网页端发起新对话时，Agent 会自动发送的欢迎语。支持 Markdown 语法。留空则不发送。'
-                                                    : 'Greeting message sent automatically when a user starts a new web conversation. Supports Markdown. Leave empty to disable.'}
-                                            </p>
-                                            <textarea
-                                                className="input"
-                                                rows={4}
-                                                value={wmDraft}
-                                                onChange={e => setWmDraft(e.target.value)}
-                                                onBlur={saveWm}
-                                                placeholder={isChinese ? '例如：你好！我是你的 AI 助手，有什么可以帮你的吗？' : "e.g. Hello! I'm your AI assistant. How can I help you?"}
-                                                style={{
-                                                    width: '100%', minHeight: '80px', resize: 'vertical',
-                                                    fontFamily: 'inherit', fontSize: '13px',
-                                                }}
-                                            />
-                                        </div>
-                                    );
-                                })()}
-
-                                {/* Autonomy Policy — native agents only */}
-                                {(agent as any)?.agent_type !== 'openclaw' && <div className="card" style={{ marginBottom: '12px' }}>
-                                    <h4 style={{ marginBottom: '4px' }}>{t('agent.settings.autonomy.title')}</h4>
-                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
-                                        {t('agent.settings.autonomy.description')}
-                                    </p>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                                        {[
-                                            { key: 'read_files', label: t('agent.settings.autonomy.readFiles'), desc: t('agent.settings.autonomy.readFilesDesc') },
-                                            { key: 'write_workspace_files', label: t('agent.settings.autonomy.writeFiles'), desc: t('agent.settings.autonomy.writeFilesDesc') },
-                                            { key: 'delete_files', label: t('agent.settings.autonomy.deleteFiles'), desc: t('agent.settings.autonomy.deleteFilesDesc') },
-                                            { key: 'send_feishu_message', label: t('agent.settings.autonomy.sendFeishu'), desc: t('agent.settings.autonomy.sendFeishuDesc') },
-                                            { key: 'web_search', label: t('agent.settings.autonomy.webSearch'), desc: t('agent.settings.autonomy.webSearchDesc') },
-                                            { key: 'manage_tasks', label: t('agent.settings.autonomy.manageTasks'), desc: t('agent.settings.autonomy.manageTasksDesc') },
-                                        ].map((action) => {
-                                            const currentLevel = (agent?.autonomy_policy as any)?.[action.key] || 'L1';
-                                            return (
-                                                <div key={action.key} style={{
-                                                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                                    padding: '10px 14px', background: 'var(--bg-elevated)', borderRadius: '8px',
-                                                    border: '1px solid var(--border-subtle)',
-                                                }}>
-                                                    <div style={{ flex: 1 }}>
-                                                        <div style={{ fontWeight: 500, fontSize: '13px' }}>{action.label}</div>
-                                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{action.desc}</div>
-                                                    </div>
-                                                    <select
-                                                        className="input"
-                                                        value={currentLevel}
-                                                        onChange={async (e) => {
-                                                            const newPolicy = { ...(agent?.autonomy_policy as any || {}), [action.key]: e.target.value };
-                                                            await agentApi.update(id!, { autonomy_policy: newPolicy } as any);
-                                                            queryClient.invalidateQueries({ queryKey: ['agent', id] });
-                                                        }}
-                                                        style={{
-                                                            width: '140px', fontSize: '12px',
-                                                            color: currentLevel === 'L1' ? 'var(--success)' : currentLevel === 'L2' ? 'var(--warning)' : 'var(--error)',
-                                                            fontWeight: 600,
-                                                        }}
-                                                    >
-                                                        <option value="L1">{t('agent.settings.autonomy.l1Auto')}</option>
-                                                        <option value="L2">{t('agent.settings.autonomy.l2Notify')}</option>
-                                                        <option value="L3">{t('agent.settings.autonomy.l3Approve')}</option>
-                                                    </select>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                </div>}
-
-                                {/* Permission Management */}
+                    activeTab === 'settings' && id && (
+                        <SettingsTab
+                            agent={agent}
+                            agentId={id}
+                            canManage={canManage}
+                            llmModels={llmModels}
+                            settingsForm={settingsForm}
+                            setSettingsForm={setSettingsForm}
+                            settingsSaved={settingsSaved}
+                            settingsError={settingsError}
+                            settingsSaving={settingsSaving}
+                            hasChanges={hasSettingsChanges}
+                            onSaveSettings={handleSaveSettings}
+                            wmDraft={wmDraft}
+                            setWmDraft={setWmDraft}
+                            wmSaved={wmSaved}
+                            onSaveWelcomeMessage={handleSaveWelcomeMessage}
+                            accessPermissionsPanel={(
                                 <AccessPermissionsPanel
-                                    agentId={id!}
+                                    agentId={id}
                                     permData={permData}
                                     canManage={canManage}
                                     queryClient={queryClient}
                                 />
-
-                                {/* Timezone */}
-                                <div className="card" style={{ marginBottom: '12px' }}>
-                                    <h4 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                        <IconWorld size={16} stroke={1.8} /> {t('agent.settings.timezone.title', 'Timezone')}
-                                    </h4>
-                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
-                                        {t('agent.settings.timezone.description', 'The timezone used for this agent\'s scheduling, active hours, and time awareness. Defaults to the company timezone if not set.')}
-                                    </p>
-                                    <div style={{
-                                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                        padding: '10px 14px', background: 'var(--bg-elevated)', borderRadius: '8px',
-                                        border: '1px solid var(--border-subtle)',
-                                    }}>
-                                        <div>
-                                            <div style={{ fontWeight: 500, fontSize: '13px' }}>{t('agent.settings.timezone.current', 'Agent Timezone')}</div>
-                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                                {agent?.timezone
-                                                    ? t('agent.settings.timezone.override', 'Custom timezone for this agent')
-                                                    : t('agent.settings.timezone.inherited', 'Using company default timezone')}
-                                            </div>
-                                        </div>
-                                        <select
-                                            className="input"
-                                            disabled={!canManage}
-                                            value={agent?.timezone || ''}
-                                            onChange={async (e) => {
-                                                if (!canManage) return;
-                                                const val = e.target.value || null;
-                                                await agentApi.update(id!, { timezone: val } as any);
-                                                queryClient.invalidateQueries({ queryKey: ['agent', id] });
-                                            }}
-                                            style={{ width: '200px', fontSize: '12px', opacity: canManage ? 1 : 0.6 }}
-                                        >
-                                            <option value="">{t('agent.settings.timezone.default', '↩ Company default')}</option>
-                                            {['UTC', 'Asia/Shanghai', 'Asia/Tokyo', 'Asia/Seoul', 'Asia/Singapore', 'Asia/Kolkata', 'Asia/Dubai',
-                                                'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Moscow',
-                                                'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-                                                'America/Sao_Paulo', 'Australia/Sydney', 'Pacific/Auckland'].map(tz => (
-                                                    <option key={tz} value={tz}>{tz}</option>
-                                                ))}
-                                        </select>
-                                    </div>
-                                </div>
-
-                                {/* Heartbeat */}
-                                <div className="card" style={{ marginBottom: '12px' }}>
-                                    <h4 style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                        {t('agent.settings.heartbeat.title', 'Heartbeat')}
-                                    </h4>
-                                    <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '16px' }}>
-                                        {t('agent.settings.heartbeat.description', 'Periodic awareness check — agent proactively monitors the plaza and work environment.')}
-                                    </p>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                                        {/* Enable toggle */}
-                                        <div style={{
-                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                            padding: '10px 14px', background: 'var(--bg-elevated)', borderRadius: '8px',
-                                            border: '1px solid var(--border-subtle)',
-                                        }}>
-                                            <div>
-                                                <div style={{ fontWeight: 500, fontSize: '13px' }}>{t('agent.settings.heartbeat.enabled', 'Enable Heartbeat')}</div>
-                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('agent.settings.heartbeat.enabledDesc', 'Agent will periodically check plaza and work status')}</div>
-                                            </div>
-                                            <label style={{ position: 'relative', display: 'inline-block', width: '44px', height: '24px', cursor: canManage ? 'pointer' : 'default' }}>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={agent?.heartbeat_enabled ?? true}
-                                                    disabled={!canManage}
-                                                    onChange={async (e) => {
-                                                        if (!canManage) return;
-                                                        await agentApi.update(id!, { heartbeat_enabled: e.target.checked } as any);
-                                                        queryClient.invalidateQueries({ queryKey: ['agent', id] });
-                                                    }}
-                                                    style={{ opacity: 0, width: 0, height: 0 }}
-                                                />
-                                                <span style={{
-                                                    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-                                                    background: (agent?.heartbeat_enabled ?? true) ? 'var(--accent-primary)' : 'var(--bg-tertiary)',
-                                                    borderRadius: '12px', transition: 'background 0.2s',
-                                                    opacity: canManage ? 1 : 0.6
-                                                }}>
-                                                    <span style={{
-                                                        position: 'absolute', top: '3px',
-                                                        left: (agent?.heartbeat_enabled ?? true) ? '23px' : '3px',
-                                                        width: '18px', height: '18px', background: 'white',
-                                                        borderRadius: '50%', transition: 'left 0.2s',
-                                                    }} />
-                                                </span>
-                                            </label>
-                                        </div>
-
-                                        {/* Interval */}
-                                        <div style={{
-                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                            padding: '10px 14px', background: 'var(--bg-elevated)', borderRadius: '8px',
-                                            border: '1px solid var(--border-subtle)',
-                                        }}>
-                                            <div>
-                                                <div style={{ fontWeight: 500, fontSize: '13px' }}>{t('agent.settings.heartbeat.interval', 'Check Interval')}</div>
-                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('agent.settings.heartbeat.intervalDesc', 'How often the agent checks for updates')}</div>
-                                            </div>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                                <input
-                                                    type="number"
-                                                    className="input"
-                                                    disabled={!canManage}
-                                                    min={1}
-                                                    defaultValue={agent?.heartbeat_interval_minutes ?? 120}
-                                                    key={agent?.heartbeat_interval_minutes}
-                                                    onBlur={async (e) => {
-                                                        if (!canManage) return;
-                                                        const val = Math.max(1, Number(e.target.value) || 120);
-                                                        e.target.value = String(val);
-                                                        await agentApi.update(id!, { heartbeat_interval_minutes: val } as any);
-                                                        queryClient.invalidateQueries({ queryKey: ['agent', id] });
-                                                    }}
-                                                    style={{ width: '80px', fontSize: '12px', opacity: canManage ? 1 : 0.6 }}
-                                                />
-                                                <span style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>{t('common.minutes', 'min')}</span>
-                                            </div>
-                                        </div>
-
-                                        {/* Active Hours */}
-                                        <div style={{
-                                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                            padding: '10px 14px', background: 'var(--bg-elevated)', borderRadius: '8px',
-                                            border: '1px solid var(--border-subtle)',
-                                        }}>
-                                            <div>
-                                                <div style={{ fontWeight: 500, fontSize: '13px' }}>{t('agent.settings.heartbeat.activeHours', 'Active Hours')}</div>
-                                                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t('agent.settings.heartbeat.activeHoursDesc', 'Only trigger heartbeat during these hours (HH:MM-HH:MM)')}</div>
-                                            </div>
-                                            <input
-                                                className="input"
-                                                disabled={!canManage}
-                                                value={agent?.heartbeat_active_hours ?? '09:00-18:00'}
-                                                onChange={async (e) => {
-                                                    if (!canManage) return;
-                                                    await agentApi.update(id!, { heartbeat_active_hours: e.target.value } as any);
-                                                    queryClient.invalidateQueries({ queryKey: ['agent', id] });
-                                                }}
-                                                style={{ width: '140px', fontSize: '12px', textAlign: 'center', opacity: canManage ? 1 : 0.6 }}
-                                                placeholder="09:00-18:00"
-                                            />
-                                        </div>
-
-
-
-                                        {/* Last Heartbeat */}
-                                        {agent?.last_heartbeat_at && (
-                                            <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', paddingLeft: '4px' }}>
-                                                {t('agent.settings.heartbeat.lastRun', 'Last heartbeat')}: {new Date(agent.last_heartbeat_at).toLocaleString()}
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-
-                                {/* Channel Config */}
-                                <div style={{ marginBottom: "12px" }}>
-                                    <ChannelConfig mode="edit" agentId={id!} />
-                                </div>
-
-                                {/* Danger Zone */}
-                                <div className="card" style={{ borderColor: 'var(--error)' }}>
-                                    <h4 style={{ color: 'var(--error)', marginBottom: '12px' }}>{t('agent.settings.danger.title')}</h4>
-                                    <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-                                        {t('agent.settings.danger.deleteWarning')}
-                                    </p>
-                                    {
-                                        !showDeleteConfirm ? (
-                                            <button className="btn btn-danger" onClick={() => setShowDeleteConfirm(true)}>× {t('agent.settings.danger.deleteAgent')}</button>
-                                        ) : (
-                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                                                <span style={{ fontSize: '13px', color: 'var(--error)', fontWeight: 600 }}>{t('agent.settings.danger.deleteWarning')}</span>
-                                                <button className="btn btn-danger" onClick={async () => {
-                                                    try {
-                                                        await agentApi.delete(id!);
-                                                        queryClient.invalidateQueries({ queryKey: ['agents'] });
-                                                        navigate('/');
-                                                    } catch (err: any) {
-                                                        await dialog.alert('删除数字员工失败', { type: 'error', details: String(err?.message || err) });
-                                                    }
-                                                }}>{t('agent.settings.danger.confirmDelete')}</button>
-                                                <button className="btn btn-secondary" onClick={() => setShowDeleteConfirm(false)}>{t('common.cancel')}</button>
-                                            </div>
-                                        )
-                                    }
-                                </div >
-                            </div >
-                        )
-                    })()
+                            )}
+                            queryClient={queryClient}
+                            formatTokens={formatTokens}
+                            showDeleteConfirm={showDeleteConfirm}
+                            setShowDeleteConfirm={setShowDeleteConfirm}
+                            onDeleteAgent={async () => {
+                                try {
+                                    await agentApi.delete(id);
+                                    queryClient.invalidateQueries({ queryKey: ['agents'] });
+                                    navigate('/');
+                                } catch (err: any) {
+                                    await dialog.alert('删除数字员工失败', { type: 'error', details: String(err?.message || err) });
+                                }
+                            }}
+                        />
+                    )
                 }
             </div >
 
