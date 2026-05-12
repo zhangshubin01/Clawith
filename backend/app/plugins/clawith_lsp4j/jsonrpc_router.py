@@ -5873,10 +5873,12 @@ async def _load_lsp4j_history_from_db(session_id: str, agent_id: uuid.UUID, user
         if not sess or sess.user_id != user_id or sess.agent_id != agent_id:
             if sess:
                 logger.warning(
-                    "LSP4J hydrate denied: session=%s user=%s agent=%s",
+                    "LSP4J hydrate denied: session={} request_user={} request_agent={} db_user={} db_agent={}",
                     session_id,
                     user_id,
                     agent_id,
+                    str(sess.user_id),
+                    str(sess.agent_id),
                 )
             return []
 

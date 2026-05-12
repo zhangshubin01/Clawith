@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import cast, func, select, String
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +22,8 @@ from app.models.chat_session import ChatSession
 from app.models.user import User
 from app.schemas.schemas import AgentCreate, AgentOut, AgentUpdate
 from app.services.access_relationships import ensure_access_granted_platform_relationships
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -883,18 +887,22 @@ async def delete_agent(
     try:
         await agent_manager.remove_container(agent)
     except Exception:
-        pass
+        logger.warning("Failed to remove_container for agent %s", agent_id, exc_info=True)
     try:
         archive_dir = await agent_manager.archive_agent_files(agent.id)
     except Exception:
-        pass
+        logger.warning("Failed to archive_agent_files for agent %s", agent_id, exc_info=True)
     if archive_dir is not None:
         try:
             await _archive_agent_task_history(db, agent.id, archive_dir)
         except Exception:
-            pass
+            logger.warning("Failed to archive_agent_task_history for agent %s", agent_id, exc_info=True)
 
-    # Delete related records that reference this agent
+    # Delete related records that reference this agent.
+    # Raw SQL with per-table savepoints is used here because SQLAlchemy ORM cascade
+    # is not configured on the Agent model relationships. Configuring proper
+    # cascade="all, delete-orphan" on all child relationships would eliminate this
+    # block and provide transactional safety -- tracked as improvement backlog.
     # Use savepoints so a failure in one table doesn't poison the whole transaction
     from sqlalchemy import text
 
@@ -921,7 +929,7 @@ async def delete_agent(
             async with db.begin_nested():
                 await db.execute(text(f"DELETE FROM {table} WHERE agent_id = :aid"), {"aid": agent_id})
         except Exception:
-            pass
+            logger.warning("Failed to cleanup table %s for agent %s", table, agent_id, exc_info=True)
 
     # Clean up secondary FK columns that also reference agents table
     secondary_fk_cleanups = [
@@ -936,7 +944,7 @@ async def delete_agent(
             async with db.begin_nested():
                 await db.execute(text(sql), {"aid": agent_id})
         except Exception:
-            pass
+            logger.warning("Failed to execute secondary FK cleanup for agent %s: %s", agent_id, sql, exc_info=True)
 
     # Also clean agent_agent_relationships (has both agent_id and target_agent_id)
     try:
@@ -946,14 +954,14 @@ async def delete_agent(
                 {"aid": agent_id},
             )
     except Exception:
-        pass
+        logger.warning("Failed to cleanup agent_agent_relationships for agent %s", agent_id, exc_info=True)
 
     # Also clear plaza posts by this agent
     try:
         async with db.begin_nested():
             await db.execute(text("DELETE FROM plaza_posts WHERE author_id = :aid"), {"aid": str(agent_id)})
     except Exception:
-        pass
+        logger.warning("Failed to cleanup plaza_posts for agent %s", agent_id, exc_info=True)
 
     # Clean up Participant identity
     try:
@@ -963,7 +971,7 @@ async def delete_agent(
                 {"aid": agent_id},
             )
     except Exception:
-        pass
+        logger.warning("Failed to cleanup participants for agent %s", agent_id, exc_info=True)
 
     await db.delete(agent)
     await db.commit()

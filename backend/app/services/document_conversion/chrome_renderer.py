@@ -52,7 +52,7 @@ async def collect_browser_layout(
     import subprocess
     import tempfile
     import time
-    import urllib.request
+    import httpx
     import websockets
 
     chrome = chrome_executable()
@@ -83,20 +83,20 @@ async def collect_browser_layout(
     try:
         base = f"http://127.0.0.1:{port}"
         deadline = time.time() + 8
-        while time.time() < deadline:
-            try:
-                with urllib.request.urlopen(f"{base}/json/version", timeout=0.25) as resp:
-                    json.loads(resp.read().decode("utf-8"))
-                break
-            except Exception:
-                await asyncio.sleep(0.1)
-        else:
-            return None
+        async with httpx.AsyncClient() as client:
+            while time.time() < deadline:
+                try:
+                    resp = await client.get(f"{base}/json/version", timeout=0.25)
+                    resp.json()
+                    break
+                except Exception:
+                    await asyncio.sleep(0.1)
+            else:
+                return None
 
-        file_url = src_file.resolve().as_uri()
-        req = urllib.request.Request(f"{base}/json/new?{file_url}", method="PUT")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            target = json.loads(resp.read().decode("utf-8"))
+            file_url = src_file.resolve().as_uri()
+            resp = await client.put(f"{base}/json/new?{file_url}", timeout=2)
+            target = resp.json()
         ws_url = target.get("webSocketDebuggerUrl")
         if not ws_url:
             return None

@@ -24,49 +24,67 @@ from app.database import get_db
 
 settings = get_settings()
 
+# Application-level salt for AES key derivation. This is NOT a secret --
+# it prevents rainbow-table attacks on the key-derivation step.
+# If rotated, re-encrypt all ciphertexts and bump _CURRENT_CIPHERTEXT_VERSION.
+_APP_KEY_SALT = b"clawith::aes256::salt-v1"
+_PBKDF2_ITERATIONS = 100_000
+_CURRENT_CIPHERTEXT_VERSION = b"\x01"  # 1-byte version header for ciphertext
+
 # Bearer token scheme
 security = HTTPBearer(auto_error=False)
+
+
+def _derive_key_v1(key: str) -> bytes:
+    """Derive a 32-byte AES-256 key via PBKDF2-HMAC-SHA256 with application salt."""
+    return hashlib.pbkdf2_hmac("sha256", key.encode("utf-8"), _APP_KEY_SALT, _PBKDF2_ITERATIONS, dklen=32)
+
+
+def _derive_key_legacy(key: str) -> bytes:
+    """Legacy single-SHA-256 key derivation (kept for backwards compatibility)."""
+    return hashlib.sha256(key.encode("utf-8")).digest()
 
 
 def encrypt_data(plaintext: str, key: str) -> str:
     """Encrypt a string using AES-256-CBC with the given key.
 
+    Uses PBKDF2-HMAC-SHA256 (100k iterations) with an application salt for
+    key derivation. Ciphertext includes a 1-byte version header so
+    decrypt_data can auto-detect the derivation method.
+
     Args:
         plaintext: The string to encrypt
-        key: The encryption key (will be hashed to 32 bytes)
+        key: The encryption key
 
     Returns:
-        Base64-encoded encrypted string with IV prefix
+        Base64-encoded encrypted string: version_byte + IV + ciphertext
     """
     if not plaintext:
         return ""
 
-    # Derive 32-byte key from the secret key
-    key_bytes = key.encode("utf-8")
-    # Use SHA-256 hash to get exactly 32 bytes for AES-256
-    import hashlib
+    aes_key = _derive_key_v1(key)
 
-    aes_key = hashlib.sha256(key_bytes).digest()
-
-    # Generate random 16-byte IV
     logger.debug("[security] encrypt_data: plaintext_len={}", len(plaintext))
     iv = os.urandom(16)
 
-    # Create cipher and encrypt
     cipher = AES.new(aes_key, AES.MODE_CBC, iv)
     padded_data = pad(plaintext.encode("utf-8"), AES.block_size)
     encrypted = cipher.encrypt(padded_data)
 
-    # Prepend IV to ciphertext and encode as base64
-    result = base64.b64encode(iv + encrypted).decode("utf-8")
+    # Prepend version byte so decrypt_data can identify the derivation method
+    result = base64.b64encode(_CURRENT_CIPHERTEXT_VERSION + iv + encrypted).decode("utf-8")
     return result
 
 
 def decrypt_data(ciphertext: str, key: str) -> str:
     """Decrypt a string encrypted with encrypt_data.
 
+    Auto-detects the key-derivation method from the ciphertext version byte:
+    - Byte \\x01: PBKDF2-HMAC-SHA256 (current)
+    - No version byte (32 bytes raw = IV+ct): legacy SHA-256 derivation
+
     Args:
-        ciphertext: Base64-encoded encrypted string with IV prefix
+        ciphertext: Base64-encoded encrypted string
         key: The encryption key (must match the key used for encryption)
 
     Returns:
@@ -79,19 +97,20 @@ def decrypt_data(ciphertext: str, key: str) -> str:
         return ""
 
     try:
-        # Decode base64
         raw = base64.b64decode(ciphertext)
 
-        # Extract IV (first 16 bytes) and ciphertext
-        iv = raw[:16]
-        encrypted = raw[16:]
+        # Detect version: if first byte is a version marker, use the
+        # corresponding key derivation; otherwise fall back to legacy SHA-256.
+        if raw[:1] == _CURRENT_CIPHERTEXT_VERSION:
+            aes_key = _derive_key_v1(key)
+            iv = raw[1:17]
+            encrypted = raw[17:]
+        else:
+            # Legacy format: no version header, IV starts at byte 0
+            aes_key = _derive_key_legacy(key)
+            iv = raw[:16]
+            encrypted = raw[16:]
 
-        # Derive key
-        import hashlib
-
-        aes_key = hashlib.sha256(key.encode("utf-8")).digest()
-
-        # Decrypt
         cipher = AES.new(aes_key, AES.MODE_CBC, iv)
         padded_data = cipher.decrypt(encrypted)
         plaintext = unpad(padded_data, AES.block_size).decode("utf-8")

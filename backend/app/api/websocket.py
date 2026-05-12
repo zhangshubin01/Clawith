@@ -957,8 +957,13 @@ async def websocket_chat(
             await websocket.send_json({"type": "done", "role": "assistant", "content": assistant_response})
 
             # Re-process any queued messages (if user sent something during generation)
+            if queued_messages:
+                logger.debug(
+                    "[WS] Discarding {} queued message(s) for session {} — "
+                    "re-queuing not yet implemented",
+                    len(queued_messages), conv_id
+                )
             for qm in queued_messages:
-                # In a real implementation, you might want to push these back to the main loop
                 pass
 
     except WebSocketDisconnect:

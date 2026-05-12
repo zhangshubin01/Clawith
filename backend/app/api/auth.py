@@ -1,6 +1,9 @@
 """Authentication API routes."""
 
+import asyncio
+import time
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from typing import Any
@@ -39,6 +42,44 @@ from app.schemas.schemas import (
 from sqlalchemy.orm import selectinload
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# ── In-memory rate limiter for auth endpoints ──────────────────────────
+_rate_limit_store: dict[str, list[float]] = defaultdict(list)
+_rate_lock = asyncio.Lock()
+
+_RATE_LIMITS: dict[str, tuple[int, int]] = {
+    "login": (5, 60),             # 5 attempts per 60s
+    "email_hint": (3, 60),        # 3 attempts per 60s (low: exposes account existence)
+    "forgot_password": (3, 300),  # 3 attempts per 5min
+}
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "0.0.0.0"
+
+
+async def _check_rate_limit(request: Request, endpoint_key: str) -> None:
+    max_attempts, window_s = _RATE_LIMITS.get(endpoint_key, (10, 60))
+    ip = _client_ip(request)
+    bucket_key = f"{endpoint_key}:{ip}"
+    now = time.time()
+
+    async with _rate_lock:
+        ts_list = _rate_limit_store[bucket_key]
+        cutoff = now - window_s
+        while ts_list and ts_list[0] < cutoff:
+            ts_list.pop(0)
+        if len(ts_list) >= max_attempts:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many attempts. Please try again later.",
+            )
+        ts_list.append(now)
 
 
 @router.get("/registration-config")
@@ -427,8 +468,9 @@ async def _handle_sso_register(data: UserRegister, db: AsyncSession):
 
 
 @router.post("/login", response_model=Any)
-async def login(data: UserLogin, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
+async def login(request: Request, data: UserLogin, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
     """Login with email/phone/username and password. Supports multi-tenant selection."""
+    await _check_rate_limit(request, "login")
     from app.models.tenant import Tenant
     from app.models.user import Identity, User
 
@@ -559,14 +601,18 @@ async def login(data: UserLogin, background_tasks: BackgroundTasks, db: AsyncSes
 
 
 @router.get("/email-hint")
-async def get_email_hint(username: str, db: AsyncSession = Depends(get_db)):
+async def get_email_hint(request: Request, username: str, db: AsyncSession = Depends(get_db)):
     """Return a hinted email address for a given username."""
+    await _check_rate_limit(request, "email_hint")
     from app.models.user import Identity
     result = await db.execute(select(Identity).where(Identity.username == username))
     identity = result.scalar_one_or_none()
-    
+
+    # Return a dummy hint for non-existent accounts to prevent user enumeration.
+    # The hint is always the same format so an attacker cannot distinguish
+    # "account exists" from "account does not exist" by response shape.
     if not identity or not identity.email:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        return {"hint": "u***r@e***e.com"}
         
     email = identity.email
     parts = email.split("@")
@@ -599,11 +645,13 @@ async def get_email_hint(username: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/forgot-password")
 async def forgot_password(
+    request: Request,
     data: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """Request a password reset link for a global Identity."""
+    await _check_rate_limit(request, "forgot_password")
     from app.services.system_email_service import resolve_email_config_async
     email_config = await resolve_email_config_async(db)
 
