@@ -75,9 +75,28 @@ load_env() {
 cleanup() {
     echo -e "${YELLOW}🔄 Stopping existing services...${NC}"
 
+    # 尝试通过 pidfile 优雅终止
+    local _cleanup_failures=0
     for pidfile in "$BACKEND_PID" "$FRONTEND_PID"; do
         if [ -f "$pidfile" ]; then
-            kill -9 "$(cat "$pidfile")" 2>/dev/null || true
+            local _pid
+            _pid=$(cat "$pidfile" 2>/dev/null) || true
+            if [ -n "$_pid" ]; then
+                # 先尝试 SIGTERM（优雅终止），等待 2s
+                kill "$_pid" 2>/dev/null || true
+                sleep 2
+                # 再尝试 SIGKILL（强制终止）
+                kill -9 "$_pid" 2>/dev/null || true
+                sleep 1
+                # 存活检测
+                if kill -0 "$_pid" 2>/dev/null; then
+                    echo -e "  ${RED}❌ 无法停止进程 PID=$_pid（可能因 macOS Seatbelt 沙箱限制）"
+                    echo -e "     请手动执行: kill -9 $_pid${NC}"
+                    _cleanup_failures=$((_cleanup_failures + 1))
+                else
+                    echo -e "  ${GREEN}✅ 已停止进程 PID=$_pid${NC}"
+                fi
+            fi
             rm -f "$pidfile"
         fi
     done
@@ -91,13 +110,30 @@ cleanup() {
             _lsof_cmd=lsof
         fi
         if [ -n "$_lsof_cmd" ]; then
-            "$_lsof_cmd" -ti:"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
+            local _port_pids
+            _port_pids=$("$_lsof_cmd" -ti:"$port" 2>/dev/null) || true
+            if [ -n "$_port_pids" ]; then
+                echo "$_port_pids" | xargs kill 2>/dev/null || true
+                sleep 1
+                echo "$_port_pids" | xargs kill -9 2>/dev/null || true
+                sleep 1
+                # 存活检测
+                for _ppid in $_port_pids; do
+                    if kill -0 "$_ppid" 2>/dev/null; then
+                        echo -e "  ${RED}❌ 端口 $port 仍被 PID=$_ppid 占用（可能因沙箱限制）"
+                        echo -e "     请手动执行: kill -9 $_ppid${NC}"
+                        _cleanup_failures=$((_cleanup_failures + 1))
+                    fi
+                done
+            fi
         elif command -v fuser &>/dev/null && [ "$(uname -s 2>/dev/null)" = Linux ]; then
             fuser -k "$port/tcp" 2>/dev/null || true
         fi
     done
 
-    sleep 1
+    if [ $_cleanup_failures -gt 0 ]; then
+        echo -e "${YELLOW}⚠️  $_cleanup_failures 个进程无法自动停止，将尝试使用备用端口${NC}"
+    fi
 }
 
 # ═══════════════════════════════════════════════════════

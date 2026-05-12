@@ -111,10 +111,15 @@ async def lifespan(app: FastAPI):
     # 安全加固：生产环境未设置 JWT_SECRET_KEY 时拒绝启动
     secret_key = (settings.JWT_SECRET_KEY or "").strip()
     if not secret_key or "change-me" in secret_key.lower():
-        logger.warning(
-            "[startup] SECURITY WARNING: JWT_SECRET_KEY 未设置或使用默认值，token 可被伪造。"
+        msg = (
+            "JWT_SECRET_KEY 未设置或使用默认值，token 可被伪造。"
             "生产环境请通过环境变量 JWT_SECRET_KEY 设置至少 32 字符的随机密钥。"
         )
+        if not settings.DEBUG:
+            logger.error("[startup] SECURITY FATAL: {}", msg)
+            raise RuntimeError(f"拒绝启动：{msg}")
+        else:
+            logger.warning("[startup] SECURITY WARNING: {}", msg)
 
     import asyncio
     import os

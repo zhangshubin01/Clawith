@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+from loguru import logger
 import hmac
 import os
 import uuid
@@ -48,6 +49,7 @@ def encrypt_data(plaintext: str, key: str) -> str:
     aes_key = hashlib.sha256(key_bytes).digest()
 
     # Generate random 16-byte IV
+    logger.debug("[security] encrypt_data: plaintext_len={}", len(plaintext))
     iv = os.urandom(16)
 
     # Create cipher and encrypt
@@ -94,8 +96,10 @@ def decrypt_data(ciphertext: str, key: str) -> str:
         padded_data = cipher.decrypt(encrypted)
         plaintext = unpad(padded_data, AES.block_size).decode("utf-8")
 
+        logger.debug("[security] decrypt_data: success, plaintext_len={}", len(plaintext))
         return plaintext
     except Exception as e:
+        logger.warning("[security] decrypt_data failed: error={}", e)
         raise ValueError(f"Decryption failed: {e}") from e
 
 
@@ -128,6 +132,7 @@ def decode_access_token(token: str) -> dict:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         return payload
     except PyJWTError:
+        logger.warning("[security] JWT decode failed: invalid or expired token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
@@ -163,6 +168,7 @@ async def get_current_user(
             or not user.is_active
             or not hmac.compare_digest(user.api_key_hash, key_hash)
         ):
+            logger.warning("[security] X-Api-Key auth failed: user={}, active={}", bool(user), getattr(user, 'is_active', None))
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked API key")
         return user
 
@@ -181,6 +187,7 @@ async def get_current_user(
             or not user.is_active
             or not hmac.compare_digest(user.api_key_hash, key_hash)
         ):
+            logger.warning("[security] Bearer cw- auth failed: user={}, active={}", bool(user), getattr(user, 'is_active', None))
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked API key")
         return user
 
@@ -204,6 +211,7 @@ async def get_current_user(
     )
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
+        logger.warning("[security] JWT user not found or inactive: user_id={}", user_id)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
     return user
 
@@ -268,6 +276,7 @@ async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
                 or not user.is_active
                 or not hmac.compare_digest(user.api_key_hash, key_hash)
             ):
+                logger.warning("[security] verify_api_key_or_token cw- failed: user={}, active={}", bool(user), getattr(user, 'is_active', None))
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid or revoked API key",
@@ -288,6 +297,7 @@ async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
         )
         user = result.scalar_one_or_none()
         if not user or not user.is_active:
+            logger.warning("[security] verify_api_key_or_token JWT user not found: user_id={}", user_id)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found or inactive",
