@@ -20,9 +20,9 @@ settings = get_settings()
 def _log_bwrap_startup_status() -> None:
     """Emit a startup diagnostic for bubblewrap availability.
 
-    We only warn when bwrap is missing so deployments can still start in
-    degraded mode. The subprocess sandbox will fall back to the hardened local
-    execution path in that case.
+    We only warn when bwrap is missing so deployments can still start. Local
+    source runs may explicitly allow a reduced-isolation fallback, while
+    containerized deployments should keep fail-closed behavior.
     """
     in_container = Path("/.dockerenv").exists()
     bwrap_path = shutil.which("bwrap")
@@ -35,14 +35,21 @@ def _log_bwrap_startup_status() -> None:
     if in_container:
         logger.warning(
             "[startup] bubblewrap (bwrap) is not installed in the backend container. "
-            "The service will still start, but execute_code will run without bwrap filesystem isolation."
+            "The service will still start, but execute_code will fail closed unless "
+            "SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true is explicitly set."
         )
         return
 
-    logger.warning(
-        "[startup] bubblewrap (bwrap) is not installed on the host. "
-        "The service will still start, but execute_code will run without bwrap filesystem isolation."
-    )
+    if settings.SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING:
+        logger.warning(
+            "[startup] bubblewrap (bwrap) is not installed on the host. "
+            "Local execute_code will use the reduced-isolation fallback."
+        )
+    else:
+        logger.warning(
+            "[startup] bubblewrap (bwrap) is not installed on the host. "
+            "execute_code will fail closed unless SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true is set."
+        )
 
 
 async def _start_ss_local() -> None:

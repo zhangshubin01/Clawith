@@ -106,9 +106,19 @@ class SubprocessBackend(BaseSandboxBackend):
     def _venv_python(self, work_path: Path) -> str:
         return f"/workspace/{work_path.joinpath('.venv', 'bin', 'python').relative_to(work_path)}"
 
+    def _host_venv_python(self, work_path: Path) -> str:
+        return str(work_path / ".venv" / "bin" / "python")
+
     def _build_command(self, language: str, script_path: str, work_path: Path) -> list[str]:
         if language == "python":
             return [self._venv_python(work_path), "-I", "-B", str(script_path)]
+        if language == "bash":
+            return ["bash", "--noprofile", "--norc", str(script_path)]
+        return ["node", str(script_path)]
+
+    def _build_host_command(self, language: str, script_path: Path, work_path: Path) -> list[str]:
+        if language == "python":
+            return [self._host_venv_python(work_path), "-I", "-B", str(script_path)]
         if language == "bash":
             return ["bash", "--noprofile", "--norc", str(script_path)]
         return ["node", str(script_path)]
@@ -151,6 +161,16 @@ class SubprocessBackend(BaseSandboxBackend):
             check=True,
             cwd=str(work_path),
         )
+
+    def _build_exec_kwargs(self, work_path: Path, timeout: int, use_preexec: bool = False) -> dict:
+        kwargs = {
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+            "env": self._build_safe_env(work_path),
+        }
+        if use_preexec:
+            kwargs["preexec_fn"] = self._build_preexec_fn(work_path, timeout)
+        return kwargs
 
     def _build_preexec_fn(self, work_path: Path, timeout: int):
         def _preexec():
@@ -339,32 +359,36 @@ class SubprocessBackend(BaseSandboxBackend):
             sandbox_command = self._build_command(language, f"/workspace/{script_path.name}", work_path)
             bwrap_command = self._build_bwrap_command(sandbox_command, work_path)
             if not bwrap_command:
-                duration_ms = int((time.time() - start_time) * 1000)
-                return ExecutionResult(
-                    success=False,
-                    stdout="",
-                    stderr="",
-                    exit_code=1,
-                    duration_ms=duration_ms,
-                    error=(
-                        "bubblewrap (bwrap) is required for execute_code but is not available. "
-                        "Install bwrap in the runtime environment and restart the backend."
-                    ),
+                if not self.config.allow_unsafe_fallback_when_bwrap_missing:
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    return ExecutionResult(
+                        success=False,
+                        stdout="",
+                        stderr="",
+                        exit_code=1,
+                        duration_ms=duration_ms,
+                        error=(
+                            "bubblewrap (bwrap) is required for execute_code but is not available. "
+                            "Install bwrap in the runtime environment or enable "
+                            "allow_unsafe_fallback_when_bwrap_missing for local development."
+                        ),
+                    )
+
+                host_command = self._build_host_command(language, script_path, work_path)
+                logger.warning(
+                    "[Subprocess] bubblewrap missing; using local fallback without filesystem isolation"
                 )
-
-            safe_env = self._build_safe_env(work_path)
-
-            kwargs = {
-                "stdout": asyncio.subprocess.PIPE,
-                "stderr": asyncio.subprocess.PIPE,
-                "env": safe_env,
-            }
-
-            proc = await asyncio.create_subprocess_exec(
-                *bwrap_command,
-                cwd=str(work_path),
-                **kwargs,
-            )
+                proc = await asyncio.create_subprocess_exec(
+                    *host_command,
+                    cwd=str(work_path),
+                    **self._build_exec_kwargs(work_path, timeout, use_preexec=True),
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    *bwrap_command,
+                    cwd=str(work_path),
+                    **self._build_exec_kwargs(work_path, timeout),
+                )
 
             try:
                 stdout, stderr = await asyncio.wait_for(
