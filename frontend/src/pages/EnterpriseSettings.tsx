@@ -2888,6 +2888,13 @@ export default function EnterpriseSettings() {
         return VALID_TABS.includes(hash) ? hash : 'info';
     };
     const [activeTab, setActiveTab] = useState<TabKey>(getTabFromHash);
+    const invalidateModelCaches = () => {
+        qc.invalidateQueries({ queryKey: ['llm-models'] });
+        qc.invalidateQueries({ queryKey: ['tenant', 'me'] });
+        qc.invalidateQueries({ queryKey: ['tenant-default-model'] });
+        qc.invalidateQueries({ queryKey: ['agents'] });
+        qc.invalidateQueries({ queryKey: ['agent'] });
+    };
 
     // Sync hash ↔ activeTab: hashchange navigation (back/forward) updates state
     useEffect(() => {
@@ -3213,11 +3220,11 @@ export default function EnterpriseSettings() {
     const providerOptions = providerSpecs.length > 0 ? providerSpecs : FALLBACK_LLM_PROVIDERS;
     const addModel = useMutation({
         mutationFn: (data: any) => fetchJson(`/enterprise/llm-models${selectedTenantId ? `?tenant_id=${selectedTenantId}` : ''}`, { method: 'POST', body: JSON.stringify(data) }),
-        onSuccess: () => { qc.invalidateQueries({ queryKey: ['llm-models', selectedTenantId] }); setShowAddModel(false); setEditingModelId(null); },
+        onSuccess: () => { invalidateModelCaches(); setShowAddModel(false); setEditingModelId(null); },
     });
     const updateModel = useMutation({
         mutationFn: ({ id, data }: { id: string; data: any }) => fetchJson(`/enterprise/llm-models/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-        onSuccess: () => { qc.invalidateQueries({ queryKey: ['llm-models', selectedTenantId] }); setShowAddModel(false); setEditingModelId(null); },
+        onSuccess: () => { invalidateModelCaches(); setShowAddModel(false); setEditingModelId(null); },
     });
     // Tenant default model — for rendering a "默认" badge in the model list.
     const { data: tenantForDefault, refetch: refetchTenantForDefault } = useQuery({
@@ -3241,6 +3248,7 @@ export default function EnterpriseSettings() {
             qc.invalidateQueries({ queryKey: ['tenant', selectedTenantId] });
             qc.invalidateQueries({ queryKey: ['tenant', 'me'] });
             qc.invalidateQueries({ queryKey: ['llm-models', selectedTenantId] });
+            invalidateModelCaches();
             qc.invalidateQueries({ queryKey: ['agents'] });
             qc.invalidateQueries({ queryKey: ['agent'] });
             toast.success(t('enterprise.llm.defaultSaved', 'Default model updated'));
@@ -3274,7 +3282,7 @@ export default function EnterpriseSettings() {
             }
             if (!res.ok && res.status !== 204) throw new Error('Delete failed');
         },
-        onSuccess: () => qc.invalidateQueries({ queryKey: ['llm-models', selectedTenantId] }),
+        onSuccess: () => invalidateModelCaches(),
     });
 
     // ─── Approvals
@@ -3598,7 +3606,7 @@ export default function EnterpriseSettings() {
                                                                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                                                                 body: JSON.stringify({ enabled: !m.enabled }),
                                                             });
-                                                            qc.invalidateQueries({ queryKey: ['llm-models', selectedTenantId] });
+                                                            invalidateModelCaches();
                                                         } catch (e) { console.error(e); }
                                                     }}
                                                     title={m.enabled ? t('enterprise.llm.clickToDisable', 'Click to disable') : t('enterprise.llm.clickToEnable', 'Click to enable')}
