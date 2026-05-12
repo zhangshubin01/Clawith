@@ -1,7 +1,7 @@
 """Add user/company onboarding state.
 
 Revision ID: add_user_tenant_onboarding
-Revises: add_agent_focus_items
+Revises: eba6ac4d8a55
 Create Date: 2026-05-09
 """
 
@@ -13,12 +13,16 @@ from sqlalchemy.dialects import postgresql
 
 
 revision: str = "add_user_tenant_onboarding"
-down_revision: Union[str, Sequence[str], None] = "add_agent_focus_items"
+down_revision: Union[str, Sequence[str], None] = "eba6ac4d8a55"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    insp = sa.inspect(bind)
+    if insp.has_table("user_tenant_onboardings"):
+        return
     op.create_table(
         "user_tenant_onboardings",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, nullable=False),
@@ -38,6 +42,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
+    insp = sa.inspect(bind)
+    if not insp.has_table("user_tenant_onboardings"):
+        return
     op.drop_index("ix_user_tenant_onboardings_tenant_id", table_name="user_tenant_onboardings")
     op.drop_index("ix_user_tenant_onboardings_user_id", table_name="user_tenant_onboardings")
     op.drop_table("user_tenant_onboardings")

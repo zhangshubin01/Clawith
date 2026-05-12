@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
-import logging
 from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING

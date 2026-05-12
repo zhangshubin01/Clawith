@@ -630,6 +630,15 @@ def install_lsp4j_tool_hooks() -> None:
             try:
                 from .jsonrpc_router import invoke_lsp4j_tool
                 result = await invoke_lsp4j_tool(tool_name, args, agent_id, user_id)
+
+                # 截断过长的工具结果，防止 context 膨胀导致 LLM 推理延迟飙升
+                # 终端输出用更小的上限（2000），因其重复性高、信息密度低
+                from .context_trimmer import trim_tool_result, MAX_TOOL_RESULT_CHARS, MAX_TERMINAL_RESULT_CHARS
+
+                _max_chars = MAX_TERMINAL_RESULT_CHARS if tool_name == "run_in_terminal" else MAX_TOOL_RESULT_CHARS
+                if isinstance(result, str) and len(result) > _max_chars:
+                    result = trim_tool_result(result, tool_name, max_chars=_max_chars)
+
                 logger.info("[LSP4J-TOOL] 结果: tool={} result_len={}", tool_name, len(result) if result else 0)
                 return result
             except Exception as e:

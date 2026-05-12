@@ -47,7 +47,7 @@ from app.config import get_settings
 from app.core.security import decrypt_data
 from app.services.auth_provider import GoogleWorkspaceAuthProvider
 from app.services.google_workspace_oauth import GOOGLE_HTTP_PROXY
-from jose import jwt
+import jwt
 
 
 def build_department_path_map(departments: list[OrgDepartment]) -> dict[uuid.UUID, str]:

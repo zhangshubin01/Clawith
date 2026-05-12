@@ -176,7 +176,8 @@ async def test_call_llm_requires_finish_tool_to_stop(monkeypatch):
     )
 
     assert result == "Final answer."
-    assert chunks == []
+    # Plain assistant text in round 1 is forwarded to on_chunk; finish content is not streamed as chunks.
+    assert chunks == ["This should not stop."]
     second_round_messages = fake_client.messages_seen[1]
     assert any(
         msg.role == "user" and msg.content == FINISH_PROTOCOL_REMINDER

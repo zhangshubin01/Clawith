@@ -81,8 +81,8 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # JWT
-    JWT_SECRET_KEY: str = "change-me-jwt-secret"
+    # JWT — 生产环境必须通过 JWT_SECRET_KEY 环境变量覆盖
+    JWT_SECRET_KEY: str = "change-me-jwt-secret-dev-only"
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 60

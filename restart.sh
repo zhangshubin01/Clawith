@@ -82,11 +82,18 @@ cleanup() {
         fi
     done
 
+    # Prefer lsof: on macOS it lives in /usr/sbin and is often missing from non-login PATH.
     for port in $BACKEND_PORT $FRONTEND_PORT; do
-        if command -v lsof &>/dev/null; then
-            lsof -ti:$port | xargs kill -9 2>/dev/null || true
-        elif command -v fuser &>/dev/null; then
-            fuser -k $port/tcp 2>/dev/null || true
+        _lsof_cmd=""
+        if [ -x /usr/sbin/lsof ]; then
+            _lsof_cmd=/usr/sbin/lsof
+        elif command -v lsof &>/dev/null; then
+            _lsof_cmd=lsof
+        fi
+        if [ -n "$_lsof_cmd" ]; then
+            "$_lsof_cmd" -ti:"$port" 2>/dev/null | xargs kill -9 2>/dev/null || true
+        elif command -v fuser &>/dev/null && [ "$(uname -s 2>/dev/null)" = Linux ]; then
+            fuser -k "$port/tcp" 2>/dev/null || true
         fi
     done
 

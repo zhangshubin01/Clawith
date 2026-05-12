@@ -13,10 +13,10 @@ from typing import Callable, Awaitable
 
 from loguru import logger
 
-# 非表格文本累计阈值（字符数），降低阈值以减少流式卡顿感知
-BUFFER_THRESHOLD = 80
-# 无换行符时的强制 flush 间隔（秒），防止长时间无换行导致前端无输出
-FORCE_FLUSH_INTERVAL = 0.2
+# 非表格文本累计阈值（字符数），超过此阈值立即 flush
+BUFFER_THRESHOLD = 200
+# 无换行符时的强制 flush 间隔（秒）
+FORCE_FLUSH_INTERVAL = 0.05
 
 _TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|\s*[:\-\| ]+\|\s*$")

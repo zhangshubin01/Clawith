@@ -108,11 +108,12 @@ async def lifespan(app: FastAPI):
     logger.info("[startup] Logging configured (stdout + file)")
     _log_bwrap_startup_status()
 
-    # Warn about default JWT secrets in production
-    if "change-me" in settings.SECRET_KEY.lower() or "change-me" in settings.JWT_SECRET_KEY.lower():
+    # 安全加固：生产环境未设置 JWT_SECRET_KEY 时拒绝启动
+    secret_key = (settings.JWT_SECRET_KEY or "").strip()
+    if not secret_key or "change-me" in secret_key.lower():
         logger.warning(
-            "[startup] WARNING: SECRET_KEY or JWT_SECRET_KEY contains default 'change-me' value. "
-            "This is insecure for production. Set unique secrets in your .env file."
+            "[startup] SECURITY WARNING: JWT_SECRET_KEY 未设置或使用默认值，token 可被伪造。"
+            "生产环境请通过环境变量 JWT_SECRET_KEY 设置至少 32 字符的随机密钥。"
         )
 
     import asyncio

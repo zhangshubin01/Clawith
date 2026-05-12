@@ -28,6 +28,7 @@ import fnmatch as _fnmatch
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 import uuid
@@ -57,6 +58,7 @@ from .context import (
     list_active_routers,
 )
 from .lsp_protocol import LSPBaseProtocolParser, ParseError
+from .answer_sync import plan_answer_sync_before_finish
 from .stream_buffer import StreamBufferManager
 from .tool_constants import (
     LSP4J_IDE_TOOL_NAMES,
@@ -82,24 +84,28 @@ from .search_input_utils import (
 
 # LSP4J 文件编辑工具（需要 filePath 转换 + fileId 注入）
 # 这些工具在 invoke_tool_on_ide 中统一处理参数转换和 results 注入
-_LSP4J_FILE_EDIT_TOOLS = frozenset({
-    "replace_text_by_path",
-    "search_replace",
-    "create_file_with_text",
-    "delete_file_by_path",
-    "apply_patch",
-    "save_file",
-})
+_LSP4J_FILE_EDIT_TOOLS = frozenset(
+    {
+        "replace_text_by_path",
+        "search_replace",
+        "create_file_with_text",
+        "delete_file_by_path",
+        "apply_patch",
+        "save_file",
+    }
+)
 
 # 高频搜索类工具：在同一请求内会被连续调用很多次。
 # 为避免插件 UI（EDT）被中间态事件风暴淹没，对其 PENDING/RUNNING 做降噪处理。
-_UI_HEAVY_SEARCH_TOOLS = frozenset({
-    "search_codebase",
-    "search_file",
-    "list_dir",
-    "grep_code",
-    "search_symbol",
-})
+_UI_HEAVY_SEARCH_TOOLS = frozenset(
+    {
+        "search_codebase",
+        "search_file",
+        "list_dir",
+        "grep_code",
+        "search_symbol",
+    }
+)
 
 # 高频工具步骤回调节流窗口（秒）。
 # 同一 request 内重复的 (step,status,description) 在窗口内仅发送一次，
@@ -111,25 +117,68 @@ _PROCESS_STEP_THROTTLE_WINDOW_SEC = 0.35
 # ──────────────────────────────────────────────
 
 # 可搜索的源文件扩展名（覆盖 Java/Kotlin/Android 项目）
-_SEARCHABLE_EXTENSIONS = frozenset({
-    # 源代码
-    '.kt', '.java', '.kts', '.py', '.go', '.rs', '.swift',
-    '.js', '.ts', '.tsx', '.jsx', '.c', '.cpp', '.h', '.hpp',
-    '.rb', '.php', '.scala', '.dart',
-    # Android 资源与配置
-    '.xml', '.json', '.yaml', '.yml', '.properties', '.pro',
-    # Gradle
-    '.gradle',
-    # 其他
-    '.sql', '.sh', '.bash', '.zsh', '.html', '.css', '.scss', '.md',
-})
+_SEARCHABLE_EXTENSIONS = frozenset(
+    {
+        # 源代码
+        ".kt",
+        ".java",
+        ".kts",
+        ".py",
+        ".go",
+        ".rs",
+        ".swift",
+        ".js",
+        ".ts",
+        ".tsx",
+        ".jsx",
+        ".c",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".rb",
+        ".php",
+        ".scala",
+        ".dart",
+        # Android 资源与配置
+        ".xml",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".properties",
+        ".pro",
+        # Gradle
+        ".gradle",
+        # 其他
+        ".sql",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".html",
+        ".css",
+        ".scss",
+        ".md",
+    }
+)
 
 # 排除的目录（构建产物 + IDE 配置）
-_EXCLUDED_DIRS = frozenset({
-    'build', '.gradle', '.idea', '.git', '.comate',
-    '__pycache__', 'node_modules', '.claude', 'logs',
-    'generated', '.kotlin', 'intermediates', 'ksp', 'kapt',
-})
+_EXCLUDED_DIRS = frozenset(
+    {
+        "build",
+        ".gradle",
+        ".idea",
+        ".git",
+        ".comate",
+        "__pycache__",
+        "node_modules",
+        ".claude",
+        "logs",
+        "generated",
+        ".kotlin",
+        "intermediates",
+        "ksp",
+        "kapt",
+    }
+)
 
 # 最大扫描文件数（防止大项目超时）
 _MAX_FILES_TO_SCAN = 500
@@ -148,6 +197,7 @@ _ANDROID_PRIORITY_SEGMENTS = (
 # 数据类定义（基于灵码插件 ChatAskParam.java 17 字段）
 # ──────────────────────────────────────────────
 
+
 @dataclass
 class ChatAskParam:
     """灵码插件 chat/ask 请求参数。
@@ -155,6 +205,7 @@ class ChatAskParam:
     所有字段均设默认值，兼容旧版插件缺少字段的情况。
     字段名严格匹配 ChatAskParam.java 的 camelCase 命名。
     """
+
     requestId: str = ""
     chatTask: str = ""
     chatContext: Any = None
@@ -173,6 +224,7 @@ class ChatAskParam:
     shellType: str = ""
     customModel: Any = None
 
+
 # ──────────────────────────────────────────────
 # 模块级变量
 # ──────────────────────────────────────────────
@@ -181,6 +233,15 @@ class ChatAskParam:
 _lsp4j_background_tasks: set[asyncio.Task] = set()
 # 严格模式：tool/invokeResult 缺失 toolCallId 时直接失败，禁止多路并发下的降级误匹配。
 _LSP4J_STRICT_TOOLCALL_ID = os.getenv("LSP4J_STRICT_TOOLCALL_ID", "1").strip() != "0"
+
+# LSP4J 工具调用结果缓存（模块级，所有连接共享）
+_lsp4j_tool_cache: dict[str, tuple[float, str]] = {}
+_LSP4J_TOOL_CACHE_TTL = 120.0
+_CACHEABLE_TOOLS = frozenset({"read_file", "search_file", "search_codebase", "search_symbol", "list_dir"})
+
+# 搜索负缓存: 记录返回 0 结果的查询，避免 LLM 重复无效搜索浪费轮次
+_search_zero_result_cache: dict[str, tuple[float, str]] = {}
+_SEARCH_ZERO_CACHE_TTL = 600.0
 
 # 基础工具名映射直接使用导入的常量（tool_constants.TOOL_NAME_MAP / TOOL_DISPLAY_NAME_MAP）
 
@@ -219,7 +280,7 @@ def _resolve_search_path(rel_path: str, project_path: str | None = None) -> Path
     # ★ 剥离 LLM 常用的 workspace/ 前缀
     _clean_path = rel_path
     if _clean_path.startswith("workspace/"):
-        _clean_path = _clean_path[len("workspace/"):]
+        _clean_path = _clean_path[len("workspace/") :]
 
     # 其余相对路径 → IDE 项目路径
     if project_path:
@@ -246,6 +307,73 @@ def _is_android_priority_path(path_text: str) -> bool:
     return any(seg in normalized for seg in _ANDROID_PRIORITY_SEGMENTS)
 
 
+def _rg_search(project_root: str, pattern: str, max_results: int = 50) -> list[dict] | None:
+    """使用 ripgrep 搜索代码，比 Python rglob + read_text 快 10-100x。
+
+    返回 [{"fileName": ..., "path": ..., "startLine": ..., "endLine": ..., "matchLine": ...}]
+    或 None 表示 rg 不可用。
+    """
+    import shutil
+    _rg = shutil.which("rg") or shutil.which("rg", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
+    if not _rg:
+        return None
+    try:
+        result = subprocess.run(
+            [_rg, "--no-heading", "--with-filename", "--line-number",
+             "--ignore-case", "--no-ignore-vcs", "--max-count=3",
+             "--glob=!.git", "--glob=!.gradle", "--glob=!.idea",
+             "--glob=!build", "--glob=!node_modules",
+             "-e", pattern, project_root],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode not in (0, 1):
+            return None  # rg error (returncode 1 = no matches, which is valid)
+        items = []
+        for line in result.stdout.strip().split("\n"):
+            if not line or len(items) >= max_results:
+                break
+            # rg output: path:lineno:content
+            parts = line.split(":", 2)
+            if len(parts) < 3:
+                continue
+            file_path, lineno_str, match_text = parts
+            try:
+                lineno = int(lineno_str)
+            except ValueError:
+                continue
+            items.append({
+                "fileName": os.path.basename(file_path),
+                "path": os.path.join(project_root, file_path),
+                "startLine": lineno,
+                "endLine": lineno,
+                "matchLine": match_text.strip()[:200],
+            })
+        logger.info("[RG-SEARCH] grep_code pattern={} results={}", pattern[:80], len(items))
+        return items
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        logger.info("[RG-SEARCH] unavailable: {}", e)
+        return None
+
+
+def _get_code_map_for_session(project_path: str) -> str:
+    """获取代码结构地图（带缓存），用于注入新会话 context。"""
+    try:
+        from .file_index import get_or_build_code_map
+        return get_or_build_code_map(project_path)
+    except Exception:
+        logger.exception("[CODE-MAP] get failed")
+        return ""
+
+
+async def _build_project_file_index(project_path: str) -> None:
+    """后台构建项目文件索引（fire-and-forget），供搜索操作使用。"""
+    try:
+        from .file_index import get_or_build_index
+        get_or_build_index(project_path, force_rebuild=True)
+    except Exception:
+        logger.exception("[FILE-INDEX] build failed")
+
+
 def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "") -> tuple[str, list[dict]]:
     """本地执行搜索工具，返回 (result_json_str, results_list).
 
@@ -265,6 +393,26 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
 
     cwd = Path(project_path) if project_path else Path.cwd()
     search_query = _sanitize_search_input(arguments.get("query", ""))
+
+    # ── 搜索负缓存: 相同查询之前返回 0 结果，直接返回不浪费扫描 ──
+    if tool_name in ("search_file", "search_codebase", "grep_code", "search_symbol"):
+        _neg_key_parts = [tool_name, search_query, arguments.get("file_pattern", ""),
+                          arguments.get("regex", ""), arguments.get("pattern", "*")]
+        _neg_key = "|".join(p for p in _neg_key_parts if p)
+        if _neg_key in _search_zero_result_cache:
+            _ts, _reason = _search_zero_result_cache[_neg_key]
+            if time.monotonic() - _ts < _SEARCH_ZERO_CACHE_TTL:
+                logger.info("[LSP4J-CACHE] negative hit: {} reason={}", _neg_key[:120], _reason)
+                if tool_name == "grep_code":
+                    return json.dumps([]), []
+                return json.dumps([]), []
+        # 清理过期负缓存
+        _now = time.monotonic()
+        _expired_neg = [k for k, (ts, _) in _search_zero_result_cache.items()
+                        if _now - ts > _SEARCH_ZERO_CACHE_TTL]
+        for k in _expired_neg:
+            del _search_zero_result_cache[k]
+
     scan_budget = _dynamic_scan_budget(cwd, search_query, tool_name)
 
     def _is_searchable(file_path: Path) -> bool:
@@ -299,6 +447,16 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         rel_path = arguments.get("relative_workspace_path") or arguments.get("path") or "."
         ws_path = _resolve_search_path(rel_path, project_path or None)
         items: list[dict] = []
+
+        # ★ 快路径: 使用文件索引
+        from .file_index import get_or_build_index
+        _file_idx = get_or_build_index(str(cwd))
+        if _file_idx is not None and _file_idx.file_count > 0:
+            items = _file_idx.list_dir(rel_path)
+            if items:
+                logger.info("[FILE-INDEX] list_dir hit: path={} entries={}", rel_path, len(items))
+                result_str = json.dumps(items, ensure_ascii=False, default=str)
+                return result_str, items
         try:
             if ws_path.exists() and ws_path.is_dir():
                 for entry in sorted(ws_path.iterdir()):
@@ -312,13 +470,15 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                     # ★ #5 修复：过滤排除目录（构建产物、IDE 配置等）
                     if not is_dir and not _is_searchable(entry):
                         continue
-                    items.append({
-                        "fileName": entry.name,
-                        "fileCount": "",
-                        "fileSize": file_size,
-                        "type": "directory" if is_dir else "file",
-                        "path": str(entry.absolute()),
-                    })
+                    items.append(
+                        {
+                            "fileName": entry.name,
+                            "fileCount": "",
+                            "fileSize": file_size,
+                            "type": "directory" if is_dir else "file",
+                            "path": str(entry.absolute()),
+                        }
+                    )
         except PermissionError:
             logger.warning("[LSP4J-TOOL] list_dir 权限不足: path={}", ws_path)
         result_str = json.dumps(items, ensure_ascii=False, default=str)
@@ -335,6 +495,35 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         resource_name = _extract_android_resource_name(query)
         search_dir = _resolve_search_path(search_path, project_path or None)
         items: list[dict] = []
+
+        # ★ 快路径: 使用文件索引（O(1) 查询），回退到 rglob 扫描
+        from .file_index import get_or_build_index
+        _file_idx = get_or_build_index(str(cwd))
+        if _file_idx is not None and _file_idx.file_count > 0:
+            items = _file_idx.search_file(query, pattern)
+            if items:
+                logger.info(
+                    "[FILE-INDEX] search_file hit: query={} pattern={} results={}",
+                    query, pattern, len(items),
+                )
+                result_str = json.dumps(items, ensure_ascii=False, default=str)
+                return result_str, items
+            else:
+                # 索引未命中，记录负缓存
+                _neg_key_parts = ["search_file", search_query,
+                                  arguments.get("file_pattern", ""), pattern]
+                _neg_key = "|".join(p for p in _neg_key_parts if p)
+                _search_zero_result_cache[_neg_key] = (time.monotonic(), "index_miss")
+                logger.info("[FILE-INDEX] search_file miss: query={} pattern={}", query, pattern)
+                # 提示换用内容搜索（项目使用混淆文件名，按名称搜不到）
+                _hint_query = query or pattern.replace("*", "").replace(".", "")
+                result_str = json.dumps(
+                    [{"hint": "按文件名搜索无结果（项目使用混淆名称）。"
+                              f"请改用 grep_code(regex) 搜索文件内容: "
+                              f"grep_code(regex=\"{_hint_query[:60]}\")"}],
+                    ensure_ascii=False, default=str)
+                return result_str, []
+
         scanned_count = 0
         path_filtered = 0
         pattern_filtered = 0
@@ -378,10 +567,12 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                         if query_lower not in file_name_lower and not resource_hit:
                             query_filtered += 1
                             continue
-                    items.append({
-                        "fileName": p.name,
-                        "path": str(p.absolute()),
-                    })
+                    items.append(
+                        {
+                            "fileName": p.name,
+                            "path": str(p.absolute()),
+                        }
+                    )
                     if len(items) >= 50:
                         break
         except PermissionError:
@@ -412,8 +603,16 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         logger.info(
             "[LSP4J-TOOL] local_search_file strategy=strict budget={} scanned={} results={} zero_result_reason={} "
             "path_filtered={} pattern_filtered={} query_filtered={} query={} pattern={} path={}",
-            scan_budget, scanned_count, len(items), zero_result_reason, path_filtered, pattern_filtered, query_filtered,
-            query, pattern, search_path,
+            scan_budget,
+            scanned_count,
+            len(items),
+            zero_result_reason,
+            path_filtered,
+            pattern_filtered,
+            query_filtered,
+            query,
+            pattern,
+            search_path,
         )
         if items:
             # Android 资源联动排序：模块层级（app/feature/src-main）→ 资源匹配 → 文件名命中。
@@ -422,7 +621,12 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                 path = str(item.get("path", ""))
                 tier = android_module_tier(path)
                 base_name = file_name.rsplit(".", 1)[0].lower() if "." in file_name else file_name.lower()
-                if is_resource_query and resource_name and _is_android_resource_path(path) and base_name == resource_name.lower():
+                if (
+                    is_resource_query
+                    and resource_name
+                    and _is_android_resource_path(path)
+                    and base_name == resource_name.lower()
+                ):
                     group = 0
                 elif (filename_kw and filename_kw.lower() in file_name.lower()) or (
                     query and query.lower() in file_name.lower()
@@ -433,59 +637,96 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                 else:
                     group = 3
                 return (tier, group, path)
+
             items.sort(key=_rank)
+        # 负缓存写入: 0 结果搜索
+        if not items and _neg_key:
+            _search_zero_result_cache[_neg_key] = (time.monotonic(), zero_result_reason)
         result_str = json.dumps(items, ensure_ascii=False, default=str)
         return result_str, items
 
     elif tool_name == "grep_code":
         regex = arguments.get("regex", "")
+        items = _rg_search(str(cwd), regex, max_results=_MAX_RESULTS)
+        if items is not None:
+            result_str = json.dumps(items, ensure_ascii=False, default=str)
+            return result_str, items
+        # rg 不可用时的 Python 回退
         try:
             pattern = _re.compile(regex, _re.IGNORECASE)
         except _re.error:
             return json.dumps({"error": f"无效的正则表达式: {regex}"}), []
         items = []
-        for p in _iter_project_files():
+        from .file_index import get_or_build_index
+        _file_idx = get_or_build_index(str(cwd))
+        if _file_idx is not None and _file_idx.all_files:
+            _iter_source = (cwd / rel for rel in _file_idx.all_files if (cwd / rel).is_file())
+        else:
+            _iter_source = _iter_project_files()
+        for p in _iter_source:
             if len(items) >= _MAX_RESULTS:
                 break
             try:
-                text = p.read_text(errors='ignore')
+                text = p.read_text(errors="ignore")
                 matches = list(pattern.finditer(text))
                 for m in matches[:5]:
                     if len(items) >= _MAX_RESULTS:
                         break
-                    start_line = text[:m.start()].count('\n') + 1
-                    end_line = text[:m.end()].count('\n') + 1
-                    items.append({
-                        "fileName": p.name,
-                        "path": str(p.absolute()),
-                        "startLine": start_line,
-                        "endLine": end_line,
-                    })
+                    start_line = text[: m.start()].count("\n") + 1
+                    end_line = text[: m.end()].count("\n") + 1
+                    items.append(
+                        {
+                            "fileName": p.name,
+                            "path": str(p.absolute()),
+                            "startLine": start_line,
+                            "endLine": end_line,
+                        }
+                    )
             except (OSError, UnicodeDecodeError):
                 pass
+        # 负缓存: 0 结果搜索
+        if not items and _neg_key:
+            _search_zero_result_cache[_neg_key] = (time.monotonic(), "no_match")
         result_str = json.dumps(items, ensure_ascii=False, default=str)
         return result_str, items
 
     elif tool_name == "search_codebase":
         query = arguments.get("query", "")
+        # ★ 快路径: 用 ripgrep 搜索（快 10-100x）
+        items = _rg_search(str(cwd), _re.escape(query), max_results=_MAX_RESULTS)
+        if items is not None:
+            result_str = json.dumps(items, ensure_ascii=False, default=str)
+            return result_str, items
+        # Python 回退
         query_lower = query.lower()
         items = []
-        for p in _iter_project_files():
+        from .file_index import get_or_build_index
+        _file_idx = get_or_build_index(str(cwd))
+        if _file_idx is not None and _file_idx.all_files:
+            _iter_source = (cwd / rel for rel in _file_idx.all_files if (cwd / rel).is_file())
+        else:
+            _iter_source = _iter_project_files()
+        for p in _iter_source:
             if len(items) >= _MAX_RESULTS:
                 break
             try:
-                text = p.read_text(errors='ignore').lower()
+                text = p.read_text(errors="ignore").lower()
                 idx = text.find(query_lower)
                 if idx >= 0:
-                    start_line = text[:idx].count('\n') + 1
-                    items.append({
-                        "fileName": p.name,
-                        "path": str(p.absolute()),
-                        "startLine": start_line,
-                        "endLine": start_line,
-                    })
+                    start_line = text[:idx].count("\n") + 1
+                    items.append(
+                        {
+                            "fileName": p.name,
+                            "path": str(p.absolute()),
+                            "startLine": start_line,
+                            "endLine": start_line,
+                        }
+                    )
             except (OSError, UnicodeDecodeError):
                 pass
+        # 负缓存: 0 结果搜索
+        if not items and _neg_key:
+            _search_zero_result_cache[_neg_key] = (time.monotonic(), "no_match")
         result_str = json.dumps(items, ensure_ascii=False, default=str)
         return result_str, items
 
@@ -495,47 +736,73 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         items = []
         is_resource_query = _is_android_resource_query(query)
         resource_name = _extract_android_resource_name(query)
-        declaration_pattern = _re.compile(
-            rf"(?i)\b(object|class|interface|typealias)\s+{_re.escape(query)}\b"
-        ) if query else None
-        resource_ref_pattern = _re.compile(rf"(?i)\bR\.(layout|string|id|drawable|color|menu|anim|mipmap)\s*\.\s*{_re.escape(resource_name)}\b") if resource_name else None
+        declaration_pattern = (
+            _re.compile(rf"(?i)\b(object|class|interface|typealias)\s+{_re.escape(query)}\b") if query else None
+        )
+        resource_ref_pattern = (
+            _re.compile(
+                rf"(?i)\bR\.(layout|string|id|drawable|color|menu|anim|mipmap)\s*\.\s*{_re.escape(resource_name)}\b"
+            )
+            if resource_name
+            else None
+        )
         declaration_hits = 0
         resource_ref_hits = 0
-        for p in _iter_project_files():
+        # ★ 快路径: 使用文件索引
+        from .file_index import get_or_build_index
+        _file_idx = get_or_build_index(str(cwd))
+        if _file_idx is not None and _file_idx.all_files:
+            _iter_source = (cwd / rel for rel in _file_idx.all_files if (cwd / rel).is_file())
+        else:
+            _iter_source = _iter_project_files()
+        for p in _iter_source:
             if len(items) >= _MAX_RESULTS:
                 break
             if query_lower in p.name.lower():
-                items.append({
-                    "fileName": p.name,
-                    "path": str(p.absolute()),
-                })
+                items.append(
+                    {
+                        "fileName": p.name,
+                        "path": str(p.absolute()),
+                    }
+                )
                 continue
             if declaration_pattern is None:
                 if not (is_resource_query and resource_ref_pattern):
                     continue
             try:
-                text = p.read_text(errors='ignore')
+                text = p.read_text(errors="ignore")
             except (OSError, UnicodeDecodeError):
                 continue
             if declaration_pattern and declaration_pattern.search(text):
                 declaration_hits += 1
-                items.append({
-                    "fileName": p.name,
-                    "path": str(p.absolute()),
-                })
+                items.append(
+                    {
+                        "fileName": p.name,
+                        "path": str(p.absolute()),
+                    }
+                )
                 continue
-            if is_resource_query and resource_name and _is_android_resource_path(str(p)) and p.stem.lower() == resource_name.lower():
-                items.append({
-                    "fileName": p.name,
-                    "path": str(p.absolute()),
-                })
+            if (
+                is_resource_query
+                and resource_name
+                and _is_android_resource_path(str(p))
+                and p.stem.lower() == resource_name.lower()
+            ):
+                items.append(
+                    {
+                        "fileName": p.name,
+                        "path": str(p.absolute()),
+                    }
+                )
                 continue
             if resource_ref_pattern and resource_ref_pattern.search(text):
                 resource_ref_hits += 1
-                items.append({
-                    "fileName": p.name,
-                    "path": str(p.absolute()),
-                })
+                items.append(
+                    {
+                        "fileName": p.name,
+                        "path": str(p.absolute()),
+                    }
+                )
         seen_paths_sym = {str(x.get("path")) for x in items}
         if is_resource_query and resource_name and len(items) < _MAX_RESULTS:
             for hit in collect_android_values_xml_hits(cwd, resource_name):
@@ -547,11 +814,16 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                     items.append({"fileName": hit["fileName"], "path": pth})
         if not items and resource_name:
             probe = resource_name.lower()
-            for p in _iter_project_files():
+            # ★ 快路径: 使用文件索引
+            _idx_source = (cwd / rel for rel in _file_idx.all_files if (cwd / rel).is_file()) if _file_idx and _file_idx.all_files else _iter_project_files()
+            for p in _idx_source:
                 if len(items) >= _MAX_RESULTS:
                     break
                 npath = str(p).replace("\\", "/").lower()
-                if any(seg in npath for seg in ("/build/", "/.gradle/", "/generated/", "/intermediates/", "/ksp/", "/kapt/")):
+                if any(
+                    seg in npath
+                    for seg in ("/build/", "/.gradle/", "/generated/", "/intermediates/", "/ksp/", "/kapt/")
+                ):
                     continue
                 if p.suffix.lower() not in {".kt", ".java", ".xml"}:
                     continue
@@ -560,21 +832,37 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                 except OSError:
                     continue
                 if probe in txt:
-                    items.append({
-                        "fileName": p.name,
-                        "path": str(p.absolute()),
-                    })
+                    items.append(
+                        {
+                            "fileName": p.name,
+                            "path": str(p.absolute()),
+                        }
+                    )
+
         # Android 噪声符号下沉排序（不丢弃，保证召回完整）
         def _android_noise(name: str) -> bool:
             base = name.rsplit(".", 1)[0]
-            return base == "R" or base.startswith("R$") or base == "BuildConfig" or base.endswith("Binding") or base.endswith("Directions")
-        items.sort(key=lambda item: (
-            android_module_tier(str(item.get("path", ""))),
-            0 if is_resource_query and resource_name and _is_android_resource_path(str(item.get("path", "")))
-                 and str(item.get("fileName", "")).rsplit(".", 1)[0].lower() == resource_name.lower() else 1,
-            1 if _android_noise(str(item.get("fileName", ""))) else 0,
-            str(item.get("path", "")),
-        ))
+            return (
+                base == "R"
+                or base.startswith("R$")
+                or base == "BuildConfig"
+                or base.endswith("Binding")
+                or base.endswith("Directions")
+            )
+
+        items.sort(
+            key=lambda item: (
+                android_module_tier(str(item.get("path", ""))),
+                0
+                if is_resource_query
+                and resource_name
+                and _is_android_resource_path(str(item.get("path", "")))
+                and str(item.get("fileName", "")).rsplit(".", 1)[0].lower() == resource_name.lower()
+                else 1,
+                1 if _android_noise(str(item.get("fileName", ""))) else 0,
+                str(item.get("path", "")),
+            )
+        )
         zero_result_reason = "none"
         if not items:
             zero_result_reason = "no_symbol_match"
@@ -583,13 +871,22 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         logger.info(
             "[LSP4J-TOOL] local_search_symbol budget={} results={} declaration_hits={} resource_ref_hits={} "
             "zero_result_reason={} query={}",
-            scan_budget, len(items), declaration_hits, resource_ref_hits, zero_result_reason, query,
+            scan_budget,
+            len(items),
+            declaration_hits,
+            resource_ref_hits,
+            zero_result_reason,
+            query,
         )
+        # 负缓存: 0 结果搜索
+        if not items and _neg_key:
+            _search_zero_result_cache[_neg_key] = (time.monotonic(), zero_result_reason)
         result_str = json.dumps(items, ensure_ascii=False, default=str)
         return result_str, items
 
     else:
         raise ValueError(f"未知的本地工具: {tool_name}")
+
 
 # ──────────────────────────────────────────────
 # IDE 上下文提示构建（基于 ChatTaskEnum.java 21 个枚举值）
@@ -617,7 +914,7 @@ def _sanitize_lang(lang: str) -> str:
 
     只允许字母、数字、+、-、.，并限制长度。
     """
-    return re.sub(r'[^a-zA-Z0-9+\-.]', '', lang)[:20]
+    return re.sub(r"[^a-zA-Z0-9+\-.]", "", lang)[:20]
 
 
 def _build_lsp4j_ide_prompt(params: ChatAskParam) -> str:
@@ -730,9 +1027,17 @@ def _build_lsp4j_ide_prompt(params: ChatAskParam) -> str:
     # 1. 渲染代码块时显示 "Apply" 按钮（CodeMarkdownHighlightComponent.java:358-461）
     # 2. 用户点击 Apply 后调用 chat/codeChange/apply
     # 3. 插件渲染 InEditorDiffRenderer 显示 diff（CodeMarkdownHighlightComponent.java:527-530）
-    if params.chatTask in ("CODE_GENERATE_COMMENT", "OPTIMIZE_CODE", "INLINE_EDIT",
-                              "DESCRIPTION_GENERATE_CODE", "CODE_PROBLEM_SOLVE",
-                              "FREE_INPUT", "PRE_CONTEXT", "CODE_REVIEW", "UNIT_TEST"):
+    if params.chatTask in (
+        "CODE_GENERATE_COMMENT",
+        "OPTIMIZE_CODE",
+        "INLINE_EDIT",
+        "DESCRIPTION_GENERATE_CODE",
+        "CODE_PROBLEM_SOLVE",
+        "FREE_INPUT",
+        "PRE_CONTEXT",
+        "CODE_REVIEW",
+        "UNIT_TEST",
+    ):
         parts.append(
             "[代码输出格式要求] 如需生成代码，请使用以下格式让代码可交互编辑：\n"
             "```python|CODE_EDIT_BLOCK|/absolute/path/to/file.py\n"
@@ -936,8 +1241,13 @@ class JSONRPCRouter:
         # 1. 判断是否为 JSON-RPC 响应（client 响应 server 的请求如 tool/invoke）
         if "id" in msg and "method" not in msg and ("result" in msg or "error" in msg):
             error_detail = msg.get("error", {}).get("message", "") if "error" in msg else ""
-            logger.info("[LSP4J ←] response: id={} has_result={} has_error={} error_detail={}",
-                         msg.get("id"), "result" in msg, "error" in msg, error_detail)
+            logger.info(
+                "[LSP4J ←] response: id={} has_result={} has_error={} error_detail={}",
+                msg.get("id"),
+                "result" in msg,
+                "error" in msg,
+                error_detail,
+            )
             await self._handle_response(msg)
             return
 
@@ -948,11 +1258,19 @@ class JSONRPCRouter:
         # 协议追踪日志：记录收到的每条请求/通知
         # 心跳/探活消息降级为 DEBUG，避免污染 INFO 日志（#2 修复）
         if method == "ping":
-            logger.debug("[LSP4J ←] method={} id={} params_keys={}", method, msg_id,
-                         list(params.keys()) if isinstance(params, dict) else type(params).__name__)
+            logger.debug(
+                "[LSP4J ←] method={} id={} params_keys={}",
+                method,
+                msg_id,
+                list(params.keys()) if isinstance(params, dict) else type(params).__name__,
+            )
         else:
-            logger.info("[LSP4J ←] method={} id={} params_keys={}", method, msg_id,
-                         list(params.keys()) if isinstance(params, dict) else type(params).__name__)
+            logger.info(
+                "[LSP4J ←] method={} id={} params_keys={}",
+                method,
+                msg_id,
+                list(params.keys()) if isinstance(params, dict) else type(params).__name__,
+            )
 
         # 2. 核心方法路由
         handler = self._METHOD_MAP.get(method)
@@ -962,13 +1280,13 @@ class JSONRPCRouter:
 
         # 3. 非核心方法通用处理（插件 JsonNotification / LSP 标准，无业务实现，静默忽略以免 -32601）
         if method in (
-            "initialized",               # 生命周期通知，无需响应
-            "textDocument/didOpen",       # 文档同步（通义灵码自动发送，忽略）
+            "initialized",  # 生命周期通知，无需响应
+            "textDocument/didOpen",  # 文档同步（通义灵码自动发送，忽略）
             "textDocument/didChange",
             "textDocument/didClose",
             "textDocument/didSave",
-            "textDocument/willChange",    # 编辑器变更前触发，无业务需求
-            "textDocument/willSave",      # 保存前触发
+            "textDocument/willChange",  # 编辑器变更前触发，无业务需求
+            "textDocument/willSave",  # 保存前触发
             "textDocument/willSaveWaitUntil",  # 保存前等待
             # LanguageServer.java — 见 docs/plugin-analysis/15-complete-method-by-method-gap-analysis.md P0
             "window/workDoneProgress/cancel",
@@ -990,9 +1308,7 @@ class JSONRPCRouter:
         # （completionItem/resolve, hover, definition, references, codeAction, etc.）
         if msg_id is not None:
             logger.info("LSP4J: 未适配方法, 返回 -32601 method={} id={}", method, msg_id)
-            await self._send_error_response(
-                msg_id, -32601, f"Method not found: {method}"
-            )
+            await self._send_error_response(msg_id, -32601, f"Method not found: {method}")
         else:
             logger.debug("LSP4J: 忽略未知通知 method={}", method)
 
@@ -1045,26 +1361,33 @@ class JSONRPCRouter:
 
         if self._project_path:
             logger.info("[LSP4J-LIFE] projectPath 提取: {}", self._project_path)
+            # 异步构建文件索引（fire-and-forget，不阻塞 initialize 响应）
+            _t_idx = asyncio.create_task(_build_project_file_index(self._project_path))
+            _lsp4j_background_tasks.add(_t_idx)
+            _t_idx.add_done_callback(_lsp4j_background_tasks.discard)
         else:
-            logger.warning("[LSP4J-LIFE] projectPath 未能提取: rootUri={} workspaceFolders={}",
-                           root_uri[:80] if root_uri else "(empty)",
-                           [f.get("uri", "")[:80] for f in (params.get("workspaceFolders") or [])])
+            logger.warning(
+                "[LSP4J-LIFE] projectPath 未能提取: rootUri={} workspaceFolders={}",
+                root_uri[:80] if root_uri else "(empty)",
+                [f.get("uri", "")[:80] for f in (params.get("workspaceFolders") or [])],
+            )
 
-        await self._send_response(msg_id, {
-            "capabilities": {
-                "textDocumentSync": {"openClose": True, "change": 1},
-                "completionProvider": {"resolveProvider": False, "triggerCharacters": ["."]},
+        await self._send_response(
+            msg_id,
+            {
+                "capabilities": {
+                    "textDocumentSync": {"openClose": True, "change": 1},
+                    "completionProvider": {"resolveProvider": False, "triggerCharacters": ["."]},
+                },
+                "serverInfo": {"name": "Clawith LSP4J", "version": "0.1.0"},
             },
-            "serverInfo": {"name": "Clawith LSP4J", "version": "0.1.0"},
-        })
+        )
 
     async def _ensure_project_path_ready(self, msg_id: Any, method: str) -> bool:
         """确保 projectPath 已就绪，防止空 projectPath 导致跨事件路由异常。"""
         if self._project_path:
             return True
-        message = (
-            "projectPath is empty; initialize with rootUri/workspaceFolders before chat."
-        )
+        message = "projectPath is empty; initialize with rootUri/workspaceFolders before chat."
         logger.warning("[LSP4J-LIFE] {} rejected: {}", method, message)
         if msg_id is not None:
             await self._send_error_response(msg_id, -32002, message)
@@ -1106,8 +1429,15 @@ class JSONRPCRouter:
         - sessionType: 会话类型（写入 extra 字段）
         """
         # 连接已关闭，拒绝新请求
+        # ★ 须尽力回 JSON-RPC error：否则 LSP4J 对带 id 的 @JsonRequest 会一直等到超时，
+        #    IDE 表现为「发消息后没有任何回复」（_send_message 在 _closed 时会静默丢弃）。
         if self._closed:
-            logger.warning("[LSP4J] chat/ask rejected: connection closed")
+            logger.warning("[LSP4J] chat/ask rejected: connection closed requestId={}", msg_id)
+            await self._send_jsonrpc_error_best_effort(
+                msg_id,
+                -32603,
+                "LSP connection closed; please reconnect the IDE plugin.",
+            )
             return
 
         # 解析参数（兼容旧版插件缺少字段）
@@ -1115,10 +1445,7 @@ class JSONRPCRouter:
 
         request_id = ask.requestId or str(uuid.uuid4())
         session_id = ask.sessionId
-        question_text = (
-            (ask.questionText or "").strip()
-            or (str(ask.chatContext or "")).strip()
-        )
+        question_text = (ask.questionText or "").strip() or (str(ask.chatContext or "")).strip()
         chat_context = str(ask.chatContext or "")
 
         # 保存流式模式和会话类型（供后续回调使用）
@@ -1133,13 +1460,34 @@ class JSONRPCRouter:
         if not await self._ensure_project_path_ready(msg_id, "chat/ask"):
             return
 
-        logger.info("[LSP4J] chat/ask 开始处理: requestId={} sessionId={} stream={} chatTask={} mode={}",
-                     request_id, session_id, ask.stream, ask.chatTask, ask.mode)
+        logger.info(
+            "[LSP4J] chat/ask 开始处理: requestId={} sessionId={} stream={} chatTask={} mode={}",
+            request_id,
+            session_id,
+            ask.stream,
+            ask.chatTask,
+            ask.mode,
+        )
+
+        # 清理过期的工具调用缓存
+        _now = time.monotonic()
+        _expired = [
+            k for k, (ts, _) in _lsp4j_tool_cache.items()
+            if _now - ts > _LSP4J_TOOL_CACHE_TTL
+        ]
+        for k in _expired:
+            del _lsp4j_tool_cache[k]
+        if _expired:
+            logger.info("[LSP4J-CACHE] cleaned {} expired entries", len(_expired))
 
         # 并发保护：同一连接只允许一个 chat/ask 同时执行
         if self._chat_lock.locked():
             # 并发请求拒绝
-            logger.warning("[LSP4J] chat/ask rejected: concurrent request, requestId={} current={}", request_id, self._current_request_id)
+            logger.warning(
+                "[LSP4J] chat/ask rejected: concurrent request, requestId={} current={}",
+                request_id,
+                self._current_request_id,
+            )
             await self._send_error_response(msg_id, -32602, "Another chat is in progress")
             return
 
@@ -1184,11 +1532,14 @@ class JSONRPCRouter:
             # chat/ask 是 @JsonRequest，LSP4J 框架会等待响应；但 call_llm 可能运行数分钟，
             # 所以必须先返回响应确认收到请求，后续内容通过通知推送。
             # 这与 commitMsg/generate 的模式一致。
-            await self._send_response(msg_id, {
-                "isSuccess": True,
-                "requestId": request_id,
-                "status": "processing",
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "isSuccess": True,
+                    "requestId": request_id,
+                    "status": "processing",
+                },
+            )
 
             # ★ 性能计时: JSON-RPC 响应发送
             _t0 = self._log_perf("JSONRPC_RESPONSE", _ask_start, _t0)
@@ -1207,22 +1558,28 @@ class JSONRPCRouter:
                     session_id,
                 )
                 _t_hist_start = time.monotonic()
-                loaded = await _load_lsp4j_history_from_db(
-                    session_id, self._agent_id, self._user_id
-                )
+                loaded = await _load_lsp4j_history_from_db(session_id, self._agent_id, self._user_id)
                 _t_hist_elapsed = time.monotonic() - _t_hist_start
                 if loaded:
                     message_history = loaded
                     current_lsp4j_message_history.set(message_history)
-                    logger.info("[LSP4J-PERF] DB history loaded: session={} elapsed={:.3f}s rows={}",
-                                session_id, _t_hist_elapsed, len(loaded))
+                    logger.info(
+                        "[LSP4J-PERF] DB history loaded: session={} elapsed={:.3f}s rows={}",
+                        session_id,
+                        _t_hist_elapsed,
+                        len(loaded),
+                    )
                 else:
-                    logger.info("[LSP4J-PERF] DB history loaded (empty): session={} elapsed={:.3f}s",
-                                session_id, _t_hist_elapsed)
+                    logger.info(
+                        "[LSP4J-PERF] DB history loaded (empty): session={} elapsed={:.3f}s",
+                        session_id,
+                        _t_hist_elapsed,
+                    )
             else:
                 logger.debug(
                     "[LSP4J-CTX] chat/ask: message_history already populated ({}) or no session_id ({})",
-                    len(message_history), session_id,
+                    len(message_history),
+                    session_id,
                 )
             # 从内存注入工具调用上下文（始终以内存为准，覆盖 DB 可能不完整的上下文）
             # 内存中的记录包含最新的工具调用（含 DB 尚未完成持久化的窗口），比 DB 更完整
@@ -1230,11 +1587,13 @@ class JSONRPCRouter:
                 inmem_records = self._tool_call_history_by_session[session_id]
                 logger.info(
                     "[LSP4J-CTX] chat/ask: found {} in-memory tool_call records for session={}",
-                    len(inmem_records), session_id,
+                    len(inmem_records),
+                    session_id,
                 )
                 # 移除 DB 注入的旧上下文（如有），以内存最新记录替换，避免丢失未持久化的工具调用
                 message_history = [
-                    m for m in message_history
+                    m
+                    for m in message_history
                     if not (m.get("role") == "system" and "[会话上下文]" in m.get("content", ""))
                 ]
                 if inmem_records:
@@ -1243,15 +1602,23 @@ class JSONRPCRouter:
                     _t_ctx_elapsed = time.monotonic() - _t_ctx_start
                     if ctx_msg:
                         message_history.insert(0, ctx_msg)
-                        logger.info("[LSP4J] tool_call context injected from memory: session_id={} tool_count={}",
-                                    session_id, len(inmem_records))
-                        logger.info("[LSP4J-PERF] Memory context format: session={} elapsed={:.3f}s ctx_len={}",
-                                    session_id, _t_ctx_elapsed, len(ctx_msg.get("content", "")))
+                        logger.info(
+                            "[LSP4J] tool_call context injected from memory: session_id={} tool_count={}",
+                            session_id,
+                            len(inmem_records),
+                        )
+                        logger.info(
+                            "[LSP4J-PERF] Memory context format: session={} elapsed={:.3f}s ctx_len={}",
+                            session_id,
+                            _t_ctx_elapsed,
+                            len(ctx_msg.get("content", "")),
+                        )
                     else:
                         logger.info(
                             "[LSP4J-CTX] chat/ask: memory context NOT injected (no useful records after formatting), "
                             "session={} tool_count={}",
-                            session_id, len(inmem_records),
+                            session_id,
+                            len(inmem_records),
                         )
             else:
                 logger.debug(
@@ -1265,13 +1632,32 @@ class JSONRPCRouter:
                 r = m.get("role", "unknown")
                 history_roles[r] = history_roles.get(r, 0) + 1
             _history_total_chars = sum(len(m.get("content", "")) for m in history_msgs)
-            logger.info("[LSP4J-PERF] History summary: session={} messages={} roles={} total_chars={}",
-                       session_id, len(history_msgs), history_roles, _history_total_chars)
+            logger.info(
+                "[LSP4J-PERF] History summary: session={} messages={} roles={} total_chars={}",
+                session_id,
+                len(history_msgs),
+                history_roles,
+                _history_total_chars,
+            )
 
             # 拼接用户消息
             full_text = question_text
             if chat_context and chat_context != question_text:
-                full_text = f"{question_text}\n\n[附加上下文]\n{chat_context}"
+                full_text = f"{question_text}\n\n[附加上文]\n{chat_context}"
+
+            # ★ 注入代码结构地图（Aider/Cursor 策略：LLM 直接知道项目结构，不需要搜索探索）
+            if self._project_path:
+                from .file_index import get_or_build_code_map as _get_cmap
+                _code_map = _get_cmap(self._project_path)
+                if _code_map:
+                    message_history = [
+                        m for m in message_history
+                        if not (m.get("role") == "system" and "项目代码结构地图" in m.get("content", ""))
+                    ]
+                    message_history.insert(0, {"role": "system", "content": _code_map})
+                    logger.info("[CODE-MAP] injected: project={} map_len={}", self._project_path, len(_code_map))
+                else:
+                    logger.warning("[CODE-MAP] empty: project={}", self._project_path)
 
             message_history.append({"role": "user", "content": full_text})
 
@@ -1326,9 +1712,7 @@ class JSONRPCRouter:
                 # ★ 逐步推送推理文本：每 15 chunk 或遇换行时发送一次
                 # 避免每个 token 都发一条通知（过多 RPC 开销），同时保证前端持续有内容更新
                 if len(thinking_chunks) % 15 == 0 or "\n" in text:
-                    await self._send_chat_think(
-                        session_id, "".join(thinking_chunks), "start", request_id
-                    )
+                    await self._send_chat_think(session_id, "".join(thinking_chunks), "start", request_id)
 
             async def on_tool_call(data: dict) -> None:
                 """工具调用回调 — 推送状态通知给 IDE + step callback + toolCall markdown"""
@@ -1355,11 +1739,19 @@ class JSONRPCRouter:
                     _should_create_ide_card = False
                     if is_lsp4j_tool:
                         from .tool_hooks import _should_route_to_ide as _route_check
+
                         raw_args = data.get("args", {})
                         _should_create_ide_card = _route_check(tool_name, raw_args)
                         if not _should_create_ide_card:
-                            logger.info("[LSP4J-TOOL] 跳过 IDE 工具卡片（相对路径回退本地）: tool={} args={}",
-                                        tool_name, {k: v for k, v in raw_args.items() if k in ("path", "file_path", "filePath", "relative_workspace_path")})
+                            logger.info(
+                                "[LSP4J-TOOL] 跳过 IDE 工具卡片（相对路径回退本地）: tool={} args={}",
+                                tool_name,
+                                {
+                                    k: v
+                                    for k, v in raw_args.items()
+                                    if k in ("path", "file_path", "filePath", "relative_workspace_path")
+                                },
+                            )
                     if _should_create_ide_card:
                         tool_call_id = str(uuid.uuid4())
                         # ★ 队列存储 3 元组：(显示名, 插件原生名称, UUID)
@@ -1385,10 +1777,19 @@ class JSONRPCRouter:
                         llm_call_id = data.get("call_id", "")
                         if llm_call_id:
                             self._call_id_to_tool_id[llm_call_id] = tool_call_id
-                        logger.debug("[LSP4J] toolCallId 入队: name={} callId={} queue_len={}",
-                                     tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
-                        logger.info("[LSP4J-TOOL] toolCall 入队: display={} mapped={} callId={} queue_len={}",
-                                    display_name, tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
+                        logger.debug(
+                            "[LSP4J] toolCallId 入队: name={} callId={} queue_len={}",
+                            tool_name,
+                            tool_call_id[:8],
+                            len(self._tool_call_id_queue),
+                        )
+                        logger.info(
+                            "[LSP4J-TOOL] toolCall 入队: display={} mapped={} callId={} queue_len={}",
+                            display_name,
+                            tool_name,
+                            tool_call_id[:8],
+                            len(self._tool_call_id_queue),
+                        )
                         logger.info(
                             "[LSP4J-TRACE] 入队 trace=req={} call={} logical={} invoke={}",
                             request_id[:8],
@@ -1415,15 +1816,21 @@ class JSONRPCRouter:
                         # 若缺少末尾状态段，插件会在 split("::")[1] 处越界。
                         markdown_block = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
 
-                        logger.info("[LSP4J-TOOL] 准备发送 toolCall markdown 块: mapped={} callId={}",
-                                     tool_name, tool_call_id[:8])
-                        logger.info("[LSP4J-TOOL] markdown 块使用显示名: name={} callId={}",
-                                    display_name, tool_call_id[:8])
+                        logger.info(
+                            "[LSP4J-TOOL] 准备发送 toolCall markdown 块: mapped={} callId={}",
+                            tool_name,
+                            tool_call_id[:8],
+                        )
+                        logger.info(
+                            "[LSP4J-TOOL] markdown 块使用显示名: name={} callId={}", display_name, tool_call_id[:8]
+                        )
                         if getattr(self, "_stream_mode", True):
                             await self._send_chat_answer(session_id, markdown_block, request_id)
                             logger.info("[LSP4J-TOOL] toolCall markdown 块已发送: callId={}", tool_call_id[:8])
                         else:
-                            logger.info("[LSP4J-TOOL] 非流式模式，跳过 toolCall markdown 块发送: callId={}", tool_call_id[:8])
+                            logger.info(
+                                "[LSP4J-TOOL] 非流式模式，跳过 toolCall markdown 块发送: callId={}", tool_call_id[:8]
+                            )
 
                         # ★ 插件 ChatToolEventProcessor 采用 buffer+replay 机制：
                         # 事件先于 panel 注册到达时自动缓冲，registerPanel 时 replay。
@@ -1444,13 +1851,19 @@ class JSONRPCRouter:
                             )
                         else:
                             await self._send_tool_call_sync(
-                                session_id, request_id, tool_call_id,
-                                "PENDING", tool_name=original_name, parameters=params,
+                                session_id,
+                                request_id,
+                                tool_call_id,
+                                "PENDING",
+                                tool_name=original_name,
+                                parameters=params,
                             )
 
                     await self._send_process_step_callback(
-                        session_id, request_id,
-                        step=f"tool_{tool_name}", description=f"正在执行: {tool_name}",
+                        session_id,
+                        request_id,
+                        step=f"tool_{tool_name}",
+                        description=f"正在执行: {tool_name}",
                         status="doing",
                     )
                     await self._send_chat_think(
@@ -1471,9 +1884,12 @@ class JSONRPCRouter:
                     # 2) invoke_tool_on_ide 已从队列 pop 后此处匹配失败导致新建兜底 UUID（两个不同 callId）。
                     is_lsp4j_tool = tool_name in LSP4J_IDE_TOOL_NAMES
                     if is_lsp4j_tool:
-                        logger.debug("[LSP4J] on_tool_call done: 跳过 IDE 工具的 FINISHED sync, "
-                                     "已由 invoke_tool_on_ide 发送, original={} mapped={}",
-                                     original_name, tool_name)
+                        logger.debug(
+                            "[LSP4J] on_tool_call done: 跳过 IDE 工具的 FINISHED sync, "
+                            "已由 invoke_tool_on_ide 发送, original={} mapped={}",
+                            original_name,
+                            tool_name,
+                        )
                     else:
                         # ★ 非 IDE 工具（纯后端执行，不走 invoke_tool_on_ide）：正常发送 FINISHED sync
                         llm_call_id = data.get("call_id", "")
@@ -1485,8 +1901,11 @@ class JSONRPCRouter:
                                 if mapped_name == tool_name:
                                     finished_call_id = stored_id
                                     self._tool_call_id_queue.pop(i)
-                                    logger.debug("[LSP4J] toolCallId 队列匹配 (done): name={} callId={}",
-                                                 tool_name, finished_call_id[:8])
+                                    logger.debug(
+                                        "[LSP4J] toolCallId 队列匹配 (done): name={} callId={}",
+                                        tool_name,
+                                        finished_call_id[:8],
+                                    )
                                     break
 
                         done_params = self._tool_params.pop(finished_call_id, {}) if finished_call_id else {}
@@ -1495,17 +1914,22 @@ class JSONRPCRouter:
                             # ★ 没有匹配的 toolCallId → 没有对应的 ToolPanel
                             # 不能发送 FINISHED sync：若使用随机 UUID，ChatToolEventProcessor
                             # 会为每个幽灵事件等待 10s（timeoutWaitPanel），堵塞所有后续工具事件。
-                            logger.warning("[LSP4J] toolCallId 未匹配 (done)，跳过 FINISHED sync: name={}",
-                                           tool_name)
+                            logger.warning("[LSP4J] toolCallId 未匹配 (done)，跳过 FINISHED sync: name={}", tool_name)
                         else:
                             await self._send_tool_call_sync(
-                                session_id, request_id, finished_call_id,
-                                "FINISHED", tool_name=original_name, parameters=done_params,
+                                session_id,
+                                request_id,
+                                finished_call_id,
+                                "FINISHED",
+                                tool_name=original_name,
+                                parameters=done_params,
                             )
 
                     await self._send_process_step_callback(
-                        session_id, request_id,
-                        step=f"tool_{tool_name}", description=f"已完成: {tool_name}",
+                        session_id,
+                        request_id,
+                        step=f"tool_{tool_name}",
+                        description=f"已完成: {tool_name}",
                         status="done",
                     )
                     await self._send_chat_think(
@@ -1520,13 +1944,16 @@ class JSONRPCRouter:
                             tc_msg = ChatMessage(
                                 conversation_id=session_id or "",
                                 role="tool_call",
-                                content=json.dumps({
-                                    "name": tool_name,
-                                    "args": data.get("args"),
-                                    "status": "done",
-                                    "result": (data.get("result") or "")[:500],
-                                    "reasoning_content": data.get("reasoning_content"),
-                                }, ensure_ascii=False),
+                                content=json.dumps(
+                                    {
+                                        "name": tool_name,
+                                        "args": data.get("args"),
+                                        "status": "done",
+                                        "result": (data.get("result") or "")[:500],
+                                        "reasoning_content": data.get("reasoning_content"),
+                                    },
+                                    ensure_ascii=False,
+                                ),
                                 agent_id=self._agent_id,
                                 user_id=self._user_id,
                             )
@@ -1534,7 +1961,9 @@ class JSONRPCRouter:
                             await _tc_db.commit()
                             logger.debug("[LSP4J] tool_call 持久化成功: tool={} sessionId={}", tool_name, session_id)
                     except Exception as _tc_e:
-                        logger.warning("[LSP4J] tool_call 持久化失败: tool={} sessionId={} error={}", tool_name, session_id, _tc_e)
+                        logger.warning(
+                            "[LSP4J] tool_call 持久化失败: tool={} sessionId={} error={}", tool_name, session_id, _tc_e
+                        )
 
             # 4. 调用 call_llm
             # 构建 IDE 环境提示（chatTask、codeLanguage 等注入 role_description）
@@ -1546,7 +1975,7 @@ class JSONRPCRouter:
             tool_hint = "\n[工具可用性] 已连接本地 IDE 环境，可直接使用 read_file、replace_text_by_path、run_in_terminal、get_terminal_output、create_file_with_text、delete_file_by_path、get_problems 等工具访问项目文件。"
             if self._project_path:
                 tool_hint += f"\n[项目根路径] {self._project_path}"
-            
+
             # ★ 优先工具链路：文件改动应通过 IDE 工具调用触发 ToolPanel / diff 卡片。
             # CODE_EDIT_BLOCK 仅作为兜底（当工具调用明确不可用时才允许）。
             tool_hint += (
@@ -1563,7 +1992,7 @@ class JSONRPCRouter:
                 "\nlist_dir/search_file 返回的路径可直接用于后续 read_file/replace_text_by_path 调用。"
                 "\n相对路径仅用于 Agent 自身文件（soul.md, memory.md, focus.md, skills/）。"
             )
-            
+
             role_desc = role_desc + tool_hint
 
             # ── 模型选择（优先级：customModel > extra.modelConfig.key > 默认） ──
@@ -1608,8 +2037,11 @@ class JSONRPCRouter:
 
             # 发送步骤开始通知（chat/process_step_callback）
             await self._send_process_step_callback(
-                session_id, request_id,
-                step="step_start", description="开始处理", status="doing",
+                session_id,
+                request_id,
+                step="step_start",
+                description="开始处理",
+                status="doing",
             )
 
             # 加载 fallback 模型
@@ -1628,10 +2060,16 @@ class JSONRPCRouter:
 
             # ★ 性能计时: 准备进入 call_llm
             _t_call_llm_start = time.monotonic()
-            _context_chars = sum(len(m.get("content", "")) for m in message_history if isinstance(m.get("content"), str))
-            logger.info("[LSP4J-PERF] PRE_CALL_LLM session={} model={} messages={} context_chars={}",
-                        session_id, model_obj.model if hasattr(model_obj, 'model') else 'unknown',
-                        len(message_history), _context_chars)
+            _context_chars = sum(
+                len(m.get("content", "")) for m in message_history if isinstance(m.get("content"), str)
+            )
+            logger.info(
+                "[LSP4J-PERF] PRE_CALL_LLM session={} model={} messages={} context_chars={}",
+                session_id,
+                model_obj.model if hasattr(model_obj, "model") else "unknown",
+                len(message_history),
+                _context_chars,
+            )
             try:
                 reply = await call_llm_with_failover(
                     primary_model=model_obj,
@@ -1647,6 +2085,11 @@ class JSONRPCRouter:
                     on_thinking=on_thinking,
                     supports_vision=supports_vision,
                     cancel_event=self._cancel_event,
+                    parallel_tools_extra_readonly={
+                        "search_file", "search_codebase", "search_symbol",
+                        "list_dir", "read_file",
+                    },
+                    tool_warning_mode="lsp4j",
                 )
             except asyncio.CancelledError:
                 cancelled = True
@@ -1661,8 +2104,13 @@ class JSONRPCRouter:
 
             # ★ 性能计时: call_llm 完成
             _t_call_llm_elapsed = time.monotonic() - _t_call_llm_start
-            logger.info("[LSP4J-PERF] CALL_LLM_DONE session={} elapsed={:.1f}s cancelled={} reply_len={}",
-                        session_id, _t_call_llm_elapsed, cancelled, len(reply))
+            logger.info(
+                "[LSP4J-PERF] CALL_LLM_DONE session={} elapsed={:.1f}s cancelled={} reply_len={}",
+                session_id,
+                _t_call_llm_elapsed,
+                cancelled,
+                len(reply),
+            )
 
             # ★ 性能计时: 思考完成
             _t0 = self._log_perf("THINK_DONE", _ask_start, _t0)
@@ -1676,22 +2124,31 @@ class JSONRPCRouter:
 
             # 发送步骤结束通知（chat/process_step_callback）
             await self._send_process_step_callback(
-                session_id, request_id,
-                step="step_end", description="处理完成", status="done",
+                session_id,
+                request_id,
+                step="step_end",
+                description="处理完成",
+                status="done",
             )
 
             # ★ 性能计时: 后置操作完成
             _t0 = self._log_perf("POST_CALLBACKS", _ask_start, _t0)
 
-            logger.info("[LSP4J] chat/ask 处理完成: requestId={} cancelled={} reply_len={} elapsed={:.1f}s",
-                         request_id, cancelled, len(reply), time.monotonic() - _ask_start)
+            logger.info(
+                "[LSP4J] chat/ask 处理完成: requestId={} cancelled={} reply_len={} elapsed={:.1f}s",
+                request_id,
+                cancelled,
+                len(reply),
+                time.monotonic() - _ask_start,
+            )
 
             # 检测任务创建意图
             if not cancelled and full_text and reply:
                 _t_task_start = time.monotonic()
                 task_match = re.search(
-                    r'(?:创建|新建|添加|建一个|帮我建|create|add)(?:一个|a )?(?:任务|待办|todo|task)[，,：：:\\s]*(.+)',
-                    full_text, re.IGNORECASE
+                    r"(?:创建|新建|添加|建一个|帮我建|create|add)(?:一个|a )?(?:任务|待办|todo|task)[，,：：:\\s]*(.+)",
+                    full_text,
+                    re.IGNORECASE,
                 )
                 if task_match:
                     task_title = task_match.group(1).strip()
@@ -1715,8 +2172,12 @@ class JSONRPCRouter:
                             logger.warning("[LSP4J] Task creation failed: {}", _te)
                 _t_task_elapsed = time.monotonic() - _t_task_start
                 if _t_task_elapsed > 0.05:  # 只记录超过50ms的操作
-                    logger.info("[LSP4J-PERF] TASK_DETECTION session={} elapsed={:.3f}s matched={}",
-                                session_id, _t_task_elapsed, bool(task_match))
+                    logger.info(
+                        "[LSP4J-PERF] TASK_DETECTION session={} elapsed={:.3f}s matched={}",
+                        session_id,
+                        _t_task_elapsed,
+                        bool(task_match),
+                    )
 
             # 5. 后台持久化
             if session_id and reply:
@@ -1735,8 +2196,11 @@ class JSONRPCRouter:
                     )
                 )
                 _t_persist_elapsed = time.monotonic() - _t_persist_start
-                logger.info("[LSP4J-PERF] PERSIST_TASK_CREATED session={} create_elapsed={:.3f}s",
-                            session_id, _t_persist_elapsed)
+                logger.info(
+                    "[LSP4J-PERF] PERSIST_TASK_CREATED session={} create_elapsed={:.3f}s",
+                    session_id,
+                    _t_persist_elapsed,
+                )
                 _lsp4j_background_tasks.add(_t)
                 _t.add_done_callback(_lsp4j_background_tasks.discard)
 
@@ -1749,26 +2213,79 @@ class JSONRPCRouter:
             await buffer.flush(force=True)
             _t_flush_elapsed = time.monotonic() - _t_flush_start
 
+            # ★ 灵码 MarkdownStreamPanel 主要消费 chat/answer。`finish` 工具返回的正文不经
+            # client.stream 的 on_chunk，reply_parts 为空时会出现 fullAnswer 非空但气泡空白。
+            # 在 chat/finish 前把与最终 reply 一致的文本补发为 chat/answer（见 answer_sync.plan_*）。
+            _streamed_plain = "".join(reply_parts)
+            _stream_mode_on = getattr(self, "_stream_mode", True)
+            _sync_plan = plan_answer_sync_before_finish(
+                cancelled=cancelled,
+                reply=reply or "",
+                streamed_plain=_streamed_plain,
+                stream_mode_on=_stream_mode_on,
+            )
+            logger.info(
+                "[LSP4J-UI] answer_sync_plan requestId={} branch={} reply_len={} streamed_len={} "
+                "stream_mode={} cancelled={}",
+                request_id,
+                _sync_plan.branch,
+                len(reply or ""),
+                len(_streamed_plain),
+                _stream_mode_on,
+                cancelled,
+            )
+            if _sync_plan.text is not None:
+                await self._send_chat_answer(
+                    session_id,
+                    _sync_plan.text,
+                    request_id,
+                    overwrite=_sync_plan.overwrite,
+                )
+                logger.info(
+                    "[LSP4J-UI] answer_sync_sent requestId={} branch={} send_len={} overwrite={}",
+                    request_id,
+                    _sync_plan.branch,
+                    len(_sync_plan.text),
+                    _sync_plan.overwrite,
+                )
+                if _sync_plan.branch == "overwrite_mismatch":
+                    logger.warning(
+                        "[LSP4J-UI] answer_sync overwrite_mismatch detail requestId={} streamed_len={} reply_len={}",
+                        request_id,
+                        len(_streamed_plain),
+                        len(reply or ""),
+                    )
+
             # 6. 发送完成信号（ChatFinishParams 格式）
             # statusCode 映射：200=成功, 200=取消(非错误), 500=异常
+            # ★ 微延迟：插件端 ChatFinishProcessor 和 ChatAnswerProcessor 并发执行，
+            # ChatFinishProcessor 会移除 REQUEST_TO_PROJECT 映射，导致 ChatAnswerProcessor
+            # 找不到请求。给 200ms 窗口让 ChatAnswerProcessor 先完成查找。
+            await asyncio.sleep(0.2)
             _t_finish_start = time.monotonic()
             finish_reason = "cancelled" if cancelled else ("success" if error_status_code == 200 else "error")
             await self._send_chat_finish(session_id, finish_reason, reply, request_id, status_code=error_status_code)
 
             # 发送 REQUEST_FINISHED 清理通知（tool/call/sync）
             await self._send_tool_call_sync(
-                session_id, request_id, "",
+                session_id,
+                request_id,
+                "",
                 "REQUEST_FINISHED",
             )
             _t_finish_elapsed = time.monotonic() - _t_finish_start
-            logger.info("[LSP4J-PERF] FINISH_NOTIFICATIONS session={} elapsed={:.3f}s",
-                        session_id, _t_finish_elapsed)
+            logger.info("[LSP4J-PERF] FINISH_NOTIFICATIONS session={} elapsed={:.3f}s", session_id, _t_finish_elapsed)
 
             # ★ 最终性能汇总
             _total_elapsed = time.monotonic() - _ask_start
-            logger.info("[LSP4J-PERF] TOTAL session={} elapsed={:.1f}s reply_len={} cancelled={} model={}",
-                        session_id, _total_elapsed, len(reply), cancelled,
-                        model_obj.model if hasattr(model_obj, 'model') else 'unknown')
+            logger.info(
+                "[LSP4J-PERF] TOTAL session={} elapsed={:.1f}s reply_len={} cancelled={} model={}",
+                session_id,
+                _total_elapsed,
+                len(reply),
+                cancelled,
+                model_obj.model if hasattr(model_obj, "model") else "unknown",
+            )
 
             # 7. JSON-RPC 响应已在 call_llm 之前发送（避免 IDE 超时）
             # 完成状态通过 chat/finish 通知传递
@@ -1782,7 +2299,11 @@ class JSONRPCRouter:
         否则 LSP4J 框架会超时等待。
         """
         # 用户停止生成
-        logger.info("[LSP4J] chat/stop: requestId={} cancel_set={}", params.get("requestId", ""), self._cancel_event.is_set() if self._cancel_event else False)
+        logger.info(
+            "[LSP4J] chat/stop: requestId={} cancel_set={}",
+            params.get("requestId", ""),
+            self._cancel_event.is_set() if self._cancel_event else False,
+        )
         if self._cancel_event:
             self._cancel_event.set()
         await self._send_response(msg_id, {})
@@ -1798,8 +2319,11 @@ class JSONRPCRouter:
         属于 fire-and-forget 模式，返回 null 即可。
         不实现实际补全逻辑，仅消除 -32601 Method not found 错误。
         """
-        logger.debug("[LSP4J] preCompletion: requestId={} triggerMode={}",
-                     params.get("requestId", ""), params.get("triggerMode", ""))
+        logger.debug(
+            "[LSP4J] preCompletion: requestId={} triggerMode={}",
+            params.get("requestId", ""),
+            params.get("triggerMode", ""),
+        )
         await self._send_response(msg_id, None)
 
     async def _handle_completion(self, params: dict, msg_id: Any) -> None:
@@ -1812,11 +2336,11 @@ class JSONRPCRouter:
 
     async def _handle_tool_invoke(self, params: dict, msg_id: Any) -> None:
         """处理 tool/invoke — 工具调用入口。
-        
+
         灵码插件通过此方法调用工具（如 add_tasks, todo_write, search_replace）。
         对于纯 UI 工具（add_tasks/todo_write），直接返回成功响应。
         对于 search_replace，降级为 replace_text_by_path 处理。
-        
+
         ToolInvokeRequest 格式：
         - toolName: 工具名称
         - parameters: 工具参数（dict）
@@ -1827,9 +2351,9 @@ class JSONRPCRouter:
         parameters = params.get("parameters", {})
         request_id = params.get("requestId", "")
         session_id = params.get("sessionId", "")
-        
+
         logger.info("[LSP4J] tool/invoke: tool={} requestId={} sessionId={}", tool_name, request_id, session_id)
-        
+
         # 特殊工具处理（纯 UI 工具）
         if tool_name in ("add_tasks", "todo_write"):
             # 直接返回成功响应，插件 AddTasksToolDetailPanel 会自动渲染任务树
@@ -1839,12 +2363,15 @@ class JSONRPCRouter:
                 "tool_name": tool_name,
                 "parameters": parameters,
             }
-            await self._send_response(msg_id, {
-                "requestId": request_id,
-                "errorCode": None,  # 成功时必须为 null，不能是 ""
-                "errorMessage": None,
-                "result": result,
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "requestId": request_id,
+                    "errorCode": None,  # 成功时必须为 null，不能是 ""
+                    "errorMessage": None,
+                    "result": result,
+                },
+            )
             logger.info("[LSP4J] tool/invoke: {} 纯 UI 工具，返回成功响应", tool_name)
             return
 
@@ -1855,10 +2382,9 @@ class JSONRPCRouter:
             new_title = parameters.get("title")
             try:
                 from app.models.task import Task as TaskModel
+
                 async with async_session() as _ut_db:
-                    _ut_r = await _ut_db.execute(
-                        select(TaskModel).where(TaskModel.id == task_id)
-                    )
+                    _ut_r = await _ut_db.execute(select(TaskModel).where(TaskModel.id == task_id))
                     task = _ut_r.scalar_one_or_none()
                     if task:
                         if new_status:
@@ -1874,69 +2400,54 @@ class JSONRPCRouter:
             except Exception as _ute:
                 logger.exception("[LSP4J] tool/invoke: update_tasks error")
                 result = {"success": False, "error": str(_ute)[:200]}
-            await self._send_response(msg_id, {
-                "requestId": request_id,
-                "errorCode": None,
-                "errorMessage": None,
-                "result": result,
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "requestId": request_id,
+                    "errorCode": None,
+                    "errorMessage": None,
+                    "result": result,
+                },
+            )
             return
-        
+
         if tool_name == "search_replace":
-            # ★ 修复：先读取文件内容，执行真正的搜索替换，再将完整结果发送 IDE
-            # 原实现直接降级为 replace_text_by_path（全文替换），丢弃 searchText，
-            # 导致 LLM 以为在做局部替换，实际整个文件被替换为 replaceText，丢失其余内容。
             file_path = parameters.get("filePath", "")
             search_text = parameters.get("searchText", "")
             replace_text = parameters.get("replaceText", "")
-            logger.info("[LSP4J] tool/invoke: search_replace path={} search_len={} replace_len={}",
-                       file_path, len(search_text), len(replace_text))
-            # 1. 尝试从缓存获取文件内容（read_file 执行后会自动缓存）
-            current_content = await self._ws_file_service.get_cached_content(file_path) if file_path else None
-            if current_content is None and file_path:
-                # 2. 缓存未命中，从 IDE 读取文件
-                # 注意：此处为嵌套工具调用（外层 search_replace 内嵌套 read_file），
-                # 会增加 30s 超时延迟。优先依赖 _ws_file_service 缓存减少嵌套调用。
-                try:
-                    current_content = await self.invoke_tool_on_ide("read_file", {"filePath": file_path})
-                    logger.debug("[LSP4J] search_replace: read_file 获取内容, path={} len={}",
-                                file_path, len(current_content or ""))
-                except Exception:
-                    logger.warning("[LSP4J] search_replace: 无法读取文件 {}, 降级为全文替换", file_path)
-                    current_content = None
-            if current_content and search_text and search_text in current_content:
-                # 3. 执行真正的搜索替换
-                new_content = current_content.replace(search_text, replace_text)
-                logger.info("[LSP4J] search_replace: 替换成功, path={} occurrences={}",
-                           file_path, current_content.count(search_text))
-                parameters = {"filePath": file_path, "text": new_content}
-            else:
-                if current_content and search_text:
-                    logger.warning("[LSP4J] search_replace: 搜索文本未在文件中找到, path={} search_preview={}",
-                                  file_path, search_text[:80])
-                parameters = {"filePath": file_path, "text": replace_text}
+            logger.info(
+                "[LSP4J] tool/invoke: search_replace path={} search_len={} replace_len={}",
+                file_path, len(search_text), len(replace_text),
+            )
+            new_content = await self._fetch_and_replace_file(file_path, search_text, replace_text)
+            parameters = {"filePath": file_path, "text": new_content if new_content else replace_text}
             tool_name = "replace_text_by_path"
-        
+
         # 正常工具调用：通过 invoke_tool_on_ide 发送到 IDE
         try:
             result = await self.invoke_tool_on_ide(tool_name, parameters)
-            await self._send_response(msg_id, {
-                "requestId": request_id,
-                "errorCode": None,  # 成功时必须为 null，不能是 ""
-                "errorMessage": None,
-                "result": result,
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "requestId": request_id,
+                    "errorCode": None,  # 成功时必须为 null，不能是 ""
+                    "errorMessage": None,
+                    "result": result,
+                },
+            )
             logger.info("[LSP4J] tool/invoke: {} 调用成功", tool_name)
         except Exception as e:
             logger.exception("[LSP4J] tool/invoke: {} 调用失败", tool_name)
-            await self._send_response(msg_id, {
-                "requestId": request_id,
-                "errorCode": "TOOL_INVOKE_FAILED",  # 错误时保留错误码
-                "errorMessage": str(e),
-                "result": None,
-            })
-    
-    
+            await self._send_response(
+                msg_id,
+                {
+                    "requestId": request_id,
+                    "errorCode": "TOOL_INVOKE_FAILED",  # 错误时保留错误码
+                    "errorMessage": str(e),
+                    "result": None,
+                },
+            )
+
     async def _handle_tool_call_approve(self, params: dict, msg_id: Any) -> None:
         """处理 tool/call/approve 请求 — 工具调用审批。
 
@@ -1950,16 +2461,22 @@ class JSONRPCRouter:
 
         if not approved:
             # 用户拒绝工具调用 — 取消 pending Future
-            logger.info("[LSP4J-TOOL] 工具审批拒绝: toolCallId={} name={}",
-                        tool_call_id[:8] if tool_call_id else "", params.get("name"))
+            logger.info(
+                "[LSP4J-TOOL] 工具审批拒绝: toolCallId={} name={}",
+                tool_call_id[:8] if tool_call_id else "",
+                params.get("name"),
+            )
             if tool_call_id:
                 future = self._pending_tools.get(str(tool_call_id))
                 if future and not future.done():
                     future.set_result("[用户拒绝] 工具调用已被用户拒绝")
                     logger.info("[LSP4J-TOOL] 已取消 pending Future: toolCallId={}", tool_call_id[:8])
         else:
-            logger.info("[LSP4J-TOOL] 工具审批通过: toolCallId={} name={}",
-                        tool_call_id[:8] if tool_call_id else "", params.get("name"))
+            logger.info(
+                "[LSP4J-TOOL] 工具审批通过: toolCallId={} name={}",
+                tool_call_id[:8] if tool_call_id else "",
+                params.get("name"),
+            )
 
         await self._send_response(msg_id, {})
 
@@ -1991,9 +2508,7 @@ class JSONRPCRouter:
                     str(params.get("requestId", ""))[:8],
                     str(params.get("name", "")),
                 )
-                await self._send_response(
-                    msg_id, {"status": "error", "message": "Missing toolCallId in strict mode"}
-                )
+                await self._send_response(msg_id, {"status": "error", "message": "Missing toolCallId in strict mode"})
                 return
             request_id = str(params.get("requestId") or "")
             tool_name = str(params.get("name") or "")
@@ -2016,12 +2531,16 @@ class JSONRPCRouter:
                 tool_call_id = candidates[0]
                 logger.warning(
                     "[LSP4J-TOOL] invokeResult toolCallId 缺失，补偿命中: callId={} requestId={} name={}",
-                    tool_call_id[:8], request_id[:8], tool_name,
+                    tool_call_id[:8],
+                    request_id[:8],
+                    tool_name,
                 )
             elif len(candidates) > 1:
                 logger.warning(
                     "[LSP4J-TOOL] invokeResult toolCallId 缺失且候选冲突: requestId={} name={} candidates={}",
-                    request_id[:8], tool_name, [c[:8] for c in candidates],
+                    request_id[:8],
+                    tool_name,
+                    [c[:8] for c in candidates],
                 )
                 await self._send_response(
                     msg_id, {"status": "error", "message": "Missing toolCallId and ambiguous fallback match"}
@@ -2030,7 +2549,8 @@ class JSONRPCRouter:
             else:
                 logger.warning(
                     "[LSP4J-TOOL] invokeResult toolCallId 缺失且无候选: requestId={} name={}",
-                    request_id[:8], tool_name,
+                    request_id[:8],
+                    tool_name,
                 )
                 await self._send_response(msg_id, {"status": "error", "message": "Missing toolCallId"})
                 return
@@ -2070,7 +2590,11 @@ class JSONRPCRouter:
                 request_id = str(params.get("requestId", ""))[:8]
                 logger.warning(
                     "[LSP4J-RESULT] ❌ 工具失败: toolCallId={} tool={} requestId={} error={}",
-                    str(tool_call_id)[:8], tool_name, request_id, error_msg)
+                    str(tool_call_id)[:8],
+                    tool_name,
+                    request_id,
+                    error_msg,
+                )
                 future.set_result(f"[工具错误] {error_msg}")
         elif not future or future.done():
             # ★ 无匹配 Future 详细日志
@@ -2122,7 +2646,11 @@ class JSONRPCRouter:
                     else:
                         result_str = str(result)
                     f.set_result(result_str)
-                    logger.info("[LSP4J-RESULT] ✅ 补偿 Future 已设置结果: realId={} result_len={}", fallback_id[:8], len(result_str))
+                    logger.info(
+                        "[LSP4J-RESULT] ✅ 补偿 Future 已设置结果: realId={} result_len={}",
+                        fallback_id[:8],
+                        len(result_str),
+                    )
                 else:
                     error_msg = params.get("errorMessage", "Tool execution failed")
                     f.set_result(f"[工具错误] {error_msg}")
@@ -2144,10 +2672,13 @@ class JSONRPCRouter:
         # 插件 ToolService.invokeResult() 期望返回 OperateCommonResult {errorCode, errorMessage}
         # ⚠️ 关键：成功时 errorCode 必须为 null（不是空字符串），否则插件会认为是错误响应
         # 插件源码：if (result.getErrorCode() != null) { log.warn("error response"); }
-        await self._send_response(msg_id, {
-            "errorCode": None,  # 成功时必须为 null，不能是 ""
-            "errorMessage": None,
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "errorCode": None,  # 成功时必须为 null，不能是 ""
+                "errorMessage": None,
+            },
+        )
         logger.info(
             "[LSP4J-RESULT] ✅ 已返回 invokeResult 响应: toolCallId={} errorCode=null",
             str(tool_call_id)[:8] if tool_call_id else "",
@@ -2173,7 +2704,9 @@ class JSONRPCRouter:
             if "error" in msg:
                 error = msg["error"]
                 # 工具响应错误
-                logger.warning("[LSP4J-TOOL] 工具响应错误: id={} code={} msg={}", msg_id, error.get("code"), error.get("message"))
+                logger.warning(
+                    "[LSP4J-TOOL] 工具响应错误: id={} code={} msg={}", msg_id, error.get("code"), error.get("message")
+                )
                 future.set_result(f"[工具错误] {error.get('message', 'Unknown error')}")
             else:
                 result = msg.get("result", {})
@@ -2190,15 +2723,24 @@ class JSONRPCRouter:
                             future.set_result(str(tool_result))
                     else:
                         # 工具执行失败
-                        logger.warning("[LSP4J-TOOL] 工具执行失败: id={} name={} error={}", msg_id, result.get("name"), result.get("errorMessage", ""))
+                        logger.warning(
+                            "[LSP4J-TOOL] 工具执行失败: id={} name={} error={}",
+                            msg_id,
+                            result.get("name"),
+                            result.get("errorMessage", ""),
+                        )
                         future.set_result(f"[工具错误] {result.get('errorMessage', 'Execution failed')}")
                 else:
                     future.set_result(str(result))
         else:
             if future is None:
                 # 未匹配的响应（可能是 tool/invoke 的 ack 响应，正常情况）
-                logger.debug("[LSP4J-TOOL] 收到未匹配的响应: id={} pending_responses={} pending_tools={}",
-                              msg_id, list(self._pending_responses.keys()), list(self._pending_tools.keys())[:3])
+                logger.debug(
+                    "[LSP4J-TOOL] 收到未匹配的响应: id={} pending_responses={} pending_tools={}",
+                    msg_id,
+                    list(self._pending_responses.keys()),
+                    list(self._pending_tools.keys())[:3],
+                )
             elif future.done():
                 # Future 已完成，忽略响应
                 logger.debug("[LSP4J-TOOL] Future 已完成/不存在，忽略响应: id={}", msg_id)
@@ -2274,19 +2816,21 @@ class JSONRPCRouter:
             if tool_call_id and tool_call_status in ("FINISHED", "ERROR", "CANCELLED"):
                 _t = asyncio.create_task(
                     _persist_lsp4j_tool_call(
-                        agent_id=self._agent_id, user_id=self._user_id,
-                        session_id=session_key, tool_name=tool_name,
-                        parameters=parameters, results=results,
-                        tool_call_id=tool_call_id, request_id=request_id,
+                        agent_id=self._agent_id,
+                        user_id=self._user_id,
+                        session_id=session_key,
+                        tool_name=tool_name,
+                        parameters=parameters,
+                        results=results,
+                        tool_call_id=tool_call_id,
+                        request_id=request_id,
                         status=tool_call_status,
                     )
                 )
                 _lsp4j_background_tasks.add(_t)
                 _t.add_done_callback(_lsp4j_background_tasks.discard)
 
-    async def _send_workspace_file_sync(
-        self, ws_file: Any, sync_type: str = "MODIFIED"
-    ) -> None:
+    async def _send_workspace_file_sync(self, ws_file: Any, sync_type: str = "MODIFIED") -> None:
         """发送 workingSpaceFile/sync 通知（WorkspaceFileSyncResult 格式）。
 
         插件 LanguageClientImpl.syncWorkspaceFile 收到后：
@@ -2294,19 +2838,26 @@ class JSONRPCRouter:
         - type=MODIFIED → WorkspaceFileModifiedNotifier（更新状态/diff/showNewDiff）
         - type=FRUSH → VFS 刷新
         """
-        payload = await self._ws_file_service.build_sync_result(
-            ws_file, self._project_path, sync_type)
-        logger.info("[WS-FILE] 发送 workingSpaceFile/sync: type={} fileId={} status={} +{} -{}",
-                    sync_type, ws_file.file_id, ws_file.status,
-                    ws_file.diff_info.add, ws_file.diff_info.delete)
+        payload = await self._ws_file_service.build_sync_result(ws_file, self._project_path, sync_type)
+        logger.info(
+            "[WS-FILE] 发送 workingSpaceFile/sync: type={} fileId={} status={} +{} -{}",
+            sync_type,
+            ws_file.file_id,
+            ws_file.status,
+            ws_file.diff_info.add,
+            ws_file.diff_info.delete,
+        )
         await self._send_client_request("workingSpaceFile/sync", payload)
 
     async def _send_snapshot_sync_all(self, session_id: str, sync_type: str = "ADD") -> None:
         """发送 snapshot/syncAll 通知（SnapshotSyncAllResult 格式）。"""
-        payload = await self._ws_file_service.build_snapshot_sync_all(
-            session_id, self._project_path, sync_type)
-        logger.info("[WS-FILE] 发送 snapshot/syncAll: type={} snapshot_count={} file_count={}",
-                    sync_type, len(payload["snapshots"]), len(payload["workingSpaceFiles"]))
+        payload = await self._ws_file_service.build_snapshot_sync_all(session_id, self._project_path, sync_type)
+        logger.info(
+            "[WS-FILE] 发送 snapshot/syncAll: type={} snapshot_count={} file_count={}",
+            sync_type,
+            len(payload["snapshots"]),
+            len(payload["workingSpaceFiles"]),
+        )
         await self._send_client_request("snapshot/syncAll", payload)
 
     async def _handle_file_edit_finished(
@@ -2335,8 +2886,7 @@ class JSONRPCRouter:
             mode = "MODIFIED"
 
         # 创建或更新工作区文件
-        ws_file = await self._ws_file_service.create_or_update_file(
-            session_id, snap.id, file_path, mode, tool_call_id)
+        ws_file = await self._ws_file_service.create_or_update_file(session_id, snap.id, file_path, mode, tool_call_id)
 
         # 获取编辑前后内容
         if tool_name == "create_file_with_text":
@@ -2356,14 +2906,18 @@ class JSONRPCRouter:
         # 设置状态为 APPLIED
         await self._ws_file_service.update_status(file_path, "APPLIED")
 
-        logger.info("[WS-FILE] 文件编辑完成: tool={} path={} mode={} wsId={} +{} -{}",
-                    tool_name, file_path, mode, ws_file.id[:8],
-                    ws_file.diff_info.add, ws_file.diff_info.delete)
+        logger.info(
+            "[WS-FILE] 文件编辑完成: tool={} path={} mode={} wsId={} +{} -{}",
+            tool_name,
+            file_path,
+            mode,
+            ws_file.id[:8],
+            ws_file.diff_info.add,
+            ws_file.diff_info.delete,
+        )
         return ws_file
 
-    async def invoke_tool_on_ide(
-        self, tool_name: str, arguments: dict, timeout: float = 120.0
-    ) -> str:
+    async def invoke_tool_on_ide(self, tool_name: str, arguments: dict, timeout: float = 120.0) -> str:
         """通过 LSP4J 协议调用 IDE 端工具（异步模式）。
 
         发送 tool/invoke 请求（ToolInvokeRequest 格式）：
@@ -2393,18 +2947,28 @@ class JSONRPCRouter:
                 original_name = orig_name
                 tool_call_id = stored_id
                 self._tool_call_id_queue.pop(i)
-                logger.info("[LSP4J-TOOL] toolCallId 队列匹配: original={} mapped={} callId={} queue_remaining={}",
-                             original_name, tool_name, tool_call_id[:8], len(self._tool_call_id_queue))
+                logger.info(
+                    "[LSP4J-TOOL] toolCallId 队列匹配: original={} mapped={} callId={} queue_remaining={}",
+                    original_name,
+                    tool_name,
+                    tool_call_id[:8],
+                    len(self._tool_call_id_queue),
+                )
                 break
         queue_matched = bool(tool_call_id)
         if not tool_call_id:
             tool_call_id = str(uuid.uuid4())
-            logger.info("[LSP4J-TOOL] toolCallId 队列未匹配，新建兜底: name={} callId={}",
-                         tool_name, tool_call_id[:8])
+            logger.info("[LSP4J-TOOL] toolCallId 队列未匹配，新建兜底: name={} callId={}", tool_name, tool_call_id[:8])
         request_id = self._current_request_id or str(uuid.uuid4())
 
-        logger.info("[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={} queue_matched={}",
-                    tool_name, tool_call_id[:8], request_id[:8], timeout, queue_matched)
+        logger.info(
+            "[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={} queue_matched={}",
+            tool_name,
+            tool_call_id[:8],
+            request_id[:8],
+            timeout,
+            queue_matched,
+        )
         _tool_invoke_start = time.monotonic()
 
         # ★ 本地工具（list_dir, search_file, add_tasks, todo_write）：后端本地执行，不发送到 IDE
@@ -2423,8 +2987,9 @@ class JSONRPCRouter:
                         results_list = [{"tasks": raw_tasks}]
                     else:
                         results_list = [{"tasks": []}]
-                    result_str = json.dumps({"success": True, "tool_name": tool_name, "tasks": raw_tasks},
-                                            ensure_ascii=False)
+                    result_str = json.dumps(
+                        {"success": True, "tool_name": tool_name, "tasks": raw_tasks}, ensure_ascii=False
+                    )
                 else:
                     result_str, results_list = _execute_local_tool(
                         tool_name, arguments, project_path=self._project_path or ""
@@ -2432,25 +2997,35 @@ class JSONRPCRouter:
                 if not queue_matched:
                     # 队列未匹配 → on_tool_call 未被调用 → 没有 markdown_block → 没有 ToolPanel
                     # 发送 FINISHED sync 只会导致消费线程阻塞等待不存在的 panel
-                    logger.warning("[LSP4J-TOOL] 跳过本地工具 FINISHED sync（无匹配 panel）: tool={} callId={}",
-                                   tool_name, tool_call_id[:8])
+                    logger.warning(
+                        "[LSP4J-TOOL] 跳过本地工具 FINISHED sync（无匹配 panel）: tool={} callId={}",
+                        tool_name,
+                        tool_call_id[:8],
+                    )
                 else:
                     # 插件采用 buffer+replay，后端无需等待 panel 注册
                     await asyncio.sleep(0)
                     await self._send_tool_call_sync(
-                        self._session_id, request_id, tool_call_id,
-                        "FINISHED", tool_name=original_name, parameters=arguments,
+                        self._session_id,
+                        request_id,
+                        tool_call_id,
+                        "FINISHED",
+                        tool_name=original_name,
+                        parameters=arguments,
                         results=results_list,
                     )
-                logger.info("[LSP4J-TOOL] 本地工具执行完成: tool={} results_count={}",
-                             tool_name, len(results_list))
+                logger.info("[LSP4J-TOOL] 本地工具执行完成: tool={} results_count={}", tool_name, len(results_list))
                 return result_str
             except Exception as e:
                 logger.exception("[LSP4J-TOOL] 本地工具执行失败: tool={}", tool_name)
                 if queue_matched:
                     await self._send_tool_call_sync(
-                        self._session_id, request_id, tool_call_id,
-                        "ERROR", tool_name=original_name, parameters=arguments,
+                        self._session_id,
+                        request_id,
+                        tool_call_id,
+                        "ERROR",
+                        tool_name=original_name,
+                        parameters=arguments,
                         error_msg=str(e),
                     )
                 return f"[错误] 工具 {tool_name} 执行失败: {e}"
@@ -2478,33 +3053,15 @@ class JSONRPCRouter:
                     logger.info("[LSP4J-TOOL] update_tasks 参数规范化 taskId={}", _tid_str[:32])
         invoke_tool_name = tool_name
         if tool_name == "search_replace":
-            # ★ 修复：先读取文件内容，执行真正的搜索替换，再将完整结果发送 IDE
-            # IDE 端无原生 search_replace 处理器，需在服务端完成搜索替换后，
-            # 通过 replace_text_by_path 发送完整新内容。
             invoke_tool_name = "replace_text_by_path"
             file_path = params.get("filePath") or params.get("file_path") or ""
             search_text = params.get("searchText") or params.get("search_text") or ""
             replace_text = params.get("replaceText") or params.get("replace_text") or ""
-            # 尝试从缓存获取文件内容
-            current_content = await self._ws_file_service.get_cached_content(file_path) if file_path else None
-            if current_content is None and file_path:
-                # 嵌套工具调用：优先使用缓存避免增加 read_file 的 30s 超时延迟
-                try:
-                    current_content = await self.invoke_tool_on_ide("read_file", {"filePath": file_path})
-                except Exception:
-                    logger.warning("[LSP4J-TOOL] search_replace: 无法读取文件 {}, 降级为全文替换", file_path)
-                    current_content = None
-            if current_content and search_text and search_text in current_content:
-                new_content = current_content.replace(search_text, replace_text)
-                logger.info("[LSP4J-TOOL] search_replace: 替换成功, path={} occurrences={}",
-                           file_path, current_content.count(search_text))
+            new_content = await self._fetch_and_replace_file(file_path, search_text, replace_text)
+            if new_content is not None:
                 params["text"] = new_content
-            else:
-                if current_content and search_text:
-                    logger.warning("[LSP4J-TOOL] search_replace: 搜索文本未找到, path={} search_preview={}",
-                                  file_path, search_text[:80])
-                if "text" not in params:
-                    params["text"] = replace_text
+            elif "text" not in params:
+                params["text"] = replace_text
         if tool_name in _LSP4J_FILE_EDIT_TOOLS:
             if "file_path" in params and "filePath" not in params:
                 params["filePath"] = params.pop("file_path")
@@ -2530,14 +3087,11 @@ class JSONRPCRouter:
             if fp and not fp.startswith("/"):
                 _stripped = fp
                 if _stripped.startswith("workspace/"):
-                    _stripped = _stripped[len("workspace/"):]
+                    _stripped = _stripped[len("workspace/") :]
                 resolved = str(Path(self._project_path) / _stripped)
                 params["filePath"] = resolved
                 logger.info("[LSP4J-TOOL] 相对路径已解析: {} -> {}", fp, resolved)
-        trace_key = (
-            f"req={request_id[:8]} call={tool_call_id[:8]} "
-            f"logical={original_name} invoke={invoke_tool_name}"
-        )
+        trace_key = f"req={request_id[:8]} call={tool_call_id[:8]} logical={original_name} invoke={invoke_tool_name}"
         logger.info("[LSP4J-TRACE] 队列状态 trace={} matched={}", trace_key, queue_matched)
 
         # ★ 使用 LLM 侧名称发送 RUNNING sync，参数保留原始 snake_case
@@ -2573,8 +3127,12 @@ class JSONRPCRouter:
                 )
             else:
                 await self._send_tool_call_sync(
-                    self._session_id, request_id, tool_call_id,
-                    "RUNNING", tool_name=original_name, parameters=sync_parameters,
+                    self._session_id,
+                    request_id,
+                    tool_call_id,
+                    "RUNNING",
+                    tool_name=original_name,
+                    parameters=sync_parameters,
                 )
         else:
             # 未匹配到 markdown 注册的 ToolPanel 时，禁止把兜底 UUID 发给前端事件流，
@@ -2595,29 +3153,37 @@ class JSONRPCRouter:
             "tool_name": tool_name,
             "created_at": time.time(),
         }
-        logger.info("[LSP4J-TOOL] Future registered: toolCallId={} pending_count={} waiting for invokeResult",
-                     tool_call_id[:8], len(self._pending_tools))
+        logger.info(
+            "[LSP4J-TOOL] Future registered: toolCallId={} pending_count={} waiting for invokeResult",
+            tool_call_id[:8],
+            len(self._pending_tools),
+        )
         logger.info("[LSP4J-TRACE] 调用工具 trace={}", trace_key)
 
         # 发送 tool/invoke 请求（带 id，触发插件 @JsonRequest("invoke") 处理器）
         # 但不注册到 _pending_responses —— 插件的 ack 响应不是工具结果，
         # 真实结果通过 tool/invokeResult 异步回传
         rpc_id = self._next_request_id()
-        await self._send_message({
-            "jsonrpc": "2.0",
-            "id": rpc_id,
-            "method": "tool/invoke",
-            "params": {
-                "requestId": request_id,
-                "toolCallId": tool_call_id,
-                "name": invoke_tool_name,  # 实际调用名（search_replace 在此降级为 replace_text_by_path）
-                "parameters": params,      # 已转换参数名（如 path → filePath）
-                "async": True,             # 异步执行，结果通过 invokeResult 回传
-            },
-        })
+        await self._send_message(
+            {
+                "jsonrpc": "2.0",
+                "id": rpc_id,
+                "method": "tool/invoke",
+                "params": {
+                    "requestId": request_id,
+                    "toolCallId": tool_call_id,
+                    "name": invoke_tool_name,  # 实际调用名（search_replace 在此降级为 replace_text_by_path）
+                    "parameters": params,  # 已转换参数名（如 path → filePath）
+                    "async": True,  # 异步执行，结果通过 invokeResult 回传
+                },
+            }
+        )
         logger.info(
             "[LSP4J-TOOL] → 已发送 tool/invoke 到 IDE: rpcId={} tool={} callId={} invokeName={}",
-            rpc_id, tool_name, tool_call_id[:8], invoke_tool_name,
+            rpc_id,
+            tool_name,
+            tool_call_id[:8],
+            invoke_tool_name,
         )
 
         # 等待异步结果（同时监听取消事件，避免 cancel 在 wait_for 期间触发时无法及时响应）
@@ -2630,11 +3196,17 @@ class JSONRPCRouter:
                     waitables.append(cancel_future)
                 done, _ = await asyncio.wait(waitables, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
                 if cancel_future and cancel_future in done:
-                    logger.info("[LSP4J-TOOL] 工具执行期间检测到取消信号: tool={} callId={}", tool_name, tool_call_id[:8])
+                    logger.info(
+                        "[LSP4J-TOOL] 工具执行期间检测到取消信号: tool={} callId={}", tool_name, tool_call_id[:8]
+                    )
                     if queue_matched:
                         await self._send_tool_call_sync(
-                            self._session_id, request_id, tool_call_id,
-                            "CANCELLED", tool_name=original_name, parameters=arguments,
+                            self._session_id,
+                            request_id,
+                            tool_call_id,
+                            "CANCELLED",
+                            tool_name=original_name,
+                            parameters=arguments,
                         )
                     self._cancelled_requests[rpc_id] = None
                     return "[已取消] 用户停止了聊天"
@@ -2671,19 +3243,23 @@ class JSONRPCRouter:
                 elif tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
                     # ★ 文件编辑工具：创建工作区文件 + 计算 diff + 发送 workingSpaceFile/sync
                     ws_file = await self._handle_file_edit_finished(
-                        tool_name, file_path_for_id, arguments, tool_call_id, request_id)
+                        tool_name, file_path_for_id, arguments, tool_call_id, request_id
+                    )
 
                     # ★ 注入工作区文件 UUID 作为 fileId（而非文件路径）
                     # ToolPanel.constructFileItem 用 results[0]["fileId"] 设置 FileItem.id，
                     # 后续 workingSpaceFile/sync 的 WorkingSpaceFileInfo.id 需与此一致，
                     # AIDevFilePanel.syncWorkspaceFile 才能通过 id 匹配更新。
                     ws_id = ws_file.id if ws_file else file_path_for_id
-                    results = [{"path": file_path_for_id, "fileId": ws_id,
-                                "message": result[:500] if result else ""}]
+                    results = [{"path": file_path_for_id, "fileId": ws_id, "message": result[:500] if result else ""}]
                     if "file_path" not in arguments:
                         arguments["file_path"] = file_path_for_id
-                    logger.info("[LSP4J-TOOL] FINISHED results 注入 path+fileId: path={} wsId={} tool={}",
-                                file_path_for_id, ws_id[:8], tool_name)
+                    logger.info(
+                        "[LSP4J-TOOL] FINISHED results 注入 path+fileId: path={} wsId={} tool={}",
+                        file_path_for_id,
+                        ws_id[:8],
+                        tool_name,
+                    )
 
                 # P1 兜底：文件工具 FINISHED 结果为空/缺 fileId 时，按 file_path 回填一次，避免 ToolPanel 早退。
                 if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
@@ -2693,11 +3269,13 @@ class JSONRPCRouter:
                     if not (has_file_id and has_path):
                         ws_file_fallback = await self._ws_file_service.get_file(file_path_for_id)
                         fallback_ws_id = ws_file_fallback.id if ws_file_fallback else file_path_for_id
-                        results = [{
-                            "path": file_path_for_id,
-                            "fileId": fallback_ws_id,
-                            "message": result[:500] if isinstance(result, str) else "",
-                        }]
+                        results = [
+                            {
+                                "path": file_path_for_id,
+                                "fileId": fallback_ws_id,
+                                "message": result[:500] if isinstance(result, str) else "",
+                            }
+                        ]
                         if "file_path" not in arguments:
                             arguments["file_path"] = file_path_for_id
                         finished_backfilled = True
@@ -2716,11 +3294,17 @@ class JSONRPCRouter:
                 if queue_matched:
                     logger.info(
                         "[LSP4J-TOOL] ✅ 准备发送 FINISHED sync: tool={} callId={} results_count={}",
-                        tool_name, tool_call_id[:8], len(results) if results else 0,
+                        tool_name,
+                        tool_call_id[:8],
+                        len(results) if results else 0,
                     )
                     await self._send_tool_call_sync(
-                        self._session_id, request_id, tool_call_id,
-                        "FINISHED", tool_name=original_name, parameters=arguments,
+                        self._session_id,
+                        request_id,
+                        tool_call_id,
+                        "FINISHED",
+                        tool_name=original_name,
+                        parameters=arguments,
                         results=results,
                     )
                     logger.info(
@@ -2743,14 +3327,19 @@ class JSONRPCRouter:
                 if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
                     logger.info(
                         "[WS-FILE] 🔍 检查文件编辑后 sync: tool={} file_path_for_id={}",
-                        tool_name, file_path_for_id,
+                        tool_name,
+                        file_path_for_id,
                     )
                     ws_file = await self._ws_file_service.get_file(file_path_for_id)
                     if ws_file:
                         logger.info(
                             "[WS-FILE] ✅ ws_file 找到: path={} wsId={} mode={} status={} +{} -{}",
-                            file_path_for_id, ws_file.id[:8], ws_file.mode, ws_file.status,
-                            ws_file.diff_info.add, ws_file.diff_info.delete,
+                            file_path_for_id,
+                            ws_file.id[:8],
+                            ws_file.mode,
+                            ws_file.status,
+                            ws_file.diff_info.add,
+                            ws_file.diff_info.delete,
                         )
                         await asyncio.sleep(0.2)
                         # 插件双通道路由差异：
@@ -2772,31 +3361,47 @@ class JSONRPCRouter:
                         )
 
                 _tool_invoke_elapsed = time.monotonic() - _tool_invoke_start
-                logger.info("[LSP4J-PERF] TOOL_SUCCESS tool={} callId={} elapsed={:.1f}s result_len={}",
-                            tool_name, tool_call_id[:8], _tool_invoke_elapsed,
-                            len(result) if result else 0)
+                logger.info(
+                    "[LSP4J-PERF] TOOL_SUCCESS tool={} callId={} elapsed={:.1f}s result_len={}",
+                    tool_name,
+                    tool_call_id[:8],
+                    _tool_invoke_elapsed,
+                    len(result) if result else 0,
+                )
                 return result
             finally:
                 if cancel_future:
                     cancel_future.cancel()
         except asyncio.TimeoutError:
             _tool_invoke_elapsed = time.monotonic() - _tool_invoke_start
-            logger.warning("[LSP4J-PERF] TOOL_TIMEOUT tool={} callId={} elapsed={:.1f}s timeout={}",
-                           tool_name, tool_call_id[:8], _tool_invoke_elapsed, timeout)
+            logger.warning(
+                "[LSP4J-PERF] TOOL_TIMEOUT tool={} callId={} elapsed={:.1f}s timeout={}",
+                tool_name,
+                tool_call_id[:8],
+                _tool_invoke_elapsed,
+                timeout,
+            )
             self._cancelled_requests[rpc_id] = None
             if len(self._cancelled_requests) > self._MAX_CANCELLED_REQUESTS_SIZE:
                 self._cancelled_requests.pop(next(iter(self._cancelled_requests)))
             if queue_matched:
                 await self._send_tool_call_sync(
-                    self._session_id, request_id, tool_call_id,
-                    "ERROR", tool_name=original_name, parameters=arguments,
+                    self._session_id,
+                    request_id,
+                    tool_call_id,
+                    "ERROR",
+                    tool_name=original_name,
+                    parameters=arguments,
                     error_msg=f"工具 {tool_name} 执行超时（{timeout}s）",
                 )
-                await self._send_client_request("chat/filterTimeout", {
-                    "requestId": request_id,
-                    "sessionId": self._session_id or "",
-                    "statusCode": 408,
-                })
+                await self._send_client_request(
+                    "chat/filterTimeout",
+                    {
+                        "requestId": request_id,
+                        "sessionId": self._session_id or "",
+                        "statusCode": 408,
+                    },
+                )
             else:
                 logger.warning(
                     "[LSP4J-TOOL] 队列未匹配，跳过 ERROR sync（避免幽灵事件）: tool={} callId={} requestId={}",
@@ -2807,7 +3412,8 @@ class JSONRPCRouter:
             # 文件编辑超时也更新状态
             if tool_name in _LSP4J_FILE_EDIT_TOOLS and file_path_for_id:
                 ws_file = await self._ws_file_service.update_status(
-                    file_path_for_id, "APPLYING_FAILED", f"超时（{timeout}s）")
+                    file_path_for_id, "APPLYING_FAILED", f"超时（{timeout}s）"
+                )
                 if ws_file:
                     await self._send_workspace_file_sync(ws_file, "MODIFIED")
             return f"[超时] 工具 {tool_name} 执行超时（{timeout}s）"
@@ -2822,12 +3428,14 @@ class JSONRPCRouter:
                 loop = asyncio.get_running_loop()
                 late_future: asyncio.Future = loop.create_future()
                 self._pending_tools[tool_call_id] = late_future
+
                 # 保留 meta 供补偿匹配使用（requestId + tool_name）
                 # 60s 后清理
                 async def _cleanup_late_window(cid: str):
                     await asyncio.sleep(60.0)
                     self._pending_tools.pop(cid, None)
                     self._pending_tool_meta.pop(cid, None)
+
                 _t = asyncio.ensure_future(_cleanup_late_window(tool_call_id))
                 _lsp4j_background_tasks.add(_t)
                 _t.add_done_callback(_lsp4j_background_tasks.discard)
@@ -2870,12 +3478,7 @@ class JSONRPCRouter:
 
         # 保护代码块：匹配 ```language\ncontent``` 或 ```toolCall::name::id::status\n```
         # 使用非贪婪匹配，确保每个代码块独立匹配
-        text = re.sub(
-            r'```[^`]*```',
-            protect_codeblock,
-            text,
-            flags=re.DOTALL
-        )
+        text = re.sub(r"```[^`]*```", protect_codeblock, text, flags=re.DOTALL)
 
         # 2. 提取并保护 Markdown 表格：防止表格单元格中的路径被转换
         table_placeholder_prefix = "__LSP4J_TABLE_PLACEHOLDER__"
@@ -2887,9 +3490,9 @@ class JSONRPCRouter:
 
         # 保护 Markdown 表格：匹配包含 | 的多行文本块（至少 2 行，其中一行包含 |---|）
         text = re.sub(
-            r'((?:^|\n)(?:\|[^\n\|]+\|[^\n]*\n)+(?:\|\s*:?-+:?\s*\|[^\n]*\n)(?:\|[^\n\|]+\|[^\n]*\n)*)',
+            r"((?:^|\n)(?:\|[^\n\|]+\|[^\n]*\n)+(?:\|\s*:?-+:?\s*\|[^\n]*\n)(?:\|[^\n\|]+\|[^\n]*\n)*)",
             protect_table,
-            text
+            text,
         )
 
         # 3. 提取并保护 Markdown 链接：[text](url) → 占位符
@@ -2901,7 +3504,7 @@ class JSONRPCRouter:
             return f"{placeholder_prefix}{len(link_placeholders) - 1}__"
 
         # 保护 Markdown 链接：[...](...)
-        text = re.sub(r'\[[^\]]*\]\([^)]+\)', protect_link, text)
+        text = re.sub(r"\[[^\]]*\]\([^)]+\)", protect_link, text)
 
         # 4. 提取并保护反引号代码内容：`code` → 占位符
         inline_code_placeholders: list[str] = []
@@ -2910,15 +3513,15 @@ class JSONRPCRouter:
             inline_code_placeholders.append(m.group(0))
             return f"__LSP4J_INLINECODE_{len(inline_code_placeholders) - 1}__"
 
-        text = re.sub(r'`[^`]+`', protect_inline_code, text)
+        text = re.sub(r"`[^`]+`", protect_inline_code, text)
 
         # 4. 现在可以安全地转换纯文本中的文件路径了
         path_pattern = re.compile(
-            r'('
-            r'/(?:[a-zA-Z0-9_\-./]+[a-zA-Z0-9_\-/]|bin|etc|usr|home|Users|tmp|var|opt)[a-zA-Z0-9_\-./]*'
-            r'|[a-zA-Z]:[/\\\\][a-zA-Z0-9_\-./\\\\]+'
-            r')'
-            r'(?::(\d+)|#L(\d+)(?:-L(\d+))?)?'
+            r"("
+            r"/(?:[a-zA-Z0-9_\-./]+[a-zA-Z0-9_\-/]|bin|etc|usr|home|Users|tmp|var|opt)[a-zA-Z0-9_\-./]*"
+            r"|[a-zA-Z]:[/\\\\][a-zA-Z0-9_\-./\\\\]+"
+            r")"
+            r"(?::(\d+)|#L(\d+)(?:-L(\d+))?)?"
         )
 
         def replace_path(match: re.Match) -> str:
@@ -2989,47 +3592,45 @@ class JSONRPCRouter:
         # 场景 1: 语言和 |CODE_EDIT_BLOCK| 换行
         # 匹配: ```语言\n|CODE_EDIT_BLOCK|... → 替换为 ```语言|CODE_EDIT_BLOCK|...
         # 正则说明: 捕获 ``` 后的语言标识（[a-zA-Z0-9_-]+），然后是换行 + |CODE_EDIT_BLOCK|
-        text = re.sub(
-            r"```([a-zA-Z0-9_-]+)\n\|CODE_EDIT_BLOCK\|",
-            r"```\1|CODE_EDIT_BLOCK|",
-            text
-        )
+        text = re.sub(r"```([a-zA-Z0-9_-]+)\n\|CODE_EDIT_BLOCK\|", r"```\1|CODE_EDIT_BLOCK|", text)
 
         # 日志：如果发生了修复，记录差异
         if text != original:
-            logger.debug(
-                "[LSP4J] CODE_EDIT_BLOCK 格式已修复\n"
-                "  修复前: {}\n"
-                "  修复后: {}",
-                original[:100], text[:100]
-            )
+            logger.debug("[LSP4J] CODE_EDIT_BLOCK 格式已修复\n  修复前: {}\n  修复后: {}", original[:100], text[:100])
 
         return text
 
     async def _send_chat_answer(
-        self, session_id: str | None, text: str, request_id: str
+        self,
+        session_id: str | None,
+        text: str,
+        request_id: str,
+        *,
+        overwrite: bool = False,
     ) -> None:
         """发送 chat/answer（ChatAnswerParams 格式）。
 
         ⚠️ 字段名必须严格匹配：
         - text（不是 content）
         - requestId（必须携带）
-        - overwrite: False（流式追加，不覆盖）
+        - overwrite: 流式追加为 False；与流式正文不一致时用 True 覆盖（见 finish-only 补发）
         - timestamp（毫秒时间戳）
         - extra: Map<String,String>（含 sessionType）
         """
         # ★ 临时调试：记录 toolCall markdown 块的详细内容
         if "toolCall::" in text:
             logger.info("[LSP4J-DEBUG] chat/answer TOOLCALL text={!r} len={}", text, len(text))
-        
+
         # 构建 extra 字段（ChatAnswerParams.extra 类型为 Map<String, String>）
         extra: dict[str, str] = {}
         session_type = getattr(self, "_current_session_type", "")
         if session_type:
             extra["sessionType"] = session_type
 
-        # chat/answer 发送追踪
-        logger.debug("[LSP4J] chat/answer: requestId={} text_len={}", request_id, len(text))
+        # chat/answer 发送追踪（INFO：排障时须在 backend.log 可见）
+        logger.info(
+            "[LSP4J-UI] chat/answer_build requestId={} raw_len={} overwrite={}", request_id, len(text), overwrite
+        )
 
         # ★ 修复 1：CODE_EDIT_BLOCK 格式自动修复
         # 流式输出时语言标识和 |CODE_EDIT_BLOCK| 可能分到不同 chunk，导致 Apply 按钮消失
@@ -3045,19 +3646,20 @@ class JSONRPCRouter:
         else:
             converted_text = self._convert_file_paths_to_links(fixed_text)
 
-        await self._send_client_request("chat/answer", {
-            "requestId": request_id,
-            "sessionId": session_id or "",
-            "text": converted_text,
-            "overwrite": False,
-            "isFiltered": False,
-            "timestamp": int(time.time() * 1000),
-            "extra": extra,
-        })
+        await self._send_client_request(
+            "chat/answer",
+            {
+                "requestId": request_id,
+                "sessionId": session_id or "",
+                "text": converted_text,
+                "overwrite": overwrite,
+                "isFiltered": False,
+                "timestamp": int(time.time() * 1000),
+                "extra": extra,
+            },
+        )
 
-    async def _send_chat_think(
-        self, session_id: str | None, text: str, step: str, request_id: str
-    ) -> None:
+    async def _send_chat_think(self, session_id: str | None, text: str, step: str, request_id: str) -> None:
         """发送 chat/think（ChatThinkingParams 格式）。
 
         ⚠️ 字段名必须严格匹配：
@@ -3071,18 +3673,25 @@ class JSONRPCRouter:
         session_type = getattr(self, "_current_session_type", "")
         if session_type:
             extra["sessionType"] = session_type
-        await self._send_client_request("chat/think", {
-            "requestId": request_id,
-            "sessionId": session_id or "",
-            "text": text,
-            "step": step,  # "start" 或 "done"
-            "timestamp": int(time.time() * 1000),
-            "extra": extra,
-        })
+        await self._send_client_request(
+            "chat/think",
+            {
+                "requestId": request_id,
+                "sessionId": session_id or "",
+                "text": text,
+                "step": step,  # "start" 或 "done"
+                "timestamp": int(time.time() * 1000),
+                "extra": extra,
+            },
+        )
 
     async def _send_chat_finish(
-        self, session_id: str | None, reason: str, full_answer: str,
-        request_id: str, status_code: int = 200,
+        self,
+        session_id: str | None,
+        reason: str,
+        full_answer: str,
+        request_id: str,
+        status_code: int = 200,
     ) -> None:
         """发送 chat/finish（ChatFinishParams 格式）。
 
@@ -3093,45 +3702,53 @@ class JSONRPCRouter:
           其他值进入对应错误分支。绝对不能用 0 表示成功。
         - fullAnswer（完整回答文本）
         """
-        logger.info("[LSP4J] chat/finish: requestId={} statusCode={} reason={}",
-                     request_id, status_code, reason)
+        logger.info("[LSP4J] chat/finish: requestId={} statusCode={} reason={}", request_id, status_code, reason)
         # ★ 修复 1：fullAnswer 也需要修复 CODE_EDIT_BLOCK 格式（历史记录显示时 Apply 按钮可用）
         fixed_full_answer = self._fix_code_edit_block_format(full_answer)
         # ★ 修复 2：fullAnswer 也需要转换文件路径（历史记录显示时可点击）
         converted_full_answer = self._convert_file_paths_to_links(fixed_full_answer)
-        
+
         # ★ 修复 3：ChatFinishParams 有 extra 字段（Map<String, Object>）
         # 虽然插件不强制要求，但保持一致性更好
         extra = {}
         session_type = getattr(self, "_current_session_type", "")
         if session_type:
             extra["sessionType"] = session_type
-        
-        await self._send_client_request("chat/finish", {
-            "requestId": request_id,
-            "sessionId": session_id or "",
-            "reason": reason,
-            "statusCode": status_code,
-            "fullAnswer": converted_full_answer,
-            "extra": extra if extra else None,  # 空 dict 发 null 避免无意义数据
-        })
 
-    async def _send_session_title_update(
-        self, session_id: str | None, title: str
-    ) -> None:
+        await self._send_client_request(
+            "chat/finish",
+            {
+                "requestId": request_id,
+                "sessionId": session_id or "",
+                "reason": reason,
+                "statusCode": status_code,
+                "fullAnswer": converted_full_answer,
+                "extra": extra if extra else None,  # 空 dict 发 null 避免无意义数据
+            },
+        )
+
+    async def _send_session_title_update(self, session_id: str | None, title: str) -> None:
         """发送 session/title/update 通知（SessionTitleRequest 格式）。
 
         参数：sessionId, sessionTitle
         """
-        await self._send_client_request("session/title/update", {
-            "sessionId": session_id or "",
-            "sessionTitle": title,
-        })
+        await self._send_client_request(
+            "session/title/update",
+            {
+                "sessionId": session_id or "",
+                "sessionTitle": title,
+            },
+        )
 
     async def _send_process_step_callback(
-        self, session_id: str | None, request_id: str,
-        step: str, description: str, status: str,
-        result: Any = None, message: str = "",
+        self,
+        session_id: str | None,
+        request_id: str,
+        step: str,
+        description: str,
+        status: str,
+        result: Any = None,
+        message: str = "",
     ) -> None:
         """发送 chat/process_step_callback 通知（ChatProcessStepCallbackParams 格式）。
 
@@ -3149,22 +3766,34 @@ class JSONRPCRouter:
             if last_sig == signature and (now - last_ts) < _PROCESS_STEP_THROTTLE_WINDOW_SEC:
                 logger.info(
                     "[LSP4J-TRACE] process_step 节流跳过: req={} step={} status={} delta={:.3f}s",
-                    request_id[:8], step, status, now - last_ts,
+                    request_id[:8],
+                    step,
+                    status,
+                    now - last_ts,
                 )
                 return
         self._process_step_last_emit[request_id] = {"sig": signature, "ts": now}
 
         # 步骤推送日志
-        logger.info("[LSP4J] process_step_callback: requestId={} step={} status={} desc={}", request_id, step, status, description[:80])
-        await self._send_client_request("chat/process_step_callback", {
-            "requestId": request_id,
-            "sessionId": session_id or "",
-            "step": step,
-            "description": description,
-            "status": status,
-            "result": result,
-            "message": message,
-        })
+        logger.info(
+            "[LSP4J] process_step_callback: requestId={} step={} status={} desc={}",
+            request_id,
+            step,
+            status,
+            description[:80],
+        )
+        await self._send_client_request(
+            "chat/process_step_callback",
+            {
+                "requestId": request_id,
+                "sessionId": session_id or "",
+                "step": step,
+                "description": description,
+                "status": status,
+                "result": result,
+                "message": message,
+            },
+        )
 
     async def _send_message(self, message: dict[str, Any]) -> None:
         """发送 LSP Base Protocol 格式的消息到 WebSocket。"""
@@ -3190,14 +3819,27 @@ class JSONRPCRouter:
                     elif _text and "|" in _text:
                         logger.info("[LSP4J →] method={} id={} text={!r}", _method, message.get("id"), _text)
                     else:
-                        logger.debug("[LSP4J →] method={} id={} params_keys={}", _method, message.get("id"), _pkeys)
+                        logger.info(
+                            "[LSP4J →] method={} id={} text_len={} overwrite={} preview={!r}",
+                            _method,
+                            message.get("id"),
+                            len(_text),
+                            _params.get("overwrite", False),
+                            (_text[:160].replace("\n", "↵") if _text else ""),
+                        )
                 else:
                     logger.info("[LSP4J →] method={} id={} params_keys={}", _method, message.get("id"), _pkeys)
             elif "result" in message:
-                logger.debug("[LSP4J →] response id={} result_type={}", message.get("id"), type(message["result"]).__name__)
+                logger.debug(
+                    "[LSP4J →] response id={} result_type={}", message.get("id"), type(message["result"]).__name__
+                )
             elif "error" in message:
-                logger.warning("[LSP4J →] error id={} code={} msg={}", message.get("id"),
-                               message.get("error", {}).get("code"), message.get("error", {}).get("message"))
+                logger.warning(
+                    "[LSP4J →] error id={} code={} msg={}",
+                    message.get("id"),
+                    message.get("error", {}).get("code"),
+                    message.get("error", {}).get("message"),
+                )
 
             frame = LSPBaseProtocolParser.format_message(message)
             await self._ws.send_text(frame)
@@ -3207,35 +3849,61 @@ class JSONRPCRouter:
             _id = message.get("id", "none")
             logger.warning("LSP4J: WebSocket 发送失败, method={} id={} error={}", _method, _id, e)
             self._closed = True
+            self._ws_connected = False
+
+    async def _send_jsonrpc_error_best_effort(self, msg_id: Any, code: int, message: str) -> None:
+        """在 _closed 等状态下仍尝试发送 JSON-RPC error，避免客户端 RPC 永久挂起。
+
+        普通 _send_message 在 self._closed 时直接 return，无法解开已结束的会话上
+        新到的 chat/ask 等 @JsonRequest。此处仅检查 _ws_connected，尽力写出一帧。
+        """
+        if msg_id is None or not self._ws_connected:
+            return
+        try:
+            frame = LSPBaseProtocolParser.format_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": code, "message": message},
+                }
+            )
+            await self._ws.send_text(frame)
+            logger.info("[LSP4J →] best-effort error id={} code={}", msg_id, code)
+        except Exception as e:
+            logger.warning("LSP4J: best-effort JSON-RPC error send failed id={} err={}", msg_id, e)
+            self._closed = True
+            self._ws_connected = False
 
     async def _send_response(self, msg_id: Any, result: Any) -> None:
         """发送 JSON-RPC 成功响应。"""
-        await self._send_message({
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "result": result,
-        })
+        await self._send_message(
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": result,
+            }
+        )
 
-    async def _send_error_response(
-        self, msg_id: Any, code: int, message: str
-    ) -> None:
+    async def _send_error_response(self, msg_id: Any, code: int, message: str) -> None:
         """发送 JSON-RPC 错误响应。"""
-        await self._send_message({
-            "jsonrpc": "2.0",
-            "id": msg_id,
-            "error": {"code": code, "message": message},
-        })
+        await self._send_message(
+            {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": code, "message": message},
+            }
+        )
 
-    async def _send_request(
-        self, method: str, params: dict, request_id: int
-    ) -> None:
+    async def _send_request(self, method: str, params: dict, request_id: int) -> None:
         """发送 JSON-RPC 请求（server → client）。"""
-        await self._send_message({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": params,
-        })
+        await self._send_message(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+        )
 
     async def _send_notification(self, method: str, params: dict) -> None:
         """发送 JSON-RPC 通知（无 id，不期望响应）。
@@ -3245,11 +3913,13 @@ class JSONRPCRouter:
         对于 @JsonRequest 方法（chat/answer, chat/think, chat/finish 等），
         必须使用 _send_client_request 以确保 LSP4J 正确分发。
         """
-        await self._send_message({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        })
+        await self._send_message(
+            {
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            }
+        )
 
     async def _send_client_request(self, method: str, params: dict) -> None:
         """发送 JSON-RPC 请求到客户端（带 id，但不等待响应）。
@@ -3265,12 +3935,14 @@ class JSONRPCRouter:
         （插件的响应会被 _handle_response 静默处理）。
         """
         request_id = self._next_request_id()
-        await self._send_message({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": params,
-        })
+        await self._send_message(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }
+        )
 
     # ──────────────────────────────────────────
     # 辅助方法
@@ -3320,6 +3992,46 @@ class JSONRPCRouter:
         self._cancelled_requests.clear()
 
     # ──────────────────────────────────────────
+    # ── search_replace 公共逻辑 ─────────────────
+    # _handle_tool_invoke 和 invoke_tool_on_ide 都用此方法，消除重复。
+
+    async def _fetch_and_replace_file(
+        self, file_path: str, search_text: str, replace_text: str
+    ) -> str | None:
+        """读取文件内容并执行搜索替换（公共方法）。
+
+        优先从缓存读取文件内容，缓存未命中时嵌套调用 read_file。
+        找到 search_text 则执行替换并返回新内容，否则返回 None（调用方降级为全文替换）。
+        """
+        current_content = await self._ws_file_service.get_cached_content(file_path) if file_path else None
+        if current_content is None and file_path:
+            try:
+                current_content = await asyncio.wait_for(
+                    self.invoke_tool_on_ide("read_file", {"filePath": file_path}),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[LSP4J] search_replace: read_file 超时 {}", file_path)
+                current_content = None
+            except Exception:
+                logger.warning("[LSP4J] search_replace: 无法读取文件 {}", file_path)
+                current_content = None
+        if current_content and search_text and search_text in current_content:
+            new_content = current_content.replace(search_text, replace_text)
+            logger.info(
+                "[LSP4J] search_replace: 替换成功 path={} occurrences={}",
+                file_path,
+                current_content.count(search_text),
+            )
+            return new_content
+        if current_content and search_text:
+            logger.warning(
+                "[LSP4J] search_replace: 搜索文本未找到 path={} search_preview={}",
+                file_path,
+                search_text[:80],
+            )
+        return None
+
     # 存根与扩展方法
     # ──────────────────────────────────────────
 
@@ -3360,12 +4072,17 @@ class JSONRPCRouter:
         """snapshot/listBySession → ListSnapshotsResult（与 SnapshotService.java 一致）。"""
         session_id = params.get("sessionId") or ""
         snaps = await self._ws_file_service.list_snapshots_for_session(session_id)
-        await self._send_response(msg_id, {
-            "snapshots": [s.to_dict() for s in snaps],
-            "errorCode": None,
-            "errorMessage": None,
-        })
-        logger.debug("[LSP4J] snapshot/listBySession: sessionId={} count={}", session_id[:16] if session_id else "", len(snaps))
+        await self._send_response(
+            msg_id,
+            {
+                "snapshots": [s.to_dict() for s in snaps],
+                "errorCode": None,
+                "errorMessage": None,
+            },
+        )
+        logger.debug(
+            "[LSP4J] snapshot/listBySession: sessionId={} count={}", session_id[:16] if session_id else "", len(snaps)
+        )
 
     async def _handle_snapshot_operate(self, params: dict, msg_id: Any) -> None:
         """snapshot/operate → OperateCommonResult；在内存中更新工作区文件状态。"""
@@ -3414,7 +4131,13 @@ class JSONRPCRouter:
                 sess_for_sync = self._session_id or ""
 
             if sess_for_sync and op_type in (
-                "ACCEPT_ALL", "REJECT_ALL", "ACCEPT", "REJECT", "APPLY", "SWITCH", "ACTIVATE",
+                "ACCEPT_ALL",
+                "REJECT_ALL",
+                "ACCEPT",
+                "REJECT",
+                "APPLY",
+                "SWITCH",
+                "ACTIVATE",
             ):
                 try:
                     await self._send_snapshot_sync_all(sess_for_sync)
@@ -3450,19 +4173,21 @@ class JSONRPCRouter:
 
         out: list[dict[str, Any]] = []
         for sess in sessions:
-            out.append({
-                "sessionId": str(sess.id),
-                "sessionTitle": sess.title or "Chat",
-                "chatRecords": [],
-                "gmtCreate": self._epoch_ms(sess.created_at),
-                "gmtModified": self._epoch_ms(sess.last_message_at or sess.created_at),
-                "sessionType": "ASSISTANT",
-                "userId": str(sess.user_id),
-                "userName": "",
-                "projectId": "",
-                "projectUri": project_uri,
-                "projectName": "",
-            })
+            out.append(
+                {
+                    "sessionId": str(sess.id),
+                    "sessionTitle": sess.title or "Chat",
+                    "chatRecords": [],
+                    "gmtCreate": self._epoch_ms(sess.created_at),
+                    "gmtModified": self._epoch_ms(sess.last_message_at or sess.created_at),
+                    "sessionType": "ASSISTANT",
+                    "userId": str(sess.user_id),
+                    "userName": "",
+                    "projectId": "",
+                    "projectUri": project_uri,
+                    "projectName": "",
+                }
+            )
         await self._send_response(msg_id, out)
 
     async def _handle_chat_get_session_by_id(self, params: dict, msg_id: Any) -> None:
@@ -3471,14 +4196,17 @@ class JSONRPCRouter:
         try:
             sid_uuid = uuid.UUID(session_id)
         except ValueError:
-            await self._send_response(msg_id, {
-                "sessionId": session_id,
-                "sessionTitle": "",
-                "chatRecords": [],
-                "sessionType": "ASSISTANT",
-                "gmtCreate": 0,
-                "gmtModified": 0,
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "sessionId": session_id,
+                    "sessionTitle": "",
+                    "chatRecords": [],
+                    "sessionType": "ASSISTANT",
+                    "gmtCreate": 0,
+                    "gmtModified": 0,
+                },
+            )
             return
 
         try:
@@ -3486,14 +4214,17 @@ class JSONRPCRouter:
                 sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid))
                 sess = sr.scalar_one_or_none()
                 if not sess or sess.user_id != self._user_id or sess.agent_id != self._agent_id:
-                    await self._send_response(msg_id, {
-                        "sessionId": session_id,
-                        "sessionTitle": "",
-                        "chatRecords": [],
-                        "sessionType": "ASSISTANT",
-                        "gmtCreate": 0,
-                        "gmtModified": 0,
-                    })
+                    await self._send_response(
+                        msg_id,
+                        {
+                            "sessionId": session_id,
+                            "sessionTitle": "",
+                            "chatRecords": [],
+                            "sessionType": "ASSISTANT",
+                            "gmtCreate": 0,
+                            "gmtModified": 0,
+                        },
+                    )
                     return
 
                 mr = await db.execute(
@@ -3501,26 +4232,33 @@ class JSONRPCRouter:
                     .where(ChatMessage.conversation_id == str(sid_uuid))
                     .where(ChatMessage.agent_id == self._agent_id)
                     .where(ChatMessage.user_id == self._user_id)
-                    .where(ChatMessage.role.in_(("user", "assistant")))
+                    .where(ChatMessage.role.in_(("user", "assistant", "tool_call")))
                     .order_by(ChatMessage.created_at.asc())
                 )
                 rows = list(mr.scalars().all())
         except Exception as e:
             logger.warning("[LSP4J] chat/getSessionById DB error: {}", e)
-            await self._send_response(msg_id, {
-                "sessionId": session_id,
-                "sessionTitle": "",
-                "chatRecords": [],
-                "sessionType": "ASSISTANT",
-                "gmtCreate": 0,
-                "gmtModified": 0,
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "sessionId": session_id,
+                    "sessionTitle": "",
+                    "chatRecords": [],
+                    "sessionType": "ASSISTANT",
+                    "gmtCreate": 0,
+                    "gmtModified": 0,
+                },
+            )
             return
 
         records: list[dict[str, Any]] = []
         i = 0
         while i < len(rows):
             row = rows[i]
+            # 跳过 tool_call 行，仅处理 user/assistant 配对
+            if row.role not in ("user", "assistant"):
+                i += 1
+                continue
             if row.role != "user":
                 i += 1
                 continue
@@ -3531,38 +4269,43 @@ class JSONRPCRouter:
             ctx = json.dumps({"text": qtext, "displayText": qtext}, ensure_ascii=False)
             atext = (asst_msg.content if asst_msg else "") or ""
             think = (asst_msg.thinking if asst_msg else None) or ""
-            records.append({
-                "requestId": rid,
-                "sessionId": session_id,
-                "chatTask": "REPLY_TASK",
-                "chatContext": ctx,
-                "question": qtext,
-                "answer": atext,
-                "extra": "",
-                "likeStatus": 0,
-                "gmtCreate": self._epoch_ms(user_msg.created_at),
-                "gmtModified": self._epoch_ms(asst_msg.created_at if asst_msg else user_msg.created_at),
-                "filterStatus": "",
-                "sessionType": "ASSISTANT",
-                "summary": "",
-                "intentionType": "",
-                "reasoningContent": think,
-            })
+            records.append(
+                {
+                    "requestId": rid,
+                    "sessionId": session_id,
+                    "chatTask": "REPLY_TASK",
+                    "chatContext": ctx,
+                    "question": qtext,
+                    "answer": atext,
+                    "extra": "",
+                    "likeStatus": 0,
+                    "gmtCreate": self._epoch_ms(user_msg.created_at),
+                    "gmtModified": self._epoch_ms(asst_msg.created_at if asst_msg else user_msg.created_at),
+                    "filterStatus": "",
+                    "sessionType": "ASSISTANT",
+                    "summary": "",
+                    "intentionType": "",
+                    "reasoningContent": think,
+                }
+            )
             i += 2 if asst_msg else 1
 
-        await self._send_response(msg_id, {
-            "sessionId": session_id,
-            "sessionTitle": sess.title or "Chat",
-            "chatRecords": records,
-            "sessionType": "ASSISTANT",
-            "userId": str(sess.user_id),
-            "userName": "",
-            "projectId": "",
-            "projectUri": "",
-            "projectName": "",
-            "gmtCreate": self._epoch_ms(sess.created_at),
-            "gmtModified": self._epoch_ms(sess.last_message_at or sess.created_at),
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "sessionId": session_id,
+                "sessionTitle": sess.title or "Chat",
+                "chatRecords": records,
+                "sessionType": "ASSISTANT",
+                "userId": str(sess.user_id),
+                "userName": "",
+                "projectId": "",
+                "projectUri": "",
+                "projectName": "",
+                "gmtCreate": self._epoch_ms(sess.created_at),
+                "gmtModified": self._epoch_ms(sess.last_message_at or sess.created_at),
+            },
+        )
 
     async def _handle_chat_delete_session_by_id(self, params: dict, msg_id: Any) -> None:
         """chat/deleteSessionById → 删除单个 IDE 会话 + 推送 chat/delete 通知。"""
@@ -3578,7 +4321,12 @@ class JSONRPCRouter:
             async with async_session() as db:
                 sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid))
                 sess = sr.scalar_one_or_none()
-                if sess and sess.user_id == self._user_id and sess.agent_id == self._agent_id and sess.source_channel == "ide_lsp4j":
+                if (
+                    sess
+                    and sess.user_id == self._user_id
+                    and sess.agent_id == self._agent_id
+                    and sess.source_channel == "ide_lsp4j"
+                ):
                     await db.execute(
                         delete(ChatMessage)
                         .where(ChatMessage.conversation_id == str(sid_uuid))
@@ -3661,10 +4409,13 @@ class JSONRPCRouter:
 
         if deleted:
             try:
-                await self._send_client_request("chat/delete", {
-                    "sessionId": session_id,
-                    "requestId": request_id,
-                })
+                await self._send_client_request(
+                    "chat/delete",
+                    {
+                        "sessionId": session_id,
+                        "requestId": request_id,
+                    },
+                )
                 logger.debug("[LSP4J] chat/delete 已推送: sessionId={} requestId={}", session_id, request_id)
             except Exception as e:
                 logger.warning("[LSP4J] chat/delete 推送失败: {}", e)
@@ -3745,27 +4496,34 @@ class JSONRPCRouter:
     async def _handle_model_query_classes(self, params: dict, msg_id: Any) -> None:
         """model/queryClasses → 返回模型类别列表，供插件 UI 分类筛选。"""
         _ = params
-        await self._send_response(msg_id, {
-            "classes": [
-                {"key": "clawith", "displayName": "Clawith Models"},
-                {"key": "byok", "displayName": "BYOK (Bring Your Own Key)"},
-            ],
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "classes": [
+                    {"key": "clawith", "displayName": "Clawith Models"},
+                    {"key": "byok", "displayName": "BYOK (Bring Your Own Key)"},
+                ],
+            },
+        )
 
     async def _handle_ping(self, params: dict, msg_id: Any) -> None:
         """ping → PingResult（通过 SELECT 1 检查 DB 连接健康）。"""
         _ = params
         try:
             from sqlalchemy import text
+
             async with async_session() as db:
                 await db.execute(text("SELECT 1"))
             await self._send_response(msg_id, {"success": True})
         except Exception as e:
             logger.warning("[LSP4J] ping DB health check failed: {}", e)
-            await self._send_response(msg_id, {
-                "success": False,
-                "errorMessage": f"Database health check failed: {e}",
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "success": False,
+                    "errorMessage": f"Database health check failed: {e}",
+                },
+            )
 
     # ──────────────────────────────────────────
     # 工作区文件服务（workingSpaceFile/*）
@@ -3781,22 +4539,27 @@ class JSONRPCRouter:
         ws_id = params.get("id", "")
         ws_file = await self._ws_file_service.get_file_by_id(ws_id)
         if ws_file:
-            logger.info("[WS-FILE] getLastStableContent: id={} len={}",
-                        ws_id[:8], len(ws_file.last_stable_content))
-            await self._send_response(msg_id, {
-                "content": ws_file.last_stable_content,
-                "version": ws_file.version,
-                "errorCode": None,
-                "errorMessage": None,
-            })
+            logger.info("[WS-FILE] getLastStableContent: id={} len={}", ws_id[:8], len(ws_file.last_stable_content))
+            await self._send_response(
+                msg_id,
+                {
+                    "content": ws_file.last_stable_content,
+                    "version": ws_file.version,
+                    "errorCode": None,
+                    "errorMessage": None,
+                },
+            )
         else:
             logger.warning("[WS-FILE] getLastStableContent: 未找到 id={}", ws_id)
-            await self._send_response(msg_id, {
-                "content": "",
-                "version": "0",
-                "errorCode": None,
-                "errorMessage": None,
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "content": "",
+                    "version": "0",
+                    "errorCode": None,
+                    "errorMessage": None,
+                },
+            )
 
     async def _handle_ws_get_full_content(self, params: dict, msg_id: Any) -> None:
         """workingSpaceFile/getFullContent — 返回编辑后的文件内容。
@@ -3806,22 +4569,27 @@ class JSONRPCRouter:
         ws_id = params.get("id", "")
         ws_file = await self._ws_file_service.get_file_by_id(ws_id)
         if ws_file:
-            logger.info("[WS-FILE] getFullContent: id={} len={}",
-                        ws_id[:8], len(ws_file.content))
-            await self._send_response(msg_id, {
-                "content": ws_file.content,
-                "version": ws_file.version,
-                "errorCode": None,
-                "errorMessage": None,
-            })
+            logger.info("[WS-FILE] getFullContent: id={} len={}", ws_id[:8], len(ws_file.content))
+            await self._send_response(
+                msg_id,
+                {
+                    "content": ws_file.content,
+                    "version": ws_file.version,
+                    "errorCode": None,
+                    "errorMessage": None,
+                },
+            )
         else:
             logger.warning("[WS-FILE] getFullContent: 未找到 id={}", ws_id)
-            await self._send_response(msg_id, {
-                "content": "",
-                "version": "0",
-                "errorCode": None,
-                "errorMessage": None,
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "content": "",
+                    "version": "0",
+                    "errorCode": None,
+                    "errorMessage": None,
+                },
+            )
 
     async def _handle_ws_list_by_snapshot(self, params: dict, msg_id: Any) -> None:
         """workingSpaceFile/listBySnapshot — 列出某个快照下的所有工作区文件。
@@ -3831,13 +4599,17 @@ class JSONRPCRouter:
         """
         snapshot_id = params.get("snapshotId", "")
         files = await self._ws_file_service.list_by_snapshot(snapshot_id)
-        logger.info("[WS-FILE] listBySnapshot: snapshotId={} count={}",
-                    snapshot_id[:8] if snapshot_id else "?", len(files))
-        await self._send_response(msg_id, {
-            "workingSpaceFiles": [f.to_wire_format() for f in files],
-            "errorCode": None,
-            "errorMessage": None,
-        })
+        logger.info(
+            "[WS-FILE] listBySnapshot: snapshotId={} count={}", snapshot_id[:8] if snapshot_id else "?", len(files)
+        )
+        await self._send_response(
+            msg_id,
+            {
+                "workingSpaceFiles": [f.to_wire_format() for f in files],
+                "errorCode": None,
+                "errorMessage": None,
+            },
+        )
 
     async def _handle_ws_operate(self, params: dict, msg_id: Any) -> None:
         """workingSpaceFile/operate — 接受/拒绝文件变更。
@@ -3849,10 +4621,13 @@ class JSONRPCRouter:
         content = params.get("content")
         success = await self._ws_file_service.operate(ws_id, op_type, content)
         logger.info("[WS-FILE] operate: id={} op={} success={}", ws_id[:8], op_type, success)
-        await self._send_response(msg_id, {
-            "errorCode": None,
-            "errorMessage": None,
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "errorCode": None,
+                "errorMessage": None,
+            },
+        )
         # 操作后发送状态更新通知
         if success:
             ws_file = await self._ws_file_service.get_file_by_id(ws_id)
@@ -3872,10 +4647,13 @@ class JSONRPCRouter:
         local_content = params.get("localContent")
         success = await self._ws_file_service.update_content(ws_id, content, local_content)
         logger.info("[WS-FILE] updateContent: id={} success={}", ws_id[:8], success)
-        await self._send_response(msg_id, {
-            "errorCode": None,
-            "errorMessage": None,
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "errorCode": None,
+                "errorMessage": None,
+            },
+        )
 
     async def _handle_step_process_confirm(self, params: dict, msg_id: Any) -> None:
         """处理 agents/testAgent/stepProcessConfirm — 步骤确认请求。
@@ -3886,12 +4664,17 @@ class JSONRPCRouter:
         返回格式：StepProcessConfirmResult { requestId, errorMessage, successful }
         """
         # 步骤确认日志
-        logger.info("[LSP4J] stepProcessConfirm: requestId={} params_keys={}", params.get("requestId", ""), list(params.keys()))
-        await self._send_response(msg_id, {
-            "requestId": params.get("requestId", ""),
-            "successful": True,
-            "errorMessage": "",
-        })
+        logger.info(
+            "[LSP4J] stepProcessConfirm: requestId={} params_keys={}", params.get("requestId", ""), list(params.keys())
+        )
+        await self._send_response(
+            msg_id,
+            {
+                "requestId": params.get("requestId", ""),
+                "successful": True,
+                "errorMessage": "",
+            },
+        )
 
     # ──────────────────────────────────────────
     # 图片上传
@@ -3901,10 +4684,7 @@ class JSONRPCRouter:
         """清理过期的图片缓存（过期 + LRU 大小限制）。"""
         now = time.time()
         # 清理过期缓存
-        expired_keys = [
-            k for k, (_, _, ts) in self._image_cache.items()
-            if now - ts > self._image_cache_ttl
-        ]
+        expired_keys = [k for k, (_, _, ts) in self._image_cache.items() if now - ts > self._image_cache_ttl]
         for k in expired_keys:
             del self._image_cache[k]
         # LRU 大小限制：超出 max_size 则按时间排序淘汰最旧的
@@ -3934,31 +4714,40 @@ class JSONRPCRouter:
         # 校验：必须为 data URI 格式
         if not image_uri.startswith("data:"):
             logger.warning("[LSP4J] image/upload: 不支持本地文件路径, requestId={}", request_id)
-            await self._send_response(msg_id, {
-                "requestId": request_id,
-                "errorCode": "LOCAL_PATH_NOT_SUPPORTED",
-                "errorMessage": "LSP4J 模式暂不支持本地文件路径图片上传",
-                "result": {"success": False},
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "requestId": request_id,
+                    "errorCode": "LOCAL_PATH_NOT_SUPPORTED",
+                    "errorMessage": "LSP4J 模式暂不支持本地文件路径图片上传",
+                    "result": {"success": False},
+                },
+            )
             return
 
         # 校验：base64 数据大小≤10MB
         base64_data = image_uri.split(",", 1)[1] if "," in image_uri else ""
         if len(base64_data) > 10 * 1024 * 1024:
             logger.warning("[LSP4J] image/upload: 图片超过 10MB 限制, requestId={}", request_id)
-            await self._send_response(msg_id, {
-                "requestId": request_id,
-                "errorCode": "FILE_TOO_LARGE",
-                "errorMessage": "图片大小超过 10MB 限制",
-                "result": {"success": False},
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "requestId": request_id,
+                    "errorCode": "FILE_TOO_LARGE",
+                    "errorMessage": "图片大小超过 10MB 限制",
+                    "result": {"success": False},
+                },
+            )
             return
 
         # 校验通过，立即返回成功响应
-        await self._send_response(msg_id, {
-            "requestId": request_id,
-            "result": {"success": True},
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "requestId": request_id,
+                "result": {"success": True},
+            },
+        )
 
         # 异步发送 uploadResultNotification
         try:
@@ -3967,12 +4756,15 @@ class JSONRPCRouter:
             # 缓存图片
             self._image_cache[request_id] = (image_url, base64_data, time.time())
 
-            await self._send_notification("image/uploadResultNotification", {
-                "result": {
-                    "requestId": request_id,
-                    "imageUrl": image_url,
+            await self._send_notification(
+                "image/uploadResultNotification",
+                {
+                    "result": {
+                        "requestId": request_id,
+                        "imageUrl": image_url,
+                    },
                 },
-            })
+            )
             logger.info("[LSP4J] image/upload 成功: requestId={} base64_len={}", request_id, len(base64_data))
         except Exception as e:
             logger.warning("[LSP4J] image/upload 异步通知失败: requestId={} error={}", request_id, e)
@@ -3991,6 +4783,7 @@ class JSONRPCRouter:
         endpoint = ""
         try:
             from app.models.plugin_config import IDEPluginConfig
+
             async with async_session() as db:
                 sr = await db.execute(
                     select(IDEPluginConfig.config_value)
@@ -4024,6 +4817,7 @@ class JSONRPCRouter:
 
         try:
             from app.models.plugin_config import IDEPluginConfig
+
             async with async_session() as db:
                 sr = await db.execute(
                     select(IDEPluginConfig)
@@ -4044,15 +4838,21 @@ class JSONRPCRouter:
                     db.add(config)
                 await db.commit()
 
-            logger.info("[LSP4J] config/updateEndpoint 已持久化: agent_id={} endpoint={}",
-                         self._agent_id, endpoint[:80] if endpoint else "")
+            logger.info(
+                "[LSP4J] config/updateEndpoint 已持久化: agent_id={} endpoint={}",
+                self._agent_id,
+                endpoint[:80] if endpoint else "",
+            )
             await self._send_response(msg_id, {"success": True})
         except Exception as e:
             logger.warning("[LSP4J] config/updateEndpoint DB error: {}", e)
-            await self._send_response(msg_id, {
-                "success": False,
-                "errorMessage": f"Persist failed: {e}",
-            })
+            await self._send_response(
+                msg_id,
+                {
+                    "success": False,
+                    "errorMessage": f"Persist failed: {e}",
+                },
+            )
 
     # ──────────────────────────────────────────
     # Commit 消息生成
@@ -4078,19 +4878,22 @@ class JSONRPCRouter:
         preferred_language = params.get("preferredLanguage", "")
 
         # 1. 立即返回成功响应（必须在通知之前）
-        await self._send_response(msg_id, {
-            "requestId": request_id,
-            "isSuccess": True,
-            "errorCode": 0,
-            "errorMessage": "",
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "requestId": request_id,
+                "isSuccess": True,
+                "errorCode": 0,
+                "errorMessage": "",
+            },
+        )
 
         # 2. 构建 prompt（按文件粒度截断，保留所有文件路径 + 每文件前 600 字符）
         _diff_parts: list[str] = []
         _total_budget = 10000  # 总输入预算（字符）
-        _per_file_cap = 600    # 单文件最大字符
+        _per_file_cap = 600  # 单文件最大字符
         _used = 0
-        for _d in (code_diffs or []):
+        for _d in code_diffs or []:
             _d_str = str(_d)
             if _used + len(_d_str) > _total_budget:
                 # 超过总预算：截断当前文件剩余部分
@@ -4109,7 +4912,9 @@ class JSONRPCRouter:
 
         existing_msgs = "\n".join(str(m) for m in commit_messages) if commit_messages else ""
         lang_hint = f"请使用{preferred_language}。" if preferred_language else "请使用中文。"
-        prompt = f"根据以下代码变更，生成简洁的 Git commit message（不超过200字符）。\n{lang_hint}\n\n代码变更:\n{diff_text}"
+        prompt = (
+            f"根据以下代码变更，生成简洁的 Git commit message（不超过200字符）。\n{lang_hint}\n\n代码变更:\n{diff_text}"
+        )
         if existing_msgs:
             prompt += f"\n\n已有的 commit messages:\n{existing_msgs[:1500]}"
 
@@ -4118,19 +4923,20 @@ class JSONRPCRouter:
         # 3. 定义流式回调
         async def _on_chunk(text: str) -> None:
             if stream:
-                await self._send_client_request("commitMsg/answer", {
-                    "requestId": request_id,
-                    "text": text,
-                    "timestamp": int(time.time() * 1000),
-                })
+                await self._send_client_request(
+                    "commitMsg/answer",
+                    {
+                        "requestId": request_id,
+                        "text": text,
+                        "timestamp": int(time.time() * 1000),
+                    },
+                )
 
         # 4. 加载 fallback 模型
         fallback_model_obj = None
         if self._agent_obj.fallback_model_id:
             async with async_session() as _fb_db:
-                _fb_r = await _fb_db.execute(
-                    select(LLMModel).where(LLMModel.id == self._agent_obj.fallback_model_id)
-                )
+                _fb_r = await _fb_db.execute(select(LLMModel).where(LLMModel.id == self._agent_obj.fallback_model_id))
                 fallback_model_obj = _fb_r.scalar_one_or_none()
 
         # 5. 调用 call_llm_with_failover
@@ -4152,18 +4958,24 @@ class JSONRPCRouter:
         # 5. 非流式模式一次性返回（截断保护，commit message 不超过 500 字符）
         if not stream and reply:
             _commit_reply = reply.strip()[:500]
-            await self._send_client_request("commitMsg/answer", {
-                "requestId": request_id,
-                "text": _commit_reply,
-                "timestamp": int(time.time() * 1000),
-            })
+            await self._send_client_request(
+                "commitMsg/answer",
+                {
+                    "requestId": request_id,
+                    "text": _commit_reply,
+                    "timestamp": int(time.time() * 1000),
+                },
+            )
 
         # 6. 发送完成通知
-        await self._send_client_request("commitMsg/finish", {
-            "requestId": request_id,
-            "statusCode": 200,
-            "reason": "",
-        })
+        await self._send_client_request(
+            "commitMsg/finish",
+            {
+                "requestId": request_id,
+                "statusCode": 200,
+                "reason": "",
+            },
+        )
 
     # ──────────────────────────────────────────
     # 多轮追问建议列表
@@ -4179,11 +4991,14 @@ class JSONRPCRouter:
         Clawith 当前不支持 DisplayTask 体系，返回空列表 + 成功。
         实际多轮对话能力通过 chat/ask{isReply:true} 实现。
         """
-        await self._send_response(msg_id, {
-            "requestId": params.get("requestId", ""),
-            "displayTasks": [],
-            "isSuccess": True,
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "requestId": params.get("requestId", ""),
+                "displayTasks": [],
+                "isSuccess": True,
+            },
+        )
 
     # ──────────────────────────────────────────
     # 点赞/踩反馈记录
@@ -4199,13 +5014,21 @@ class JSONRPCRouter:
         """
         _like_val = params.get("like", 0)
         _label = "赞" if _like_val == 1 else ("踩" if _like_val == -1 else f"未知({_like_val})")
-        logger.info("[LSP4J] chat/like: requestId={} sessionId={} like={} label={}",
-                    params.get("requestId", ""), params.get("sessionId", ""), _like_val, _label)
-        await self._send_response(msg_id, {
-            "requestId": params.get("requestId", ""),
-            "sessionId": params.get("sessionId", ""),
-            "isSuccess": True,
-        })
+        logger.info(
+            "[LSP4J] chat/like: requestId={} sessionId={} like={} label={}",
+            params.get("requestId", ""),
+            params.get("sessionId", ""),
+            _like_val,
+            _label,
+        )
+        await self._send_response(
+            msg_id,
+            {
+                "requestId": params.get("requestId", ""),
+                "sessionId": params.get("sessionId", ""),
+                "isSuccess": True,
+            },
+        )
 
     # ──────────────────────────────────────────
     # 自定义命令查询
@@ -4222,11 +5045,14 @@ class JSONRPCRouter:
         Clawith 当前无自定义命令体系，返回空列表。
         """
         _ = params
-        await self._send_response(msg_id, {
-            "commands": [],
-            "commandShowPosition": "",
-            "contextProviders": [],
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "commands": [],
+                "commandShowPosition": "",
+                "contextProviders": [],
+            },
+        )
 
     # ──────────────────────────────────────────
     # BYOK 模型配置
@@ -4239,11 +5065,14 @@ class JSONRPCRouter:
         Clawith 不支持 BYOK（Bring Your Own Key），返回禁用状态。
         """
         _ = params
-        await self._send_response(msg_id, {
-            "enabled": False,
-            "providers": [],
-            "tags": [],
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "enabled": False,
+                "providers": [],
+                "tags": [],
+            },
+        )
 
     async def _handle_model_check_byok_config(self, params: dict, msg_id: Any) -> None:
         """处理 model/checkByokConfig 请求。
@@ -4253,23 +5082,30 @@ class JSONRPCRouter:
 
         Clawith 不支持 BYOK，始终返回失败。
         """
-        logger.info("[LSP4J] model/checkByokConfig: provider={} model={}",
-                    params.get("provider", ""), params.get("model", ""))
-        await self._send_response(msg_id, {
-            "errorCode": "BYOK_NOT_SUPPORTED",
-            "errorMsg": "Clawith 不支持 BYOK 自定义模型密钥配置",
-            "success": False,
-        })
+        logger.info(
+            "[LSP4J] model/checkByokConfig: provider={} model={}", params.get("provider", ""), params.get("model", "")
+        )
+        await self._send_response(
+            msg_id,
+            {
+                "errorCode": "BYOK_NOT_SUPPORTED",
+                "errorMsg": "Clawith 不支持 BYOK 自定义模型密钥配置",
+                "success": False,
+            },
+        )
 
     async def _handle_tool_call_results(self, params: dict, msg_id: Any) -> None:
         """处理 tool/call/results 请求（Clawith-only：返回会话内历史）。"""
         session_id = params.get("sessionId", "")
         tool_results = self._tool_call_history_by_session.get(session_id, [])
-        await self._send_response(msg_id, {
-            "successful": True,
-            "errorMessage": "",
-            "toolResults": tool_results,
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "successful": True,
+                "errorMessage": "",
+                "toolResults": tool_results,
+            },
+        )
 
     async def _handle_auth_status(self, params: dict, msg_id: Any) -> None:
         """auth/status → AuthStatus（基于 WebSocket 认证 token 查询真实用户数据）。"""
@@ -4282,9 +5118,8 @@ class JSONRPCRouter:
         try:
             async with async_session() as db:
                 from app.models.user import User as UserModel
-                ur = await db.execute(
-                    select(UserModel).where(UserModel.id == self._user_id)
-                )
+
+                ur = await db.execute(select(UserModel).where(UserModel.id == self._user_id))
                 user_obj = ur.scalar_one_or_none()
                 if user_obj is not None:
                     _name = user_obj.display_name or ""
@@ -4293,46 +5128,51 @@ class JSONRPCRouter:
                     _tenant_id = str(user_obj.tenant_id) if user_obj.tenant_id else ""
                     if user_obj.tenant_id:
                         from app.models.tenant import Tenant
-                        tr = await db.execute(
-                            select(Tenant).where(Tenant.id == user_obj.tenant_id)
-                        )
+
+                        tr = await db.execute(select(Tenant).where(Tenant.id == user_obj.tenant_id))
                         tenant_obj = tr.scalar_one_or_none()
                         if tenant_obj is not None:
                             _tenant_name = tenant_obj.name or ""
         except Exception as e:
             logger.warning("[LSP4J-AUTH] 查询用户信息失败，使用降级数据: {}", e)
 
-        await self._send_response(msg_id, {
-            "messageId": "",
-            "status": 2,  # AuthStateEnum.LOGIN
-            "name": _name or f"User {str(self._user_id)[:8]}",
-            "id": str(self._user_id),
-            "accountId": str(self._user_id),
-            "token": "",
-            "quota": 1,
-            "whitelist": 3,  # AuthWhitelistStatusEnum.PASS
-            "orgId": _tenant_id,
-            "orgName": _tenant_name or "Clawith",
-            "yxUid": str(self._user_id),
-            "avatarUrl": _avatar,
-            "userType": "clawith",
-            "isSubAccount": False,
-            "cloudType": "private",
-            "email": _email,
-            "userTag": "clawith-only",
-            "privacyPolicyAgreed": True,
-            "isPrivacyPolicyModifiable": False,
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "messageId": "",
+                "status": 2,  # AuthStateEnum.LOGIN
+                "name": _name or f"User {str(self._user_id)[:8]}",
+                "id": str(self._user_id),
+                "accountId": str(self._user_id),
+                "token": "",
+                "quota": 1,
+                "whitelist": 3,  # AuthWhitelistStatusEnum.PASS
+                "orgId": _tenant_id,
+                "orgName": _tenant_name or "Clawith",
+                "yxUid": str(self._user_id),
+                "avatarUrl": _avatar,
+                "userType": "clawith",
+                "isSubAccount": False,
+                "cloudType": "private",
+                "email": _email,
+                "userTag": "clawith-only",
+                "privacyPolicyAgreed": True,
+                "isPrivacyPolicyModifiable": False,
+            },
+        )
 
     async def _handle_session_get_current(self, params: dict, msg_id: Any) -> None:
         """session/getCurrent → ListCurrentSessionResult。"""
         _ = params
         current_session_ids = [self._session_id] if self._session_id else []
-        await self._send_response(msg_id, {
-            "errorCode": None,
-            "errorMessage": None,
-            "currentSessionIds": current_session_ids,
-        })
+        await self._send_response(
+            msg_id,
+            {
+                "errorCode": None,
+                "errorMessage": None,
+                "currentSessionIds": current_session_ids,
+            },
+        )
 
     async def _handle_code_change_apply(self, params: dict, msg_id: Any) -> None:
         """处理 chat/codeChange/apply — 交互式代码变更（diff 渲染入口）。
@@ -4353,29 +5193,43 @@ class JSONRPCRouter:
         session_id = params.get("sessionId", "")
 
         # diff 入口日志
-        logger.info("[LSP4J] codeChange/apply: applyId={} filePath={} requestId={} codeEdit_len={}", apply_id, file_path, request_id, len(code_edit))
+        logger.info(
+            "[LSP4J] codeChange/apply: applyId={} filePath={} requestId={} codeEdit_len={}",
+            apply_id,
+            file_path,
+            request_id,
+            len(code_edit),
+        )
 
         # 空 codeEdit 安全守卫：拒绝请求，防止 IDE 端误将空内容写入文件
         if not code_edit or not code_edit.strip():
-            logger.warning("[LSP4J] codeChange/apply REJECTED: empty codeEdit, applyId={} filePath={}", apply_id, file_path)
-            await self._send_response(msg_id, {
-                "applyId": apply_id,
-                "projectPath": params.get("projectPath", ""),
-                "filePath": file_path,
-                "applyCode": "",  # 必须为空，插件端校验后会拒绝应用
-                "requestId": request_id,
-                "sessionId": session_id,
-                "extra": params.get("extra", ""),
-                "sessionType": params.get("sessionType", ""),
-                "mode": params.get("mode", ""),
-            })
+            logger.warning(
+                "[LSP4J] codeChange/apply REJECTED: empty codeEdit, applyId={} filePath={}", apply_id, file_path
+            )
+            await self._send_response(
+                msg_id,
+                {
+                    "applyId": apply_id,
+                    "projectPath": params.get("projectPath", ""),
+                    "filePath": file_path,
+                    "applyCode": "",  # 必须为空，插件端校验后会拒绝应用
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "extra": params.get("extra", ""),
+                    "sessionType": params.get("sessionType", ""),
+                    "mode": params.get("mode", ""),
+                },
+            )
             # 发送拒绝通知，避免插件端长时间等待 diff
-            await self._send_client_request("chat/codeChange/apply/finish", {
-                "applyId": apply_id,
-                "filePath": file_path,
-                "success": False,
-                "errorMessage": "Empty codeEdit rejected by server safety guard",
-            })
+            await self._send_client_request(
+                "chat/codeChange/apply/finish",
+                {
+                    "applyId": apply_id,
+                    "filePath": file_path,
+                    "success": False,
+                    "errorMessage": "Empty codeEdit rejected by server safety guard",
+                },
+            )
             return
 
         # 构建响应（ChatCodeChangeApplyResult 9 个字段）
@@ -4383,7 +5237,7 @@ class JSONRPCRouter:
             "applyId": apply_id,
             "projectPath": params.get("projectPath", ""),
             "filePath": file_path,
-            "applyCode": code_edit,   # ← 关键：插件用此渲染 diff
+            "applyCode": code_edit,  # ← 关键：插件用此渲染 diff
             "requestId": request_id,
             "sessionId": session_id,
             "extra": params.get("extra", ""),
@@ -4393,11 +5247,14 @@ class JSONRPCRouter:
         await self._send_response(msg_id, result)
 
         # 发送 apply/finish 通知（部分插件版本依赖此通知刷新 diff）
-        await self._send_client_request("chat/codeChange/apply/finish", {
-            **result,
-            "success": True,
-            "errorMessage": None,
-        })
+        await self._send_client_request(
+            "chat/codeChange/apply/finish",
+            {
+                **result,
+                "success": True,
+                "errorMessage": None,
+            },
+        )
         logger.debug("[LSP4J] codeChange/apply/finish sent: applyId={}", apply_id)
 
     # ──────────────────────────────────────────
@@ -4416,94 +5273,95 @@ class JSONRPCRouter:
     }
     # ── 扩展方法（基于 ChatService.java 15 个方法 + ToolCallService + ToolService + TestAgentService） ──
     # ⚠️ 使用 .update() 追加，确保已有的 tool/invokeResult 等现有条目不被覆盖
-    _METHOD_MAP.update({
-        # ── chat/ 方法（ChatService.java @JsonSegment("chat")） ──
-        "chat/systemEvent": _handle_stub,
-        "chat/getStage": _handle_stub,
-        "chat/replyRequest": _handle_chat_reply_request,      # 多轮追问建议列表
-        "chat/like": _handle_chat_like,                       # 点赞/踩反馈记录
-        "chat/codeChange/apply": _handle_code_change_apply,     # 完整实现（ChatCodeChangeApplyResult + apply/finish）
-        "image/upload": _handle_image_upload,                     # 双响应模式（校验→响应→异步通知）
-        "chat/stopSession": _handle_stub,
-        "chat/receive/notice": _handle_stub,
-        "chat/quota/doNotRemindAgain": _handle_stub,
-        "chat/listAllSessions": _handle_chat_list_all_sessions,  # ide_lsp4j 持久化会话列表
-        "chat/getSessionById": _handle_chat_get_session_by_id,     # 从 DB 恢复聊天记录
-        "chat/deleteSessionById": _handle_chat_delete_session_by_id,  # 删除会话
-        "chat/clearAllSessions": _handle_chat_clear_all_sessions,      # 清空会话
-        "chat/deleteChatById": _handle_chat_delete_chat_by_id,         # 删除单条消息
-        # ── config/ 方法（ConfigService.java） ──
-        "config/getEndpoint": _handle_config_get_endpoint,       # 返回 GlobalEndpointConfig
-        "config/updateEndpoint": _handle_config_update_endpoint, # 更新端点配置
-        # ── commitMsg/ 方法（CommitMessageService.java） ──
-        "commitMsg/generate": _handle_commit_msg_generate,       # 生成 commit message（流式）
-        # ── tool/ 方法（ToolCallService.java + ToolService.java） ──
-        "tool/call/results": _handle_tool_call_results,        # ToolCallService.listToolCallInfo（MVP 空列表）
-        # ── 任务规划工具（ToolTypeEnum.java:56-60） ──
-        "tool/invoke": _handle_tool_invoke,                    # 工具调用入口（add_tasks/todo_write/search_replace 在此处理）
-        # ── agents/ 方法（TestAgentService.java） ──
-        "agents/testAgent/stepProcessConfirm": _handle_step_process_confirm,
-        # ── textDocument/ 方法（TextDocumentService.java — inline edit，P2-3） ──
-        "textDocument/completion": _handle_completion,        # 标准 LSP 补全（返回空列表，避免 -32601）
-        "textDocument/preCompletion": _handle_pre_completion,  # IDE 补全预请求（返回 Void）
-        "textDocument/inlineEdit": _handle_inline_edit,        # 行内编辑建议（返回 InlineEditResult）
-        "textDocument/editPredict": _handle_edit_predict,      # 编辑预测（返回 Void）
-        # ── LanguageServer.java 直接定义的 @JsonRequest 方法 ──
-        "config/getGlobal": _handle_stub,                     # 全局配置查询
-        "config/queryModels": _handle_config_query_models,    # 模型查询（占位列表）
-        "ping": _handle_ping,                                 # 心跳 ping
-        "ide/update": _handle_stub,                           # IDE 状态更新
-        "dataPolicy/query": _handle_stub,                     # 数据政策查询
-        "dataPolicy/sign": _handle_stub,                      # 同意数据政策
-        "dataPolicy/cancel": _handle_stub,                    # 拒绝数据政策
-        "auth/profile/getUrl": _handle_stub,                  # 获取用户资料 URL
-        "auth/profile/update": _handle_stub,                  # 更新用户资料
-        "extension/query": _handle_extension_query,           # 查询自定义命令（返回空列表）
-        "extension/contextProvider/loadComboBoxItems": _handle_stub,  # 上下文下拉项加载
-        "codebase/recommendation": _handle_stub,              # 代码库推荐
-        "kb/list": _handle_stub,                              # 知识库列表
-        "model/queryClasses": _handle_model_query_classes,     # 查询模型类别
-        "model/getByokConfig": _handle_model_get_byok_config,      # BYOK 配置查询（不支持，返回空）
-        "model/checkByokConfig": _handle_model_check_byok_config,  # BYOK 配置校验（不支持，返回失败）
-        "user/plan": _handle_stub,                            # 用户计划查询
-        "webview/command/list": _handle_stub,                 # WebView 命令列表
-        # ── @JsonDelegate 服务: AuthService（6 个方法） ──
-        "auth/login": _handle_stub,                           # 登录
-        "auth/status": _handle_auth_status,                   # Clawith-only 登录态
-        "auth/logout": _handle_stub,                          # 登出
-        "auth/grantInfos": _handle_stub,                      # 授权信息（@Deprecated）
-        "auth/grantInfosWrap": _handle_stub,                  # 授权信息（新版）
-        "auth/switchAccount": _handle_stub,                   # 切换账号
-        # ── @JsonDelegate 服务: LoginService（1 个方法） ──
-        "login/generateUrl": _handle_stub,                    # 生成登录 URL
-        # ── @JsonDelegate 服务: FeedbackService（1 个方法） ──
-        "feedback/submit": _handle_stub,                      # 提交反馈
-        # ── @JsonDelegate 服务: SnapshotService（2 个方法） ──
-        "snapshot/listBySession": _handle_snapshot_list_by_session,
-        "snapshot/operate": _handle_snapshot_operate,
-        # ── @JsonDelegate 服务: WorkingSpaceFileService（5 个方法） ──
-        "workingSpaceFile/operate": _handle_ws_operate,
-        "workingSpaceFile/listBySnapshot": _handle_ws_list_by_snapshot,
-        "workingSpaceFile/getLastStableContent": _handle_ws_get_last_stable_content,
-        "workingSpaceFile/getFullContent": _handle_ws_get_full_content,
-        "workingSpaceFile/updateContent": _handle_ws_update_content,
-        # ── @JsonDelegate 服务: SessionService（1 个方法） ──
-        "session/getCurrent": _handle_session_get_current,    # 获取当前会话
-        # ── @JsonDelegate 服务: SystemService（1 个方法） ──
-        "system/reportDiagnosisLog": _handle_stub,            # 上报诊断日志
-        # ── @JsonDelegate 服务: SnippetService（2 个方法） ──
-        "snippet/search": _handle_stub,                       # 代码片段搜索
-        "snippet/report": _handle_stub,                       # 代码片段上报
-    })
+    _METHOD_MAP.update(
+        {
+            # ── chat/ 方法（ChatService.java @JsonSegment("chat")） ──
+            "chat/systemEvent": _handle_stub,
+            "chat/getStage": _handle_stub,
+            "chat/replyRequest": _handle_chat_reply_request,  # 多轮追问建议列表
+            "chat/like": _handle_chat_like,  # 点赞/踩反馈记录
+            "chat/codeChange/apply": _handle_code_change_apply,  # 完整实现（ChatCodeChangeApplyResult + apply/finish）
+            "image/upload": _handle_image_upload,  # 双响应模式（校验→响应→异步通知）
+            "chat/stopSession": _handle_stub,
+            "chat/receive/notice": _handle_stub,
+            "chat/quota/doNotRemindAgain": _handle_stub,
+            "chat/listAllSessions": _handle_chat_list_all_sessions,  # ide_lsp4j 持久化会话列表
+            "chat/getSessionById": _handle_chat_get_session_by_id,  # 从 DB 恢复聊天记录
+            "chat/deleteSessionById": _handle_chat_delete_session_by_id,  # 删除会话
+            "chat/clearAllSessions": _handle_chat_clear_all_sessions,  # 清空会话
+            "chat/deleteChatById": _handle_chat_delete_chat_by_id,  # 删除单条消息
+            # ── config/ 方法（ConfigService.java） ──
+            "config/getEndpoint": _handle_config_get_endpoint,  # 返回 GlobalEndpointConfig
+            "config/updateEndpoint": _handle_config_update_endpoint,  # 更新端点配置
+            # ── commitMsg/ 方法（CommitMessageService.java） ──
+            "commitMsg/generate": _handle_commit_msg_generate,  # 生成 commit message（流式）
+            # ── tool/ 方法（ToolCallService.java + ToolService.java） ──
+            "tool/call/results": _handle_tool_call_results,  # ToolCallService.listToolCallInfo（MVP 空列表）
+            # ── 任务规划工具（ToolTypeEnum.java:56-60） ──
+            "tool/invoke": _handle_tool_invoke,  # 工具调用入口（add_tasks/todo_write/search_replace 在此处理）
+            # ── agents/ 方法（TestAgentService.java） ──
+            "agents/testAgent/stepProcessConfirm": _handle_step_process_confirm,
+            # ── textDocument/ 方法（TextDocumentService.java — inline edit，P2-3） ──
+            "textDocument/completion": _handle_completion,  # 标准 LSP 补全（返回空列表，避免 -32601）
+            "textDocument/preCompletion": _handle_pre_completion,  # IDE 补全预请求（返回 Void）
+            "textDocument/inlineEdit": _handle_inline_edit,  # 行内编辑建议（返回 InlineEditResult）
+            "textDocument/editPredict": _handle_edit_predict,  # 编辑预测（返回 Void）
+            # ── LanguageServer.java 直接定义的 @JsonRequest 方法 ──
+            "config/getGlobal": _handle_stub,  # 全局配置查询
+            "config/queryModels": _handle_config_query_models,  # 模型查询（占位列表）
+            "ping": _handle_ping,  # 心跳 ping
+            "ide/update": _handle_stub,  # IDE 状态更新
+            "dataPolicy/query": _handle_stub,  # 数据政策查询
+            "dataPolicy/sign": _handle_stub,  # 同意数据政策
+            "dataPolicy/cancel": _handle_stub,  # 拒绝数据政策
+            "auth/profile/getUrl": _handle_stub,  # 获取用户资料 URL
+            "auth/profile/update": _handle_stub,  # 更新用户资料
+            "extension/query": _handle_extension_query,  # 查询自定义命令（返回空列表）
+            "extension/contextProvider/loadComboBoxItems": _handle_stub,  # 上下文下拉项加载
+            "codebase/recommendation": _handle_stub,  # 代码库推荐
+            "kb/list": _handle_stub,  # 知识库列表
+            "model/queryClasses": _handle_model_query_classes,  # 查询模型类别
+            "model/getByokConfig": _handle_model_get_byok_config,  # BYOK 配置查询（不支持，返回空）
+            "model/checkByokConfig": _handle_model_check_byok_config,  # BYOK 配置校验（不支持，返回失败）
+            "user/plan": _handle_stub,  # 用户计划查询
+            "webview/command/list": _handle_stub,  # WebView 命令列表
+            # ── @JsonDelegate 服务: AuthService（6 个方法） ──
+            "auth/login": _handle_stub,  # 登录
+            "auth/status": _handle_auth_status,  # Clawith-only 登录态
+            "auth/logout": _handle_stub,  # 登出
+            "auth/grantInfos": _handle_stub,  # 授权信息（@Deprecated）
+            "auth/grantInfosWrap": _handle_stub,  # 授权信息（新版）
+            "auth/switchAccount": _handle_stub,  # 切换账号
+            # ── @JsonDelegate 服务: LoginService（1 个方法） ──
+            "login/generateUrl": _handle_stub,  # 生成登录 URL
+            # ── @JsonDelegate 服务: FeedbackService（1 个方法） ──
+            "feedback/submit": _handle_stub,  # 提交反馈
+            # ── @JsonDelegate 服务: SnapshotService（2 个方法） ──
+            "snapshot/listBySession": _handle_snapshot_list_by_session,
+            "snapshot/operate": _handle_snapshot_operate,
+            # ── @JsonDelegate 服务: WorkingSpaceFileService（5 个方法） ──
+            "workingSpaceFile/operate": _handle_ws_operate,
+            "workingSpaceFile/listBySnapshot": _handle_ws_list_by_snapshot,
+            "workingSpaceFile/getLastStableContent": _handle_ws_get_last_stable_content,
+            "workingSpaceFile/getFullContent": _handle_ws_get_full_content,
+            "workingSpaceFile/updateContent": _handle_ws_update_content,
+            # ── @JsonDelegate 服务: SessionService（1 个方法） ──
+            "session/getCurrent": _handle_session_get_current,  # 获取当前会话
+            # ── @JsonDelegate 服务: SystemService（1 个方法） ──
+            "system/reportDiagnosisLog": _handle_stub,  # 上报诊断日志
+            # ── @JsonDelegate 服务: SnippetService（2 个方法） ──
+            "snippet/search": _handle_stub,  # 代码片段搜索
+            "snippet/report": _handle_stub,  # 代码片段上报
+        }
+    )
 
 
 # ──────────────────────────────────────────────
 # 模块级工具调用入口（供 tool_hooks.py 调用）
 # ──────────────────────────────────────────────
 
-async def invoke_lsp4j_tool(
-    tool_name: str, arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID
-) -> str:
+
+async def invoke_lsp4j_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID, user_id: uuid.UUID) -> str:
     """通过 LSP4J WebSocket 调用 IDE 端工具。
 
     由 tool_hooks.py 中的 _lsp4j_aware_execute_tool 调用。
@@ -4528,15 +5386,30 @@ async def invoke_lsp4j_tool(
         # 只要 user_id 相同，说明是同一用户的 IDE，工具调用结果可以正确返回。
         for (rk_uid, rk_aid), rk_instance in await list_active_routers():
             if rk_uid == str(user_id):
-                logger.info("[LSP4J-TOOL] 子 Agent 回退: sub_agent={} → primary_agent={} tool={}",
-                            agent_id, rk_aid, tool_name)
+                logger.info(
+                    "[LSP4J-TOOL] 子 Agent 回退: sub_agent={} → primary_agent={} tool={}", agent_id, rk_aid, tool_name
+                )
                 router_instance = rk_instance
                 break
     if router_instance is None:
         active_keys = [key for key, _ in await list_active_routers()]
-        logger.warning("[LSP4J-TOOL] 路由器未找到: agent_key={} active_keys={}",
-                        agent_key, active_keys)
+        logger.warning("[LSP4J-TOOL] 路由器未找到: agent_key={} active_keys={}", agent_key, active_keys)
         return f"[错误] LSP4J 连接不可用（user_id={user_id}, agent_id={agent_id}）"
+
+    # ── 工具调用结果缓存 ──
+    # 同一会话中 search_file/list_dir/read_file 经常被重复调用相同参数，
+    # 缓存结果避免重复 WebSocket 往返和 IDE 端重复执行。
+    import hashlib
+
+    if tool_name in _CACHEABLE_TOOLS:
+        params_str = json.dumps(arguments, sort_keys=True, default=str)
+        params_hash = hashlib.md5(params_str.encode()).hexdigest()[:12]
+        cache_key = f"{tool_name}:{params_hash}"
+        if cache_key in _lsp4j_tool_cache:
+            ts, cached = _lsp4j_tool_cache[cache_key]
+            if time.monotonic() - ts < _LSP4J_TOOL_CACHE_TTL:
+                logger.info("[LSP4J-CACHE] hit: {} elapsed={:.1f}s", cache_key, time.monotonic() - ts)
+                return cached
 
     # 工具超时策略（秒）：按工具类型差异化，避免 read_file 300s 掩盖真实故障
     _TOOL_TIMEOUTS = {
@@ -4559,23 +5432,50 @@ async def invoke_lsp4j_tool(
     # run_in_terminal: 按命令类型区分超时，避免编译命令被截断
     if tool_name == "run_in_terminal":
         command = str(arguments.get("command", ""))
-        _BUILD_KEYWORDS = ("gradlew", "mvn ", "npm run build", "make ", "cargo build",
-                          "xcodebuild", "bazel build", "cmake --build", "msbuild")
-        _READONLY_KEYWORDS = ("git show", "git diff", "git log", "ls ", "cat ",
-                             "head ", "tail ", "grep ", "find ", "wc ", "pwd")
+        _BUILD_KEYWORDS = (
+            "gradlew",
+            "mvn ",
+            "npm run build",
+            "make ",
+            "cargo build",
+            "xcodebuild",
+            "bazel build",
+            "cmake --build",
+            "msbuild",
+        )
+        _READONLY_KEYWORDS = (
+            "git show",
+            "git diff",
+            "git log",
+            "ls ",
+            "cat ",
+            "head ",
+            "tail ",
+            "grep ",
+            "find ",
+            "wc ",
+            "pwd",
+        )
         if any(kw in command for kw in _BUILD_KEYWORDS):
-            timeout = 600.0   # 编译/构建: 10 分钟
+            timeout = 600.0  # 编译/构建: 10 分钟
         elif any(kw in command for kw in _READONLY_KEYWORDS):
-            timeout = 30.0    # 读操作: 30 秒
+            timeout = 30.0  # 读操作: 30 秒
         else:
-            timeout = 180.0   # 其他命令: 3 分钟
+            timeout = 180.0  # 其他命令: 3 分钟
     logger.info("[LSP4J-TOOL] 调用 IDE 工具: tool={} agent_key={} timeout={}", tool_name, agent_key, timeout)
-    return await router_instance.invoke_tool_on_ide(tool_name, arguments, timeout=timeout)
+    result = await router_instance.invoke_tool_on_ide(tool_name, arguments, timeout=timeout)
+
+    # 缓存写入: 只缓存读操作的成功结果
+    if tool_name in _CACHEABLE_TOOLS and result and not result.startswith("[错误]"):
+        _lsp4j_tool_cache[cache_key] = (time.monotonic(), result)
+
+    return result
 
 
 # ──────────────────────────────────────────────
 # 对话持久化
 # ──────────────────────────────────────────────
+
 
 async def _persist_lsp4j_chat_turn(
     agent_id: uuid.UUID,
@@ -4639,30 +5539,36 @@ async def _persist_lsp4j_chat_turn(
             # ★ 显式设置 created_at，确保用户消息时间戳早于助手消息
             # 避免同一事务中两条消息的 server_default 时间戳相同导致排序错乱
             from datetime import timedelta
+
             if user_text:
-                db.add(ChatMessage(
-                    agent_id=agent_id,
-                    user_id=user_id,
-                    role="user",
-                    content=user_text,
-                    conversation_id=str(sid_uuid),
-                    created_at=now - timedelta(seconds=1),  # 用户消息时间戳早 1 秒
-                ))
+                db.add(
+                    ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="user",
+                        content=user_text,
+                        conversation_id=str(sid_uuid),
+                        created_at=now - timedelta(seconds=1),  # 用户消息时间戳早 1 秒
+                    )
+                )
 
             if reply_text:
-                db.add(ChatMessage(
-                    agent_id=agent_id,
-                    user_id=user_id,
-                    role="assistant",
-                    content=reply_text,
-                    conversation_id=str(sid_uuid),
-                    thinking=thinking_text,  # 构造时传入，非事后更新
-                    created_at=now,  # 助手消息时间戳
-                ))
+                db.add(
+                    ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=reply_text,
+                        conversation_id=str(sid_uuid),
+                        thinking=thinking_text,  # 构造时传入，非事后更新
+                        created_at=now,  # 助手消息时间戳
+                    )
+                )
 
             # 持久化工具调用记录（role="tool_call"），使会话历史可从 DB 完整恢复
             if tool_calls:
                 import json
+
                 for tc in tool_calls:
                     if not isinstance(tc, dict):
                         continue
@@ -4672,26 +5578,36 @@ async def _persist_lsp4j_chat_turn(
                     if _tc_status not in ("FINISHED", "ERROR", "CANCELLED"):
                         continue
                     _status_map = {"FINISHED": "done", "ERROR": "error", "CANCELLED": "cancelled"}
-                    _tc_content = json.dumps({
-                        "toolCallId": tc.get("toolCallId", ""),
-                        "name": _tc_name,
-                        "status": _status_map.get(_tc_status, _tc_status.lower() if _tc_status else "done"),
-                        "args": tc.get("parameters", {}),
-                        "result": str(tc.get("results", ""))[:500],
-                        "reasoning_content": tc.get("errorMsg") if tc.get("errorCode") else "",
-                    }, ensure_ascii=False)
-                    db.add(ChatMessage(
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        role="tool_call",
-                        content=_tc_content,
-                        conversation_id=str(sid_uuid),
-                        created_at=now + timedelta(milliseconds=1),
-                    ))
+                    _tc_content = json.dumps(
+                        {
+                            "toolCallId": tc.get("toolCallId", ""),
+                            "name": _tc_name,
+                            "status": _status_map.get(_tc_status, _tc_status.lower() if _tc_status else "done"),
+                            "args": tc.get("parameters", {}),
+                            "result": str(tc.get("results", ""))[:500],
+                            "reasoning_content": tc.get("errorMsg") if tc.get("errorCode") else "",
+                        },
+                        ensure_ascii=False,
+                    )
+                    db.add(
+                        ChatMessage(
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            role="tool_call",
+                            content=_tc_content,
+                            conversation_id=str(sid_uuid),
+                            created_at=now + timedelta(milliseconds=1),
+                        )
+                    )
 
             await db.commit()
             # 持久化成功
-            logger.debug("[LSP4J] persist success: session_id={} user_len={} reply_len={}", session_id, len(user_text), len(reply_text))
+            logger.debug(
+                "[LSP4J] persist success: session_id={} user_len={} reply_len={}",
+                session_id,
+                len(user_text),
+                len(reply_text),
+            )
 
             # 通知 Clawith 前端 WebSocket 刷新 Web UI
             try:
@@ -4708,6 +5624,7 @@ async def _persist_lsp4j_chat_turn(
 
             # 记录活动日志
             from app.services.activity_logger import log_activity
+
             await log_activity(
                 agent_id=agent_id,
                 action_type="chat_reply",
@@ -4757,14 +5674,16 @@ async def _persist_lsp4j_tool_call(
                 "result": str(results or "")[:500],
                 "reasoning_content": "",
             }
-            db.add(ChatMessage(
-                agent_id=agent_id,
-                user_id=user_id,
-                role="tool_call",
-                content=json.dumps(payload, ensure_ascii=False, default=str),
-                conversation_id=str(sid_uuid),
-                created_at=datetime.now(tz_persist.utc),
-            ))
+            db.add(
+                ChatMessage(
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    role="tool_call",
+                    content=json.dumps(payload, ensure_ascii=False, default=str),
+                    conversation_id=str(sid_uuid),
+                    created_at=datetime.now(tz_persist.utc),
+                )
+            )
             await db.commit()
             logger.info("[LSP4J] tool_call persisted: session={} tool={}", session_id, tool_name)
     except Exception:
@@ -4783,8 +5702,27 @@ def _format_tool_context_message(tool_records: list[dict]) -> dict | None:
     Returns:
         {"role": "system", "content": "..."} 或 None（无有效上下文时）
     """
-    logger.info(
-        "[LSP4J-CTX] _format_tool_context_message: processing {} tool records", len(tool_records))
+    from .context_trimmer import (
+        trim_tool_context_history, MAX_TOOL_HISTORY_ROUNDS, compress_tool_context_summary,
+    )
+
+    logger.info("[LSP4J-CTX] _format_tool_context_message: processing {} tool records", len(tool_records))
+
+    # 智能压缩: 超过 5 条记录时，用分组摘要替代逐条详情
+    summary_lines = compress_tool_context_summary(tool_records)
+    if summary_lines:
+        logger.info(
+            "[LSP4J-CTX] smart_compress: {} records → {}-line summary (recent_detail + grouped)",
+            len(tool_records),
+            len(summary_lines),
+        )
+        result_content = "\n".join(summary_lines)
+        logger.info("[LSP4J-CTX] compressed context len={}", len(result_content))
+        return {"role": "system", "content": result_content}
+
+    # 首轮或记录少时: 仍用逐条详情
+    tool_records = trim_tool_context_history(tool_records)
+
     lines = ["[会话上下文] 本轮对话之前已执行的工具调用及结果：", ""]
     skipped_old_format = 0
     skipped_no_name = 0
@@ -4799,7 +5737,11 @@ def _format_tool_context_message(tool_records: list[dict]) -> dict | None:
         has_old_format = "name" in tc and "args" in tc
         logger.info(
             "[LSP4J-CTX]   record[{}]: name={} keys=[{}] new_fmt={} old_fmt={} params_keys=[{}] results_type={}",
-            i, name, ",".join(record_keys[:8]), has_new_format, has_old_format,
+            i,
+            name,
+            ",".join(record_keys[:8]),
+            has_new_format,
+            has_old_format,
             ",".join(list(params.keys())[:5]) if params else "none",
             type(results).__name__ if results else "none",
         )
@@ -4808,14 +5750,16 @@ def _format_tool_context_message(tool_records: list[dict]) -> dict | None:
                 results = json.loads(results)
             except (json.JSONDecodeError, TypeError):
                 results = [{"content": str(results)[:500]}]
-        elif results is None:
+        if results is None:
             results = []
         elif not isinstance(results, list):
             results = [results]
         # 日志：记录 results 结构
         logger.info(
             "[LSP4J-CTX]   record[{}]: results_count={} first_result_type={}",
-            i, len(results), type(results[0]).__name__ if results else "empty",
+            i,
+            len(results),
+            type(results[0]).__name__ if results else "empty",
         )
 
         if name in ("search_file", "search_codebase", "grep_code", "search_symbol", "list_dir"):
@@ -4860,37 +5804,50 @@ def _format_tool_context_message(tool_records: list[dict]) -> dict | None:
             cmd = params.get("command", "")
             lines.append(f"{i}. run_in_terminal: {cmd[:150]}")
 
-        elif name in ("replace_text_by_path", "search_replace", "create_file_with_text", "delete_file_by_path",
-                      "edit_file", "write_file"):
+        elif name in (
+            "replace_text_by_path",
+            "search_replace",
+            "create_file_with_text",
+            "delete_file_by_path",
+            "edit_file",
+            "write_file",
+        ):
             fp = params.get("filePath", "") or params.get("file_path", "")
             lines.append(f"{i}. {name}: {fp}" if fp else f"{i}. {name}: 已执行")
         else:
             # 非 IDE 原生工具（如 plaza_*, duckduckgo_*），仍然记录供 LLM 参考
             param_keys = list(params.keys())[:3] if params else []
-            lines.append(f"{i}. {name}: 已执行 (params={','.join(param_keys)})" if param_keys else f"{i}. {name}: 已执行")
+            lines.append(
+                f"{i}. {name}: 已执行 (params={','.join(param_keys)})" if param_keys else f"{i}. {name}: 已执行"
+            )
 
         formatted_count += 1
 
     if len(lines) <= 2:
         logger.info(
             "[LSP4J-CTX] _format_tool_context_message: NO USEFUL CONTEXT (records={} formatted={} skipped_old={} skipped_noname={})",
-            len(tool_records), formatted_count, skipped_old_format, skipped_no_name,
+            len(tool_records),
+            formatted_count,
+            skipped_old_format,
+            skipped_no_name,
         )
         return None
     lines.append("")
-    lines.append("以上工具已在之前的对话轮次中执行完毕。如当前问题涉及相同文件或搜索，请优先参考上述结果，避免重复调用工具。")
+    lines.append(
+        "以上工具已在之前的对话轮次中执行完毕。如当前问题涉及相同文件或搜索，请优先参考上述结果，避免重复调用工具。"
+    )
     result_content = "\n".join(lines)
     logger.info(
         "[LSP4J-CTX] _format_tool_context_message: produced context len={} lines={} tools_mentioned={}",
-        len(result_content), len(lines), formatted_count,
+        len(result_content),
+        len(lines),
+        formatted_count,
     )
     logger.info("[LSP4J-CTX] context preview (first 300 chars): {}", result_content[:300])
     return {"role": "system", "content": result_content}
 
 
-async def _load_lsp4j_history_from_db(
-    session_id: str, agent_id: uuid.UUID, user_id: uuid.UUID
-) -> list[dict]:
+async def _load_lsp4j_history_from_db(session_id: str, agent_id: uuid.UUID, user_id: uuid.UUID) -> list[dict]:
     """从数据库加载 LSP4J 对话历史。
 
     验证 session_id UUID + 所有权后返回历史消息列表。
@@ -4917,7 +5874,9 @@ async def _load_lsp4j_history_from_db(
             if sess:
                 logger.warning(
                     "LSP4J hydrate denied: session=%s user=%s agent=%s",
-                    session_id, user_id, agent_id,
+                    session_id,
+                    user_id,
+                    agent_id,
                 )
             return []
 
@@ -4937,7 +5896,9 @@ async def _load_lsp4j_history_from_db(
             tc_rows = [m for m in rows if m.role == "tool_call"]
             logger.info(
                 "[LSP4J-CTX] _load_history: session={} user_msg_count={} tool_call_db_rows={}",
-                session_id, len(history), len(tc_rows),
+                session_id,
+                len(history),
+                len(tc_rows),
             )
             if tc_rows:
                 tool_records = []
@@ -4949,23 +5910,29 @@ async def _load_lsp4j_history_from_db(
                         parse_failures += 1
                         logger.warning(
                             "[LSP4J-CTX] _load_history: JSON parse failed for tool_call id={}: {}",
-                            tc.id, e,
+                            tc.id,
+                            e,
                         )
                 logger.info(
                     "[LSP4J-CTX] _load_history: parsed {} tool_records, parse_failures={}",
-                    len(tool_records), parse_failures,
+                    len(tool_records),
+                    parse_failures,
                 )
                 if tool_records:
                     ctx_msg = _format_tool_context_message(tool_records)
                     if ctx_msg:
                         history.insert(0, ctx_msg)
-                        logger.info("[LSP4J] tool_call context injected from DB: session_id={} tool_count={}",
-                                    session_id, len(tool_records))
+                        logger.info(
+                            "[LSP4J] tool_call context injected from DB: session_id={} tool_count={}",
+                            session_id,
+                            len(tool_records),
+                        )
                     else:
                         logger.info(
                             "[LSP4J-CTX] _load_history: context NOT injected (no useful tool records after formatting), "
                             "session={} tool_count={}",
-                            session_id, len(tool_records),
+                            session_id,
+                            len(tool_records),
                         )
                 else:
                     logger.info(
@@ -4987,6 +5954,7 @@ async def _load_lsp4j_history_from_db(
 # ──────────────────────────────────────────────
 # 模型变更广播（供模型池变更时外部调用）
 # ──────────────────────────────────────────────
+
 
 async def broadcast_config_refresh_models() -> int:
     """向所有活跃的 LSP4J 客户端推送 config/refreshModels 通知。

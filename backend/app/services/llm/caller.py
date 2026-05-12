@@ -41,10 +41,18 @@ if TYPE_CHECKING:
     from app.models.llm import LLMModel
 
 
-TOOLS_REQUIRING_ARGS = frozenset({
-    "write_file", "read_file", "move_file", "delete_file", "read_document",
-    "send_message_to_agent", "send_feishu_message", "send_email"
-})
+TOOLS_REQUIRING_ARGS = frozenset(
+    {
+        "write_file",
+        "read_file",
+        "move_file",
+        "delete_file",
+        "read_document",
+        "send_message_to_agent",
+        "send_feishu_message",
+        "send_email",
+    }
+)
 
 
 def _sanitize_tool_calls_for_context(tool_calls: list[dict]) -> tuple[list[dict] | None, str | None]:
@@ -84,14 +92,16 @@ def _sanitize_tool_calls_for_context(tool_calls: list[dict]) -> tuple[list[dict]
                 "Retry the tool call with `function.arguments` as one valid JSON object string."
             )
 
-        sanitized.append({
-            "id": tc.get("id", ""),
-            "type": tc.get("type") or "function",
-            "function": {
-                "name": tool_name,
-                "arguments": args_str,
-            },
-        })
+        sanitized.append(
+            {
+                "id": tc.get("id", ""),
+                "type": tc.get("type") or "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": args_str,
+                },
+            }
+        )
 
     return sanitized, None
 
@@ -99,6 +109,7 @@ def _sanitize_tool_calls_for_context(tool_calls: list[dict]) -> tuple[list[dict]
 # ═══════════════════════════════════════════════════════════════════════════════
 # Failover Guard
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class FailoverGuard:
     """Guard state for failover decisions."""
@@ -155,7 +166,7 @@ def is_retryable_error(result: str) -> bool:
     for code in ["429", "500", "502", "503", "504"]:
         idx = result_lower.find(code)
         while idx != -1:
-            window = result_lower[max(0, idx - 30):idx + len(code) + 30]
+            window = result_lower[max(0, idx - 30) : idx + len(code) + 30]
             if any(kw in window for kw in http_context_keywords):
                 return True
             idx = result_lower.find(code, idx + 1)
@@ -180,8 +191,8 @@ def _get_thinking_kwargs(model: "LLMModel") -> dict:
         如果是 DeepSeek V4 模型，返回 {"thinking": {"type": "enabled"}}；
         否则返回空字典，不影响其他模型。
     """
-    model_name = getattr(model, 'model', '') or ''
-    if 'deepseek-v4' in model_name or 'deepseek_v4' in model_name:
+    model_name = getattr(model, "model", "") or ""
+    if "deepseek-v4" in model_name or "deepseek_v4" in model_name:
         return {"thinking": {"type": "enabled"}}
     return {}
 
@@ -190,14 +201,15 @@ def _usage_from_response_or_estimate(response, api_messages: list[LLMMessage]) -
     usage = extract_token_usage(response.usage)
     if usage:
         return usage
-    round_chars = sum(len(m.content or '') if isinstance(m.content, str) else 0 for m in api_messages)
-    round_chars += len(response.content or '')
+    round_chars = sum(len(m.content or "") if isinstance(m.content, str) else 0 for m in api_messages)
+    round_chars += len(response.content or "")
     return estimate_token_usage_from_chars(round_chars)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helper Functions
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 async def _get_agent_config(agent_id) -> tuple[int, str | None]:
     """Get agent config: max_tool_rounds and token limit status."""
@@ -206,15 +218,22 @@ async def _get_agent_config(agent_id) -> tuple[int, str | None]:
 
     try:
         from app.models.agent import Agent as AgentModel
+
         async with async_session() as _db:
             _ar = await _db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             _agent = _ar.scalar_one_or_none()
             if _agent:
                 max_rounds = _agent.max_tool_rounds or 50
                 if _agent.max_tokens_per_day and _agent.tokens_used_today >= _agent.max_tokens_per_day:
-                    return max_rounds, f"⚠️ Daily token usage has reached the limit ({_agent.tokens_used_today:,}/{_agent.max_tokens_per_day:,}). Please try again tomorrow or ask admin to increase the limit."
+                    return (
+                        max_rounds,
+                        f"⚠️ Daily token usage has reached the limit ({_agent.tokens_used_today:,}/{_agent.max_tokens_per_day:,}). Please try again tomorrow or ask admin to increase the limit.",
+                    )
                 if _agent.max_tokens_per_month and _agent.tokens_used_month >= _agent.max_tokens_per_month:
-                    return max_rounds, f"⚠️ Monthly token usage has reached the limit ({_agent.tokens_used_month:,}/{_agent.max_tokens_per_month:,}). Please ask admin to increase the limit."
+                    return (
+                        max_rounds,
+                        f"⚠️ Monthly token usage has reached the limit ({_agent.tokens_used_month:,}/{_agent.max_tokens_per_month:,}). Please ask admin to increase the limit.",
+                    )
                 return max_rounds, None
     except Exception:
         pass
@@ -227,6 +246,7 @@ async def _get_user_name(user_id) -> str | None:
         return None
     try:
         from app.models.user import User as _UserModel
+
         async with async_session() as _udb:
             _ur = await _udb.execute(select(_UserModel).where(_UserModel.id == user_id))
             _u = _ur.scalar_one_or_none()
@@ -237,9 +257,7 @@ async def _get_user_name(user_id) -> str | None:
     return None
 
 
-def _convert_messages_for_vision(
-    api_messages: list, supports_vision: bool
-) -> list:
+def _convert_messages_for_vision(api_messages: list, supports_vision: bool) -> list:
     """Convert image markers to vision format if supported, or strip them."""
     import re as _re_v
     import copy
@@ -252,40 +270,45 @@ def _convert_messages_for_vision(
         for i, msg in enumerate(new_messages):
             if msg.role != "user" or not msg.content or not isinstance(msg.content, str):
                 continue
-            
+
             content_str = msg.content
-            pattern = r'\[image_data:(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)\]'
+            pattern = r"\[image_data:(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)\]"
             images = _re_v.findall(pattern, content_str)
-            
+
             if not images:
                 continue
 
-            text = _re_v.sub(pattern, '', content_str).strip()
+            text = _re_v.sub(pattern, "", content_str).strip()
             parts = [{"type": "image_url", "image_url": {"url": img}} for img in images]
             if text:
                 # Per OpenAI spec, text part should come after image parts
                 parts.append({"type": "text", "text": text})
-            
-            new_messages[i] = type(msg)(role=msg.role, content=parts, tool_calls=msg.tool_calls, tool_call_id=msg.tool_call_id)
+
+            new_messages[i] = type(msg)(
+                role=msg.role, content=parts, tool_calls=msg.tool_calls, tool_call_id=msg.tool_call_id
+            )
     else:
         # Non-vision format: ensure content is a string for all roles, stripping image data.
-        _img_marker_pattern = r'\[image_data:data:image/[^;]+;base64,[A-Za-z0-9+/=]+\]'
+        _img_marker_pattern = r"\[image_data:data:image/[^;]+;base64,[A-Za-z0-9+/=]+\]"
         for i, msg in enumerate(new_messages):
-            
             if isinstance(msg.content, list):
                 # It's a list, join all text parts. This handles user messages
                 # with vision content and tool messages from vision_inject.
                 text_parts = [part.get("text", "") for part in msg.content if part.get("type") == "text"]
                 content_str = "\n".join(text_parts).strip()
-                new_messages[i] = type(msg)(role=msg.role, content=content_str, tool_calls=msg.tool_calls, tool_call_id=msg.tool_call_id)
+                new_messages[i] = type(msg)(
+                    role=msg.role, content=content_str, tool_calls=msg.tool_calls, tool_call_id=msg.tool_call_id
+                )
 
             elif isinstance(msg.content, str) and "[image_data:" in msg.content:
                 # It's a string with image markers, strip them
                 _n_imgs = len(_re_v.findall(_img_marker_pattern, msg.content))
-                cleaned = _re_v.sub(_img_marker_pattern, '', msg.content).strip()
+                cleaned = _re_v.sub(_img_marker_pattern, "", msg.content).strip()
                 if _n_imgs > 0:
                     cleaned += f"\n[用户发送了 {_n_imgs} 张图片，但当前模型不支持视觉，无法查看图片内容]"
-                new_messages[i] = type(msg)(role=msg.role, content=cleaned, tool_calls=msg.tool_calls, tool_call_id=msg.tool_call_id)
+                new_messages[i] = type(msg)(
+                    role=msg.role, content=cleaned, tool_calls=msg.tool_calls, tool_call_id=msg.tool_call_id
+                )
 
     return new_messages
 
@@ -293,7 +316,10 @@ def _convert_messages_for_vision(
 def _check_tool_requires_args(tool_name: str, args: dict) -> tuple[bool, str]:
     """Check if tool requires arguments and return (should_execute, result_or_error)."""
     if not args and tool_name in TOOLS_REQUIRING_ARGS:
-        return False, f"Error: {tool_name} was called with empty arguments. You must provide the required parameters. Please retry with the correct arguments."
+        return (
+            False,
+            f"Error: {tool_name} was called with empty arguments. You must provide the required parameters. Please retry with the correct arguments.",
+        )
     return True, ""
 
 
@@ -347,21 +373,25 @@ async def _process_tool_call(
         logger.warning(f"[LLM] Blocked disabled tool call: {tool_name} agent_id={agent_id}")
         if on_tool_call:
             try:
-                await on_tool_call({
-                    "name": tool_name,
-                    "call_id": tc.get("id", ""),
-                    "args": args,
-                    "status": "done",
-                    "result": result,
-                    "reasoning_content": full_reasoning_content
-                })
+                await on_tool_call(
+                    {
+                        "name": tool_name,
+                        "call_id": tc.get("id", ""),
+                        "args": args,
+                        "status": "done",
+                        "result": result,
+                        "reasoning_content": full_reasoning_content,
+                    }
+                )
             except Exception:
                 pass
-        api_messages.append(LLMMessage(
-            role="tool",
-            tool_call_id=tc["id"],
-            content=result,
-        ))
+        api_messages.append(
+            LLMMessage(
+                role="tool",
+                tool_call_id=tc["id"],
+                content=result,
+            )
+        )
         return ""
 
     cache_key = None
@@ -377,39 +407,46 @@ async def _process_tool_call(
             logger.info("[LLM-OPT] Skip duplicate tool call: {}", tool_name)
             if on_tool_call:
                 try:
-                    await on_tool_call({
-                        "name": tool_name,
-                        "call_id": tc.get("id", ""),
-                        "args": args,
-                        "status": "done",
-                        "result": cached_result if isinstance(cached_result, str) else str(cached_result),
-                        "reasoning_content": full_reasoning_content
-                    })
+                    await on_tool_call(
+                        {
+                            "name": tool_name,
+                            "call_id": tc.get("id", ""),
+                            "args": args,
+                            "status": "done",
+                            "result": cached_result if isinstance(cached_result, str) else str(cached_result),
+                            "reasoning_content": full_reasoning_content,
+                        }
+                    )
                 except Exception as _e:
                     logger.warning(f"[LLM] on_tool_call dedupe error: {_e}")
-            api_messages.append(LLMMessage(
-                role="tool",
-                tool_call_id=tc["id"],
-                content=cached_result,
-            ))
+            api_messages.append(
+                LLMMessage(
+                    role="tool",
+                    tool_call_id=tc["id"],
+                    content=cached_result,
+                )
+            )
             return ""
 
     # Notify client about tool call (in-progress)
     if on_tool_call:
         try:
-            await on_tool_call({
-                "name": tool_name,
-                "call_id": tc.get("id", ""),
-                "args": args,
-                "status": "running",
-                "reasoning_content": full_reasoning_content
-            })
+            await on_tool_call(
+                {
+                    "name": tool_name,
+                    "call_id": tc.get("id", ""),
+                    "args": args,
+                    "status": "running",
+                    "reasoning_content": full_reasoning_content,
+                }
+            )
         except Exception as _e:
             logger.warning(f"[LLM] on_tool_call running error: {_e}")
 
     # Execute tool
     result = await execute_tool(
-        tool_name, args,
+        tool_name,
+        args,
         agent_id=agent_id,
         user_id=user_id or agent_id,
         session_id=session_id,
@@ -422,6 +459,7 @@ async def _process_tool_call(
         try:
             from app.services.vision_inject import try_inject_screenshot_vision
             from app.config import get_settings
+
             settings = get_settings()
             ws_path = Path(settings.AGENT_DATA_DIR) / str(agent_id)
             vision_content = try_inject_screenshot_vision(tool_name, str(result), ws_path)
@@ -434,31 +472,35 @@ async def _process_tool_call(
     # Notify client about tool call result
     if on_tool_call:
         try:
-            await on_tool_call({
-                "name": tool_name,
-                "call_id": tc.get("id", ""),
-                "args": args,
-                "status": "done",
-                "result": result,
-                "reasoning_content": full_reasoning_content
-            })
+            await on_tool_call(
+                {
+                    "name": tool_name,
+                    "call_id": tc.get("id", ""),
+                    "args": args,
+                    "status": "done",
+                    "result": result,
+                    "reasoning_content": full_reasoning_content,
+                }
+            )
         except Exception as _e:
             logger.warning(f"[LLM] on_tool_call done error: {_e}")
-    
-    api_messages.append(LLMMessage(
-        role="tool",
-        tool_call_id=tc["id"],
-        content=tool_content,
-    ))
+
+    api_messages.append(
+        LLMMessage(
+            role="tool",
+            tool_call_id=tc["id"],
+            content=tool_content,
+        )
+    )
     if tool_result_cache is not None and cache_key:
         tool_result_cache[cache_key] = tool_content
     return ""
 
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Core LLM Call Functions
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 async def call_llm(
     model: LLMModel,
@@ -476,11 +518,15 @@ async def call_llm(
     max_tool_rounds_override: int | None = None,
     cancel_event: asyncio.Event | None = None,
     skip_tools: bool = False,
+    parallel_tools_extra_readonly: set[str] | None = None,
+    tool_warning_mode: str = "default",
 ) -> str:
     """Call LLM via unified client with function-calling tool loop.
 
     Args:
         cancel_event: 可选的取消事件，设置后中断工具循环和流式输出（用于 chat/stop）。
+        parallel_tools_extra_readonly: 扩展只读工具名集合，合并到 _READONLY_TOOLS（LSP4J 路径使用）
+        tool_warning_mode: "default" 保持现有行为，"lsp4j" 使用更主动的收敛引导
     """
     # Get agent config for tool rounds
     _max_tool_rounds, _token_limit_msg = await _get_agent_config(agent_id)
@@ -494,8 +540,11 @@ async def call_llm(
 
     # Build rich prompt with soul, memory, skills, relationships
     from app.services.agent_context import build_agent_context
+
     # Look up current user's display name so the agent knows who it's talking to
-    static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_user_name)
+    static_prompt, dynamic_prompt = await build_agent_context(
+        agent_id, agent_name, role_description, current_user_name=_user_name
+    )
 
     # Load tools dynamically from DB. `skip_tools=True` is set by the WS
     # handler on the onboarding greeting turn; keep the runtime-level `finish`
@@ -509,13 +558,15 @@ async def call_llm(
     # Convert messages to LLMMessage format
     api_messages = [LLMMessage(role="system", content=static_prompt, dynamic_content=dynamic_prompt)]
     for msg in messages:
-        api_messages.append(LLMMessage(
-            role=msg.get("role", "user"),
-            content=msg.get("content"),
-            tool_calls=msg.get("tool_calls"),
-            tool_call_id=msg.get("tool_call_id"),
-            reasoning_content=msg.get("reasoning_content"),
-        ))
+        api_messages.append(
+            LLMMessage(
+                role=msg.get("role", "user"),
+                content=msg.get("content"),
+                tool_calls=msg.get("tool_calls"),
+                tool_call_id=msg.get("tool_call_id"),
+                reasoning_content=msg.get("reasoning_content"),
+            )
+        )
 
     # Vision format conversion
     api_messages = _convert_messages_for_vision(api_messages, supports_vision)
@@ -532,7 +583,7 @@ async def call_llm(
     except Exception as e:
         return f"[Error] Failed to create LLM client: {e}"
 
-    max_tokens = get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None))
+    max_tokens = get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None))
     _accumulated_usage = TokenUsage()
 
     # Tool-calling loop
@@ -547,19 +598,38 @@ async def call_llm(
         _warn_threshold_80 = int(_max_tool_rounds * 0.8)
         _warn_threshold_96 = _max_tool_rounds - 2
         if round_i == _warn_threshold_80:
-            api_messages.append(LLMMessage(
-                role="user",
-                content=(
-                    f"⚠️ 你已使用 {round_i}/{_max_tool_rounds} 轮工具调用。"
-                    "如果当前任务尚未完成，请尽快使用 upsert_focus_item 保存进度，"
-                    "并使用 set_trigger 设置续接触发器，在剩余轮次中做好收尾。"
-                ),
-            ))
+            if tool_warning_mode == "lsp4j":
+                api_messages.append(
+                    LLMMessage(
+                        role="user",
+                        content=(
+                            f"⚠️ 已使用 {round_i}/{_max_tool_rounds} 轮工具调用。"
+                            "请直接评估当前进度：\n"
+                            "1. 已获取的信息是否足够？足够则立即给出最终回复\n"
+                            "2. 多个独立的只读工具（search/read/list）可同时调用以减少轮数\n"
+                            "3. 不要重复查询已获取的信息\n"
+                            "4. 如任务接近完成，直接给出最终回复"
+                        ),
+                    )
+                )
+            else:
+                api_messages.append(
+                    LLMMessage(
+                        role="user",
+                        content=(
+                            f"⚠️ 你已使用 {round_i}/{_max_tool_rounds} 轮工具调用。"
+                            "如果当前任务尚未完成，请尽快使用 upsert_focus_item 保存进度，"
+                            "并使用 set_trigger 设置续接触发器，在剩余轮次中做好收尾。"
+                        ),
+                    )
+                )
         elif round_i == _warn_threshold_96:
-            api_messages.append(LLMMessage(
-                role="user",
-                content="🚨 仅剩 2 轮工具调用。请立即使用 upsert_focus_item 保存进度并设置续接触发器。",
-            ))
+            api_messages.append(
+                LLMMessage(
+                    role="user",
+                    content="🚨 仅剩 2 轮工具调用。请立即使用 upsert_focus_item 保存进度并设置续接触发器。",
+                )
+            )
 
         try:
             # DeepSeek V4 思考模式参数
@@ -568,14 +638,22 @@ async def call_llm(
             # ★ Timing: measure LLM stream round latency
             _llm_round_start = asyncio.get_event_loop().time()
             _msg_count = len(api_messages)
-            _msg_total_chars = sum(len(m.content or '') if isinstance(m.content, str) else 0 for m in api_messages)
-            logger.info("[LLM-TIMING] Round {} START: model={} messages={} chars={} thinking={}",
-                         round_i + 1, model.model, _msg_count, _msg_total_chars, bool(_thinking_kwargs))
+            _msg_total_chars = sum(len(m.content or "") if isinstance(m.content, str) else 0 for m in api_messages)
+            logger.info(
+                "[LLM-TIMING] Round {} START: model={} messages={} chars={} thinking={}",
+                round_i + 1,
+                model.model,
+                _msg_count,
+                _msg_total_chars,
+                bool(_thinking_kwargs),
+            )
 
             # Use streaming API for real-time responses
             async def _buffer_chunk(_text: str) -> None:
-                # Final user-facing text must come through finish(content=...).
-                return None
+                # Stream deltas to callers (IDE LSP4J chat/answer, web WS chunks).
+                # Final assembled text still comes from response / finish_call.
+                if on_chunk and _text:
+                    await on_chunk(_text)
 
             response = await client.stream(
                 messages=api_messages,
@@ -589,10 +667,17 @@ async def call_llm(
                 **_thinking_kwargs,
             )
             _llm_round_elapsed = asyncio.get_event_loop().time() - _llm_round_start
-            logger.info("[LLM-TIMING] Round {} END: elapsed={:.1f}s tools={} content_len={}",
-                         round_i + 1, _llm_round_elapsed, len(response.tool_calls or []), len(response.content or ''))
+            logger.info(
+                "[LLM-TIMING] Round {} END: elapsed={:.1f}s tools={} content_len={}",
+                round_i + 1,
+                _llm_round_elapsed,
+                len(response.tool_calls or []),
+                len(response.content or ""),
+            )
         except LLMError as e:
-            logger.error(f"[LLM] LLMError: provider={getattr(model, 'provider', '?')} model={getattr(model, 'model', '?')} {e}")
+            logger.error(
+                f"[LLM] LLMError: provider={getattr(model, 'provider', '?')} model={getattr(model, 'model', '?')} {e}"
+            )
             if agent_id and _accumulated_usage.total_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_usage)
             await client.close()
@@ -616,7 +701,7 @@ async def call_llm(
             continue
 
         # Execute tool calls
-        logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
+        logger.info(f"[LLM] Round {round_i + 1}: {len(response.tool_calls)} tool call(s)")
         sanitized_tool_calls, retry_instruction = _sanitize_tool_calls_for_context(response.tool_calls)
         if retry_instruction:
             api_messages.append(LLMMessage(role="user", content=retry_instruction))
@@ -630,35 +715,48 @@ async def call_llm(
                 await client.close()
                 return finish_call.content
 
-            api_messages.append(LLMMessage(
+            api_messages.append(
+                LLMMessage(
+                    role="assistant",
+                    content=response.content or None,
+                    tool_calls=sanitized_tool_calls,
+                    reasoning_content=response.reasoning_content,
+                )
+            )
+            api_messages.append(
+                LLMMessage(
+                    role="tool",
+                    content=finish_call.error or "`finish` was invalid.",
+                    tool_call_id=finish_call.call_id,
+                )
+            )
+            continue
+
+        # Add assistant message with tool calls
+        api_messages.append(
+            LLMMessage(
                 role="assistant",
                 content=response.content or None,
                 tool_calls=sanitized_tool_calls,
                 reasoning_content=response.reasoning_content,
-            ))
-            api_messages.append(LLMMessage(
-                role="tool",
-                content=finish_call.error or "`finish` was invalid.",
-                tool_call_id=finish_call.call_id,
-            ))
-            continue
-
-        # Add assistant message with tool calls
-        api_messages.append(LLMMessage(
-            role="assistant",
-            content=response.content or None,
-            tool_calls=sanitized_tool_calls,
-            reasoning_content=response.reasoning_content,
-        ))
+            )
+        )
 
         full_reasoning_content = response.reasoning_content or ""
 
         # ─── Parallel tool execution (conservative: read-only only) ────────
-        _READONLY_TOOLS = frozenset({
-            "read_file", "list_files", "search_in_files",
-            "jina_search", "web_search", "jina_read",
-            "read_document", "get_working_directory"
-        })
+        _READONLY_TOOLS = frozenset(
+            {
+                "read_file",
+                "list_files",
+                "search_in_files",
+                "jina_search",
+                "web_search",
+                "jina_read",
+                "read_document",
+                "get_working_directory",
+            }
+        ) | (parallel_tools_extra_readonly or frozenset())
 
         tool_calls = sanitized_tool_calls or []
         readonly_calls = [tc for tc in tool_calls if tc.get("function", {}).get("name") in _READONLY_TOOLS]
@@ -666,9 +764,14 @@ async def call_llm(
 
         async def _exec_tool(tc):
             return await _process_tool_call(
-                tc=tc, api_messages=api_messages, agent_id=agent_id, user_id=user_id,
-                session_id=session_id, supports_vision=supports_vision,
-                on_tool_call=on_tool_call, full_reasoning_content=full_reasoning_content,
+                tc=tc,
+                api_messages=api_messages,
+                agent_id=agent_id,
+                user_id=user_id,
+                session_id=session_id,
+                supports_vision=supports_vision,
+                on_tool_call=on_tool_call,
+                full_reasoning_content=full_reasoning_content,
                 allowed_tool_names=allowed_tool_names,
                 tool_result_cache=tool_result_cache,
             )
@@ -701,11 +804,13 @@ async def call_llm(
                 tool_result_cache=tool_result_cache,
             )
             if tool_error:
-                api_messages.append(LLMMessage(
-                    role="tool",
-                    content=tool_error,
-                    tool_call_id=tc.get("id", ""),
-                ))
+                api_messages.append(
+                    LLMMessage(
+                        role="tool",
+                        content=tool_error,
+                        tool_call_id=tc.get("id", ""),
+                    )
+                )
 
     # Record tokens even on "too many rounds" exit
     if agent_id and _accumulated_usage.total_tokens > 0:
@@ -731,6 +836,8 @@ async def call_llm_with_failover(
     on_failover=None,
     cancel_event: asyncio.Event | None = None,
     skip_tools: bool = False,
+    parallel_tools_extra_readonly: set[str] | None = None,
+    tool_warning_mode: str = "default",
 ) -> str:
     """Call LLM with automatic failover support.
 
@@ -776,12 +883,18 @@ async def call_llm_with_failover(
         supports_vision=supports_vision,
         cancel_event=cancel_event,
         skip_tools=skip_tools,
+        parallel_tools_extra_readonly=parallel_tools_extra_readonly,
+        tool_warning_mode=tool_warning_mode,
     )
 
     # Check if we need to failover
     if not is_retryable_error(primary_result):
         # 区分正常回复和真正的非重试错误
-        is_error = primary_result.startswith("[LLM Error]") or primary_result.startswith("[LLM call error]") or primary_result.startswith("[Error]")
+        is_error = (
+            primary_result.startswith("[LLM Error]")
+            or primary_result.startswith("[LLM call error]")
+            or primary_result.startswith("[Error]")
+        )
         if not is_error:
             # 正常回复，不需要 failover，不打 WARNING
             return primary_result
@@ -841,9 +954,11 @@ async def call_llm_with_failover(
         on_tool_call=_fallback_on_tool_call,
         on_tool_delta=on_tool_delta,
         on_thinking=on_thinking,
-        supports_vision=getattr(fallback_model, 'supports_vision', False),
+        supports_vision=getattr(fallback_model, "supports_vision", False),
         cancel_event=cancel_event,
         skip_tools=skip_tools,
+        parallel_tools_extra_readonly=parallel_tools_extra_readonly,
+        tool_warning_mode=tool_warning_mode,
     )
 
     # Combine error messages if fallback also failed
@@ -856,6 +971,7 @@ async def call_llm_with_failover(
 # ═══════════════════════════════════════════════════════════════════════════════
 # High-level Agent Call Functions
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 async def call_agent_llm(
     db: AsyncSession,
@@ -922,7 +1038,7 @@ async def call_agent_llm(
             session_id=session_id,
             on_chunk=on_chunk,
             on_thinking=on_thinking,
-            supports_vision=supports_vision or getattr(primary_model, 'supports_vision', False),
+            supports_vision=supports_vision or getattr(primary_model, "supports_vision", False),
         )
         return reply
     except Exception as e:
@@ -991,10 +1107,7 @@ async def call_agent_llm_with_tools(
                 timeout=_get_model_timeout(model),
             )
 
-            max_tokens = get_max_tokens(
-                model.provider, model.model,
-                getattr(model, 'max_output_tokens', None)
-            )
+            max_tokens = get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None))
 
             # DeepSeek V4 思考模式参数
             _thinking_kwargs = _get_thinking_kwargs(model)
@@ -1039,25 +1152,31 @@ async def call_agent_llm_with_tools(
                             await record_token_usage(agent_id, _accumulated_usage)
                         await client.close()
                         return finish_call.content, True, tool_executed
-                    api_messages.append(LLMMessage(
+                    api_messages.append(
+                        LLMMessage(
+                            role="assistant",
+                            content=response.content or None,
+                            tool_calls=sanitized_tool_calls,
+                            reasoning_content=response.reasoning_content,
+                        )
+                    )
+                    api_messages.append(
+                        LLMMessage(
+                            role="tool",
+                            tool_call_id=finish_call.call_id,
+                            content=finish_call.error or "`finish` was invalid.",
+                        )
+                    )
+                    continue
+
+                api_messages.append(
+                    LLMMessage(
                         role="assistant",
                         content=response.content or None,
                         tool_calls=sanitized_tool_calls,
                         reasoning_content=response.reasoning_content,
-                    ))
-                    api_messages.append(LLMMessage(
-                        role="tool",
-                        tool_call_id=finish_call.call_id,
-                        content=finish_call.error or "`finish` was invalid.",
-                    ))
-                    continue
-
-                api_messages.append(LLMMessage(
-                    role="assistant",
-                    content=response.content or None,
-                    tool_calls=sanitized_tool_calls,
-                    reasoning_content=response.reasoning_content,
-                ))
+                    )
+                )
 
                 for tc in sanitized_tool_calls or []:
                     fn = tc["function"]
@@ -1070,20 +1189,25 @@ async def call_agent_llm_with_tools(
 
                     tool_executed = True
                     if tool_name not in allowed_tool_names:
-                        logger.warning(f"[call_agent_llm_with_tools] Blocked disabled tool call: {tool_name} agent_id={agent_id}")
+                        logger.warning(
+                            f"[call_agent_llm_with_tools] Blocked disabled tool call: {tool_name} agent_id={agent_id}"
+                        )
                         result = _tool_not_enabled_message(tool_name)
                     else:
                         result = await execute_tool(
-                            tool_name, args,
+                            tool_name,
+                            args,
                             agent_id=agent_id,
                             user_id=agent.creator_id,
                             session_id=session_id,
                         )
-                    api_messages.append(LLMMessage(
-                        role="tool",
-                        tool_call_id=tc["id"],
-                        content=str(result),
-                    ))
+                    api_messages.append(
+                        LLMMessage(
+                            role="tool",
+                            tool_call_id=tc["id"],
+                            content=str(result),
+                        )
+                    )
 
             if agent_id and _accumulated_usage.total_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_usage)
