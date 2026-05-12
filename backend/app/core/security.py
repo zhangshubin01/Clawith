@@ -77,11 +77,7 @@ def decrypt_data(ciphertext: str, key: str) -> str:
 
     Auto-detects the key-derivation from the ciphertext header:
     - 3-byte magic \\x01\\xca\\xfe: PBKDF2-HMAC-SHA256 (current)
-    - Single byte \\x01 (brief intermediate format): PBKDF2-HMAC-SHA256
-    - No header: legacy SHA-256 derivation
-
-    A 3-byte magic avoids the ~1/256 false-positive rate of a 1-byte
-    marker against legacy ciphertexts whose IV starts with \\x01.
+    - No magic: legacy SHA-256 derivation
     """
     if not ciphertext:
         return ""
@@ -93,13 +89,6 @@ def decrypt_data(ciphertext: str, key: str) -> str:
             aes_key = _derive_key_v1(key)
             iv = raw[3:19]
             encrypted = raw[19:]
-        elif raw[:1] == b"\x01" and len(raw) >= 33:
-            # Brief intermediate format (single \\x01, still PBKDF2).
-            # Require >= 33 bytes (1 + 16 IV + 16 ct min) to avoid
-            # misidentifying legacy payloads whose IV starts with \\x01.
-            aes_key = _derive_key_v1(key)
-            iv = raw[1:17]
-            encrypted = raw[17:]
         else:
             aes_key = _derive_key_legacy(key)
             iv = raw[:16]
