@@ -26,10 +26,10 @@ settings = get_settings()
 
 # Application-level salt for AES key derivation. This is NOT a secret --
 # it prevents rainbow-table attacks on the key-derivation step.
-# If rotated, re-encrypt all ciphertexts and bump _CURRENT_CIPHERTEXT_VERSION.
+# If rotated, re-encrypt all ciphertexts and bump _CIPHERTEXT_MAGIC.
 _APP_KEY_SALT = b"clawith::aes256::salt-v1"
 _PBKDF2_ITERATIONS = 100_000
-_CURRENT_CIPHERTEXT_VERSION = b"\x01"  # 1-byte version header for ciphertext
+_CIPHERTEXT_MAGIC = b"\x01\xca\xfe"  # 3-byte magic for PBKDF2 ciphertext (1/16M false-positive vs 1-byte's 1/256)
 
 # Bearer token scheme
 security = HTTPBearer(auto_error=False)
@@ -49,15 +49,11 @@ def encrypt_data(plaintext: str, key: str) -> str:
     """Encrypt a string using AES-256-CBC with the given key.
 
     Uses PBKDF2-HMAC-SHA256 (100k iterations) with an application salt for
-    key derivation. Ciphertext includes a 1-byte version header so
-    decrypt_data can auto-detect the derivation method.
-
-    Args:
-        plaintext: The string to encrypt
-        key: The encryption key
+    key derivation. Ciphertext includes a 3-byte magic prefix so
+    decrypt_data can reliably detect the derivation method.
 
     Returns:
-        Base64-encoded encrypted string: version_byte + IV + ciphertext
+        Base64-encoded encrypted string: 3-byte magic + IV + ciphertext
     """
     if not plaintext:
         return ""
@@ -71,27 +67,21 @@ def encrypt_data(plaintext: str, key: str) -> str:
     padded_data = pad(plaintext.encode("utf-8"), AES.block_size)
     encrypted = cipher.encrypt(padded_data)
 
-    # Prepend version byte so decrypt_data can identify the derivation method
-    result = base64.b64encode(_CURRENT_CIPHERTEXT_VERSION + iv + encrypted).decode("utf-8")
+    # Prepend 3-byte magic so decrypt_data can identify the derivation method reliably
+    result = base64.b64encode(_CIPHERTEXT_MAGIC + iv + encrypted).decode("utf-8")
     return result
 
 
 def decrypt_data(ciphertext: str, key: str) -> str:
     """Decrypt a string encrypted with encrypt_data.
 
-    Auto-detects the key-derivation method from the ciphertext version byte:
-    - Byte \\x01: PBKDF2-HMAC-SHA256 (current)
-    - No version byte (32 bytes raw = IV+ct): legacy SHA-256 derivation
+    Auto-detects the key-derivation from the ciphertext header:
+    - 3-byte magic \\x01\\xca\\xfe: PBKDF2-HMAC-SHA256 (current)
+    - Single byte \\x01 (brief intermediate format): PBKDF2-HMAC-SHA256
+    - No header: legacy SHA-256 derivation
 
-    Args:
-        ciphertext: Base64-encoded encrypted string
-        key: The encryption key (must match the key used for encryption)
-
-    Returns:
-        Decrypted plaintext string
-
-    Raises:
-        ValueError: If decryption fails (wrong key, corrupted data, etc.)
+    A 3-byte magic avoids the ~1/256 false-positive rate of a 1-byte
+    marker against legacy ciphertexts whose IV starts with \\x01.
     """
     if not ciphertext:
         return ""
@@ -99,14 +89,18 @@ def decrypt_data(ciphertext: str, key: str) -> str:
     try:
         raw = base64.b64decode(ciphertext)
 
-        # Detect version: if first byte is a version marker, use the
-        # corresponding key derivation; otherwise fall back to legacy SHA-256.
-        if raw[:1] == _CURRENT_CIPHERTEXT_VERSION:
+        if raw[:3] == _CIPHERTEXT_MAGIC:
+            aes_key = _derive_key_v1(key)
+            iv = raw[3:19]
+            encrypted = raw[19:]
+        elif raw[:1] == b"\x01" and len(raw) >= 33:
+            # Brief intermediate format (single \\x01, still PBKDF2).
+            # Require >= 33 bytes (1 + 16 IV + 16 ct min) to avoid
+            # misidentifying legacy payloads whose IV starts with \\x01.
             aes_key = _derive_key_v1(key)
             iv = raw[1:17]
             encrypted = raw[17:]
         else:
-            # Legacy format: no version header, IV starts at byte 0
             aes_key = _derive_key_legacy(key)
             iv = raw[:16]
             encrypted = raw[16:]
