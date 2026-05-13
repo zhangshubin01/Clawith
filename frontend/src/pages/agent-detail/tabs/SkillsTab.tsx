@@ -13,6 +13,7 @@ type SafeDisplayIcon = (icon?: string | null, fallback?: ReactNode) => ReactNode
 
 interface Props {
     agentId: string;
+    canManage: boolean;
     safeDisplayIcon: SafeDisplayIcon;
     showAgentClawhub: boolean;
     setShowAgentClawhub: Dispatch<SetStateAction<boolean>>;
@@ -40,6 +41,7 @@ interface Props {
 export default function SkillsTab(props: Props) {
     const {
         agentId,
+        canManage,
         safeDisplayIcon,
         showAgentClawhub,
         setShowAgentClawhub,
@@ -124,7 +126,7 @@ export default function SkillsTab(props: Props) {
                 </div>
             </div>
 
-            <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: true, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} />
+            <FileBrowser api={adapter} rootPath="skills" features={{ newFile: true, edit: true, delete: canManage, newFolder: true, upload: true, directoryNavigation: true }} title={t('agent.skills.skillFiles')} />
 
             {showAgentClawhub && (
                 <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowAgentClawhub(false)}>

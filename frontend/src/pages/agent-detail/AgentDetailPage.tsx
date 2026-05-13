@@ -5520,6 +5520,7 @@ export default function AgentDetailPage() {
                     activeTab === 'skills' && id && (
                         <SkillsTab
                             agentId={id}
+                            canManage={canManage}
                             safeDisplayIcon={safeDisplayIcon}
                             showAgentClawhub={showAgentClawhub}
                             setShowAgentClawhub={setShowAgentClawhub}
@@ -5564,7 +5565,7 @@ export default function AgentDetailPage() {
                             upload: (file, path, onProgress) => fileApi.upload(id!, file, path + '/', onProgress),
                             downloadUrl: (p) => fileApi.downloadUrl(id!, p),
                         };
-                        return <FileBrowser api={adapter} rootPath="workspace" features={{ upload: true, newFile: true, newFolder: true, edit: true, delete: true, directoryNavigation: true }} />;
+                        return <FileBrowser api={adapter} rootPath="workspace" features={{ upload: true, newFile: true, newFolder: true, edit: true, delete: canManage, directoryNavigation: true }} />;
                     })()
                 }
 
