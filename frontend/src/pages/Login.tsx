@@ -8,9 +8,8 @@ import {
     IconAlertTriangle,
     IconArrowRight,
     IconCheck,
-    IconWorld,
 } from '@tabler/icons-react';
-import { Plate, OrreryPlate } from '../components/atlas';
+import { AtlasFrame, CompassPlate } from '../components/atlas';
 
 export default function Login() {
     const { t, i18n } = useTranslation();
@@ -403,34 +402,29 @@ export default function Login() {
     const shouldShowGlobalOAuth = !tenant?.sso_enabled && !isRegister && !showVerification;
 
     return (
-        <div className="login-page login-page--atlas">
-            {/* ── Left: Branding Panel ── */}
-            <div className="login-hero">
-                <div className="login-hero-mark" aria-hidden="true">
-                    <img src="/logo-black.png" className="login-hero-mark-logo" alt="" />
-                    <span className="login-hero-mark-name">Clawith</span>
-                    <span className="login-hero-mark-divider" />
-                    <span className="login-hero-mark-tag">{t('login.hero.mark')}</span>
+        <AtlasFrame onToggleLang={toggleLang}>
+            <div className="atlas-screen-split atlas-login-split">
+                {/* ── Left: Hero with compass ── */}
+                <div className="atlas-screen-plate atlas-login-hero">
+                    <div className="atlas-login-compass">
+                        <CompassPlate size={520} />
+                    </div>
+                    <div className="atlas-login-welcome">
+                        <p className="atlas-mono">{isZh ? '欢迎回来' : 'WELCOME BACK'}</p>
+                        <h1 className="atlas-h1">
+                            {isZh ? (
+                                <>欢迎，<em>创始人。</em></>
+                            ) : (
+                                <>{t('login.hero.welcome')} <em>{t('login.hero.founder')}.</em></>
+                            )}
+                        </h1>
+                        <p className="atlas-body atlas-body--muted">{t('login.hero.description')}</p>
+                    </div>
                 </div>
-                <div className="login-hero-content">
-                    <Plate caption="FIG. I · COSMOGRAPHY OF AGENCY · MMXXVI">
-                        <OrreryPlate size={420} />
-                    </Plate>
-                </div>
-            </div>
 
-            {/* ── Right: Form Panel ── */}
-            <div className="login-form-panel">
-                <div className="login-form-wrapper">
-                    <button
-                        type="button"
-                        className="login-language-switcher"
-                        onClick={toggleLang}
-                        aria-label={t('common.switchLanguage', 'Switch language')}
-                        title={t('common.switchLanguage', 'Switch language')}
-                    >
-                        <span className="login-language-switcher-icon" aria-hidden="true"><IconWorld size={18} stroke={1.8} /></span>
-                    </button>
+                {/* ── Right: Form Panel ── */}
+                <div className="atlas-screen-form atlas-login-form-pane">
+                    <div className="atlas-login-form-wrapper">
                     {checkingEmail ? (
                         // While resolving invitation email, show a minimal loading indicator
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '200px', gap: '16px' }}>
@@ -866,8 +860,9 @@ export default function Login() {
                     )}
                     </>
                     )}
+                    </div>
                 </div>
             </div>
-        </div>
+        </AtlasFrame>
     );
 }
