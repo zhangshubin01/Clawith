@@ -2144,7 +2144,6 @@ class JSONRPCRouter:
             # 保持在 200。这里解析字符串以恢复真实状态码，用于区分 429 配额耗尽 vs
             # 500 内部错误，使 chat/finish 的 finish_reason 能正确反映错误类型。
             if isinstance(reply, str) and reply.startswith("[LLM Error]"):
-                import re
                 _m = re.search(r'HTTP (\d{3})', reply)
                 error_status_code = int(_m.group(1)) if _m else 500
                 logger.info(
