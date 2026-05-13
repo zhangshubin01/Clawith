@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { IconArrowLeft, IconArrowRight, IconCheck, IconWorld } from '@tabler/icons-react';
+import { IconArrowLeft, IconArrowRight, IconWorld } from '@tabler/icons-react';
 import { onboardingApi } from '../services/api';
 import { useAuthStore } from '../stores';
 
@@ -110,9 +110,6 @@ export default function Onboarding() {
                     <button className="onboarding-back" onClick={() => navigate(-1)}>
                         <IconArrowLeft size={15} /> {isZh ? '返回' : 'Back'}
                     </button>
-                    <button className="onboarding-skip" onClick={createAssistant} disabled={loading}>
-                        {isZh ? '暂时跳过' : 'Skip for now'}
-                    </button>
                     <div className="assistant-stage">
                         <div className="assistant-spotlight" aria-hidden="true">
                             <div className="assistant-light-beam" />
@@ -122,9 +119,10 @@ export default function Onboarding() {
                             </div>
                         </div>
                         <div className="assistant-panel">
-                            <div className="onboarding-kicker onboarding-kicker--dark">{isZh ? '第 2 幕 · 雇佣第一位员工' : 'Act 2 · Hire the first employee'}</div>
-                            <h1>{isZh ? '有人来应聘你的第一位私人助理。' : 'Someone is here to become your first private assistant.'}</h1>
-                            <p>{isZh ? 'ta 只向你汇报，帮你打理日常。先给 ta 起个名字。' : 'They report only to you and help with daily coordination. Give them a name first.'}</p>
+                            <h1>{isZh ? '见见你的第一位员工。' : 'Meet your first employee.'}</h1>
+                            <p>{isZh
+                                ? '你的私人助理 —— 打理日程、备忘、和你不愿亲自处理的事。'
+                                : "Your personal assistant — for your calendar, your memory, and the things you'd rather hand off."}</p>
                             {error && <div className="onboarding-error">{error}</div>}
                             <input
                                 className="assistant-name-input"
@@ -133,7 +131,7 @@ export default function Onboarding() {
                                 placeholder={isZh ? '助理的名字' : 'Assistant name'}
                             />
                             <button className="assistant-expand" type="button" onClick={() => setExpanded(v => !v)}>
-                                {isZh ? '进阶设置 · 性格 · 办事风格 · 禁忌' : 'Advanced · personality · work style · boundaries'}
+                                {isZh ? '定制你的助理' : 'Customize your assistant'}
                                 <span>{expanded ? (isZh ? '收起' : 'Collapse') : (isZh ? '展开' : 'Expand')}</span>
                             </button>
                             {expanded && (
@@ -169,6 +167,9 @@ export default function Onboarding() {
                                 <button className="onboarding-primary-btn" onClick={createAssistant} disabled={loading || !assistantName.trim()}>
                                     {loading ? <span className="login-spinner" /> : (isZh ? '欢迎入职' : 'Welcome aboard')} <IconArrowRight size={16} />
                                 </button>
+                                <button className="assistant-footer-skip" type="button" onClick={createAssistant} disabled={loading}>
+                                    {isZh ? '暂时跳过' : 'Skip for now'}
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -176,25 +177,40 @@ export default function Onboarding() {
             )}
 
             {step === 'opening' && (
-                <div className="opening-stage">
-                    <div className="opening-confetti" aria-hidden="true">
-                        <span /><span /><span /><span /><span />
-                    </div>
-                    <div className="opening-cards" aria-hidden="true">
-                        <div>灵</div>
-                        <div>{isZh ? '你' : 'You'}</div>
-                        <div>?</div>
-                    </div>
-                    <div className="onboarding-kicker">{isZh ? '第 3 幕 · 灯光亮起' : 'Act 3 · Lights on'}</div>
-                    <h1>{isZh ? '公司正式开业。' : 'The company is open.'}</h1>
-                    <p>{isZh ? '你的第一位员工已就位。先带你看一眼办公室。' : 'Your first employee is in place. Let us take a quick look around the office.'}</p>
+                <div className="opening-stage opening-stage--minimal">
+                    <svg className="opening-newstar" viewBox="0 0 100 100" aria-hidden="true">
+                        <defs>
+                            <radialGradient id="opening-halo" cx="50%" cy="50%" r="50%">
+                                <stop offset="0%" stopColor="#111116" stopOpacity="0.95" />
+                                <stop offset="18%" stopColor="#111116" stopOpacity="0.5" />
+                                <stop offset="50%" stopColor="#3a3a55" stopOpacity="0.14" />
+                                <stop offset="100%" stopColor="#3a3a55" stopOpacity="0" />
+                            </radialGradient>
+                            <linearGradient id="opening-ray" x1="0%" y1="50%" x2="100%" y2="50%">
+                                <stop offset="0%" stopColor="#111116" stopOpacity="0" />
+                                <stop offset="50%" stopColor="#111116" stopOpacity="0.85" />
+                                <stop offset="100%" stopColor="#111116" stopOpacity="0" />
+                            </linearGradient>
+                            <filter id="opening-shimmer" x="-30%" y="-30%" width="160%" height="160%">
+                                <feTurbulence type="fractalNoise" baseFrequency="0.45" numOctaves="2" seed="11" result="noise" />
+                                <feDisplacementMap in="SourceGraphic" in2="noise" scale="3" />
+                            </filter>
+                        </defs>
+                        <g transform="translate(50 50)">
+                            <circle r="26" fill="url(#opening-halo)" filter="url(#opening-shimmer)" opacity="0.3" />
+                            <circle r="9" fill="url(#opening-halo)" filter="url(#opening-shimmer)" opacity="0.55" />
+                            <rect x="-26" y="-0.22" width="52" height="0.45" fill="url(#opening-ray)" opacity="0.7" />
+                            <rect x="-26" y="-0.22" width="52" height="0.45" fill="url(#opening-ray)" opacity="0.7" transform="rotate(90)" />
+                            <rect x="-14" y="-0.16" width="28" height="0.3" fill="url(#opening-ray)" opacity="0.3" transform="rotate(38)" />
+                            <rect x="-14" y="-0.16" width="28" height="0.3" fill="url(#opening-ray)" opacity="0.3" transform="rotate(-38)" />
+                            <circle r="1.6" fill="#111116" />
+                        </g>
+                    </svg>
+                    <h1>{isZh ? '灯，亮了。' : 'The lights are on.'}</h1>
                     {error && <div className="onboarding-error">{error}</div>}
                     <button className="onboarding-primary-btn" onClick={enterOffice} disabled={!assistantId}>
                         {isZh ? '进入办公室' : 'Enter office'} <IconArrowRight size={16} />
                     </button>
-                    <div className="opening-check">
-                        <IconCheck size={15} /> {assistantName || (isZh ? '私人助理' : 'Private Assistant')} {isZh ? '已入职' : 'is ready'}
-                    </div>
                 </div>
             )}
         </div>
