@@ -132,6 +132,14 @@ export default function CompanySetup() {
             footerRight="MMXXVI"
         >
             <StarField density="medium" seed={17} />
+            <svg
+                className="atlas-name-bg-circle"
+                viewBox="0 0 800 800"
+                aria-hidden="true"
+            >
+                <circle cx="400" cy="400" r="320" fill="none" stroke="currentColor" strokeWidth="0.5" />
+                <circle cx="400" cy="400" r="220" fill="none" stroke="currentColor" strokeWidth="0.5" strokeDasharray="2 4" />
+            </svg>
             <div className="atlas-screen-center atlas-screen-pad">
                 <div className="atlas-name-stack">
                     <p className="atlas-tag">— {isZh ? '为你的起点命名' : 'DESIGNATE YOUR ORIGIN'}</p>

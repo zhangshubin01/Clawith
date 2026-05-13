@@ -6,20 +6,19 @@ interface Props {
 /** Tiny scattered "stars" inside the compass rings — fixed positions for stability */
 const COMPASS_STARS: Array<[number, number, number, number]> = [
     // [x, y, r, opacity]
-    [60, -110, 1.0, 0.55],
-    [200, -50, 1.2, 0.7],
-    [-110, 90, 0.9, 0.5],
-    [-30, 145, 1.1, 0.6],
-    [120, 175, 0.9, 0.55],
-    [-180, -20, 0.8, 0.45],
+    [60, -110, 1.1, 0.62],
+    [205, -55, 1.3, 0.72],
+    [-115, 95, 0.9, 0.5],
+    [-30, 150, 1.1, 0.6],
+    [125, 175, 0.95, 0.55],
 ];
 
-export default function CompassPlate({ size = 480, className }: Props) {
+export default function CompassPlate({ size = 620, className }: Props) {
     const cls = ['atlas-illustration', className].filter(Boolean).join(' ');
-    // Concentric ring radii
-    const rings = [240, 180, 120, 60];
+    // Five concentric ring radii — outermost biggest, scaled to fill the canvas
+    const rings = [270, 220, 165, 110, 55];
     const rOuter = rings[0];
-    const labelDist = 264;
+    const labelDist = rOuter + 22;
 
     return (
         <svg
@@ -33,23 +32,30 @@ export default function CompassPlate({ size = 480, className }: Props) {
             aria-hidden="true"
         >
             <g transform="translate(300 300)">
-                {/* Concentric rings */}
+                {/* Concentric rings — outer is faintest, inner gradually stronger */}
                 {rings.map((r, i) => (
-                    <circle key={i} cx="0" cy="0" r={r} opacity={i === 0 ? 0.45 : 0.32} />
+                    <circle
+                        key={i}
+                        cx="0"
+                        cy="0"
+                        r={r}
+                        opacity={i === 0 ? 0.42 : 0.3 + i * 0.04}
+                    />
                 ))}
 
-                {/* Cardinal axes — short segments at the rim */}
-                <line x1={-rOuter - 12} y1="0" x2={-rOuter + 6} y2="0" opacity="0.4" />
-                <line x1={rOuter - 6} y1="0" x2={rOuter + 12} y2="0" opacity="0.4" />
-                <line x1="0" y1={-rOuter - 12} x2="0" y2={-rOuter + 6} opacity="0.4" />
-                <line x1="0" y1={rOuter - 6} x2="0" y2={rOuter + 12} opacity="0.4" />
+                {/* Cardinal axis hairlines that cross the entire chart */}
+                <line x1={-rOuter} y1="0" x2={rOuter} y2="0" opacity="0.18" />
+                <line x1="0" y1={-rOuter} x2="0" y2={rOuter} opacity="0.18" />
 
-                {/* Tick marks every 15° on the outer ring (skip cardinal positions) */}
-                {Array.from({ length: 24 }, (_, i) => {
-                    if (i % 6 === 0) return null; // 0,90,180,270 = cardinals
-                    const a = (i * 15 * Math.PI) / 180;
-                    const r1 = rOuter - 4;
-                    const r2 = rOuter + 4;
+                {/* Dense tick marks on the outer ring — every 3°, longer at every 15°
+                    (skipping the cardinal positions, which get labels) */}
+                {Array.from({ length: 120 }, (_, i) => {
+                    const deg = i * 3;
+                    if (deg % 90 === 0) return null; // skip N/S/E/W
+                    const a = (deg * Math.PI) / 180;
+                    const isMajor = deg % 15 === 0;
+                    const r1 = rOuter;
+                    const r2 = rOuter + (isMajor ? 8 : 4);
                     return (
                         <line
                             key={i}
@@ -57,12 +63,12 @@ export default function CompassPlate({ size = 480, className }: Props) {
                             y1={r1 * Math.sin(a)}
                             x2={r2 * Math.cos(a)}
                             y2={r2 * Math.sin(a)}
-                            opacity="0.35"
+                            opacity={isMajor ? 0.55 : 0.32}
                         />
                     );
                 })}
 
-                {/* Scattered stars */}
+                {/* Scattered stars (faint dots inside the rings) */}
                 {COMPASS_STARS.map(([x, y, r, o], i) => (
                     <circle key={i} cx={x} cy={y} r={r} fill="currentColor" stroke="none" opacity={o} />
                 ))}
@@ -86,7 +92,7 @@ export default function CompassPlate({ size = 480, className }: Props) {
                     <text x={-labelDist} y="0" textAnchor="end" dominantBaseline="middle">W</text>
                 </g>
 
-                {/* Origin coordinate */}
+                {/* Origin coordinate next to center marker */}
                 <g
                     fill="currentColor"
                     stroke="none"
