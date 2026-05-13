@@ -1626,41 +1626,43 @@ class JSONRPCRouter:
                     len(inmem_records),
                     session_id,
                 )
-                # 移除 DB 注入的旧上下文（如有），以内存最新记录替换，避免丢失未持久化的工具调用
-                message_history = [
-                    m
-                    for m in message_history
-                    if not (m.get("role") == "system" and "[会话上下文]" in m.get("content", ""))
-                ]
+                # 内存有最新工具调用时替换 DB 注入的旧上下文，避免丢失 DB 持久化窗口内的最新调用
                 if inmem_records:
+                    # 移除 DB 注入的旧上下文
+                    message_history = [
+                        m
+                        for m in message_history
+                        if not (m.get("role") == "system" and "[会话上下文]" in m.get("content", ""))
+                    ]
                     _t_ctx_start = time.monotonic()
                     ctx_msg = _format_tool_context_message(inmem_records)
                     _t_ctx_elapsed = time.monotonic() - _t_ctx_start
                     if ctx_msg:
                         message_history.insert(0, ctx_msg)
                         logger.info(
-                            "[LSP4J] tool_call context injected from memory: session_id={} tool_count={}",
+                            "[LSP4J-CTX] tool_call context injected from memory: session={} count={}"
+                            " formatted_len={}",
                             session_id,
                             len(inmem_records),
-                        )
-                        logger.info(
-                            "[LSP4J-PERF] Memory context format: session={} elapsed={:.3f}s ctx_len={}",
-                            session_id,
-                            _t_ctx_elapsed,
                             len(ctx_msg.get("content", "")),
                         )
                     else:
                         logger.info(
-                            "[LSP4J-CTX] chat/ask: memory context NOT injected (no useful records after formatting), "
-                            "session={} tool_count={}",
+                            "[LSP4J-CTX] memory context empty after formatting: session={} count={}",
                             session_id,
                             len(inmem_records),
                         )
-            else:
-                logger.debug(
-                    "[LSP4J-CTX] chat/ask: no in-memory tool_call records for session={}",
-                    session_id,
-                )
+                else:
+                    # 无内存记录时保留 DB 注入的上下文
+                    _db_ctx_count = sum(
+                        1 for m in message_history
+                        if m.get("role") == "system" and "[会话上下文]" in m.get("content", "")
+                    )
+                    logger.info(
+                        "[LSP4J-CTX] using DB tool context: session={} ctx_msg_count={}",
+                        session_id,
+                        _db_ctx_count,
+                    )
             # 历史消息加载完成
             history_msgs = message_history or []
             history_roles = {}
@@ -2256,6 +2258,18 @@ class JSONRPCRouter:
             current_lsp4j_message_history.set(message_history)
             _cache_key = f"{self._user_id}:{session_id}"
             _SESSION_MESSAGE_CACHE[_cache_key] = (time.monotonic(), list(message_history))
+
+            # 清除本轮已持久化的工具调用记录，避免下一轮上下文重复注入
+            # 工具调用已通过 _persist_lsp4j_tool_call 单独写入 DB，
+            # 下次加载时从 DB 恢复即可，内存无需保留。
+            if session_id and session_id in self._tool_call_history_by_session:
+                _cleared_count = len(self._tool_call_history_by_session[session_id])
+                self._tool_call_history_by_session[session_id].clear()
+                logger.info(
+                    "[LSP4J-CTX] 已清除 session={} 内存工具调用记录: count={}",
+                    session_id,
+                    _cleared_count,
+                )
 
             # ★ 刷新缓冲区，确保所有累积的文本都已发送
             _t_flush_start = time.monotonic()
@@ -5627,7 +5641,7 @@ async def _persist_lsp4j_chat_turn(
             try:
                 sid_uuid = uuid.UUID(session_id)
             except ValueError:
-                logger.debug("LSP4J: persist 跳过非 UUID session_id={}", session_id)
+                logger.info("[LSP4J] persist 跳过非 UUID session_id={}", session_id)
                 return
 
             # 查找或创建 ChatSession
@@ -5647,8 +5661,12 @@ async def _persist_lsp4j_chat_turn(
                     last_message_at=now,
                 )
                 db.add(sess)
-                # TODO(P2-4): ChatSession 还有 project_path / current_file / open_files 字段，
-                # 待插件未来发送对应数据后可直接利用，当前不增加死代码
+                logger.info(
+                    "[LSP4J] ChatSession created: session_id={} agent_id={} title={}",
+                    session_id,
+                    agent_id,
+                    sess.title,
+                )
             else:
                 sess.last_message_at = now
                 # 同步 agent_id：同一 session 可能在不同 agent 间共享（同一用户切换 Agent），
@@ -5693,12 +5711,12 @@ async def _persist_lsp4j_chat_turn(
                 )
 
             await db.commit()
-            # 持久化成功
-            logger.debug(
-                "[LSP4J] persist success: session_id={} user_len={} reply_len={}",
+            logger.info(
+                "[LSP4J] persist success: session_id={} user_len={} reply_len={} msg_count={}",
                 session_id,
                 len(user_text),
                 len(reply_text),
+                (1 if user_text else 0) + (1 if reply_text else 0),
             )
 
             # 通知 Clawith 前端 WebSocket 刷新 Web UI
