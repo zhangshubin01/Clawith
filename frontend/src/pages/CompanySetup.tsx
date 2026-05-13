@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { IconAlertTriangle, IconWorld, IconX } from '@tabler/icons-react';
 import { useAuthStore } from '../stores';
 import { tenantApi, authApi } from '../services/api';
-import CosmicBackground from '../components/CosmicBackground';
+import { LoneStar, HairlineInput, Button, MonoLabel } from '../components/atlas';
 
 export default function CompanySetup() {
     const { t, i18n } = useTranslation();
@@ -121,169 +121,110 @@ export default function CompanySetup() {
         return null;
     }
 
+    const isZh = i18n.language.startsWith('zh');
+
     return (
-        <div className="company-setup-page company-setup-page--dark">
-            {/* Particle starfield background */}
-            <CosmicBackground />
+        <div className="company-setup-page company-setup-page--atlas">
+            <LoneStar className="company-setup-bg" />
 
-            {/* The "new company" — pulsing star, positioned in upper-right */}
-            <svg
-                className="company-setup-newstar"
-                viewBox="0 0 100 100"
-                aria-hidden="true"
-            >
-                <defs>
-                    <radialGradient id="newstar-halo" cx="50%" cy="50%" r="50%">
-                        <stop offset="0%" stopColor="#ffffff" stopOpacity="1" />
-                        <stop offset="18%" stopColor="#ffffff" stopOpacity="0.55" />
-                        <stop offset="50%" stopColor="#cdd8ff" stopOpacity="0.14" />
-                        <stop offset="100%" stopColor="#a8b8ff" stopOpacity="0" />
-                    </radialGradient>
-                    <linearGradient id="newstar-ray" x1="0%" y1="50%" x2="100%" y2="50%">
-                        <stop offset="0%" stopColor="#ffffff" stopOpacity="0" />
-                        <stop offset="50%" stopColor="#ffffff" stopOpacity="1" />
-                        <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-                    </linearGradient>
-                    <filter id="newstar-shimmer" x="-30%" y="-30%" width="160%" height="160%">
-                        <feTurbulence type="fractalNoise" baseFrequency="0.45" numOctaves="2" seed="7" result="noise" />
-                        <feDisplacementMap in="SourceGraphic" in2="noise" scale="3" />
-                    </filter>
-                </defs>
-
-                <g transform="translate(50 50)">
-                    {/* outer hazy halo with irregular edges */}
-                    <circle r="26" fill="url(#newstar-halo)" filter="url(#newstar-shimmer)" opacity="0.32">
-                        <animate attributeName="opacity" values="0.28;0.36;0.28" dur="4.7s" repeatCount="indefinite" />
-                    </circle>
-
-                    {/* mid glow — slightly irregular */}
-                    <circle r="9" fill="url(#newstar-halo)" filter="url(#newstar-shimmer)" opacity="0.5">
-                        <animate attributeName="opacity" values="0.42;0.56;0.46" dur="3.2s" repeatCount="indefinite" />
-                    </circle>
-
-                    {/* diffraction spikes — short, soft */}
-                    <rect x="-26" y="-0.22" width="52" height="0.45" fill="url(#newstar-ray)" opacity="0.55">
-                        <animate attributeName="opacity" values="0.42;0.62;0.46" dur="5.3s" repeatCount="indefinite" />
-                    </rect>
-                    <rect x="-26" y="-0.22" width="52" height="0.45" fill="url(#newstar-ray)" opacity="0.55" transform="rotate(90)">
-                        <animate attributeName="opacity" values="0.46;0.6;0.42" dur="4.1s" repeatCount="indefinite" />
-                    </rect>
-
-                    {/* very faint diagonal hints */}
-                    <rect x="-14" y="-0.16" width="28" height="0.3" fill="url(#newstar-ray)" opacity="0.22" transform="rotate(38)" />
-                    <rect x="-14" y="-0.16" width="28" height="0.3" fill="url(#newstar-ray)" opacity="0.22" transform="rotate(-38)" />
-
-                    {/* tiny core */}
-                    <circle r="1.4" fill="#ffffff">
-                        <animate attributeName="opacity" values="0.88;1;0.88" dur="3.7s" repeatCount="indefinite" />
-                    </circle>
-                </g>
-            </svg>
-
-            {/* Language Switcher */}
             <button type="button" className="company-setup-lang-switcher" onClick={toggleLang} aria-label="Toggle language">
                 <IconWorld size={18} stroke={1.8} />
             </button>
 
             <div className="company-setup-container">
-                <div className="company-setup-header company-setup-header--genesis">
-                    <h1>{i18n.language.startsWith('zh')
-                        ? '开始吧。给你的公司起个名字。'
-                        : "Let's begin. Name your Company."}</h1>
-                </div>
+                <h1 className="atlas-display company-setup-title">
+                    {isZh ? '开始吧。给你的公司起个名字。' : "Let's begin. Name your Company."}
+                </h1>
 
                 {error && (
-                    <div className="login-error" style={{ marginBottom: 16 }}>
-                        <span><IconAlertTriangle size={14} stroke={1.8} /></span> {error}
+                    <div className="atlas-error">
+                        <IconAlertTriangle size={14} stroke={1.8} /> {error}
                     </div>
                 )}
 
                 {allowCreate ? (
-                    <form className="company-name-form" onSubmit={handleCreate}>
-                        <input
+                    <form className="atlas-form" onSubmit={handleCreate}>
+                        <HairlineInput
                             value={companyName}
                             onChange={(e) => setCompanyName(e.target.value)}
                             required
                             autoFocus
-                            placeholder={i18n.language.startsWith('zh') ? '在这里写下名字' : 'Write the name here'}
+                            placeholder={isZh ? '在这里写下名字' : 'Write the name here'}
+                            serif="md"
                         />
-                        <button className="onboarding-primary-btn" type="submit" disabled={loading || !companyName.trim()}>
-                            {loading ? <span className="login-spinner" /> : (i18n.language.startsWith('zh') ? '继续' : 'Continue')}
-                        </button>
+                        <MonoLabel>{isZh ? '名称 · 必填' : 'DESIGNATION · REQUIRED'}</MonoLabel>
+                        <Button variant="outline" type="submit" disabled={loading || !companyName.trim()}>
+                            {loading ? '…' : (isZh ? '继续 →' : 'CONTINUE →')}
+                        </Button>
                     </form>
                 ) : (
-                    <form className="company-name-form" onSubmit={handleJoin}>
-                        <input
+                    <form className="atlas-form" onSubmit={handleJoin}>
+                        <HairlineInput
                             value={inviteCode}
                             onChange={(e) => setInviteCode(e.target.value)}
                             required
                             autoFocus
                             placeholder={t('companySetup.inviteCodePlaceholder', 'e.g. ABC12345')}
-                            style={{ textTransform: 'uppercase', letterSpacing: '2px', fontFamily: 'monospace' }}
+                            style={{ textTransform: 'uppercase', letterSpacing: '2px', fontFamily: 'var(--font-mono)' }}
                         />
-                        <button className="onboarding-primary-btn" type="submit" disabled={loading || !inviteCode.trim()}>
-                            {loading ? <span className="login-spinner" /> : t('companySetup.joinBtn', 'Join Company')}
-                        </button>
+                        <MonoLabel>{isZh ? '邀请码 · 必填' : 'INVITATION CODE · REQUIRED'}</MonoLabel>
+                        <Button variant="primary" type="submit" disabled={loading || !inviteCode.trim()}>
+                            {loading ? '…' : t('companySetup.joinBtn', 'JOIN COMPANY')}
+                        </Button>
                     </form>
                 )}
 
                 {allowCreate && (
                     <button
                         type="button"
-                        className="company-setup-join-link"
+                        className="atlas-mono atlas-text-link company-setup-join-link"
                         onClick={() => { setJoinError(''); setShowJoinModal(true); }}
                     >
-                        {i18n.language.startsWith('zh') ? '加入已有团队？' : 'Joining an existing team?'}
+                        {isZh ? '加入已有团队？' : 'Joining an existing team?'}
                     </button>
                 )}
             </div>
 
             {showJoinModal && (
                 <div
-                    className="join-modal-overlay"
+                    className="atlas-modal-overlay"
                     onClick={() => !loading && setShowJoinModal(false)}
                 >
-                    <div className="join-modal" onClick={(e) => e.stopPropagation()}>
+                    <div className="atlas-modal" onClick={(e) => e.stopPropagation()}>
                         <button
                             type="button"
-                            className="join-modal-close"
+                            className="atlas-modal-close"
                             onClick={() => setShowJoinModal(false)}
                             disabled={loading}
                             aria-label="Close"
                         >
                             <IconX size={18} stroke={1.8} />
                         </button>
-                        <h2 className="join-modal-title">
-                            {i18n.language.startsWith('zh') ? '加入已有团队' : 'Join an existing team'}
+                        <h2 className="atlas-h1 atlas-modal-title">
+                            {isZh ? '加入已有团队' : 'Join an existing team'}
                         </h2>
-                        <p className="join-modal-desc">
-                            {i18n.language.startsWith('zh')
+                        <p className="atlas-body atlas-body--muted atlas-modal-desc">
+                            {isZh
                                 ? '输入团队管理员发给你的邀请码。'
                                 : 'Enter the invitation code your team admin shared with you.'}
                         </p>
-                        <form onSubmit={handleJoin} className="join-modal-form">
-                            <input
+                        <form onSubmit={handleJoin} className="atlas-form">
+                            <HairlineInput
                                 value={inviteCode}
                                 onChange={(e) => setInviteCode(e.target.value)}
                                 required
                                 autoFocus
                                 placeholder={t('companySetup.inviteCodePlaceholder', 'e.g. ABC12345')}
-                                className="join-modal-input"
+                                style={{ textTransform: 'uppercase', letterSpacing: '2px', fontFamily: 'var(--font-mono)' }}
                             />
                             {joinError && (
-                                <div className="login-error" style={{ marginTop: 4 }}>
-                                    <span><IconAlertTriangle size={14} stroke={1.8} /></span> {joinError}
+                                <div className="atlas-error">
+                                    <IconAlertTriangle size={14} stroke={1.8} /> {joinError}
                                 </div>
                             )}
-                            <button
-                                className="onboarding-primary-btn"
-                                type="submit"
-                                disabled={loading || !inviteCode.trim()}
-                            >
-                                {loading
-                                    ? <span className="login-spinner" />
-                                    : (i18n.language.startsWith('zh') ? '加入' : 'Join')}
-                            </button>
+                            <Button variant="primary" type="submit" disabled={loading || !inviteCode.trim()}>
+                                {loading ? '…' : (isZh ? '加入' : 'JOIN')}
+                            </Button>
                         </form>
                     </div>
                 </div>

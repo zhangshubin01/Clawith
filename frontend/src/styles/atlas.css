@@ -1,0 +1,794 @@
+/* ═══════════════════════════════════════════════════════
+   Atlas design system — onboarding screens only
+   Reuses existing color tokens; adds type/stroke/radius.
+   Light theme = "Paper Atlas". Dark theme = "Night Atlas".
+   ═══════════════════════════════════════════════════════ */
+
+:root {
+  --font-serif: 'Cormorant Garamond', Georgia, 'Times New Roman', serif;
+  --atlas-radius: 2px;
+}
+
+/* Stroke tokens — driven by existing color vars so they flip with theme */
+:root,
+[data-theme="dark"],
+[data-theme="light"] {
+  --hairline: 0.5px solid var(--text-primary);
+  --hairline-muted: 0.5px solid var(--border-subtle);
+}
+
+/* ─── Type utility classes ──────────────────────────────── */
+.atlas-display {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 40px;
+  line-height: 1.1;
+  letter-spacing: 0;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.atlas-h1 {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: 32px;
+  line-height: 1.2;
+  letter-spacing: 0;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.atlas-body {
+  font-family: var(--font-family);
+  font-weight: 400;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.atlas-body--muted {
+  color: var(--text-secondary);
+}
+
+.atlas-mono {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* ─── Atlas Button ──────────────────────────────────────── */
+.atlas-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 20px;
+  border-radius: var(--atlas-radius);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.atlas-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.atlas-btn--primary {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  border: 0;
+}
+.atlas-btn--primary:hover:not(:disabled) {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  outline: 1px solid var(--text-primary);
+  outline-offset: -1px;
+}
+
+.atlas-btn--outline {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--text-primary);
+}
+.atlas-btn--outline:hover:not(:disabled) {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+}
+
+.atlas-btn--ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 0;
+  padding: 0 8px;
+}
+.atlas-btn--ghost:hover:not(:disabled) {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-thickness: 0.5px;
+  text-underline-offset: 4px;
+}
+
+/* ─── Atlas HairlineInput ───────────────────────────────── */
+.atlas-input-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.atlas-input-label {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.atlas-input {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--text-primary);
+  padding: 8px 0;
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: 14px;
+  outline: none;
+  border-radius: 0;
+  transition: border-bottom-width 120ms ease;
+}
+
+.atlas-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.atlas-input:focus {
+  border-bottom-width: 1.5px;
+  padding-bottom: 7.5px;
+}
+
+.atlas-input--serif {
+  font-family: var(--font-serif);
+  font-size: 24px;
+  font-style: italic;
+}
+
+.atlas-input--serif-lg {
+  font-family: var(--font-serif);
+  font-size: 28px;
+  font-style: italic;
+}
+
+/* ─── Atlas Plate (illustration + caption) ──────────────── */
+.atlas-plate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+}
+
+.atlas-plate-figure {
+  display: block;
+  color: var(--text-primary);
+}
+
+.atlas-plate-caption {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+/* ─── Atlas Illustration (SVG container) ────────────────── */
+.atlas-illustration {
+  display: block;
+  color: var(--text-primary);
+}
+
+.atlas-illustration * {
+  vector-effect: non-scaling-stroke;
+}
+
+/* ─── Common helpers ───────────────────────────────────── */
+.atlas-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 100%;
+}
+
+.atlas-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--text-primary);
+  border-radius: var(--atlas-radius);
+  font-family: var(--font-family);
+  font-size: 12px;
+  color: var(--text-primary);
+  background: transparent;
+}
+
+.atlas-text-link {
+  background: none;
+  border: 0;
+  padding: 4px 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-decoration: none;
+}
+.atlas-text-link:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-thickness: 0.5px;
+  text-underline-offset: 4px;
+}
+
+.atlas-icon-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--atlas-radius);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 140ms ease, color 140ms ease;
+}
+.atlas-icon-btn:hover {
+  border-color: var(--text-primary);
+}
+
+.atlas-back-link {
+  position: absolute;
+  top: 24px;
+  left: 28px;
+  z-index: 2;
+}
+
+/* ───────────────────────────────────────────────────────────
+   SCREEN 1 — LOGIN  (.login-page--atlas overrides)
+   ─────────────────────────────────────────────────────────── */
+.login-page--atlas {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.login-page--atlas .login-hero {
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+  padding: 32px 48px;
+  position: relative;
+  flex: 0 0 60%;
+}
+
+.login-page--atlas .login-hero::before,
+.login-page--atlas .login-hero-bg {
+  display: none;
+}
+
+.login-page--atlas .login-hero-mark {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--text-primary);
+  margin-bottom: 0;
+}
+
+.login-page--atlas .login-hero-mark-logo {
+  width: 24px;
+  height: 24px;
+  filter: none;
+  opacity: 0.9;
+}
+
+.login-page--atlas .login-hero-mark-name {
+  font-family: var(--font-serif);
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-primary);
+}
+
+.login-page--atlas .login-hero-mark-divider {
+  display: inline-block;
+  width: 24px;
+  height: 0;
+  border-top: 1px solid var(--text-primary);
+  opacity: 0.6;
+}
+
+.login-page--atlas .login-hero-mark-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.login-page--atlas .login-hero-content {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 0;
+}
+
+.login-page--atlas .login-form-panel {
+  background: var(--bg-primary);
+  flex: 0 0 40%;
+  padding: 32px 56px;
+  border-left: 1px solid var(--border-subtle);
+}
+
+.login-page--atlas .login-form-wrapper {
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.login-page--atlas .login-form-title {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: 32px;
+  line-height: 1.2;
+  color: var(--text-primary);
+  margin: 0 0 8px;
+}
+
+.login-page--atlas .login-form-subtitle {
+  font-family: var(--font-family);
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin: 0 0 28px;
+}
+
+.login-page--atlas .login-field input,
+.login-page--atlas .login-field input[type="text"],
+.login-page--atlas .login-field input[type="email"],
+.login-page--atlas .login-field input[type="password"],
+.login-page--atlas .login-field select {
+  height: 44px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--text-primary);
+  border-radius: 0;
+  padding: 8px 0;
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: 14px;
+  box-shadow: none;
+}
+
+.login-page--atlas .login-field input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.login-page--atlas .login-field input:focus,
+.login-page--atlas .login-field select:focus {
+  outline: none;
+  border-bottom-width: 1.5px;
+  padding-bottom: 7.5px;
+  box-shadow: none;
+}
+
+.login-page--atlas .login-field label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.login-page--atlas .login-submit {
+  height: 44px;
+  border-radius: var(--atlas-radius);
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  border: 0;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 140ms ease, color 140ms ease;
+}
+.login-page--atlas .login-submit:hover:not(:disabled) {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  outline: 1px solid var(--text-primary);
+  outline-offset: -1px;
+}
+
+.login-page--atlas .login-switch button,
+.login-page--atlas .login-switch a {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.login-page--atlas .login-language-switcher {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--atlas-radius);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  transform: none;
+}
+.login-page--atlas .login-language-switcher:hover {
+  background: transparent;
+  border-color: var(--text-primary);
+  color: var(--text-primary);
+  transform: none;
+}
+.login-page--atlas .login-language-switcher:focus-visible {
+  box-shadow: none;
+  outline: 1px solid var(--text-primary);
+  outline-offset: 2px;
+}
+
+/* ───────────────────────────────────────────────────────────
+   SCREEN 2 — COMPANY SETUP  (.company-setup-page--atlas)
+   ─────────────────────────────────────────────────────────── */
+.company-setup-page.company-setup-page--atlas {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  position: relative;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  overflow: hidden;
+}
+
+.company-setup-page.company-setup-page--atlas::before {
+  display: none;
+}
+
+.company-setup-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+  color: var(--text-primary);
+}
+
+.company-setup-page--atlas .company-setup-container {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 480px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 32px;
+}
+
+.company-setup-page--atlas .company-setup-title {
+  text-align: center;
+  margin: 0;
+  font-size: 36px;
+}
+
+.company-setup-page--atlas .company-setup-join-link {
+  align-self: center;
+  margin-top: 8px;
+}
+
+.company-setup-page--atlas .company-setup-lang-switcher {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  width: 38px;
+  height: 38px;
+  border-radius: var(--atlas-radius);
+}
+
+.company-setup-page--atlas .company-setup-lang-switcher:hover {
+  border-color: var(--text-primary);
+}
+
+/* ───────────────────────────────────────────────────────────
+   Atlas modal (used by Screen 2 invitation flow)
+   ─────────────────────────────────────────────────────────── */
+.atlas-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg-primary) 80%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: 20px;
+}
+
+.atlas-modal {
+  background: var(--bg-primary);
+  border: 1px solid var(--text-primary);
+  border-radius: var(--atlas-radius);
+  width: 100%;
+  max-width: 420px;
+  padding: 36px 32px 32px;
+  position: relative;
+}
+
+.atlas-modal-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--atlas-radius);
+}
+.atlas-modal-close:hover { color: var(--text-secondary); }
+.atlas-modal-close:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.atlas-modal-title {
+  margin: 0 0 8px;
+  font-size: 24px;
+}
+
+.atlas-modal-desc {
+  margin: 0 0 24px;
+}
+
+/* ───────────────────────────────────────────────────────────
+   SCREEN 3 — ONBOARDING (.onboarding-page--atlas + assistant)
+   ─────────────────────────────────────────────────────────── */
+.onboarding-page.onboarding-page--atlas {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  position: relative;
+  min-height: 100dvh;
+}
+
+.onboarding-page--atlas .onboarding-lang {
+  position: absolute;
+  top: 24px;
+  right: 28px;
+}
+
+.assistant-stage--atlas {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 100dvh;
+  gap: 0;
+}
+
+.assistant-plate-left {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 80px 48px;
+  border-right: 1px solid var(--border-subtle);
+}
+
+.assistant-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.assistant-panel--atlas {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 96px 64px;
+  max-width: 560px;
+  align-self: center;
+  background: transparent;
+  width: 100%;
+  margin-left: 0;
+}
+
+.assistant-panel--atlas h1.atlas-display {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 36px;
+  line-height: 1.15;
+  letter-spacing: 0;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.assistant-panel--atlas p.atlas-body {
+  margin: 0 0 8px;
+  color: var(--text-secondary);
+  font-family: var(--font-family);
+}
+
+.assistant-expand--atlas {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.assistant-options--atlas {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.assistant-options--atlas .assistant-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.assistant-options--atlas .assistant-chips button {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--atlas-radius);
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+.assistant-options--atlas .assistant-chips button:hover {
+  border-color: var(--text-primary);
+}
+.assistant-options--atlas .assistant-chips button.active {
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  border-color: var(--text-primary);
+}
+
+.assistant-options--atlas textarea {
+  width: 100%;
+  min-height: 80px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--atlas-radius);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-family);
+  font-size: 13px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+.assistant-options--atlas textarea:focus {
+  outline: none;
+  border-color: var(--text-primary);
+}
+
+.assistant-footer--atlas {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-top: 8px;
+}
+
+/* ───────────────────────────────────────────────────────────
+   SCREEN 4 — OPENING (.opening-stage--atlas)
+   ─────────────────────────────────────────────────────────── */
+.opening-stage--atlas {
+  position: relative;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+
+.opening-grid-bg {
+  position: absolute;
+  inset: 0;
+  background-image:
+    repeating-linear-gradient(0deg, var(--border-subtle), var(--border-subtle) 1px, transparent 1px, transparent 48px),
+    repeating-linear-gradient(90deg, var(--border-subtle), var(--border-subtle) 1px, transparent 1px, transparent 48px);
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.opening-stack {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 60px;
+}
+
+.opening-stack > h1.opening-stage-title {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 40px;
+  line-height: 1.1;
+  letter-spacing: 0;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.opening-stack > .atlas-btn {
+  margin-top: -28px; /* tighten gap after the 60px stack gap */
+}
+
+.opening-fig-caption {
+  margin-top: 20px;
+}
+
+/* ───────────────────────────────────────────────────────────
+   Responsive — collapse 60/40 + 50/50 splits on narrow viewports
+   ─────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .login-page--atlas {
+    flex-direction: column;
+  }
+  .login-page--atlas .login-hero,
+  .login-page--atlas .login-form-panel {
+    flex: 1 1 auto;
+    border-left: 0;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .assistant-stage--atlas {
+    grid-template-columns: 1fr;
+  }
+  .assistant-plate-left {
+    padding: 56px 32px 32px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .assistant-panel--atlas {
+    padding: 32px 32px 64px;
+  }
+}

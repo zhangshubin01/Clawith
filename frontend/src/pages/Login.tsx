@@ -10,6 +10,7 @@ import {
     IconCheck,
     IconWorld,
 } from '@tabler/icons-react';
+import { Plate, OrreryPlate } from '../components/atlas';
 
 export default function Login() {
     const { t, i18n } = useTranslation();
@@ -402,22 +403,19 @@ export default function Login() {
     const shouldShowGlobalOAuth = !tenant?.sso_enabled && !isRegister && !showVerification;
 
     return (
-        <div className="login-page">
+        <div className="login-page login-page--atlas">
             {/* ── Left: Branding Panel ── */}
             <div className="login-hero">
-                <div className="login-hero-bg" />
                 <div className="login-hero-mark" aria-hidden="true">
                     <img src="/logo-black.png" className="login-hero-mark-logo" alt="" />
-                    <span>Clawith</span>
+                    <span className="login-hero-mark-name">Clawith</span>
                     <span className="login-hero-mark-divider" />
-                    <span>{t('login.hero.mark')}</span>
+                    <span className="login-hero-mark-tag">{t('login.hero.mark')}</span>
                 </div>
                 <div className="login-hero-content">
-                    <h1 className="login-hero-title">
-                        {t('login.hero.welcome')}{' '}
-                        <span>{t('login.hero.founder')}</span>
-                    </h1>
-                    <p className="login-hero-desc">{t('login.hero.description')}</p>
+                    <Plate caption="FIG. I · COSMOGRAPHY OF AGENCY · MMXXVI">
+                        <OrreryPlate size={420} />
+                    </Plate>
                 </div>
             </div>
 
