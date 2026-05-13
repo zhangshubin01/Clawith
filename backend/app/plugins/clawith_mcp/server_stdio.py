@@ -2,7 +2,7 @@
 """Stdio MCP 服务器，供 Claude Code / Claude Desktop 全局 MCP 配置使用。
 
 用法:
-    CLAWITH_URL=http://localhost:8008 CLAWITH_API_KEY=cw-xxx python server_stdio.py
+    CLAWITH_URL=http://localhost:8008 CLAWITH_TOKEN=<JWT> python server_stdio.py
 
 Claude Code ~/.claude/settings.json:
     {

@@ -101,7 +101,7 @@ async def lsp4j_websocket_endpoint(
 
     URL 参数：
     - agent_id: 智能体 UUID 或名称
-    - token: API Key（cw- 前缀）或 JWT
+    - token: JWT token
 
     认证失败关闭码：
     - 4001: token 无效或缺失

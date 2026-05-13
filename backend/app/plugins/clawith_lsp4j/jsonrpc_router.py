@@ -231,6 +231,16 @@ class ChatAskParam:
 
 # 后台持久化任务集合（防止 GC 回收未完成的 fire-and-forget 任务）
 _lsp4j_background_tasks: set[asyncio.Task] = set()
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """fire-and-forget 任务完成回调：记录未捕获异常，防止持久化失败无声丢失。"""
+    try:
+        exc = task.exception()
+        if exc is not None:
+            logger.error("[LSP4J] 后台任务异常: task={} error={}", task.get_name(), exc)
+    except (asyncio.CancelledError, asyncio.InvalidStateError):
+        pass
 # 严格模式：tool/invokeResult 缺失 toolCallId 时直接失败，禁止多路并发下的降级误匹配。
 _LSP4J_STRICT_TOOLCALL_ID = os.getenv("LSP4J_STRICT_TOOLCALL_ID", "1").strip() != "0"
 
@@ -1377,6 +1387,7 @@ class JSONRPCRouter:
             _t_idx = asyncio.create_task(_build_project_file_index(self._project_path))
             _lsp4j_background_tasks.add(_t_idx)
             _t_idx.add_done_callback(_lsp4j_background_tasks.discard)
+            _t_idx.add_done_callback(_log_task_exception)
         else:
             logger.warning(
                 "[LSP4J-LIFE] projectPath 未能提取: rootUri={} workspaceFolders={}",
@@ -2252,6 +2263,7 @@ class JSONRPCRouter:
                 )
                 _lsp4j_background_tasks.add(_t)
                 _t.add_done_callback(_lsp4j_background_tasks.discard)
+                _t.add_done_callback(_log_task_exception)
 
             # 更新消息历史（同时刷新模块级缓存，确保跨连接场景也能读到最新消息）
             message_history.append({"role": "assistant", "content": reply})
@@ -2901,6 +2913,7 @@ class JSONRPCRouter:
                 )
                 _lsp4j_background_tasks.add(_t)
                 _t.add_done_callback(_lsp4j_background_tasks.discard)
+                _t.add_done_callback(_log_task_exception)
 
     async def _send_workspace_file_sync(self, ws_file: Any, sync_type: str = "MODIFIED") -> None:
         """发送 workingSpaceFile/sync 通知（WorkspaceFileSyncResult 格式）。
@@ -3531,6 +3544,7 @@ class JSONRPCRouter:
                 _t = asyncio.ensure_future(_cleanup_late_window(tool_call_id))
                 _lsp4j_background_tasks.add(_t)
                 _t.add_done_callback(_lsp4j_background_tasks.discard)
+                _t.add_done_callback(_log_task_exception)
             else:
                 self._pending_tools.pop(tool_call_id, None)
                 self._pending_tool_meta.pop(tool_call_id, None)
@@ -5841,11 +5855,11 @@ def _format_tool_context_message(tool_records: list[dict]) -> dict | None:
         name = tc.get("name") or tc.get("tool_name", "")
         params = tc.get("parameters") or tc.get("arguments") or tc.get("args") or {}
         results = tc.get("results") or tc.get("result") or []
-        # 日志：记录每条 tool_call 的格式特征（帮助区分新旧格式）
+        # 日志：记录每条 tool_call 的格式特征（debug 级别，避免噪音）
         record_keys = list(tc.keys())
         has_new_format = "tool_name" in tc and "tool_call_id" in tc
         has_old_format = "name" in tc and "args" in tc
-        logger.info(
+        logger.debug(
             "[LSP4J-CTX]   record[{}]: name={} keys=[{}] new_fmt={} old_fmt={} params_keys=[{}] results_type={}",
             i,
             name,
@@ -5864,8 +5878,7 @@ def _format_tool_context_message(tool_records: list[dict]) -> dict | None:
             results = []
         elif not isinstance(results, list):
             results = [results]
-        # 日志：记录 results 结构
-        logger.info(
+        logger.debug(
             "[LSP4J-CTX]   record[{}]: results_count={} first_result_type={}",
             i,
             len(results),

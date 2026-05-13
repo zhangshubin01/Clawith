@@ -3,7 +3,6 @@
 import base64
 import hashlib
 from loguru import logger
-import hmac
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -30,9 +29,6 @@ settings = get_settings()
 _APP_KEY_SALT = b"clawith::aes256::salt-v1"
 _PBKDF2_ITERATIONS = 100_000
 _CIPHERTEXT_MAGIC = b"\x01\xca\xfe"  # 3-byte magic for PBKDF2 ciphertext (1/16M false-positive vs 1-byte's 1/256)
-
-# API Key 连续校验失败计数器，按 key 前缀聚合，用于检测爆破/失效 Key 高频重试
-_API_KEY_FAIL_COUNTER: dict[str, int] = {}
 
 # Bearer token scheme
 security = HTTPBearer(auto_error=False)
@@ -147,82 +143,40 @@ def decode_access_token(token: str) -> dict:
         )
 
 
-async def _authenticate_by_api_key(db: AsyncSession, api_key_str: str):
-    """Validate a cw- API key against the database.
-
-    Returns the User if the key is valid and the user is active, None otherwise.
-    Performs constant-time comparison via hmac.compare_digest to prevent timing attacks.
-    """
-    from app.models.user import User
-
-    key_hash = hashlib.sha256(api_key_str.encode()).hexdigest()
-    result = await db.execute(
-        select(User)
-        .where(User.api_key_hash == key_hash)
-        .options(selectinload(User.identity))
-    )
-    user = result.scalar_one_or_none()
-    if (
-        not user
-        or not user.is_active
-        or not hmac.compare_digest(user.api_key_hash, key_hash)
-    ):
-        return None
-    return user
-
-
 async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
-):
-    """Dependency to get the current authenticated and active user.
-
-    Accepts two authentication methods (in priority order):
-    1. X-Api-Key header — permanent user API key (for MCP / external tools)
-    2. Authorization: Bearer <JWT> — standard session token
-    """
+) -> User:
+    """Get current user from JWT Bearer token (cw- API Key support removed)."""
     from app.models.user import User
 
-    # ── Method 1: X-Api-Key header ──────────────────────
-    api_key = request.headers.get("X-Api-Key") or request.headers.get("x-api-key")
-    if api_key and api_key.startswith("cw-"):
-        user = await _authenticate_by_api_key(db, api_key)
-        if not user:
-            logger.warning("[security] X-Api-Key auth failed: no matching active user")
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked API key")
-        return user
-
-    # ── Method 2: Bearer cw-xxx (Android Studio / clients that send API key as Bearer) ──
-    if credentials and credentials.credentials.startswith("cw-"):
-        user = await _authenticate_by_api_key(db, credentials.credentials)
-        if not user:
-            logger.warning("[security] Bearer cw- auth failed: no matching active user")
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked API key")
-        return user
-
-    # ── Method 3: Bearer JWT ─────────────────────────────
     if not credentials:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
+    # Only JWT Bearer authentication remains
     payload = decode_access_token(credentials.credentials)
     user_id = payload.get("sub")
     if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+        )
 
     result = await db.execute(
-        select(User)
-        .where(User.id == uuid.UUID(user_id))
-        .options(selectinload(User.identity))
+        select(User).where(User.id == uuid.UUID(str(user_id))).options(selectinload(User.identity))
     )
     user = result.scalar_one_or_none()
-    if not user or not user.is_active:
-        logger.warning("[security] JWT user not found or inactive: user_id={}", user_id)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is inactive",
+        )
     return user
 
 
@@ -257,11 +211,7 @@ async def get_authenticated_user(
 
 
 async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
-    """Authenticate thin clients that pass `cw-` API key or JWT in a query param (e.g. ACP WebSocket).
-
-    Raises:
-        HTTPException: 401 if token is missing, invalid, or user inactive.
-    """
+    """Authenticate thin clients via JWT token (cw- API Key support removed)."""
     from app.database import async_session
     from app.models.user import User
 
@@ -272,34 +222,15 @@ async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
         )
     raw = str(token).strip()
 
+    # cw- API Key 分支已删除，仅支持 JWT
+    payload = decode_access_token(raw)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
     async with async_session() as db:
-        if raw.startswith("cw-"):
-            user = await _authenticate_by_api_key(db, raw)
-            if not user:
-                _key_prefix = raw[:20] if raw else "unknown"
-                _failed_count = _API_KEY_FAIL_COUNTER.get(_key_prefix, 0) + 1
-                _API_KEY_FAIL_COUNTER[_key_prefix] = _failed_count
-                if _failed_count >= 3:
-                    logger.error(
-                        "[security] API Key 连续校验失败 {} 次: prefix={}..., user={}, active={}",
-                        _failed_count, _key_prefix, bool(user), getattr(user, 'is_active', None))
-                else:
-                    logger.warning(
-                        "[security] verify_api_key_or_token cw- failed: user={}, active={}",
-                        bool(user), getattr(user, 'is_active', None))
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid or revoked API key",
-                )
-            return user.id
-
-        payload = decode_access_token(raw)
-        user_id = payload.get("sub")
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token",
-            )
         result = await db.execute(
             select(User)
             .where(User.id == uuid.UUID(str(user_id)))
@@ -307,7 +238,6 @@ async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
         )
         user = result.scalar_one_or_none()
         if not user or not user.is_active:
-            logger.warning("[security] verify_api_key_or_token JWT user not found: user_id={}", user_id)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found or inactive",

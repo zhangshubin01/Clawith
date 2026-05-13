@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/ide-plugin", tags=["ide-plugin"])
 
 @router.get("/agents")
 async def list_agents_for_ide(
-    x_api_key: str = Header(..., description="API Key (cw-xxx) or JWT"),
+    x_api_key: str = Header(..., description="JWT token"),
     db: AsyncSession = Depends(get_db),
 ):
     """获取用户可访问的智能体列表 (简化版,仅返回必要字段)"""
@@ -58,7 +58,7 @@ async def list_agents_for_ide(
 
 @router.get("/models")
 async def list_models_for_ide(
-    x_api_key: str = Header(..., description="API Key (cw-xxx) or JWT"),
+    x_api_key: str = Header(..., description="JWT token"),
     db: AsyncSession = Depends(get_db),
 ):
     """获取可用的 LLM 模型列表"""

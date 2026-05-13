@@ -3,14 +3,14 @@
 
 Cursor / Windsurf 等 MCP HTTP 客户端连接方式：
     POST http://localhost:8008/mcp
-    Header: X-Api-Key: cw-xxx
+    Header: X-Api-Key: <JWT token>
 
 Cursor ~/.cursor/mcp.json 配置示例:
     {
       "mcpServers": {
         "clawith": {
           "url": "http://localhost:8008/mcp",
-          "headers": {"X-Api-Key": "cw-xxx"}
+          "headers": {"X-Api-Key": "<JWT token>"}
         }
       }
     }
@@ -23,7 +23,7 @@ Continue / Android Studio SSE 配置示例:
           "transport": {
             "type": "sse",
             "url": "http://localhost:8008/mcp/sse",
-            "requestOptions": {"headers": {"X-Api-Key": "cw-xxx"}}
+            "requestOptions": {"headers": {"X-Api-Key": "<JWT token>"}}
           }
         }
       ]
@@ -251,7 +251,7 @@ async def mcp_handler(
     兼容 Cursor、Windsurf 及任何 MCP HTTP 客户端。
 
     认证方式:
-        X-Api-Key: cw-xxx
+        X-Api-Key: <JWT token>
         Authorization: Bearer <jwt>
     """
     try:

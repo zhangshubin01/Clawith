@@ -16,12 +16,12 @@ Base URL 填写「后端 HTTP 根地址」即可（不要带 /api；一般也不
 
 生产: https://你的 Clawith 后端域名
 
-鉴权: Web 生成的用户 API Key（cw-...）。支持 Authorization: Bearer cw-... 或 X-Api-Key: cw-...
+鉴权: JWT token。支持 Authorization: Bearer <JWT> 或 X-Api-Key: <JWT>
 
 Cursor 配置（路径以当前 Cursor 版本为准）:
     Settings > Models > Add Model（或等效的 OpenAI 兼容 / Custom Base URL）
     Base URL:  见上文（本地示例: http://127.0.0.1:8008）
-    API Key:   cw-xxx
+    Token:    <JWT>
     Model:     智能体名称或 UUID（须与聊天里选用的模型一致；若客户端不发 model，服务端可设
                环境变量 CLAWITH_OPENAI_COMPAT_DEFAULT_AGENT）
 
@@ -33,7 +33,7 @@ Continue 配置 (~/.continue/config.json):
           "provider": "openai",
           "model": "<智能体名称>",
           "apiBase": "http://127.0.0.1:8008",
-          "apiKey": "cw-xxx"
+          "apiKey": "<JWT token>"
         }
       ]
     }
@@ -70,7 +70,7 @@ async def list_models(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
 ):
-    """Authenticate with API key (cw-...) or JWT token."""
+    """Authenticate with JWT token."""
     from app.core.security import verify_api_key_or_token
     user_id = await verify_api_key_or_token(
         request.headers.get("X-Api-Key")
@@ -236,7 +236,7 @@ async def openai_chat_completions(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: AsyncSession = Depends(get_db),
 ):
-    """Authenticate with API key (cw-...) or JWT token."""
+    """Authenticate with JWT token."""
     from app.core.security import verify_api_key_or_token
     user_id = await verify_api_key_or_token(
         request.headers.get("X-Api-Key")
@@ -252,7 +252,7 @@ async def openai_chat_completions(
     支持 stream=true（SSE delta 格式）和 stream=false（完整 JSON）。
 
     认证:
-        X-Api-Key: cw-xxx
+        X-Api-Key: <JWT>
         Authorization: Bearer <jwt>
     """
     from app.models.llm import LLMModel

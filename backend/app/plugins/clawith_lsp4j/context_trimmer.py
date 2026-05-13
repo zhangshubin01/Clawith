@@ -199,7 +199,7 @@ def compress_tool_context_summary(
         elif name in ("replace_text_by_path", "search_replace", "create_file_with_text",
                       "delete_file_by_path", "edit_file", "write_file"):
             fp = params.get("filePath", "") or params.get("file_path", "")
-            short = fp.split("/")[-1] if "/" in fp and "/" in fp else fp[:60]
+            short = fp.split("/")[-1] if "/" in fp else fp[:60]
             if short and short not in write_ops:
                 write_ops.append(short)
         elif name == "run_in_terminal":
