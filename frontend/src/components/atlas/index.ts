@@ -5,6 +5,7 @@ export { default as Plate } from './Plate';
 export { default as AtlasFrame } from './AtlasFrame';
 export { default as StarField } from './StarField';
 export { default as CompassPlate } from './CompassPlate';
+export { default as CosmographyPlate } from './CosmographyPlate';
 export { default as OrbitPlate } from './OrbitPlate';
 export { default as UniverseMap } from './UniverseMap';
 /* Legacy illustrations — unused; will be removed after Phase 3 */

@@ -19,12 +19,12 @@ interface Props {
 }
 
 function BrandMark() {
+    // Renders the official Clawith logo, swapped by theme via CSS
     return (
-        <svg className="atlas-brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" aria-hidden="true">
-            <circle cx="12" cy="12" r="10" />
-            <circle cx="12" cy="12" r="5" />
-            <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
-        </svg>
+        <span className="atlas-brand-mark-img" aria-hidden="true">
+            <img src="/logo-black.png" alt="" className="atlas-brand-mark-light" />
+            <img src="/logo-white.png" alt="" className="atlas-brand-mark-dark" />
+        </span>
     );
 }
 

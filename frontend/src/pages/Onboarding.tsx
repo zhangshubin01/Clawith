@@ -147,20 +147,23 @@ export default function Onboarding() {
                             <span className="atlas-mono">{expanded ? (isZh ? '收起' : 'COLLAPSE') : (isZh ? '展开' : 'EXPAND')}</span>
                         </button>
 
+                        {/* Personality chips — always visible (default voice picker) */}
+                        <div className="atlas-chip-row">
+                            {personalityOptions.map((item) => (
+                                <button
+                                    key={item.id}
+                                    type="button"
+                                    className={`atlas-chip${personality === item.id ? ' is-active' : ''}`}
+                                    onClick={() => setPersonality(item.id)}
+                                >
+                                    {isZh ? item.zh : item.en}
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Advanced — work style + boundaries — collapsed by default */}
                         {expanded && (
                             <div className="atlas-options">
-                                <div className="atlas-chip-row">
-                                    {personalityOptions.map((item) => (
-                                        <button
-                                            key={item.id}
-                                            type="button"
-                                            className={`atlas-chip${personality === item.id ? ' is-active' : ''}`}
-                                            onClick={() => setPersonality(item.id)}
-                                        >
-                                            {isZh ? item.zh : item.en}
-                                        </button>
-                                    ))}
-                                </div>
                                 <div>
                                     <span className="atlas-input-label" style={{ display: 'block', marginBottom: 10 }}>
                                         {isZh ? '办事风格' : 'WORK STYLE'}
