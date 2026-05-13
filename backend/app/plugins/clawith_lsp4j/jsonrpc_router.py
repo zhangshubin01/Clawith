@@ -2231,8 +2231,6 @@ class JSONRPCRouter:
 
             # 5. 后台持久化
             if session_id and reply:
-                # 提取本轮工具调用历史
-                _session_tool_calls = self._tool_call_history_by_session.get(session_id, [])
                 _t_persist_start = time.monotonic()
                 _t = asyncio.create_task(
                     _persist_lsp4j_chat_turn(
@@ -2242,7 +2240,6 @@ class JSONRPCRouter:
                         reply_text=reply,
                         user_id=self._user_id,
                         thinking_text="".join(thinking_chunks) if thinking_chunks else None,
-                        tool_calls=_session_tool_calls if _session_tool_calls else None,
                     )
                 )
                 _t_persist_elapsed = time.monotonic() - _t_persist_start
@@ -2254,9 +2251,11 @@ class JSONRPCRouter:
                 _lsp4j_background_tasks.add(_t)
                 _t.add_done_callback(_lsp4j_background_tasks.discard)
 
-            # 更新消息历史
+            # 更新消息历史（同时刷新模块级缓存，确保跨连接场景也能读到最新消息）
             message_history.append({"role": "assistant", "content": reply})
             current_lsp4j_message_history.set(message_history)
+            _cache_key = f"{self._user_id}:{session_id}"
+            _SESSION_MESSAGE_CACHE[_cache_key] = (time.monotonic(), list(message_history))
 
             # ★ 刷新缓冲区，确保所有累积的文本都已发送
             _t_flush_start = time.monotonic()
@@ -5604,15 +5603,13 @@ async def _persist_lsp4j_chat_turn(
     reply_text: str,
     user_id: uuid.UUID,
     thinking_text: str | None = None,
-    tool_calls: list[dict[str, Any]] | None = None,
 ) -> None:
     """持久化一轮 LSP4J 对话到数据库（fire-and-forget 后台任务）。
 
     参考 ACP 的 _persist_chat_turn（router.py:1724-1784），
     source_channel 使用 "ide_lsp4j" 以区分来源。
 
-    tool_calls: 工具调用历史记录，每条包含 name, parameters, results, toolCallStatus 等字段。
-    以 role="tool_call" 的 ChatMessage 行存储，使会话历史可从 DB 完整恢复。
+    工具调用由 _persist_lsp4j_tool_call 单独持久化，此函数仅持久化 user/assistant 消息。
 
     ⚠️ 边界条件：session_id 应为 UUID 格式（通义灵码使用 UUID.randomUUID().toString()），
     但某些代码路径可能传 null。uuid.UUID() 抛 ValueError 时静默返回。
@@ -5694,41 +5691,6 @@ async def _persist_lsp4j_chat_turn(
                         created_at=now,  # 助手消息时间戳
                     )
                 )
-
-            # 持久化工具调用记录（role="tool_call"），使会话历史可从 DB 完整恢复
-            if tool_calls:
-                import json
-
-                for tc in tool_calls:
-                    if not isinstance(tc, dict):
-                        continue
-                    _tc_name = tc.get("name", "unknown")
-                    _tc_status = tc.get("toolCallStatus", "")
-                    # 仅持久化终态工具调用
-                    if _tc_status not in ("FINISHED", "ERROR", "CANCELLED"):
-                        continue
-                    _status_map = {"FINISHED": "done", "ERROR": "error", "CANCELLED": "cancelled"}
-                    _tc_content = json.dumps(
-                        {
-                            "toolCallId": tc.get("toolCallId", ""),
-                            "name": _tc_name,
-                            "status": _status_map.get(_tc_status, _tc_status.lower() if _tc_status else "done"),
-                            "args": tc.get("parameters", {}),
-                            "result": str(tc.get("results", ""))[:500],
-                            "reasoning_content": tc.get("errorMsg") if tc.get("errorCode") else "",
-                        },
-                        ensure_ascii=False,
-                    )
-                    db.add(
-                        ChatMessage(
-                            agent_id=agent_id,
-                            user_id=user_id,
-                            role="tool_call",
-                            content=_tc_content,
-                            conversation_id=str(sid_uuid),
-                            created_at=now + timedelta(milliseconds=1),
-                        )
-                    )
 
             await db.commit()
             # 持久化成功
