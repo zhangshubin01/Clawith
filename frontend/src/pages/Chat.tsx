@@ -527,8 +527,11 @@ export default function Chat() {
                         }
                         return next;
                     });
-                    // Auto-expand the live panel on first data
-                    setLivePanelVisible(true);
+                    // Auto-expand the live panel on first data arrival
+                    // (for desktop/browser screenshots, or the first code chunk only)
+                    if (data.env !== 'code' || !liveState.code) {
+                        setLivePanelVisible(true);
+                    }
                     return;
                 }
 
