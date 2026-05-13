@@ -206,7 +206,7 @@ async def list_files(
             continue
         if not path and entry.name == "enterprise_info":
             continue
-        rel = str(entry.resolve().relative_to(base_abs))
+        rel = str(entry.relative_to(base_abs))
         if is_enterprise:
             rel = f"enterprise_info/{rel}" if rel != "." else "enterprise_info"
         stat = entry.stat()
@@ -848,7 +848,7 @@ async def list_enterprise_kb_files(
     for entry in sorted(target.iterdir(), key=lambda e: (not e.is_dir(), e.name)):
         if entry.name == '.gitkeep':
             continue
-        rel = str(entry.resolve().relative_to(info_dir.resolve()))
+        rel = str(entry.relative_to(info_dir.resolve()))
         stat = entry.stat()
         items.append({
             "name": entry.name,
