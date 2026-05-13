@@ -7,20 +7,21 @@ interface Props {
 
 /** Pre-placed dots on the four orbits (using local pre-rotation coords) */
 const DOTS: Array<{ orbit: number; theta: number }> = [
-    { orbit: 3, theta: 165 }, // upper-left, on the outermost ring
-    { orbit: 3, theta: 22 },  // upper-right, on the outermost ring
-    { orbit: 2, theta: 155 }, // mid, left
-    { orbit: 2, theta: 22 },  // mid, right
+    { orbit: 3, theta: 160 }, // upper-left, on the outermost ring
+    { orbit: 3, theta: 18 },  // upper-right, on the outermost ring
+    { orbit: 2, theta: 145 }, // lower-left area, mid orbit
+    { orbit: 2, theta: 18 },  // mid right, on inner-middle orbit
 ];
 
-export default function CosmographyPlate({ size = 560, rotation = -18, className }: Props) {
+export default function CosmographyPlate({ size = 600, rotation = 14, className }: Props) {
     const cls = ['atlas-illustration', className].filter(Boolean).join(' ');
-    // Four concentric, co-rotating ellipses (rx,ry)
+    // Four concentric, co-rotating ellipses (rx,ry) — progressive spacing
+    // with outer:inner ≈ 6:1, aspect rx:ry ≈ 1.35 (matches reference plate)
     const orbits: Array<[number, number]> = [
-        [80, 46],
-        [160, 92],
-        [240, 138],
-        [320, 184],
+        [62, 46],
+        [165, 122],
+        [275, 204],
+        [380, 282],
     ];
 
     return (
