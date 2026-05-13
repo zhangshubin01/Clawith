@@ -31,6 +31,9 @@ _APP_KEY_SALT = b"clawith::aes256::salt-v1"
 _PBKDF2_ITERATIONS = 100_000
 _CIPHERTEXT_MAGIC = b"\x01\xca\xfe"  # 3-byte magic for PBKDF2 ciphertext (1/16M false-positive vs 1-byte's 1/256)
 
+# API Key 连续校验失败计数器，按 key 前缀聚合，用于检测爆破/失效 Key 高频重试
+_API_KEY_FAIL_COUNTER: dict[str, int] = {}
+
 # Bearer token scheme
 security = HTTPBearer(auto_error=False)
 
@@ -100,8 +103,11 @@ def decrypt_data(ciphertext: str, key: str) -> str:
 
         logger.debug("[security] decrypt_data: success, plaintext_len={}", len(plaintext))
         return plaintext
+    except (ValueError, KeyError) as e:
+        logger.debug("[security] decrypt_data failed (caller should handle): error={}", e)
+        raise ValueError(f"Decryption failed: {e}") from e
     except Exception as e:
-        logger.warning("[security] decrypt_data failed: error={}", e)
+        logger.error("[security] decrypt_data unexpected error", exc_info=True)
         raise ValueError(f"Decryption failed: {e}") from e
 
 
@@ -141,6 +147,30 @@ def decode_access_token(token: str) -> dict:
         )
 
 
+async def _authenticate_by_api_key(db: AsyncSession, api_key_str: str):
+    """Validate a cw- API key against the database.
+
+    Returns the User if the key is valid and the user is active, None otherwise.
+    Performs constant-time comparison via hmac.compare_digest to prevent timing attacks.
+    """
+    from app.models.user import User
+
+    key_hash = hashlib.sha256(api_key_str.encode()).hexdigest()
+    result = await db.execute(
+        select(User)
+        .where(User.api_key_hash == key_hash)
+        .options(selectinload(User.identity))
+    )
+    user = result.scalar_one_or_none()
+    if (
+        not user
+        or not user.is_active
+        or not hmac.compare_digest(user.api_key_hash, key_hash)
+    ):
+        return None
+    return user
+
+
 async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
@@ -157,39 +187,17 @@ async def get_current_user(
     # ── Method 1: X-Api-Key header ──────────────────────
     api_key = request.headers.get("X-Api-Key") or request.headers.get("x-api-key")
     if api_key and api_key.startswith("cw-"):
-        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-        result = await db.execute(
-            select(User)
-            .where(User.api_key_hash == key_hash)
-            .options(selectinload(User.identity))
-        )
-        user = result.scalar_one_or_none()
-        # hmac.compare_digest 做内存层常量时间校验，防止时序攻击
-        if (
-            not user
-            or not user.is_active
-            or not hmac.compare_digest(user.api_key_hash, key_hash)
-        ):
-            logger.warning("[security] X-Api-Key auth failed: user={}, active={}", bool(user), getattr(user, 'is_active', None))
+        user = await _authenticate_by_api_key(db, api_key)
+        if not user:
+            logger.warning("[security] X-Api-Key auth failed: no matching active user")
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked API key")
         return user
 
     # ── Method 2: Bearer cw-xxx (Android Studio / clients that send API key as Bearer) ──
     if credentials and credentials.credentials.startswith("cw-"):
-        api_key = credentials.credentials
-        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-        result = await db.execute(
-            select(User)
-            .where(User.api_key_hash == key_hash)
-            .options(selectinload(User.identity))
-        )
-        user = result.scalar_one_or_none()
-        if (
-            not user
-            or not user.is_active
-            or not hmac.compare_digest(user.api_key_hash, key_hash)
-        ):
-            logger.warning("[security] Bearer cw- auth failed: user={}, active={}", bool(user), getattr(user, 'is_active', None))
+        user = await _authenticate_by_api_key(db, credentials.credentials)
+        if not user:
+            logger.warning("[security] Bearer cw- auth failed: no matching active user")
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or revoked API key")
         return user
 
@@ -266,19 +274,19 @@ async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
 
     async with async_session() as db:
         if raw.startswith("cw-"):
-            key_hash = hashlib.sha256(raw.encode()).hexdigest()
-            result = await db.execute(
-                select(User)
-                .where(User.api_key_hash == key_hash)
-                .options(selectinload(User.identity))
-            )
-            user = result.scalar_one_or_none()
-            if (
-                not user
-                or not user.is_active
-                or not hmac.compare_digest(user.api_key_hash, key_hash)
-            ):
-                logger.warning("[security] verify_api_key_or_token cw- failed: user={}, active={}", bool(user), getattr(user, 'is_active', None))
+            user = await _authenticate_by_api_key(db, raw)
+            if not user:
+                _key_prefix = raw[:20] if raw else "unknown"
+                _failed_count = _API_KEY_FAIL_COUNTER.get(_key_prefix, 0) + 1
+                _API_KEY_FAIL_COUNTER[_key_prefix] = _failed_count
+                if _failed_count >= 3:
+                    logger.error(
+                        "[security] API Key 连续校验失败 {} 次: prefix={}..., user={}, active={}",
+                        _failed_count, _key_prefix, bool(user), getattr(user, 'is_active', None))
+                else:
+                    logger.warning(
+                        "[security] verify_api_key_or_token cw- failed: user={}, active={}",
+                        bool(user), getattr(user, 'is_active', None))
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid or revoked API key",

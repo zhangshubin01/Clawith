@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     # Logging
     LOG_DIR: str = _default_log_dir()
     LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "color"  # "color" (human-readable) or "json" (structured for log aggregators)
     LOG_ROTATION: str = "00:00"
     LOG_RETENTION: str = "30 days"
     LOG_COMPRESSION: str = "gz"

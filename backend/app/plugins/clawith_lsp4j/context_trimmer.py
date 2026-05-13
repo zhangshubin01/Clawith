@@ -37,10 +37,41 @@ def trim_tool_result(result_content: str, tool_name: str = "", max_chars: int = 
         return result_content[:max_chars] + TRUNCATION_MARKER
 
     if tool_name in ("run_in_terminal",):
-        half = max_chars // 2
-        return result_content[:half] + f"\n... [省略 {len(result_content) - max_chars} 字符] ...\n" + result_content[-half:]
+        return _trim_terminal_output_intelligent(result_content, max_chars)
 
     return result_content[:max_chars] + TRUNCATION_MARKER
+
+
+def _trim_terminal_output_intelligent(result: str, max_chars: int = 2000) -> str:
+    """终端输出智能截断：保留前 N 行 + 错误行 + 尾部，比简单头尾截断更有效。"""
+    if len(result) <= max_chars:
+        return result
+
+    lines = result.split("\n")
+    head_lines = 30
+    head = "\n".join(lines[:head_lines])
+
+    error_keywords = ("error", "fail", "exception", "traceback", "cannot", "unable", "denied", "ERROR", "FAIL")
+    error_lines = [l for l in lines if any(kw in l for kw in error_keywords)]
+    error_block = "\n".join(error_lines[:10]) if error_lines else ""
+
+    tail_lines = []
+    for l in reversed(lines):
+        tail_lines.insert(0, l)
+        if len("\n".join(tail_lines)) > 200:
+            break
+    tail = "\n".join(tail_lines)
+
+    omitted = len(lines) - head_lines - len(error_lines[:10]) - len(tail_lines)
+    parts = [head]
+    if omitted > 0:
+        parts.append(f"\n... [省略 {omitted} 行] ...")
+    if error_block and error_block not in head:
+        parts.append(error_block)
+    if tail:
+        parts.append(f"\n... [尾部 {len(tail_lines)} 行] ...\n{tail}")
+
+    return "\n".join(parts)
 
 
 def trim_tool_context_history(tool_records: list[dict], max_rounds: int = MAX_TOOL_HISTORY_ROUNDS) -> list[dict]:

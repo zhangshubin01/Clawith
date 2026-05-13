@@ -62,7 +62,7 @@ class SSORegisterRequest(BaseModel):
 
 class UserLogin(BaseModel):
     login_identifier: str = Field(description="Email address for login")
-    password: str = Field(min_length=6, description="Login password")
+    password: str = Field(min_length=6, max_length=128, description="Login password")
     tenant_id: uuid.UUID | None = None  # Optional: when set, restrict login to users of this tenant
 
 

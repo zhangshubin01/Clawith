@@ -1,3 +1,5 @@
+"""ACP 命令基类 — 定义 CommandContext 上下文对象与 AcpCommand 抽象命令接口。"""
+
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional

@@ -13,8 +13,23 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Literal
 
+import ssl
+
+import certifi
 import httpx
 from loguru import logger
+
+
+def _create_ssl_context() -> ssl.SSLContext:
+    """创建 SSL context，只使用 certifi 证书包，避开 macOS Keychain 沙箱限制。
+
+    ssl.create_default_context() 在 macOS 上会访问 Security.framework
+    的 Keychain，在 daemon 进程中可能触发 PermissionError。
+    手动创建 ssl.SSLContext 并只加载 certifi 证书包可以完全绕过 Keychain。
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.load_verify_locations(certifi.where())
+    return ctx
 
 
 # ============================================================================
@@ -302,7 +317,7 @@ class OpenAICompatibleClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None)
+            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None, verify=_create_ssl_context())
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
@@ -749,7 +764,7 @@ class OpenAIResponsesClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None)
+            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None, verify=_create_ssl_context())
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
@@ -1056,7 +1071,7 @@ class GeminiClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None)
+            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None, verify=_create_ssl_context())
         return self._client
 
     async def _get_openai_fallback_client(self) -> OpenAICompatibleClient:
@@ -1552,7 +1567,7 @@ class AnthropicClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None)
+            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None, verify=_create_ssl_context())
         return self._client
 
     def _get_headers(self) -> dict[str, str]:

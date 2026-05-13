@@ -81,7 +81,7 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "读取文件内容。支持两种路径：绝对路径（如 /Users/xxx/project/src/Main.java）读取 IDE 项目文件；相对路径（如 soul.md, memory/memory.md）读取 Agent 自身文件。",
+            "description": "读取文件内容。支持两种路径：绝对路径（如 /Users/xxx/project/src/Main.java）读取 IDE 项目文件；相对路径（如 soul.md, memory/memory.md）读取 Agent 自身文件。优先使用此工具读取已知路径的文件，比 run_in_terminal sed/cat/head/tail 快 20 倍。支持 offset/limit 参数分页读取大文件。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -106,7 +106,7 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "run_in_terminal",
-            "description": "在 IDE 终端中执行命令。",
+            "description": "在 IDE 终端中执行命令。注意：读取文件内容请使用 read_file（快 20 倍），搜索代码请使用 grep_code/search_codebase（支持缓存）。仅在编译、git 操作、包管理等需要 shell 环境时才使用终端命令。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -479,6 +479,13 @@ _LSP4J_FILE_PATH_TOOLS = frozenset({
     "save_file",
 })
 
+# 搜索类工具始终在本地后端通过 ripgrep 执行，比走 IDE PSI 索引快 10-100 倍
+_LOCAL_SEARCH_TOOLS = frozenset({
+    "grep_code",
+    "search_codebase",
+    "search_symbol",
+})
+
 # Agent 内部文件 — 始终在本地后端执行，不路由到 IDE
 _AGENT_INTERNAL_FILE_NAMES = frozenset({
     "soul.md", "focus.md", "tasks.json", "memory.md",
@@ -522,6 +529,9 @@ def _should_route_to_ide(tool_name: str, args: dict) -> bool:
     3. Agent 内部文件（soul.md, memory.md, workspace/xxx, skills/xxx）→ 本地
     4. 其余相对路径 → IDE（由 invoke_tool_on_ide 解析为绝对路径）
     """
+    # 搜索类工具走本地 ripgrep，比 IDE PSI 索引快 10-100 倍，且避免 65s 超时
+    if tool_name in _LOCAL_SEARCH_TOOLS:
+        return False
     if tool_name not in _LSP4J_FILE_PATH_TOOLS:
         return True
 
@@ -645,6 +655,17 @@ def install_lsp4j_tool_hooks() -> None:
                 # LSP4J 工具调用异常（只记录不吞异常，继续向上传播）
                 logger.exception("[LSP4J-TOOL] LSP4J 工具调用异常: tool={} error={}", tool_name, e)
                 raise
+
+        # 本地搜索工具：后端 ripgrep 直行，比 IDE PSI 索引快 10-100 倍
+        if tool_name in _LOCAL_SEARCH_TOOLS:
+            from .jsonrpc_router import _execute_local_tool, get_active_router
+            # 尝试从活跃路由获取 IDE 项目路径，否则回退到 CWD
+            _agent_key = (str(user_id), str(agent_id))
+            _active = await get_active_router(_agent_key)
+            _proj_path = _active._project_path if _active and hasattr(_active, "_project_path") else ""
+            result_str, _ = _execute_local_tool(tool_name, args, _proj_path or "")
+            logger.info("[LSP4J-TOOL] 本地搜索执行: tool={} result_len={}", tool_name, len(result_str))
+            return result_str
 
         # ACP 原路径（或 LSP4J 工具回退到本地执行）
         # ★ 本地回退参数名映射：IDE 工具参数名 → 基础工具参数名

@@ -511,6 +511,10 @@ export default function Chat() {
 
         const connect = () => {
             if (cancelled) return;
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.close(1000, 'replaced by new connection');
+                wsRef.current = null;
+            }
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const lang = (i18n.language || 'en').toLowerCase().startsWith('zh') ? 'zh' : 'en';
             const wsUrl = `${protocol}//${window.location.host}/ws/chat/${id}?token=${token}&lang=${lang}`;

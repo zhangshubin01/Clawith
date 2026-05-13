@@ -27,6 +27,7 @@ from app.database import async_session
 from app.models.agent import Agent as AgentModel
 from app.models.llm import LLMModel
 from app.models.user import User
+import app.api.websocket as ws_module
 
 from .context import (
     current_lsp4j_ws,
@@ -208,6 +209,30 @@ async def lsp4j_websocket_endpoint(
             t.add_done_callback(_ws_tasks.discard)
     except WebSocketDisconnect:
         logger.info("[LSP4J-LIFE] WS disconnected agent_id={}", agent_obj.id)
+        # 通知 Chat WS：LSP4J 工具连接已断开，IDE 工具将不可用
+        _sid = getattr(jsonrpc, "_session_id", None)
+        _agent_id = str(agent_obj.id)
+        if _sid:
+            try:
+                await ws_module.manager.send_to_session(
+                    _agent_id,
+                    str(_sid),
+                    {
+                        "type": "lsp4j_disconnected",
+                        "message": "IDE 工具连接已断开，工具调用将不可用。请重新连接 IDE 插件。",
+                    },
+                )
+                logger.info("[LSP4J-LIFE] 已通知 Chat WS: session={} agent={}", _sid, _agent_id)
+            except Exception as _e:
+                logger.debug("[LSP4J-LIFE] Chat WS 通知失败（可能 Chat WS 已断开）: {}", _e)
+        # 会话结束生命周期事件
+        _msg_count = len(getattr(jsonrpc, "_message_history", []) or [])
+        logger.info(
+            "[LSP4J-LIFE] session_end: session={} agent={} msgs={} end_type=disconnect",
+            _sid,
+            _agent_id,
+            _msg_count,
+        )
     except Exception as e:
         logger.error("[LSP4J-LIFE] WS error: {}", e)
     finally:

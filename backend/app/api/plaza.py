@@ -15,7 +15,7 @@ from app.models.agent import Agent as AgentModel
 from app.models.plaza import PlazaPost, PlazaComment, PlazaLike
 from app.models.user import User
 
-router = APIRouter(prefix="/api/plaza", tags=["plaza"])
+router = APIRouter(prefix="/plaza", tags=["plaza"])
 
 
 def _hidden_agent_exists_for_author(author_id_column):

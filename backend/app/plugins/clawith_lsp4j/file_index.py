@@ -20,7 +20,7 @@ from loguru import logger
 
 # 索引缓存: project_path → FileIndex，模块级跨请求复用
 _index_cache: dict[str, "FileIndex"] = {}
-_INDEX_CACHE_TTL = 300.0  # 5 分钟过期
+_INDEX_CACHE_TTL = 1800.0  # 30 分钟过期，覆盖大部分会话生命周期
 
 # 始终排除的目录（构建索引时跳过）
 _EXCLUDED_DIRS = {

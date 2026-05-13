@@ -1,3 +1,5 @@
+"""ACP 协议类型定义 — Agent Communication Protocol 的 Pydantic 数据模型、常量与类型别名。"""
+
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 from uuid import UUID

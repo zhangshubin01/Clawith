@@ -1,5 +1,11 @@
 """Clawith Backend — FastAPI Application Entry Point."""
 
+import os as _os
+
+import certifi as _certifi
+
+_os.environ.setdefault("SSL_CERT_FILE", _certifi.where())
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 import shutil
@@ -210,11 +216,11 @@ async def lifespan(app: FastAPI):
                     _new_dir = _data_dir / f"enterprise_info_{_tenant.id}"
                     if not _new_dir.exists():
                         shutil.copytree(str(_old_dir), str(_new_dir))
-                        print(f"[startup] ✅ Migrated enterprise_info → enterprise_info_{_tenant.id}", flush=True)
+                        logger.info(f"[startup] Migrated enterprise_info → enterprise_info_{_tenant.id}")
                     else:
-                        print(f"[startup] ℹ️ enterprise_info_{_tenant.id} already exists, skipping migration", flush=True)
+                        logger.info(f"[startup] enterprise_info_{_tenant.id} already exists, skipping migration")
     except Exception as e:
-        print(f"[startup] ⚠️ enterprise_info migration failed: {e}", flush=True)
+        logger.warning(f"[startup] enterprise_info migration failed: {e}")
 
     try:
         from app.services.tool_seeder import seed_builtin_tools, clean_orphaned_mcp_tools
@@ -409,10 +415,10 @@ app.include_router(teams_router, prefix=settings.API_PREFIX)
 
 app.include_router(atlassian_router, prefix=settings.API_PREFIX)
 
-app.include_router(triggers_router)
+app.include_router(triggers_router, prefix=settings.API_PREFIX)
 app.include_router(focus_router, prefix=settings.API_PREFIX)
-app.include_router(chat_sessions_router)
-app.include_router(plaza_router)
+app.include_router(chat_sessions_router, prefix=settings.API_PREFIX)
+app.include_router(plaza_router, prefix=settings.API_PREFIX)
 app.include_router(notification_router, prefix=settings.API_PREFIX)
 app.include_router(webhooks_router)  # Public endpoint, no API prefix
 app.include_router(ws_router)
@@ -422,7 +428,7 @@ app.include_router(pages_router, prefix=settings.API_PREFIX)
 app.include_router(pages_public_router)  # Public endpoint for /p/{short_id}, no API prefix
 app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
-app.include_router(okr_router)  # OKR — self-prefixed at /api/okr
+app.include_router(okr_router, prefix=settings.API_PREFIX)
 app.include_router(onboarding_router, prefix=settings.API_PREFIX)
 
 # Register IDE Plugin API (used by Tongyi Lingma IDE plugin for agent listing)

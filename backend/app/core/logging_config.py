@@ -163,16 +163,31 @@ def configure_file_logging(settings: Settings) -> None:
 
 
 def _add_stdout_handler(settings: Settings) -> None:
-    """Add stdout handler with settings-based configuration."""
-    logger.add(
-        sys.stdout,
-        level=settings.LOG_LEVEL,
-        format=_LOG_FORMAT_COLOR,
-        enqueue=True,
-        backtrace=True,
-        diagnose=settings.LOG_DIAGNOSE,
-        filter=_ensure_trace_id,
-    )
+    """Add stdout handler with settings-based configuration.
+
+    When LOG_FORMAT="json", uses loguru's built-in JSON serializer for
+    direct ingestion by log aggregators (ELK, Datadog, Loki, etc.).
+    """
+    if settings.LOG_FORMAT == "json":
+        logger.add(
+            sys.stdout,
+            level=settings.LOG_LEVEL,
+            serialize=True,
+            enqueue=True,
+            backtrace=True,
+            diagnose=settings.LOG_DIAGNOSE,
+            filter=_ensure_trace_id,
+        )
+    else:
+        logger.add(
+            sys.stdout,
+            level=settings.LOG_LEVEL,
+            format=_LOG_FORMAT_COLOR,
+            enqueue=True,
+            backtrace=True,
+            diagnose=settings.LOG_DIAGNOSE,
+            filter=_ensure_trace_id,
+        )
 
 
 def _add_file_handler(settings: Settings, log_path: Path) -> None:
@@ -181,19 +196,34 @@ def _add_file_handler(settings: Settings, log_path: Path) -> None:
     enqueue=True provides thread-safety only (not multi-process safe).
     Current deployment is single-process, so this is sufficient.
     """
-    logger.add(
-        str(log_path / "clawith_{time:YYYY-MM-DD}.log"),
-        level=settings.LOG_LEVEL,
-        format=_LOG_FORMAT_PLAIN,
-        rotation=settings.LOG_ROTATION,
-        retention=settings.LOG_RETENTION,
-        compression=settings.LOG_COMPRESSION,
-        enqueue=True,
-        backtrace=True,
-        diagnose=settings.LOG_DIAGNOSE,
-        filter=_ensure_trace_id,
-        encoding="utf-8",
-    )
+    if settings.LOG_FORMAT == "json":
+        logger.add(
+            str(log_path / "clawith_{time:YYYY-MM-DD}.log"),
+            level=settings.LOG_LEVEL,
+            serialize=True,
+            rotation=settings.LOG_ROTATION,
+            retention=settings.LOG_RETENTION,
+            compression=settings.LOG_COMPRESSION,
+            enqueue=True,
+            backtrace=True,
+            diagnose=settings.LOG_DIAGNOSE,
+            filter=_ensure_trace_id,
+            encoding="utf-8",
+        )
+    else:
+        logger.add(
+            str(log_path / "clawith_{time:YYYY-MM-DD}.log"),
+            level=settings.LOG_LEVEL,
+            format=_LOG_FORMAT_PLAIN,
+            rotation=settings.LOG_ROTATION,
+            retention=settings.LOG_RETENTION,
+            compression=settings.LOG_COMPRESSION,
+            enqueue=True,
+            backtrace=True,
+            diagnose=settings.LOG_DIAGNOSE,
+            filter=_ensure_trace_id,
+            encoding="utf-8",
+        )
 
 
 def quiet_noisy_connection_loggers() -> None:

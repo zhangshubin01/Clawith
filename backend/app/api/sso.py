@@ -1,3 +1,5 @@
+"""单点登录 REST API — OAuth2 协议对接（Google/飞书等），处理授权回调与 token 交换。"""
+
 import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote

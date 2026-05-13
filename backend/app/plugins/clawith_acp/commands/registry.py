@@ -1,3 +1,5 @@
+"""ACP 命令注册表 — 管理斜杠命令的注册、查找与执行调度。"""
+
 from typing import List, Optional
 from .base import AcpCommand
 

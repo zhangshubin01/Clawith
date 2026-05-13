@@ -22,6 +22,8 @@ from app.services.llm import call_llm_with_failover
 
 router = APIRouter(tags=["websocket"])
 
+MAX_CONNECTIONS = 500
+
 
 class ConnectionManager:
     """Manage WebSocket connections per agent."""
@@ -30,7 +32,15 @@ class ConnectionManager:
         # agent_id_str -> list of (WebSocket, session_id_str | None, user_id_str | None)
         self.active_connections: dict[str, list[tuple]] = {}
 
+    @property
+    def total_connections(self) -> int:
+        return sum(len(conns) for conns in self.active_connections.values())
+
     async def connect(self, agent_id: str, websocket: WebSocket, session_id: str = None, user_id: str | None = None):
+        if self.total_connections >= MAX_CONNECTIONS:
+            await websocket.close(code=1013, reason="Server at capacity")
+            logger.warning("WebSocket connection rejected: max connections ({}) reached", MAX_CONNECTIONS)
+            return
         await websocket.accept()
         if agent_id not in self.active_connections:
             self.active_connections[agent_id] = []
@@ -136,7 +146,6 @@ async def get_chat_history(
         if m.role == "tool_call":
             # Parse JSON-encoded tool call data
             try:
-                import json
                 data = json.loads(m.content)
                 entry["content"] = ""
                 entry["toolName"] = data.get("name", "")
@@ -335,8 +344,7 @@ async def websocket_chat(
         if msg.role == "tool_call":
             # Convert stored tool_call JSON into OpenAI-format assistant+tool pair
             try:
-                import json as _j_hist
-                tc_data = _j_hist.loads(msg.content)
+                tc_data = json.loads(msg.content)
                 tc_name = tc_data.get("name", "unknown")
                 tc_args = tc_data.get("args", {})
                 tc_result = tc_data.get("result", "")
@@ -668,8 +676,7 @@ async def websocket_chat(
                                 _ws_args = data.get("args") or {}
                                 if isinstance(_ws_args, str):
                                     try:
-                                        import json as _json_wsa
-                                        _ws_args = _json_wsa.loads(_ws_args)
+                                        _ws_args = json.loads(_ws_args)
                                     except Exception:
                                         _ws_args = {}
                                 _ws_path = _ws_args.get("output_path") or _ws_args.get("destination_path") or _ws_args.get("path", "")
@@ -688,13 +695,12 @@ async def websocket_chat(
                         # Save completed tool calls to DB so they persist in chat history
                         if data.get("status") == "done":
                             try:
-                                import json as _json_tc
                                 async with async_session() as _tc_db:
                                     tc_msg = ChatMessage(
                                         agent_id=agent_id,
                                         user_id=user_id,
                                         role="tool_call",
-                                        content=_json_tc.dumps({
+                                        content=json.dumps({
                                             "name": data.get("name", ""),
                                             "args": data.get("args"),
                                             "status": "done",

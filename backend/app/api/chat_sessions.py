@@ -17,7 +17,7 @@ from app.models.chat_session import ChatSession
 from app.models.agent import Agent
 from app.models.user import User
 
-router = APIRouter(prefix="/api/agents", tags=["chat-sessions"])
+router = APIRouter(prefix="/agents", tags=["chat-sessions"])
 
 
 def _can_view_all_agent_chat_sessions(user: User, agent: Agent) -> bool:

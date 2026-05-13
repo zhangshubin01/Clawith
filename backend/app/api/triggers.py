@@ -10,7 +10,7 @@ from app.api.auth import get_current_user
 from app.database import async_session
 from app.models.trigger import AgentTrigger
 
-router = APIRouter(prefix="/api/agents", tags=["triggers"])
+router = APIRouter(prefix="/agents", tags=["triggers"])
 
 
 class TriggerResponse(BaseModel):

@@ -1,3 +1,5 @@
+"""插件基类 — 定义 ClawithPlugin 抽象接口，所有插件需继承此类并实现 register 方法。"""
+
 # backend/app/plugins/base.py
 from abc import ABC, abstractmethod
 from typing import ClassVar

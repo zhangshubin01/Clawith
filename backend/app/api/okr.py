@@ -37,7 +37,7 @@ from app.models.okr import (
     WorkReport,
 )
 
-router = APIRouter(prefix="/api/okr", tags=["okr"])
+router = APIRouter(prefix="/okr", tags=["okr"])
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -240,33 +240,10 @@ def _compute_current_period(
 ) -> tuple[date, date]:
     """Compute the start and end dates of the current OKR period.
 
-    This is a simple deterministic calculation from today's date so the
-    frontend and API always agree on what "the current period" is.
+    Delegates to _compute_period_for_date with today's date, so the frontend
+    and API always agree on what "the current period" is.
     """
-    today = date.today()
-    if frequency == "monthly":
-        start = today.replace(day=1)
-        # Last day of this month
-        if today.month == 12:
-            end = today.replace(month=12, day=31)
-        else:
-            end = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
-    elif frequency == "custom" and length_days:
-        # Align to multiples of length_days from the Unix epoch
-        epoch = date(1970, 1, 1)
-        days_since_epoch = (today - epoch).days
-        period_index = days_since_epoch // length_days
-        start = epoch + timedelta(days=period_index * length_days)
-        end = start + timedelta(days=length_days - 1)
-    else:
-        # Default: quarterly (Q1/Q2/Q3/Q4)
-        quarter = (today.month - 1) // 3 + 1
-        start = date(today.year, (quarter - 1) * 3 + 1, 1)
-        if quarter == 4:
-            end = date(today.year, 12, 31)
-        else:
-            end = date(today.year, quarter * 3 + 1, 1) - timedelta(days=1)
-    return start, end
+    return _compute_period_for_date(frequency, length_days, date.today())
 
 
 def _compute_period_for_date(

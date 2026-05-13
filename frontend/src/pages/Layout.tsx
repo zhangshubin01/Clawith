@@ -544,7 +544,8 @@ export default function Layout() {
             const res = await fetchJson<{ unread_count: number }>('/notifications/unread-count');
             return (res as any)?.unread_count || 0;
         },
-        refetchInterval: 30000,
+        refetchInterval: 120000,
+        staleTime: 60000,
         enabled: !!user,
     });
     const { data: notifications = [] } = useQuery({
@@ -739,7 +740,8 @@ export default function Layout() {
     const { data: agents = [] } = useQuery({
         queryKey: ['agents', currentTenant],
         queryFn: () => agentApi.list(currentTenant || undefined),
-        refetchInterval: 30000,
+        refetchInterval: 120000,
+        staleTime: 60000,
     });
 
     const openAgentDrawer = useCallback(() => {

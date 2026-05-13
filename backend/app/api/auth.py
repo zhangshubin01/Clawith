@@ -44,6 +44,8 @@ from sqlalchemy.orm import selectinload
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 # ── In-memory rate limiter for auth endpoints ──────────────────────────
+# 注意：多 gunicorn worker 部署时，内存字典不跨 worker 共享，速率限制会在各 worker
+# 独立计数。生产环境高并发场景建议迁移至 Redis 实现（如 redis-py + Lua 脚本）。
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
 _rate_lock = asyncio.Lock()
 

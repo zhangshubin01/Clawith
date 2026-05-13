@@ -1,3 +1,5 @@
+"""工作空间路径工具 — 提供安全的路径解析与 WorkspacePathError 异常，防止路径穿越攻击。"""
+
 from dataclasses import dataclass
 from pathlib import Path
 
