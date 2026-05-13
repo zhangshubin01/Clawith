@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 from app.services.sandbox.config import SandboxConfig, SandboxType
@@ -138,6 +139,21 @@ class Settings(BaseSettings):
     SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING: bool = _default_allow_unsafe_bwrap_fallback()
     SANDBOX_DEFAULT_TIMEOUT: int = 30
     SANDBOX_MAX_TIMEOUT: int = 60
+
+    @model_validator(mode='after')
+    def validate_secrets(self):
+        """生产环境检查：拒绝使用默认密钥启动。"""
+        if self.SECRET_KEY == "change-me-in-production":
+            raise ValueError(
+                "SECRET_KEY 仍为默认值 'change-me-in-production'，"
+                "请设置 SECRET_KEY 环境变量"
+            )
+        if self.JWT_SECRET_KEY == "change-me-jwt-secret-dev-only":
+            raise ValueError(
+                "JWT_SECRET_KEY 仍为默认值 'change-me-jwt-secret-dev-only'，"
+                "请设置 JWT_SECRET_KEY 环境变量"
+            )
+        return self
 
     def get_agent_workspace_path(self, agent_id: str) -> Path:
         """Return the workspace directory path for a given agent.

@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import httpx
 from loguru import logger
 
 from app.services.document_conversion.chrome_renderer import chrome_executable
@@ -23,7 +24,6 @@ async def convert_html_to_pdf(src_file: Path, tgt_file: Path, target_path: str, 
             import subprocess
             import tempfile
             import time
-            import urllib.request
             import websockets
 
             chrome = chrome_executable()
@@ -53,21 +53,23 @@ async def convert_html_to_pdf(src_file: Path, tgt_file: Path, target_path: str, 
             )
             try:
                 base = f"http://127.0.0.1:{port}"
+                client = httpx.AsyncClient()
                 deadline = time.time() + 8
                 while time.time() < deadline:
                     try:
-                        with urllib.request.urlopen(f"{base}/json/version", timeout=0.25) as resp:
-                            json.loads(resp.read().decode("utf-8"))
+                        r = await client.get(f"{base}/json/version")
+                        json.loads(r.text)
                         break
                     except Exception:
                         await asyncio.sleep(0.1)
                 else:
+                    await client.aclose()
                     return False
 
                 file_url = src_file.resolve().as_uri()
-                req = urllib.request.Request(f"{base}/json/new?{file_url}", method="PUT")
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    target = json.loads(resp.read().decode("utf-8"))
+                r = await client.put(f"{base}/json/new?{file_url}")
+                target = r.json()
+                await client.aclose()
                 ws_url = target.get("webSocketDebuggerUrl")
                 if not ws_url:
                     return False

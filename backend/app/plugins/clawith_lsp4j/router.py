@@ -111,12 +111,17 @@ async def lsp4j_websocket_endpoint(
     await websocket.accept()
     logger.info("[LSP4J-LIFE] WS connection accepted")
 
-    # 1. token 认证
-    logger.info("[LSP4J-LIFE] WS authenticating with token: {}...", token[:20] if token else "None")
+    # 1. token 认证：优先从 URL query parameter 读取，其次从 Authorization header
     if not token:
-        logger.warning("[LSP4J-LIFE] WS auth failed: missing token")
-        await websocket.close(code=4001, reason="Missing token")
-        return
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            logger.info("[LSP4J-LIFE] WS token from Authorization header")
+        else:
+            logger.warning("[LSP4J-LIFE] WS auth failed: missing token (neither query param nor Authorization header)")
+            await websocket.close(code=4001, reason="Missing token")
+            return
+    logger.info("[LSP4J-LIFE] WS authenticating with token: {}...", token[:20] if token else "None")
 
     try:
         user_id = await verify_api_key_or_token(token)

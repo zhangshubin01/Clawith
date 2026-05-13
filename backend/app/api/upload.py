@@ -2,6 +2,7 @@
 
 import base64
 import os
+import shlex
 import uuid
 from pathlib import Path
 
@@ -47,13 +48,13 @@ def extract_text(file_path: Path, extension: str) -> str:
 import sys
 try:
     import PyPDF2
-    reader = PyPDF2.PdfReader('{file_path}')
+    reader = PyPDF2.PdfReader({shlex.quote(str(file_path))})
     text = '\\n'.join(page.extract_text() or '' for page in reader.pages)
     print(text[:8000])
 except ImportError:
     # Fallback: use pdftotext if available
     import subprocess as sp
-    r = sp.run(['pdftotext', '{file_path}', '-'], capture_output=True, text=True)
+    r = sp.run(['pdftotext', {shlex.quote(str(file_path))}, '-'], capture_output=True, text=True)
     print(r.stdout[:8000] if r.returncode == 0 else '[无法解析PDF]')
 """],
                 capture_output=True, text=True, timeout=30,
@@ -69,7 +70,7 @@ except ImportError:
                 ["python3", "-c", f"""
 try:
     from docx import Document
-    doc = Document('{file_path}')
+    doc = Document({shlex.quote(str(file_path))})
     text = '\\n'.join(p.text for p in doc.paragraphs)
     print(text[:8000])
 except ImportError:
@@ -88,7 +89,7 @@ except ImportError:
                 ["python3", "-c", f"""
 try:
     import openpyxl
-    wb = openpyxl.load_workbook('{file_path}', read_only=True)
+    wb = openpyxl.load_workbook({shlex.quote(str(file_path))}, read_only=True)
     lines = []
     for ws in wb.worksheets[:3]:
         lines.append(f'## Sheet: {{ws.title}}')
