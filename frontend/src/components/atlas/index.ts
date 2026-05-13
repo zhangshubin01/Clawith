@@ -4,7 +4,10 @@ export { default as MonoLabel } from './MonoLabel';
 export { default as Plate } from './Plate';
 export { default as AtlasFrame } from './AtlasFrame';
 export { default as StarField } from './StarField';
-/* Legacy illustrations (to be replaced by Phase 2 SVGs) */
+export { default as CompassPlate } from './CompassPlate';
+export { default as OrbitPlate } from './OrbitPlate';
+export { default as UniverseMap } from './UniverseMap';
+/* Legacy illustrations — unused; will be removed after Phase 3 */
 export { default as OrreryPlate } from './OrreryPlate';
 export { default as LoneStar } from './LoneStar';
 export { default as ConstellationFigure } from './ConstellationFigure';
