@@ -71,12 +71,12 @@ export default function UniverseMap({
     const cls = ['atlas-illustration', className].filter(Boolean).join(' ');
     const cx = 300;
     const cy = 320;
-    // Slightly smaller rings than before (was 280/115) so the longest orbit
-    // labels — "II · EMPLOYEE" / "V · EMPLOYEE" — get enough margin to fit
-    // inside the (modestly) padded viewBox without clipping.
-    const rOuter = 215;
-    const rInner = 90;
-    const padX = 120;
+    // Larger rings so the chart matches the user-supplied mock's footprint.
+    // padX is just enough horizontal viewBox margin to let the longest
+    // outward labels ("II · EMPLOYEE" / "V · EMPLOYEE") fit without clipping.
+    const rOuter = 265;
+    const rInner = 110;
+    const padX = 80;
     const vbX = -padX;
     const vbW = 600 + padX * 2;
     const vbH = 670;

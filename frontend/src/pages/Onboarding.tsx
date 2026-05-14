@@ -214,9 +214,9 @@ export default function Onboarding() {
     return (
         <AtlasFrame onToggleLang={toggleLang}>
             <div className="atlas-screen-split">
-                <div className="atlas-screen-plate">
+                <div className="atlas-screen-plate atlas-screen-plate--snug">
                     <StarField density="low" seed={9} />
-                    <UniverseMap size={600} assistantName={displayName} />
+                    <UniverseMap size={640} assistantName={displayName} />
                 </div>
                 <div className="atlas-screen-form atlas-screen-form--padded">
                     <h1 className="atlas-display">

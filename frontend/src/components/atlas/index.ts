@@ -8,6 +8,7 @@ export { default as StarField } from './StarField';
 export { default as CompassPlate } from './CompassPlate';
 export { default as CosmographyPlate } from './CosmographyPlate';
 export { default as OrbitPlate } from './OrbitPlate';
+export { default as OriginPlate } from './OriginPlate';
 export { default as UniverseMap } from './UniverseMap';
 /* Legacy illustrations — unused; will be removed after Phase 3 */
 export { default as OrreryPlate } from './OrreryPlate';

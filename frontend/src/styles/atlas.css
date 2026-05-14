@@ -554,6 +554,10 @@
   overflow: hidden;
 }
 
+.atlas-screen-plate--snug {
+  padding: 60px 24px;
+}
+
 .atlas-screen-plate--gridded .atlas-grid-bg {
   position: absolute;
   inset: 0;
