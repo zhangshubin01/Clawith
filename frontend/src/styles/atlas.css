@@ -928,7 +928,6 @@
   padding: 16px 0;
   background: transparent;
   border: 0;
-  border-top: 1px solid var(--hairline);
   border-bottom: 1px solid var(--hairline);
   color: var(--ink);
   cursor: pointer;

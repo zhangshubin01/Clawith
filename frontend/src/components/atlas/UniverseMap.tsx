@@ -195,7 +195,14 @@ export default function UniverseMap({
                             />
                             {o.filled ? (
                                 <>
-                                    <circle cx={ex} cy={ey} r="4.5" fill="currentColor" stroke="none" />
+                                    {/* Pulsing halo for the active orbit endpoint */}
+                                    <circle cx={ex} cy={ey} r="7" fill="none" stroke="currentColor" strokeWidth="0.5" opacity="0.55">
+                                        <animate attributeName="r" values="7;16" dur="2.4s" repeatCount="indefinite" />
+                                        <animate attributeName="opacity" values="0.55;0" dur="2.4s" repeatCount="indefinite" />
+                                    </circle>
+                                    <circle cx={ex} cy={ey} r="4.5" fill="currentColor" stroke="none">
+                                        <animate attributeName="opacity" values="1;0.55;1" dur="2.4s" repeatCount="indefinite" />
+                                    </circle>
                                     <circle cx={ex} cy={ey} r="7" opacity="0.5" />
                                 </>
                             ) : (
@@ -218,9 +225,15 @@ export default function UniverseMap({
                     );
                 })}
 
-                {/* Center FOUNDER marker */}
+                {/* Center FOUNDER marker — pulsing halo + outer ring + breathing dot */}
+                <circle cx="0" cy="0" r="7" fill="none" stroke="currentColor" strokeWidth="0.5" opacity="0.5">
+                    <animate attributeName="r" values="7;15" dur="3.2s" repeatCount="indefinite" />
+                    <animate attributeName="opacity" values="0.45;0" dur="3.2s" repeatCount="indefinite" />
+                </circle>
                 <circle cx="0" cy="0" r="7" />
-                <circle cx="0" cy="0" r="1.6" fill="currentColor" stroke="none" />
+                <circle cx="0" cy="0" r="1.6" fill="currentColor" stroke="none">
+                    <animate attributeName="opacity" values="1;0.6;1" dur="3.2s" repeatCount="indefinite" />
+                </circle>
                 {/* Tiny cross-hairs through center */}
                 <line x1="-12" y1="0" x2="-9" y2="0" opacity="0.4" />
                 <line x1="9" y1="0" x2="12" y2="0" opacity="0.4" />

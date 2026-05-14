@@ -50,9 +50,15 @@ export default function OrbitPlate({
                     <circle key={i} cx={x} cy={y} r={r} fill="currentColor" stroke="none" opacity={o} />
                 ))}
 
-                {/* Center FOUNDER marker — outer ring + center dot */}
+                {/* Center FOUNDER marker — pulsing halo + outer ring + breathing dot */}
+                <circle cx="0" cy="0" r="10" fill="none" stroke="currentColor" strokeWidth="0.5" opacity="0.5">
+                    <animate attributeName="r" values="10;18" dur="3.2s" repeatCount="indefinite" />
+                    <animate attributeName="opacity" values="0.45;0" dur="3.2s" repeatCount="indefinite" />
+                </circle>
                 <circle cx="0" cy="0" r="10" />
-                <circle cx="0" cy="0" r="2.6" fill="currentColor" stroke="none" />
+                <circle cx="0" cy="0" r="2.6" fill="currentColor" stroke="none">
+                    <animate attributeName="opacity" values="1;0.6;1" dur="3.2s" repeatCount="indefinite" />
+                </circle>
 
                 {/* Founder label */}
                 <text
