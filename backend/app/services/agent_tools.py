@@ -2127,7 +2127,8 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     """Load enabled tools for an agent from DB (OpenAI function-calling format).
 
     Falls back to hardcoded AGENT_TOOLS if DB not ready.
-    Always includes core system tools (send_channel_file, write_file).
+    Includes core system tools (send_channel_file, write_file) unless the user
+    has explicitly disabled them via the Agent tool panel.
     Feishu tools are only included when the agent has a configured Feishu channel.
     send_channel_message is included when any channel (Feishu/DingTalk/WeCom) is configured.
 
@@ -2189,12 +2190,27 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
             result = []
             db_tool_names = set()
+            # Track tool names that were explicitly disabled by the user
+            # (have an AgentTool record with enabled=False). These must NOT
+            # be re-added by the _always_tools fallback below.
+            explicitly_disabled_names = set()
+            # Track tools included via is_default fallback (no AgentTool record)
+            default_included_names = []
             for t in all_tools:
                 tid = str(t.id)
                 at = assignments.get(tid)
                 enabled = at.enabled if at else t.is_default
                 if not enabled:
+                    # If there is an explicit AgentTool assignment with
+                    # enabled=False, record the tool name so the
+                    # _always_tools loop won't override the user's choice.
+                    if at and not at.enabled:
+                        explicitly_disabled_names.add(t.name)
                     continue
+
+                # Track tools that are included via is_default (no explicit assignment)
+                if at is None and t.is_default:
+                    default_included_names.append(t.name)
 
                 # Skip feishu tools if the agent has no Feishu channel configured
                 if t.category == "feishu" and not has_feishu:
@@ -2230,17 +2246,44 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 result.append(tool_def)
                 db_tool_names.add(t.name)
 
+            if explicitly_disabled_names:
+                logger.info(
+                    f"[Tools] agent={agent_id} explicitly disabled: "
+                    f"{sorted(explicitly_disabled_names)}"
+                )
+            if default_included_names:
+                logger.debug(
+                    f"[Tools] agent={agent_id} included via is_default (no AgentTool record): "
+                    f"{sorted(default_included_names)}"
+                )
 
             if result:
-                # Append always-available system tools that aren't already in the DB list
+                # Append always-available system tools that aren't already in
+                # the DB list — but respect explicit user disabling.
+                always_added = []
                 for t in _always_tools:
-                    if t["function"]["name"] not in db_tool_names:
+                    fn_name = t["function"]["name"]
+                    if fn_name not in db_tool_names and fn_name not in explicitly_disabled_names:
                         result.append(t)
+                        always_added.append(fn_name)
+                if always_added:
+                    logger.debug(
+                        f"[Tools] agent={agent_id} added from _always_tools: {always_added}"
+                    )
                 # Inject OS-aware paths into computer-related tool descriptions
                 result = _patch_computer_tool_descriptions(result, computer_os_type)
                 # Strip msg_type from send_message_to_agent when async A2A is disabled
                 if not _a2a_async:
                     result = _strip_a2a_msg_type(result)
+                # Final diagnostic: log the complete tool list and assignment stats
+                final_names = sorted(t["function"]["name"] for t in result)
+                logger.info(
+                    f"[Tools] agent={agent_id} FINAL {len(result)} tools "
+                    f"(assignments={len(assignments)}, "
+                    f"disabled={len(explicitly_disabled_names)}, "
+                    f"default_fallback={len(default_included_names)}): "
+                    f"{final_names}"
+                )
                 return result
     except Exception as e:
         logger.error(f"[Tools] DB load failed, using fallback: {e}")
