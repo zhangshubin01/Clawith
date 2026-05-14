@@ -2242,8 +2242,22 @@ class JSONRPCRouter:
                         bool(task_match),
                     )
 
-            # 5. 后台持久化
+            # 5. 后台持久化（含 IDE 上下文 #57）
             if session_id and reply:
+                # 从 chat/ask 参数中提取 IDE 上下文用于持久化
+                _ide_project_path = self._project_path or ""
+                _ide_current_file = ""
+                _ide_open_files = None
+                try:
+                    _chat_ctx = ask.chatContext
+                    if isinstance(_chat_ctx, dict):
+                        _ide_current_file = _chat_ctx.get("activeFilePath", "") or ""
+                        _ide_open_files_raw = _chat_ctx.get("openFiles")
+                        if isinstance(_ide_open_files_raw, list):
+                            _ide_open_files = _ide_open_files_raw
+                except Exception:
+                    pass  # 上下文提取失败不影响消息持久化
+
                 _t_persist_start = time.monotonic()
                 _t = asyncio.create_task(
                     _persist_lsp4j_chat_turn(
@@ -2253,6 +2267,9 @@ class JSONRPCRouter:
                         reply_text=reply,
                         user_id=self._user_id,
                         thinking_text="".join(thinking_chunks) if thinking_chunks else None,
+                        project_path=_ide_project_path or None,
+                        current_file=_ide_current_file or None,
+                        open_files=_ide_open_files,
                     )
                 )
                 _t_persist_elapsed = time.monotonic() - _t_persist_start
@@ -5631,11 +5648,15 @@ async def _persist_lsp4j_chat_turn(
     reply_text: str,
     user_id: uuid.UUID,
     thinking_text: str | None = None,
+    project_path: str | None = None,       # IDE 项目根路径 (#57 修复)
+    current_file: str | None = None,        # IDE 当前活动文件 (#57 修复)
+    open_files: list | None = None,         # IDE 打开文件列表 (#57 修复)
 ) -> None:
     """持久化一轮 LSP4J 对话到数据库（fire-and-forget 后台任务）。
 
     参考 ACP 的 _persist_chat_turn（router.py:1724-1784），
     source_channel 使用 "ide_lsp4j" 以区分来源。
+    project_path / current_file / open_files 用于持久化 IDE 上下文到 ChatSession（#57）。
 
     工具调用由 _persist_lsp4j_tool_call 单独持久化，此函数仅持久化 user/assistant 消息。
 
@@ -5671,15 +5692,21 @@ async def _persist_lsp4j_chat_turn(
                     user_id=user_id,
                     title=f"LSP4J {local_now.strftime('%m-%d %H:%M')}",
                     source_channel="ide_lsp4j",
+                    client_type="ide_lsp4j",              # 标记 IDE LSP4J 客户端来源
+                    project_path=project_path,             # 持久化 IDE 项目根路径
+                    current_file=current_file,             # 持久化当前活动文件
+                    open_files=open_files,                 # 持久化打开文件列表
                     created_at=now,
                     last_message_at=now,
                 )
                 db.add(sess)
                 logger.info(
-                    "[LSP4J] ChatSession created: session_id={} agent_id={} title={}",
+                    "[LSP4J] ChatSession created: session_id={} agent_id={} title={} project={} file={}",
                     session_id,
                     agent_id,
                     sess.title,
+                    project_path,
+                    current_file,
                 )
             else:
                 sess.last_message_at = now
@@ -5693,6 +5720,13 @@ async def _persist_lsp4j_chat_turn(
                         agent_id,
                     )
                     sess.agent_id = agent_id
+                # 更新 IDE 上下文（用户可能切换了项目或文件）(#57)
+                if project_path is not None:
+                    sess.project_path = project_path
+                if current_file is not None:
+                    sess.current_file = current_file
+                if open_files is not None:
+                    sess.open_files = open_files
 
             # 添加消息
             # ★ 显式设置 created_at，确保用户消息时间戳早于助手消息

@@ -47,6 +47,11 @@ class SessionOut(BaseModel):
     # Group chat session fields
     is_group: bool = False
     group_name: Optional[str] = None
+    # IDE 插件会话上下文字段（#55 模型映射后可用）
+    client_type: Optional[str] = "web"      # 'web' | 'ide_plugin' | 'ide_lsp4j'
+    project_path: Optional[str] = None      # IDE 项目根路径
+    current_file: Optional[str] = None      # 当前活动编辑文件
+    open_files: Optional[list] = None       # 打开文件列表
 
     class Config:
         from_attributes = True
@@ -191,6 +196,10 @@ async def list_sessions(
                 participant_type="group" if session.is_group else participant_type,
                 is_group=session.is_group,
                 group_name=session.group_name,
+                client_type=session.client_type,
+                project_path=session.project_path,
+                current_file=session.current_file,
+                open_files=session.open_files,
             ))
         return out
 
@@ -261,6 +270,10 @@ async def list_sessions(
                 message_count=count,
                 unread_count=unread_counts.get(str(session.id), 0),
                 is_primary=bool(session.is_primary),
+                client_type=session.client_type,
+                project_path=session.project_path,
+                current_file=session.current_file,
+                open_files=session.open_files,
             ))
         return out
 
@@ -302,6 +315,10 @@ async def create_session(
         is_primary=False,
         participant_type="user",
         is_group=False,
+        client_type="web",
+        project_path=None,
+        current_file=None,
+        open_files=None,
     )
 
 

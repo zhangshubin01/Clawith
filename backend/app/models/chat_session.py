@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, String, ForeignKey, func, UniqueConstraint, Index, text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -55,3 +55,13 @@ class ChatSession(Base):
     last_read_at_by_user: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # IDE 插件上下文（迁移 29f3f8de3ca0 + 25811072c8fd 添加，SQLAlchemy 模型需显式映射）
+    client_type: Mapped[str] = mapped_column(String(20), nullable=False, default="web", server_default="web")
+    # 客户端类型: 'web' | 'ide_plugin' | 'ide_lsp4j' — 区分 Web UI、ACP、LSP4J 来源
+    project_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # IDE 项目根路径，用于文件索引构建和相对路径解析
+    current_file: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # IDE 当前活动编辑文件路径
+    open_files: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # IDE 当前打开的文件列表（JSON 数组），用于 LLM 上下文注入
