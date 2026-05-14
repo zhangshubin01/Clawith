@@ -75,8 +75,9 @@ export default function UniverseMap({
     // padX is just enough horizontal viewBox margin to let the longest
     // outward labels ("II · EMPLOYEE" / "V · EMPLOYEE") fit without clipping.
     const rOuter = 265;
-    const rOuterOut = rOuter + 4;
-    const rOuterIn = rOuter - 4;
+    // Outer pair gap = 10 (~20% wider than before)
+    const rOuterOut = rOuter + 5;
+    const rOuterIn = rOuter - 5;
     const rInner = 110;
     const padX = 80;
     const vbX = -padX;
@@ -147,14 +148,14 @@ export default function UniverseMap({
                 {/* Inner ring — single prominent line */}
                 <circle cx="0" cy="0" r={rInner} opacity="0.95" strokeWidth="0.7" />
 
-                {/* Sparse, short tick marks between the outer pair — every 6°,
-                    with subtle longer majors at every 30°. Kept quite faint. */}
+                {/* Sparse, short tick marks inside the outer pair — every 6°,
+                    inset slightly from both rings so they don't bridge the gap. */}
                 {Array.from({ length: 60 }, (_, i) => {
                     const deg = i * 6;
                     const a = (deg * Math.PI) / 180;
                     const isMajor = deg % 30 === 0;
-                    const r1 = rOuterIn;
-                    const r2 = rOuterOut + (isMajor ? 3 : 0);
+                    const r1 = rOuterIn + 2.5;
+                    const r2 = rOuterOut - (isMajor ? 0 : 2.5);
                     return (
                         <line
                             key={i}

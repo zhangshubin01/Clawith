@@ -42,10 +42,10 @@ export default function OriginPlate({
     const cx = 320;
     const cy = 340;
     // Outer perimeter is rendered as a "double-line track": two faint thin
-    // rings very close together (rOuterOut + rOuterIn), with the inner ring
-    // as a single prominent line at rInner.
-    const rOuterOut = 268;
-    const rOuterIn = 260;
+    // rings (gap = 10, ~20% wider than before), with the inner ring as a
+    // single prominent line at rInner.
+    const rOuterOut = 269;
+    const rOuterIn = 259;
     const rInner = 110;
     const padX = 60;
     const vbX = -padX;
@@ -91,14 +91,14 @@ export default function OriginPlate({
                 <line x1={-rOuterOut} y1="0" x2={rOuterOut} y2="0" opacity="0.1" />
                 <line x1="0" y1={-rOuterOut} x2="0" y2={rOuterOut} opacity="0.1" />
 
-                {/* Sparse, short tick marks between the outer pair — every 6°,
-                    with subtle longer majors at every 30°. Kept quite faint. */}
+                {/* Sparse, short tick marks inside the outer pair — every 6°,
+                    inset slightly from both rings so they don't bridge the gap. */}
                 {Array.from({ length: 60 }, (_, i) => {
                     const deg = i * 6;
                     const a = (deg * Math.PI) / 180;
                     const isMajor = deg % 30 === 0;
-                    const r1 = rOuterIn;
-                    const r2 = rOuterOut + (isMajor ? 3 : 0);
+                    const r1 = rOuterIn + 2.5;
+                    const r2 = rOuterOut - (isMajor ? 0 : 2.5);
                     return (
                         <line
                             key={i}
