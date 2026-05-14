@@ -382,12 +382,32 @@ run_docker_mode() {
 # ═══════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
+# 同步版本号（每次重启自动更新为最新 git commit）
+# ═══════════════════════════════════════════════════════
+sync_version() {
+    cd "$ROOT"
+    local _version="1.9.3"
+    local _commit=""
+    if command -v git &>/dev/null && git rev-parse --short HEAD &>/dev/null; then
+        _commit=$(git rev-parse --short HEAD)
+    fi
+    if [ -f "$BACKEND_DIR/VERSION" ]; then
+        echo "$_version" > "$BACKEND_DIR/VERSION"
+    fi
+    if [ -f "$FRONTEND_DIR/VERSION" ]; then
+        echo "$_version" > "$FRONTEND_DIR/VERSION"
+    fi
+    [ -n "$_commit" ] && echo "$_commit" > "$ROOT/COMMIT"
+    echo -e "${GREEN}✅ Version: $_version (${_commit})${NC}"
+}
+
 main() {
     init_dirs
     load_env
     run_docker_mode || true
-    # 启动本地模式，如果docker 不存在
     cleanup
+    sync_version
     start_postgres
     start_backend
     start_frontend
