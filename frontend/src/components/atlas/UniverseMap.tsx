@@ -139,21 +139,22 @@ export default function UniverseMap({
             </text>
 
             <g transform={`translate(${cx} ${cy})`}>
-                {/* Outer perimeter — two faint thin concentric rings forming a
-                    "track" / double-line look */}
-                <circle cx="0" cy="0" r={rOuterOut} opacity="0.32" />
-                <circle cx="0" cy="0" r={rOuterIn} opacity="0.32" />
+                {/* Outer perimeter — two very faint thin concentric rings,
+                    "double-line" / railway-track look */}
+                <circle cx="0" cy="0" r={rOuterOut} opacity="0.2" />
+                <circle cx="0" cy="0" r={rOuterIn} opacity="0.2" />
 
                 {/* Inner ring — single prominent line */}
                 <circle cx="0" cy="0" r={rInner} opacity="0.95" strokeWidth="0.7" />
 
-                {/* Dense tick marks bridging the outer pair, every 3° (longer at 15°) */}
-                {Array.from({ length: 120 }, (_, i) => {
-                    const deg = i * 3;
+                {/* Sparse, short tick marks between the outer pair — every 6°,
+                    with subtle longer majors at every 30°. Kept quite faint. */}
+                {Array.from({ length: 60 }, (_, i) => {
+                    const deg = i * 6;
                     const a = (deg * Math.PI) / 180;
-                    const isMajor = deg % 15 === 0;
+                    const isMajor = deg % 30 === 0;
                     const r1 = rOuterIn;
-                    const r2 = rOuterOut + (isMajor ? 6 : 0);
+                    const r2 = rOuterOut + (isMajor ? 3 : 0);
                     return (
                         <line
                             key={i}
@@ -161,7 +162,7 @@ export default function UniverseMap({
                             y1={r1 * Math.sin(a)}
                             x2={r2 * Math.cos(a)}
                             y2={r2 * Math.sin(a)}
-                            opacity={isMajor ? 0.45 : 0.28}
+                            opacity={isMajor ? 0.32 : 0.2}
                         />
                     );
                 })}
