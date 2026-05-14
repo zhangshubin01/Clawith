@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { IconWorld } from '@tabler/icons-react';
+import ClawithWordmark from './ClawithWordmark';
 
 interface Props {
     /** When provided, replaces the Clawith brand with a "← BACK" pill button */
@@ -9,16 +10,6 @@ interface Props {
     /** Page contents */
     children: ReactNode;
     className?: string;
-}
-
-function BrandMark() {
-    // Renders the official Clawith logo, swapped by theme via CSS
-    return (
-        <span className="atlas-brand-mark-img" aria-hidden="true">
-            <img src="/logo-black.png" alt="" className="atlas-brand-mark-light" />
-            <img src="/logo-white.png" alt="" className="atlas-brand-mark-dark" />
-        </span>
-    );
 }
 
 export default function AtlasFrame({ onBack, onToggleLang, className, children }: Props) {
@@ -32,10 +23,7 @@ export default function AtlasFrame({ onBack, onToggleLang, className, children }
                             <span aria-hidden="true">←</span> Back
                         </button>
                     ) : (
-                        <div className="atlas-brand">
-                            <BrandMark />
-                            <span className="atlas-brand-name">Clawith</span>
-                        </div>
+                        <ClawithWordmark height={28} className="atlas-brand-wordmark" />
                     )}
                 </div>
                 {onToggleLang && (
