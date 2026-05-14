@@ -137,12 +137,11 @@ export default function CompanySetup() {
             </svg>
             <div className="atlas-screen-center atlas-screen-pad">
                 <div className="atlas-name-stack">
-                    <p className="atlas-tag">— {isZh ? '为你的起点命名' : 'DESIGNATE YOUR ORIGIN'}</p>
                     <h1 className="atlas-display atlas-display--centered">
                         {isZh ? (
-                            <><span>开始吧。</span><br /><em>给你的公司起个名字。</em></>
+                            <><span>开始吧。</span><br /><span>给你的公司起个名字。</span></>
                         ) : (
-                            <><span>Let's begin.</span><br /><em>Name your Company.</em></>
+                            <><span>Let's begin.</span><br /><span>Name your Company.</span></>
                         )}
                     </h1>
                     <p className="atlas-body atlas-body--muted atlas-name-sub">

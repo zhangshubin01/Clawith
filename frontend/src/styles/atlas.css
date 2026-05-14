@@ -390,14 +390,14 @@
 
 .atlas-input--serif {
   font-family: var(--font-serif);
-  font-style: italic;
+  font-style: normal;
   font-size: 22px;
   font-weight: 400;
 }
 
 .atlas-input--serif-lg {
   font-family: var(--font-serif);
-  font-style: italic;
+  font-style: normal;
   font-size: 26px;
   font-weight: 400;
   text-align: center;
@@ -694,17 +694,6 @@
 /* Login form widget overrides — scoped to .atlas-page so other pages
    keep their original styles. */
 .atlas-page .login-form-header { margin-bottom: 28px; }
-
-.atlas-page .login-form-header::before {
-  content: '— LOGIN';
-  display: block;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin-bottom: 16px;
-}
 
 .atlas-page .login-form-title {
   font-family: var(--font-serif);

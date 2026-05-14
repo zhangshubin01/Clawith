@@ -21,6 +21,8 @@ interface Props {
     delta?: string;
     /** Top label */
     topLabel?: string;
+    /** When provided, overrides the I·ASSISTANT orbit's label with this name */
+    assistantName?: string;
     className?: string;
 }
 
@@ -31,6 +33,15 @@ const DEFAULT_ORBITS: OrbitDef[] = [
     { id: 'V',   role: 'EMPLOYEE',  angle: 150,  ring: 'outer', filled: false },
     { id: 'III', role: 'EMPLOYEE',  angle: 82,   ring: 'outer', filled: false },
 ];
+
+/** Render an orbit's label — the I·ASSISTANT orbit can be overridden to show
+ *  the actual assistant name (e.g. CLAWIEE) instead of "I · ASSISTANT". */
+function labelFor(o: OrbitDef, assistantNameOverride?: string): string {
+    if (o.id === 'I' && o.role === 'ASSISTANT' && assistantNameOverride) {
+        return assistantNameOverride.toUpperCase();
+    }
+    return `${o.id} · ${o.role}`;
+}
 
 /** Scattered tiny stars across the map */
 const MAP_STARS: Array<[number, number, number, number]> = [
@@ -54,6 +65,7 @@ export default function UniverseMap({
     alpha = 'α 00ʰ00ᵐ',
     delta = 'δ +00°00′',
     topLabel = 'YOUR UNIVERSE',
+    assistantName,
     className,
 }: Props) {
     const cls = ['atlas-illustration', className].filter(Boolean).join(' ');
@@ -185,7 +197,7 @@ export default function UniverseMap({
                                 opacity={o.filled ? 0.85 : 0.5}
                                 style={{ letterSpacing: '0.12em' }}
                             >
-                                {`${o.id} · ${o.role}`}
+                                {labelFor(o, assistantName)}
                             </text>
                         </g>
                     );

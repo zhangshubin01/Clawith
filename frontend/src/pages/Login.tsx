@@ -9,7 +9,7 @@ import {
     IconArrowRight,
     IconCheck,
 } from '@tabler/icons-react';
-import { AtlasFrame, CompassPlate } from '../components/atlas';
+import { AtlasFrame, CosmographyPlate } from '../components/atlas';
 
 export default function Login() {
     const { t, i18n } = useTranslation();
@@ -407,16 +407,13 @@ export default function Login() {
                 {/* ── Left: Hero with compass ── */}
                 <div className="atlas-screen-plate atlas-login-hero">
                     <div className="atlas-login-compass">
-                        <CompassPlate size={620} />
+                        <CosmographyPlate size={620} />
                     </div>
                     <div className="atlas-login-welcome">
-                        <p className="atlas-mono">{isZh ? '欢迎回来' : 'WELCOME BACK'}</p>
                         <h1 className="atlas-h1">
-                            {isZh ? (
-                                <>欢迎，<em>创始人。</em></>
-                            ) : (
-                                <>{t('login.hero.welcome')} <em>{t('login.hero.founder')}.</em></>
-                            )}
+                            {isZh
+                                ? '欢迎，创始人。'
+                                : `${t('login.hero.welcome')} ${t('login.hero.founder')}.`}
                         </h1>
                         <p className="atlas-body atlas-body--muted">{t('login.hero.description')}</p>
                     </div>

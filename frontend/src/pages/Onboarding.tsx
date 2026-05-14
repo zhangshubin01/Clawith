@@ -113,13 +113,8 @@ export default function Onboarding() {
                         />
                     </div>
                     <div className="atlas-screen-form atlas-screen-form--padded">
-                        <p className="atlas-tag">— {isZh ? '轨道 I · 助理' : 'ORBIT I · ASSISTANT'}</p>
                         <h1 className="atlas-h1">
-                            {isZh ? (
-                                <>见见你的<em>第一位员工</em>。</>
-                            ) : (
-                                <>Meet your <em>first employee.</em></>
-                            )}
+                            {isZh ? '见见你的第一位员工。' : 'Meet your first employee.'}
                         </h1>
                         <p className="atlas-body atlas-body--muted">{isZh
                             ? '你的私人助理 —— 打理日程、备忘、和你不愿亲自处理的事。给 ta 起个名字。'
@@ -221,15 +216,14 @@ export default function Onboarding() {
             <div className="atlas-screen-split">
                 <div className="atlas-screen-plate">
                     <StarField density="low" seed={9} />
-                    <UniverseMap size={600} />
+                    <UniverseMap size={600} assistantName={displayName} />
                 </div>
                 <div className="atlas-screen-form atlas-screen-form--padded">
-                    <p className="atlas-tag">— {isZh ? '星表 · 0001' : 'CATALOGUE · 0001'}</p>
                     <h1 className="atlas-display">
                         {isZh ? (
-                            <>灯，亮<em>了</em>。</>
+                            <>灯，亮了。</>
                         ) : (
-                            <>The lights<br />are <em>on.</em></>
+                            <>The lights<br />are on.</>
                         )}
                     </h1>
                     <p className="atlas-body atlas-body--muted">{isZh
