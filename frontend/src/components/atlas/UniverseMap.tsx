@@ -138,10 +138,11 @@ export default function UniverseMap({
 
             <g transform={`translate(${cx} ${cy})`}>
                 {/* Outer ring */}
-                <circle cx="0" cy="0" r={rOuter} opacity="0.4" />
+                <circle cx="0" cy="0" r={rOuter} opacity="0.55" />
 
-                {/* Inner solid ring */}
-                <circle cx="0" cy="0" r={rInner} opacity="0.65" />
+                {/* Inner solid ring — drawn more prominently than the
+                    outer to read as a "double ring" pair */}
+                <circle cx="0" cy="0" r={rInner} opacity="0.9" strokeWidth="0.7" />
 
                 {/* Tick marks on outer ring every 10° */}
                 {Array.from({ length: 36 }, (_, i) => {

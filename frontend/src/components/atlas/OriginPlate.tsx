@@ -76,10 +76,11 @@ export default function OriginPlate({
 
             <g transform={`translate(${cx} ${cy})`}>
                 {/* Outer ring */}
-                <circle cx="0" cy="0" r={rOuter} opacity="0.42" />
+                <circle cx="0" cy="0" r={rOuter} opacity="0.55" />
 
-                {/* Inner ring — echoes the Screen 4 UniverseMap chrome */}
-                <circle cx="0" cy="0" r={rInner} opacity="0.6" />
+                {/* Inner ring — echoes the Screen 4 UniverseMap chrome.
+                    Made prominent so it reads clearly as a "double ring". */}
+                <circle cx="0" cy="0" r={rInner} opacity="0.85" strokeWidth="0.7" />
 
                 {/* Cross-hair axes spanning the entire chart */}
                 <line x1={-rOuter} y1="0" x2={rOuter} y2="0" opacity="0.16" />
