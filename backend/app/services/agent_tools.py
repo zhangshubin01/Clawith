@@ -6289,8 +6289,11 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
         # ── Inject file-delivery message into A2A chat session ──
         # This ensures the target agent sees the file delivery in its
         # conversation context when send_message_to_agent is called next.
+        print(f"[A2A-File-TRACE] About to inject file delivery msg: from={source_name} to={target_name} file={delivered_name}", flush=True)
+        logger.warning(f"[A2A-File-TRACE] About to inject file delivery msg: from={source_name} to={target_name} file={delivered_name}")
         try:
-            from app.models.chat import ChatMessage, ChatSession
+            from app.models.audit import ChatMessage
+            from app.models.chat_session import ChatSession
             from app.models.participant import Participant
             async with async_session() as db2:
                 # Find or create A2A session (same ordering as send_message_to_agent)
@@ -6345,9 +6348,11 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
                 ))
                 chat_session.last_message_at = ts
                 await db2.commit()
-                logger.info(f"[A2A-File] Injected file delivery message into session {chat_session.id} for {target_name}")
+                print(f"[A2A-File] Injected file delivery message into session {chat_session.id} for {target_name}", flush=True)
+                logger.warning(f"[A2A-File] OK: Injected file delivery message into session {chat_session.id} for {target_name}")
         except Exception as e:
-            logger.warning(f"[A2A-File] Failed to inject file delivery message: {e}")
+            print(f"[A2A-File] FAILED to inject file delivery message: {e}", flush=True)
+            logger.error(f"[A2A-File] FAILED to inject file delivery message: {e}")
 
         return (
             f"✅ File sent to {target_name}.\n"
