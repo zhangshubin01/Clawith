@@ -42,6 +42,7 @@ export default function OriginPlate({
     const cx = 320;
     const cy = 340;
     const rOuter = 265;
+    const rInner = 110;
     const padX = 60;
     const vbX = -padX;
     const vbW = 640 + padX * 2;
@@ -76,6 +77,9 @@ export default function OriginPlate({
             <g transform={`translate(${cx} ${cy})`}>
                 {/* Outer ring */}
                 <circle cx="0" cy="0" r={rOuter} opacity="0.42" />
+
+                {/* Inner ring — echoes the Screen 4 UniverseMap chrome */}
+                <circle cx="0" cy="0" r={rInner} opacity="0.6" />
 
                 {/* Cross-hair axes spanning the entire chart */}
                 <line x1={-rOuter} y1="0" x2={rOuter} y2="0" opacity="0.16" />

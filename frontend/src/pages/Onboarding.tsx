@@ -240,13 +240,13 @@ export default function Onboarding() {
                         </li>
                         <li>
                             <span className="atlas-roster-mark" aria-hidden="true">○</span>
-                            <span className="atlas-roster-label">{isZh ? '助理 · I' : 'ASSISTANT · I'}</span>
+                            <span className="atlas-roster-label">{isZh ? '1 号员工' : 'NO. 1 EMPLOYEE'}</span>
                             <span className="atlas-roster-value">{displayName}</span>
                         </li>
                         <li>
                             <span className="atlas-roster-mark" aria-hidden="true">·</span>
-                            <span className="atlas-roster-label">{isZh ? '空缺轨道' : 'VACANT ORBITS'}</span>
-                            <span className="atlas-roster-value">04</span>
+                            <span className="atlas-roster-label">{isZh ? '未来员工' : 'FUTURE EMPLOYEES'}</span>
+                            <span className="atlas-roster-value">∞</span>
                         </li>
                     </ul>
 
