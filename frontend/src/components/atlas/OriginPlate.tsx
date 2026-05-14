@@ -42,11 +42,9 @@ export default function OriginPlate({
     const cx = 320;
     const cy = 340;
     // Outer perimeter is rendered as a "double-line track": two faint thin
-    // rings (gap = 10, ~20% wider than before), with the inner ring as a
-    // single prominent line at rInner.
+    // rings (gap = 10). No inner ring — Login is "uncharted territory".
     const rOuterOut = 269;
     const rOuterIn = 259;
-    const rInner = 110;
     const padX = 60;
     const vbX = -padX;
     const vbW = 640 + padX * 2;
@@ -80,12 +78,11 @@ export default function OriginPlate({
 
             <g transform={`translate(${cx} ${cy})`}>
                 {/* Outer perimeter — two very faint thin concentric rings,
-                    "double-line" / railway-track look */}
+                    "double-line" / railway-track look. Login page is the
+                    "uncharted territory" so no inner ring is drawn — only
+                    Screen 4's UniverseMap shows the prominent inner ring. */}
                 <circle cx="0" cy="0" r={rOuterOut} opacity="0.2" />
                 <circle cx="0" cy="0" r={rOuterIn} opacity="0.2" />
-
-                {/* Inner ring — single prominent line */}
-                <circle cx="0" cy="0" r={rInner} opacity="0.95" strokeWidth="0.7" />
 
                 {/* Cross-hair axes spanning the entire chart */}
                 <line x1={-rOuterOut} y1="0" x2={rOuterOut} y2="0" opacity="0.1" />
