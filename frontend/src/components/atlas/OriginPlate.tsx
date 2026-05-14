@@ -41,7 +41,11 @@ export default function OriginPlate({
     const cls = ['atlas-illustration', className].filter(Boolean).join(' ');
     const cx = 320;
     const cy = 340;
-    const rOuter = 265;
+    // Outer perimeter is rendered as a "double-line track": two faint thin
+    // rings very close together (rOuterOut + rOuterIn), with the inner ring
+    // as a single prominent line at rInner.
+    const rOuterOut = 268;
+    const rOuterIn = 260;
     const rInner = 110;
     const padX = 60;
     const vbX = -padX;
@@ -75,24 +79,26 @@ export default function OriginPlate({
             </text>
 
             <g transform={`translate(${cx} ${cy})`}>
-                {/* Outer ring */}
-                <circle cx="0" cy="0" r={rOuter} opacity="0.55" />
+                {/* Outer perimeter — two faint thin concentric rings forming
+                    a "track" / double-line look */}
+                <circle cx="0" cy="0" r={rOuterOut} opacity="0.32" />
+                <circle cx="0" cy="0" r={rOuterIn} opacity="0.32" />
 
-                {/* Inner ring — echoes the Screen 4 UniverseMap chrome.
-                    Made prominent so it reads clearly as a "double ring". */}
-                <circle cx="0" cy="0" r={rInner} opacity="0.85" strokeWidth="0.7" />
+                {/* Inner ring — single prominent line */}
+                <circle cx="0" cy="0" r={rInner} opacity="0.95" strokeWidth="0.7" />
 
                 {/* Cross-hair axes spanning the entire chart */}
-                <line x1={-rOuter} y1="0" x2={rOuter} y2="0" opacity="0.16" />
-                <line x1="0" y1={-rOuter} x2="0" y2={rOuter} opacity="0.16" />
+                <line x1={-rOuterOut} y1="0" x2={rOuterOut} y2="0" opacity="0.14" />
+                <line x1="0" y1={-rOuterOut} x2="0" y2={rOuterOut} opacity="0.14" />
 
-                {/* Dense tick marks on the outer ring — every 3°, longer at 15° */}
+                {/* Dense tick marks bridging the outer pair, every 3° (longer at 15°) */}
                 {Array.from({ length: 120 }, (_, i) => {
                     const deg = i * 3;
                     const a = (deg * Math.PI) / 180;
                     const isMajor = deg % 15 === 0;
-                    const r1 = rOuter;
-                    const r2 = rOuter + (isMajor ? 8 : 4);
+                    // Ticks span the gap of the outer pair, with majors poking outward
+                    const r1 = rOuterIn;
+                    const r2 = rOuterOut + (isMajor ? 6 : 0);
                     return (
                         <line
                             key={i}

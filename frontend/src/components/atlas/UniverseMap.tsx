@@ -75,6 +75,8 @@ export default function UniverseMap({
     // padX is just enough horizontal viewBox margin to let the longest
     // outward labels ("II · EMPLOYEE" / "V · EMPLOYEE") fit without clipping.
     const rOuter = 265;
+    const rOuterOut = rOuter + 4;
+    const rOuterIn = rOuter - 4;
     const rInner = 110;
     const padX = 80;
     const vbX = -padX;
@@ -137,18 +139,21 @@ export default function UniverseMap({
             </text>
 
             <g transform={`translate(${cx} ${cy})`}>
-                {/* Outer ring */}
-                <circle cx="0" cy="0" r={rOuter} opacity="0.55" />
+                {/* Outer perimeter — two faint thin concentric rings forming a
+                    "track" / double-line look */}
+                <circle cx="0" cy="0" r={rOuterOut} opacity="0.32" />
+                <circle cx="0" cy="0" r={rOuterIn} opacity="0.32" />
 
-                {/* Inner solid ring — drawn more prominently than the
-                    outer to read as a "double ring" pair */}
-                <circle cx="0" cy="0" r={rInner} opacity="0.9" strokeWidth="0.7" />
+                {/* Inner ring — single prominent line */}
+                <circle cx="0" cy="0" r={rInner} opacity="0.95" strokeWidth="0.7" />
 
-                {/* Tick marks on outer ring every 10° */}
-                {Array.from({ length: 36 }, (_, i) => {
-                    const a = (i * 10 * Math.PI) / 180;
-                    const r1 = rOuter - 3;
-                    const r2 = rOuter + 4;
+                {/* Dense tick marks bridging the outer pair, every 3° (longer at 15°) */}
+                {Array.from({ length: 120 }, (_, i) => {
+                    const deg = i * 3;
+                    const a = (deg * Math.PI) / 180;
+                    const isMajor = deg % 15 === 0;
+                    const r1 = rOuterIn;
+                    const r2 = rOuterOut + (isMajor ? 6 : 0);
                     return (
                         <line
                             key={i}
@@ -156,7 +161,7 @@ export default function UniverseMap({
                             y1={r1 * Math.sin(a)}
                             x2={r2 * Math.cos(a)}
                             y2={r2 * Math.sin(a)}
-                            opacity="0.32"
+                            opacity={isMajor ? 0.45 : 0.28}
                         />
                     );
                 })}
