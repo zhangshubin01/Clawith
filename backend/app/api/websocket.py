@@ -1,6 +1,9 @@
 """WebSocket chat endpoint for real-time agent conversations."""
 
+import asyncio
 import json
+import re
+import time
 import uuid
 from datetime import datetime, timezone as tz
 
@@ -26,11 +29,17 @@ MAX_CONNECTIONS = 500
 
 
 class ConnectionManager:
-    """Manage WebSocket connections per agent."""
+    """Manage WebSocket connections per agent with heartbeat and idle cleanup.
+
+    Each connection tracked as (websocket, session_id, user_id, connected_at, last_activity_ts).
+    Idle connections (>300s without activity) are removed by a background cleanup task (#65, #66).
+    """
 
     def __init__(self):
-        # agent_id_str -> list of (WebSocket, session_id_str | None, user_id_str | None)
+        # agent_id_str -> list of (WebSocket, session_id, user_id, connected_at, last_activity)
         self.active_connections: dict[str, list[tuple]] = {}
+        self._cleanup_task: asyncio.Task | None = None
+        self._cleanup_started: bool = False
 
     @property
     def total_connections(self) -> int:
@@ -39,44 +48,87 @@ class ConnectionManager:
     async def connect(self, agent_id: str, websocket: WebSocket, session_id: str = None, user_id: str | None = None):
         if self.total_connections >= MAX_CONNECTIONS:
             await websocket.close(code=1013, reason="Server at capacity")
-            logger.warning("WebSocket connection rejected: max connections ({}) reached", MAX_CONNECTIONS)
+            logger.warning("[WS] 连接被拒绝：已达最大连接数 ({})", MAX_CONNECTIONS)
             return
         await websocket.accept()
+        _now = time.monotonic()
         if agent_id not in self.active_connections:
             self.active_connections[agent_id] = []
-        self.active_connections[agent_id].append((websocket, session_id, user_id))
+        self.active_connections[agent_id].append((websocket, session_id, user_id, _now, _now))
+        # 延迟启动清理任务（避免首次连接前创建空转任务）
+        if not self._cleanup_started:
+            self._cleanup_started = True
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
     def disconnect(self, agent_id: str, websocket: WebSocket):
         if agent_id in self.active_connections:
             self.active_connections[agent_id] = [
-                (ws, sid, uid) for ws, sid, uid in self.active_connections[agent_id] if ws != websocket
+                t for t in self.active_connections[agent_id] if t[0] != websocket
             ]
+            if not self.active_connections[agent_id]:
+                del self.active_connections[agent_id]
+
+    def touch(self, agent_id: str, websocket: WebSocket):
+        """更新连接的最后活动时间（收到消息时调用）。"""
+        if agent_id in self.active_connections:
+            for i, t in enumerate(self.active_connections[agent_id]):
+                if t[0] == websocket:
+                    ws, sid, uid, cat, _ = t
+                    self.active_connections[agent_id][i] = (ws, sid, uid, cat, time.monotonic())
+                    break
+
+    async def _cleanup_loop(self, max_idle_seconds: float = 300.0, interval: float = 60.0):
+        """后台任务：每 60 秒清理空闲超过 300 秒的连接，同时发送心跳 ping（#65, #66）。"""
+        while True:
+            await asyncio.sleep(interval)
+            _now = time.monotonic()
+            stale_agents = []
+            for agent_id, conns in list(self.active_connections.items()):
+                alive = []
+                for ws, sid, uid, cat, last_act in conns:
+                    if _now - last_act > max_idle_seconds:
+                        # 空闲超时：发送 ping 确认存活
+                        try:
+                            await ws.send_json({"type": "ping"})
+                            alive.append((ws, sid, uid, cat, _now))
+                        except Exception:
+                            logger.info("[WS] 清理死连接: agent={} session={}", agent_id, sid)
+                    else:
+                        alive.append((ws, sid, uid, cat, last_act))
+                if alive:
+                    self.active_connections[agent_id] = alive
+                else:
+                    stale_agents.append(agent_id)
+            for aid in stale_agents:
+                del self.active_connections[aid]
+            if stale_agents:
+                logger.info("[WS] 清理完成：移除 {} 个无活跃连接的 agent", len(stale_agents))
 
     async def send_message(self, agent_id: str, message: dict):
         if agent_id in self.active_connections:
-            for ws, _sid, _uid in self.active_connections[agent_id]:
+            for t in self.active_connections[agent_id]:
                 try:
-                    await ws.send_json(message)
+                    await t[0].send_json(message)
                 except Exception:
                     pass
 
     async def send_to_session(self, agent_id: str, session_id: str, message: dict):
         """Send message only to WebSocket connections matching the given session_id."""
         if agent_id in self.active_connections:
-            for ws, sid, _uid in self.active_connections[agent_id]:
-                if sid == session_id:
+            for t in self.active_connections[agent_id]:
+                if t[1] == session_id:
                     try:
-                        await ws.send_json(message)
+                        await t[0].send_json(message)
                     except Exception:
                         pass
 
     async def send_to_user(self, agent_id: str, user_id: str, message: dict):
         """Send message to all live WebSocket sessions of a given platform user for an agent."""
         if agent_id in self.active_connections:
-            for ws, _sid, uid in self.active_connections[agent_id]:
-                if uid == user_id:
+            for t in self.active_connections[agent_id]:
+                if t[2] == user_id:
                     try:
-                        await ws.send_json(message)
+                        await t[0].send_json(message)
                     except Exception:
                         pass
 
@@ -84,14 +136,14 @@ class ConnectionManager:
         """Return distinct session IDs for all active WS connections of an agent."""
         if agent_id not in self.active_connections:
             return []
-        return list(set(sid for _ws, sid, _uid in self.active_connections[agent_id] if sid))
+        return list(set(t[1] for t in self.active_connections[agent_id] if t[1]))
 
     def is_user_viewing_session(self, agent_id: str, session_id: str, user_id: str) -> bool:
         """Return True if the given platform user currently has this exact session open."""
         if agent_id not in self.active_connections:
             return False
-        for _ws, sid, uid in self.active_connections[agent_id]:
-            if sid == session_id and uid == user_id:
+        for t in self.active_connections[agent_id]:
+            if t[1] == session_id and t[2] == user_id:
                 return True
         return False
 
@@ -126,11 +178,29 @@ from app.database import get_db
 @router.get("/api/chat/{agent_id}/history")
 async def get_chat_history(
     agent_id: uuid.UUID,
+    session_id: str = Query(None, description="会话 ID（UUID 格式）；不传则自动查找当前用户的主会话"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return web chat message history for this user + agent."""
-    conv_id = f"web_{current_user.id}"
+    """Return web chat message history for this user + agent.
+
+    优先使用 session_id（新格式，UUID），回退到主会话查询，
+    最后回退到旧格式 web_{user_id} 兼容 WebSocket 迁移前的历史数据（#64 修复）。
+    """
+    from app.services.chat_session_service import get_primary_platform_session
+
+    if session_id:
+        # 新格式：直接使用传入的 session_id（UUID）
+        conv_id = session_id
+    else:
+        # 尝试查找用户在此 Agent 下的主会话
+        primary = await get_primary_platform_session(db, agent_id, current_user.id)
+        if primary:
+            conv_id = str(primary.id)
+        else:
+            # 回退到旧格式 web_{user_id}，兼容迁移前的历史数据
+            conv_id = f"web_{current_user.id}"
+
     result = await db.execute(
         select(ChatMessage)
         .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == conv_id)
@@ -279,7 +349,7 @@ async def websocket_chat(
                     _existing = _sr.scalar_one_or_none()
                     if not _existing:
                         conv_id = None
-                    elif _existing.source_channel != "agent" and str(_existing.user_id) != str(user_id):
+                    elif _existing.source_channel not in ("agent", "trigger") and str(_existing.user_id) != str(user_id):
                         await websocket.send_json({"type": "error", "content": "Not authorized for this session"})
                         await websocket.close(code=4003)
                         return
@@ -386,6 +456,9 @@ async def websocket_chat(
         while True:
             logger.info(f"[WS] Waiting for message from {agent_name}...")
             data = await websocket.receive_json()
+
+            # 更新连接活动时间，供 ConnectionManager 超时清理和心跳使用（#65）
+            manager.touch(str(agent_id), websocket)
 
             # Set a unique trace ID for this specific message processing.
             from app.core.logging_config import set_trace_id
@@ -522,7 +595,8 @@ async def websocket_chat(
                             # Use display_content for title (avoids raw base64/markers)
                             title_src = display_content if display_content else content
                             # Clean up common prefixes from image/file messages
-                            clean_title = title_src.replace("[图片] ", "📷 ").replace("[image_data:", "").strip()
+                            # 完整删除 [image_data:...] 标记（含 base64 数据体），避免截断后的残留进入标题（#60 修复）
+                            clean_title = re.sub(r'\[image_data:[^\]]*\]', '', title_src).replace("[图片] ", "📷 ").strip()
                             if file_name and not clean_title:
                                 clean_title = f"📎 {file_name}"
                             _sess.title = clean_title[:40] if clean_title else content[:40]
@@ -551,7 +625,6 @@ async def websocket_chat(
                 continue
 
             # Detect task creation intent
-            import re
             task_match = re.search(
                 r'(?:创建|新建|添加|建一个|帮我建|create|add)(?:一个|a )?(?:任务|待办|todo|task)[，,：：:\\s]*(.+)',
                 content, re.IGNORECASE
@@ -847,6 +920,8 @@ async def websocket_chat(
                             else:
                                 # Queue non-abort messages for later
                                 queued_messages.append(msg)
+                                # 当用户在当前回复完成前发送新消息时，立即提示而非静默丢弃（#67 修复）
+                                await websocket.send_json({"type": "info", "content": "当前回复尚未完成，请等待结束后重新发送"})
                         except _aio.TimeoutError:
                             continue
                         except WebSocketDisconnect:
@@ -962,15 +1037,20 @@ async def websocket_chat(
             # Final 'done' packet
             await websocket.send_json({"type": "done", "role": "assistant", "content": assistant_response})
 
-            # Re-process any queued messages (if user sent something during generation)
+            # 用户在 AI 生成回复期间发送的消息暂时无法处理，
+            # 返回明确提示而非静默丢弃，避免用户感知为"消息被吞"（#67 修复）
             if queued_messages:
-                logger.debug(
-                    "[WS] Discarding {} queued message(s) for session {} — "
-                    "re-queuing not yet implemented",
+                logger.warning(
+                    "[WS] 丢弃 {} 条排队消息: session={} — 用户在当前回复完成前发送了新消息",
                     len(queued_messages), conv_id
                 )
-            for qm in queued_messages:
-                pass
+                await websocket.send_json({
+                    "type": "info",
+                    "content": (
+                        f"⚠️ 当前回复尚未完成，{len(queued_messages)} 条消息未被处理。"
+                        "请等待回复结束后重新发送。"
+                    )
+                })
 
     except WebSocketDisconnect:
         logger.info(f"[WS] Client disconnected: {user_id}")

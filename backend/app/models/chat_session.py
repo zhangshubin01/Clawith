@@ -5,7 +5,7 @@ from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, String, ForeignKey, func, UniqueConstraint, Index, text
 from sqlalchemy.dialects.postgresql import JSON, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
@@ -55,6 +55,14 @@ class ChatSession(Base):
     last_read_at_by_user: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # ORM 关系：chat_messages.conversation_id (String) ↔ chat_sessions.id (UUID)
+    # 通过 cast 桥接两种类型，提供类型安全的 ORM join 替代 raw SQL cast（#61 修复）
+    messages = relationship(
+        "ChatMessage",
+        primaryjoin="cast(ChatSession.id, String) == ChatMessage.conversation_id",
+        viewonly=True,
+    )
 
     # IDE 插件上下文（迁移 29f3f8de3ca0 + 25811072c8fd 添加，SQLAlchemy 模型需显式映射）
     client_type: Mapped[str] = mapped_column(String(20), nullable=False, default="web", server_default="web")

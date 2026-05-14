@@ -6,7 +6,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import cast, select, func, String
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access
@@ -113,7 +113,7 @@ async def list_sessions(
 
             unread_res = await db.execute(
                 select(ChatSession.id, func.count(ChatMessage.id))
-                .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
+                .join(ChatSession.messages)
                 .where(
                     ChatSession.id.in_(session_uuid_ids),
                     ChatSession.user_id == current_user.id,
@@ -238,7 +238,7 @@ async def list_sessions(
 
             unread_res = await db.execute(
                 select(ChatSession.id, func.count(ChatMessage.id))
-                .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
+                .join(ChatSession.messages)
                 .where(
                     ChatSession.id.in_(session_uuid_ids),
                     ChatMessage.role.in_(["assistant", "system", "tool_call"]),
@@ -368,7 +368,13 @@ async def delete_session(
 
     # Delete associated messages first
     from sqlalchemy import delete as sql_delete
-    await db.execute(sql_delete(ChatMessage).where(ChatMessage.conversation_id == str(session_id)))
+    # 添加 agent_id 过滤——防御性编程 + 可利用联合索引加速（#59 修复）
+    await db.execute(
+        sql_delete(ChatMessage).where(
+            ChatMessage.conversation_id == str(session_id),
+            ChatMessage.agent_id == agent_id,
+        )
+    )
     await db.delete(session)
     await db.commit()
     return None

@@ -142,6 +142,20 @@ class FailoverGuard:
         return True
 
 
+def _is_llm_error(response: dict) -> bool:
+    """结构化检测 LLM 错误——不再依赖字符串前缀匹配 (#69 修复)。
+
+    检查 response 的结构化字段而非 content 字符串，更可靠地判断 LLM 调用是否异常。
+    """
+    if not response:
+        return True
+    if response.get("finish_reason") == "error":
+        return True
+    if response.get("tool_calls") is not None and not isinstance(response["tool_calls"], list):
+        return True
+    return False
+
+
 def is_retryable_error(result: str) -> bool:
     """Check if an error result is retryable.
 
@@ -631,6 +645,30 @@ async def call_llm(
                 )
             )
 
+        # 上下文截断：每轮结束后估算 token 数，超出窗口时保留 system + 最近 3 轮——#84 修复
+        MAX_CTX_TOKENS = 8000
+        _total_est = 0
+        for _m in api_messages:
+            _c = _m.content or ""
+            if isinstance(_c, str):
+                # 中文: 1 字符 ≈ 0.3 token; 英文: 1 字符 ≈ 0.25 token
+                _chinese_count = sum(1 for ch in _c if '一' <= ch <= '鿿')
+                _total_est += int(_chinese_count * 0.3 + (len(_c) - _chinese_count) * 0.25)
+        if _total_est > MAX_CTX_TOKENS and len(api_messages) > 8:
+            # 保护 tool_call/tool_result 配对不被截断拆分——#72 修复
+            # 在消息序列中，tool_call(role="assistant", tool_calls=[...]) 在前，
+            # tool_result(role="tool", tool_call_id=...) 在后。
+            # 截断时若尾块起始是 tool_result，需向前扩展包含对应的 tool_call。
+            _new_tail_start = len(api_messages) - 6
+            while _new_tail_start > 2 and api_messages[_new_tail_start].role == "tool":
+                _new_tail_start -= 1
+            api_messages = api_messages[:2] + api_messages[_new_tail_start:]
+            logger.info(
+                "[LLM-CTX] 上下文截断: estimated_tokens={} messages={}",
+                _total_est,
+                len(api_messages),
+            )
+
         try:
             # DeepSeek V4 思考模式参数
             _thinking_kwargs = _get_thinking_kwargs(model)
@@ -692,11 +730,16 @@ async def call_llm(
         # Track tokens for this round
         _accumulated_usage.add(_usage_from_response_or_estimate(response, api_messages))
 
-        # Plain assistant text is not a stop condition. The model must finish
-        # explicitly via finish(content=...).
+        # Plain assistant text with no tool calls: auto-finish (no extra reminder round).
+        # The model intentionally returned text without invoking finish() — that's
+        # semantically equivalent to a finish response (#93 修复).
         if not response.tool_calls:
             if response.content:
-                api_messages.append(LLMMessage(role="assistant", content=response.content))
+                if agent_id and _accumulated_usage.total_tokens > 0:
+                    await record_token_usage(agent_id, _accumulated_usage)
+                await client.close()
+                return response.content
+            # Empty text + no tool calls is abnormal — fall through to reminder
             api_messages.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
             continue
 
@@ -787,30 +830,51 @@ async def call_llm(
                 if result:
                     api_messages.append(LLMMessage(role="tool", content=result, tool_call_id=tc.get("id", "")))
 
-        # Execute write tools serially
+        # 按文件路径分组——同文件串行，不同文件并行（#89 修复）
         if cancel_event and cancel_event.is_set():
             break
+        file_groups: dict[str, list[dict]] = {}
         for tc in write_calls:
-            tool_error = await _process_tool_call(
-                tc=tc,
-                api_messages=api_messages,
-                agent_id=agent_id,
-                user_id=user_id,
-                session_id=session_id,
-                supports_vision=supports_vision,
-                on_tool_call=on_tool_call,
-                full_reasoning_content=full_reasoning_content,
-                allowed_tool_names=allowed_tool_names,
-                tool_result_cache=tool_result_cache,
-            )
-            if tool_error:
-                api_messages.append(
-                    LLMMessage(
-                        role="tool",
-                        content=tool_error,
-                        tool_call_id=tc.get("id", ""),
-                    )
+            fp = tc.get("parameters", {}).get("filePath") or tc.get("parameters", {}).get("file_path", "")
+            file_groups.setdefault(fp, []).append(tc)
+
+        async def _run_write_group(tools: list[dict]) -> list[tuple[dict, str | None]]:
+            """串行执行同一文件路径下的写工具，返回 (tc, error_or_None) 列表。"""
+            results: list[tuple[dict, str | None]] = []
+            for t in tools:
+                err = await _process_tool_call(
+                    tc=t,
+                    api_messages=api_messages,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    supports_vision=supports_vision,
+                    on_tool_call=on_tool_call,
+                    full_reasoning_content=full_reasoning_content,
+                    allowed_tool_names=allowed_tool_names,
+                    tool_result_cache=tool_result_cache,
                 )
+                results.append((t, err))
+            return results
+
+        if file_groups:
+            group_results = await asyncio.gather(
+                *(_run_write_group(group) for group in file_groups.values()),
+                return_exceptions=True,
+            )
+            for grp in group_results:
+                if isinstance(grp, Exception):
+                    logger.error("[LLM] write group 执行异常: {}", grp)
+                    continue
+                for tc, tool_error in grp:
+                    if tool_error:
+                        api_messages.append(
+                            LLMMessage(
+                                role="tool",
+                                content=tool_error,
+                                tool_call_id=tc.get("id", ""),
+                            )
+                        )
 
     # Record tokens even on "too many rounds" exit
     if agent_id and _accumulated_usage.total_tokens > 0:
@@ -1135,7 +1199,10 @@ async def call_agent_llm_with_tools(
 
                 if not response.tool_calls:
                     if response.content:
-                        api_messages.append(LLMMessage(role="assistant", content=response.content))
+                        if agent_id and _accumulated_usage.total_tokens > 0:
+                            await record_token_usage(agent_id, _accumulated_usage)
+                        await client.close()
+                        return response.content, True, tool_executed
                     api_messages.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
                     continue
 

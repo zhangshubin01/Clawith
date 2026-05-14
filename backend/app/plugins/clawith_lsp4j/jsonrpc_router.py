@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch as _fnmatch
+import hashlib
 import json
 import os
 import re
@@ -263,7 +264,7 @@ _SEARCH_ZERO_CACHE_TTL = 600.0
 
 # 会话消息内存缓存：同 session 内多次 chat/ask 无需重复查 DB
 _SESSION_MESSAGE_CACHE: dict[str, tuple[float, list[dict]]] = {}
-_SESSION_MESSAGE_CACHE_TTL = 1800.0  # 30 分钟，覆盖大部分会话生命周期
+_SESSION_MESSAGE_CACHE_TTL = 300.0  # DB 缓存 TTL（5 分钟）：减少数据库重复读取频率，优化响应速度
 
 # 基础工具名映射直接使用导入的常量（tool_constants.TOOL_NAME_MAP / TOOL_DISPLAY_NAME_MAP）
 
@@ -1031,6 +1032,21 @@ def _build_lsp4j_ide_prompt(params: ChatAskParam) -> str:
     except Exception as e:
         logger.warning("[LSP4J] extra.context 解析异常，跳过: {}", e)
 
+    # IDE 上下文注入——让智能体感知本地项目环境（源自 ChatSession 持久化字段）
+    try:
+        _ide_ctx = params.chatContext if isinstance(params.chatContext, dict) else {}
+        _ide_ctx_parts = []
+        if _ide_ctx.get("activeFilePath"):
+            _ide_ctx_parts.append(f"- 当前编辑文件: {_ide_ctx['activeFilePath']}")
+        _ide_open_files = _ide_ctx.get("openFiles", [])
+        if _ide_open_files and isinstance(_ide_open_files, list):
+            _ide_ctx_parts.append(f"- 已打开文件: {', '.join(str(f) for f in _ide_open_files[:10])}")
+        if _ide_ctx_parts:
+            parts.append("## 当前 IDE 环境")
+            parts.extend(_ide_ctx_parts)
+    except Exception as e:
+        logger.warning("[LSP4J] IDE 上下文注入异常: {}", e)
+
     # shellType（P2-2）
     if params.shellType:
         parts.append(f"项目终端 Shell: {params.shellType}")
@@ -1174,6 +1190,8 @@ class JSONRPCRouter:
 
         # 项目根路径（从 initialize 的 rootUri 提取，用于 tool/call/sync 通知）
         self._project_path: str = ""
+        # 快照哈希值：用于准确判断项目文件是否已变更，避免重复同步——#92 修复
+        self._last_snapshot_hash: str = ""
 
         # ★ toolCallId 队列：按序存储 (original_name, mapped_name, tool_call_id)，
         # original_name 为 LLM 侧名称（如 edit_file），mapped_name 为插件原生名称（如 replace_text_by_path）。
@@ -1528,7 +1546,11 @@ class JSONRPCRouter:
                 current_lsp4j_session_id.set(session_id)
 
                 # 自动生成会话标题（取用户消息前 40 字符，替换换行为空格）
-                auto_title = question_text[:40].replace("\n", " ").strip()
+                # 清理 base64 图片数据残留，防止标题被图片编码污染（#60 修复）
+                cleaned = re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', '', question_text).strip()
+                if not cleaned:
+                    cleaned = "图片消息"
+                auto_title = cleaned[:40].replace("\n", " ").strip()
                 if auto_title:
                     await self._send_session_title_update(session_id, auto_title)
 
@@ -1543,10 +1565,16 @@ class JSONRPCRouter:
 
             # ★ 创建 snapshot 并发送 snapshot/syncAll（diff 卡片支持）
             await self._ws_file_service.get_or_create_snapshot(session_id, request_id)
-            try:
-                await self._send_snapshot_sync_all(session_id)
-            except Exception as e:
-                logger.warning("[WS-FILE] snapshot/syncAll 发送失败（非致命）: {}", e)
+            # 快照按需同步——#92 修复：项目文件未变更则跳过快照同步
+            current_hash = self._compute_project_hash()
+            if current_hash and current_hash == self._last_snapshot_hash:
+                logger.debug("[WS-FILE] 项目文件未变更，跳过快照同步: hash={}", current_hash[:8])
+            else:
+                self._last_snapshot_hash = current_hash
+                try:
+                    await self._send_snapshot_sync_all(session_id)
+                except Exception as e:
+                    logger.warning("[WS-FILE] snapshot/syncAll 发送失败（非致命）: {}", e)
 
             # ★ 性能计时: snapshot 操作
             _t0 = self._log_perf("SNAPSHOT", _ask_start, _t0)
@@ -1871,35 +1899,24 @@ class JSONRPCRouter:
                                 tool_name,
                                 tool_call_id[:8],
                             )
+                            tool_markdown = ""
                         else:
-                            markdown_block = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
+                            tool_markdown = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
 
                             logger.info(
-                                "[LSP4J-TOOL] 准备发送 toolCall markdown 块: mapped={} callId={}",
+                                "[LSP4J-TOOL] 将 INIT markdown 合并到 PENDING sync: mapped={} callId={}",
                                 tool_name,
                                 tool_call_id[:8],
                             )
-                            logger.info(
-                                "[LSP4J-TOOL] markdown 块使用显示名: name={} callId={}", display_name, tool_call_id[:8]
-                            )
-                            if getattr(self, "_stream_mode", True):
-                                await self._send_chat_answer(session_id, markdown_block, request_id)
-                                logger.info("[LSP4J-TOOL] toolCall markdown 块已发送: callId={}", tool_call_id[:8])
-                            else:
-                                logger.info(
-                                    "[LSP4J-TOOL] 非流式模式，跳过 toolCall markdown 块发送: callId={}", tool_call_id[:8]
-                                )
 
                         # ★ 插件 ChatToolEventProcessor 采用 buffer+replay 机制：
                         # 事件先于 panel 注册到达时自动缓冲，registerPanel 时 replay。
                         # 后端无需等待，yield 控制权即可。
                         await asyncio.sleep(0)
 
-                        # 发送 PENDING sync（双通道之事件通道）
-                        # 插件 ChatToolEventProcessor 收到后更新卡片参数（scopeLabel 依赖 parameters）
-                        # ★ 使用 LLM 侧名称 + snake_case 参数
-                        # ToolPanel 存储 sync 中的 toolName 用于后续 FINISHED 时判断是否为文件工具，
-                        # 同时 parameters["file_path"] 用于 constructFileItem() 渲染文件链接。
+                        # 将 INIT markdown 合并到 PENDING tool/call/sync 中，减少一次 WebSocket 往返
+                        # IDE 端 ChatToolEventProcessor 收到携带 markdown 的 PENDING sync 后，
+                        # 可直接创建 ToolPanel 卡片，无需等待独立的 INIT markdown 流式到达。
                         if tool_name in _UI_HEAVY_SEARCH_TOOLS:
                             logger.info(
                                 "[LSP4J-TRACE] 跳过 PENDING（高频搜索降噪）: req={} call={} tool={}",
@@ -1915,6 +1932,7 @@ class JSONRPCRouter:
                                 "PENDING",
                                 tool_name=original_name,
                                 parameters=params,
+                                markdown=tool_markdown,
                             )
 
                     await self._send_process_step_callback(
@@ -2882,6 +2900,7 @@ class JSONRPCRouter:
         results: list[dict] | str | None = None,
         error_code: str = "",
         error_msg: str = "",
+        markdown: str = "",
     ) -> None:
         """发送 tool/call/sync 通知（ToolCallSyncResult 格式）。
 
@@ -2891,6 +2910,8 @@ class JSONRPCRouter:
 
         注意：results 必须为 List<Map<String, Object>> 格式，
         由 _wrap_results 自动将字符串结果包装为 [{"content": "..."}]。
+        markdown 参数携带 INIT markdown 内容，使 IDE 端可一步创建 ToolPanel 卡片，
+        无需等待独立的 INIT markdown 流式消息，减少一次 WebSocket 往返。
         """
         wrapped_results = self._wrap_results(results)
         payload = {
@@ -2905,6 +2926,8 @@ class JSONRPCRouter:
             "errorCode": error_code,
             "errorMsg": error_msg,
         }
+        if markdown:
+            payload["markdown"] = markdown
         await self._send_client_request("tool/call/sync", payload)
 
         # 记录历史，供 tool/call/results 拉取。
@@ -2956,6 +2979,36 @@ class JSONRPCRouter:
             ws_file.diff_info.delete,
         )
         await self._send_client_request("workingSpaceFile/sync", payload)
+
+    def _compute_project_hash(self) -> str:
+        """计算项目文件的哈希值，用于判断快照是否需要重新同步——#92 修复。
+
+        遍历 project_path 下的关键文件，计算 SHA256 哈希。
+        若文件未变更，则跳过 snapshot/syncAll 避免不必要的 WebSocket 通知。
+        """
+        if not self._project_path:
+            return ""
+        try:
+            root = Path(self._project_path)
+            if not root.is_dir():
+                return ""
+            # 取项目根目录下关键配置文件和时间戳组合作为轻量哈希
+            checksum = hashlib.sha256()
+            for path in root.rglob("*"):
+                if path.is_file() and path.suffix in {
+                    ".py", ".kt", ".kts", ".java", ".ts", ".tsx", ".js", ".jsx",
+                    ".go", ".rs", ".swift", ".gradle", ".kts", ".xml", ".json",
+                    ".yaml", ".yml", ".toml", ".cfg", ".ini", ".env", ".md",
+                }:
+                    try:
+                        stat = path.stat()
+                        checksum.update(f"{path.relative_to(root)}:{stat.st_size}:{stat.st_mtime}".encode())
+                    except (OSError, ValueError):
+                        continue
+            return checksum.hexdigest()
+        except Exception as e:
+            logger.warning("[WS-FILE] _compute_project_hash 失败: {}", e)
+            return ""
 
     async def _send_snapshot_sync_all(self, session_id: str, sync_type: str = "ADD") -> None:
         """发送 snapshot/syncAll 通知（SnapshotSyncAllResult 格式）。"""
@@ -5703,9 +5756,11 @@ async def _persist_lsp4j_chat_turn(
                 logger.info("[LSP4J] persist 跳过非 UUID session_id={}", session_id)
                 return
 
-            # 查找或创建 ChatSession
-            sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid))
-            sess = sr.scalar_one_or_none()
+            # 使用显式事务块包裹 ChatSession + ChatMessage 写入，确保原子性——#68 修复
+            async with db.begin():
+                # 查找或创建 ChatSession
+                sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid))
+                sess = sr.scalar_one_or_none()
             now = datetime.now(tz_persist.utc)
             local_now = now.astimezone()
 
@@ -5782,7 +5837,9 @@ async def _persist_lsp4j_chat_turn(
                     )
                 )
 
-            await db.commit()
+            # 事务块自动提交/回滚——#68 修复
+            # db.begin() 在块结束时自动 commit，发生异常时自动 rollback
+
             logger.info(
                 "[LSP4J] persist success: session_id={} user_len={} reply_len={} msg_count={}",
                 session_id,
@@ -5856,17 +5913,19 @@ async def _persist_lsp4j_tool_call(
                 "result": str(results or "")[:500],
                 "reasoning_content": "",
             }
-            db.add(
-                ChatMessage(
-                    agent_id=agent_id,
-                    user_id=user_id,
-                    role="tool_call",
-                    content=json.dumps(payload, ensure_ascii=False, default=str),
-                    conversation_id=str(sid_uuid),
-                    created_at=datetime.now(tz_persist.utc),
+            # 使用显式事务块包裹工具调用持久化——#68 修复
+            async with db.begin():
+                db.add(
+                    ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="tool_call",
+                        content=json.dumps(payload, ensure_ascii=False, default=str),
+                        conversation_id=str(sid_uuid),
+                        created_at=datetime.now(tz_persist.utc),
+                    )
                 )
-            )
-            await db.commit()
+            # db.begin() 在块结束时自动 commit
             logger.info("[LSP4J] tool_call persisted: session={} tool={}", session_id, tool_name)
     except Exception:
         logger.exception("[LSP4J] tool_call persist failed: session={} tool={}", session_id, tool_name)
