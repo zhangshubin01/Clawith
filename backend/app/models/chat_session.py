@@ -55,12 +55,16 @@ class ChatSession(Base):
     last_read_at_by_user: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # #77 修复：软删除和状态字段，避免数据丢失和强制列表 count 查询
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", server_default="active")
+    message_count: Mapped[int] = mapped_column(default=0, server_default="0")
 
     # ORM 关系：chat_messages.conversation_id (String) ↔ chat_sessions.id (UUID)
-    # 通过 cast 桥接两种类型，提供类型安全的 ORM join 替代 raw SQL cast（#61 修复）
+    # 通过 foreign() + cast 桥接两种类型，提供类型安全的 ORM join（#61 修复）
     messages = relationship(
         "ChatMessage",
-        primaryjoin="cast(ChatSession.id, String) == ChatMessage.conversation_id",
+        primaryjoin="cast(ChatSession.id, String) == foreign(ChatMessage.conversation_id)",
         viewonly=True,
     )
 
