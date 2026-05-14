@@ -377,6 +377,10 @@
   color: var(--muted);
 }
 
+.atlas-input-meta--right {
+  justify-content: flex-end;
+}
+
 /* Standalone hairline (no row) — used in some forms */
 .atlas-input-standalone {
   background: transparent;

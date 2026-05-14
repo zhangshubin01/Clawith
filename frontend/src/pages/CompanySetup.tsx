@@ -167,8 +167,7 @@ export default function CompanySetup() {
                                 autoFocus
                                 placeholder={isZh ? '在这里写下名字' : 'Atlas & Co.'}
                             />
-                            <div className="atlas-input-meta">
-                                <span>{isZh ? '区域 · I' : 'SECTOR · I'}</span>
+                            <div className="atlas-input-meta atlas-input-meta--right">
                                 <span>{companyName.length} / {MAX_LEN}</span>
                             </div>
                             <button
