@@ -362,7 +362,7 @@ async def get_agent_tools(
                 assignments[tid] = new_at
                 backfilled += 1
         if backfilled:
-            await db.flush()
+            await db.commit()
             logger.info(
                 f"[Tools] Backfilled {backfilled} AgentTool records for "
                 f"agent={agent_id}"
