@@ -1863,23 +1863,32 @@ class JSONRPCRouter:
                         # ```toolCall::toolName::toolCallId::INIT
                         # ```
                         # 若缺少末尾状态段，插件会在 split("::")[1] 处越界。
-                        markdown_block = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
-
-                        logger.info(
-                            "[LSP4J-TOOL] 准备发送 toolCall markdown 块: mapped={} callId={}",
-                            tool_name,
-                            tool_call_id[:8],
-                        )
-                        logger.info(
-                            "[LSP4J-TOOL] markdown 块使用显示名: name={} callId={}", display_name, tool_call_id[:8]
-                        )
-                        if getattr(self, "_stream_mode", True):
-                            await self._send_chat_answer(session_id, markdown_block, request_id)
-                            logger.info("[LSP4J-TOOL] toolCall markdown 块已发送: callId={}", tool_call_id[:8])
-                        else:
+                        # 高频搜索工具（search_codebase/search_file/list_dir/grep_code）仅需最终结果，
+                        # 无需 INIT 卡片 UI，直接跳过 markdown 块发送以减少插件端闪烁与开销。
+                        if tool_name in _UI_HEAVY_SEARCH_TOOLS:
                             logger.info(
-                                "[LSP4J-TOOL] 非流式模式，跳过 toolCall markdown 块发送: callId={}", tool_call_id[:8]
+                                "[LSP4J-TOOL] 高频搜索工具跳过 INIT 卡片: mapped={} callId={}",
+                                tool_name,
+                                tool_call_id[:8],
                             )
+                        else:
+                            markdown_block = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
+
+                            logger.info(
+                                "[LSP4J-TOOL] 准备发送 toolCall markdown 块: mapped={} callId={}",
+                                tool_name,
+                                tool_call_id[:8],
+                            )
+                            logger.info(
+                                "[LSP4J-TOOL] markdown 块使用显示名: name={} callId={}", display_name, tool_call_id[:8]
+                            )
+                            if getattr(self, "_stream_mode", True):
+                                await self._send_chat_answer(session_id, markdown_block, request_id)
+                                logger.info("[LSP4J-TOOL] toolCall markdown 块已发送: callId={}", tool_call_id[:8])
+                            else:
+                                logger.info(
+                                    "[LSP4J-TOOL] 非流式模式，跳过 toolCall markdown 块发送: callId={}", tool_call_id[:8]
+                                )
 
                         # ★ 插件 ChatToolEventProcessor 采用 buffer+replay 机制：
                         # 事件先于 panel 注册到达时自动缓冲，registerPanel 时 replay。
@@ -2350,10 +2359,7 @@ class JSONRPCRouter:
 
             # 6. 发送完成信号（ChatFinishParams 格式）
             # statusCode 映射：200=成功, 429=配额耗尽, 408=超时, 500=异常
-            # ★ 微延迟：插件端 ChatFinishProcessor 和 ChatAnswerProcessor 并发执行，
-            # ChatFinishProcessor 会移除 REQUEST_TO_PROJECT 映射，导致 ChatAnswerProcessor
-            # 找不到请求。给 200ms 窗口让 ChatAnswerProcessor 先完成查找。
-            await asyncio.sleep(0.2)
+            # 200ms sleep 已移除——ChatFinishProcessor 竞态应在 IDE 插件端通过消息序列表保证。
             _t_finish_start = time.monotonic()
             if cancelled:
                 finish_reason = "cancelled"
@@ -3059,8 +3065,26 @@ class JSONRPCRouter:
                 break
         queue_matched = bool(tool_call_id)
         if not tool_call_id:
-            tool_call_id = str(uuid.uuid4())
-            logger.info("[LSP4J-TOOL] toolCallId 队列未匹配，新建兜底: name={} callId={}", tool_name, tool_call_id[:8])
+            # 队列失配时按工具名称回退匹配，避免生成僵尸 UUID
+            # 遍历队列剩余条目，按 mapped_name 匹配当前工具名称
+            fallback_id = None
+            for i, (orig_name, mapped_name, stored_id) in enumerate(self._tool_call_id_queue):
+                if mapped_name == tool_name:
+                    fallback_id = stored_id
+                    original_name = orig_name
+                    self._tool_call_id_queue.pop(i)
+                    logger.info(
+                        "[LSP4J-TOOL] toolCallId 队列回退匹配: original={} mapped={} callId={}",
+                        original_name,
+                        tool_name,
+                        fallback_id[:8],
+                    )
+                    break
+            tool_call_id = fallback_id or str(uuid.uuid4())
+            if not fallback_id:
+                logger.info(
+                    "[LSP4J-TOOL] toolCallId 队列未匹配，新建兜底: name={} callId={}", tool_name, tool_call_id[:8]
+                )
         request_id = self._current_request_id or str(uuid.uuid4())
 
         logger.info(
