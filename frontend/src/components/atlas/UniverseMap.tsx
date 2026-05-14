@@ -71,15 +71,22 @@ export default function UniverseMap({
     const cls = ['atlas-illustration', className].filter(Boolean).join(' ');
     const cx = 300;
     const cy = 320;
-    const rOuter = 280;
-    const rInner = 115;
+    // Slightly smaller rings than before (was 280/115) so the longest orbit
+    // labels — "II · EMPLOYEE" / "V · EMPLOYEE" — get enough margin to fit
+    // inside the (modestly) padded viewBox without clipping.
+    const rOuter = 215;
+    const rInner = 90;
+    const padX = 120;
+    const vbX = -padX;
+    const vbW = 600 + padX * 2;
+    const vbH = 670;
 
     return (
         <svg
             className={cls}
-            viewBox="0 0 600 640"
+            viewBox={`${vbX} 0 ${vbW} ${vbH}`}
             width={size}
-            height={(size * 640) / 600}
+            height={(size * vbH) / vbW}
             fill="none"
             stroke="currentColor"
             strokeWidth="0.5"
@@ -100,10 +107,10 @@ export default function UniverseMap({
                 {topLabel}
             </text>
 
-            {/* Bottom-left stellar coordinate */}
+            {/* Bottom-left stellar coordinate (40px in from the visible left edge) */}
             <text
-                x="40"
-                y="618"
+                x={vbX + 40}
+                y={vbH - 28}
                 fill="currentColor"
                 stroke="none"
                 fontFamily="IBM Plex Mono, ui-monospace, monospace"
@@ -114,10 +121,10 @@ export default function UniverseMap({
                 {alpha}
             </text>
 
-            {/* Bottom-right stellar coordinate */}
+            {/* Bottom-right stellar coordinate (40px in from the visible right edge) */}
             <text
-                x="560"
-                y="618"
+                x={vbX + vbW - 40}
+                y={vbH - 28}
                 textAnchor="end"
                 fill="currentColor"
                 stroke="none"
