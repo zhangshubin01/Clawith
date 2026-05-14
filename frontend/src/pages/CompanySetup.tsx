@@ -125,12 +125,7 @@ export default function CompanySetup() {
     const MAX_LEN = 48;
 
     return (
-        <AtlasFrame
-            step={1}
-            onToggleLang={toggleLang}
-            footerLeft={`CLW · 2026 · YOUR AGENT COMPANY`}
-            footerRight="MMXXVI"
-        >
+        <AtlasFrame onToggleLang={toggleLang}>
             <StarField density="medium" seed={17} />
             <svg
                 className="atlas-name-bg-circle"

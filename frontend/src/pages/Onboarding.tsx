@@ -102,7 +102,7 @@ export default function Onboarding() {
 
     if (step === 'assistant') {
         return (
-            <AtlasFrame step={2} onBack={() => navigate(-1)} onToggleLang={toggleLang}>
+            <AtlasFrame onBack={() => navigate(-1)} onToggleLang={toggleLang}>
                 <div className="atlas-screen-split">
                     <div className="atlas-screen-plate atlas-screen-plate--gridded">
                         <div className="atlas-grid-bg" aria-hidden="true" />
@@ -217,7 +217,7 @@ export default function Onboarding() {
     // step === 'opening'
     const displayName = (assistantName || 'Clawiee').toUpperCase();
     return (
-        <AtlasFrame step={3} onToggleLang={toggleLang}>
+        <AtlasFrame onToggleLang={toggleLang}>
             <div className="atlas-screen-split">
                 <div className="atlas-screen-plate">
                     <StarField density="low" seed={9} />
