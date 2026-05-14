@@ -69,9 +69,16 @@ export default function OrbitPlate({
                     {founderLabel}
                 </text>
 
-                {/* Assistant satellite — small open ring + center dot */}
+                {/* Assistant satellite — pulsing halo + open ring + center dot.
+                    The halo ring expands and fades, giving a quiet "alive" pulse. */}
+                <circle cx={ax} cy={ay} r="6" fill="none" stroke="currentColor" strokeWidth="0.5" opacity="0.6">
+                    <animate attributeName="r" values="6;14" dur="2.4s" repeatCount="indefinite" />
+                    <animate attributeName="opacity" values="0.55;0" dur="2.4s" repeatCount="indefinite" />
+                </circle>
                 <circle cx={ax} cy={ay} r="6" />
-                <circle cx={ax} cy={ay} r="1.6" fill="currentColor" stroke="none" />
+                <circle cx={ax} cy={ay} r="1.6" fill="currentColor" stroke="none">
+                    <animate attributeName="opacity" values="1;0.5;1" dur="2.4s" repeatCount="indefinite" />
+                </circle>
 
                 {/* Assistant label */}
                 <text

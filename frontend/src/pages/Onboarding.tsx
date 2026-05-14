@@ -18,7 +18,12 @@ export default function Onboarding() {
     const [step, setStep] = useState<Step>('assistant');
     const [assistantId, setAssistantId] = useState<string | null>(null);
     const [assistantName, setAssistantName] = useState('Clawiee');
-    const [personality, setPersonality] = useState('warm');
+    const [personalities, setPersonalities] = useState<string[]>(['warm']);
+    const togglePersonality = (id: string) => {
+        setPersonalities((prev) =>
+            prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]
+        );
+    };
     const [workStyle, setWorkStyle] = useState('concise');
     const [boundaries, setBoundaries] = useState('');
     const [expanded, setExpanded] = useState(false);
@@ -66,7 +71,7 @@ export default function Onboarding() {
         try {
             const result = await onboardingApi.createPersonalAssistant({
                 name: assistantName.trim(),
-                personality,
+                personality: personalities.join(', ') || 'warm',
                 work_style: workStyle,
                 boundaries,
             });
@@ -114,7 +119,11 @@ export default function Onboarding() {
                     </div>
                     <div className="atlas-screen-form atlas-screen-form--padded">
                         <h1 className="atlas-h1">
-                            {isZh ? '见见你的第一位员工。' : 'Meet your first employee.'}
+                            {isZh ? (
+                                <>见见你的<em>第一位员工</em>。</>
+                            ) : (
+                                <>Meet your <em>first employee.</em></>
+                            )}
                         </h1>
                         <p className="atlas-body atlas-body--muted">{isZh
                             ? '你的私人助理 —— 打理日程、备忘、和你不愿亲自处理的事。给 ta 起个名字。'
@@ -142,14 +151,15 @@ export default function Onboarding() {
                             <span className="atlas-mono">{expanded ? (isZh ? '收起' : 'COLLAPSE') : (isZh ? '展开' : 'EXPAND')}</span>
                         </button>
 
-                        {/* Personality chips — always visible (default voice picker) */}
+                        {/* Personality chips — always visible, multi-select */}
                         <div className="atlas-chip-row">
                             {personalityOptions.map((item) => (
                                 <button
                                     key={item.id}
                                     type="button"
-                                    className={`atlas-chip${personality === item.id ? ' is-active' : ''}`}
-                                    onClick={() => setPersonality(item.id)}
+                                    className={`atlas-chip${personalities.includes(item.id) ? ' is-active' : ''}`}
+                                    aria-pressed={personalities.includes(item.id)}
+                                    onClick={() => togglePersonality(item.id)}
                                 >
                                     {isZh ? item.zh : item.en}
                                 </button>
