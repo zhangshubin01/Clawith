@@ -600,6 +600,7 @@ class OpenAICompatibleClient(LLMClient):
         return LLMResponse(
             content=msg.get("content", ""),
             tool_calls=msg.get("tool_calls", []),
+            reasoning_content=msg.get("reasoning_content"),
             finish_reason=choice.get("finish_reason"),
             usage=data.get("usage"),
             model=data.get("model"),

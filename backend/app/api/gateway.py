@@ -6,6 +6,8 @@ to poll for messages, report results, send messages, and send heartbeat pings.
 
 import asyncio
 import hashlib
+import hmac
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -26,15 +28,69 @@ from app.schemas.schemas import (
 
 router = APIRouter(prefix="/gateway", tags=["gateway"])
 
+# PBKDF2 参数: 参考 backend/app/core/security.py 的安全实践
+# 600,000 次迭代 = OWASP 2024 推荐的 SHA-256 最小迭代次数
+_PBKDF2_ITERATIONS = 600_000
+_PBKDF2_DKLEN = 32  # 256-bit 输出
+_PBKDF2_SALT_BYTES = 16
+_PBKDF2_PREFIX = "pbkdf2:sha256:600000$"  # 版本头，用于区分存储格式
 
-def _hash_key(key: str) -> str:
-    """Hash an API key for storage."""
-    return hashlib.sha256(key.encode()).hexdigest()
+
+def _hash_key_pbkdf2(key: str) -> str:
+    """使用 PBKDF2-HMAC-SHA256 哈希 API Key（新格式）。
+
+    存储格式: pbkdf2:sha256:600000$<salt_hex>$<hash_hex>
+    盐值: 随机 16 字节，十六进制编码
+    """
+    salt = os.urandom(_PBKDF2_SALT_BYTES)
+    dk = hashlib.pbkdf2_hmac("sha256", key.encode("utf-8"), salt, _PBKDF2_ITERATIONS, dklen=_PBKDF2_DKLEN)
+    return f"{_PBKDF2_PREFIX}{salt.hex()}${dk.hex()}"
+
+
+def _verify_key(api_key: str, stored_hash: str) -> bool:
+    """验证 API Key 是否匹配存储的哈希值。
+
+    自动检测存储格式:
+    - pbkdf2:sha256:600000$ 开头 → PBKDF2 验证
+    - 无版本头 → 旧式 SHA-256 验证（兼容旧密钥），记 warning 提示升级
+    """
+    if stored_hash.startswith(_PBKDF2_PREFIX):
+        # 新格式: pbkdf2:sha256:600000$<salt_hex>$<hash_hex>
+        rest = stored_hash[len(_PBKDF2_PREFIX):]
+        parts = rest.split("$", 1)
+        if len(parts) != 2:
+            logger.warning("[Gateway] 无效的 PBKDF2 哈希格式")
+            return False
+        salt_hex, hash_hex = parts
+        try:
+            salt = bytes.fromhex(salt_hex)
+            expected_hash = bytes.fromhex(hash_hex)
+        except ValueError:
+            logger.warning("[Gateway] PBKDF2 哈希十六进制解码失败")
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", api_key.encode("utf-8"), salt, _PBKDF2_ITERATIONS, dklen=_PBKDF2_DKLEN)
+        return hmac.compare_digest(dk, expected_hash)
+    else:
+        # 旧格式: 纯 SHA-256（兼容旧密钥）
+        legacy_hash = hashlib.sha256(api_key.encode()).hexdigest()
+        if hmac.compare_digest(stored_hash.encode(), legacy_hash.encode()):
+            logger.warning(
+                "[Gateway] 旧式 SHA-256 API Key 验证成功，建议迁移到 PBKDF2。"
+                " 请重新生成 API Key 以使用 PBKDF2 存储。key_prefix={}",
+                api_key[:8]
+            )
+            return True
+        return False
 
 
 async def _get_agent_by_key(api_key: str, db: AsyncSession) -> Agent:
-    """Authenticate an OpenClaw agent by its API key."""
-    # First try plaintext (new behavior)
+    """通过 API Key 认证 OpenClaw agent。
+
+    支持两种存储格式:
+    - PBKDF2-HMAC-SHA256（新格式，安全）
+    - 纯 SHA-256（旧格式，兼容）
+    """
+    # 首先按原文查找（明文模式，新行为）
     result = await db.execute(
         select(Agent).where(
             Agent.api_key_hash == api_key,
@@ -43,20 +99,32 @@ async def _get_agent_by_key(api_key: str, db: AsyncSession) -> Agent:
     )
     agent = result.scalar_one_or_none()
 
-    # Fallback to hashed (legacy behavior)
-    if not agent:
-        key_hash = _hash_key(api_key)
-        result = await db.execute(
-            select(Agent).where(
-                Agent.api_key_hash == key_hash,
-                Agent.agent_type == "openclaw",
-            )
-        )
-        agent = result.scalar_one_or_none()
+    if agent:
+        return agent
 
-    if not agent:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    return agent
+    # 遍历所有 openclaw agent 进行哈希验证（支持混合存储格式）
+    result = await db.execute(
+        select(Agent).where(
+            Agent.agent_type == "openclaw",
+        )
+    )
+    agents = result.scalars().all()
+
+    for candidate in agents:
+        stored = candidate.api_key_hash
+        if not stored:
+            continue
+        if _verify_key(api_key, stored):
+            # 如果是旧格式验证成功，自动升级为 PBKDF2
+            if not stored.startswith(_PBKDF2_PREFIX):
+                candidate.api_key_hash = _hash_key_pbkdf2(api_key)
+                logger.info(
+                    "[Gateway] 自动升级旧式 SHA-256 哈希为 PBKDF2，agent_id={}",
+                    candidate.id
+                )
+            return candidate
+
+    raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 # ─── Poll for messages ──────────────────────────────────
@@ -244,7 +312,7 @@ async def report_result(
     # Push to WebSocket if user is connected
     if body.result and msg.conversation_id and msg.sender_user_id:
         try:
-            from app.api.websocket import manager
+            from app.services.connection_manager import manager
             await manager.send_message(str(agent.id), {
                 "type": "done",
                 "role": "assistant",

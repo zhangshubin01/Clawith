@@ -69,6 +69,8 @@ class PatchSessionIn(BaseModel):
 async def list_sessions(
     agent_id: uuid.UUID,
     scope: str = Query("mine", description="'mine' or 'all'"),
+    skip: int = Query(0, ge=0, description="分页跳过条数 (#70 修复)"),
+    limit: int = Query(50, ge=1, le=200, description="分页返回条数 (#70 修复)"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -84,6 +86,16 @@ async def list_sessions(
         if not _can_view_all_agent_chat_sessions(current_user, agent):
             raise HTTPException(status_code=403, detail="Not authorized to view all sessions")
 
+        # 分页总计查询（与主查询共享相同的 WHERE 条件，#70 修复）
+        count_result = await db.execute(
+            select(func.count(ChatSession.id))
+            .where(
+                (ChatSession.agent_id == agent_id)
+                | ((ChatSession.peer_agent_id == agent_id) & (ChatSession.source_channel == "agent"))
+            )
+        )
+        total = count_result.scalar() or 0
+
         # Fetch all sessions (including agent-to-agent where this agent is peer)
         result = await db.execute(
             select(ChatSession)
@@ -92,6 +104,7 @@ async def list_sessions(
                 | ((ChatSession.peer_agent_id == agent_id) & (ChatSession.source_channel == "agent"))
             )
             .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
+            .offset(skip).limit(limit)  # #70 修复：分页支持
         )
         sessions = result.scalars().all()
         out = []
@@ -201,18 +214,31 @@ async def list_sessions(
                 current_file=session.current_file,
                 open_files=session.open_files,
             ))
-        return out
+        return {"items": out, "total": total, "skip": skip, "limit": limit}
 
     else:  # scope == "mine"
+        # 分页总计查询（与主查询共享相同的 WHERE 条件，#70 修复）
+        count_result = await db.execute(
+            select(func.count(ChatSession.id))
+            .where(
+                ChatSession.agent_id == agent_id,
+                ChatSession.user_id == current_user.id,
+                ChatSession.is_group == False,
+                ChatSession.source_channel.notin_(["agent", "trigger"]),
+            )
+        )
+        total = count_result.scalar() or 0
+
         result = await db.execute(
             select(ChatSession)
             .where(
                 ChatSession.agent_id == agent_id,
                 ChatSession.user_id == current_user.id,
-                ChatSession.is_group == False,  # Group sessions are not "mine"
-                ChatSession.source_channel.notin_(["agent", "trigger"]),  # Exclude agent-to-agent and reflection sessions
+                ChatSession.is_group == False,
+                ChatSession.source_channel.notin_(["agent", "trigger"]),
             )
             .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
+            .offset(skip).limit(limit)  # #70 修复：分页支持
         )
         sessions = result.scalars().all()
         out = []
@@ -275,7 +301,7 @@ async def list_sessions(
                 current_file=session.current_file,
                 open_files=session.open_files,
             ))
-        return out
+        return {"items": out, "total": total, "skip": skip, "limit": limit}
 
 
 @router.post("/{agent_id}/sessions", status_code=201)

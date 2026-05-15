@@ -42,6 +42,7 @@ def _cleanup_stale_invoke_cache():
     stale = [k for k, v in _last_invoke.items() if (now - v).total_seconds() > DEDUP_WINDOW * 2]
     for k in stale:
         del _last_invoke[k]
+    _cleanup_webhook_rate_cache()
 
 
 async def _should_skip_non_workday(trigger: AgentTrigger, local_now: datetime) -> bool:
@@ -180,9 +181,45 @@ async def _handle_okr_collection_trigger(trigger: AgentTrigger, now: datetime) -
     logger.info(f"[Trigger] Deterministic OKR collection sent for trigger {trigger.name}")
     return True
 
-# Webhook rate limiter: token -> list of timestamps
-_webhook_hits: dict[str, list[float]] = {}
-WEBHOOK_RATE_LIMIT = 5   # max hits per minute per token
+# Webhook 速率限制器: agent_id -> 最近触发时间戳列表
+# 防止同一 agent 的 webhook 触发器在短时间内被重复调用
+_webhook_hits: dict[uuid.UUID, list[float]] = {}
+_WEBHOOK_RATE_LIMIT = 10  # 每分钟每个 agent 最多触发 10 次 webhook
+_WEBHOOK_RATE_WINDOW = 60.0  # 限速窗口（秒）
+
+
+def _check_webhook_rate_limit(agent_id: uuid.UUID, now: datetime) -> bool:
+    """检查 webhook 速率限制，返回 True 表示超出限制。
+
+    基于 agent_id 限速，使用简单 dict + timestamp 实现，无需外部库。
+    自动清理过期的时间戳记录。
+    """
+    import time as _time
+    ts = _time.time()
+    hits = _webhook_hits.get(agent_id, [])
+    # 清理窗口外的旧时间戳
+    hits = [t for t in hits if ts - t < _WEBHOOK_RATE_WINDOW]
+    if len(hits) >= _WEBHOOK_RATE_LIMIT:
+        _webhook_hits[agent_id] = hits  # 保持清理后的数据
+        logger.warning(
+            "[TriggerDaemon] Webhook 速率限制: agent={} 超出限制 {}次/{}秒",
+            agent_id, _WEBHOOK_RATE_LIMIT, _WEBHOOK_RATE_WINDOW
+        )
+        return True
+    hits.append(ts)
+    _webhook_hits[agent_id] = hits
+    return False
+
+
+def _cleanup_webhook_rate_cache():
+    """清理过期的 webhook 速率限制记录（由定期清理任务调用）。"""
+    import time as _time
+    ts = _time.time()
+    stale = [k for k, v in _webhook_hits.items() if all(ts - t >= _WEBHOOK_RATE_WINDOW for t in v)]
+    for k in stale:
+        del _webhook_hits[k]
+    if stale:
+        logger.debug("[TriggerDaemon] 清理 {} 条过期 webhook 速率记录", len(stale))
 
 
 # ── SSRF Protection ─────────────────────────────────────────────────
@@ -297,6 +334,9 @@ async def _evaluate_trigger(trigger: AgentTrigger, now: datetime) -> bool:
         return await _check_new_agent_messages(trigger)
 
     elif t == "webhook":
+        # 检查 webhook 速率限制，防止同一 agent 被频繁触发
+        if _check_webhook_rate_limit(trigger.agent_id, now):
+            return False
         # Check if a webhook payload is pending
         if cfg.get("_webhook_pending"):
             return True
@@ -863,7 +903,7 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
 
         if final_reply and delivery_target and not delivered_platform_message_via_tool:
             try:
-                from app.api.websocket import manager as ws_manager
+                from app.services.connection_manager import manager as ws_manager
                 agent_id_str = str(agent_id)
 
                 # Build notification message with trigger badge

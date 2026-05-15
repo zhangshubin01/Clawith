@@ -2052,7 +2052,7 @@ export default function AgentDetailPage() {
             const res = await fetch(`/api/agents/${id}/sessions?scope=all`, { headers: { Authorization: `Bearer ${tkn}` } });
             if (!res.ok) return [];
             const all = await res.json();
-            return all.filter((s: any) => s.source_channel === 'trigger');
+            return all.items.filter((s: any) => s.source_channel === 'trigger');
         },
         enabled: !!id && awareDataActive,
         refetchInterval: awareDataActive ? 10000 : false,
@@ -2146,6 +2146,15 @@ export default function AgentDetailPage() {
     const [historyMsgs, setHistoryMsgs] = useState<any[]>([]);
     const [sessionsLoading, setSessionsLoading] = useState(false);
     const [allSessionsLoading, setAllSessionsLoading] = useState(false);
+    const PAGE_SIZE = 50;
+    const [sessionsTotal, setSessionsTotal] = useState(0);
+    const [sessionsHasMore, setSessionsHasMore] = useState(false);
+    const [allSessionsTotal, setAllSessionsTotal] = useState(0);
+    const [allSessionsHasMore, setAllSessionsHasMore] = useState(false);
+    const [sessionsLoadingMore, setSessionsLoadingMore] = useState(false);
+    const [allSessionsLoadingMore, setAllSessionsLoadingMore] = useState(false);
+    const sessionsCurrentPageRef = useRef(0);
+    const allSessionsCurrentPageRef = useRef(0);
     const [agentExpired, setAgentExpired] = useState(false);
     // Websocket chat state (for 'me' conversation)
     const token = useAuthStore((s) => s.token);
@@ -2310,46 +2319,89 @@ export default function AgentDetailPage() {
         setWsConnected(!!ws && ws.readyState === WebSocket.OPEN);
     };
 
-    const fetchMySessions = async (silent = false, agentId: string | undefined = id) => {
+    const fetchMySessions = async (silent = false, agentId: string | undefined = id, page = 0) => {
         if (!agentId) return [];
-        if (!silent && currentAgentIdRef.current === agentId) setSessionsLoading(true);
+        if (!silent && currentAgentIdRef.current === agentId) {
+            if (page === 0) setSessionsLoading(true);
+            else setSessionsLoadingMore(true);
+        }
         try {
             const tkn = localStorage.getItem('token');
-            const res = await fetch(`/api/agents/${agentId}/sessions?scope=mine`, { headers: { Authorization: `Bearer ${tkn}` } });
+            const res = await fetch(`/api/agents/${agentId}/sessions?scope=mine&skip=${page * PAGE_SIZE}&limit=${PAGE_SIZE}`, { headers: { Authorization: `Bearer ${tkn}` } });
             if (res.ok) {
-                const data = (await res.json()).map((row: any) => normalizeChatSession(row));
-                if (currentAgentIdRef.current === agentId) setSessions(data);
-                if (!silent && currentAgentIdRef.current === agentId) setSessionsLoading(false);
+                const json = await res.json();
+                const data = json.items.map((row: any) => normalizeChatSession(row));
+                if (currentAgentIdRef.current === agentId) {
+                    if (page === 0) {
+                        setSessions(data);
+                        sessionsCurrentPageRef.current = 0;
+                    } else {
+                        setSessions(prev => [...prev, ...data]);
+                        sessionsCurrentPageRef.current = page;
+                    }
+                    setSessionsTotal(json.total);
+                    const hasMore = (page + 1) * PAGE_SIZE < json.total;
+                    setSessionsHasMore(hasMore);
+                }
+                if (!silent && currentAgentIdRef.current === agentId) {
+                    setSessionsLoading(false);
+                    setSessionsLoadingMore(false);
+                }
                 return data;
             }
         } catch { }
-        if (!silent && currentAgentIdRef.current === agentId) setSessionsLoading(false);
+        if (!silent && currentAgentIdRef.current === agentId) {
+            setSessionsLoading(false);
+            setSessionsLoadingMore(false);
+        }
         return [];
     };
 
-    const fetchAllSessions = async () => {
+    const loadMoreSessions = () => {
+        const nextPage = sessionsCurrentPageRef.current + 1;
+        fetchMySessions(false, id, nextPage);
+    };
+
+    const fetchAllSessions = async (page = 0) => {
         if (!id || !canViewAllAgentChatSessions) return;
-        setAllSessionsLoading(true);
+        if (page === 0) setAllSessionsLoading(true);
+        else setAllSessionsLoadingMore(true);
         try {
             const tkn = localStorage.getItem('token');
-            const res = await fetch(`/api/agents/${id}/sessions?scope=all`, { headers: { Authorization: `Bearer ${tkn}` } });
+            const res = await fetch(`/api/agents/${id}/sessions?scope=all&skip=${page * PAGE_SIZE}&limit=${PAGE_SIZE}`, { headers: { Authorization: `Bearer ${tkn}` } });
             if (!currentAgentIdRef.current || currentAgentIdRef.current !== id) return;
             if (res.ok) {
-                const all = (await res.json())
+                const json = await res.json();
+                const all = json.items
                     .filter((s: any) => String(s.source_channel || 'direct').toLowerCase() !== 'trigger')
                     .map((row: any) => normalizeChatSession(row));
-                setAllSessions(all);
+                if (page === 0) {
+                    setAllSessions(all);
+                    allSessionsCurrentPageRef.current = 0;
+                } else {
+                    setAllSessions(prev => [...prev, ...all]);
+                    allSessionsCurrentPageRef.current = page;
+                }
+                setAllSessionsTotal(json.total);
+                const hasMore = (page + 1) * PAGE_SIZE < json.total;
+                setAllSessionsHasMore(hasMore);
             } else {
-                setAllSessions([]);
+                if (page === 0) setAllSessions([]);
                 if (res.status === 403) {
                     console.warn('[chat] scope=all sessions forbidden (need org/platform/agent admin)');
                 }
             }
         } catch {
-            if (currentAgentIdRef.current === id) setAllSessions([]);
+            if (currentAgentIdRef.current === id && page === 0) setAllSessions([]);
         } finally {
-            setAllSessionsLoading(false);
+            if (page === 0) setAllSessionsLoading(false);
+            else setAllSessionsLoadingMore(false);
         }
+    };
+
+    const loadMoreAllSessions = () => {
+        const nextPage = allSessionsCurrentPageRef.current + 1;
+        fetchAllSessions(nextPage);
     };
 
     const selectSession = async (rawSess: any, scopeOverride: 'mine' | 'all' = chatScope) => {
@@ -2828,6 +2880,12 @@ export default function AgentDetailPage() {
         setChatScope('mine');
         setSessions([]);
         setAllSessions([]);
+        setSessionsTotal(0);
+        setSessionsHasMore(false);
+        setAllSessionsTotal(0);
+        setAllSessionsHasMore(false);
+        sessionsCurrentPageRef.current = 0;
+        allSessionsCurrentPageRef.current = 0;
         setAgentExpired(false);
         settingsInitRef.current = false;
     }, [id]);
@@ -2836,6 +2894,12 @@ export default function AgentDetailPage() {
     useEffect(() => {
         setSessions([]);
         setAllSessions([]);
+        setSessionsTotal(0);
+        setSessionsHasMore(false);
+        setAllSessionsTotal(0);
+        setAllSessionsHasMore(false);
+        sessionsCurrentPageRef.current = 0;
+        allSessionsCurrentPageRef.current = 0;
         setChatScope('mine');
         sessionMsgAbortRef.current?.abort();
         activeSessionIdRef.current = null;
@@ -5730,6 +5794,27 @@ export default function AgentDetailPage() {
                                                         </div>
                                                     );
                                                 })}
+                                                {sessionsHasMore && (
+                                                    <div style={{ padding: '8px 12px', textAlign: 'center' }}>
+                                                        <button
+                                                            onClick={loadMoreSessions}
+                                                            disabled={sessionsLoadingMore}
+                                                            style={{
+                                                                width: '100%',
+                                                                padding: '6px 0',
+                                                                fontSize: '12px',
+                                                                color: 'var(--text-secondary)',
+                                                                background: 'transparent',
+                                                                border: '1px solid var(--border-subtle)',
+                                                                borderRadius: '6px',
+                                                                cursor: sessionsLoadingMore ? 'default' : 'pointer',
+                                                                opacity: sessionsLoadingMore ? 0.6 : 1,
+                                                            }}
+                                                        >
+                                                            {sessionsLoadingMore ? t('common.loading') : `${t('common.loadMore', '加载更多')} (${sessions.length}/${sessionsTotal})`}
+                                                        </button>
+                                                    </div>
+                                                )}
                                             </div>
                                         </>
                                     ) : (
@@ -5806,6 +5891,27 @@ export default function AgentDetailPage() {
                                                             </div>
                                                         );
                                                     })
+                                                )}
+                                                {allSessionsHasMore && (
+                                                    <div style={{ padding: '8px 12px', textAlign: 'center' }}>
+                                                        <button
+                                                            onClick={loadMoreAllSessions}
+                                                            disabled={allSessionsLoadingMore}
+                                                            style={{
+                                                                width: '100%',
+                                                                padding: '6px 0',
+                                                                fontSize: '12px',
+                                                                color: 'var(--text-secondary)',
+                                                                background: 'transparent',
+                                                                border: '1px solid var(--border-subtle)',
+                                                                borderRadius: '6px',
+                                                                cursor: allSessionsLoadingMore ? 'default' : 'pointer',
+                                                                opacity: allSessionsLoadingMore ? 0.6 : 1,
+                                                            }}
+                                                        >
+                                                            {allSessionsLoadingMore ? t('common.loading') : `${t('common.loadMore', '加载更多')} (${allSessions.length}/${allSessionsTotal})`}
+                                                        </button>
+                                                    </div>
                                                 )}
                                             </div>
                                         </>

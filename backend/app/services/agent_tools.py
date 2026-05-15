@@ -6057,7 +6057,7 @@ async def _send_platform_message(agent_id: uuid.UUID, args: dict) -> str:
 
             # Push via WebSocket if user has an active connection
             try:
-                from app.api.websocket import manager as ws_manager
+                from app.services.connection_manager import manager as ws_manager
                 await ws_manager.send_to_user(
                     str(agent_id),
                     str(target_user.id),

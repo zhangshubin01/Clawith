@@ -7,14 +7,14 @@ import time
 import uuid
 from datetime import datetime, timezone as tz
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import decode_access_token
+from app.core.security import decode_access_token, get_current_user
 from app.core.permissions import check_agent_access, is_agent_expired
-from app.database import async_session
+from app.database import async_session, get_db
 from app.models.agent import Agent
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
@@ -25,131 +25,11 @@ from app.services.llm import call_llm_with_failover
 
 router = APIRouter(tags=["websocket"])
 
-MAX_CONNECTIONS = 500
-
-
-class ConnectionManager:
-    """Manage WebSocket connections per agent with heartbeat and idle cleanup.
-
-    Each connection tracked as (websocket, session_id, user_id, connected_at, last_activity_ts).
-    Idle connections (>300s without activity) are removed by a background cleanup task (#65, #66).
-    """
-
-    def __init__(self):
-        # agent_id_str -> list of (WebSocket, session_id, user_id, connected_at, last_activity)
-        self.active_connections: dict[str, list[tuple]] = {}
-        self._cleanup_task: asyncio.Task | None = None
-        self._cleanup_started: bool = False
-
-    @property
-    def total_connections(self) -> int:
-        return sum(len(conns) for conns in self.active_connections.values())
-
-    async def connect(self, agent_id: str, websocket: WebSocket, session_id: str = None, user_id: str | None = None):
-        if self.total_connections >= MAX_CONNECTIONS:
-            await websocket.close(code=1013, reason="Server at capacity")
-            logger.warning("[WS] 连接被拒绝：已达最大连接数 ({})", MAX_CONNECTIONS)
-            return
-        await websocket.accept()
-        _now = time.monotonic()
-        if agent_id not in self.active_connections:
-            self.active_connections[agent_id] = []
-        self.active_connections[agent_id].append((websocket, session_id, user_id, _now, _now))
-        # 延迟启动清理任务（避免首次连接前创建空转任务）
-        if not self._cleanup_started:
-            self._cleanup_started = True
-            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-
-    def disconnect(self, agent_id: str, websocket: WebSocket):
-        if agent_id in self.active_connections:
-            self.active_connections[agent_id] = [
-                t for t in self.active_connections[agent_id] if t[0] != websocket
-            ]
-            if not self.active_connections[agent_id]:
-                del self.active_connections[agent_id]
-
-    def touch(self, agent_id: str, websocket: WebSocket):
-        """更新连接的最后活动时间（收到消息时调用）。"""
-        if agent_id in self.active_connections:
-            for i, t in enumerate(self.active_connections[agent_id]):
-                if t[0] == websocket:
-                    ws, sid, uid, cat, _ = t
-                    self.active_connections[agent_id][i] = (ws, sid, uid, cat, time.monotonic())
-                    break
-
-    async def _cleanup_loop(self, max_idle_seconds: float = 300.0, interval: float = 60.0):
-        """后台任务：每 60 秒清理空闲超过 300 秒的连接，同时发送心跳 ping（#65, #66）。"""
-        while True:
-            await asyncio.sleep(interval)
-            _now = time.monotonic()
-            stale_agents = []
-            for agent_id, conns in list(self.active_connections.items()):
-                alive = []
-                for ws, sid, uid, cat, last_act in conns:
-                    if _now - last_act > max_idle_seconds:
-                        # 空闲超时：发送 ping 确认存活
-                        try:
-                            await ws.send_json({"type": "ping"})
-                            alive.append((ws, sid, uid, cat, _now))
-                        except Exception:
-                            logger.info("[WS] 清理死连接: agent={} session={}", agent_id, sid)
-                    else:
-                        alive.append((ws, sid, uid, cat, last_act))
-                if alive:
-                    self.active_connections[agent_id] = alive
-                else:
-                    stale_agents.append(agent_id)
-            for aid in stale_agents:
-                del self.active_connections[aid]
-            if stale_agents:
-                logger.info("[WS] 清理完成：移除 {} 个无活跃连接的 agent", len(stale_agents))
-
-    async def send_message(self, agent_id: str, message: dict):
-        if agent_id in self.active_connections:
-            for t in self.active_connections[agent_id]:
-                try:
-                    await t[0].send_json(message)
-                except Exception:
-                    pass
-
-    async def send_to_session(self, agent_id: str, session_id: str, message: dict):
-        """Send message only to WebSocket connections matching the given session_id."""
-        if agent_id in self.active_connections:
-            for t in self.active_connections[agent_id]:
-                if t[1] == session_id:
-                    try:
-                        await t[0].send_json(message)
-                    except Exception:
-                        pass
-
-    async def send_to_user(self, agent_id: str, user_id: str, message: dict):
-        """Send message to all live WebSocket sessions of a given platform user for an agent."""
-        if agent_id in self.active_connections:
-            for t in self.active_connections[agent_id]:
-                if t[2] == user_id:
-                    try:
-                        await t[0].send_json(message)
-                    except Exception:
-                        pass
-
-    def get_active_session_ids(self, agent_id: str) -> list[str]:
-        """Return distinct session IDs for all active WS connections of an agent."""
-        if agent_id not in self.active_connections:
-            return []
-        return list(set(t[1] for t in self.active_connections[agent_id] if t[1]))
-
-    def is_user_viewing_session(self, agent_id: str, session_id: str, user_id: str) -> bool:
-        """Return True if the given platform user currently has this exact session open."""
-        if agent_id not in self.active_connections:
-            return False
-        for t in self.active_connections[agent_id]:
-            if t[1] == session_id and t[2] == user_id:
-                return True
-        return False
-
-
-manager = ConnectionManager()
-
+from app.services.connection_manager import (
+    manager, _ConnectionInfo,
+    _model_config_cache, _MODEL_CONFIG_CACHE_TTL,
+    _disconnect_debounce, _DISCONNECT_DEBOUNCE_WINDOW,
+)
 
 async def maybe_mark_session_read_for_active_viewer(
     db: AsyncSession,
@@ -168,11 +48,6 @@ async def maybe_mark_session_read_for_active_viewer(
 
     session.last_read_at_by_user = datetime.now(tz.utc)
     return True
-
-
-from fastapi import Depends
-from app.core.security import get_current_user
-from app.database import get_db
 
 
 @router.get("/api/chat/{agent_id}/history")
@@ -236,6 +111,7 @@ async def websocket_chat(
     token: str = Query(...),
     session_id: str = Query(None),
     lang: str = Query("en"),
+    client_type: str = Query("web", description="客户端类型: web / ide_plugin / ide_lsp4j (#99 修复)"),
 ):
     """WebSocket endpoint for real-time chat with an agent.
 
@@ -251,11 +127,12 @@ async def websocket_chat(
     # Accept immediately so browser sees onopen without waiting for DB setup
     await websocket.accept()
 
-    # Authenticate
+    # 认证：仅捕获已知异常类型，避免宽泛的 except Exception 吞掉系统级错误（#130 修复）
     try:
         payload = decode_access_token(token)
         user_id = uuid.UUID(payload["sub"])
-    except Exception:
+    except (HTTPException, ValueError, KeyError) as e:
+        logger.warning("[WS] 认证失败 ({}): {}", type(e).__name__, e)
         await websocket.send_json({"type": "error", "content": "Authentication failed"})
         await websocket.close(code=4001)
         return
@@ -328,9 +205,7 @@ async def websocket_chat(
                 fallback_llm_model = None  # No further fallback available
                 logger.info(f"[WS] Primary model unavailable, using fallback: {llm_model.model}")
 
-            # Resolve or create chat session
-            from app.models.chat_session import ChatSession
-            from sqlalchemy import select as _sel
+            # 解析或创建聊天会话（#99 修复：传入 client_type 标记客户端来源）
             conv_id = session_id
             if conv_id:
                 # Validate the session belongs to this agent and to this user.
@@ -341,7 +216,7 @@ async def websocket_chat(
                     _existing = None
                 else:
                     _sr = await db.execute(
-                        _sel(ChatSession).where(
+                        select(ChatSession).where(
                             ChatSession.id == _sid,
                             ChatSession.agent_id == agent_id,
                         )
@@ -353,16 +228,26 @@ async def websocket_chat(
                         await websocket.send_json({"type": "error", "content": "Not authorized for this session"})
                         await websocket.close(code=4003)
                         return
+                    # #99 修复：已有 session 的 client_type 若不匹配则更新
+                    if client_type and client_type != "web" and _existing and _existing.client_type != client_type:
+                        _existing.client_type = client_type
+                        await db.commit()
+                        logger.info(
+                            "[WS] 更新已有 session {} 的 client_type: {} → {}",
+                            conv_id, _existing.client_type or "web", client_type,
+                        )
             if not conv_id:
+                # 根据客户端类型确定 source_channel（#132 修复：不再硬编码 "web"）
+                _channel = client_type if client_type in ("web", "ide_plugin", "ide_lsp4j") else "web"
                 # Prefer the user's designated primary platform session. This keeps agent-initiated
                 # conversations and ongoing long-form context anchored in one stable thread, while
                 # user-created side sessions remain temporary.
                 _sr = await db.execute(
-                    _sel(ChatSession)
+                    select(ChatSession)
                     .where(
                         ChatSession.agent_id == agent_id,
                         ChatSession.user_id == user_id,
-                        ChatSession.source_channel == "web",
+                        ChatSession.source_channel == _channel,
                         ChatSession.is_group == False,
                         ChatSession.is_primary == True,
                     )
@@ -374,11 +259,16 @@ async def websocket_chat(
                     conv_id = str(_latest.id)
                 else:
                     # Lazily elect or create the primary session only when it is actually needed.
-                    _new_session = await ensure_primary_platform_session(db, agent_id, user_id)
+                    # #100 修复：根据客户端类型传入对应的 source_channel
+                    _new_session = await ensure_primary_platform_session(db, agent_id, user_id, source_channel=_channel)
                     await db.commit()
                     await db.refresh(_new_session)
                     conv_id = str(_new_session.id)
-                    logger.info(f"[WS] Selected primary session {conv_id}")
+                    # #99 修复：设置 client_type 标记客户端来源
+                    if client_type:
+                        _new_session.client_type = client_type
+                        await db.commit()
+                    logger.info("[WS] Selected primary session {} (channel={})", conv_id, _channel)
 
             try:
                 history_result = await db.execute(
@@ -401,8 +291,17 @@ async def websocket_chat(
 
     agent_id_str = str(agent_id)
     if agent_id_str not in manager.active_connections:
-        manager.active_connections[agent_id_str] = []
-    manager.active_connections[agent_id_str].append((websocket, conv_id, str(user_id)))
+        manager.active_connections[agent_id_str] = {}
+    _now = time.monotonic()
+    conn_key = f"{conv_id}@{user_id}" if conv_id else str(id(websocket))
+    manager.active_connections[agent_id_str][conn_key] = _ConnectionInfo(
+        ws=websocket, session_id=conv_id or "", user_id=str(user_id),
+        connected_at=_now, last_activity=_now,
+    )
+    # 延迟启动清理任务
+    if not manager._cleanup_started:
+        manager._cleanup_started = True
+        manager._cleanup_task = asyncio.create_task(manager._cleanup_loop())
     logger.info(f"[WS] Ready! Agent={agent_name}")
 
     # Send session_id to frontend so Take Control can reference the correct session.
@@ -453,9 +352,17 @@ async def websocket_chat(
         if welcome_message and not history_messages:
             await websocket.send_json({"type": "done", "role": "assistant", "content": welcome_message})
 
+        # #142 修复：排队消息重放标记。当工具循环结束后有待处理消息时，
+        # 将其设为 data 直接进入消息处理逻辑，跳过 websocket.receive_json()。
+        _replay_data: dict | None = None
         while True:
-            logger.info(f"[WS] Waiting for message from {agent_name}...")
-            data = await websocket.receive_json()
+            if _replay_data is not None:
+                data = _replay_data
+                _replay_data = None
+                logger.info("[WS] 重放排队消息: session={} msg_len={}", conv_id, len(str(data.get("content", ""))))
+            else:
+                logger.debug(f"[WS] Waiting for message from {agent_name}...")
+                data = await websocket.receive_json()
 
             # 更新连接活动时间，供 ConnectionManager 超时清理和心跳使用（#65）
             manager.touch(str(agent_id), websocket)
@@ -475,7 +382,7 @@ async def websocket_chat(
             # (a) skip persisting a user-side turn and (b) not echo any user
             # bubble — the agent opens the conversation itself.
             is_onboarding_trigger = data.get("kind") == "onboarding_trigger"
-            logger.info(f"[WS] Received: {content[:50]}" + (" [onboarding]" if is_onboarding_trigger else ""))
+            logger.debug(f"[WS] Received: {content[:50]}" + (" [onboarding]" if is_onboarding_trigger else ""))
 
             if not content and not is_onboarding_trigger:
                 continue
@@ -601,7 +508,7 @@ async def websocket_chat(
                                 clean_title = f"📎 {file_name}"
                             _sess.title = clean_title[:40] if clean_title else content[:40]
                     await db.commit()
-                logger.info("[WS] User message saved")
+                logger.debug("[WS] User message saved")
 
             # ── OpenClaw routing: insert into gateway_messages instead of LLM ──
             if agent_type == "openclaw":
@@ -633,33 +540,43 @@ async def websocket_chat(
             # Track thinking content for storage (initialize before condition)
             thinking_content = []
 
-            # Reload model config on every message so Settings changes take effect
-            # immediately without requiring a page refresh / WebSocket reconnect.
-            async with async_session() as _mdb:
-                _agent_r = await _mdb.execute(select(Agent).where(Agent.id == agent_id))
-                _agent_cur = _agent_r.scalar_one_or_none()
-                if _agent_cur:
-                    if _agent_cur.primary_model_id:
-                        _m_r = await _mdb.execute(select(LLMModel).where(LLMModel.id == _agent_cur.primary_model_id))
-                        _m = _m_r.scalar_one_or_none()
-                        llm_model = _m if (_m and _m.enabled) else None
-                    else:
-                        llm_model = None
-                    if _agent_cur.fallback_model_id:
-                        _fb_r = await _mdb.execute(select(LLMModel).where(LLMModel.id == _agent_cur.fallback_model_id))
-                        _fb = _fb_r.scalar_one_or_none()
-                        fallback_llm_model = _fb if (_fb and _fb.enabled) else None
-                    else:
-                        fallback_llm_model = None
-                    # Config-level fallback: primary missing → use fallback immediately
-                    if not llm_model and fallback_llm_model:
-                        llm_model = fallback_llm_model
-                        fallback_llm_model = None
+            # #103 修复：每轮消息检查模型配置是否需要刷新（60s TTL 缓存）
+            _model_cache_key = f"{agent_id}"
+            _model_cache_ts, _model_cache_result = _model_config_cache.get(_model_cache_key, (0, None))
+            if time.monotonic() - _model_cache_ts > _MODEL_CONFIG_CACHE_TTL:
+                async with async_session() as _mdb:
+                    _agent_r = await _mdb.execute(select(Agent).where(Agent.id == agent_id))
+                    _agent_cur = _agent_r.scalar_one_or_none()
+                    _model_cache_result = {}
+                    if _agent_cur:
+                        if _agent_cur.primary_model_id:
+                            _m_r = await _mdb.execute(select(LLMModel).where(LLMModel.id == _agent_cur.primary_model_id))
+                            _m = _m_r.scalar_one_or_none()
+                            _model_cache_result["primary"] = _m if (_m and _m.enabled) else None
+                        else:
+                            _model_cache_result["primary"] = None
+                        if _agent_cur.fallback_model_id:
+                            _fb_r = await _mdb.execute(select(LLMModel).where(LLMModel.id == _agent_cur.fallback_model_id))
+                            _fb = _fb_r.scalar_one_or_none()
+                            _model_cache_result["fallback"] = _fb if (_fb and _fb.enabled) else None
+                        else:
+                            _model_cache_result["fallback"] = None
+                    _model_config_cache[_model_cache_key] = (time.monotonic(), _model_cache_result)
+            if _model_cache_result:
+                llm_model = _model_cache_result.get("primary")
+                fallback_llm_model = _model_cache_result.get("fallback")
+                if not llm_model and fallback_llm_model:
+                    llm_model = fallback_llm_model
+                    fallback_llm_model = None
+
+            # #142 修复：排队消息列表提升到 if 块外部，
+            # 确保 effective_llm_model 为 None 时也能访问该变量。
+            queued_messages: list[dict] = []
 
             # Call LLM with streaming
             if effective_llm_model:
                 try:
-                    logger.info(f"[WS] Calling LLM {effective_llm_model.model} (streaming)...")
+                    logger.debug(f"[WS] Calling LLM {effective_llm_model.model} (streaming)...")
                     
                     # Accumulate partial content for abort handling
                     partial_chunks: list[str] = []
@@ -906,7 +823,6 @@ async def websocket_chat(
 
                     # Listen for abort while LLM is running
                     aborted = False
-                    queued_messages: list[dict] = []
                     while not llm_task.done():
                         try:
                             msg = await _aio.wait_for(
@@ -918,10 +834,17 @@ async def websocket_chat(
                                 aborted = True
                                 break
                             else:
-                                # Queue non-abort messages for later
+                                # #142 修复：将非 abort 消息加入排队，发送确认 ack 告知用户
                                 queued_messages.append(msg)
-                                # 当用户在当前回复完成前发送新消息时，立即提示而非静默丢弃（#67 修复）
-                                await websocket.send_json({"type": "info", "content": "当前回复尚未完成，请等待结束后重新发送"})
+                                msg_len = len(str(msg.get("content", "")))
+                                logger.info(
+                                    "[WS] 消息已排队: session={} msg_len={} queue_size={}",
+                                    conv_id, msg_len, len(queued_messages),
+                                )
+                                await websocket.send_json({
+                                    "type": "info",
+                                    "content": f"📨 消息已接收（{msg_len} 字符），当前任务完成后自动处理。",
+                                })
                         except _aio.TimeoutError:
                             continue
                         except WebSocketDisconnect:
@@ -1032,28 +955,40 @@ async def websocket_chat(
                     user_id=user_id,
                 )
                 await db.commit()
-            logger.info("[WS] Assistant message saved")
+            logger.debug("[WS] Assistant message saved")
 
             # Final 'done' packet
             await websocket.send_json({"type": "done", "role": "assistant", "content": assistant_response})
 
-            # 用户在 AI 生成回复期间发送的消息暂时无法处理，
-            # 返回明确提示而非静默丢弃，避免用户感知为"消息被吞"（#67 修复）
+            # #142 修复：工具循环结束后处理排队消息，而非静默丢弃。
+            # 取最后一条排队消息（最新用户意图）作为下一轮输入，
+            # 通过 _replay_data 标记重入消息处理循环。
             if queued_messages:
-                logger.warning(
-                    "[WS] 丢弃 {} 条排队消息: session={} — 用户在当前回复完成前发送了新消息",
-                    len(queued_messages), conv_id
+                logger.info(
+                    "[WS] 处理排队消息: session={} queue_size={} msg_lengths={}",
+                    conv_id, len(queued_messages),
+                    [len(str(m.get("content", ""))) for m in queued_messages],
                 )
-                await websocket.send_json({
-                    "type": "info",
-                    "content": (
-                        f"⚠️ 当前回复尚未完成，{len(queued_messages)} 条消息未被处理。"
-                        "请等待回复结束后重新发送。"
-                    )
-                })
+                _replay_data = queued_messages[-1]
+                continue
 
     except WebSocketDisconnect:
-        logger.info(f"[WS] Client disconnected: {user_id}")
+        # #134 修复：100ms 防抖窗口内同一用户的多次断开合并为一条日志
+        _uid = str(user_id)
+        _debounce_now = time.monotonic()
+        if _uid in _disconnect_debounce:
+            _last_ts, _count = _disconnect_debounce[_uid]
+            if _debounce_now - _last_ts < _DISCONNECT_DEBOUNCE_WINDOW:
+                _disconnect_debounce[_uid] = (_last_ts, _count + 1)
+            else:
+                if _count > 1:
+                    logger.info("[WS] User disconnected {} sessions: {}", _count + 1, _uid)
+                else:
+                    logger.info("[WS] Client disconnected: {}", _uid)
+                _disconnect_debounce[_uid] = (_debounce_now, 0)
+        else:
+            _disconnect_debounce[_uid] = (_debounce_now, 0)
+            logger.info("[WS] Client disconnected: {}", _uid)
         manager.disconnect(str(agent_id), websocket)
     except Exception as e:
         logger.error(f"[WS] Unexpected error: {e}")

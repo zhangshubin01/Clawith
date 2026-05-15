@@ -12,7 +12,7 @@ from typing import Union
 from alembic import op
 
 revision: str = 'add_chat_message_indexes'
-down_revision: Union[str, None] = 'user_tenant_onboarding_defaults'
+down_revision: Union[str, None] = 'add_chat_session_soft_delete'
 branch_labels: Union[str, None] = None
 depends_on: Union[str, None] = None
 

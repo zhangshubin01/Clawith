@@ -5,10 +5,13 @@ workspace files and composes a comprehensive system prompt.
 """
 
 import asyncio
+import logging
 import uuid
 from collections import OrderedDict
 from contextvars import ContextVar
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from app.config import get_settings
 
@@ -342,7 +345,8 @@ When installing or importing an MCP server via `discover_resources` / `import_mc
             )
             _has_feishu = _cfg_r.scalar_one_or_none() is not None
     except Exception:
-        pass
+        # #146 修复：Feishu 通道配置加载失败时记录警告，优雅降级（不影响 Agent 核心功能）
+        logger.warning("无法加载 Feishu 通道配置（非关键，Agent 仍可正常工作）", exc_info=True)
 
     if _has_feishu:
         static_parts.append("""
@@ -407,7 +411,8 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
         if dingtalk_context:
             static_parts.append(dingtalk_context)
     except Exception:
-        pass
+        # #146 修复：DingTalk 上下文加载失败时记录警告，优雅降级
+        logger.warning("无法加载 DingTalk 上下文（非关键，Agent 仍可正常工作）", exc_info=True)
 
     # --- Atlassian Rovo Tools (injected when Atlassian channel is configured) ---
     try:
@@ -461,12 +466,13 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
 - Report success without a tool result
 - Ask the user for their Atlassian credentials — they are pre-configured""")
     except Exception:
-        pass
+        logger.warning("无法加载 Atlassian 工具列表（非关键功能，Agent 仍可正常工作）", exc_info=True)
 
     # --- Company Intro (from system settings) ---
     try:
         from app.database import async_session
         from app.models.system_settings import SystemSetting
+        from app.models.agent import Agent as _AgentModel
         from sqlalchemy import select as sa_select
         async with async_session() as db:
             # Resolve agent's tenant_id
@@ -489,7 +495,7 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
                     if ts and ts.value and ts.value.get("content"):
                         company_intro = ts.value["content"].strip()
                 except Exception:
-                    pass
+                    logger.warning("无法从 tenant_settings 加载 Company Intro（非关键）", exc_info=True)
 
             # Priority 2: system_settings with tenant-scoped key (backward compat)
             if not company_intro and _agent_tenant_id:
@@ -513,7 +519,7 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
             if company_intro:
                 static_parts.append(f"\n## Company Information\n{company_intro}")
     except Exception:
-        pass  # Don't break agent if DB is unavailable
+        logger.warning("无法加载 Company Intro（数据库不可用或查询失败，非关键功能）", exc_info=True)
 
     if _is_ide_session.get():
         static_parts.append("""
@@ -696,7 +702,8 @@ If no search or webpage-reading tool is available, say that web lookup is not en
         if focus.strip():
             dynamic_parts.append(f"\n## Focus\n{focus}")
     except Exception:
-        pass
+        # #146 修复：Focus 上下文加载失败时记录警告，优雅降级
+        logger.warning("无法加载 Focus 上下文（非关键，Agent 仍可正常工作）", exc_info=True)
 
     # --- Active Triggers ---
     try:
@@ -720,7 +727,8 @@ If no search or webpage-reading tool is available, say that web lookup is not en
                     lines.append(f"\n- **{t.name}** [{t.type}]{ref_str}\n  Config: `{config_str}`\n  Reason: {reason_str}")
                 dynamic_parts.append("\n## Active Triggers\n" + "\n".join(lines))
     except Exception:
-        pass
+        # #146 修复：Trigger 上下文加载失败时记录警告，优雅降级
+        logger.warning("无法加载活跃触发器上下文（非关键，Agent 仍可正常工作）", exc_info=True)
 
     # --- Time Info ---
 

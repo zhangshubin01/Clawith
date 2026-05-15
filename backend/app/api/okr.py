@@ -24,9 +24,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select, delete
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
-from app.database import async_session
+from app.database import async_session, get_db
 from app.models.identity import IdentityProvider
 from app.models.okr import (
     CompanyReport,
@@ -452,114 +453,111 @@ class CompanyReportRegenerate(BaseModel):
 
 
 @router.get("/settings", response_model=OKRSettingsOut)
-async def get_okr_settings(user=Depends(get_current_user)):
+async def get_okr_settings(user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Return OKR configuration for the current tenant."""
-    async with async_session() as db:
-        settings = await _get_or_create_settings(db, user.tenant_id)
+    settings = await _get_or_create_settings(db, user.tenant_id)
 
-        # Also resolve the OKR Agent ID so the UI can show the chat button
-        okr_agent_id_str = str(settings.okr_agent_id) if settings.okr_agent_id else None
+    # Also resolve the OKR Agent ID so the UI can show the chat button
+    okr_agent_id_str = str(settings.okr_agent_id) if settings.okr_agent_id else None
 
-        await db.commit()
-        return OKRSettingsOut(
-            enabled=settings.enabled,
-            first_enabled_at=settings.first_enabled_at.isoformat() if settings.first_enabled_at else None,
-            daily_report_enabled=settings.daily_report_enabled,
-            daily_report_time=settings.daily_report_time,
-            daily_report_skip_non_workdays=settings.daily_report_skip_non_workdays,
-            weekly_report_enabled=False,
-            weekly_report_day=0,
-            period_frequency=settings.period_frequency,
-            period_length_days=settings.period_length_days,
-            period_frequency_locked=settings.first_enabled_at is not None,
-            okr_agent_id=okr_agent_id_str,
-        )
+    return OKRSettingsOut(
+        enabled=settings.enabled,
+        first_enabled_at=settings.first_enabled_at.isoformat() if settings.first_enabled_at else None,
+        daily_report_enabled=settings.daily_report_enabled,
+        daily_report_time=settings.daily_report_time,
+        daily_report_skip_non_workdays=settings.daily_report_skip_non_workdays,
+        weekly_report_enabled=False,
+        weekly_report_day=0,
+        period_frequency=settings.period_frequency,
+        period_length_days=settings.period_length_days,
+        period_frequency_locked=settings.first_enabled_at is not None,
+        okr_agent_id=okr_agent_id_str,
+    )
 
 
 @router.put("/settings", response_model=OKRSettingsOut)
-async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_user)):
+async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Update OKR configuration. Org admins only."""
     # Allow org admins and platform admins to modify OKR settings.
     # user.role is the canonical authority; is_admin is not a real field.
     if getattr(user, "role", None) not in ("org_admin", "platform_admin"):
         raise HTTPException(403, "Only org admins can modify OKR settings")
 
-    async with async_session() as db:
-        settings = await _get_or_create_settings(db, user.tenant_id)
-        period_is_locked = settings.first_enabled_at is not None
+    settings = await _get_or_create_settings(db, user.tenant_id)
+    period_is_locked = settings.first_enabled_at is not None
 
-        if period_is_locked:
-            if body.period_frequency is not None and body.period_frequency != settings.period_frequency:
-                raise HTTPException(
-                    400,
-                    "OKR period frequency is locked after OKR is first enabled.",
-                )
-            if body.period_length_days is not None and body.period_length_days != settings.period_length_days:
-                raise HTTPException(
-                    400,
-                    "OKR period length is locked after OKR is first enabled.",
-                )
+    if period_is_locked:
+        if body.period_frequency is not None and body.period_frequency != settings.period_frequency:
+            raise HTTPException(
+                400,
+                "OKR period frequency is locked after OKR is first enabled.",
+            )
+        if body.period_length_days is not None and body.period_length_days != settings.period_length_days:
+            raise HTTPException(
+                400,
+                "OKR period length is locked after OKR is first enabled.",
+            )
 
-        if body.enabled is not None:
-            settings.enabled = body.enabled
-        if body.daily_report_enabled is not None:
-            settings.daily_report_enabled = body.daily_report_enabled
-        if body.daily_report_time is not None:
-            settings.daily_report_time = body.daily_report_time
-        if body.daily_report_skip_non_workdays is not None:
-            settings.daily_report_skip_non_workdays = body.daily_report_skip_non_workdays
-        if body.period_frequency is not None:
-            settings.period_frequency = body.period_frequency
-        if body.period_length_days is not None:
-            settings.period_length_days = body.period_length_days
+    if body.enabled is not None:
+        settings.enabled = body.enabled
+    if body.daily_report_enabled is not None:
+        settings.daily_report_enabled = body.daily_report_enabled
+    if body.daily_report_time is not None:
+        settings.daily_report_time = body.daily_report_time
+    if body.daily_report_skip_non_workdays is not None:
+        settings.daily_report_skip_non_workdays = body.daily_report_skip_non_workdays
+    if body.period_frequency is not None:
+        settings.period_frequency = body.period_frequency
+    if body.period_length_days is not None:
+        settings.period_length_days = body.period_length_days
 
-        # Member reporting is daily-only in the redesigned OKR workflow.
-        settings.weekly_report_enabled = False
-        settings.weekly_report_day = 0
+    # Member reporting is daily-only in the redesigned OKR workflow.
+    settings.weekly_report_enabled = False
+    settings.weekly_report_day = 0
 
-        if body.enabled is True and settings.first_enabled_at is None:
-            settings.first_enabled_at = datetime.now(timezone.utc)
+    if body.enabled is True and settings.first_enabled_at is None:
+        settings.first_enabled_at = datetime.now(timezone.utc)
 
-        await _sync_okr_report_triggers(db, settings)
-        await db.commit()
+    await _sync_okr_report_triggers(db, settings)
+    await db.commit()
 
-        # ── Auto-create OKR Agent when first enabled ──────────────────────────
-        # If OKR was just turned on and no agent exists yet for this tenant,
-        # seed one so the user doesn't see "OKR Agent not found".
-        okr_agent_id_str: str | None = str(settings.okr_agent_id) if settings.okr_agent_id else None
+    # ── Auto-create OKR Agent when first enabled ──────────────────────────
+    # If OKR was just turned on and no agent exists yet for this tenant,
+    # seed one so the user doesn't see "OKR Agent not found".
+    okr_agent_id_str: str | None = str(settings.okr_agent_id) if settings.okr_agent_id else None
 
-        if body.enabled and not settings.okr_agent_id:
-            from app.services.agent_seeder import seed_okr_agent_for_tenant
-            logger.info(f"[OKR] OKR enabled for tenant {user.tenant_id} — auto-seeding OKR Agent")
-            await seed_okr_agent_for_tenant(user.tenant_id, user.id)
+    if body.enabled and not settings.okr_agent_id:
+        from app.services.agent_seeder import seed_okr_agent_for_tenant
+        logger.info(f"[OKR] OKR enabled for tenant {user.tenant_id} — auto-seeding OKR Agent")
+        await seed_okr_agent_for_tenant(user.tenant_id, user.id)
 
-            # Re-read settings to pick up the newly written okr_agent_id
-            async with async_session() as db2:
-                refreshed = await _get_or_create_settings(db2, user.tenant_id)
-                await _sync_okr_report_triggers(db2, refreshed)
-                await db2.commit()
-                okr_agent_id_str = str(refreshed.okr_agent_id) if refreshed.okr_agent_id else None
+        # 重新读取 settings 以获取 seed 写入的 okr_agent_id（需要独立会话）
+        async with async_session() as db2:
+            refreshed = await _get_or_create_settings(db2, user.tenant_id)
+            await _sync_okr_report_triggers(db2, refreshed)
+            await db2.commit()
+            okr_agent_id_str = str(refreshed.okr_agent_id) if refreshed.okr_agent_id else None
 
-        return OKRSettingsOut(
-            enabled=settings.enabled,
-            first_enabled_at=settings.first_enabled_at.isoformat() if settings.first_enabled_at else None,
-            daily_report_enabled=settings.daily_report_enabled,
-            daily_report_time=settings.daily_report_time,
-            daily_report_skip_non_workdays=settings.daily_report_skip_non_workdays,
-            weekly_report_enabled=False,
-            weekly_report_day=0,
-            period_frequency=settings.period_frequency,
-            period_length_days=settings.period_length_days,
-            period_frequency_locked=settings.first_enabled_at is not None,
-            okr_agent_id=okr_agent_id_str,
-        )
+    return OKRSettingsOut(
+        enabled=settings.enabled,
+        first_enabled_at=settings.first_enabled_at.isoformat() if settings.first_enabled_at else None,
+        daily_report_enabled=settings.daily_report_enabled,
+        daily_report_time=settings.daily_report_time,
+        daily_report_skip_non_workdays=settings.daily_report_skip_non_workdays,
+        weekly_report_enabled=False,
+        weekly_report_day=0,
+        period_frequency=settings.period_frequency,
+        period_length_days=settings.period_length_days,
+        period_frequency_locked=settings.first_enabled_at is not None,
+        okr_agent_id=okr_agent_id_str,
+    )
 
 
 # ─── Sync Relationships ───────────────────────────────────────────────────────
 
 
 @router.post("/sync-relationships")
-async def sync_okr_relationships(user=Depends(get_current_user)):
+async def sync_okr_relationships(user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Manually re-sync the OKR Agent's relationship network.
 
     Connects the OKR Agent to all active OrgMembers (org-structure-synced humans)
@@ -571,16 +569,14 @@ async def sync_okr_relationships(user=Depends(get_current_user)):
     if getattr(user, "role", None) not in ("org_admin", "platform_admin"):
         raise HTTPException(403, "Only org admins can sync OKR relationships")
 
+    # Locate the OKR Agent from settings
+    settings = await _get_or_create_settings(db, user.tenant_id)
+    if not settings.okr_agent_id:
+        raise HTTPException(404, "OKR Agent not found for this tenant. Enable OKR in Company Settings first.")
+    okr_agent_id = settings.okr_agent_id
 
-    async with async_session() as db:
-        # Locate the OKR Agent from settings
-        settings = await _get_or_create_settings(db, user.tenant_id)
-        if not settings.okr_agent_id:
-            raise HTTPException(404, "OKR Agent not found for this tenant. Enable OKR in Company Settings first.")
-        okr_agent_id = settings.okr_agent_id
-
-        await _sync_okr_agent_relationships(db, user.tenant_id, okr_agent_id)
-        await db.commit()
+    await _sync_okr_agent_relationships(db, user.tenant_id, okr_agent_id)
+    await db.commit()
 
     return {"status": "ok", "okr_agent_id": str(okr_agent_id)}
 
@@ -589,34 +585,33 @@ async def sync_okr_relationships(user=Depends(get_current_user)):
 
 
 @router.get("/periods", response_model=list[PeriodOut])
-async def list_periods(user=Depends(get_current_user)):
+async def list_periods(user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Return OKR periods from first enablement through the next period.
 
     Periods are computed from the tenant's locked OKR cadence. Once OKR has
     been enabled for a tenant, the first enabled period remains the start of
     the selectable history even if OKR is later disabled and re-enabled.
     """
-    async with async_session() as db:
-        settings = await _get_or_create_settings(db, user.tenant_id)
-        first_enabled_at = settings.first_enabled_at
-        if first_enabled_at is None and settings.enabled:
-            earliest_result = await db.execute(
-                select(OKRObjective.period_start)
-                .where(OKRObjective.tenant_id == user.tenant_id)
-                .order_by(OKRObjective.period_start.asc())
-                .limit(1)
+    settings = await _get_or_create_settings(db, user.tenant_id)
+    first_enabled_at = settings.first_enabled_at
+    if first_enabled_at is None and settings.enabled:
+        earliest_result = await db.execute(
+            select(OKRObjective.period_start)
+            .where(OKRObjective.tenant_id == user.tenant_id)
+            .order_by(OKRObjective.period_start.asc())
+            .limit(1)
+        )
+        earliest_period_start = earliest_result.scalar_one_or_none()
+        if earliest_period_start:
+            first_enabled_at = datetime.combine(
+                earliest_period_start,
+                datetime.min.time(),
+                tzinfo=timezone.utc,
             )
-            earliest_period_start = earliest_result.scalar_one_or_none()
-            if earliest_period_start:
-                first_enabled_at = datetime.combine(
-                    earliest_period_start,
-                    datetime.min.time(),
-                    tzinfo=timezone.utc,
-                )
-            else:
-                first_enabled_at = datetime.now(timezone.utc)
-            settings.first_enabled_at = first_enabled_at
-        await db.commit()
+        else:
+            first_enabled_at = datetime.now(timezone.utc)
+        settings.first_enabled_at = first_enabled_at
+    await db.commit()
 
     freq = settings.period_frequency
     length = settings.period_length_days
@@ -699,6 +694,7 @@ async def list_objectives(
     period_start: str | None = None,
     period_end: str | None = None,
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """List all Objectives for the current tenant within a period.
 
@@ -709,163 +705,161 @@ async def list_objectives(
     from app.models.agent import Agent
     from app.models.user import User
 
-    async with async_session() as db:
-        if not period_start or not period_end:
-            settings = await _get_or_create_settings(db, user.tenant_id)
-            ps, pe = _compute_current_period(
-                settings.period_frequency, settings.period_length_days
-            )
-            await db.commit()
-        else:
-            ps = date.fromisoformat(period_start)
-            pe = date.fromisoformat(period_end)
-
-        result = await db.execute(
-            select(OKRObjective)
-            .where(
-                OKRObjective.tenant_id == user.tenant_id,
-                OKRObjective.period_start >= ps,
-                OKRObjective.period_end <= pe,
-                OKRObjective.status != "archived",
-            )
-            .order_by(OKRObjective.owner_type, OKRObjective.created_at)
+    if not period_start or not period_end:
+        settings = await _get_or_create_settings(db, user.tenant_id)
+        ps, pe = _compute_current_period(
+            settings.period_frequency, settings.period_length_days
         )
-        objectives = result.scalars().all()
+        await db.commit()
+    else:
+        ps = date.fromisoformat(period_start)
+        pe = date.fromisoformat(period_end)
 
-        # Fetch all KRs for these objectives in one query
-        obj_ids = [o.id for o in objectives]
-        krs_result = await db.execute(
-            select(OKRKeyResult)
-            .where(OKRKeyResult.objective_id.in_(obj_ids))
-            .order_by(OKRKeyResult.created_at)
+    result = await db.execute(
+        select(OKRObjective)
+        .where(
+            OKRObjective.tenant_id == user.tenant_id,
+            OKRObjective.period_start >= ps,
+            OKRObjective.period_end <= pe,
+            OKRObjective.status != "archived",
         )
-        all_krs = krs_result.scalars().all()
+        .order_by(OKRObjective.owner_type, OKRObjective.created_at)
+    )
+    objectives = result.scalars().all()
 
-        # Group KRs by objective
-        krs_by_obj: dict[uuid.UUID, list[OKRKeyResult]] = {}
-        for kr in all_krs:
-            krs_by_obj.setdefault(kr.objective_id, []).append(kr)
+    # Fetch all KRs for these objectives in one query
+    obj_ids = [o.id for o in objectives]
+    krs_result = await db.execute(
+        select(OKRKeyResult)
+        .where(OKRKeyResult.objective_id.in_(obj_ids))
+        .order_by(OKRKeyResult.created_at)
+    )
+    all_krs = krs_result.scalars().all()
 
-        # Batch-resolve owner names: collect distinct user/agent IDs
-        user_owner_ids = [
-            o.owner_id for o in objectives
-            if o.owner_type == "user" and o.owner_id
-        ]
-        agent_owner_ids = [
-            o.owner_id for o in objectives
-            if o.owner_type == "agent" and o.owner_id
-        ]
+    # Group KRs by objective
+    krs_by_obj: dict[uuid.UUID, list[OKRKeyResult]] = {}
+    for kr in all_krs:
+        krs_by_obj.setdefault(kr.objective_id, []).append(kr)
 
-        user_names: dict[uuid.UUID, str] = {}
-        if user_owner_ids:
-            u_result = await db.execute(
-                select(User.id, User.display_name).where(User.id.in_(user_owner_ids))
-            )
-            user_names = {row.id: (row.display_name or "") for row in u_result.fetchall()}
+    # Batch-resolve owner names: collect distinct user/agent IDs
+    user_owner_ids = [
+        o.owner_id for o in objectives
+        if o.owner_type == "user" and o.owner_id
+    ]
+    agent_owner_ids = [
+        o.owner_id for o in objectives
+        if o.owner_type == "agent" and o.owner_id
+    ]
 
-            # Fallback: owner_id might be an OrgMember.id (e.g. OKR Agent passed
-            # OrgMember.id instead of User.id). Look them up in org_members table.
-            from app.models.org import OrgMember
-            unresolved_ids = [oid for oid in user_owner_ids if oid not in user_names]
-            if unresolved_ids:
-                m_result = await db.execute(
-                    select(OrgMember.id, OrgMember.name).where(
-                        OrgMember.id.in_(unresolved_ids)
-                    )
+    user_names: dict[uuid.UUID, str] = {}
+    if user_owner_ids:
+        u_result = await db.execute(
+            select(User.id, User.display_name).where(User.id.in_(user_owner_ids))
+        )
+        user_names = {row.id: (row.display_name or "") for row in u_result.fetchall()}
+
+        # Fallback: owner_id might be an OrgMember.id (e.g. OKR Agent passed
+        # OrgMember.id instead of User.id). Look them up in org_members table.
+        from app.models.org import OrgMember
+        unresolved_ids = [oid for oid in user_owner_ids if oid not in user_names]
+        if unresolved_ids:
+            m_result = await db.execute(
+                select(OrgMember.id, OrgMember.name).where(
+                    OrgMember.id.in_(unresolved_ids)
                 )
-                for row in m_result.fetchall():
-                    user_names[row.id] = row.name or ""
-
-        agent_names: dict[uuid.UUID, str] = {}
-        if agent_owner_ids:
-            a_result = await db.execute(
-                select(Agent.id, Agent.name).where(Agent.id.in_(agent_owner_ids))
             )
-            agent_names = {row.id: (row.name or "") for row in a_result.fetchall()}
+            for row in m_result.fetchall():
+                user_names[row.id] = row.name or ""
 
-        def _resolve_name(obj: OKRObjective) -> str | None:
-            if not obj.owner_id:
-                return None
-            if obj.owner_type == "user":
-                return user_names.get(obj.owner_id)
-            if obj.owner_type == "agent":
-                return agent_names.get(obj.owner_id)
+    agent_names: dict[uuid.UUID, str] = {}
+    if agent_owner_ids:
+        a_result = await db.execute(
+            select(Agent.id, Agent.name).where(Agent.id.in_(agent_owner_ids))
+        )
+        agent_names = {row.id: (row.name or "") for row in a_result.fetchall()}
+
+    def _resolve_name(obj: OKRObjective) -> str | None:
+        if not obj.owner_id:
             return None
+        if obj.owner_type == "user":
+            return user_names.get(obj.owner_id)
+        if obj.owner_type == "agent":
+            return agent_names.get(obj.owner_id)
+        return None
 
-        return [
-            _obj_to_out(o, krs_by_obj.get(o.id, []), owner_name=_resolve_name(o))
-            for o in objectives
-        ]
+    return [
+        _obj_to_out(o, krs_by_obj.get(o.id, []), owner_name=_resolve_name(o))
+        for o in objectives
+    ]
 
 
 
 @router.post("/objectives", response_model=ObjectiveOut)
-async def create_objective(body: ObjectiveCreate, user=Depends(get_current_user)):
+async def create_objective(body: ObjectiveCreate, user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Create a new Objective."""
     from app.models.org import OrgMember
 
     if not _is_okr_admin(user):
         raise _dashboard_write_forbidden()
 
-    async with async_session() as db:
-        resolved_owner_id: uuid.UUID | None = None
+    resolved_owner_id: uuid.UUID | None = None
 
-        if body.owner_id:
-            candidate = uuid.UUID(body.owner_id)
+    if body.owner_id:
+        candidate = uuid.UUID(body.owner_id)
 
-            if body.owner_type == "user":
-                # Verify the UUID is a real User.id — if not, check if it's an
-                # OrgMember.id and transparently resolve to the linked user_id.
-                # This guards against OKR Agent accidentally passing OrgMember.id.
-                user_check = await db.execute(select(User.id).where(User.id == candidate))
-                if user_check.scalar_one_or_none():
-                    resolved_owner_id = candidate
-                else:
-                    # Fallback: maybe agent sent OrgMember.id — resolve to user_id
-                    member_check = await db.execute(
-                        select(OrgMember.id, OrgMember.user_id).where(
-                            OrgMember.id == candidate,
-                        )
-                    )
-                    member_row = member_check.first()
-                    if member_row:
-                        if member_row.user_id:
-                            # Linked member: use the platform user_id
-                            resolved_owner_id = member_row.user_id
-                            logger.info(
-                                f"[create_objective] Resolved OrgMember.id {candidate} "
-                                f"→ user_id {resolved_owner_id}"
-                            )
-                        else:
-                            # Channel-only member with no platform account yet.
-                            # Store OrgMember.id directly as owner_id so the OKR
-                            # can be matched back in members_without_okr checks.
-                            resolved_owner_id = candidate
-                            logger.info(
-                                f"[create_objective] Channel-only OrgMember {candidate} "
-                                f"has no user_id — storing OrgMember.id as owner_id"
-                            )
-                    else:
-                        raise HTTPException(
-                            422,
-                            f"owner_id '{body.owner_id}' does not match any User or OrgMember in this tenant",
-                        )
-            else:
+        if body.owner_type == "user":
+            # Verify the UUID is a real User.id — if not, check if it's an
+            # OrgMember.id and transparently resolve to the linked user_id.
+            # This guards against OKR Agent accidentally passing OrgMember.id.
+            user_check = await db.execute(select(User.id).where(User.id == candidate))
+            if user_check.scalar_one_or_none():
                 resolved_owner_id = candidate
+            else:
+                # Fallback: maybe agent sent OrgMember.id — resolve to user_id
+                member_check = await db.execute(
+                    select(OrgMember.id, OrgMember.user_id).where(
+                        OrgMember.id == candidate,
+                    )
+                )
+                member_row = member_check.first()
+                if member_row:
+                    if member_row.user_id:
+                        # Linked member: use the platform user_id
+                        resolved_owner_id = member_row.user_id
+                        logger.info(
+                            f"[create_objective] Resolved OrgMember.id {candidate} "
+                            f"→ user_id {resolved_owner_id}"
+                        )
+                    else:
+                        # Channel-only member with no platform account yet.
+                        # Store OrgMember.id directly as owner_id so the OKR
+                        # can be matched back in members_without_okr checks.
+                        resolved_owner_id = candidate
+                        logger.info(
+                            f"[create_objective] Channel-only OrgMember {candidate} "
+                            f"has no user_id — storing OrgMember.id as owner_id"
+                        )
+                else:
+                    raise HTTPException(
+                        422,
+                        f"owner_id '{body.owner_id}' does not match any User or OrgMember in this tenant",
+                    )
+        else:
+            resolved_owner_id = candidate
 
-        obj = OKRObjective(
-            tenant_id=user.tenant_id,
-            title=body.title,
-            description=body.description,
-            owner_type=body.owner_type,
-            owner_id=resolved_owner_id,
-            period_start=date.fromisoformat(body.period_start),
-            period_end=date.fromisoformat(body.period_end),
-        )
-        db.add(obj)
-        await db.commit()
-        await db.refresh(obj)
-        return _obj_to_out(obj)
+    obj = OKRObjective(
+        tenant_id=user.tenant_id,
+        title=body.title,
+        description=body.description,
+        owner_type=body.owner_type,
+        owner_id=resolved_owner_id,
+        period_start=date.fromisoformat(body.period_start),
+        period_end=date.fromisoformat(body.period_end),
+    )
+    db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return _obj_to_out(obj)
 
 
 @router.patch("/objectives/{objective_id}", response_model=ObjectiveOut)
@@ -873,59 +867,59 @@ async def update_objective(
     objective_id: uuid.UUID,
     body: ObjectiveUpdate,
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Update an Objective's title, description or status."""
     if not _is_okr_admin(user):
         raise _dashboard_write_forbidden()
 
-    async with async_session() as db:
-        result = await db.execute(
-            select(OKRObjective).where(
-                OKRObjective.id == objective_id,
-                OKRObjective.tenant_id == user.tenant_id,
-            )
+    result = await db.execute(
+        select(OKRObjective).where(
+            OKRObjective.id == objective_id,
+            OKRObjective.tenant_id == user.tenant_id,
         )
-        obj = result.scalar_one_or_none()
-        if not obj:
-            raise HTTPException(404, "Objective not found")
+    )
+    obj = result.scalar_one_or_none()
+    if not obj:
+        raise HTTPException(404, "Objective not found")
 
-        if body.title is not None:
-            obj.title = body.title
-        if body.description is not None:
-            obj.description = body.description
-        if body.status is not None:
-            obj.status = body.status
+    if body.title is not None:
+        obj.title = body.title
+    if body.description is not None:
+        obj.description = body.description
+    if body.status is not None:
+        obj.status = body.status
 
-        await db.commit()
-        await db.refresh(obj)
-        return _obj_to_out(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return _obj_to_out(obj)
 
 
 @router.delete("/objectives/{objective_id}")
 async def delete_objective(
     objective_id: uuid.UUID,
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Soft delete an Objective (set status to archived)."""
     if not _is_okr_admin(user):
         raise _dashboard_write_forbidden()
 
-    async with async_session() as db:
-        result = await db.execute(
-            select(OKRObjective).where(
-                OKRObjective.id == objective_id,
-                OKRObjective.tenant_id == user.tenant_id,
-            )
+    result = await db.execute(
+        select(OKRObjective).where(
+            OKRObjective.id == objective_id,
+            OKRObjective.tenant_id == user.tenant_id,
         )
-        obj = result.scalar_one_or_none()
-        if not obj:
-            raise HTTPException(404, "Objective not found")
+    )
+    obj = result.scalar_one_or_none()
+    if not obj:
+        raise HTTPException(404, "Objective not found")
 
-        # Soft delete
-        obj.status = "archived"
-        await db.commit()
+    # Soft delete
+    obj.status = "archived"
+    await db.commit()
 
-        return {"status": "success"}
+    return {"status": "success"}
 
 
 # ─── Key Results ──────────────────────────────────────────────────────────────
@@ -935,26 +929,25 @@ async def delete_objective(
     "/objectives/{objective_id}/key-results", response_model=list[KeyResultOut]
 )
 async def list_key_results(
-    objective_id: uuid.UUID, user=Depends(get_current_user)
+    objective_id: uuid.UUID, user=Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
     """List all KRs for the given Objective."""
-    async with async_session() as db:
-        # Verify objective belongs to this tenant
-        obj_result = await db.execute(
-            select(OKRObjective).where(
-                OKRObjective.id == objective_id,
-                OKRObjective.tenant_id == user.tenant_id,
-            )
+    # Verify objective belongs to this tenant
+    obj_result = await db.execute(
+        select(OKRObjective).where(
+            OKRObjective.id == objective_id,
+            OKRObjective.tenant_id == user.tenant_id,
         )
-        if not obj_result.scalar_one_or_none():
-            raise HTTPException(404, "Objective not found")
+    )
+    if not obj_result.scalar_one_or_none():
+        raise HTTPException(404, "Objective not found")
 
-        result = await db.execute(
-            select(OKRKeyResult)
-            .where(OKRKeyResult.objective_id == objective_id)
-            .order_by(OKRKeyResult.created_at)
-        )
-        return [_kr_to_out(kr) for kr in result.scalars().all()]
+    result = await db.execute(
+        select(OKRKeyResult)
+        .where(OKRKeyResult.objective_id == objective_id)
+        .order_by(OKRKeyResult.created_at)
+    )
+    return [_kr_to_out(kr) for kr in result.scalars().all()]
 
 
 @router.post(
@@ -964,33 +957,33 @@ async def create_key_result(
     objective_id: uuid.UUID,
     body: KeyResultCreate,
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Create a new Key Result under the specified Objective."""
     if not _is_okr_admin(user):
         raise _dashboard_write_forbidden()
 
-    async with async_session() as db:
-        # Verify objective belongs to this tenant
-        obj_result = await db.execute(
-            select(OKRObjective).where(
-                OKRObjective.id == objective_id,
-                OKRObjective.tenant_id == user.tenant_id,
-            )
+    # Verify objective belongs to this tenant
+    obj_result = await db.execute(
+        select(OKRObjective).where(
+            OKRObjective.id == objective_id,
+            OKRObjective.tenant_id == user.tenant_id,
         )
-        if not obj_result.scalar_one_or_none():
-            raise HTTPException(404, "Objective not found")
+    )
+    if not obj_result.scalar_one_or_none():
+        raise HTTPException(404, "Objective not found")
 
-        kr = OKRKeyResult(
-            objective_id=objective_id,
-            title=body.title,
-            target_value=body.target_value,
-            unit=body.unit,
-            focus_ref=body.focus_ref,
-        )
-        db.add(kr)
-        await db.commit()
-        await db.refresh(kr)
-        return _kr_to_out(kr)
+    kr = OKRKeyResult(
+        objective_id=objective_id,
+        title=body.title,
+        target_value=body.target_value,
+        unit=body.unit,
+        focus_ref=body.focus_ref,
+    )
+    db.add(kr)
+    await db.commit()
+    await db.refresh(kr)
+    return _kr_to_out(kr)
 
 
 @router.patch("/key-results/{kr_id}", response_model=KeyResultOut)
@@ -998,6 +991,7 @@ async def update_key_result(
     kr_id: uuid.UUID,
     body: KeyResultUpdate,
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Update a Key Result's fields or current progress value.
 
@@ -1007,48 +1001,47 @@ async def update_key_result(
     if not _is_okr_admin(user):
         raise _dashboard_write_forbidden()
 
-    async with async_session() as db:
-        result = await db.execute(
-            select(OKRKeyResult, OKRObjective)
-            .join(OKRObjective, OKRKeyResult.objective_id == OKRObjective.id)
-            .where(
-                OKRKeyResult.id == kr_id,
-                OKRObjective.tenant_id == user.tenant_id,
-            )
+    result = await db.execute(
+        select(OKRKeyResult, OKRObjective)
+        .join(OKRObjective, OKRKeyResult.objective_id == OKRObjective.id)
+        .where(
+            OKRKeyResult.id == kr_id,
+            OKRObjective.tenant_id == user.tenant_id,
         )
-        row = result.first()
-        if not row:
-            raise HTTPException(404, "Key Result not found")
-        kr, _ = row
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(404, "Key Result not found")
+    kr, _ = row
 
-        prev_value = kr.current_value
+    prev_value = kr.current_value
 
-        if body.title is not None:
-            kr.title = body.title
-        if body.target_value is not None:
-            kr.target_value = body.target_value
-        if body.current_value is not None:
-            kr.current_value = body.current_value
-        if body.unit is not None:
-            kr.unit = body.unit
-        if body.focus_ref is not None:
-            kr.focus_ref = body.focus_ref
-        if body.status is not None:
-            kr.status = body.status
+    if body.title is not None:
+        kr.title = body.title
+    if body.target_value is not None:
+        kr.target_value = body.target_value
+    if body.current_value is not None:
+        kr.current_value = body.current_value
+    if body.unit is not None:
+        kr.unit = body.unit
+    if body.focus_ref is not None:
+        kr.focus_ref = body.focus_ref
+    if body.status is not None:
+        kr.status = body.status
 
-        # Log progress change when current_value was updated
-        if body.current_value is not None and body.current_value != prev_value:
-            log = OKRProgressLog(
-                kr_id=kr_id,
-                previous_value=prev_value,
-                new_value=body.current_value,
-                source="manual",
-            )
-            db.add(log)
+    # Log progress change when current_value was updated
+    if body.current_value is not None and body.current_value != prev_value:
+        log = OKRProgressLog(
+            kr_id=kr_id,
+            previous_value=prev_value,
+            new_value=body.current_value,
+            source="manual",
+        )
+        db.add(log)
 
-        await db.commit()
-        await db.refresh(kr)
-        return _kr_to_out(kr)
+    await db.commit()
+    await db.refresh(kr)
+    return _kr_to_out(kr)
 
 
 @router.post("/key-results/{kr_id}/progress", response_model=KeyResultOut)
@@ -1056,6 +1049,7 @@ async def update_kr_progress_endpoint(
     kr_id: uuid.UUID,
     body: ProgressUpdate,
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Convenience endpoint for updating only the current progress value.
 
@@ -1065,55 +1059,55 @@ async def update_kr_progress_endpoint(
     if not _is_okr_admin(user):
         raise _dashboard_write_forbidden()
 
-    async with async_session() as db:
-        result = await db.execute(
-            select(OKRKeyResult, OKRObjective)
-            .join(OKRObjective, OKRKeyResult.objective_id == OKRObjective.id)
-            .where(
-                OKRKeyResult.id == kr_id,
-                OKRObjective.tenant_id == user.tenant_id,
-            )
+    result = await db.execute(
+        select(OKRKeyResult, OKRObjective)
+        .join(OKRObjective, OKRKeyResult.objective_id == OKRObjective.id)
+        .where(
+            OKRKeyResult.id == kr_id,
+            OKRObjective.tenant_id == user.tenant_id,
         )
-        row = result.first()
-        if not row:
-            raise HTTPException(404, "Key Result not found")
-        kr, _ = row
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(404, "Key Result not found")
+    kr, _ = row
 
-        prev_value = kr.current_value
-        kr.current_value = body.value
-        kr.last_updated_at = datetime.utcnow()
+    prev_value = kr.current_value
+    kr.current_value = body.value
+    kr.last_updated_at = datetime.utcnow()
 
-        # Update status: use explicit override or auto-compute from progress ratio
-        if body.status and body.status in ("on_track", "at_risk", "behind", "completed"):
-            kr.status = body.status
-        elif kr.target_value:
-            ratio = body.value / kr.target_value
-            if ratio >= 1.0:
-                kr.status = "completed"
-            elif ratio >= 0.7:
-                kr.status = "on_track"
-            elif ratio >= 0.4:
-                kr.status = "at_risk"
-            else:
-                kr.status = "behind"
+    # Update status: use explicit override or auto-compute from progress ratio
+    if body.status and body.status in ("on_track", "at_risk", "behind", "completed"):
+        kr.status = body.status
+    elif kr.target_value:
+        ratio = body.value / kr.target_value
+        if ratio >= 1.0:
+            kr.status = "completed"
+        elif ratio >= 0.7:
+            kr.status = "on_track"
+        elif ratio >= 0.4:
+            kr.status = "at_risk"
+        else:
+            kr.status = "behind"
 
-        log = OKRProgressLog(
-            kr_id=kr_id,
-            previous_value=prev_value,
-            new_value=body.value,
-            source="manual",
-            note=body.note,
-        )
-        db.add(log)
-        await db.commit()
-        await db.refresh(kr)
-        return _kr_to_out(kr)
+    log = OKRProgressLog(
+        kr_id=kr_id,
+        previous_value=prev_value,
+        new_value=body.value,
+        source="manual",
+        note=body.note,
+    )
+    db.add(log)
+    await db.commit()
+    await db.refresh(kr)
+    return _kr_to_out(kr)
 
 
 @router.delete("/key-results/{kr_id}")
 async def delete_key_result(
     kr_id: uuid.UUID,
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Hard delete a key result."""
     from app.models.okr import OKRProgressLog
@@ -1121,26 +1115,25 @@ async def delete_key_result(
     if not _is_okr_admin(user):
         raise _dashboard_write_forbidden()
 
-    async with async_session() as db:
-        result = await db.execute(
-            select(OKRKeyResult, OKRObjective)
-            .join(OKRObjective, OKRKeyResult.objective_id == OKRObjective.id)
-            .where(
-                OKRKeyResult.id == kr_id,
-                OKRObjective.tenant_id == user.tenant_id,
-            )
+    result = await db.execute(
+        select(OKRKeyResult, OKRObjective)
+        .join(OKRObjective, OKRKeyResult.objective_id == OKRObjective.id)
+        .where(
+            OKRKeyResult.id == kr_id,
+            OKRObjective.tenant_id == user.tenant_id,
         )
-        row = result.first()
-        if not row:
-            raise HTTPException(404, "Key Result not found")
-        kr, _ = row
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(404, "Key Result not found")
+    kr, _ = row
 
-        # Manual cascade delete logs
-        await db.execute(delete(OKRProgressLog).where(OKRProgressLog.kr_id == kr_id))
-        await db.execute(delete(OKRKeyResult).where(OKRKeyResult.id == kr_id))
-        
-        await db.commit()
-        return {"status": "success"}
+    # Manual cascade delete logs
+    await db.execute(delete(OKRProgressLog).where(OKRProgressLog.kr_id == kr_id))
+    await db.execute(delete(OKRKeyResult).where(OKRKeyResult.id == kr_id))
+
+    await db.commit()
+    return {"status": "success"}
 
 
 # ─── Reports ──────────────────────────────────────────────────────────────────
@@ -1290,20 +1283,20 @@ async def list_reports(
     report_type: str | None = None,  # "daily" | "weekly" | None for both
     limit: int = 50,
     user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """List work reports for the current tenant, newest first."""
-    async with async_session() as db:
-        query = (
-            select(WorkReport)
-            .where(WorkReport.tenant_id == user.tenant_id)
-            .order_by(WorkReport.period_date.desc(), WorkReport.created_at.desc())
-            .limit(limit)
-        )
-        if report_type:
-            query = query.where(WorkReport.report_type == report_type)
+    query = (
+        select(WorkReport)
+        .where(WorkReport.tenant_id == user.tenant_id)
+        .order_by(WorkReport.period_date.desc(), WorkReport.created_at.desc())
+        .limit(limit)
+    )
+    if report_type:
+        query = query.where(WorkReport.report_type == report_type)
 
-        result = await db.execute(query)
-        reports = result.scalars().all()
+    result = await db.execute(query)
+    reports = result.scalars().all()
 
     return [
         WorkReportOut(
@@ -1324,7 +1317,7 @@ async def list_reports(
 
 
 @router.get("/members-without-okr")
-async def members_without_okr(user=Depends(get_current_user)):
+async def members_without_okr(user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Return tracked members (those in OKR Agent's relationship list) who lack
     OKRs in the current period.  Also returns:
     - okr_agent_id        : UUID of the OKR Agent for the chat-link button
@@ -1336,226 +1329,222 @@ async def members_without_okr(user=Depends(get_current_user)):
     from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
     from app.models.user import User
 
-    async with async_session() as db:
-        settings = await _get_or_create_settings(db, user.tenant_id)
-        if not settings.enabled:
-            raise HTTPException(403, "OKR is not enabled for this tenant")
+    settings = await _get_or_create_settings(db, user.tenant_id)
+    if not settings.enabled:
+        raise HTTPException(403, "OKR is not enabled for this tenant")
 
-        ps, pe = _compute_current_period(
-            settings.period_frequency, settings.period_length_days
+    ps, pe = _compute_current_period(
+        settings.period_frequency, settings.period_length_days
+    )
+
+    # ── Check if a company-level OKR exists this period ──────────────────
+    co_result = await db.execute(
+        select(OKRObjective.id).where(
+            OKRObjective.tenant_id == user.tenant_id,
+            OKRObjective.owner_type == "company",
+            OKRObjective.period_start >= ps,
+            OKRObjective.period_end <= pe,
+            OKRObjective.status != "archived",
+        ).limit(1)
+    )
+    company_okr_exists: bool = co_result.scalar_one_or_none() is not None
+
+    # ── Collect owner_ids that already have OKRs this period ──────────────
+    existing_result = await db.execute(
+        select(OKRObjective.owner_id).where(
+            OKRObjective.tenant_id == user.tenant_id,
+            OKRObjective.owner_type.in_(["user", "agent"]),
+            OKRObjective.period_start >= ps,
+            OKRObjective.period_end <= pe,
+            OKRObjective.status != "archived",
+            OKRObjective.owner_id.isnot(None),
         )
-        await db.commit()
+    )
+    covered_ids: set[uuid.UUID] = {row[0] for row in existing_result.fetchall()}
 
-    async with async_session() as db:
-        # ── Check if a company-level OKR exists this period ──────────────────
-        co_result = await db.execute(
-            select(OKRObjective.id).where(
-                OKRObjective.tenant_id == user.tenant_id,
-                OKRObjective.owner_type == "company",
-                OKRObjective.period_start >= ps,
-                OKRObjective.period_end <= pe,
-                OKRObjective.status != "archived",
-            ).limit(1)
-        )
-        company_okr_exists: bool = co_result.scalar_one_or_none() is not None
+    # ── Get the OKR Agent from Settings ──────────────────────────────────
+    settings = await _get_or_create_settings(db, user.tenant_id)
+    okr_agent_id_val: uuid.UUID | None = settings.okr_agent_id
+    okr_agent_id_str: str | None = str(okr_agent_id_val) if okr_agent_id_val else None
 
-        # ── Collect owner_ids that already have OKRs this period ──────────────
-        existing_result = await db.execute(
-            select(OKRObjective.owner_id).where(
-                OKRObjective.tenant_id == user.tenant_id,
-                OKRObjective.owner_type.in_(["user", "agent"]),
-                OKRObjective.period_start >= ps,
-                OKRObjective.period_end <= pe,
-                OKRObjective.status != "archived",
-                OKRObjective.owner_id.isnot(None),
+    # ── Fetch tracked members from OKR Agent's relationship list ──────────
+    tracked_user_ids: list[str] = []
+    tracked_agent_ids: list[str] = []
+    members_without_okr: list[dict] = []
+
+    if okr_agent_id_val:
+        # ── Human members ─────────────────────────────────────────────────
+        # Fetch ALL OrgMembers in OKR Agent's relationships, regardless of
+        # whether they have a platform account (user_id) or not.
+        # This includes members from any channel (Feishu, Slack, etc.) and
+        # members who haven't joined the platform yet (user_id=NULL).
+        all_member_rows = (await db.execute(
+            select(
+                OrgMember.id,
+                OrgMember.name,
+                OrgMember.user_id,
+                OrgMember.external_id,
+                OrgMember.avatar_url,
+                IdentityProvider.name.label("provider_name"),
             )
-        )
-        covered_ids: set[uuid.UUID] = {row[0] for row in existing_result.fetchall()}
-
-        # ── Get the OKR Agent from Settings ──────────────────────────────────
-        settings = await _get_or_create_settings(db, user.tenant_id)
-        okr_agent_id_val: uuid.UUID | None = settings.okr_agent_id
-        okr_agent_id_str: str | None = str(okr_agent_id_val) if okr_agent_id_val else None
-
-        # ── Fetch tracked members from OKR Agent's relationship list ──────────
-        tracked_user_ids: list[str] = []
-        tracked_agent_ids: list[str] = []
-        members_without_okr: list[dict] = []
-
-        if okr_agent_id_val:
-            # ── Human members ─────────────────────────────────────────────────
-            # Fetch ALL OrgMembers in OKR Agent's relationships, regardless of
-            # whether they have a platform account (user_id) or not.
-            # This includes members from any channel (Feishu, Slack, etc.) and
-            # members who haven't joined the platform yet (user_id=NULL).
-            all_member_rows = (await db.execute(
-                select(
-                    OrgMember.id,
-                    OrgMember.name,
-                    OrgMember.user_id,
-                    OrgMember.external_id,
-                    OrgMember.avatar_url,
-                    IdentityProvider.name.label("provider_name"),
-                )
-                .join(AgentRelationship, AgentRelationship.member_id == OrgMember.id)
-                .outerjoin(IdentityProvider, OrgMember.provider_id == IdentityProvider.id)
-                .where(
-                    AgentRelationship.agent_id == okr_agent_id_val,
-                    OrgMember.status == "active",
-                )
-            )).fetchall()
-
-            # ── Canonicalize: one record per logical person ───────────────────
-            # A "logical person" may have multiple OrgMember rows:
-            #   a) Multiple channels (Feishu + Slack) — both may have user_id set
-            #   b) Historical duplicates from channel ID changes
-            #   c) A shell record (user_id=NULL) + a linked record (user_id!=NULL)
-            #      with the same external_id
-            #
-            # Resolution rules (applied in order):
-            #   1. Group by external_id → prefer user_id-linked over shell
-            #      (handles case b/c: stale shell rows from the same channel identity)
-            #   2. Group by user_id → keep one row per platform account
-            #      (handles case a: same person has accounts on different channels)
-
-            # Rule 1 — best OrgMember per external_id (prefer user_id != NULL)
-            best_by_ext: dict[str, object] = {}
-            unkeyed: list[object] = []  # rows with no external_id
-            for row in all_member_rows:
-                if not row.external_id:
-                    unkeyed.append(row)
-                    continue
-                existing = best_by_ext.get(row.external_id)
-                if existing is None:
-                    best_by_ext[row.external_id] = row
-                elif existing.user_id is None and row.user_id is not None:
-                    # Upgrade shell to linked
-                    best_by_ext[row.external_id] = row
-
-            candidates = list(best_by_ext.values()) + unkeyed
-
-            # Rule 2 — deduplicate by user_id (one entry per platform account)
-            seen_user_ids: set[uuid.UUID] = set()
-            canonical_members: list[object] = []
-            for row in candidates:
-                if row.user_id is not None:
-                    if row.user_id in seen_user_ids:
-                        continue  # already represented via another channel
-                    seen_user_ids.add(row.user_id)
-                canonical_members.append(row)
-
-            # ── Classify canonical members ─────────────────────────────────────
-            for row in canonical_members:
-                if row.user_id is not None:
-                    tracked_user_ids.append(str(row.user_id))
-                    # Check both User.id and OrgMember.id — OKR Agent may store
-                    # OrgMember.id as owner_id instead of the linked User.id.
-                    if row.user_id not in covered_ids and row.id not in covered_ids:
-                        members_without_okr.append({
-                            "id": str(row.id),
-                            "type": "user",
-                            "display_name": row.name or "",
-                            "avatar_url": row.avatar_url or "",
-                            "channel": row.provider_name or None,
-                            "channel_user_id": None,
-                            "source_label": row.provider_name or "Platform User",
-                        })
-                else:
-                    # Channel-only member (no platform account yet).
-                    # Check if an OKR was created with OrgMember.id as owner_id
-                    # (e.g. OKR Agent used OrgMember.id when no User.id was available).
-                    if row.id not in covered_ids:
-                        members_without_okr.append({
-                            "id": str(row.id),
-                            "type": "user",
-                            "display_name": row.name or "",
-                            "avatar_url": row.avatar_url or "",
-                            "channel": row.provider_name or None,
-                            "channel_user_id": None,
-                            "source_label": row.provider_name or "Platform User",
-                        })
-
-            # ── Agent members via AgentAgentRelationship ───────────────────────
-            agent_rel_result = await db.execute(
-                select(Agent.id, Agent.name, Agent.avatar_url)
-                .join(AgentAgentRelationship, AgentAgentRelationship.target_agent_id == Agent.id)
-                .where(
-                    AgentAgentRelationship.agent_id == okr_agent_id_val,
-                    Agent.is_system == False,  # noqa: E712
-                    Agent.status.notin_(["stopped", "error"]),
-                )
+            .join(AgentRelationship, AgentRelationship.member_id == OrgMember.id)
+            .outerjoin(IdentityProvider, OrgMember.provider_id == IdentityProvider.id)
+            .where(
+                AgentRelationship.agent_id == okr_agent_id_val,
+                OrgMember.status == "active",
             )
-            for row in agent_rel_result.fetchall():
-                tracked_agent_ids.append(str(row.id))
+        )).fetchall()
+
+        # ── Canonicalize: one record per logical person ───────────────────
+        # A "logical person" may have multiple OrgMember rows:
+        #   a) Multiple channels (Feishu + Slack) — both may have user_id set
+        #   b) Historical duplicates from channel ID changes
+        #   c) A shell record (user_id=NULL) + a linked record (user_id!=NULL)
+        #      with the same external_id
+        #
+        # Resolution rules (applied in order):
+        #   1. Group by external_id → prefer user_id-linked over shell
+        #      (handles case b/c: stale shell rows from the same channel identity)
+        #   2. Group by user_id → keep one row per platform account
+        #      (handles case a: same person has accounts on different channels)
+
+        # Rule 1 — best OrgMember per external_id (prefer user_id != NULL)
+        best_by_ext: dict[str, object] = {}
+        unkeyed: list[object] = []  # rows with no external_id
+        for row in all_member_rows:
+            if not row.external_id:
+                unkeyed.append(row)
+                continue
+            existing = best_by_ext.get(row.external_id)
+            if existing is None:
+                best_by_ext[row.external_id] = row
+            elif existing.user_id is None and row.user_id is not None:
+                # Upgrade shell to linked
+                best_by_ext[row.external_id] = row
+
+        candidates = list(best_by_ext.values()) + unkeyed
+
+        # Rule 2 — deduplicate by user_id (one entry per platform account)
+        seen_user_ids: set[uuid.UUID] = set()
+        canonical_members: list[object] = []
+        for row in candidates:
+            if row.user_id is not None:
+                if row.user_id in seen_user_ids:
+                    continue  # already represented via another channel
+                seen_user_ids.add(row.user_id)
+            canonical_members.append(row)
+
+        # ── Classify canonical members ─────────────────────────────────────
+        for row in canonical_members:
+            if row.user_id is not None:
+                tracked_user_ids.append(str(row.user_id))
+                # Check both User.id and OrgMember.id — OKR Agent may store
+                # OrgMember.id as owner_id instead of the linked User.id.
+                if row.user_id not in covered_ids and row.id not in covered_ids:
+                    members_without_okr.append({
+                        "id": str(row.id),
+                        "type": "user",
+                        "display_name": row.name or "",
+                        "avatar_url": row.avatar_url or "",
+                        "channel": row.provider_name or None,
+                        "channel_user_id": None,
+                        "source_label": row.provider_name or "Platform User",
+                    })
+            else:
+                # Channel-only member (no platform account yet).
+                # Check if an OKR was created with OrgMember.id as owner_id
+                # (e.g. OKR Agent used OrgMember.id when no User.id was available).
                 if row.id not in covered_ids:
                     members_without_okr.append({
                         "id": str(row.id),
-                        "type": "agent",
+                        "type": "user",
                         "display_name": row.name or "",
                         "avatar_url": row.avatar_url or "",
-                        "channel": None,
+                        "channel": row.provider_name or None,
                         "channel_user_id": None,
-                        "source_label": None,
+                        "source_label": row.provider_name or "Platform User",
                     })
 
-        # Fallback: OKR Agent not seeded, OR no relationships yet (sync not done)
-        # In either case show ALL members so the panel is useful before first sync.
-        if not okr_agent_id_val or (not tracked_user_ids and not tracked_agent_ids):
-            agent_result = await db.execute(
-                select(Agent.id, Agent.name, Agent.avatar_url).where(
-                    Agent.tenant_id == user.tenant_id,
-                    Agent.is_system == False,  # noqa: E712
-                    Agent.status.notin_(["stopped", "error"]),
-                )
+        # ── Agent members via AgentAgentRelationship ───────────────────────
+        agent_rel_result = await db.execute(
+            select(Agent.id, Agent.name, Agent.avatar_url)
+            .join(AgentAgentRelationship, AgentAgentRelationship.target_agent_id == Agent.id)
+            .where(
+                AgentAgentRelationship.agent_id == okr_agent_id_val,
+                Agent.is_system == False,  # noqa: E712
+                Agent.status.notin_(["stopped", "error"]),
             )
-            for row in agent_result.fetchall():
-                tracked_agent_ids.append(str(row.id))
-                if row.id not in covered_ids:
-                    members_without_okr.append({
-                        "id": str(row.id), "type": "agent",
-                        "display_name": row.name or "",
-                        "avatar_url": row.avatar_url or "",
-                        "channel": None, "channel_user_id": None,
-                    })
+        )
+        for row in agent_rel_result.fetchall():
+            tracked_agent_ids.append(str(row.id))
+            if row.id not in covered_ids:
+                members_without_okr.append({
+                    "id": str(row.id),
+                    "type": "agent",
+                    "display_name": row.name or "",
+                    "avatar_url": row.avatar_url or "",
+                    "channel": None,
+                    "channel_user_id": None,
+                    "source_label": None,
+                })
 
-            user_result = await db.execute(
-                select(User.id, User.display_name, User.avatar_url).where(
-                    User.tenant_id == user.tenant_id,
-                )
+    # Fallback: OKR Agent not seeded, OR no relationships yet (sync not done)
+    # In either case show ALL members so the panel is useful before first sync.
+    if not okr_agent_id_val or (not tracked_user_ids and not tracked_agent_ids):
+        agent_result = await db.execute(
+            select(Agent.id, Agent.name, Agent.avatar_url).where(
+                Agent.tenant_id == user.tenant_id,
+                Agent.is_system == False,  # noqa: E712
+                Agent.status.notin_(["stopped", "error"]),
             )
-            for row in user_result.fetchall():
-                tracked_user_ids.append(str(row.id))
-                if row.id not in covered_ids:
-                    members_without_okr.append({
-                        "id": str(row.id), "type": "user",
-                        "display_name": row.display_name or "",
-                        "avatar_url": row.avatar_url or "",
-                        "channel": None, "channel_user_id": None,
-                    })
+        )
+        for row in agent_result.fetchall():
+            tracked_agent_ids.append(str(row.id))
+            if row.id not in covered_ids:
+                members_without_okr.append({
+                    "id": str(row.id), "type": "agent",
+                    "display_name": row.name or "",
+                    "avatar_url": row.avatar_url or "",
+                    "channel": None, "channel_user_id": None,
+                })
+
+        user_result = await db.execute(
+            select(User.id, User.display_name, User.avatar_url).where(
+                User.tenant_id == user.tenant_id,
+            )
+        )
+        for row in user_result.fetchall():
+            tracked_user_ids.append(str(row.id))
+            if row.id not in covered_ids:
+                members_without_okr.append({
+                    "id": str(row.id), "type": "user",
+                    "display_name": row.display_name or "",
+                    "avatar_url": row.avatar_url or "",
+                    "channel": None, "channel_user_id": None,
+                })
 
     # ── Check for recent oneshot failure notifications ──────────────────────
     last_outreach_error = None
     if okr_agent_id_val:
         from app.models.notification import Notification
-        async with async_session() as db2:
-            notif_result = await db2.execute(
-                select(Notification)
-                .where(
-                    Notification.user_id == user.id,
-                    Notification.ref_id == okr_agent_id_val,
-                    Notification.type == "system",
-                    Notification.title.contains("task failed"),
-                )
-                .order_by(Notification.created_at.desc())
-                .limit(1)
+        notif_result = await db.execute(
+            select(Notification)
+            .where(
+                Notification.user_id == user.id,
+                Notification.ref_id == okr_agent_id_val,
+                Notification.type == "system",
+                Notification.title.contains("task failed"),
             )
-            notif = notif_result.scalar_one_or_none()
-            if notif:
-                last_outreach_error = {
-                    "message": notif.body,
-                    "timestamp": notif.created_at.isoformat() if notif.created_at else "",
-                    "is_read": notif.is_read,
-                }
+            .order_by(Notification.created_at.desc())
+            .limit(1)
+        )
+        notif = notif_result.scalar_one_or_none()
+        if notif:
+            last_outreach_error = {
+                "message": notif.body,
+                "timestamp": notif.created_at.isoformat() if notif.created_at else "",
+                "is_read": notif.is_read,
+            }
 
     # ── Check for channel members whose channel is not configured on the OKR Agent ──
     channel_warnings: list[dict] = []
@@ -1585,15 +1574,14 @@ async def members_without_okr(user=Depends(get_current_user)):
                     needed_types.add(ct)
 
             if needed_types:
-                async with async_session() as db3:
-                    configured_result = await db3.execute(
-                        select(_CC.channel_type).where(
-                            _CC.agent_id == okr_agent_id_val,
-                            _CC.channel_type.in_(list(needed_types)),
-                            _CC.is_configured == True,  # noqa: E712
-                        )
+                configured_result = await db.execute(
+                    select(_CC.channel_type).where(
+                        _CC.agent_id == okr_agent_id_val,
+                        _CC.channel_type.in_(list(needed_types)),
+                        _CC.is_configured == True,  # noqa: E712
                     )
-                    configured_types = {row[0] for row in configured_result.fetchall()}
+                )
+                configured_types = {row[0] for row in configured_result.fetchall()}
 
                 missing_types = needed_types - configured_types
                 # Build warnings for each missing channel
@@ -1627,7 +1615,7 @@ async def members_without_okr(user=Depends(get_current_user)):
 
 
 @router.post("/trigger-member-outreach")
-async def trigger_member_outreach(user=Depends(get_current_user)):
+async def trigger_member_outreach(user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """Admin-initiated trigger: instruct the OKR Agent to contact all tracked
     members who haven't set their OKRs for the current period.
 
@@ -1648,137 +1636,136 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
     from app.models.chat_session import ChatSession
     from app.models.user import User
 
-    async with async_session() as db:
-        settings = await _get_or_create_settings(db, user.tenant_id)
-        if not settings.enabled:
-            raise HTTPException(403, "OKR is not enabled for this tenant")
+    settings = await _get_or_create_settings(db, user.tenant_id)
+    if not settings.enabled:
+        raise HTTPException(403, "OKR is not enabled for this tenant")
 
-        ps, pe = _compute_current_period(settings.period_frequency, settings.period_length_days)
+    ps, pe = _compute_current_period(settings.period_frequency, settings.period_length_days)
 
-        # ── Find the OKR Agent from Settings ─────────────────────────────────
-        if not settings.okr_agent_id:
-            raise HTTPException(
-                404,
-                "OKR Agent not found. Please ensure OKR is enabled and the agent has been seeded.",
-            )
-        okr_agent_result = await db.execute(select(Agent).where(Agent.id == settings.okr_agent_id))
-        okr_agent = okr_agent_result.scalar_one_or_none()
-        if not okr_agent:
-            raise HTTPException(
-                404,
-                "OKR Agent not found. Please ensure OKR is enabled and the agent has been seeded.",
-            )
-
-        # ── Collect owner_ids that already have OKRs this period ─────────────
-        existing_result = await db.execute(
-            select(OKRObjective.owner_id).where(
-                OKRObjective.tenant_id == user.tenant_id,
-                OKRObjective.owner_type.in_(["user", "agent"]),
-                OKRObjective.period_start >= ps,
-                OKRObjective.period_end <= pe,
-                OKRObjective.status != "archived",
-                OKRObjective.owner_id.isnot(None),
-            )
+    # ── Find the OKR Agent from Settings ─────────────────────────────────
+    if not settings.okr_agent_id:
+        raise HTTPException(
+            404,
+            "OKR Agent not found. Please ensure OKR is enabled and the agent has been seeded.",
         )
-        covered_ids: set[uuid.UUID] = {row[0] for row in existing_result.fetchall()}
-
-        # ── Fetch company OKRs + KRs for this period to share as context ─────
-        company_okr_result = await db.execute(
-            select(OKRObjective).where(
-                OKRObjective.tenant_id == user.tenant_id,
-                OKRObjective.owner_type == "company",
-                OKRObjective.period_start >= ps,
-                OKRObjective.period_end <= pe,
-                OKRObjective.status != "archived",
-            ).order_by(OKRObjective.created_at)
+    okr_agent_result = await db.execute(select(Agent).where(Agent.id == settings.okr_agent_id))
+    okr_agent = okr_agent_result.scalar_one_or_none()
+    if not okr_agent:
+        raise HTTPException(
+            404,
+            "OKR Agent not found. Please ensure OKR is enabled and the agent has been seeded.",
         )
-        company_okrs = company_okr_result.scalars().all()
 
-        # Fetch KRs for each company OKR
-        company_okr_krs: dict[uuid.UUID, list] = {}
-        for co in company_okrs:
-            kr_result = await db.execute(
-                select(OKRKeyResult)
-                .where(OKRKeyResult.objective_id == co.id)
-                .order_by(OKRKeyResult.created_at)
-            )
-            company_okr_krs[co.id] = kr_result.scalars().all()
-
-        # ── Fetch tracked human members from AgentRelationship ────────────────
-        rel_result = await db.execute(
-            select(AgentRelationship, OrgMember)
-            .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
-            .where(
-                AgentRelationship.agent_id == okr_agent.id,
-                OrgMember.status == "active",
-            )
+    # ── Collect owner_ids that already have OKRs this period ─────────────
+    existing_result = await db.execute(
+        select(OKRObjective.owner_id).where(
+            OKRObjective.tenant_id == user.tenant_id,
+            OKRObjective.owner_type.in_(["user", "agent"]),
+            OKRObjective.period_start >= ps,
+            OKRObjective.period_end <= pe,
+            OKRObjective.status != "archived",
+            OKRObjective.owner_id.isnot(None),
         )
-        rel_rows = rel_result.all()
+    )
+    covered_ids: set[uuid.UUID] = {row[0] for row in existing_result.fetchall()}
 
-        # ── Fetch tracked agent members from AgentAgentRelationship ──────────
-        agent_rel_result = await db.execute(
-            select(Agent).join(
-                AgentAgentRelationship,
-                AgentAgentRelationship.target_agent_id == Agent.id,
-            ).where(
-                AgentAgentRelationship.agent_id == okr_agent.id,
-                Agent.is_system == False,  # noqa: E712
-                Agent.status.notin_(["stopped", "error"]),
-            )
+    # ── Fetch company OKRs + KRs for this period to share as context ─────
+    company_okr_result = await db.execute(
+        select(OKRObjective).where(
+            OKRObjective.tenant_id == user.tenant_id,
+            OKRObjective.owner_type == "company",
+            OKRObjective.period_start >= ps,
+            OKRObjective.period_end <= pe,
+            OKRObjective.status != "archived",
+        ).order_by(OKRObjective.created_at)
+    )
+    company_okrs = company_okr_result.scalars().all()
+
+    # Fetch KRs for each company OKR
+    company_okr_krs: dict[uuid.UUID, list] = {}
+    for co in company_okrs:
+        kr_result = await db.execute(
+            select(OKRKeyResult)
+            .where(OKRKeyResult.objective_id == co.id)
+            .order_by(OKRKeyResult.created_at)
         )
-        tracked_agents = agent_rel_result.scalars().all()
+        company_okr_krs[co.id] = kr_result.scalars().all()
 
-        # ── Resolve platform user for each OrgMember (for web fallback display)
-        member_user_ids: dict[uuid.UUID, uuid.UUID | None] = {}  # org_member.id → user.id
-        for _, org_member in rel_rows:
-            member_user_ids[org_member.id] = org_member.user_id
+    # ── Fetch tracked human members from AgentRelationship ────────────────
+    rel_result = await db.execute(
+        select(AgentRelationship, OrgMember)
+        .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
+        .where(
+            AgentRelationship.agent_id == okr_agent.id,
+            OrgMember.status == "active",
+        )
+    )
+    rel_rows = rel_result.all()
 
-            # Level 2: if OrgMember.user_id is null, try chat_sessions by external_conv_id
-            if not org_member.user_id:
-                patterns = []
-                if org_member.open_id:
-                    patterns.append(f"feishu_p2p_{org_member.open_id}")
-                if org_member.external_id:
-                    patterns.append(f"feishu_p2p_{org_member.external_id}")
-                    patterns.append(f"dingtalk_p2p_{org_member.external_id}")
-                if patterns:
-                    sess_result = await db.execute(
-                        select(ChatSession.user_id).where(
-                            ChatSession.agent_id == okr_agent.id,
-                            or_(*[ChatSession.external_conv_id == p for p in patterns]),
-                        ).limit(1)
-                    )
-                    found = sess_result.scalar_one_or_none()
-                    if found:
-                        member_user_ids[org_member.id] = found
+    # ── Fetch tracked agent members from AgentAgentRelationship ──────────
+    agent_rel_result = await db.execute(
+        select(Agent).join(
+            AgentAgentRelationship,
+            AgentAgentRelationship.target_agent_id == Agent.id,
+        ).where(
+            AgentAgentRelationship.agent_id == okr_agent.id,
+            Agent.is_system == False,  # noqa: E712
+            Agent.status.notin_(["stopped", "error"]),
+        )
+    )
+    tracked_agents = agent_rel_result.scalars().all()
 
-        # ── Fetch recent 3 messages per member (for context) ─────────────────
-        async def _recent_msgs(target_user_id: uuid.UUID | None) -> list[tuple]:
-            """Return up to 3 recent chat_messages between OKR Agent and user."""
-            if not target_user_id:
-                return []
-            msgs_result = await db.execute(
-                select(ChatMessage.role, ChatMessage.content, ChatMessage.created_at)
-                .where(
-                    ChatMessage.agent_id == okr_agent.id,
-                    ChatMessage.user_id == target_user_id,
+    # ── Resolve platform user for each OrgMember (for web fallback display)
+    member_user_ids: dict[uuid.UUID, uuid.UUID | None] = {}  # org_member.id → user.id
+    for _, org_member in rel_rows:
+        member_user_ids[org_member.id] = org_member.user_id
+
+        # Level 2: if OrgMember.user_id is null, try chat_sessions by external_conv_id
+        if not org_member.user_id:
+            patterns = []
+            if org_member.open_id:
+                patterns.append(f"feishu_p2p_{org_member.open_id}")
+            if org_member.external_id:
+                patterns.append(f"feishu_p2p_{org_member.external_id}")
+                patterns.append(f"dingtalk_p2p_{org_member.external_id}")
+            if patterns:
+                sess_result = await db.execute(
+                    select(ChatSession.user_id).where(
+                        ChatSession.agent_id == okr_agent.id,
+                        or_(*[ChatSession.external_conv_id == p for p in patterns]),
+                    ).limit(1)
                 )
-                .order_by(ChatMessage.created_at.desc())
-                .limit(3)
+                found = sess_result.scalar_one_or_none()
+                if found:
+                    member_user_ids[org_member.id] = found
+
+    # ── Fetch recent 3 messages per member (for context) ─────────────────
+    async def _recent_msgs(target_user_id: uuid.UUID | None) -> list[tuple]:
+        """Return up to 3 recent chat_messages between OKR Agent and user."""
+        if not target_user_id:
+            return []
+        msgs_result = await db.execute(
+            select(ChatMessage.role, ChatMessage.content, ChatMessage.created_at)
+            .where(
+                ChatMessage.agent_id == okr_agent.id,
+                ChatMessage.user_id == target_user_id,
             )
-            return list(reversed(msgs_result.all()))  # chronological order
-
-        # ── Build prompt context for each member without OKR ─────────────────
-        # Also resolve admin username for the final summary message
-        admin_result = await db.execute(
-            select(User.display_name).where(User.id == user.id)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(3)
         )
-        admin_row = admin_result.first()
-        admin_username = (admin_row.display_name if admin_row else None) or str(user.id)
+        return list(reversed(msgs_result.all()))  # chronological order
 
-        await db.commit()
+    # ── Build prompt context for each member without OKR ─────────────────
+    # Also resolve admin username for the final summary message
+    admin_result = await db.execute(
+        select(User.display_name).where(User.id == user.id)
+    )
+    admin_row = admin_result.first()
+    admin_username = (admin_row.display_name if admin_row else None) or str(user.id)
 
-    # ── Assemble the list of members to contact ───────────────────────────────
+    await db.commit()
+
+# ── Assemble the list of members to contact ───────────────────────────────
     # (DB session is closed — all data fetched above)
     members_to_contact: list[str] = []
     index = 1
@@ -1817,11 +1804,10 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         # Look up username for platform users
         username_hint = ""
         if platform_uid:
-            async with async_session() as db2:
-                u_res = await db2.execute(
-                    select(User.display_name).where(User.id == platform_uid)
-                )
-                u_row = u_res.first()
+            u_res = await db.execute(
+                select(User.display_name).where(User.id == platform_uid)
+            )
+            u_row = u_res.first()
             if u_row and u_row.display_name:
                 username_hint = (
                     f'\n  Platform account: "{u_row.display_name}"'

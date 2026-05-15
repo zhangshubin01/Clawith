@@ -13,9 +13,7 @@
 """
 
 import uuid
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access
@@ -23,6 +21,7 @@ from app.core.security import get_current_user
 from app.database import get_db
 from app.models.user import User
 from app.schemas.schemas import (
+    ListTasksQuery,
     TaskCreate,
     TaskLogCreate,
     TaskLogOut,
@@ -48,19 +47,7 @@ async def get_task_service(db: AsyncSession = Depends(get_db)) -> TaskService:
 @router.get("/", response_model=TaskPaginatedResponse)
 async def list_tasks(
     agent_id: uuid.UUID,
-    # 过滤参数
-    status_filter: Annotated[str | None, Query(description="按状态过滤: pending/doing/done")] = None,
-    type_filter: Annotated[str | None, Query(description="按类型过滤: todo/supervision")] = None,
-    priority_filter: Annotated[str | None, Query(description="按优先级过滤: low/medium/high/urgent")] = None,
-    search_keyword: Annotated[str | None, Query(description="搜索关键词（标题/描述）")] = None,
-    # 排序参数
-    sort_by: Annotated[str, Query(description="排序字段: created_at/updated_at/due_date/priority/title")] = "created_at",
-    sort_order: Annotated[str, Query(description="排序方向: asc/desc")] = "desc",
-    # 分页参数
-    page: Annotated[int, Query(ge=1, description="页码")] = 1,
-    page_size: Annotated[int, Query(ge=1, le=100, description="每页数量")] = 20,
-    # 认证和服务
-    include_stats: Annotated[bool, Query(description="是否包含统计信息")] = False,
+    query: ListTasksQuery = Depends(),
     current_user: User = Depends(get_current_user),
     task_service: TaskService = Depends(get_task_service),
 ):
@@ -78,26 +65,26 @@ async def list_tasks(
     try:
         tasks, total = await task_service.list_tasks(
             agent_id=agent_id,
-            status_filter=status_filter,
-            type_filter=type_filter,
-            priority_filter=priority_filter,
-            search_keyword=search_keyword,
-            sort_by=sort_by,
-            sort_order=sort_order,
-            page=page,
-            page_size=page_size,
+            status_filter=query.status_filter,
+            type_filter=query.type_filter,
+            priority_filter=query.priority_filter,
+            search_keyword=query.search_keyword,
+            sort_by=query.sort_by,
+            sort_order=query.sort_order,
+            page=query.page,
+            page_size=query.page_size,
         )
 
         statistics = None
-        if include_stats:
+        if query.include_stats:
             statistics_data = await task_service.get_task_statistics(agent_id)
             statistics = TaskStatisticsOut(**statistics_data)
 
         return TaskPaginatedResponse(
             items=task_service.batch_to_task_out(tasks),
             total=total,
-            page=page,
-            page_size=page_size,
+            page=query.page,
+            page_size=query.page_size,
             statistics=statistics,
         )
 

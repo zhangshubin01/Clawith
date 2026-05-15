@@ -27,7 +27,7 @@ from sqlalchemy import select
 from app.services import agent_tools
 from app.services.llm import call_llm_with_failover
 from app.services.task_executor import execute_task as _execute_task
-import app.api.websocket as ws_module
+from app.services.connection_manager import manager
 from app.models.chat_session import ChatSession
 from app.models.audit import ChatMessage
 from app.models.task import Task as TaskModel
@@ -450,7 +450,7 @@ async def _acp_await_client_permission(
         # Whichever dialog (IDE or web) resolves first will unblock the future.
         if agent_id and session_id:
             try:
-                await ws_module.manager.send_to_session(str(agent_id), str(session_id), payload)
+                await manager.send_to_session(str(agent_id), str(session_id), payload)
                 logger.debug(
                     "ACP permission_request → frontend chat ws session_id={} perm_id={}",
                     session_id or "-",
@@ -1850,7 +1850,7 @@ async def _persist_chat_turn(agent_id, session_id: str, user_text: str, reply_te
             # Notify Clawith frontend WebSocket so the web UI refreshes in real-time.
             try:
                 sid_normalized = str(sid_uuid)
-                await ws_module.manager.send_to_session(
+                await manager.send_to_session(
                     str(agent_id),
                     sid_normalized,
                     {"type": "done", "role": "assistant", "content": reply_text},

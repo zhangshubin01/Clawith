@@ -331,8 +331,11 @@ class AgentStatusOut(BaseModel):
 
 
 
-class TaskListParams(BaseModel):
-    """任务列表查询参数."""
+class ListTasksQuery(BaseModel):
+    """任务列表查询参数 — 封装所有过滤、排序、分页参数.
+
+    使用 Depends() 注入，保持向后兼容。
+    """
     status_filter: str | None = Field(None, description="按状态过滤: pending/doing/done")
     type_filter: str | None = Field(None, description="按类型过滤: todo/supervision")
     priority_filter: str | None = Field(None, description="按优先级过滤: low/medium/high/urgent")
@@ -341,6 +344,7 @@ class TaskListParams(BaseModel):
     sort_order: str = Field("desc", description="排序方向: asc/desc")
     page: int = Field(1, ge=1, description="页码")
     page_size: int = Field(20, ge=1, le=100, description="每页数量")
+    include_stats: bool = Field(False, description="是否包含统计信息")
 
 
 class TaskStatisticsOut(BaseModel):

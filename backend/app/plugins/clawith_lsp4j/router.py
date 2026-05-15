@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Query
@@ -27,7 +28,7 @@ from app.database import async_session
 from app.models.agent import Agent as AgentModel
 from app.models.llm import LLMModel
 from app.models.user import User
-import app.api.websocket as ws_module
+from app.services.connection_manager import manager
 
 from .context import (
     current_lsp4j_ws,
@@ -202,11 +203,50 @@ async def lsp4j_websocket_endpoint(
         #    需要消息循环读取才能 resolve Future。如果串行 await route()，
         #    消息循环被 chat/ask 阻塞，tool/invokeResult 无法被处理 → 死锁。
         _ws_tasks: set[asyncio.Task] = set()
+        _ws_task_times: dict[asyncio.Task, float] = {}
+
+        async def _cleanup_ws_tasks():
+            """定期清理 _ws_tasks，防止 CancelledError 导致 done_callback 不触发时 task 泄漏。
+
+            每 120s 扫描一次：
+            - 已完成的 task 直接移除
+            - 运行超过 600s 的 task 强制 cancel 并移除
+            """
+            try:
+                while True:
+                    await asyncio.sleep(120)
+                    now = time.monotonic()
+                    stale: list[asyncio.Task] = []
+                    for t in list(_ws_tasks):
+                        if t.done():
+                            stale.append(t)
+                        elif now - _ws_task_times.get(t, now) > 600:
+                            logger.warning(
+                                "[LSP4J-TASK-CLEANUP] Force-cancelling task older than 600s: {}",
+                                t.get_name() if hasattr(t, 'get_name') else repr(t),
+                            )
+                            t.cancel()
+                            stale.append(t)
+                    for t in stale:
+                        _ws_tasks.discard(t)
+                        _ws_task_times.pop(t, None)
+                    if stale:
+                        logger.info(
+                            "[LSP4J-TASK-CLEANUP] Cleaned up {} stale tasks, {} remaining",
+                            len(stale), len(_ws_tasks),
+                        )
+            except asyncio.CancelledError:
+                logger.debug("[LSP4J-TASK-CLEANUP] Cleanup task cancelled for agent_id={}", agent_obj.id)
+
+        cleanup_task = asyncio.create_task(_cleanup_ws_tasks())
+
         while True:
             raw_data = await websocket.receive_text()
             t = asyncio.create_task(jsonrpc.route(raw_data))
             _ws_tasks.add(t)
+            _ws_task_times[t] = time.monotonic()
             t.add_done_callback(_ws_tasks.discard)
+            t.add_done_callback(lambda done_t: _ws_task_times.pop(done_t, None))
     except WebSocketDisconnect:
         logger.info("[LSP4J-LIFE] WS disconnected agent_id={}", agent_obj.id)
         # 通知 Chat WS：LSP4J 工具连接已断开，IDE 工具将不可用
@@ -214,7 +254,7 @@ async def lsp4j_websocket_endpoint(
         _agent_id = str(agent_obj.id)
         if _sid:
             try:
-                await ws_module.manager.send_to_session(
+                await manager.send_to_session(
                     _agent_id,
                     str(_sid),
                     {
@@ -244,6 +284,22 @@ async def lsp4j_websocket_endpoint(
             except asyncio.CancelledError:
                 pass
             logger.info("[LSP4J-KEEPALIVE] Keep-alive task cleaned up for agent_id={}", agent_obj.id)
+
+        # 清理 _ws_tasks 定期清理任务
+        if 'cleanup_task' in locals():
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("[LSP4J-TASK-CLEANUP] Cleanup task stopped for agent_id={}", agent_obj.id)
+        # 强制清空残留任务
+        if '_ws_tasks' in locals() and _ws_tasks:
+            pending_count = len(_ws_tasks)
+            for t in list(_ws_tasks):
+                if not t.done():
+                    t.cancel()
+            logger.info("[LSP4J-TASK-CLEANUP] Cancelled {} pending tasks on disconnect", pending_count)
 
         # 5. 清理（按顺序）
         # 5.1 重置 ContextVar

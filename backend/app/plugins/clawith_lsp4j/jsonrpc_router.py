@@ -31,6 +31,8 @@ import os
 import re
 import subprocess
 import time
+import websockets.exceptions
+from collections import OrderedDict
 from pathlib import Path
 import uuid
 from dataclasses import dataclass
@@ -39,6 +41,7 @@ from typing import Any
 
 from loguru import logger
 from sqlalchemy import delete, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
 from app.database import async_session
@@ -50,7 +53,7 @@ from app.models.task import Task as TaskModel
 from app.services.llm.caller import call_llm_with_failover
 from app.services.agent_context import _is_ide_session
 from app.services.task_executor import execute_task as _execute_task
-import app.api.websocket as ws_module
+from app.services.connection_manager import manager
 
 from .context import (
     current_lsp4j_message_history,
@@ -248,7 +251,19 @@ _LSP4J_STRICT_TOOLCALL_ID = os.getenv("LSP4J_STRICT_TOOLCALL_ID", "1").strip() !
 # LSP4J 工具调用结果缓存（模块级，所有连接共享）
 _lsp4j_tool_cache: dict[str, tuple[float, str]] = {}
 _LSP4J_TOOL_CACHE_TTL = 300.0  # 与 IDE 插件端缓存 TTL 对齐
-_CACHEABLE_TOOLS = frozenset({"read_file", "search_file", "search_codebase", "search_symbol", "list_dir", "grep_code"})
+_CACHEABLE_TOOLS = frozenset({"read_file", "search_file", "search_codebase", "search_symbol", "list_dir", "grep_code", "get_problems"})
+
+# 会话级只读工具缓存（短 TTL=30s，写工具执行后主动失效整会话缓存）
+# Key: f"{user_id}:{agent_id}:{tool_name}:{params_hash}"
+_SESSION_READONLY_CACHE: dict[str, tuple[float, str]] = {}
+_SESSION_READONLY_CACHE_TTL = 30.0
+_SESSION_READONLY_TOOLS = frozenset({"get_problems", "search_file", "list_dir"})
+
+# 写工具集合 — 执行后触发会话级只读缓存失效
+_WRITE_TOOLS = frozenset({
+    "replace_text_by_path", "create_file_with_text", "delete_file_by_path",
+    "run_in_terminal", "apply_patch", "search_replace", "save_file",
+})
 
 # 终端只读命令前缀：匹配的命令插件端可走 ProcessBuilder 快径，免去 invokeAndWait + Ctrl+C 开销
 _TERMINAL_READONLY_PREFIXES = (
@@ -263,8 +278,9 @@ _search_zero_result_cache: dict[str, tuple[float, str]] = {}
 _SEARCH_ZERO_CACHE_TTL = 600.0
 
 # 会话消息内存缓存：同 session 内多次 chat/ask 无需重复查 DB
-_SESSION_MESSAGE_CACHE: dict[str, tuple[float, list[dict]]] = {}
-_SESSION_MESSAGE_CACHE_TTL = 300.0  # DB 缓存 TTL（5 分钟）：减少数据库重复读取频率，优化响应速度
+_SESSION_MESSAGE_CACHE: OrderedDict[str, tuple[float, list[dict]]] = OrderedDict()
+_SESSION_MESSAGE_CACHE_TTL = 300.0
+_SESSION_MESSAGE_CACHE_MAX = 500  # #102 修复：LRU 淘汰上限，基于 OrderedDict 的 O(1) 淘汰
 
 # 基础工具名映射直接使用导入的常量（tool_constants.TOOL_NAME_MAP / TOOL_DISPLAY_NAME_MAP）
 
@@ -383,8 +399,8 @@ def _get_code_map_for_session(project_path: str) -> str:
     try:
         from .file_index import get_or_build_code_map
         return get_or_build_code_map(project_path)
-    except Exception:
-        logger.exception("[CODE-MAP] get failed")
+    except (ImportError, OSError) as e:
+        logger.error("[CODE-MAP] get failed: {}", e, exc_info=True)
         return ""
 
 
@@ -393,8 +409,8 @@ async def _build_project_file_index(project_path: str) -> None:
     try:
         from .file_index import get_or_build_index
         get_or_build_index(project_path, force_rebuild=True)
-    except Exception:
-        logger.exception("[FILE-INDEX] build failed")
+    except (ImportError, OSError) as e:
+        logger.error("[FILE-INDEX] build failed: {}", e, exc_info=True)
 
 
 def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "") -> tuple[str, list[dict]]:
@@ -985,7 +1001,7 @@ def _build_lsp4j_ide_prompt(params: ChatAskParam) -> str:
             image_urls = chat_context.get("imageUrls", [])
             if image_urls and isinstance(image_urls, list):
                 parts.append(f"用户附带了 {len(image_urls)} 张图片")
-    except Exception as e:
+    except (TypeError, KeyError, ValueError) as e:
         logger.warning("[LSP4J] chatContext 解析异常，跳过: {}", e)
 
     # ── extra.context 结构化解析 ──
@@ -1029,7 +1045,7 @@ def _build_lsp4j_ide_prompt(params: ChatAskParam) -> str:
 
             if params.extra.get("fullFileEdit"):
                 parts.append("整文件编辑模式：请输出完整的文件内容。")
-    except Exception as e:
+    except (TypeError, KeyError, ValueError) as e:
         logger.warning("[LSP4J] extra.context 解析异常，跳过: {}", e)
 
     # IDE 上下文注入——让智能体感知本地项目环境（源自 ChatSession 持久化字段）
@@ -1044,7 +1060,7 @@ def _build_lsp4j_ide_prompt(params: ChatAskParam) -> str:
         if _ide_ctx_parts:
             parts.append("## 当前 IDE 环境")
             parts.extend(_ide_ctx_parts)
-    except Exception as e:
+    except (TypeError, KeyError, ValueError) as e:
         logger.warning("[LSP4J] IDE 上下文注入异常: {}", e)
 
     # shellType（P2-2）
@@ -1184,6 +1200,7 @@ class JSONRPCRouter:
 
         # chat 并发锁，防止多个 chat/ask 同时执行
         self._chat_lock = asyncio.Lock()
+        self._chat_queue: asyncio.Queue = asyncio.Queue(maxsize=1)  # #101 修复：并发请求排队
 
         # 当前请求 ID（用于 chat/answer 等消息中携带的 requestId）
         self._current_request_id: str | None = None
@@ -1383,7 +1400,7 @@ class JSONRPCRouter:
                         logger.warning("[LSP4J-LIFE] URI 含路径穿越，忽略: {}", uri)
                         return None
                     return norm_path
-            except Exception as e:
+            except (ValueError, TypeError) as e:
                 logger.warning("[LSP4J-LIFE] URI 解析失败: {} error={}", uri, e)
             return None
 
@@ -1521,15 +1538,20 @@ class JSONRPCRouter:
         if _expired:
             logger.info("[LSP4J-CACHE] cleaned {} expired entries", len(_expired))
 
-        # 并发保护：同一连接只允许一个 chat/ask 同时执行
+        # #101 修复：并发保护改为排队机制（最多排队 1 个请求）
         if self._chat_lock.locked():
-            # 并发请求拒绝
-            logger.warning(
-                "[LSP4J] chat/ask rejected: concurrent request, requestId={} current={}",
-                request_id,
-                self._current_request_id,
-            )
-            await self._send_error_response(msg_id, -32602, "Another chat is in progress")
+            if self._chat_queue.full():
+                logger.warning(
+                    "[LSP4J] chat/ask rejected: queue full, requestId={} current={}",
+                    request_id,
+                    self._current_request_id,
+                )
+                await self._send_error_response(msg_id, -32602, "Another chat is in progress and queue is full")
+                return
+            # 只存储 (params, msg_id)，_handle_chat_ask 会从 params 重新派生所需字段
+            await self._chat_queue.put((params, msg_id))
+            logger.info("[LSP4J] chat/ask queued: requestId={} queue_depth={}", request_id, self._chat_queue.qsize())
+            await self._send_response(msg_id, {"isSuccess": True, "requestId": request_id, "status": "queued"})
             return
 
         async with self._chat_lock:
@@ -1573,7 +1595,7 @@ class JSONRPCRouter:
                 self._last_snapshot_hash = current_hash
                 try:
                     await self._send_snapshot_sync_all(session_id)
-                except Exception as e:
+                except websockets.exceptions.ConnectionClosed as e:
                     logger.warning("[WS-FILE] snapshot/syncAll 发送失败（非致命）: {}", e)
 
             # ★ 性能计时: snapshot 操作
@@ -1616,6 +1638,7 @@ class JSONRPCRouter:
                     _cache_ts, _cached_msgs = _cached
                     if _now - _cache_ts < _SESSION_MESSAGE_CACHE_TTL:
                         message_history = _cached_msgs
+                        _SESSION_MESSAGE_CACHE.move_to_end(_cache_key)  # LRU: 标记最近使用
                         current_lsp4j_message_history.set(message_history)
                         logger.info(
                             "[LSP4J-CTX] 复用内存消息缓存: session={} msgs={} cache_age={:.0f}s",
@@ -1894,20 +1917,10 @@ class JSONRPCRouter:
                         # 高频搜索工具（search_codebase/search_file/list_dir/grep_code）仅需最终结果，
                         # 无需 INIT 卡片 UI，直接跳过 markdown 块发送以减少插件端闪烁与开销。
                         if tool_name in _UI_HEAVY_SEARCH_TOOLS:
-                            logger.info(
-                                "[LSP4J-TOOL] 高频搜索工具跳过 INIT 卡片: mapped={} callId={}",
-                                tool_name,
-                                tool_call_id[:8],
-                            )
                             tool_markdown = ""
                         else:
+                            # #94 修复：延迟 100ms 发送 INIT 卡片，快速工具可跳过卡片避免闪烁
                             tool_markdown = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
-
-                            logger.info(
-                                "[LSP4J-TOOL] 将 INIT markdown 合并到 PENDING sync: mapped={} callId={}",
-                                tool_name,
-                                tool_call_id[:8],
-                            )
 
                         # ★ 插件 ChatToolEventProcessor 采用 buffer+replay 机制：
                         # 事件先于 panel 注册到达时自动缓冲，registerPanel 时 replay。
@@ -2037,7 +2050,7 @@ class JSONRPCRouter:
                             _tc_db.add(tc_msg)
                             await _tc_db.commit()
                             logger.debug("[LSP4J] tool_call 持久化成功: tool={} sessionId={}", tool_name, session_id)
-                    except Exception as _tc_e:
+                    except SQLAlchemyError as _tc_e:
                         logger.warning(
                             "[LSP4J] tool_call 持久化失败: tool={} sessionId={} error={}", tool_name, session_id, _tc_e
                         )
@@ -2165,6 +2178,7 @@ class JSONRPCRouter:
                     parallel_tools_extra_readonly={
                         "search_file", "search_codebase", "search_symbol",
                         "list_dir", "read_file", "grep_code",
+                        "get_problems", "get_terminal_output",
                     },
                     tool_warning_mode="lsp4j",
                 )
@@ -2256,9 +2270,11 @@ class JSONRPCRouter:
                                 await _tsk_db.commit()
                                 await _tsk_db.refresh(task)
                                 _task_id = task.id
-                            asyncio.create_task(_execute_task(_task_id, str(self._agent_id)))
+                            _t = asyncio.create_task(_execute_task(_task_id, str(self._agent_id)))
+                            _lsp4j_background_tasks.add(_t)
+                            _t.add_done_callback(_lsp4j_background_tasks.discard)
                             logger.info("[LSP4J] Task created: id={} title={}", _task_id, task_title)
-                        except Exception as _te:
+                        except SQLAlchemyError as _te:
                             logger.warning("[LSP4J] Task creation failed: {}", _te)
                 _t_task_elapsed = time.monotonic() - _t_task_start
                 if _t_task_elapsed > 0.05:  # 只记录超过50ms的操作
@@ -2282,7 +2298,7 @@ class JSONRPCRouter:
                         _ide_open_files_raw = _chat_ctx.get("openFiles")
                         if isinstance(_ide_open_files_raw, list):
                             _ide_open_files = _ide_open_files_raw
-                except Exception:
+                except (TypeError, KeyError, ValueError):
                     pass  # 上下文提取失败不影响消息持久化
 
                 _t_persist_start = time.monotonic()
@@ -2313,7 +2329,11 @@ class JSONRPCRouter:
             message_history.append({"role": "assistant", "content": reply})
             current_lsp4j_message_history.set(message_history)
             _cache_key = f"{self._user_id}:{session_id}"
+            # #102 修复：写入前检查 LRU 淘汰（O(1) 基于 OrderedDict）
+            if len(_SESSION_MESSAGE_CACHE) >= _SESSION_MESSAGE_CACHE_MAX:
+                _SESSION_MESSAGE_CACHE.popitem(last=False)
             _SESSION_MESSAGE_CACHE[_cache_key] = (time.monotonic(), list(message_history))
+            _SESSION_MESSAGE_CACHE.move_to_end(_cache_key)  # 确保更新场景也移到 LRU 末尾
 
             # 清除本轮已持久化的工具调用记录，避免下一轮上下文重复注入
             # 工具调用已通过 _persist_lsp4j_tool_call 单独写入 DB，
@@ -2368,12 +2388,31 @@ class JSONRPCRouter:
                     _sync_plan.overwrite,
                 )
                 if _sync_plan.branch == "overwrite_mismatch":
-                    logger.warning(
-                        "[LSP4J-UI] answer_sync overwrite_mismatch detail requestId={} streamed_len={} reply_len={}",
-                        request_id,
-                        len(_streamed_plain),
-                        len(reply or ""),
+                    # #112 修复：仅长度差异超过 20% 时才 WARNING，小差异降级为 INFO
+                    _reply_len = len(reply or "")
+                    _streamed_len = len(_streamed_plain)
+                    _max_len = max(_reply_len, _streamed_len)
+                    _diff_pct = abs(_reply_len - _streamed_len) / _max_len if _max_len > 0 else 0
+                    _log_msg = (
+                        "[LSP4J-UI] answer_sync overwrite_mismatch detail requestId={} "
+                        "streamed_len={} reply_len={} diff_pct={:.1%}"
                     )
+                    if _diff_pct > 0.2:
+                        logger.warning(
+                            _log_msg,
+                            request_id,
+                            _streamed_len,
+                            _reply_len,
+                            _diff_pct,
+                        )
+                    else:
+                        logger.info(
+                            _log_msg,
+                            request_id,
+                            _streamed_len,
+                            _reply_len,
+                            _diff_pct,
+                        )
 
             # 6. 发送完成信号（ChatFinishParams 格式）
             # statusCode 映射：200=成功, 429=配额耗尽, 408=超时, 500=异常
@@ -2415,7 +2454,19 @@ class JSONRPCRouter:
             # 7. JSON-RPC 响应已在 call_llm 之前发送（避免 IDE 超时）
             # 完成状态通过 chat/finish 通知传递
 
+            # 7. JSON-RPC 响应已在 call_llm 之前发送（避免 IDE 超时）
+            # 完成状态通过 chat/finish 通知传递
+
             self._current_request_id = None
+
+            # #101 修复：处理排队中的下一个请求
+            if not self._chat_queue.empty():
+                try:
+                    queued_params, queued_msg_id = self._chat_queue.get_nowait()
+                    logger.info("[LSP4J] chat/ask dequeued: processing next request from queue")
+                    asyncio.create_task(self._handle_chat_ask(queued_params, queued_msg_id))
+                except asyncio.QueueEmpty:
+                    pass
 
     async def _handle_chat_stop(self, params: dict, msg_id: Any) -> None:
         """处理 chat/stop 请求 — 取消当前正在进行的 chat/ask。
@@ -2522,7 +2573,7 @@ class JSONRPCRouter:
                     else:
                         result = {"success": False, "error": f"Task not found: {task_id}"}
                         logger.warning("[LSP4J] tool/invoke: update_tasks not found id={}", task_id)
-            except Exception as _ute:
+            except SQLAlchemyError as _ute:
                 logger.exception("[LSP4J] tool/invoke: update_tasks error")
                 result = {"success": False, "error": str(_ute)[:200]}
             await self._send_response(
@@ -2561,7 +2612,7 @@ class JSONRPCRouter:
                 },
             )
             logger.info("[LSP4J] tool/invoke: {} 调用成功", tool_name)
-        except Exception as e:
+        except websockets.exceptions.ConnectionClosed as e:
             logger.exception("[LSP4J] tool/invoke: {} 调用失败", tool_name)
             await self._send_response(
                 msg_id,
@@ -3006,7 +3057,7 @@ class JSONRPCRouter:
                     except (OSError, ValueError):
                         continue
             return checksum.hexdigest()
-        except Exception as e:
+        except (OSError, ValueError) as e:
             logger.warning("[WS-FILE] _compute_project_hash 失败: {}", e)
             return ""
 
@@ -3329,6 +3380,26 @@ class JSONRPCRouter:
                 request_id[:8],
             )
 
+        # #113 修复：清理超时未响应的 toolCallId Future（>300s 自动移除，避免累积）
+        _now_ts = time.time()
+        _stale_ids = [
+            tid for tid, meta in self._pending_tool_meta.items()
+            if _now_ts - meta.get("created_at", 0) > 300
+        ]
+        for _stale_id in _stale_ids:
+            f = self._pending_tools.pop(_stale_id, None)
+            if f and not f.done():
+                f.cancel()
+            self._pending_tool_meta.pop(_stale_id, None)
+            logger.warning(
+                "[LSP4J-TOOL] 超时清理 toolCallId={} tool={} created_at={:.0f}s ago",
+                _stale_id[:8],
+                self._pending_tool_meta.get(_stale_id, {}).get("tool_name", "?"),
+                _now_ts - self._pending_tool_meta.get(_stale_id, {}).get("created_at", _now_ts),
+            )
+        if _stale_ids:
+            logger.info("[LSP4J-TOOL] 清理 {} 个超时 Future，剩余 {} 个", len(_stale_ids), len(self._pending_tools))
+
         # 创建 Future 等待异步结果（通过 tool/invokeResult 回传）
         loop = asyncio.get_running_loop()
         tool_future: asyncio.Future = loop.create_future()
@@ -3551,7 +3622,7 @@ class JSONRPCRouter:
                         if self._session_id:
                             try:
                                 await self._send_snapshot_sync_all(self._session_id)
-                            except Exception as e:
+                            except websockets.exceptions.ConnectionClosed as e:
                                 logger.warning("[WS-FILE] 工具编辑后 snapshot/syncAll 失败（非致命）: {}", e)
                     else:
                         logger.warning(
@@ -3744,7 +3815,7 @@ class JSONRPCRouter:
 
         try:
             text = path_pattern.sub(replace_path, text)
-        except Exception as e:
+        except re.error as e:
             logger.debug("[LSP4J] 文件路径转换失败，使用原文: {}", e)
             return text
 
@@ -4043,7 +4114,7 @@ class JSONRPCRouter:
 
             frame = LSPBaseProtocolParser.format_message(message)
             await self._ws.send_text(frame)
-        except Exception as e:
+        except websockets.exceptions.ConnectionClosed as e:
             # WebSocket 发送失败意味着连接已不可用，标记关闭防止后续调用继续失败
             _method = message.get("method", "unknown")
             _id = message.get("id", "none")
@@ -4069,7 +4140,7 @@ class JSONRPCRouter:
             )
             await self._ws.send_text(frame)
             logger.info("[LSP4J →] best-effort error id={} code={}", msg_id, code)
-        except Exception as e:
+        except websockets.exceptions.ConnectionClosed as e:
             logger.warning("LSP4J: best-effort JSON-RPC error send failed id={} err={}", msg_id, e)
             self._closed = True
             self._ws_connected = False
@@ -4213,7 +4284,7 @@ class JSONRPCRouter:
             except asyncio.TimeoutError:
                 logger.warning("[LSP4J] search_replace: read_file 超时 {}", file_path)
                 current_content = None
-            except Exception:
+            except (websockets.exceptions.ConnectionClosed, json.JSONDecodeError):
                 logger.warning("[LSP4J] search_replace: 无法读取文件 {}", file_path)
                 current_content = None
         if current_content and search_text and search_text in current_content:
@@ -4341,14 +4412,14 @@ class JSONRPCRouter:
             ):
                 try:
                     await self._send_snapshot_sync_all(sess_for_sync)
-                except Exception as e:
+                except websockets.exceptions.ConnectionClosed as e:
                     logger.warning("[WS-FILE] snapshot/operate 后 snapshot/syncAll 失败: {}", e)
 
             if err:
                 await self._send_response(msg_id, {"errorCode": err, "errorMessage": err})
             else:
                 await self._send_response(msg_id, {"errorCode": None, "errorMessage": None})
-        except Exception as e:
+        except (OSError, ValueError, KeyError) as e:
             logger.warning("[LSP4J] snapshot/operate failed: {}", e)
             await self._send_response(msg_id, {"errorCode": "operate_failed", "errorMessage": str(e)})
 
@@ -4366,7 +4437,7 @@ class JSONRPCRouter:
                     .limit(50)
                 )
                 sessions = list(r.scalars().all())
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("[LSP4J] chat/listAllSessions DB error: {}", e)
             await self._send_response(msg_id, [])
             return
@@ -4436,7 +4507,7 @@ class JSONRPCRouter:
                     .order_by(ChatMessage.created_at.asc())
                 )
                 rows = list(mr.scalars().all())
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("[LSP4J] chat/getSessionById DB error: {}", e)
             await self._send_response(
                 msg_id,
@@ -4536,7 +4607,7 @@ class JSONRPCRouter:
                     await db.delete(sess)
                     await db.commit()
                     deleted = True
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("[LSP4J] chat/deleteSessionById DB error: {}", e)
 
         if self._session_id == session_id:
@@ -4548,7 +4619,7 @@ class JSONRPCRouter:
             try:
                 await self._send_client_request("chat/delete", {"sessionId": session_id, "requestId": ""})
                 logger.debug("[LSP4J] chat/delete 已推送: sessionId={}", session_id)
-            except Exception as e:
+            except websockets.exceptions.ConnectionClosed as e:
                 logger.warning("[LSP4J] chat/delete 推送失败: {}", e)
 
     async def _handle_chat_clear_all_sessions(self, params: dict, msg_id: Any) -> None:
@@ -4572,7 +4643,7 @@ class JSONRPCRouter:
                     .where(ChatSession.source_channel == "ide_lsp4j")
                 )
                 await db.commit()
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("[LSP4J] chat/clearAllSessions DB error: {}", e)
 
         self._session_id = None
@@ -4603,7 +4674,7 @@ class JSONRPCRouter:
                 )
                 await db.commit()
                 deleted = res.rowcount > 0
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("[LSP4J] chat/deleteChatById DB error: {}", e)
         await self._send_response(msg_id, None)
 
@@ -4617,7 +4688,7 @@ class JSONRPCRouter:
                     },
                 )
                 logger.debug("[LSP4J] chat/delete 已推送: sessionId={} requestId={}", session_id, request_id)
-            except Exception as e:
+            except websockets.exceptions.ConnectionClosed as e:
                 logger.warning("[LSP4J] chat/delete 推送失败: {}", e)
 
     # ── reasoning 模型名称模式（基于 provider + model 推断，避免 DB 迁移） ──
@@ -4660,7 +4731,7 @@ class JSONRPCRouter:
                 if tenant_id:
                     stmt = stmt.where((LLMModel.tenant_id.is_(None)) | (LLMModel.tenant_id == tenant_id))
                 rows = list((await db.execute(stmt)).scalars().all())
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("[LSP4J] config/queryModels DB error: {}", e)
             rows = []
 
@@ -4715,7 +4786,7 @@ class JSONRPCRouter:
             async with async_session() as db:
                 await db.execute(text("SELECT 1"))
             await self._send_response(msg_id, {"success": True})
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("[LSP4J] ping DB health check failed: {}", e)
             await self._send_response(
                 msg_id,
@@ -4834,7 +4905,7 @@ class JSONRPCRouter:
             if ws_file:
                 try:
                     await self._send_workspace_file_sync(ws_file, "MODIFIED")
-                except Exception as e:
+                except websockets.exceptions.ConnectionClosed as e:
                     logger.warning("[WS-FILE] operate 后发送 sync 失败: {}", e)
 
     async def _handle_ws_update_content(self, params: dict, msg_id: Any) -> None:
@@ -4966,7 +5037,7 @@ class JSONRPCRouter:
                 },
             )
             logger.info("[LSP4J] image/upload 成功: requestId={} base64_len={}", request_id, len(base64_data))
-        except Exception as e:
+        except websockets.exceptions.ConnectionClosed as e:
             logger.warning("[LSP4J] image/upload 异步通知失败: requestId={} error={}", request_id, e)
 
     # ──────────────────────────────────────────
@@ -4994,7 +5065,7 @@ class JSONRPCRouter:
                 row = sr.scalar_one_or_none()
                 if row:
                     endpoint = row
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("[LSP4J] config/getEndpoint DB 回退: {}", e)
 
         if not endpoint:
@@ -5044,7 +5115,7 @@ class JSONRPCRouter:
                 endpoint[:80] if endpoint else "",
             )
             await self._send_response(msg_id, {"success": True})
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("[LSP4J] config/updateEndpoint DB error: {}", e)
             await self._send_response(
                 msg_id,
@@ -5152,7 +5223,7 @@ class JSONRPCRouter:
                 on_chunk=_on_chunk if stream else None,
             )
         except Exception as e:
-            logger.error("[LSP4J] commitMsg/generate call_llm error: {}", e)
+            logger.error("[LSP4J] commitMsg/generate call_llm error: {}", e, exc_info=True)
             reply = f"[错误] {e}"
 
         # 5. 非流式模式一次性返回（截断保护，commit message 不超过 500 字符）
@@ -5333,7 +5404,7 @@ class JSONRPCRouter:
                         tenant_obj = tr.scalar_one_or_none()
                         if tenant_obj is not None:
                             _tenant_name = tenant_obj.name or ""
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.warning("[LSP4J-AUTH] 查询用户信息失败，使用降级数据: {}", e)
 
         await self._send_response(
@@ -5615,6 +5686,18 @@ async def invoke_lsp4j_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID
             logger.info("[LSP4J-CACHE] negative hit (remote): {} reason={}", _neg_key[:120], _reason)
             return "[]" if tool_name == "grep_code" else json.dumps([])
 
+    # ── 会话级只读缓存（30s TTL，写工具后失效）──
+    agent_key_str = f"{str(user_id)}:{str(agent_id)}"
+    if tool_name in _SESSION_READONLY_TOOLS:
+        _sess_params_str = json.dumps(arguments, sort_keys=True, default=str)
+        _sess_params_hash = hashlib.md5(_sess_params_str.encode()).hexdigest()[:12]
+        _session_cache_key = f"{agent_key_str}:{tool_name}:{_sess_params_hash}"
+        if _session_cache_key in _SESSION_READONLY_CACHE:
+            _sess_ts, _sess_cached = _SESSION_READONLY_CACHE[_session_cache_key]
+            if time.monotonic() - _sess_ts < _SESSION_READONLY_CACHE_TTL:
+                logger.info("[LSP4J-CACHE] session hit: {} elapsed={:.1f}s", _session_cache_key, time.monotonic() - _sess_ts)
+                return _sess_cached
+
     if tool_name in _CACHEABLE_TOOLS:
         params_str = json.dumps(arguments, sort_keys=True, default=str)
         params_hash = hashlib.md5(params_str.encode()).hexdigest()[:12]
@@ -5679,6 +5762,18 @@ async def invoke_lsp4j_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID
     logger.info("[LSP4J-TOOL] 调用 IDE 工具: tool={} agent_key={} timeout={}", tool_name, agent_key, timeout)
     result = await router_instance.invoke_tool_on_ide(tool_name, arguments, timeout=timeout)
 
+    # 写工具执行后失效该会话的所有只读缓存
+    if tool_name in _WRITE_TOOLS:
+        _invalidated = 0
+        _prefix = agent_key_str + ":"
+        for _key in list(_SESSION_READONLY_CACHE.keys()):
+            if _key.startswith(_prefix):
+                del _SESSION_READONLY_CACHE[_key]
+                _invalidated += 1
+        if _invalidated:
+            logger.info("[LSP4J-CACHE] write-tool invalidated session cache: tool={} agent={} removed={}",
+                        tool_name, agent_key_str, _invalidated)
+
     # 非 Python 项目检测 Python 命令：注入反诱导提示，引导 LLM 使用 IDE 原生工具
     if tool_name == "run_in_terminal" and result:
         command = str(arguments.get("command", ""))
@@ -5698,6 +5793,11 @@ async def invoke_lsp4j_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID
     if tool_name in _CACHEABLE_TOOLS and result and not result.startswith("[错误]"):
         _lsp4j_tool_cache[cache_key] = (time.monotonic(), result)
 
+    # 会话级只读缓存写入（30s TTL）
+    if tool_name in _SESSION_READONLY_TOOLS and result and not result.startswith("[错误]"):
+        _SESSION_READONLY_CACHE[_session_cache_key] = (time.monotonic(), result)
+        logger.info("[LSP4J-CACHE] session cache write: {}", _session_cache_key)
+
     # 负缓存写入: LSP4J 远程空搜索结果也缓存，避免重复 WebSocket 往返
     _search_tools = {"search_file", "search_codebase", "grep_code", "search_symbol"}
     if tool_name in _search_tools and result:
@@ -5707,7 +5807,7 @@ async def invoke_lsp4j_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID
             if len(_items) == 0:
                 _search_zero_result_cache[_neg_key] = (time.monotonic(), "lsp4j_remote")
                 logger.info("[LSP4J-CACHE] negative cache write (remote): {}", _neg_key[:120])
-        except Exception:
+        except (json.JSONDecodeError, TypeError, KeyError):
             pass
 
     return result
@@ -5756,89 +5856,83 @@ async def _persist_lsp4j_chat_turn(
                 logger.info("[LSP4J] persist 跳过非 UUID session_id={}", session_id)
                 return
 
-            # 使用显式事务块包裹 ChatSession + ChatMessage 写入，确保原子性——#68 修复
+            # #115 修复：统一事务块包裹 SELECT + ChatSession 写入 + ChatMessage 写入，确保原子性
             async with db.begin():
                 # 查找或创建 ChatSession
                 sr = await db.execute(select(ChatSession).where(ChatSession.id == sid_uuid))
                 sess = sr.scalar_one_or_none()
-            now = datetime.now(tz_persist.utc)
-            local_now = now.astimezone()
+                now = datetime.now(tz_persist.utc)
+                local_now = now.astimezone()
 
-            if not sess:
-                sess = ChatSession(
-                    id=sid_uuid,
-                    agent_id=agent_id,
-                    user_id=user_id,
-                    title=f"LSP4J {local_now.strftime('%m-%d %H:%M')}",
-                    source_channel="ide_lsp4j",
-                    client_type="ide_lsp4j",              # 标记 IDE LSP4J 客户端来源
-                    project_path=project_path,             # 持久化 IDE 项目根路径
-                    current_file=current_file,             # 持久化当前活动文件
-                    open_files=open_files,                 # 持久化打开文件列表
-                    created_at=now,
-                    last_message_at=now,
-                )
-                db.add(sess)
-                logger.info(
-                    "[LSP4J] ChatSession created: session_id={} agent_id={} title={} project={} file={}",
-                    session_id,
-                    agent_id,
-                    sess.title,
-                    project_path,
-                    current_file,
-                )
-            else:
-                sess.last_message_at = now
-                # 同步 agent_id：同一 session 可能在不同 agent 间共享（同一用户切换 Agent），
-                # 更新为最近使用的 agent，确保 WebUI 正确归类会话
-                if str(sess.agent_id) != str(agent_id):
+                if not sess:
+                    sess = ChatSession(
+                        id=sid_uuid,
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        title=f"LSP4J {local_now.strftime('%m-%d %H:%M')}",
+                        source_channel="ide_lsp4j",
+                        client_type="ide_lsp4j",              # 标记 IDE LSP4J 客户端来源
+                        project_path=project_path,             # 持久化 IDE 项目根路径
+                        current_file=current_file,             # 持久化当前活动文件
+                        open_files=open_files,                 # 持久化打开文件列表
+                        created_at=now,
+                        last_message_at=now,
+                    )
+                    db.add(sess)
                     logger.info(
-                        "[LSP4J] Session agent_id updated: session={} old_agent={} new_agent={}",
+                        "[LSP4J] ChatSession created: session_id={} agent_id={} title={} project={} file={}",
                         session_id,
-                        sess.agent_id,
                         agent_id,
+                        sess.title,
+                        project_path,
+                        current_file,
                     )
-                    sess.agent_id = agent_id
-                # 更新 IDE 上下文（用户可能切换了项目或文件）(#57)
-                if project_path is not None:
-                    sess.project_path = project_path
-                if current_file is not None:
-                    sess.current_file = current_file
-                if open_files is not None:
-                    sess.open_files = open_files
+                else:
+                    sess.last_message_at = now
+                    if str(sess.agent_id) != str(agent_id):
+                        logger.info(
+                            "[LSP4J] Session agent_id updated: session={} old_agent={} new_agent={}",
+                            session_id,
+                            sess.agent_id,
+                            agent_id,
+                        )
+                        sess.agent_id = agent_id
+                    # 更新 IDE 上下文（用户可能切换了项目或文件）(#57)
+                    if project_path is not None:
+                        sess.project_path = project_path
+                    if current_file is not None:
+                        sess.current_file = current_file
+                    if open_files is not None:
+                        sess.open_files = open_files
 
-            # 添加消息
-            # ★ 显式设置 created_at，确保用户消息时间戳早于助手消息
-            # 避免同一事务中两条消息的 server_default 时间戳相同导致排序错乱
-            from datetime import timedelta
+                # 添加消息——显式设置 created_at，确保用户消息时间戳早于助手消息
+                from datetime import timedelta
 
-            if user_text:
-                db.add(
-                    ChatMessage(
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        role="user",
-                        content=user_text,
-                        conversation_id=str(sid_uuid),
-                        created_at=now - timedelta(seconds=1),  # 用户消息时间戳早 1 秒
+                if user_text:
+                    db.add(
+                        ChatMessage(
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            role="user",
+                            content=user_text,
+                            conversation_id=str(sid_uuid),
+                            created_at=now - timedelta(seconds=1),
+                        )
                     )
-                )
 
-            if reply_text:
-                db.add(
-                    ChatMessage(
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        role="assistant",
-                        content=reply_text,
-                        conversation_id=str(sid_uuid),
-                        thinking=thinking_text,  # 构造时传入，非事后更新
-                        created_at=now,  # 助手消息时间戳
+                if reply_text:
+                    db.add(
+                        ChatMessage(
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            role="assistant",
+                            content=reply_text,
+                            conversation_id=str(sid_uuid),
+                            thinking=thinking_text,
+                            created_at=now,
+                        )
                     )
-                )
-
-            # 事务块自动提交/回滚——#68 修复
-            # db.begin() 在块结束时自动 commit，发生异常时自动 rollback
+            # db.begin() 退出时统一 commit 或回滚，确保 ChatSession + ChatMessage 写入原子性
 
             logger.info(
                 "[LSP4J] persist success: session_id={} user_len={} reply_len={} msg_count={}",
@@ -5848,17 +5942,12 @@ async def _persist_lsp4j_chat_turn(
                 (1 if user_text else 0) + (1 if reply_text else 0),
             )
 
-            # 通知 Clawith 前端 WebSocket 刷新 Web UI
+            # #116 修复：按 agent_id 广播到所有连接的 WebUI 客户端，而非仅投递到单个 session
             try:
-                sid_normalized = str(sid_uuid)
-                await ws_module.manager.send_to_session(
-                    str(agent_id),
-                    sid_normalized,
-                    {"type": "done", "role": "assistant", "content": reply_text, "source": "lsp4j"},
-                )
-                # 前端通知已发送
-                logger.debug("[LSP4J] 前端通知已发送: session_id={}", sid_normalized)
-            except Exception as _fe:
+                _push_msg = {"type": "done", "role": "assistant", "content": reply_text, "source": "lsp4j"}
+                await manager.send_message(str(agent_id), _push_msg)
+                logger.debug("[LSP4J] 前端通知已广播: agent_id={}", agent_id)
+            except websockets.exceptions.ConnectionClosed as _fe:
                 logger.debug("LSP4J persist: 前端通知失败: {}", _fe)
 
             # 记录活动日志
@@ -5877,7 +5966,7 @@ async def _persist_lsp4j_chat_turn(
             )
 
     except Exception as e:
-        logger.error("LSP4J: 对话持久化失败: {}", e)
+        logger.error("LSP4J: 对话持久化失败: {}", e, exc_info=True)
 
 
 async def _persist_lsp4j_tool_call(
@@ -6193,7 +6282,7 @@ async def _load_lsp4j_history_from_db(session_id: str, agent_id: uuid.UUID, user
                     "[LSP4J-CTX] _load_history: no tool_call rows found for session={}",
                     session_id,
                 )
-        except Exception:
+        except (json.JSONDecodeError, TypeError, KeyError):
             logger.exception("[LSP4J] tool_call 历史加载失败（非致命）")
 
         logger.info("[LSP4J] history loaded from DB: session_id={} count={}", session_id, len(history))
@@ -6230,7 +6319,7 @@ async def broadcast_config_refresh_models() -> int:
         try:
             await router._send_client_request("config/refreshModels", {})
             count += 1
-        except Exception as e:
+        except websockets.exceptions.ConnectionClosed as e:
             logger.warning("[LSP4J] broadcast config/refreshModels 失败: key={} error={}", _key, e)
 
     logger.info("[LSP4J] broadcast config/refreshModels: 已推送 {} 个客户端", count)

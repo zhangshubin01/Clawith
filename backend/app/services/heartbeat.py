@@ -342,7 +342,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                         "type": "function",
                         "function": tc["function"],
                     } for tc in response.tool_calls],
-                    reasoning_content=response.reasoning_content,
+                    reasoning_content=getattr(response, 'reasoning_content', None),  # #111 修复：安全访问 reasoning_content
                 ))
 
                 finish_call = find_finish_call(response.tool_calls)
@@ -701,7 +701,7 @@ async def run_agent_oneshot(
                         "type": "function",
                         "function": tc["function"],
                     } for tc in response.tool_calls],
-                    reasoning_content=response.reasoning_content,
+                    reasoning_content=getattr(response, 'reasoning_content', None),  # #111 修复：安全访问 reasoning_content
                 ))
 
                 finish_call = find_finish_call(response.tool_calls)
