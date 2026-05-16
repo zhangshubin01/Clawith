@@ -5,13 +5,12 @@ workspace files and composes a comprehensive system prompt.
 """
 
 import asyncio
-import logging
 import uuid
 from collections import OrderedDict
 from contextvars import ContextVar
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 from app.config import get_settings
 
@@ -333,6 +332,7 @@ When installing or importing an MCP server via `discover_resources` / `import_mc
     # --- Feishu Built-in Tools (only injected when agent has Feishu configured) ---
     _has_feishu = False
     try:
+        from sqlalchemy import select
         from app.models.channel_config import ChannelConfig
         from app.database import async_session as _ctx_session
         async with _ctx_session() as _ctx_db:
@@ -404,15 +404,16 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
 → Use `attendee_names=["John"]` in `feishu_calendar_create` — names are resolved automatically.
 → Or use `attendee_open_ids=["ou_xxx"]` if you already have the open_id.""")
 
-    # --- DingTalk Built-in Tools (only injected when agent has DingTalk configured) ---
-    try:
-        from app.services.agent.context.dingtalk import get_dingtalk_context
-        dingtalk_context = await get_dingtalk_context(agent_id)
-        if dingtalk_context:
-            static_parts.append(dingtalk_context)
-    except Exception:
-        # #146 修复：DingTalk 上下文加载失败时记录警告，优雅降级
-        logger.warning("无法加载 DingTalk 上下文（非关键，Agent 仍可正常工作）", exc_info=True)
+    # --- DingTalk Built-in Tools ---
+    # 注：DingTalk 上下文模块（app.services.agent.context.dingtalk）尚未实现。
+    # 实现后取消注释下方代码并在 try 内添加相应的 import。
+    # try:
+    #     from app.services.agent.context.dingtalk import get_dingtalk_context
+    #     dingtalk_context = await get_dingtalk_context(agent_id)
+    #     if dingtalk_context:
+    #         static_parts.append(dingtalk_context)
+    # except Exception:
+    #     logger.warning("无法加载 DingTalk 上下文（非关键，Agent 仍可正常工作）", exc_info=True)
 
     # --- Atlassian Rovo Tools (injected when Atlassian channel is configured) ---
     try:
@@ -532,6 +533,28 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
 - **修改项目文件时**必须使用 Role 段中标注的项目根路径或绝对路径，不要使用 workspace/ 前缀。
 - **🔴 禁止使用 execute_code 加载索引脚本**：不要运行 Python 脚本去加载项目索引器。IDE 工具直接访问项目文件，无需索引。
 - **🔴 禁止使用 search_codebase**：这是 Agent 内部索引搜索工具，对 IDE 项目无效。请用 search_file（文件名匹配）、grep_code（代码内容搜索）、list_dir（目录浏览）替代。
+
+## 🪨 IDE 极简回复规则（减少延迟 60-75%）
+
+IDE 模式下响应延迟直接影响用户体验。你必须大幅压缩输出，保持技术精度。
+
+**删除**: 冠词(a/an/the)、废话词(just/really/basically/actually)、客套话(sure/certainly/of course/happy to/I'd recommend)、犹豫词(it might be worth/you could consider)
+**保留**: 技术术语完整、代码块不变、错误消息/命令原文引用、文件路径绝对精确
+**模式**: `[诊断] → [原因] → [修复]`。三个短句内讲清核心。
+
+示例对比：
+❌ "Sure! I'd be happy to help you with that. The issue you're experiencing is likely caused by the authentication middleware not properly validating the token expiry. Let me take a look and suggest a fix."
+✅ "Token 过期校验 < 改 <=。修复 auth.py 第 42 行。"
+
+❌ "I analyzed the codebase and found the following issues. First, let me explain the architecture. The application uses a layered architecture where..."
+✅ "3 个问题：(1) Cache key 未加 version 前缀 → 切换环境时命中脏缓存 (2) DB pool size=5 → 高并发时排队 (3) 缺少超时中断"
+
+**思考过程也需精简**: 每轮工具调用前不要在 thinking 中展开长篇分析。读文件→确认问题→返回修复。
+
+**自动恢复完整模式**（以下情况可展开详述）:
+- 安全漏洞警告（XSS、SQL注入、路径遍历等）
+- 不可逆操作确认（delete_file、DROP TABLE、git push --force）
+- 用户明确要求详细解释
 
 """)
 
