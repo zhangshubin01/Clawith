@@ -1,7 +1,11 @@
 """Schedule API — CRUD for agent cron jobs."""
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
+
+# 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
+_bg_tasks: set[asyncio.Task] = set()
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -14,6 +18,10 @@ from app.database import get_db
 from app.models.schedule import AgentSchedule
 from app.models.user import User
 from app.services.scheduler import compute_next_run
+
+# 后台任务强引用集合
+_schedules_bg: set[asyncio.Task] = set()
+
 
 router = APIRouter(prefix="/agents/{agent_id}/schedules", tags=["schedules"])
 
@@ -188,7 +196,11 @@ async def trigger_schedule(
     # Fire in background
     import asyncio
     from app.services.scheduler import _execute_schedule
-    asyncio.create_task(_execute_schedule(sched.id, sched.agent_id, sched.instruction))
+    _t = asyncio.create_task(_execute_schedule(sched.id, sched.agent_id, sched.instruction))
+    _schedules_bg.add(_t)
+    _t.add_done_callback(_schedules_bg.discard)
+    _bg_tasks.add(_t)
+    _t.add_done_callback(_bg_tasks.discard)
 
     # Update tracking
     sched.last_run_at = datetime.now(timezone.utc)

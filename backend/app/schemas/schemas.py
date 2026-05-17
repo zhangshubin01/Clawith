@@ -8,8 +8,10 @@ from pydantic import BaseModel, EmailStr, Field
 
 # ─── Auth ───────────────────────────────────────────────
 
+
 class UserRegister(BaseModel):
     """Legacy combined registration - kept for backward compatibility."""
+
     username: str = Field(min_length=1, max_length=100)
     email: EmailStr
     password: str = Field(min_length=6, max_length=128)
@@ -22,6 +24,7 @@ class UserRegister(BaseModel):
 
 class RegisterInitRequest(BaseModel):
     """Step 1: Initialize registration with account credentials."""
+
     username: str = Field(min_length=1, max_length=100)
     email: EmailStr
     password: str = Field(min_length=6, max_length=128)
@@ -31,22 +34,25 @@ class RegisterInitRequest(BaseModel):
 
 class RegisterInitResponse(BaseModel):
     """Response after step 1 - user created, needs email verification."""
+
     user_id: uuid.UUID
     email: str
     access_token: str
     message: str = "Registration initiated. Please verify your email."
-    user: "UserOut" # Include full user info
+    user: "UserOut"  # Include full user info
     needs_company_setup: bool = True
     target_tenant_id: uuid.UUID | None = None
 
 
 class RegisterCompleteRequest(BaseModel):
     """Step 3: Complete registration after email verification."""
+
     token: str = Field(min_length=6, max_length=512, description="Email verification code")
 
 
 class RegisterCompleteResponse(BaseModel):
     """Response after successful registration completion."""
+
     access_token: str
     token_type: str = "bearer"
     user: "UserOut"
@@ -55,6 +61,7 @@ class RegisterCompleteResponse(BaseModel):
 
 class SSORegisterRequest(BaseModel):
     """SSO registration - completely separate from normal registration."""
+
     provider: str = Field(description="Provider type (feishu, dingtalk, etc.)")
     code: str = Field(description="OAuth authorization code from provider")
     invitation_code: str | None = None
@@ -85,6 +92,7 @@ class ResendVerificationRequest(BaseModel):
 
 class NeedsVerificationResponse(BaseModel):
     """Response when user needs to verify email before continuing."""
+
     needs_verification: bool = True
     email: str
     message: str = "Email already registered but not verified. Please enter the verification code."
@@ -101,6 +109,7 @@ class TokenResponse(BaseModel):
 
 class TenantChoice(BaseModel):
     """Multi-tenant login: tenant selection info."""
+
     tenant_id: uuid.UUID | None
     tenant_name: str
     tenant_slug: str
@@ -109,6 +118,7 @@ class TenantChoice(BaseModel):
 
 class MultiTenantResponse(BaseModel):
     """Response when multiple tenants match the same login identifier."""
+
     requires_tenant_selection: bool = True
     login_identifier: str
     tenants: list[TenantChoice]
@@ -127,6 +137,7 @@ class TenantSwitchResponse(BaseModel):
 
 class IdentityOut(BaseModel):
     """Global identity information."""
+
     id: uuid.UUID
     email: str | None = None
     phone: str | None = None
@@ -204,6 +215,7 @@ class UserUpdate(BaseModel):
 
 
 # ─── Agent ──────────────────────────────────────────────
+
 
 class AgentCreate(BaseModel):
     name: str = Field(min_length=2, max_length=100, description="Agent name, 2-100 characters")
@@ -318,6 +330,7 @@ class AgentUpdate(BaseModel):
 
 class AgentStatusOut(BaseModel):
     """Agent status from state.json."""
+
     agent_id: uuid.UUID
     name: str
     status: str
@@ -330,12 +343,12 @@ class AgentStatusOut(BaseModel):
 # ─── Task ───────────────────────────────────────────────
 
 
-
 class ListTasksQuery(BaseModel):
     """任务列表查询参数 — 封装所有过滤、排序、分页参数.
 
     使用 Depends() 注入，保持向后兼容。
     """
+
     status_filter: str | None = Field(None, description="按状态过滤: pending/doing/done")
     type_filter: str | None = Field(None, description="按类型过滤: todo/supervision")
     priority_filter: str | None = Field(None, description="按优先级过滤: low/medium/high/urgent")
@@ -349,6 +362,7 @@ class ListTasksQuery(BaseModel):
 
 class TaskStatisticsOut(BaseModel):
     """任务统计响应."""
+
     by_status: dict[str, int]
     by_priority: dict[str, int]
     upcoming_deadline_count: int
@@ -357,6 +371,7 @@ class TaskStatisticsOut(BaseModel):
 
 class TaskPaginatedResponse(BaseModel):
     """任务分页响应."""
+
     items: list["TaskOut"]
     total: int
     page: int
@@ -423,6 +438,7 @@ class TaskLogOut(BaseModel):
 
 # ─── LLM ────────────────────────────────────────────────
 
+
 class LLMModelCreate(BaseModel):
     provider: str
     model: str
@@ -435,6 +451,7 @@ class LLMModelCreate(BaseModel):
     supports_vision: bool = False
     max_output_tokens: int | None = None
     request_timeout: int | None = None
+
 
 class LLMModelUpdate(BaseModel):
     provider: str | None = None
@@ -470,6 +487,7 @@ class LLMModelOut(BaseModel):
 
 # ─── Channel Config ─────────────────────────────────────
 
+
 class ChannelConfigCreate(BaseModel):
     channel_type: str = "feishu"
     app_id: str
@@ -498,6 +516,7 @@ class ChannelConfigOut(BaseModel):
 
 # ─── Approval ───────────────────────────────────────────
 
+
 class ApprovalRequestOut(BaseModel):
     id: uuid.UUID
     agent_id: uuid.UUID
@@ -518,8 +537,10 @@ class ApprovalAction(BaseModel):
 
 # ─── Enterprise Info ────────────────────────────────────
 
+
 class UserInviteRequest(BaseModel):
     emails: list[EmailStr] = Field(..., description="List of emails to invite")
+
 
 class EnterpriseInfoUpdate(BaseModel):
     content: dict
@@ -539,6 +560,7 @@ class EnterpriseInfoOut(BaseModel):
 
 # ─── Chat ───────────────────────────────────────────────
 
+
 class ChatMessageOut(BaseModel):
     id: uuid.UUID
     agent_id: uuid.UUID
@@ -557,6 +579,7 @@ class ChatSend(BaseModel):
 
 # ─── Audit Log ──────────────────────────────────────────
 
+
 class AuditLogOut(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID | None = None
@@ -571,6 +594,7 @@ class AuditLogOut(BaseModel):
 
 # ─── Generic ────────────────────────────────────────────
 
+
 class PaginatedResponse(BaseModel):
     items: list
     total: int
@@ -584,6 +608,7 @@ class HealthResponse(BaseModel):
 
 
 # ─── Gateway (OpenClaw) ─────────────────────────────────
+
 
 class GatewayHistoryItem(BaseModel):
     role: str  # "user" or "assistant"
@@ -611,7 +636,6 @@ class GatewayMessageOut(BaseModel):
     history: list[GatewayHistoryItem] = []
 
 
-
 class GatewayPollResponse(BaseModel):
     messages: list[GatewayMessageOut] = []
     relationships: list[GatewayRelationshipItem] = []
@@ -627,8 +651,9 @@ class GatewaySendMessageRequest(BaseModel):
     content: str = Field(min_length=1)
     channel: str | None = None  # Optional: "feishu", "agent", etc. Auto-detected if omitted.
 
+
 # 更新前向引用
 try:
     TaskPaginatedResponse.model_rebuild()
 except Exception:
-    pass
+    logger.warning("TaskPaginatedResponse.model_rebuild() failed, may affect schema validation", exc_info=True)

@@ -97,6 +97,14 @@ def _make_login_data(login_identifier="test@example.com", password="correctpassw
     )
 
 
+def _make_request(client_ip="127.0.0.1"):
+    """Create a minimal fake FastAPI Request for tests."""
+    return SimpleNamespace(
+        headers={"X-Forwarded-For": client_ip, "x-forwarded-for": client_ip},
+        client=SimpleNamespace(host=client_ip),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Login tests
 # ---------------------------------------------------------------------------
@@ -110,7 +118,7 @@ async def test_login_invalid_credentials_no_identity():
     bg = AsyncMock()
 
     with pytest.raises(HTTPException) as exc:
-        await auth_api.login(data, bg, db)
+        await auth_api.login(_make_request(), data, bg, db)
     assert exc.value.status_code == 401
 
 
@@ -123,7 +131,7 @@ async def test_login_invalid_credentials_wrong_password():
     bg = AsyncMock()
 
     with pytest.raises(HTTPException) as exc:
-        await auth_api.login(data, bg, db)
+        await auth_api.login(_make_request(), data, bg, db)
     assert exc.value.status_code == 401
 
 
@@ -136,7 +144,7 @@ async def test_login_disabled_account():
     bg = AsyncMock()
 
     with pytest.raises(HTTPException) as exc:
-        await auth_api.login(data, bg, db)
+        await auth_api.login(_make_request(), data, bg, db)
     assert exc.value.status_code == 403
     assert "disabled" in str(exc.value.detail).lower()
 
@@ -155,7 +163,7 @@ async def test_login_unverified_email():
 
     with patch.object(auth_api, "_send_verification_email_task", new_callable=AsyncMock):
         with pytest.raises(HTTPException) as exc:
-            await auth_api.login(data, bg, db)
+            await auth_api.login(_make_request(), data, bg, db)
     assert exc.value.status_code == 403
     assert exc.value.detail["needs_verification"] is True
 
@@ -169,6 +177,7 @@ async def test_login_unverified_email():
 async def test_get_me_returns_user():
     """GET /me with an authenticated user returns user data."""
     identity = _make_identity()
+    setattr(identity, 'is_platform_admin', False)
     user = SimpleNamespace(
         id=uuid.uuid4(),
         identity_id=identity.id,
@@ -177,6 +186,8 @@ async def test_get_me_returns_user():
         username=identity.username,
         email=identity.email,
         avatar_url=None,
+        is_active=True,
+        display_name=identity.username,
         identity=identity,
     )
 

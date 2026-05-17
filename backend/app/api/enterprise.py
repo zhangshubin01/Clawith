@@ -976,10 +976,44 @@ def validate_provider_config(provider_type: str, config: dict):
     return
 
 
+# OAuth2/SSO provider config 中的敏感字段名，存储前自动加密，读取时自动解密（#82 修复）
+_SENSITIVE_CONFIG_KEYS = {"client_secret", "app_secret"}
+
+def _encrypt_provider_secrets(config: dict) -> dict:
+    """对 provider config 中的敏感字段（client_secret/app_secret）进行加密存储。
+    使用 settings.SECRET_KEY 通过 AES-256-CBC + PBKDF2 派生密钥。
+    已加密的值（带 \\x01\\xca\\xfe 魔数头）不会重复加密。"""
+    if not config:
+        return config
+    key = settings.SECRET_KEY
+    for field in _SENSITIVE_CONFIG_KEYS:
+        value = config.get(field)
+        if value and isinstance(value, str) and not value.startswith("AW"):  # Base64 of 0x01 0xca 0xfe = "Acr+"
+            try:
+                config[field] = encrypt_data(value, key)
+            except Exception:
+                logger.warning("Failed to encrypt provider config field: %s", field)
+    return config
+
+def _decrypt_provider_secrets(config: dict) -> dict:
+    """解密 provider config 中被加密的敏感字段，用于 API 响应。"""
+    if not config:
+        return config
+    key = settings.SECRET_KEY
+    for field in _SENSITIVE_CONFIG_KEYS:
+        value = config.get(field)
+        if value and isinstance(value, str):
+            try:
+                config[field] = decrypt_data(value, key)
+            except Exception:
+                # 可能是未加密的旧数据，保持原样
+                pass
+    return config
+
 def _sanitize_identity_provider_config(provider_type: str, config: dict | None) -> dict | None:
     if config is None:
         return None
-    sanitized = dict(config)
+    sanitized = _decrypt_provider_secrets(dict(config))
     if provider_type == "google_workspace":
         sanitized.pop("google_admin_refresh_token", None)
         sanitized.pop("google_admin_refresh_token_encrypted", None)
@@ -1031,12 +1065,14 @@ async def create_identity_provider(
                 detail="IP address does not support multi-tenant SSO. Another tenant already has SSO enabled."
             )
 
+    # 加密 OAuth2/SSO client_secret 后再存入 DB，防止数据库泄露导致凭据泄漏（#82 修复）
+    encrypted_config = _encrypt_provider_secrets(dict(data.config))
     provider = IdentityProvider(
         provider_type=data.provider_type,
         name=data.name,
         is_active=data.is_active,
         sso_login_enabled=data.sso_login_enabled,
-        config=data.config,
+        config=encrypted_config,
         tenant_id=tid
     )
     db.add(provider)
@@ -1085,11 +1121,13 @@ async def create_oauth2_provider(
     if not tid:
         raise HTTPException(status_code=400, detail="tenant_id is required to create an identity provider")
 
+    # 加密 OAuth2 client_secret 后再存入 DB（#82 修复）
+    encrypted_config = _encrypt_provider_secrets(config)
     provider = IdentityProvider(
         provider_type="oauth2",
         name=data.name,
         is_active=data.is_active,
-        config=config,
+        config=encrypted_config,
         tenant_id=tid
     )
     db.add(provider)
@@ -1164,7 +1202,8 @@ async def update_oauth2_provider(
 
         # Validate the updated config
         validate_provider_config("oauth2", current_config)
-        provider.config = current_config
+        # 加密 OAuth2 client_secret 后再存入 DB（#82 修复）
+        provider.config = _encrypt_provider_secrets(current_config)
 
     await db.commit()
     await db.refresh(provider)
@@ -1211,15 +1250,15 @@ async def update_identity_provider(
                 )
         provider.sso_login_enabled = data.sso_login_enabled
     if data.config is not None:
-        # Merge config
-        new_config = provider.config.copy()
-        new_config.update(data.config)
-        
+        # Merge config — 先解密 DB 中的旧值，再合并新值，最后统一加密（#82 修复）
+        current_config = _decrypt_provider_secrets(provider.config.copy())
+        current_config.update(data.config)
+
         # Validate merged config
-        validate_provider_config(provider.provider_type, new_config)
-        
-        provider.config = new_config
-        
+        validate_provider_config(provider.provider_type, current_config)
+
+        provider.config = _encrypt_provider_secrets(current_config)
+
     await db.commit()
     await db.refresh(provider)
     auth_provider_registry._clear_cache(provider.provider_type)

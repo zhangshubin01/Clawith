@@ -39,3 +39,4 @@ docs/
 *.log
 .cursor/
 .agents/rules/deploy.md
+backups/

@@ -191,7 +191,11 @@ async def send_email(
     # Attach files
     if attachments and workspace_path:
         for rel_path in attachments:
-            full_path = workspace_path / rel_path
+            full_path = (workspace_path / rel_path).resolve()
+            # 防止路径遍历：确保解析后的路径仍在 workspace 内
+            if not str(full_path).startswith(str(workspace_path.resolve())):
+                logger.warning("[Email] Attachment path traversal blocked: {}", rel_path)
+                continue
             if full_path.exists() and full_path.is_file():
                 with open(full_path, "rb") as f:
                     part = MIMEBase("application", "octet-stream")

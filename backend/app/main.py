@@ -39,7 +39,7 @@ def _log_bwrap_startup_status() -> None:
         return
 
     if in_container:
-        logger.warning(
+        logger.info(
             "[startup] bubblewrap (bwrap) is not installed in the backend container. "
             "The service will still start, but execute_code will fail closed unless "
             "SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true is explicitly set."
@@ -47,12 +47,12 @@ def _log_bwrap_startup_status() -> None:
         return
 
     if settings.SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING:
-        logger.warning(
+        logger.info(
             "[startup] bubblewrap (bwrap) is not installed on the host. "
             "Local execute_code will use the reduced-isolation fallback."
         )
     else:
-        logger.warning(
+        logger.info(
             "[startup] bubblewrap (bwrap) is not installed on the host. "
             "execute_code will fail closed unless SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true is set."
         )
@@ -69,17 +69,14 @@ async def _start_ss_local() -> None:
         logger.info("[Proxy] ss-local not found — Discord proxy disabled")
         return
     # Load proxy nodes from config file (gitignored, mounted as Docker volume)
-    import json as _json
     cfg_file = os.environ.get("SS_CONFIG_FILE", "/data/ss-nodes.json")
     if os.path.exists(cfg_file):
-        # Guard against empty or malformed config file — both produce a clear
-        # warning and a clean exit rather than an unhandled JSONDecodeError.
         try:
-            raw = open(cfg_file).read().strip()
+            raw = Path(cfg_file).read_text().strip()
             if not raw:
                 logger.warning(f"[Proxy] {cfg_file} exists but is empty — skipping proxy")
                 return
-            nodes = _json.loads(raw)
+            nodes = json.loads(raw)
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning(f"[Proxy] Failed to parse {cfg_file}: {exc} — skipping proxy")
             return
@@ -95,6 +92,7 @@ async def _start_ss_local() -> None:
                "local_port": 1080, "password": node["password"], "method": node["method"], "timeout": 10}
         tf = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
         json.dump(cfg, tf); tf.close()
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ss-local", "-c", tf.name,
@@ -104,10 +102,13 @@ async def _start_ss_local() -> None:
                 os.environ["DISCORD_PROXY"] = "socks5h://127.0.0.1:1080"
                 logger.info(f"[Proxy] ss-local → {node['label']} ({node['server']}:{node['port']})")
                 return
-            err = (await proc.stderr.read()).decode()[:120]
+            err = (await proc.stderr.read()).decode("utf-8", errors="replace")[:120]
             logger.warning(f"[Proxy] {node['label']} failed: {err}")
         except Exception as e:
             logger.error(f"[Proxy] {node['label']} error: {e}")
+        finally:
+            if proc is None or proc.returncode is not None:
+                Path(tf.name).unlink(missing_ok=True)
     logger.warning("[Proxy] All SS nodes failed — Discord API calls will run without proxy")
 
 
@@ -313,6 +314,9 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    from app.services.connection_manager import manager
+    ss_task.cancel()
+    await manager.shutdown()
     await close_redis()
 
 
@@ -456,14 +460,14 @@ def _load_version_info() -> dict[str, str]:
     version = "unknown"
     for candidate in ["../frontend/VERSION", "frontend/VERSION", "VERSION"]:
         try:
-            version = open(candidate).read().strip()
+            version = Path(candidate).read_text().strip()
             break
         except FileNotFoundError:
             continue
     commit = ""
     for commit_file in ["../COMMIT", "COMMIT", "../frontend/COMMIT"]:
         try:
-            commit = open(commit_file).read().strip()
+            commit = Path(commit_file).read_text().strip()
             break
         except FileNotFoundError:
             continue
@@ -472,9 +476,9 @@ def _load_version_info() -> dict[str, str]:
             commit = subprocess.check_output(
                 ["git", "rev-parse", "--short", "HEAD"],
                 stderr=subprocess.DEVNULL, timeout=3,
-            ).decode().strip()
-        except Exception:
-            pass
+            ).decode("utf-8", errors="replace").strip()
+        except Exception as e:
+            logger.debug("Failed to resolve git commit: {}", e)
     return {"version": version, "commit": commit}
 
 _version_cache = _load_version_info()

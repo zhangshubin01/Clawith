@@ -77,6 +77,7 @@ from app.database import async_session
 from app.models.channel_config import ChannelConfig
 from sqlalchemy import select
 
+_feishu_ws_bg: set[asyncio.Task] = set()
 
 if not _HAS_LARK:
     logger.warning(
@@ -267,7 +268,9 @@ class FeishuWSManager:
                     await client._connect()
             else:
                 await client._connect()
-            asyncio.create_task(client._ping_loop())
+            _pt = asyncio.create_task(client._ping_loop())
+            _feishu_ws_bg.add(_pt)
+            _pt.add_done_callback(_feishu_ws_bg.discard)
 
         async def _run_async_client():
             try:

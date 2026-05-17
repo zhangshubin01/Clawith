@@ -161,7 +161,7 @@ function markdownToHtml(md: string): string {
             if (!inCodeBlock) {
                 flushPara(); flushList(); flushBlockquote(); flushTable();
                 inCodeBlock = true;
-                codeLang = line.slice(3).trim();
+                codeLang = line.slice(3).trim().replace(/[^a-zA-Z0-9+#.\-_]/g, '');
                 codeLines = [];
             } else {
                 const codeContent = escapeHtml(codeLines.join('\n'));

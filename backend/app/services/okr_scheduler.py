@@ -15,7 +15,7 @@ Design decisions:
 
 import re
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -184,7 +184,7 @@ async def collect_all_focus_updates(
 
                     prev_value = kr.current_value
                     kr.current_value = value
-                    kr.last_updated_at = datetime.utcnow()
+                    kr.last_updated_at = datetime.now(timezone.utc)
 
                     # Auto-compute status from progress ratio
                     if kr.target_value:
@@ -469,13 +469,11 @@ async def generate_weekly_report(
         if not okr_settings or not okr_settings.enabled:
             return "OKR is not enabled for this tenant."
 
-        previous_month_ref = date.today().replace(day=1) - timedelta(days=1)
         objectives, krs_by_obj, ps, pe = await _build_okr_snapshot(
             tenant_id,
             db,
             okr_settings.period_frequency,
             okr_settings.period_length_days,
-            target_date=previous_month_ref,
         )
 
         content = _format_report_body(objectives, krs_by_obj, ps, pe, "weekly")

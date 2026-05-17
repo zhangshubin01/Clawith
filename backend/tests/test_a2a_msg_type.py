@@ -6,6 +6,7 @@ Validates the branching logic in _send_message_to_agent:
 - consult:   synchronous request-response (original behaviour)
 """
 
+import json
 import uuid
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch

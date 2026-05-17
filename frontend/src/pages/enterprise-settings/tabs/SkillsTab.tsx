@@ -1,9 +1,14 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import PromptModal from '../../../components/PromptModal';
 import FileBrowser from '../../../components/FileBrowser';
 import type { FileBrowserApi } from '../../../components/FileBrowser';
 import { skillApi } from '../../../services/api';
+import { useQueryClient } from '@tanstack/react-query';
+import { fetchJson } from '../utils/fetchJson';
+import { IconCheck } from '@tabler/icons-react';
+import { useAuthStore } from '../../../stores';
+import { CompanyRegion, buildCompanyRegions } from '../../../utils/companyRegions';
 
 // ─── Skills Tab ────────────────────────────────────
 export default function SkillsTab() {
@@ -1067,197 +1072,6 @@ function CompanyTimezoneEditor() {
                         )}
                     </div>
                 )}
-            </div>
-        </div>
-    );
-}
-
-
-function A2AAsyncToggle() {
-    const { t, i18n } = useTranslation();
-    const user = useAuthStore((s) => s.user);
-    const tenantId = user?.tenant_id || localStorage.getItem('current_tenant_id') || '';
-    const [enabled, setEnabled] = useState(false);
-    const [saving, setSaving] = useState(false);
-    const [error, setError] = useState('');
-    const zh = i18n.language?.startsWith('zh');
-
-    useEffect(() => {
-        if (!tenantId) return;
-        fetchJson<any>(`/tenants/${tenantId}`)
-            .then(d => setEnabled(!!d?.a2a_async_enabled))
-            .catch((e: any) => setError(e.message || 'Failed to load A2A setting'));
-    }, [tenantId]);
-
-    const handleToggle = async () => {
-        if (!tenantId || saving) return;
-        const next = !enabled;
-        setEnabled(next);
-        setSaving(true);
-        setError('');
-        try {
-            await fetchJson(`/tenants/${tenantId}`, {
-                method: 'PUT',
-                body: JSON.stringify({ a2a_async_enabled: next }),
-            });
-        } catch (e: any) {
-            setEnabled(!next);
-            setError(e.message || 'Failed to save A2A setting');
-        } finally {
-            setSaving(false);
-        }
-    };
-
-    return (
-        <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
-            <div style={{ fontSize: '13px', fontWeight: 500, marginBottom: '4px' }}>
-                {zh ? 'Agent 异步协作（Beta）' : 'Agent Async Collaboration (Beta)'}
-            </div>
-            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                {zh
-                    ? '开启后，数字员工之间可使用 notify / task_delegate 等异步协作模式。关闭后，Agent 间消息统一走同步 consult。'
-                    : 'When enabled, agents can use async notify and task_delegate modes. When disabled, agent-to-agent messaging falls back to synchronous consult.'}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}>
-                <div style={{ width: '100%' }}>
-                    {error && (
-                        <div style={{ fontSize: '11px', color: 'var(--error)' }}>
-                            {error}
-                        </div>
-                    )}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    <label style={{ position: 'relative', display: 'inline-block', width: '40px', height: '22px', flexShrink: 0, opacity: saving ? 0.6 : 1 }}>
-                        <input
-                            type="checkbox"
-                            checked={enabled}
-                            onChange={handleToggle}
-                            disabled={saving || !tenantId}
-                            style={{ opacity: 0, width: 0, height: 0 }}
-                        />
-                        <span style={{
-                            position: 'absolute', inset: 0,
-                            borderRadius: '999px',
-                            cursor: saving ? 'not-allowed' : 'pointer',
-                            background: enabled ? 'var(--accent-primary)' : 'var(--border-subtle)',
-                            transition: '0.2s',
-                        }}>
-                            <span style={{
-                                position: 'absolute',
-                                top: '2px',
-                                left: enabled ? '20px' : '2px',
-                                width: '18px',
-                                height: '18px',
-                                borderRadius: '50%',
-                                background: '#fff',
-                                transition: '0.2s',
-                                boxShadow: '0 1px 2px rgba(0,0,0,0.12)',
-                            }} />
-                        </span>
-                    </label>
-                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                        {enabled ? (zh ? '已开启' : 'Enabled') : (zh ? '已关闭' : 'Disabled')}
-                    </span>
-                </div>
-            </div>
-            <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text-tertiary)', maxWidth: '640px' }}>
-                {zh
-                    ? '说明：OKR 日报收集本身会优先使用更稳的同步方式，不依赖这里的异步开关。'
-                    : 'Note: OKR daily collection itself uses the more reliable synchronous path and does not depend on this toggle.'}
-            </div>
-        </div>
-    );
-}
-
-
-// ── Broadcast Section ──────────────────────────
-function BroadcastSection() {
-    const { t } = useTranslation();
-    const toast = useToast();
-    const [title, setTitle] = useState('');
-    const [body, setBody] = useState('');
-    const [sendEmail, setSendEmail] = useState(false);
-    const [sending, setSending] = useState(false);
-    const [result, setResult] = useState<{ users: number; agents: number; emails: number } | null>(null);
-
-    const handleSend = async () => {
-        if (!title.trim()) return;
-        setSending(true);
-        setResult(null);
-        try {
-            const token = localStorage.getItem('token');
-            const res = await fetch('/api/notifications/broadcast', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                body: JSON.stringify({ title: title.trim(), body: body.trim(), send_email: sendEmail }),
-            });
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                toast.error('广播发送失败', { details: String(err.detail || `HTTP ${res.status}`) });
-                setSending(false);
-                return;
-            }
-            const data = await res.json();
-            setResult({
-                users: data.users_notified,
-                agents: data.agents_notified,
-                emails: data.emails_sent || 0,
-            });
-            setTitle('');
-            setBody('');
-            setSendEmail(false);
-        } catch (e: any) {
-            toast.error('广播发送失败', { details: String(e?.message || e) });
-        }
-        setSending(false);
-    };
-
-    return (
-        <div style={{ marginTop: '24px', marginBottom: '24px' }}>
-            <h3 style={{ marginBottom: '4px' }}>{t('enterprise.broadcast.title', 'Broadcast Notification')}</h3>
-            <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
-                {t('enterprise.broadcast.description', 'Send a notification to all users and agents in this company.')}
-            </p>
-            <div className="card" style={{ padding: '16px' }}>
-                <input
-                    className="form-input"
-                    placeholder={t('enterprise.broadcast.titlePlaceholder', 'Notification title')}
-                    value={title}
-                    onChange={e => setTitle(e.target.value)}
-                    maxLength={200}
-                    style={{ marginBottom: '8px', fontSize: '13px' }}
-                />
-                <textarea
-                    className="form-input"
-                    placeholder={t('enterprise.broadcast.bodyPlaceholder', 'Optional details...')}
-                    value={body}
-                    onChange={e => setBody(e.target.value)}
-                    maxLength={1000}
-                    rows={3}
-                    style={{ resize: 'vertical', fontSize: '13px', marginBottom: '12px' }}
-                />
-                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', fontSize: '13px' }}>
-                    <input
-                        type="checkbox"
-                        checked={sendEmail}
-                        onChange={e => setSendEmail(e.target.checked)}
-                    />
-                    <span>{t('enterprise.broadcast.sendEmail', 'Also send email to users with a configured address')}</span>
-                </label>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                    <button className="btn btn-primary" onClick={handleSend} disabled={sending || !title.trim()}>
-                        {sending ? t('common.loading') : t('enterprise.broadcast.send', 'Send Broadcast')}
-                    </button>
-                    {result && (
-                        <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                            {t(
-                                'enterprise.broadcast.sentWithEmail',
-                                `Sent to ${result.users} users, ${result.agents} agents, and ${result.emails} email recipients`,
-                                { users: result.users, agents: result.agents, emails: result.emails },
-                            )}
-                        </span>
-                    )}
-                </div>
             </div>
         </div>
     );

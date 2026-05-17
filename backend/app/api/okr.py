@@ -38,6 +38,9 @@ from app.models.okr import (
     WorkReport,
 )
 
+# 后台任务强引用集合
+_okr_bg: set[asyncio.Task] = set()
+
 router = APIRouter(prefix="/okr", tags=["okr"])
 
 
@@ -1074,7 +1077,7 @@ async def update_kr_progress_endpoint(
 
     prev_value = kr.current_value
     kr.current_value = body.value
-    kr.last_updated_at = datetime.utcnow()
+    kr.last_updated_at = datetime.now(timezone.utc)
 
     # Update status: use explicit override or auto-compute from progress ratio
     if body.status and body.status in ("on_track", "at_risk", "behind", "completed"):

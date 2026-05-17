@@ -92,7 +92,7 @@ def extract_token_usage(usage: dict | None) -> TokenUsage | None:
                 "cache_creation_input_tokens",
             )
         if cached or cache_creation:
-            logger.info(
+            logger.debug(
                 f"[Token Cache] API Provider -> Created: {cache_creation} tokens, "
                 f"Read: {cached} tokens"
             )
@@ -118,7 +118,7 @@ def extract_token_usage(usage: dict | None) -> TokenUsage | None:
             cache_creation += _token_counter(details, "cache_creation_input_tokens", "cache_creation_tokens")
             cache_read += _token_counter(details, "cached_tokens", "cache_read_input_tokens", "cache_read_tokens")
         if cache_creation or cache_read:
-            logger.info(f"[Token Cache] Anthropic Native Hit -> Created: {cache_creation}, Read: {cache_read} tokens")
+            logger.debug(f"[Token Cache] Anthropic Native Hit -> Created: {cache_creation}, Read: {cache_read} tokens")
         input_tokens = _int_token(usage.get("input_tokens", 0))
         output_tokens = _int_token(usage.get("output_tokens", 0))
         return TokenUsage(

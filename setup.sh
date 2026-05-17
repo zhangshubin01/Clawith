@@ -26,14 +26,14 @@ get_server_ip() {
     echo "$ip"
 }
 
-# --- Check Python version (>= 3.12 required) ---
+# --- Check Python version (>= 3.11, consistent with pyproject.toml) ---
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if command -v "$PYTHON_BIN" &>/dev/null; then
     PY_VER=$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
     PY_MAJOR=$(echo "$PY_VER" | cut -d. -f1)
     PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
-    if [ "$PY_MAJOR" -lt 3 ] || ([ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 12 ]); then
-        echo -e "${RED}Python $PY_VER detected, but Clawith requires Python >= 3.12.${NC}"
+    if [ "$PY_MAJOR" -lt 3 ] || ([ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -lt 11 ]); then
+        echo -e "${RED}Python $PY_VER detected, but Clawith requires Python >= 3.11.${NC}"
         echo ""
         echo "  Please install Python 3.12+:"
         echo "    Ubuntu:     sudo apt install python3.12 python3.12-venv"

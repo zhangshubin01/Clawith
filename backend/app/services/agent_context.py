@@ -5,6 +5,7 @@ workspace files and composes a comprehensive system prompt.
 """
 
 import asyncio
+import threading
 import uuid
 from collections import OrderedDict
 from contextvars import ContextVar
@@ -26,7 +27,7 @@ _is_ide_session: ContextVar[bool] = ContextVar("_is_ide_session", default=False)
 # ─── Context File Cache (LRU + mtime invalidation) ───────────────────────────────
 _MAX_CONTEXT_CACHE_SIZE = 100
 _context_file_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()  # key: "agent_id:filename", value: (content, mtime)
-_context_cache_lock = asyncio.Lock()
+_context_cache_lock = threading.Lock()
 
 # ─── Skills Index Cache (separate, per-agent) ───────────────────────────────────────────
 _MAX_SKILLS_CACHE_SIZE = 100
@@ -48,24 +49,23 @@ def _read_file_cached(agent_id: uuid.UUID, filename: str, max_chars: int = 3000)
     ws = _agent_workspace(agent_id)
     filepath = ws / filename
 
-    # Fast path: lock-free read for cache hit (OrderedDict is thread-safe for atomic ops)
-    # Only lock for write operations (cache miss / eviction)
-    if cache_key in _context_file_cache:
-        content, cached_mtime = _context_file_cache[cache_key]
-        if filepath.exists():
-            current_mtime = filepath.stat().st_mtime
-            if current_mtime == cached_mtime:
-                # Move to end (most recently used) - atomic for read
-                try:
-                    _context_file_cache.move_to_end(cache_key)
-                except KeyError:
-                    pass  # Already removed, fall through
-                return content
-        # mtime changed, invalidate
-        try:
-            del _context_file_cache[cache_key]
-        except KeyError:
-            pass
+    # 持有锁进行读写操作，避免协程并发时 OrderedDict 的竞态条件
+    with _context_cache_lock:
+        if cache_key in _context_file_cache:
+            content, cached_mtime = _context_file_cache[cache_key]
+            if filepath.exists():
+                current_mtime = filepath.stat().st_mtime
+                if current_mtime == cached_mtime:
+                    try:
+                        _context_file_cache.move_to_end(cache_key)
+                    except KeyError:
+                        pass  # Already removed, fall through
+                    return content
+            # mtime changed, invalidate
+            try:
+                del _context_file_cache[cache_key]
+            except KeyError:
+                pass
     if not filepath.exists():
         return ""
 
@@ -688,10 +688,29 @@ Default visual style for generated HTML or rich visual documents:
 
 10. **你必须始终使用中文回复用户，即使用户使用其他语言提问。**
 
-11. **Keep user-facing replies clean and restrained.**
-   - Do not use emoji in normal replies unless the user explicitly asks for them or the emoji is part of quoted/source content.
-   - Prefer plain text labels such as "Success", "Warning", "Error", "Summary", or "Next steps" instead of emoji-prefixed headings.
-   - If tool results contain emoji, do not copy those emoji into the final user-facing answer by default.
+11. **🪨 极简回复规则（ultra 级别）**（#120 修复：从一行扩展为完整正反例）
+
+**删除**: 冠词(a/an/the)、废话词(just/really/basically/actually/simply)、客套话(sure/certainly/happy to/I'd recommend)、犹豫词(it might be worth/you could consider)
+**保留**: 技术术语完整、代码块不变、错误消息/命令原文引用、文件路径绝对精确
+**模式**: `[诊断] → [原因] → [修复]`。三个短句内讲清核心。
+**缩写**: DB/auth/config/req/res/fn/impl 等通用词允许缩写。箭头(→)替代因果连词。
+
+示例对比：
+❌ "Sure! I'd be happy to help you with that. The issue is likely caused by the authentication middleware not properly validating the token expiry."
+✅ "Token 过期校验 < 改 <=。修复 auth.py 行 42。"
+
+❌ "数据库连接池复用已打开的连接，避免每次请求新建连接的开销"
+✅ "池 reuse DB conn。Skip handshake → fast under load。"
+
+❌ "I analyzed the codebase and found the following issues. First, let me explain the architecture..."
+✅ "3 个问题：(1) Cache key 未加 version 前缀 (2) DB pool size=5 高并发排队 (3) 缺少超时中断"
+
+**不要用 emoji**。工具结果中的 emoji 不复制到最终回复。用 Success/Warning/Error 代替 emoji 前缀。
+
+**自动恢复完整模式**（以下情况可展开详述）:
+- 安全漏洞警告（XSS、SQL注入、路径遍历等）
+- 不可逆操作确认（delete_file、DROP TABLE、git push --force）
+- 用户明确要求详细解释
 
 12. **Never assume a file exists — always verify with `list_files` first.**
 

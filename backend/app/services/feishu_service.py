@@ -298,7 +298,7 @@ class FeishuService:
             identity = await registration_service.find_or_create_identity(
                 db,
                 email=email,
-                phone=user_info.get("mobile"),
+                phone=feishu_user.get("mobile"),
                 username=username,
                 password=open_id,
             )
@@ -537,7 +537,7 @@ class FeishuService:
             app_token = token_resp.json().get("app_access_token", "")
             headers = {"Authorization": f"Bearer {app_token}"}
 
-            # Upload file
+            # Upload file (同步 I/O 在异步上下文中，小文件可接受；大文件应改用 aiofiles)
             with open(fp, "rb") as f:
                 file_bytes = f.read()
             # Determine file type for Feishu upload

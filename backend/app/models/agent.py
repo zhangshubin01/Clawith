@@ -32,8 +32,8 @@ class Agent(Base):
     welcome_message: Mapped[str | None] = mapped_column(Text, default=None)
 
     # Ownership
-    creator_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"))
+    creator_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
 
     # Agent type: 'native' (platform-hosted LLM) or 'openclaw' (remote OpenClaw bot)
     agent_type: Mapped[str] = mapped_column(String(20), default="native", nullable=False)

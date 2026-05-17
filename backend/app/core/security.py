@@ -13,7 +13,7 @@ from Crypto.Util.Padding import pad, unpad
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import jwt
-from jwt import PyJWTError
+from jwt import ExpiredSignatureError, PyJWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -119,9 +119,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(user_id: str, role: str, expires_delta: timedelta | None = None) -> str:
     """Create a JWT access token."""
-    expire = datetime.now(timezone.utc) + (
-        expires_delta or timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode = {
         "sub": user_id,
         "role": role,
@@ -140,6 +138,27 @@ def decode_access_token(token: str) -> dict:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
+        )
+
+
+def decode_access_token_soft(token: str) -> dict:
+    """解码 JWT 但不验证过期时间（#217 修复：用于 refresh 端点）。
+
+    仅验证签名和格式正确性，容忍 exp 已过期的 token。
+    """
+    try:
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+            options={"verify_exp": False},
+        )
+        return payload
+    except PyJWTError:
+        logger.warning("[security] JWT soft-decode failed: invalid token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
         )
 
 
@@ -199,11 +218,7 @@ async def get_authenticated_user(
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    result = await db.execute(
-        select(User)
-        .where(User.id == uuid.UUID(user_id))
-        .options(selectinload(User.identity))
-    )
+    result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)).options(selectinload(User.identity)))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
@@ -211,7 +226,11 @@ async def get_authenticated_user(
 
 
 async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
-    """Authenticate thin clients via JWT token (cw- API Key support removed)."""
+    """Authenticate thin clients via JWT token (cw- API Key support removed).
+
+    #217 修复：区分 token_expired 和 invalid token，
+    让 IDE 插件收到 token_expired 后可以尝试调用 /api/auth/refresh 换新 token。
+    """
     from app.database import async_session
     from app.models.user import User
 
@@ -222,8 +241,31 @@ async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
         )
     raw = str(token).strip()
 
-    # cw- API Key 分支已删除，仅支持 JWT
-    payload = decode_access_token(raw)
+    # 先尝试验证完整 token（含过期检查）
+    try:
+        payload = jwt.decode(raw, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+    except ExpiredSignatureError:
+        # #217：过期 token 返回特定错误码，客户端可尝试 refresh
+        try:
+            payload = jwt.decode(
+                raw, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM], options={"verify_exp": False}
+            )
+        except PyJWTError:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        user_id = payload.get("sub")
+        if user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="token_expired",
+            )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    except PyJWTError:
+        logger.warning("[security] JWT decode failed: invalid token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(
@@ -232,9 +274,7 @@ async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
         )
     async with async_session() as db:
         result = await db.execute(
-            select(User)
-            .where(User.id == uuid.UUID(str(user_id)))
-            .options(selectinload(User.identity))
+            select(User).where(User.id == uuid.UUID(str(user_id))).options(selectinload(User.identity))
         )
         user = result.scalar_one_or_none()
         if not user or not user.is_active:
@@ -264,12 +304,16 @@ def require_role(*allowed_roles: str):
         @router.post("/", dependencies=[Depends(require_role("org_admin", "platform_admin"))])
         async def my_endpoint(...):
     """
+
     async def _check(current_user=Depends(get_current_user)):
         identity_is_platform_admin = bool(getattr(getattr(current_user, "identity", None), "is_platform_admin", False))
-        if current_user.role not in allowed_roles and not ("platform_admin" in allowed_roles and identity_is_platform_admin):
+        if current_user.role not in allowed_roles and not (
+            "platform_admin" in allowed_roles and identity_is_platform_admin
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"需要以下角色之一: {', '.join(allowed_roles)}",
             )
         return current_user
+
     return _check

@@ -58,6 +58,9 @@ from app.models.user import User
 
 router = APIRouter(tags=["openai-compat"])
 
+# 模块级后台任务集合，保存 asyncio.create_task 返回值防止 GC 回收
+_bg_tasks: set[asyncio.Task] = set()
+
 security = HTTPBearer(auto_error=False)
 
 
@@ -429,7 +432,7 @@ async def openai_chat_completions(
         return _oai_response(cid, model_ref, reply)
 
     # ── 流式（SSE） ─────────────────────────────────────────────────────────
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
 
     async def on_chunk(text: str) -> None:
         await queue.put(("chunk", text))
@@ -450,7 +453,10 @@ async def openai_chat_completions(
         except Exception as exc:
             await queue.put(("error", str(exc)))
 
-    asyncio.create_task(run_llm())
+    # 保存 Task 引用防 GC 回收；done 时自动从集合移除
+    _t = asyncio.create_task(run_llm())
+    _bg_tasks.add(_t)
+    _t.add_done_callback(_bg_tasks.discard)
 
     async def event_stream():
         yield _oai_chunk_role(cid, model_ref)   # 第一个 chunk：声明 role

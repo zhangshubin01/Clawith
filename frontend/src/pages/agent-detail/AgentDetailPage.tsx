@@ -3903,7 +3903,7 @@ export default function AgentDetailPage() {
     const { data: schedules = [] } = useQuery({
         queryKey: ['schedules', id],
         queryFn: () => scheduleApi.list(id!),
-        enabled: !!id && activeTab === 'tasks',
+        enabled: !!id && (activeTab as string) === 'tasks',
     });
 
     // Schedule form state
@@ -3985,7 +3985,7 @@ export default function AgentDetailPage() {
         if (activeTab !== 'chat') return;
         queryClient.refetchQueries({ queryKey: ['llm-models'] });
         queryClient.refetchQueries({ queryKey: ['tenant', 'me'] });
-    }, [activeTab, location.key, queryClient]);
+    }, [activeTab, (location as any).key, queryClient]);
 
     const enabledLlmModels = useMemo(
         () => (llmModels as any[]).filter((m: any) => m.enabled),

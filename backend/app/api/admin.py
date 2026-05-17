@@ -222,7 +222,7 @@ async def get_platform_timeseries(
     from app.models.activity_log import DailyTokenUsage
     from app.models.chat_session import ChatSession
     from sqlalchemy import cast, Date, text
-    from datetime import timedelta
+    from datetime import timedelta, timezone
 
     # 1. New Companies per day
     companies_q = await db.execute(
@@ -437,9 +437,9 @@ async def get_enhanced_metrics(
     from app.models.chat_session import ChatSession
     from app.models.tool import Tool, AgentTool
     from sqlalchemy import text
-    from datetime import timedelta
+    from datetime import timedelta, timezone
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # ── 1. Average tokens per session (last 30 days) ──
     # Sum of daily_token_usage / count of chat_sessions in last 30 days

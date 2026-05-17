@@ -40,6 +40,9 @@ from app.api.feishu import _call_agent_llm
 from app.schemas.schemas import ChannelConfigOut
 from app.services.wecom_stream import wecom_stream_manager
 
+_wecom_bg: set[asyncio.Task] = set()
+
+
 router = APIRouter(tags=["wecom"])
 
 
@@ -230,12 +233,14 @@ async def configure_wecom_channel(
 
     try:
         if has_ws_mode:
-            asyncio.create_task(
-                wecom_stream_manager.start_client(agent_id, bot_id, bot_secret)
-            )
+            _t = asyncio.create_task(wecom_stream_manager.start_client(agent_id, bot_id, bot_secret) )
+            _wecom_bg.add(_t)
+            _t.add_done_callback(_wecom_bg.discard)
             logger.info(f"[WeCom] WebSocket client start triggered for agent {agent_id}")
         else:
-            asyncio.create_task(wecom_stream_manager.stop_client(agent_id))
+            _t = asyncio.create_task(wecom_stream_manager.stop_client(agent_id))
+            _wecom_bg.add(_t)
+            _t.add_done_callback(_wecom_bg.discard)
             logger.info(f"[WeCom] WebSocket client stop triggered for agent {agent_id}")
     except Exception as e:
         logger.error(f"[WeCom] Failed to update WebSocket client state: {e}")
@@ -425,16 +430,16 @@ async def wecom_event_webhook(
             return Response(content="success", media_type="text/plain")
 
         # Process in background task
-        asyncio.create_task(
-            _process_wecom_text(db, agent_id, config, from_user, user_text, chat_id=chat_id)
-        )
+        _t = asyncio.create_task(_process_wecom_text(db, agent_id, config, from_user, user_text, chat_id=chat_id) )
+        _wecom_bg.add(_t)
+        _t.add_done_callback(_wecom_bg.discard)
 
     elif msg_type == "event":
         event = msg_root.findtext("Event", "")
         if event == "kf_msg_or_event":
-            asyncio.create_task(
-                _process_wecom_kf_event(agent_id, config, token, open_kfid)
-            )
+            _t = asyncio.create_task(_process_wecom_kf_event(agent_id, config, token, open_kfid) )
+            _wecom_bg.add(_t)
+            _t.add_done_callback(_wecom_bg.discard)
         else:
             logger.info(f"[WeCom] Received event: {event} (not handled)")
 

@@ -12,8 +12,12 @@
     - 删除任务接口
 """
 
+import asyncio
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
+
+# 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
+_bg_tasks: set[asyncio.Task] = set()
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access
@@ -31,6 +35,8 @@ from app.schemas.schemas import (
     TaskUpdate,
 )
 from app.services.task_service import TaskService
+
+
 
 router = APIRouter(prefix="/agents/{agent_id}/tasks", tags=["tasks"])
 
@@ -155,7 +161,9 @@ async def create_task(
     if data.type == "todo":
         import asyncio
         from app.services.task_executor import execute_task
-        asyncio.create_task(execute_task(task.id, agent_id))
+        _t = asyncio.create_task(execute_task(task.id, agent_id))
+        _bg_tasks.add(_t)
+        _t.add_done_callback(_bg_tasks.discard)
 
     return task_out
 
@@ -263,8 +271,9 @@ async def trigger_task(
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
 
-    import asyncio
     from app.services.task_executor import execute_task
-    asyncio.create_task(execute_task(task.id, agent_id))
+    _t = asyncio.create_task(execute_task(task.id, agent_id))
+    _bg_tasks.add(_t)
+    _t.add_done_callback(_bg_tasks.discard)
 
     return {"status": "triggered", "task_id": str(task_id)}

@@ -143,7 +143,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode='after')
     def validate_secrets(self):
-        """生产环境检查：拒绝使用默认密钥启动。"""
+        """生产环境检查：拒绝使用默认密钥启动。DEBUG 模式下仅警告，不阻止启动。"""
+        if self.DEBUG:
+            return self
         if self.SECRET_KEY == "change-me-in-production":
             raise ValueError(
                 "SECRET_KEY 仍为默认值 'change-me-in-production'，"

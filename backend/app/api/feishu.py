@@ -597,7 +597,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
 
         if msg_type in ("file", "image"):
             import asyncio as _asyncio
-            _asyncio.create_task(
+            asyncio.create_task(
                 _handle_feishu_file(
                     db,
                     agent_id,
@@ -1085,7 +1085,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                         db.add(task_obj)
                         await db.commit()
                         await db.refresh(task_obj)
-                        _asyncio.create_task(execute_task(task_obj.id, agent_id))
+                        asyncio.create_task(execute_task(task_obj.id, agent_id))
                         reply_text += f"\n\n📋 已同步创建任务到任务面板：【{task_title}】"
                         logger.info(f"[Feishu] Created task: {task_title}")
                     except Exception as e:

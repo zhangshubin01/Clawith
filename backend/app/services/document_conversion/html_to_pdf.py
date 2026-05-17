@@ -67,12 +67,14 @@ async def convert_html_to_pdf(src_file: Path, tgt_file: Path, target_path: str, 
                     return False
 
                 file_url = src_file.resolve().as_uri()
-                r = await client.put(f"{base}/json/new?{file_url}")
-                target = r.json()
-                await client.aclose()
-                ws_url = target.get("webSocketDebuggerUrl")
-                if not ws_url:
-                    return False
+                try:
+                    r = await client.put(f"{base}/json/new?{file_url}")
+                    target = r.json()
+                    ws_url = target.get("webSocketDebuggerUrl")
+                    if not ws_url:
+                        return False
+                finally:
+                    await client.aclose()
 
                 msg_id = 0
                 async with websockets.connect(ws_url, max_size=20_000_000) as ws_conn:

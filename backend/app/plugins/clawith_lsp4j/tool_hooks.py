@@ -607,7 +607,7 @@ def install_lsp4j_tool_hooks() -> None:
             tool_name = mapped_name
             is_lsp4j_tool = tool_name in LSP4J_IDE_TOOL_NAMES
 
-        logger.info("[LSP4J-TOOL] execute_tool: name={} lsp4j_ws={} is_lsp4j_tool={}",
+        logger.debug("[LSP4J-TOOL] execute_tool: name={} lsp4j_ws={} is_lsp4j_tool={}",
                      tool_name, lsp4j_ws is not None, is_lsp4j_tool)
 
         # ★ 路径判断：相对路径 → agent 工作空间文件（如 focus.md），走本地执行
@@ -634,7 +634,7 @@ def install_lsp4j_tool_hooks() -> None:
                 logger.debug("[LSP4J-TOOL] 参数名映射: tool={} map={}", tool_name, name_map)
 
             # LSP4J 路径：通过 WebSocket 调用 IDE 端工具
-            logger.info("[LSP4J-TOOL] 走 LSP4J 路径: tool={} args={}", tool_name,
+            logger.debug("[LSP4J-TOOL] 走 LSP4J 路径: tool={} args={}", tool_name,
                          {k: (v[:50] + "...") if isinstance(v, str) and len(v) > 50 else v
                           for k, v in args.items()})
             try:

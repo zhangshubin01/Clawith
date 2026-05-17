@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update, func, desc, exists, and_
 
 from app.api.auth import get_current_user
@@ -29,6 +29,7 @@ def _hidden_agent_exists_for_author(author_id_column):
 
 
 # ── Schemas ─────────────────────────────────────────
+
 
 class PostCreate(BaseModel):
     content: str = Field(..., max_length=500)
@@ -55,8 +56,7 @@ class PostOut(BaseModel):
     comments_count: int
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class CommentOut(BaseModel):
@@ -68,8 +68,7 @@ class CommentOut(BaseModel):
     content: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PostDetail(PostOut):
@@ -78,13 +77,15 @@ class PostDetail(PostOut):
 
 # ── Helpers ─────────────────────────────────────────
 
-async def _notify_mentions(db, content: str, author_id: uuid.UUID, author_name: str,
-                           post_id: uuid.UUID, tenant_id: uuid.UUID | None):
+
+async def _notify_mentions(
+    db, content: str, author_id: uuid.UUID, author_name: str, post_id: uuid.UUID, tenant_id: uuid.UUID | None
+):
     """Parse @mentions in content and send notifications to mentioned agents/users."""
     from app.models.agent import Agent
     from app.services.notification_service import send_notification
 
-    mentions = re.findall(r'@(\S+)', content)
+    mentions = re.findall(r"@(\S+)", content)
     if not mentions:
         return
 
@@ -114,7 +115,8 @@ async def _notify_mentions(db, content: str, author_id: uuid.UUID, author_name: 
         if agent and agent.id not in notified_ids:
             notified_ids.add(agent.id)
             await send_notification(
-                db, agent_id=agent.id,
+                db,
+                agent_id=agent.id,
                 type="mention",
                 title=f"{author_name} mentioned you in a post",
                 body=content[:150],
@@ -127,7 +129,8 @@ async def _notify_mentions(db, content: str, author_id: uuid.UUID, author_name: 
         if user and user.id not in notified_ids:
             notified_ids.add(user.id)
             await send_notification(
-                db, user_id=user.id,
+                db,
+                user_id=user.id,
                 type="mention",
                 title=f"{author_name} mentioned you in a post",
                 body=content[:150],
@@ -138,6 +141,7 @@ async def _notify_mentions(db, content: str, author_id: uuid.UUID, author_name: 
 
 
 # ── Routes ──────────────────────────────────────────
+
 
 @router.get("/posts")
 async def list_posts(
@@ -152,7 +156,6 @@ async def list_posts(
     System agent posts are excluded from the feed — system agents (is_system=True)
     communicate through internal Chat and reports rather than Plaza.
     """
-    from app.models.agent import Agent as AgentModel
     # Enforce tenant from JWT; platform_admin can optionally specify a different tenant
     effective_tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
     if tenant_id and current_user.role == "platform_admin":
@@ -161,18 +164,13 @@ async def list_posts(
         q = select(PlazaPost).order_by(desc(PlazaPost.created_at))
         if effective_tenant_id:
             q = q.where(PlazaPost.tenant_id == effective_tenant_id)
-        q = q.where(
-            ~(
-                (PlazaPost.author_type == "agent")
-                & _hidden_agent_exists_for_author(PlazaPost.author_id)
-            )
-        )
+        q = q.where(~((PlazaPost.author_type == "agent") & _hidden_agent_exists_for_author(PlazaPost.author_id)))
         if since:
             try:
                 since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
                 q = q.where(PlazaPost.created_at > since_dt)
             except Exception:
-                pass
+                logger.warning("[Plaza] since 参数解析失败，忽略 since 过滤", exc_info=True)
         q = q.offset(offset).limit(limit)
         result = await db.execute(q)
         posts = result.scalars().all()
@@ -192,16 +190,13 @@ async def plaza_stats(
         effective_tenant_id = tenant_id
     async with async_session() as db:
         # Build base filters
-        private_or_system_post = (
-            (PlazaPost.author_type == "agent")
-            & _hidden_agent_exists_for_author(PlazaPost.author_id)
+        private_or_system_post = (PlazaPost.author_type == "agent") & _hidden_agent_exists_for_author(
+            PlazaPost.author_id
         )
         post_filter = (PlazaPost.tenant_id == effective_tenant_id) if effective_tenant_id else True
         post_filter = post_filter & ~private_or_system_post
         # Total posts
-        total_posts = (await db.execute(
-            select(func.count(PlazaPost.id)).where(post_filter)
-        )).scalar() or 0
+        total_posts = (await db.execute(select(func.count(PlazaPost.id)).where(post_filter))).scalar() or 0
         # Total comments (join through post tenant_id)
         comment_q = select(func.count(PlazaComment.id))
         if effective_tenant_id:
@@ -228,10 +223,7 @@ async def plaza_stats(
             .limit(5)
         )
         top_result = await db.execute(top_q)
-        top_contributors = [
-            {"name": row[0], "type": row[1], "posts": row[2]}
-            for row in top_result.fetchall()
-        ]
+        top_contributors = [{"name": row[0], "type": row[1], "posts": row[2]} for row in top_result.fetchall()]
         return {
             "total_posts": total_posts,
             "total_comments": total_comments,
@@ -269,8 +261,8 @@ async def create_post(body: PostCreate, current_user: User = Depends(get_current
 
         try:
             await _notify_mentions(db, body.content, body.author_id, body.author_name, post.id, effective_tenant_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[Plaza] 通知/提及发送失败: {}", e, exc_info=True)
 
         await db.commit()
         await db.refresh(post)
@@ -290,9 +282,7 @@ async def get_post(post_id: uuid.UUID, current_user: User = Depends(get_current_
         if not post:
             raise HTTPException(404, "Post not found")
         if post.author_type == "agent":
-            hidden_post = await db.execute(
-                select(_hidden_agent_exists_for_author(post.author_id))
-            )
+            hidden_post = await db.execute(select(_hidden_agent_exists_for_author(post.author_id)))
             if hidden_post.scalar():
                 raise HTTPException(404, "Post not found")
         cr = await db.execute(
@@ -382,6 +372,7 @@ async def create_comment(post_id: uuid.UUID, body: CommentCreate, current_user: 
             try:
                 from app.models.agent import Agent
                 from app.services.notification_service import send_notification
+
                 if post.author_type == "agent":
                     # Notify the agent directly (consumed by heartbeat)
                     await send_notification(
@@ -419,13 +410,14 @@ async def create_comment(post_id: uuid.UUID, body: CommentCreate, current_user: 
                         ref_id=post_id,
                         sender_name=body.author_name,
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[Plaza] 评论者通知发送失败: {}", e, exc_info=True)
 
         # Notify other agents who have commented on this post
         try:
             from app.models.agent import Agent
             from app.services.notification_service import send_notification
+
             other_comments = await db.execute(
                 select(PlazaComment.author_id, PlazaComment.author_type)
                 .where(PlazaComment.post_id == post_id)
@@ -448,14 +440,14 @@ async def create_comment(post_id: uuid.UUID, body: CommentCreate, current_user: 
                         ref_id=post_id,
                         sender_name=body.author_name,
                     )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[Plaza] 评论通知发送失败: {}", e, exc_info=True)
 
         # Extract @mentions and notify mentioned agents/users
         try:
             await _notify_mentions(db, body.content, body.author_id, body.author_name, post_id, post.tenant_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[Plaza] 通知/提及发送失败: {}", e, exc_info=True)
 
         await db.commit()
         await db.refresh(comment)
@@ -463,7 +455,9 @@ async def create_comment(post_id: uuid.UUID, body: CommentCreate, current_user: 
 
 
 @router.post("/posts/{post_id}/like")
-async def like_post(post_id: uuid.UUID, author_id: uuid.UUID, author_type: str = "human", current_user: User = Depends(get_current_user)):
+async def like_post(
+    post_id: uuid.UUID, author_id: uuid.UUID, author_type: str = "human", current_user: User = Depends(get_current_user)
+):
     """Like a post (toggle). Requires authentication; enforces tenant isolation."""
     effective_tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
     async with async_session() as db:

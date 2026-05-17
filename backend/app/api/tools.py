@@ -1,6 +1,10 @@
 """Tool management API — CRUD for tools and per-agent assignments."""
 
+import asyncio
 import uuid
+
+# 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
+_bg_tasks: set[asyncio.Task] = set()
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -23,6 +27,9 @@ from app.services.tool_config import (
     meaningful_config,
     set_tenant_tool_config,
 )
+
+# 后台任务强引用集合
+_tools_bg: set[asyncio.Task] = set()
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -938,7 +945,11 @@ async def update_category_config(
         import asyncio
         # Need plaintext key for sync
         plaintext_key = data.config.get("api_key") or data.config.get("api_secret") or data.config.get("app_secret")
-        asyncio.create_task(_sync_atlassian_tools_for_agent(agent_id, plaintext_key))
+        _t = asyncio.create_task(_sync_atlassian_tools_for_agent(agent_id, plaintext_key))
+        _tools_bg.add(_t)
+        _t.add_done_callback(_tools_bg.discard)
+        _bg_tasks.add(_t)
+        _t.add_done_callback(_bg_tasks.discard)
 
     return {"ok": True}
 

@@ -12,6 +12,9 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
+_bg_tasks: set[asyncio.Task] = set()
+
 from app.core.security import decode_access_token, get_current_user
 from app.core.permissions import check_agent_access, is_agent_expired
 from app.database import async_session, get_db
@@ -30,6 +33,9 @@ from app.services.connection_manager import (
     _model_config_cache, _MODEL_CONFIG_CACHE_TTL,
     _disconnect_debounce, _DISCONNECT_DEBOUNCE_WINDOW,
 )
+
+# 后台任务强引用集合
+_ws_bg: set[asyncio.Task] = set()
 
 async def maybe_mark_session_read_for_active_viewer(
     db: AsyncSession,
@@ -301,7 +307,10 @@ async def websocket_chat(
     # 延迟启动清理任务
     if not manager._cleanup_started:
         manager._cleanup_started = True
-        manager._cleanup_task = asyncio.create_task(manager._cleanup_loop())
+        _t = asyncio.create_task(manager._cleanup_loop())
+        _ws_bg.add(_t)
+        _t.add_done_callback(_ws_bg.discard)
+        manager._cleanup_task = _t
     logger.info(f"[WS] Ready! Agent={agent_name}")
 
     # Send session_id to frontend so Take Control can reference the correct session.
@@ -325,7 +334,7 @@ async def websocket_chat(
                     "tool_calls": [{
                         "id": tc_id,
                         "type": "function",
-                        "function": {"name": tc_name, "arguments": _j_hist.dumps(tc_args, ensure_ascii=False)},
+                        "function": {"name": tc_name, "arguments": json.dumps(tc_args, ensure_ascii=False)},
                     }],
                 }
                 if tc_data.get("reasoning_content"):
@@ -892,7 +901,7 @@ async def websocket_chat(
                         await increment_conversation_usage(user_id)
                         await increment_agent_llm_usage(agent_id)
                     except Exception:
-                        pass
+                        logger.debug("[WS] Usage tracking update skipped (non-critical)", exc_info=True)
 
                     # Log activity
                     from app.services.activity_logger import log_activity
@@ -929,7 +938,9 @@ async def websocket_chat(
                             logger.info(f"[WS] Task created: {task.id}")
                             # Trigger background execution
                             task_id = task.id
-                        _asyncio.create_task(execute_task(task_id, agent_id))
+                        _t = asyncio.create_task(execute_task(task_id, agent_id))
+                        _ws_bg.add(_t)
+                        _t.add_done_callback(_ws_bg.discard)
                         assistant_response += f"\n\n📋 Task synced to task board: [{task_title}]"
                     except Exception as te:
                         logger.error(f"[WS] Task creation failed: {te}")

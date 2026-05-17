@@ -245,13 +245,17 @@ def _log_task_exception(task: asyncio.Task) -> None:
             logger.error("[LSP4J] 后台任务异常: task={} error={}", task.get_name(), exc)
     except (asyncio.CancelledError, asyncio.InvalidStateError):
         pass
+
+
 # 严格模式：tool/invokeResult 缺失 toolCallId 时直接失败，禁止多路并发下的降级误匹配。
 _LSP4J_STRICT_TOOLCALL_ID = os.getenv("LSP4J_STRICT_TOOLCALL_ID", "1").strip() != "0"
 
 # LSP4J 工具调用结果缓存（模块级，所有连接共享）
 _lsp4j_tool_cache: dict[str, tuple[float, str]] = {}
 _LSP4J_TOOL_CACHE_TTL = 300.0  # 与 IDE 插件端缓存 TTL 对齐
-_CACHEABLE_TOOLS = frozenset({"read_file", "search_file", "search_codebase", "search_symbol", "list_dir", "grep_code", "get_problems"})
+_CACHEABLE_TOOLS = frozenset(
+    {"read_file", "search_file", "search_codebase", "search_symbol", "list_dir", "grep_code", "get_problems"}
+)
 
 # 会话级只读工具缓存（短 TTL=30s，写工具执行后主动失效整会话缓存）
 # Key: f"{user_id}:{agent_id}:{tool_name}:{params_hash}"
@@ -260,17 +264,38 @@ _SESSION_READONLY_CACHE_TTL = 30.0
 _SESSION_READONLY_TOOLS = frozenset({"get_problems", "search_file", "list_dir"})
 
 # 写工具集合 — 执行后触发会话级只读缓存失效
-_WRITE_TOOLS = frozenset({
-    "replace_text_by_path", "create_file_with_text", "delete_file_by_path",
-    "run_in_terminal", "apply_patch", "search_replace", "save_file",
-})
+_WRITE_TOOLS = frozenset(
+    {
+        "replace_text_by_path",
+        "create_file_with_text",
+        "delete_file_by_path",
+        "run_in_terminal",
+        "apply_patch",
+        "search_replace",
+        "save_file",
+    }
+)
 
 # 终端只读命令前缀：匹配的命令插件端可走 ProcessBuilder 快径，免去 invokeAndWait + Ctrl+C 开销
 _TERMINAL_READONLY_PREFIXES = (
-    "git show", "git diff", "git log", "git status",
-    "ls ", "cat ", "head ", "tail ", "grep ", "find ",
-    "wc ", "pwd", "which ", "whoami", "echo ", "date",
-    "uname ", "hostname",
+    "git show",
+    "git diff",
+    "git log",
+    "git status",
+    "ls ",
+    "cat ",
+    "head ",
+    "tail ",
+    "grep ",
+    "find ",
+    "wc ",
+    "pwd",
+    "which ",
+    "whoami",
+    "echo ",
+    "date",
+    "uname ",
+    "hostname",
 )
 
 # 搜索负缓存: 记录返回 0 结果的查询，避免 LLM 重复无效搜索浪费轮次
@@ -353,17 +378,32 @@ def _rg_search(project_root: str, pattern: str, max_results: int = 50) -> list[d
     或 None 表示 rg 不可用。
     """
     import shutil
+
     _rg = shutil.which("rg") or shutil.which("rg", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
     if not _rg:
         return None
     try:
         result = subprocess.run(
-            [_rg, "--no-heading", "--with-filename", "--line-number",
-             "--ignore-case", "--no-ignore-vcs", "--max-count=3",
-             "--glob=!.git", "--glob=!.gradle", "--glob=!.idea",
-             "--glob=!build", "--glob=!node_modules",
-             "-e", pattern, project_root],
-            capture_output=True, text=True, timeout=15,
+            [
+                _rg,
+                "--no-heading",
+                "--with-filename",
+                "--line-number",
+                "--ignore-case",
+                "--no-ignore-vcs",
+                "--max-count=3",
+                "--glob=!.git",
+                "--glob=!.gradle",
+                "--glob=!.idea",
+                "--glob=!build",
+                "--glob=!node_modules",
+                "-e",
+                pattern,
+                project_root,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if result.returncode not in (0, 1):
             return None  # rg error (returncode 1 = no matches, which is valid)
@@ -380,13 +420,15 @@ def _rg_search(project_root: str, pattern: str, max_results: int = 50) -> list[d
                 lineno = int(lineno_str)
             except ValueError:
                 continue
-            items.append({
-                "fileName": os.path.basename(file_path),
-                "path": os.path.join(project_root, file_path),
-                "startLine": lineno,
-                "endLine": lineno,
-                "matchLine": match_text.strip()[:200],
-            })
+            items.append(
+                {
+                    "fileName": os.path.basename(file_path),
+                    "path": os.path.join(project_root, file_path),
+                    "startLine": lineno,
+                    "endLine": lineno,
+                    "matchLine": match_text.strip()[:200],
+                }
+            )
         logger.info("[RG-SEARCH] grep_code pattern={} results={}", pattern[:80], len(items))
         return items
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
@@ -398,6 +440,7 @@ def _get_code_map_for_session(project_path: str) -> str:
     """获取代码结构地图（带缓存），用于注入新会话 context。"""
     try:
         from .file_index import get_or_build_code_map
+
         return get_or_build_code_map(project_path)
     except (ImportError, OSError) as e:
         logger.error("[CODE-MAP] get failed: {}", e, exc_info=True)
@@ -408,6 +451,7 @@ async def _build_project_file_index(project_path: str) -> None:
     """后台构建项目文件索引（fire-and-forget），供搜索操作使用。"""
     try:
         from .file_index import get_or_build_index
+
         get_or_build_index(project_path, force_rebuild=True)
     except (ImportError, OSError) as e:
         logger.error("[FILE-INDEX] build failed: {}", e, exc_info=True)
@@ -435,8 +479,13 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
 
     # ── 搜索负缓存: 相同查询之前返回 0 结果，直接返回不浪费扫描 ──
     if tool_name in ("search_file", "search_codebase", "grep_code", "search_symbol"):
-        _neg_key_parts = [tool_name, search_query, arguments.get("file_pattern", ""),
-                          arguments.get("regex", ""), arguments.get("pattern", "*")]
+        _neg_key_parts = [
+            tool_name,
+            search_query,
+            arguments.get("file_pattern", ""),
+            arguments.get("regex", ""),
+            arguments.get("pattern", "*"),
+        ]
         _neg_key = "|".join(p for p in _neg_key_parts if p)
         if _neg_key in _search_zero_result_cache:
             _ts, _reason = _search_zero_result_cache[_neg_key]
@@ -447,8 +496,7 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                 return json.dumps([]), []
         # 清理过期负缓存
         _now = time.monotonic()
-        _expired_neg = [k for k, (ts, _) in _search_zero_result_cache.items()
-                        if _now - ts > _SEARCH_ZERO_CACHE_TTL]
+        _expired_neg = [k for k, (ts, _) in _search_zero_result_cache.items() if _now - ts > _SEARCH_ZERO_CACHE_TTL]
         for k in _expired_neg:
             del _search_zero_result_cache[k]
 
@@ -489,6 +537,7 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
 
         # ★ 快路径: 使用文件索引
         from .file_index import get_or_build_index
+
         _file_idx = get_or_build_index(str(cwd))
         if _file_idx is not None and _file_idx.file_count > 0:
             items = _file_idx.list_dir(rel_path)
@@ -537,30 +586,38 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
 
         # ★ 快路径: 使用文件索引（O(1) 查询），回退到 rglob 扫描
         from .file_index import get_or_build_index
+
         _file_idx = get_or_build_index(str(cwd))
         if _file_idx is not None and _file_idx.file_count > 0:
             items = _file_idx.search_file(query, pattern)
             if items:
                 logger.info(
                     "[FILE-INDEX] search_file hit: query={} pattern={} results={}",
-                    query, pattern, len(items),
+                    query,
+                    pattern,
+                    len(items),
                 )
                 result_str = json.dumps(items, ensure_ascii=False, default=str)
                 return result_str, items
             else:
                 # 索引未命中，记录负缓存
-                _neg_key_parts = ["search_file", search_query,
-                                  arguments.get("file_pattern", ""), pattern]
+                _neg_key_parts = ["search_file", search_query, arguments.get("file_pattern", ""), pattern]
                 _neg_key = "|".join(p for p in _neg_key_parts if p)
                 _search_zero_result_cache[_neg_key] = (time.monotonic(), "index_miss")
                 logger.info("[FILE-INDEX] search_file miss: query={} pattern={}", query, pattern)
                 # 提示换用内容搜索（项目使用混淆文件名，按名称搜不到）
                 _hint_query = query or pattern.replace("*", "").replace(".", "")
                 result_str = json.dumps(
-                    [{"hint": "按文件名搜索无结果（项目使用混淆名称）。"
-                              f"请改用 grep_code(regex) 搜索文件内容: "
-                              f"grep_code(regex=\"{_hint_query[:60]}\")"}],
-                    ensure_ascii=False, default=str)
+                    [
+                        {
+                            "hint": "按文件名搜索无结果（项目使用混淆名称）。"
+                            f"请改用 grep_code(regex) 搜索文件内容: "
+                            f'grep_code(regex="{_hint_query[:60]}")'
+                        }
+                    ],
+                    ensure_ascii=False,
+                    default=str,
+                )
                 return result_str, []
 
         scanned_count = 0
@@ -697,6 +754,7 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
             return json.dumps({"error": f"无效的正则表达式: {regex}"}), []
         items = []
         from .file_index import get_or_build_index
+
         _file_idx = get_or_build_index(str(cwd))
         if _file_idx is not None and _file_idx.all_files:
             _iter_source = (cwd / rel for rel in _file_idx.all_files if (cwd / rel).is_file())
@@ -740,6 +798,7 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         query_lower = query.lower()
         items = []
         from .file_index import get_or_build_index
+
         _file_idx = get_or_build_index(str(cwd))
         if _file_idx is not None and _file_idx.all_files:
             _iter_source = (cwd / rel for rel in _file_idx.all_files if (cwd / rel).is_file())
@@ -789,6 +848,7 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         resource_ref_hits = 0
         # ★ 快路径: 使用文件索引
         from .file_index import get_or_build_index
+
         _file_idx = get_or_build_index(str(cwd))
         if _file_idx is not None and _file_idx.all_files:
             _iter_source = (cwd / rel for rel in _file_idx.all_files if (cwd / rel).is_file())
@@ -854,7 +914,11 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         if not items and resource_name:
             probe = resource_name.lower()
             # ★ 快路径: 使用文件索引
-            _idx_source = (cwd / rel for rel in _file_idx.all_files if (cwd / rel).is_file()) if _file_idx and _file_idx.all_files else _iter_project_files()
+            _idx_source = (
+                (cwd / rel for rel in _file_idx.all_files if (cwd / rel).is_file())
+                if _file_idx and _file_idx.all_files
+                else _iter_project_files()
+            )
             for p in _idx_source:
                 if len(items) >= _MAX_RESULTS:
                     break
@@ -1529,10 +1593,7 @@ class JSONRPCRouter:
 
         # 清理过期的工具调用缓存
         _now = time.monotonic()
-        _expired = [
-            k for k, (ts, _) in _lsp4j_tool_cache.items()
-            if _now - ts > _LSP4J_TOOL_CACHE_TTL
-        ]
+        _expired = [k for k, (ts, _) in _lsp4j_tool_cache.items() if _now - ts > _LSP4J_TOOL_CACHE_TTL]
         for k in _expired:
             del _lsp4j_tool_cache[k]
         if _expired:
@@ -1564,12 +1625,20 @@ class JSONRPCRouter:
 
             # 设置 session_id
             if session_id:
+                is_new_session = self._session_id != session_id
                 self._session_id = session_id
                 current_lsp4j_session_id.set(session_id)
+                if is_new_session:
+                    logger.info(
+                        "[SESSION] IDE 会话激活: session_id={} client_type=ide_lsp4j user_id={} agent_id={}",
+                        session_id,
+                        self._user_id,
+                        self._agent_id,
+                    )
 
                 # 自动生成会话标题（取用户消息前 40 字符，替换换行为空格）
                 # 清理 base64 图片数据残留，防止标题被图片编码污染（#60 修复）
-                cleaned = re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', '', question_text).strip()
+                cleaned = re.sub(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+", "", question_text).strip()
                 if not cleaned:
                     cleaned = "图片消息"
                 auto_title = cleaned[:40].replace("\n", " ").strip()
@@ -1628,7 +1697,9 @@ class JSONRPCRouter:
             if session_id and not message_history:
                 # 清理过期缓存
                 _now = time.monotonic()
-                _stale_keys = [k for k, (ts, _) in _SESSION_MESSAGE_CACHE.items() if _now - ts > _SESSION_MESSAGE_CACHE_TTL]
+                _stale_keys = [
+                    k for k, (ts, _) in _SESSION_MESSAGE_CACHE.items() if _now - ts > _SESSION_MESSAGE_CACHE_TTL
+                ]
                 for _k in _stale_keys:
                     _SESSION_MESSAGE_CACHE.pop(_k, None)
                 # 检查内存缓存
@@ -1702,8 +1773,7 @@ class JSONRPCRouter:
                     if ctx_msg:
                         message_history.insert(0, ctx_msg)
                         logger.info(
-                            "[LSP4J-CTX] tool_call context injected from memory: session={} count={}"
-                            " formatted_len={}",
+                            "[LSP4J-CTX] tool_call context injected from memory: session={} count={} formatted_len={}",
                             session_id,
                             len(inmem_records),
                             len(ctx_msg.get("content", "")),
@@ -1717,7 +1787,8 @@ class JSONRPCRouter:
                 else:
                     # 无内存记录时保留 DB 注入的上下文
                     _db_ctx_count = sum(
-                        1 for m in message_history
+                        1
+                        for m in message_history
                         if m.get("role") == "system" and "[会话上下文]" in m.get("content", "")
                     )
                     logger.info(
@@ -1748,10 +1819,12 @@ class JSONRPCRouter:
             # ★ 注入代码结构地图（Aider/Cursor 策略：LLM 直接知道项目结构，不需要搜索探索）
             if self._project_path:
                 from .file_index import get_or_build_code_map as _get_cmap
+
                 _code_map = _get_cmap(self._project_path)
                 if _code_map:
                     message_history = [
-                        m for m in message_history
+                        m
+                        for m in message_history
                         if not (m.get("role") == "system" and "项目代码结构地图" in m.get("content", ""))
                     ]
                     message_history.insert(0, {"role": "system", "content": _code_map})
@@ -2176,11 +2249,17 @@ class JSONRPCRouter:
                     supports_vision=supports_vision,
                     cancel_event=self._cancel_event,
                     parallel_tools_extra_readonly={
-                        "search_file", "search_codebase", "search_symbol",
-                        "list_dir", "read_file", "grep_code",
-                        "get_problems", "get_terminal_output",
+                        "search_file",
+                        "search_codebase",
+                        "search_symbol",
+                        "list_dir",
+                        "read_file",
+                        "grep_code",
+                        "get_problems",
+                        "get_terminal_output",
                     },
                     tool_warning_mode="lsp4j",
+                    max_tool_rounds_override=20,  # #119: IDE 场景 5-8 轮足够
                 )
             except asyncio.CancelledError:
                 cancelled = True
@@ -2198,7 +2277,7 @@ class JSONRPCRouter:
             # 保持在 200。这里解析字符串以恢复真实状态码，用于区分 429 配额耗尽 vs
             # 500 内部错误，使 chat/finish 的 finish_reason 能正确反映错误类型。
             if isinstance(reply, str) and reply.startswith("[LLM Error]"):
-                _m = re.search(r'HTTP (\d{3})', reply)
+                _m = re.search(r"HTTP (\d{3})", reply)
                 error_status_code = int(_m.group(1)) if _m else 500
                 logger.info(
                     "[LSP4J] LLM error string detected: statusCode={} preview={}...",
@@ -2299,7 +2378,7 @@ class JSONRPCRouter:
                         if isinstance(_ide_open_files_raw, list):
                             _ide_open_files = _ide_open_files_raw
                 except (TypeError, KeyError, ValueError):
-                    pass  # 上下文提取失败不影响消息持久化
+                    logger.debug("[LSP4J] IDE上下文提取失败，不影响消息持久化")
 
                 _t_persist_start = time.monotonic()
                 _t = asyncio.create_task(
@@ -2335,17 +2414,34 @@ class JSONRPCRouter:
             _SESSION_MESSAGE_CACHE[_cache_key] = (time.monotonic(), list(message_history))
             _SESSION_MESSAGE_CACHE.move_to_end(_cache_key)  # 确保更新场景也移到 LRU 末尾
 
-            # 清除本轮已持久化的工具调用记录，避免下一轮上下文重复注入
-            # 工具调用已通过 _persist_lsp4j_tool_call 单独写入 DB，
-            # 下次加载时从 DB 恢复即可，内存无需保留。
+            # #188 修复：工具调用记录清空延迟到持久化任务完成后执行。
+            # 旧实现先清空后持久化 → 持久化失败时记录永久丢失。
+            # 新实现：仅在持久化成功后再清空内存记录。
             if session_id and session_id in self._tool_call_history_by_session:
-                _cleared_count = len(self._tool_call_history_by_session[session_id])
-                self._tool_call_history_by_session[session_id].clear()
-                logger.info(
-                    "[LSP4J-CTX] 已清除 session={} 内存工具调用记录: count={}",
-                    session_id,
-                    _cleared_count,
-                )
+                _t_persist = _t  # 引用前面创建的持久化 Task
+                _sid = session_id
+                _records = self._tool_call_history_by_session[_sid]
+
+                def _on_persist_done(_fut):
+                    try:
+                        _fut.result()  # 检查持久化是否成功（失败会 throw）
+                        _cleared = len(_records)
+                        _records.clear()
+                        logger.info(
+                            "[LSP4J-CTX] 持久化完成，已清除 session={} 内存工具调用记录: count={}",
+                            _sid,
+                            _cleared,
+                        )
+                    except Exception:
+                        # 持久化失败时保留内存记录，后续可重试
+                        logger.warning(
+                            "[LSP4J-CTX] 持久化失败，保留 session={} 内存工具调用记录（记录数={}）",
+                            _sid,
+                            len(_records),
+                            exc_info=True,
+                        )
+
+                _t_persist.add_done_callback(_on_persist_done)
 
             # ★ 刷新缓冲区，确保所有累积的文本都已发送
             _t_flush_start = time.monotonic()
@@ -2454,9 +2550,6 @@ class JSONRPCRouter:
             # 7. JSON-RPC 响应已在 call_llm 之前发送（避免 IDE 超时）
             # 完成状态通过 chat/finish 通知传递
 
-            # 7. JSON-RPC 响应已在 call_llm 之前发送（避免 IDE 超时）
-            # 完成状态通过 chat/finish 通知传递
-
             self._current_request_id = None
 
             # #101 修复：处理排队中的下一个请求
@@ -2464,7 +2557,9 @@ class JSONRPCRouter:
                 try:
                     queued_params, queued_msg_id = self._chat_queue.get_nowait()
                     logger.info("[LSP4J] chat/ask dequeued: processing next request from queue")
-                    asyncio.create_task(self._handle_chat_ask(queued_params, queued_msg_id))
+                    task = asyncio.create_task(self._handle_chat_ask(queued_params, queued_msg_id))
+                    self._lsp4j_background_tasks.add(task)
+                    task.add_done_callback(self._lsp4j_background_tasks.discard)
                 except asyncio.QueueEmpty:
                     pass
 
@@ -2593,7 +2688,9 @@ class JSONRPCRouter:
             replace_text = parameters.get("replaceText", "")
             logger.info(
                 "[LSP4J] tool/invoke: search_replace path={} search_len={} replace_len={}",
-                file_path, len(search_text), len(replace_text),
+                file_path,
+                len(search_text),
+                len(replace_text),
             )
             new_content = await self._fetch_and_replace_file(file_path, search_text, replace_text)
             parameters = {"filePath": file_path, "text": new_content if new_content else replace_text}
@@ -3047,9 +3144,28 @@ class JSONRPCRouter:
             checksum = hashlib.sha256()
             for path in root.rglob("*"):
                 if path.is_file() and path.suffix in {
-                    ".py", ".kt", ".kts", ".java", ".ts", ".tsx", ".js", ".jsx",
-                    ".go", ".rs", ".swift", ".gradle", ".kts", ".xml", ".json",
-                    ".yaml", ".yml", ".toml", ".cfg", ".ini", ".env", ".md",
+                    ".py",
+                    ".kt",
+                    ".kts",
+                    ".java",
+                    ".ts",
+                    ".tsx",
+                    ".js",
+                    ".jsx",
+                    ".go",
+                    ".rs",
+                    ".swift",
+                    ".gradle",
+                    ".kts",
+                    ".xml",
+                    ".json",
+                    ".yaml",
+                    ".yml",
+                    ".toml",
+                    ".cfg",
+                    ".ini",
+                    ".env",
+                    ".md",
                 }:
                     try:
                         stat = path.stat()
@@ -3382,10 +3498,7 @@ class JSONRPCRouter:
 
         # #113 修复：清理超时未响应的 toolCallId Future（>300s 自动移除，避免累积）
         _now_ts = time.time()
-        _stale_ids = [
-            tid for tid, meta in self._pending_tool_meta.items()
-            if _now_ts - meta.get("created_at", 0) > 300
-        ]
+        _stale_ids = [tid for tid, meta in self._pending_tool_meta.items() if _now_ts - meta.get("created_at", 0) > 300]
         for _stale_id in _stale_ids:
             f = self._pending_tools.pop(_stale_id, None)
             if f and not f.done():
@@ -3447,7 +3560,7 @@ class JSONRPCRouter:
         # 等待异步结果（同时监听取消事件，避免 cancel 在 wait_for 期间触发时无法及时响应）
         file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
         try:
-            cancel_future = asyncio.ensure_future(self._cancel_event.wait()) if self._cancel_event else None
+            cancel_future = asyncio.create_task(self._cancel_event.wait()) if self._cancel_event else None
             try:
                 waitables = [tool_future]
                 if cancel_future:
@@ -3473,14 +3586,20 @@ class JSONRPCRouter:
                     _t2 = time.monotonic()
                     logger.info(
                         "[LSP4J-TIMING] tool={} send={:.0f}ms wait={:.0f}ms total={:.0f}ms trace={} TIMEOUT",
-                        tool_name, (_t1 - _t0) * 1000, (_t2 - _t1) * 1000, (_t2 - _t0) * 1000,
+                        tool_name,
+                        (_t1 - _t0) * 1000,
+                        (_t2 - _t1) * 1000,
+                        (_t2 - _t0) * 1000,
                         trace_key,
                     )
                     raise asyncio.TimeoutError()
                 result = tool_future.result()
                 logger.info(
                     "[LSP4J-TIMING] tool={} send={:.0f}ms wait={:.0f}ms total={:.0f}ms trace={}",
-                    tool_name, (_t1 - _t0) * 1000, (_t2 - _t1) * 1000, (_t2 - _t0) * 1000,
+                    tool_name,
+                    (_t1 - _t0) * 1000,
+                    (_t2 - _t1) * 1000,
+                    (_t2 - _t0) * 1000,
                     trace_key,
                 )
 
@@ -3706,7 +3825,7 @@ class JSONRPCRouter:
                     self._pending_tools.pop(cid, None)
                     self._pending_tool_meta.pop(cid, None)
 
-                _t = asyncio.ensure_future(_cleanup_late_window(tool_call_id))
+                _t = asyncio.create_task(_cleanup_late_window(tool_call_id))
                 _lsp4j_background_tasks.add(_t)
                 _t.add_done_callback(_lsp4j_background_tasks.discard)
                 _t.add_done_callback(_log_task_exception)
@@ -4266,9 +4385,7 @@ class JSONRPCRouter:
     # ── search_replace 公共逻辑 ─────────────────
     # _handle_tool_invoke 和 invoke_tool_on_ide 都用此方法，消除重复。
 
-    async def _fetch_and_replace_file(
-        self, file_path: str, search_text: str, replace_text: str
-    ) -> str | None:
+    async def _fetch_and_replace_file(self, file_path: str, search_text: str, replace_text: str) -> str | None:
         """读取文件内容并执行搜索替换（公共方法）。
 
         优先从缓存读取文件内容，缓存未命中时嵌套调用 read_file。
@@ -4424,7 +4541,7 @@ class JSONRPCRouter:
             await self._send_response(msg_id, {"errorCode": "operate_failed", "errorMessage": str(e)})
 
     async def _handle_chat_list_all_sessions(self, params: dict, msg_id: Any) -> None:
-        """chat/listAllSessions → IDE 历史列表（仅 ide_lsp4j 持久化会话）。"""
+        """chat/listAllSessions → 用户会话列表（跨端共享，排除 agent/trigger 内部渠道）。"""
         project_uri = params.get("projectUri") or ""
         try:
             async with async_session() as db:
@@ -4432,7 +4549,7 @@ class JSONRPCRouter:
                     select(ChatSession)
                     .where(ChatSession.user_id == self._user_id)
                     .where(ChatSession.agent_id == self._agent_id)
-                    .where(ChatSession.source_channel == "ide_lsp4j")
+                    .where(ChatSession.source_channel.notin_(["agent", "trigger"]))
                     .order_by(ChatSession.created_at.desc())
                     .limit(50)
                 )
@@ -4444,6 +4561,10 @@ class JSONRPCRouter:
 
         out: list[dict[str, Any]] = []
         for sess in sessions:
+            last_read = sess.last_read_at_by_user
+            total = sess.message_count or 0
+            # 简化未读计算：上次已读后有新消息则认为有未读
+            unread = total if last_read is None else max(0, total - 1)
             out.append(
                 {
                     "sessionId": str(sess.id),
@@ -4457,9 +4578,57 @@ class JSONRPCRouter:
                     "projectId": "",
                     "projectUri": project_uri,
                     "projectName": "",
+                    "messageCount": total,
+                    "unreadCount": unread,
                 }
             )
         await self._send_response(msg_id, out)
+
+    def _format_tool_call_record(self, msg, session_id: str) -> dict[str, Any]:
+        """将 tool_call ChatMessage 解析为结构化字典，与 API 层 get_session_messages 对齐。"""
+        ts = self._epoch_ms(msg.created_at) if msg.created_at else 0
+        entry: dict[str, Any] = {
+            "requestId": str(uuid.uuid4()),
+            "sessionId": session_id,
+            "chatTask": "TOOL_CALL",
+            "chatContext": "{}",
+            "question": "",
+            "answer": "",
+            "extra": "",
+            "likeStatus": 0,
+            "gmtCreate": ts,
+            "gmtModified": ts,
+            "filterStatus": "",
+            "sessionType": "ASSISTANT",
+            "summary": "",
+            "intentionType": "",
+            "reasoningContent": "",
+        }
+        try:
+            data = json.loads(msg.content)
+            tool_name = data.get("name", "")
+            tool_args = data.get("args")
+            tool_result = data.get("result", "")
+            tool_status = data.get("status", "done")
+            # 格式化工具调用信息供 IDE 展示
+            args_str = json.dumps(tool_args, ensure_ascii=False)[:500] if tool_args else ""
+            result_str = str(tool_result)[:2000] if tool_result else ""
+            entry["question"] = f"{tool_name}\n{args_str}"
+            entry["answer"] = result_str
+            entry["extra"] = json.dumps(
+                {
+                    "toolName": tool_name,
+                    "toolArgs": tool_args,
+                    "toolStatus": tool_status,
+                    "toolResult": str(tool_result)[:2000],
+                },
+                ensure_ascii=False,
+            )
+        except Exception:
+            logger.warning("[LSP4J] 聊天记录序列化失败，使用降级展示", exc_info=True)
+            entry["question"] = "工具调用"
+            entry["answer"] = msg.content or ""
+        return entry
 
     async def _handle_chat_get_session_by_id(self, params: dict, msg_id: Any) -> None:
         """chat/getSessionById → 从 DB 组装可恢复的 ChatSession（含 REPLY_TASK 记录）。"""
@@ -4526,20 +4695,43 @@ class JSONRPCRouter:
         i = 0
         while i < len(rows):
             row = rows[i]
-            # 跳过 tool_call 行，仅处理 user/assistant 配对
-            if row.role not in ("user", "assistant"):
+            # 跳过 tool_call 和 assistant 的无配对行，仅从 user 开始配对
+            if row.role not in ("user", "assistant", "tool_call"):
+                i += 1
+                continue
+            if row.role == "tool_call":
+                # 将 tool_call 记录解析为结构化 ChatRecord，与 API 层 get_session_messages 对齐
+                tc_entry = self._format_tool_call_record(row, session_id)
+                records.append(tc_entry)
                 i += 1
                 continue
             if row.role != "user":
                 i += 1
                 continue
             user_msg = row
-            asst_msg = rows[i + 1] if i + 1 < len(rows) and rows[i + 1].role == "assistant" else None
+            # 收集 user 之后的 tool_call 和 assistant 消息
+            tool_records: list[dict[str, Any]] = []
+            asst_msg = None
+            j = i + 1
+            while j < len(rows):
+                next_row = rows[j]
+                if next_row.role == "tool_call":
+                    tool_records.append(self._format_tool_call_record(next_row, session_id))
+                    j += 1
+                    continue
+                elif next_row.role == "assistant":
+                    asst_msg = next_row
+                    j += 1
+                    break
+                else:
+                    break
             rid = str(uuid.uuid4())
             qtext = user_msg.content or ""
             ctx = json.dumps({"text": qtext, "displayText": qtext}, ensure_ascii=False)
             atext = (asst_msg.content if asst_msg else "") or ""
             think = (asst_msg.thinking if asst_msg else None) or ""
+            # 将 tool_call 记录注入到 assistant answer 的 extra 字段，IDE 端可解析展示
+            extra_tool_calls = json.dumps(tool_records, ensure_ascii=False) if tool_records else ""
             records.append(
                 {
                     "requestId": rid,
@@ -4548,7 +4740,7 @@ class JSONRPCRouter:
                     "chatContext": ctx,
                     "question": qtext,
                     "answer": atext,
-                    "extra": "",
+                    "extra": extra_tool_calls,
                     "likeStatus": 0,
                     "gmtCreate": self._epoch_ms(user_msg.created_at),
                     "gmtModified": self._epoch_ms(asst_msg.created_at if asst_msg else user_msg.created_at),
@@ -4559,7 +4751,7 @@ class JSONRPCRouter:
                     "reasoningContent": think,
                 }
             )
-            i += 2 if asst_msg else 1
+            i = j
 
         await self._send_response(
             msg_id,
@@ -4577,6 +4769,26 @@ class JSONRPCRouter:
                 "gmtModified": self._epoch_ms(sess.last_message_at or sess.created_at),
             },
         )
+
+    def _cleanup_session(self, session_id: str) -> None:
+        """统一清理指定会话的所有路由器内存状态。
+
+        调用时机：会话删除时、chat/stop 时、会话切换时。
+        """
+        # 清理当前活跃会话标识
+        if self._session_id == session_id:
+            self._session_id = None
+        # 清理工具调用历史（按 session_id 索引）
+        self._tool_call_history_by_session.pop(session_id, None)
+        # 清理步骤去重缓存中属于该会话的 request_id 条目
+        stale_steps = [
+            rid
+            for rid in self._process_step_last_emit
+            if self._process_step_last_emit[rid].get("session_id") == session_id
+        ]
+        for rid in stale_steps:
+            self._process_step_last_emit.pop(rid, None)
+        logger.info("[SESSION] IDE 会话清理: session_id={}", session_id)
 
     async def _handle_chat_delete_session_by_id(self, params: dict, msg_id: Any) -> None:
         """chat/deleteSessionById → 删除单个 IDE 会话 + 推送 chat/delete 通知。"""
@@ -4596,7 +4808,7 @@ class JSONRPCRouter:
                     sess
                     and sess.user_id == self._user_id
                     and sess.agent_id == self._agent_id
-                    and sess.source_channel == "ide_lsp4j"
+                    and sess.source_channel.notin_(["agent", "trigger"])
                 ):
                     await db.execute(
                         delete(ChatMessage)
@@ -4607,12 +4819,16 @@ class JSONRPCRouter:
                     await db.delete(sess)
                     await db.commit()
                     deleted = True
+                    logger.info(
+                        "[SESSION] IDE 会话已删除: session_id={} message_count={} user_id={}",
+                        session_id,
+                        sess.message_count,
+                        self._user_id,
+                    )
         except SQLAlchemyError as e:
             logger.warning("[LSP4J] chat/deleteSessionById DB error: {}", e)
 
-        if self._session_id == session_id:
-            self._session_id = None
-        self._tool_call_history_by_session.pop(session_id, None)
+        self._cleanup_session(session_id)
         await self._send_response(msg_id, None)
 
         if deleted:
@@ -4623,7 +4839,7 @@ class JSONRPCRouter:
                 logger.warning("[LSP4J] chat/delete 推送失败: {}", e)
 
     async def _handle_chat_clear_all_sessions(self, params: dict, msg_id: Any) -> None:
-        """chat/clearAllSessions → 清空当前 agent+user 的 IDE 会话（Clawith-only）。"""
+        """chat/clearAllSessions → 清空当前 agent+user 的所有用户会话（排除 agent/trigger 内部渠道）。"""
         _ = params
         try:
             async with async_session() as db:
@@ -4631,7 +4847,7 @@ class JSONRPCRouter:
                     select(ChatSession.id)
                     .where(ChatSession.user_id == self._user_id)
                     .where(ChatSession.agent_id == self._agent_id)
-                    .where(ChatSession.source_channel == "ide_lsp4j")
+                    .where(ChatSession.source_channel.notin_(["agent", "trigger"]))
                 )
                 session_ids = [str(v) for v in sr.scalars().all()]
                 if session_ids:
@@ -4640,7 +4856,7 @@ class JSONRPCRouter:
                     delete(ChatSession)
                     .where(ChatSession.user_id == self._user_id)
                     .where(ChatSession.agent_id == self._agent_id)
-                    .where(ChatSession.source_channel == "ide_lsp4j")
+                    .where(ChatSession.source_channel.notin_(["agent", "trigger"]))
                 )
                 await db.commit()
         except SQLAlchemyError as e:
@@ -5695,13 +5911,16 @@ async def invoke_lsp4j_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID
         if _session_cache_key in _SESSION_READONLY_CACHE:
             _sess_ts, _sess_cached = _SESSION_READONLY_CACHE[_session_cache_key]
             if time.monotonic() - _sess_ts < _SESSION_READONLY_CACHE_TTL:
-                logger.info("[LSP4J-CACHE] session hit: {} elapsed={:.1f}s", _session_cache_key, time.monotonic() - _sess_ts)
+                logger.info(
+                    "[LSP4J-CACHE] session hit: {} elapsed={:.1f}s", _session_cache_key, time.monotonic() - _sess_ts
+                )
                 return _sess_cached
 
     if tool_name in _CACHEABLE_TOOLS:
         params_str = json.dumps(arguments, sort_keys=True, default=str)
         params_hash = hashlib.md5(params_str.encode()).hexdigest()[:12]
-        cache_key = f"{tool_name}:{params_hash}"
+        # 加上 user/agent 隔离，防止跨用户/跨 agent 的工具结果缓存污染
+        cache_key = f"{self._user_id}:{self._agent_id}:{tool_name}:{params_hash}"
         if cache_key in _lsp4j_tool_cache:
             ts, cached = _lsp4j_tool_cache[cache_key]
             if time.monotonic() - ts < _LSP4J_TOOL_CACHE_TTL:
@@ -5771,15 +5990,24 @@ async def invoke_lsp4j_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID
                 del _SESSION_READONLY_CACHE[_key]
                 _invalidated += 1
         if _invalidated:
-            logger.info("[LSP4J-CACHE] write-tool invalidated session cache: tool={} agent={} removed={}",
-                        tool_name, agent_key_str, _invalidated)
+            logger.info(
+                "[LSP4J-CACHE] write-tool invalidated session cache: tool={} agent={} removed={}",
+                tool_name,
+                agent_key_str,
+                _invalidated,
+            )
 
     # 非 Python 项目检测 Python 命令：注入反诱导提示，引导 LLM 使用 IDE 原生工具
     if tool_name == "run_in_terminal" and result:
         command = str(arguments.get("command", ""))
         _PYTHON_SHELL_PATTERNS = (
-            "python3 -c", "python -c", "python3 <<", "python <<",
-            "import re", "import json", "import os",
+            "python3 -c",
+            "python -c",
+            "python3 <<",
+            "python <<",
+            "import re",
+            "import json",
+            "import os",
         )
         if any(p in command for p in _PYTHON_SHELL_PATTERNS):
             logger.warning("[LSP4J] 检测到 Python 命令: {}", command[:80])
@@ -5825,9 +6053,9 @@ async def _persist_lsp4j_chat_turn(
     reply_text: str,
     user_id: uuid.UUID,
     thinking_text: str | None = None,
-    project_path: str | None = None,       # IDE 项目根路径 (#57 修复)
-    current_file: str | None = None,        # IDE 当前活动文件 (#57 修复)
-    open_files: list | None = None,         # IDE 打开文件列表 (#57 修复)
+    project_path: str | None = None,  # IDE 项目根路径 (#57 修复)
+    current_file: str | None = None,  # IDE 当前活动文件 (#57 修复)
+    open_files: list | None = None,  # IDE 打开文件列表 (#57 修复)
 ) -> None:
     """持久化一轮 LSP4J 对话到数据库（fire-and-forget 后台任务）。
 
@@ -5871,10 +6099,10 @@ async def _persist_lsp4j_chat_turn(
                         user_id=user_id,
                         title=f"LSP4J {local_now.strftime('%m-%d %H:%M')}",
                         source_channel="ide_lsp4j",
-                        client_type="ide_lsp4j",              # 标记 IDE LSP4J 客户端来源
-                        project_path=project_path,             # 持久化 IDE 项目根路径
-                        current_file=current_file,             # 持久化当前活动文件
-                        open_files=open_files,                 # 持久化打开文件列表
+                        client_type="ide_lsp4j",  # 标记 IDE LSP4J 客户端来源
+                        project_path=project_path,  # 持久化 IDE 项目根路径
+                        current_file=current_file,  # 持久化当前活动文件
+                        open_files=open_files,  # 持久化打开文件列表
                         created_at=now,
                         last_message_at=now,
                     )
@@ -5932,6 +6160,9 @@ async def _persist_lsp4j_chat_turn(
                             created_at=now,
                         )
                     )
+                # #185 修复：更新 message_count（之前仅更新 last_message_at 未更新此字段）
+                _new_count = (1 if user_text else 0) + (1 if reply_text else 0)
+                sess.message_count = (sess.message_count or 0) + _new_count
             # db.begin() 退出时统一 commit 或回滚，确保 ChatSession + ChatMessage 写入原子性
 
             logger.info(
@@ -6033,7 +6264,9 @@ def _format_tool_context_message(tool_records: list[dict]) -> dict | None:
         {"role": "system", "content": "..."} 或 None（无有效上下文时）
     """
     from .context_trimmer import (
-        trim_tool_context_history, MAX_TOOL_HISTORY_ROUNDS, compress_tool_context_summary,
+        trim_tool_context_history,
+        MAX_TOOL_HISTORY_ROUNDS,
+        compress_tool_context_summary,
     )
 
     logger.info("[LSP4J-CTX] _format_tool_context_message: processing {} tool records", len(tool_records))
@@ -6302,7 +6535,7 @@ async def broadcast_config_refresh_models() -> int:
 
     外部调用示例（如 app/api/llm.py 模型增删改成功后）：
         from app.plugins.clawith_lsp4j.jsonrpc_router import broadcast_config_refresh_models
-        asyncio.ensure_future(broadcast_config_refresh_models())
+        _t = asyncio.create_task(broadcast_config_refresh_models()); _t.add_done_callback(_log_task_exception)
 
     Returns:
         成功推送的客户端数量

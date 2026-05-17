@@ -52,10 +52,10 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
 
             return response
 
-        except Exception as exc:
+        except Exception:
             duration = time.time() - start_time
             logger.error(
                 f"<-- {request.method} {request.url.path} "
-                f"ERROR {duration:.3f}s - {exc}"
+                f"ERROR {duration:.3f}s", exc_info=True
             )
             raise

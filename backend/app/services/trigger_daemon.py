@@ -25,6 +25,11 @@ from app.database import async_session
 from app.models.trigger import AgentTrigger
 from app.models.agent import Agent
 
+
+
+# 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
+_bg_tasks: set[asyncio.Task] = set()
+
 TICK_INTERVAL = 15  # seconds
 DEDUP_WINDOW = 30   # seconds — same agent won't be invoked twice within this window
 MAX_AGENT_CHAIN_DEPTH = 5  # A→B→A→B→A max depth before stopping
@@ -1080,7 +1085,9 @@ async def _tick():
         except Exception as e:
             logger.warning(f"Failed to pre-update trigger state: {e}")
 
-        asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers))
+        _t = asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers))
+        _bg_tasks.add(_t)
+        _t.add_done_callback(_bg_tasks.discard)
 
 
 async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False, a2a_session_id: str | None = None) -> None:
@@ -1146,7 +1153,9 @@ async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, 
         last_fired_at=now,
         fire_count=0,
     )
-    asyncio.create_task(_invoke_agent_for_triggers(agent_id, [dummy_trigger]))
+    _t = asyncio.create_task(_invoke_agent_for_triggers(agent_id, [dummy_trigger]))
+    _bg_tasks.add(_t)
+    _t.add_done_callback(_bg_tasks.discard)
 
 
 async def start_trigger_daemon():

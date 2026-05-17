@@ -5,7 +5,7 @@ from datetime import datetime, timezone as tz
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,8 +53,7 @@ class SessionOut(BaseModel):
     current_file: Optional[str] = None      # 当前活动编辑文件
     open_files: Optional[list] = None       # 打开文件列表
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class CreateSessionIn(BaseModel):

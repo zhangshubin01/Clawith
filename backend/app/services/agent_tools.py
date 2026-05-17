@@ -69,6 +69,10 @@ from app.services.llm.finish import (
 
 from collections import OrderedDict
 
+# 后台任务强引用集合
+_agent_tools_bg: set[asyncio.Task] = set()
+
+
 _settings = get_settings()
 WORKSPACE_ROOT = Path(_settings.AGENT_DATA_DIR)
 
@@ -3022,8 +3026,14 @@ async def execute_tool(
             )
         return result
     except Exception as e:
-        logger.exception(f"[Tool] Execution failed: {tool_name}")
-        return f"Tool execution error ({tool_name}): {type(e).__name__}: {str(e)[:200]}"
+        # #169 修复：区分网络超时（WARNING）与真正异常（ERROR）
+        _exc_name = type(e).__name__
+        _is_network = _exc_name in ("ReadTimeout", "ConnectTimeout", "ConnectError", "RemoteProtocolError")
+        if _is_network:
+            logger.warning("[Tool] 网络超时 ({}): {} - {}", tool_name, _exc_name, str(e)[:120])
+        else:
+            logger.exception("[Tool] Execution failed: {}", tool_name)
+        return f"Tool execution error ({tool_name}): {_exc_name}: {str(e)[:200]}"
 
 
 async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str:
@@ -3060,17 +3070,38 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
 
 
 async def _search_duckduckgo(query: str, max_results: int) -> str:
-    """Search via DuckDuckGo HTML (free, no API key)."""
+    """Search via DuckDuckGo HTML (free, no API key).
+
+    #166 修复：添加指数退避重试（最多 2 次→1s, 3s），应对国内网络不稳定。
+    """
+    import asyncio
     import httpx
     import re
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        resp = await client.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
-            timeout=10,
-        )
+    last_error = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                resp = await client.get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": query},
+                    headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+                    timeout=10,
+                )
+            break  # 成功，跳出重试循环
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as e:
+            last_error = e
+            if attempt < 2:
+                _delay = 1.0 * (2 ** attempt)  # 1s → 3s
+                logger.info("[DDG] 尝试 {}/3 失败: {}，{}s后重试...", attempt + 1, type(e).__name__, _delay)
+                await asyncio.sleep(_delay)
+            else:
+                logger.warning("[DDG] 3次重试均失败: {} - {}", type(e).__name__, str(e)[:120])
+                return f'🔍 DuckDuckGo 搜索不可用（网络超时）: "{query}"。请稍后重试或使用其他搜索引擎。'
+        except Exception as e:
+            # 非网络错误（解析失败等）不重试
+            logger.warning("[DDG] 搜索失败（非网络错误）: {} - {}", type(e).__name__, str(e)[:100])
+            return f'🔍 DuckDuckGo 搜索出错: "{query}" - {type(e).__name__}'
 
     results = []
     blocks = re.findall(
@@ -5219,7 +5250,9 @@ async def _manage_tasks(
                 # Trigger auto-execution for todo tasks
                 import asyncio
                 from app.services.task_executor import execute_task
-                asyncio.create_task(execute_task(task.id, agent_id))
+                _t = asyncio.create_task(execute_task(task.id, agent_id))
+                _agent_tools_bg.add(_t)
+                _t.add_done_callback(_agent_tools_bg.discard)
                 await _sync_tasks_to_file(agent_id, ws)
                 return f"✅ Task created: {title} — auto-execution started"
             else:
@@ -8940,9 +8973,9 @@ async def _bitable_query_records(agent_id: uuid.UUID, arguments: dict) -> str:
         elif isinstance(filter_info, str) and filter_info.strip():
             try:
                 filters_dict = json.loads(filter_info)
-            except:
-                pass 
-                
+            except (json.JSONDecodeError, TypeError):
+                logger.debug(f"bitable_query_records: failed to parse filter_info JSON, using raw value: {filter_info!r}")
+
         resp = await feishu_service.bitable_query_records(app_id, app_secret, app_token, table_id, filters_dict)
         err = _check_feishu_err(resp)
         if err: return err
@@ -12948,7 +12981,7 @@ async def _update_kr_progress(agent_id: uuid.UUID | None, user_id: uuid.UUID | N
 
             prev_value = kr.current_value
             kr.current_value = float(value)
-            kr.last_updated_at = datetime.utcnow()
+            kr.last_updated_at = datetime.now(timezone.utc)
 
             # Auto-determine status based on progress ratio
             ratio = kr.current_value / kr.target_value if kr.target_value else 0
@@ -13482,7 +13515,7 @@ async def _update_any_kr_progress(agent_id: uuid.UUID | None, user_id: uuid.UUID
                     kr.status = "behind"
 
             from datetime import datetime
-            kr.last_updated_at = datetime.utcnow()
+            kr.last_updated_at = datetime.now(timezone.utc)
 
             note = arguments.get("note", "Updated by OKR Agent after check-in")
             log_entry = OKRProgressLog(

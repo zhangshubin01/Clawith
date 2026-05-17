@@ -89,6 +89,14 @@ class RecordingDB:
         self.committed = True
 
 
+def _make_request():
+    """Create a minimal fake FastAPI Request for tests."""
+    return SimpleNamespace(
+        headers={"X-Forwarded-For": "127.0.0.1", "x-forwarded-for": "127.0.0.1"},
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+
+
 def make_user(**overrides):
     values = {
         "id": uuid.uuid4(),
@@ -174,6 +182,7 @@ async def test_forgot_password_returns_generic_response_for_unknown_email():
     background_tasks = BackgroundTasks()
 
     response = await auth_api.forgot_password(
+        _make_request(),
         ForgotPasswordRequest(email="missing@example.com"),
         background_tasks,
         db,
@@ -205,7 +214,7 @@ async def test_forgot_password_queues_background_email(monkeypatch):
     monkeypatch.setattr(password_reset_service, "build_password_reset_url", fake_build_password_reset_url)
 
 
-    response = await auth_api.forgot_password(ForgotPasswordRequest(email=user.email), background_tasks, db)
+    response = await auth_api.forgot_password(_make_request(), ForgotPasswordRequest(email=user.email), background_tasks, db)
 
     assert response["ok"] is True
     assert db.committed is True

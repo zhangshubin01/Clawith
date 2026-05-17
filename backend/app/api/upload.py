@@ -37,7 +37,7 @@ def extract_text(file_path: Path, extension: str) -> str:
     if extension in TEXT_EXTENSIONS:
         try:
             return file_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+        except UnicodeDecodeError:
             return file_path.read_text(encoding="gbk", errors="replace")
 
     if extension == ".pdf":
@@ -114,6 +114,12 @@ async def upload_file(
     agent_id: str = Form(""),
     current_user: User = Depends(get_current_user),
 ):
+    # 校验 agent_id 为合法 UUID，防止路径遍历
+    if agent_id:
+        try:
+            uuid.UUID(agent_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid agent_id format")
     """Upload a file for chat context. Saves to agent workspace/uploads/ and returns extracted text."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename")
@@ -128,7 +134,7 @@ async def upload_file(
         # Save to agent's workspace/uploads/
         uploads_dir = WORKSPACE_ROOT / agent_id / "workspace" / "uploads"
         uploads_dir.mkdir(parents=True, exist_ok=True)
-        save_path = uploads_dir / file.filename
+        save_path = uploads_dir / Path(file.filename).name  # 仅用文件名，防止路径遍历
         # Avoid overwriting: add suffix if file exists
         if save_path.exists():
             stem = save_path.stem
@@ -144,7 +150,7 @@ async def upload_file(
         fallback_dir = Path("/tmp/clawith_uploads")
         fallback_dir.mkdir(exist_ok=True)
         file_id = str(uuid.uuid4())[:8]
-        save_path = fallback_dir / f"{file_id}_{file.filename}"
+        save_path = fallback_dir / f"{file_id}_{Path(file.filename).name}"
         save_path.write_bytes(content)
 
     # Extract text (only for known formats)

@@ -8,7 +8,7 @@ import re
 import secrets
 import uuid
 import io
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiofiles
@@ -76,7 +76,7 @@ def _tenant_logo_url(tenant_id: uuid.UUID) -> str:
     try:
         mtime = int(_tenant_logo_path(tenant_id).stat().st_mtime)
     except OSError:
-        mtime = int(datetime.utcnow().timestamp())
+        mtime = int(datetime.now(timezone.utc).timestamp())
     return f"/api/tenants/{tenant_id}/logo?v={mtime}"
 
 

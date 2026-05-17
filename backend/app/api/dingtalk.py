@@ -17,10 +17,14 @@ from app.models.channel_config import ChannelConfig
 from app.models.user import User
 from app.schemas.schemas import ChannelConfigOut
 
+_dingtalk_bg: set[asyncio.Task] = set()
+
+
 router = APIRouter(tags=["dingtalk"])
 
 
 # ─── Config CRUD ────────────────────────────────────────
+
 
 @router.post("/agents/{agent_id}/dingtalk-channel", response_model=ChannelConfigOut, status_code=201)
 async def configure_dingtalk_channel(
@@ -62,12 +66,18 @@ async def configure_dingtalk_channel(
         if conn_mode == "websocket":
             from app.services.dingtalk_stream import dingtalk_stream_manager
             import asyncio
-            asyncio.create_task(dingtalk_stream_manager.start_client(agent_id, app_key, app_secret))
+
+            _t = asyncio.create_task(dingtalk_stream_manager.start_client(agent_id, app_key, app_secret))
+            _dingtalk_bg.add(_t)
+            _t.add_done_callback(_dingtalk_bg.discard)
         else:
             # Stop existing Stream client if switched to webhook
             from app.services.dingtalk_stream import dingtalk_stream_manager
             import asyncio
-            asyncio.create_task(dingtalk_stream_manager.stop_client(agent_id))
+
+            _t = asyncio.create_task(dingtalk_stream_manager.stop_client(agent_id))
+            _dingtalk_bg.add(_t)
+            _t.add_done_callback(_dingtalk_bg.discard)
 
         return ChannelConfigOut.model_validate(existing)
 
@@ -86,7 +96,10 @@ async def configure_dingtalk_channel(
     if conn_mode == "websocket":
         from app.services.dingtalk_stream import dingtalk_stream_manager
         import asyncio
-        asyncio.create_task(dingtalk_stream_manager.start_client(agent_id, app_key, app_secret))
+
+        _t = asyncio.create_task(dingtalk_stream_manager.start_client(agent_id, app_key, app_secret))
+        _dingtalk_bg.add(_t)
+        _t.add_done_callback(_dingtalk_bg.discard)
 
     return ChannelConfigOut.model_validate(config)
 
@@ -133,10 +146,14 @@ async def delete_dingtalk_channel(
     # Stop Stream client
     from app.services.dingtalk_stream import dingtalk_stream_manager
     import asyncio
-    asyncio.create_task(dingtalk_stream_manager.stop_client(agent_id))
+
+    _t = asyncio.create_task(dingtalk_stream_manager.stop_client(agent_id))
+    _dingtalk_bg.add(_t)
+    _t.add_done_callback(_dingtalk_bg.discard)
 
 
 # ─── Message Processing (called by Stream callback) ────
+
 
 async def process_dingtalk_message(
     agent_id: uuid.UUID,
@@ -180,9 +197,11 @@ async def process_dingtalk_message(
         if not sender_staff_id:
             logger.warning("[DingTalk] Skip message attribution because sender_staff_id is empty")
             return
-        creator_id = agent_obj.creator_id
         from app.models.agent import DEFAULT_CONTEXT_WINDOW_SIZE
-        ctx_size = (agent_obj.context_window_size or DEFAULT_CONTEXT_WINDOW_SIZE) if agent_obj else DEFAULT_CONTEXT_WINDOW_SIZE
+
+        ctx_size = (
+            (agent_obj.context_window_size or DEFAULT_CONTEXT_WINDOW_SIZE) if agent_obj else DEFAULT_CONTEXT_WINDOW_SIZE
+        )
 
         # Determine conv_id for session isolation
         if conversation_type == "2":
@@ -224,34 +243,37 @@ async def process_dingtalk_message(
 
         # Build saved_content for DB (no base64 blobs, keep it display-friendly)
         import re as _re_dt
+
         _clean_text = _re_dt.sub(
-            r'\[image_data:data:image/[^;]+;base64,[A-Za-z0-9+/=]+\]',
-            "", user_text,
+            r"\[image_data:data:image/[^;]+;base64,[A-Za-z0-9+/=]+\]",
+            "",
+            user_text,
         ).strip()
         if saved_file_paths:
             from pathlib import Path as _PathDT
-            _file_prefixes = "\n".join(
-                f"[file:{_PathDT(p).name}]" for p in saved_file_paths
-            )
+
+            _file_prefixes = "\n".join(f"[file:{_PathDT(p).name}]" for p in saved_file_paths)
             saved_content = f"{_file_prefixes}\n{_clean_text}".strip() if _clean_text else _file_prefixes
         else:
             saved_content = _clean_text or user_text
 
         # Save user message
-        db.add(ChatMessage(
-            agent_id=agent_id, user_id=platform_user_id,
-            role="user", content=saved_content,
-            conversation_id=session_conv_id,
-        ))
+        db.add(
+            ChatMessage(
+                agent_id=agent_id,
+                user_id=platform_user_id,
+                role="user",
+                content=saved_content,
+                conversation_id=session_conv_id,
+            )
+        )
         sess.last_message_at = datetime.now(timezone.utc)
         await db.commit()
 
         # Build LLM input text: for images, inject base64 markers so vision models can see them
         llm_user_text = user_text
         if image_base64_list:
-            image_markers = "\n".join(
-                f"[image_data:{uri}]" for uri in image_base64_list
-            )
+            image_markers = "\n".join(f"[image_data:{uri}]" for uri in image_base64_list)
             llm_user_text = f"{user_text}\n{image_markers}" if user_text else image_markers
 
         # ── Set up channel_file_sender so the agent can send files via DingTalk ──
@@ -296,28 +318,33 @@ async def process_dingtalk_message(
                     _media_type = "file"
 
                 # Upload media to DingTalk
-                _mid = await _upload_dingtalk_media(
-                    _dt_app_key, _dt_app_secret, file_path, _media_type
-                )
+                _mid = await _upload_dingtalk_media(_dt_app_key, _dt_app_secret, file_path, _media_type)
 
                 if _mid:
                     # Send via proactive message API
                     _ok = await _send_dingtalk_media_message(
-                        _dt_app_key, _dt_app_secret,
-                        _dt_target_id, _mid, _media_type,
-                        _dt_conv_type, filename=_fp.name,
+                        _dt_app_key,
+                        _dt_app_secret,
+                        _dt_target_id,
+                        _mid,
+                        _media_type,
+                        _dt_conv_type,
+                        filename=_fp.name,
                     )
                     if _ok:
                         # Also send accompany text if provided
                         if msg:
                             try:
                                 async with httpx.AsyncClient(timeout=10) as _cl:
-                                    await _cl.post(session_webhook, json={
-                                        "msgtype": "text",
-                                        "text": {"content": msg},
-                                    })
+                                    await _cl.post(
+                                        session_webhook,
+                                        json={
+                                            "msgtype": "text",
+                                            "text": {"content": msg},
+                                        },
+                                    )
                             except Exception:
-                                pass
+                                logger.warning("[DingTalk] 消息发送失败", exc_info=True)
                         return
 
                 # Fallback: send a text message with file info
@@ -327,10 +354,13 @@ async def process_dingtalk_message(
                 _fallback_parts.append(f"[File: {_fp.name}]")
                 try:
                     async with httpx.AsyncClient(timeout=10) as _cl:
-                        await _cl.post(session_webhook, json={
-                            "msgtype": "text",
-                            "text": {"content": "\n\n".join(_fallback_parts)},
-                        })
+                        await _cl.post(
+                            session_webhook,
+                            json={
+                                "msgtype": "text",
+                                "text": {"content": "\n\n".join(_fallback_parts)},
+                            },
+                        )
                 except Exception as _fb_err:
                     logger.error(f"[DingTalk] Fallback file text also failed: {_fb_err}")
 
@@ -339,8 +369,11 @@ async def process_dingtalk_message(
         # Call LLM
         try:
             reply_text = await _call_agent_llm(
-                db, agent_id, llm_user_text,
-                history=history, user_id=platform_user_id,
+                db,
+                agent_id,
+                llm_user_text,
+                history=history,
+                user_id=platform_user_id,
             )
         finally:
             # Reset ContextVar
@@ -350,54 +383,66 @@ async def process_dingtalk_message(
             if message_id and _dt_app_key:
                 try:
                     from app.services.dingtalk_reaction import recall_thinking_reaction
+
                     await recall_thinking_reaction(
-                        _dt_app_key, _dt_app_secret,
-                        message_id, conversation_id,
+                        _dt_app_key,
+                        _dt_app_secret,
+                        message_id,
+                        conversation_id,
                     )
                 except Exception as _recall_err:
                     logger.warning(f"[DingTalk] Failed to recall thinking reaction: {_recall_err}")
 
         has_media = bool(image_base64_list or saved_file_paths)
-        logger.info(
-            f"[DingTalk] LLM reply ({'media' if has_media else 'text'} input): "
-            f"{reply_text[:100]}"
-        )
+        logger.info(f"[DingTalk] LLM reply ({'media' if has_media else 'text'} input): {reply_text[:100]}")
 
         # Reply via session webhook (markdown)
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                await client.post(session_webhook, json={
-                    "msgtype": "markdown",
-                    "markdown": {
-                        "title": agent_obj.name or "AI Reply",
-                        "text": reply_text,
+                await client.post(
+                    session_webhook,
+                    json={
+                        "msgtype": "markdown",
+                        "markdown": {
+                            "title": agent_obj.name or "AI Reply",
+                            "text": reply_text,
+                        },
                     },
-                })
+                )
         except Exception as e:
             logger.error(f"[DingTalk] Failed to reply via webhook: {e}")
             # Fallback: try plain text
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
-                    await client.post(session_webhook, json={
-                        "msgtype": "text",
-                        "text": {"content": reply_text},
-                    })
+                    await client.post(
+                        session_webhook,
+                        json={
+                            "msgtype": "text",
+                            "text": {"content": reply_text},
+                        },
+                    )
             except Exception as e2:
                 logger.error(f"[DingTalk] Fallback text reply also failed: {e2}")
 
         # Save assistant reply
-        db.add(ChatMessage(
-            agent_id=agent_id, user_id=platform_user_id,
-            role="assistant", content=reply_text,
-            conversation_id=session_conv_id,
-        ))
+        db.add(
+            ChatMessage(
+                agent_id=agent_id,
+                user_id=platform_user_id,
+                role="assistant",
+                content=reply_text,
+                conversation_id=session_conv_id,
+            )
+        )
         sess.last_message_at = datetime.now(timezone.utc)
         await db.commit()
 
         # Log activity
         from app.services.activity_logger import log_activity
+
         await log_activity(
-            agent_id, "chat_reply",
+            agent_id,
+            "chat_reply",
             f"Replied to DingTalk message: {reply_text[:80]}",
             detail={"channel": "dingtalk", "user_text": user_text[:200], "reply": reply_text[:500]},
         )
@@ -405,9 +450,10 @@ async def process_dingtalk_message(
 
 # ─── OAuth Callback (SSO) ──────────────────────────────
 
+
 @router.get("/auth/dingtalk/callback")
 async def dingtalk_callback(
-    authCode: str, # DingTalk uses authCode parameter
+    authCode: str,  # DingTalk uses authCode parameter
     state: str = None,
     db: AsyncSession = Depends(get_db),
 ):

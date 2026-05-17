@@ -5,7 +5,11 @@ Unlike Slack/Discord (messaging channels), Atlassian is a tool-access channel:
 the agent uses Jira, Confluence, and Compass via the Atlassian Rovo MCP server.
 """
 
+import asyncio
 import uuid
+
+# 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
+_bg_tasks: set[asyncio.Task] = set()
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
@@ -18,10 +22,12 @@ from app.database import get_db
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
 
+# 后台任务强引用集合
+_atlassian_bg: set[asyncio.Task] = set()
+
 router = APIRouter(tags=["atlassian"])
 
 ATLASSIAN_MCP_URL = "https://mcp.atlassian.com/v1/mcp"
-
 
 # ─── Config CRUD ────────────────────────────────────────
 
@@ -65,7 +71,9 @@ async def configure_atlassian_channel(
         await db.commit()
         # Sync tools for this agent in background
         import asyncio
-        asyncio.create_task(_sync_atlassian_tools_for_agent(agent_id, api_key))
+        _t = asyncio.create_task(_sync_atlassian_tools_for_agent(agent_id, api_key))
+        _bg_tasks.add(_t)
+        _t.add_done_callback(_bg_tasks.discard)
         return _serialize(existing)
 
     config = ChannelConfig(
@@ -80,10 +88,10 @@ async def configure_atlassian_channel(
     await db.commit()
     await db.refresh(config)
     # Sync tools for this agent in background
-    import asyncio
-    asyncio.create_task(_sync_atlassian_tools_for_agent(agent_id, api_key))
+    _t = asyncio.create_task(_sync_atlassian_tools_for_agent(agent_id, api_key))
+    _atlassian_bg.add(_t)
+    _t.add_done_callback(_atlassian_bg.discard)
     return _serialize(config)
-
 
 @router.get("/agents/{agent_id}/atlassian-channel")
 async def get_atlassian_channel(
@@ -102,7 +110,6 @@ async def get_atlassian_channel(
     if not config:
         raise HTTPException(status_code=404, detail="Atlassian not configured")
     return _serialize(config)
-
 
 @router.delete("/agents/{agent_id}/atlassian-channel", status_code=204)
 async def delete_atlassian_channel(
@@ -124,7 +131,6 @@ async def delete_atlassian_channel(
         raise HTTPException(status_code=404, detail="Atlassian not configured")
     await db.delete(config)
     await db.commit()
-
 
 @router.post("/agents/{agent_id}/atlassian-channel/test")
 async def test_atlassian_channel(
@@ -157,7 +163,6 @@ async def test_atlassian_channel(
     except Exception as e:
         return {"ok": False, "error": str(e)[:300]}
 
-
 # ─── Internal helper ────────────────────────────────────
 
 def _serialize(config: ChannelConfig) -> dict:
@@ -171,7 +176,6 @@ def _serialize(config: ChannelConfig) -> dict:
         "extra_config": config.extra_config or {},
         "created_at": config.created_at.isoformat() if config.created_at else None,
     }
-
 
 # ─── Utility for internal use ──────────────────────────
 
@@ -272,7 +276,6 @@ async def _sync_atlassian_tools_for_agent(agent_id: uuid.UUID, api_key: str) -> 
         await db.commit()
     logger.info(f"[AtlassianChannel] {assigned} new tool assignments for agent {agent_id}")
 
-
 async def get_atlassian_api_key_for_agent(agent_id: uuid.UUID, db=None) -> str | None:
     """Return the configured Atlassian API key for the given agent, or None."""
     from app.database import async_session
@@ -294,7 +297,8 @@ async def get_atlassian_api_key_for_agent(agent_id: uuid.UUID, db=None) -> str |
         try:
             return decrypt_data(config.app_secret, get_settings().SECRET_KEY)
         except Exception:
-            return config.app_secret
+            logger.warning("[Atlassian] Failed to decrypt app_secret, returning None")
+            return None
 
     if db is not None:
         return await _fetch(db)

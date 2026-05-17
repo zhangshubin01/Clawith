@@ -123,15 +123,20 @@ async def lsp4j_websocket_endpoint(
             logger.warning("[LSP4J-LIFE] WS auth failed: missing token (neither query param nor Authorization header)")
             await websocket.close(code=4001, reason="Missing token")
             return
-    logger.info("[LSP4J-LIFE] WS authenticating with token: {}...", token[:20] if token else "None")
+    logger.info("[LSP4J-LIFE] WS authenticating (token length={})", len(token) if token else 0)
 
     try:
         user_id = await verify_api_key_or_token(token)
         logger.info("[LSP4J-LIFE] WS auth success: user_id={}", user_id)
     except HTTPException as e:
         msg = e.detail if isinstance(e.detail, str) else "Unauthorized"
-        logger.warning("[LSP4J-LIFE] WS auth failed: {}", msg)
-        await websocket.close(code=4001, reason=msg)
+        # token_expired 使用 debug 级别，避免客户端重连时日志风暴
+        if msg == "token_expired":
+            logger.debug("[LSP4J-LIFE] WS auth failed: token_expired")
+        else:
+            logger.warning("[LSP4J-LIFE] WS auth failed: {}", msg)
+        code = 4003 if msg == "token_expired" else 4001
+        await websocket.close(code=code, reason=msg)
         return
     except Exception:
         logger.exception("[LSP4J-LIFE] WebSocket auth error")

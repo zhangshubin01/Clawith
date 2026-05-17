@@ -1,5 +1,6 @@
 """E2B API-based sandbox backend."""
 
+import shlex
 import time
 
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
@@ -129,7 +130,7 @@ class E2bBackend(BaseSandboxBackend):
                     )
 
                 # Run the command - use string format for e2b
-                cmd_str = f"{cmd} {args[0]} '{args[1]}'"
+                cmd_str = f"{cmd} {args[0]} {shlex.quote(args[1])}"
                 result = await sandbox.commands.run(cmd_str)
 
             duration_ms = int((time.time() - start_time) * 1000)

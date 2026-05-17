@@ -66,7 +66,7 @@ class ConnectionManager:
             await websocket.close(code=1013, reason="Server at capacity")
             logger.warning("[WS] 连接被拒绝：已达最大连接数 ({})", MAX_CONNECTIONS)
             return
-        await websocket.accept()
+        # accept 由调用方（websocket_chat）完成，ConnectionManager 仅负责连接追踪
         _now = time.monotonic()
         conn_key = f"{session_id}@{user_id}" if session_id else str(id(websocket))
         if agent_id not in self.active_connections:
@@ -81,6 +81,15 @@ class ConnectionManager:
         if not self._cleanup_started:
             self._cleanup_started = True
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+    async def shutdown(self):
+        """取消后台清理循环，优雅关闭。"""
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
 
     def disconnect(self, agent_id: str, websocket: WebSocket):
         if agent_id in self.active_connections:
@@ -119,7 +128,7 @@ class ConnectionManager:
                             info.last_ping_ts = _now
                             info.ping_count += 1
                             if info.ping_count > 5:
-                                logger.warning(
+                                logger.info(
                                     "[WS] 半死连接清理: agent={} session={} user={} ping_count={}",
                                     agent_id, info.session_id, info.user_id, info.ping_count,
                                 )

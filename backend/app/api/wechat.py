@@ -6,6 +6,9 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
+# 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
+_bg_tasks: set[asyncio.Task] = set()
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
@@ -19,6 +22,10 @@ from app.models.channel_config import ChannelConfig
 from app.models.user import User
 from app.schemas.schemas import ChannelConfigOut
 from app.services.wechat_channel import WECHAT_CHANNEL_VERSION, WECHAT_ILINK_BASE_URL, wechat_poll_manager
+
+# 后台任务强引用集合
+_wechat_bg: set[asyncio.Task] = set()
+
 
 
 router = APIRouter(tags=["wechat"])
@@ -133,7 +140,11 @@ async def get_wechat_qrcode_status(
             await db.flush()
 
         await db.commit()
-        asyncio.create_task(wechat_poll_manager.start_client(agent_id))
+        _t = asyncio.create_task(wechat_poll_manager.start_client(agent_id))
+        _wechat_bg.add(_t)
+        _t.add_done_callback(_wechat_bg.discard)
+        _bg_tasks.add(_t)
+        _t.add_done_callback(_bg_tasks.discard)
 
     return payload
 

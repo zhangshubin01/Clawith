@@ -13,6 +13,10 @@ from croniter import croniter
 from loguru import logger
 from sqlalchemy import select
 
+# 后台任务强引用集合
+_scheduler_bg: set[asyncio.Task] = set()
+
+
 
 def compute_next_run(cron_expr: str, after: datetime | None = None) -> datetime | None:
     """Compute the next run time from a cron expression."""

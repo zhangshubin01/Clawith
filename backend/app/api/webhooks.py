@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 # In-memory rate limiter: token -> list of timestamps
 _rate_hits: dict[str, list[float]] = {}
 RATE_LIMIT = 5       # max hits per minute per token
+MAX_RATE_ENTRIES = 10000  # 防止内存无限增长
 MAX_PAYLOAD_SIZE = 65536  # 64KB max payload
 
 
@@ -47,7 +48,9 @@ async def receive_webhook(token: str, request: Request):
         logger.warning(f"Webhook hard rate limit exceeded for token {token[:8]}...")
         return JSONResponse({"ok": True}, status_code=429)
     hits.append(now)
-    _rate_hits[token] = hits
+    if len(_rate_hits) < MAX_RATE_ENTRIES:
+        _rate_hits[token] = hits
+    # 超限时不写入，避免内存无限增长（仅在 DEBUG 启用时可见）
 
     # Payload size check
     body = await request.body()

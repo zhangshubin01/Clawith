@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.plugins.clawith_acp import router as acp_router
+from app.plugins.clawith_acp.router import _acp_ws_envelope, ACP_WS_SCHEMA_VERSION
 
 # Repo root: backend/tests/plugins -> … -> Clawith
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -40,15 +41,15 @@ def _load_thin_server_module():
 
 
 def test_acp_ws_envelope_adds_schema_version():
-    env = acp_router._acp_ws_envelope({"type": "chunk", "content": "x"})
-    assert env["schemaVersion"] == acp_router.ACP_WS_SCHEMA_VERSION
+    env = _acp_ws_envelope({"type": "chunk", "content": "x"})
+    assert env["schemaVersion"] == ACP_WS_SCHEMA_VERSION
     assert env["type"] == "chunk"
     assert env["content"] == "x"
 
 
 def test_acp_ws_envelope_done_message():
-    env = acp_router._acp_ws_envelope({"type": "done"})
-    assert env["schemaVersion"] == acp_router.ACP_WS_SCHEMA_VERSION
+    env = _acp_ws_envelope({"type": "done"})
+    assert env["schemaVersion"] == ACP_WS_SCHEMA_VERSION
     assert env["type"] == "done"
 
 
@@ -275,7 +276,7 @@ async def test_custom_get_tools_no_ide_when_ws_inactive(monkeypatch):
 
 def test_thin_cloud_msg_matches_router_version():
     thin = _load_thin_server_module()
-    assert thin.CLOUD_WS_SCHEMA_VERSION == acp_router.ACP_WS_SCHEMA_VERSION
+    assert thin.CLOUD_WS_SCHEMA_VERSION == ACP_WS_SCHEMA_VERSION
 
 
 def test_thin_cloud_msg_shape():

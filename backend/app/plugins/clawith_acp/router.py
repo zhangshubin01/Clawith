@@ -138,6 +138,7 @@ def install_acp_tool_hooks() -> None:
     agent_tools.execute_tool = _custom_execute_tool
     _acp_hooks_installed = True
 
+
 current_acp_ws = ContextVar("current_acp_ws", default=None)
 current_acp_pending_tools = ContextVar("current_acp_pending_tools", default={})
 current_acp_pending_permissions = ContextVar("current_acp_pending_permissions", default={})
@@ -162,6 +163,7 @@ def _acp_verbose() -> bool:
 
 def _acp_log_chunks() -> bool:
     return (os.environ.get("CLAWITH_ACP_LOG_CHUNKS") or "").strip().lower() in ("1", "true", "yes", "on")
+
 
 # IDE tools that must receive an affirmative `permission_result` before `execute_tool` is sent.
 # ide_write_file requires explicit approval via the Clawith web UI PermissionModal (IDEA ACP plugin
@@ -371,7 +373,10 @@ IDE_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "source": {"type": "string", "description": "Absolute or relative path to the source file/directory to move"},
+                    "source": {
+                        "type": "string",
+                        "description": "Absolute or relative path to the source file/directory to move",
+                    },
                     "destination": {"type": "string", "description": "Absolute or relative path to the destination"},
                 },
                 "required": ["source", "destination"],
@@ -457,7 +462,7 @@ async def _acp_await_client_permission(
                     perm_id,
                 )
             except Exception:
-                pass
+                logger.warning("[ACP] Failed to forward permission request to session {}", session_id, exc_info=True)
         allowed = bool(await asyncio.wait_for(fut, timeout=timeout))
         logger.info(
             "ACP permission resolved session_id={} tool={} perm_id={} allowed={}",
@@ -492,9 +497,10 @@ def resolve_acp_permission(perm_id: str, granted: bool) -> bool:
     logger.warning("ACP permission resolve: perm_id={} not found or already done", perm_id)
     return False
 
+
 def _generate_structured_diff_blocks(file_path: str, old_content: str, new_content: str) -> list[dict[str, Any]]:
     """Generate ACP structured diff blocks from old/new content.
-    
+
     Follows the claude-agent-acp pattern: creates structured hunk objects with
     location information that the IDE can render inline in permission dialog.
     """
@@ -503,45 +509,52 @@ def _generate_structured_diff_blocks(file_path: str, old_content: str, new_conte
     # but this follows the ACP structured block format expected by the protocol.
     old_lines = old_content.splitlines(keepends=True)
     new_lines = new_content.splitlines(keepends=True)
-    
+
     diff_blocks: list[dict[str, Any]] = []
-    
+
     # For new file (no old content)
     if not old_lines:
-        diff_blocks.append({
-            "type": "diff_block",
-            "new": new_content,
-            "old": "",
-            "start_line": 1,
-            "end_line": 0,
-            "file_path": file_path,
-        })
+        diff_blocks.append(
+            {
+                "type": "diff_block",
+                "new": new_content,
+                "old": "",
+                "start_line": 1,
+                "end_line": 0,
+                "file_path": file_path,
+            }
+        )
         return diff_blocks
-    
+
     # For empty new file (delete)
     if not new_lines:
-        diff_blocks.append({
-            "type": "diff_block",
-            "new": "",
-            "old": old_content,
-            "start_line": 1,
-            "end_line": len(old_lines),
-            "file_path": file_path,
-        })
+        diff_blocks.append(
+            {
+                "type": "diff_block",
+                "new": "",
+                "old": old_content,
+                "start_line": 1,
+                "end_line": len(old_lines),
+                "file_path": file_path,
+            }
+        )
         return diff_blocks
-    
+
     # Use a simple approach: when the whole file changed, send as a single block
     # In future, we could optimize this with proper diff hunk splitting
-    diff_blocks.append({
-        "type": "diff_block",
-        "file_path": file_path,
-        "old": old_content,
-        "new": new_content,
-        "start_line": 1,
-        "end_line": len(old_lines),
-    })
-    
+    diff_blocks.append(
+        {
+            "type": "diff_block",
+            "file_path": file_path,
+            "old": old_content,
+            "new": new_content,
+            "start_line": 1,
+            "end_line": len(old_lines),
+        }
+    )
+
     return diff_blocks
+
 
 async def _read_file_for_diff(
     ws: WebSocket,
@@ -585,15 +598,15 @@ async def _read_file_for_diff(
     finally:
         pending.pop(call_id, None)
 
+
 async def _custom_get_tools(agent_id):
     tools = await _original_get_tools(agent_id)
     if current_acp_ws.get() is not None:
         return tools + IDE_TOOLS
     return tools
 
-async def _custom_execute_tool(
-    tool_name, args, agent_id, user_id, session_id: str = ""
-):
+
+async def _custom_execute_tool(tool_name, args, agent_id, user_id, session_id: str = ""):
     """Must match ``agent_tools.execute_tool`` arity: session_id defaults for scheduler/heartbeat/A2A callers."""
     ws = current_acp_ws.get()
     pending = current_acp_pending_tools.get()
@@ -662,9 +675,13 @@ async def _custom_execute_tool(
                         new_content = args.get("content", "")
                     MAX_DIFF_SIZE = 100_000  # 100KB per side
                     if len(old_content) > MAX_DIFF_SIZE:
-                        old_content = old_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(old_content)} 字符)"
+                        old_content = (
+                            old_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(old_content)} 字符)"
+                        )
                     if len(new_content) > MAX_DIFF_SIZE:
-                        new_content = new_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(new_content)} 字符)"
+                        new_content = (
+                            new_content[:MAX_DIFF_SIZE] + f"\n... (内容过长，已截断，共 {len(new_content)} 字符)"
+                        )
                     extra = {
                         "file_path": file_path,
                         "old_content": old_content,
@@ -675,16 +692,20 @@ async def _custom_execute_tool(
                     if _acp_supports_structured_diff.get():
                         diff_blocks = _generate_structured_diff_blocks(file_path, old_content, new_content)
                         if diff_blocks:
-                            await ws.send_json(_acp_ws_envelope({
-                                "type": "sessionUpdate",
-                                "_meta": {
-                                    "structured_diff": {
-                                        "file_path": file_path,
-                                        "diff_blocks": diff_blocks,
-                                        "tool_name": tool_name,
+                            await ws.send_json(
+                                _acp_ws_envelope(
+                                    {
+                                        "type": "sessionUpdate",
+                                        "_meta": {
+                                            "structured_diff": {
+                                                "file_path": file_path,
+                                                "diff_blocks": diff_blocks,
+                                                "tool_name": tool_name,
+                                            }
+                                        },
                                     }
-                                }
-                            }))
+                                )
+                            )
                             logger.info(
                                 "ACP sent structured diff via sessionUpdate session_id={} file={} blocks={}",
                                 session_id or "-",
@@ -699,22 +720,28 @@ async def _custom_execute_tool(
                         }
                         # For delete, send an empty structured diff to indicate deletion
                         if _acp_supports_structured_diff.get():
-                            await ws.send_json(_acp_ws_envelope({
-                                "type": "sessionUpdate",
-                                "_meta": {
-                                    "structured_diff": {
-                                        "file_path": file_path,
-                                        "diff_blocks": [{
-                                            "type": "diff_block",
-                                            "file_path": file_path,
-                                            "old": "",
-                                            "new": "",
-                                            "is_deletion": True,
-                                        }],
-                                        "tool_name": tool_name,
+                            await ws.send_json(
+                                _acp_ws_envelope(
+                                    {
+                                        "type": "sessionUpdate",
+                                        "_meta": {
+                                            "structured_diff": {
+                                                "file_path": file_path,
+                                                "diff_blocks": [
+                                                    {
+                                                        "type": "diff_block",
+                                                        "file_path": file_path,
+                                                        "old": "",
+                                                        "new": "",
+                                                        "is_deletion": True,
+                                                    }
+                                                ],
+                                                "tool_name": tool_name,
+                                            }
+                                        },
                                     }
-                                }
-                            }))
+                                )
+                            )
                 elif tool_name == "ide_move":
                     source = args.get("source", "")
                     destination = args.get("destination", "")
@@ -724,19 +751,26 @@ async def _custom_execute_tool(
                     }
                     # For move, send structured diff notification
                     if _acp_supports_structured_diff.get() and source:
-                        await ws.send_json(_acp_ws_envelope({
-                            "type": "sessionUpdate",
-                            "_meta": {
-                                "structured_diff": {
-                                    "source_path": source,
-                                    "destination_path": destination,
-                                    "is_move": True,
-                                    "tool_name": tool_name,
+                        await ws.send_json(
+                            _acp_ws_envelope(
+                                {
+                                    "type": "sessionUpdate",
+                                    "_meta": {
+                                        "structured_diff": {
+                                            "source_path": source,
+                                            "destination_path": destination,
+                                            "is_move": True,
+                                            "tool_name": tool_name,
+                                        }
+                                    },
                                 }
-                            }
-                        }))
+                            )
+                        )
                 allowed = await _acp_await_client_permission(
-                    ws, pending_perm, tool_name, args,
+                    ws,
+                    pending_perm,
+                    tool_name,
+                    args,
                     agent_id=str(agent_id),
                     session_id=session_id,
                     extra_payload=extra,
@@ -786,7 +820,7 @@ async def _custom_execute_tool(
                 call_id,
                 len(str(result or "")),
             )
-            
+
             # Terminal incremental output optimization: when client supports it,
             # send incremental output via sessionUpdate with _meta extension
             if tool_name == "ide_terminal_output" and _acp_supports_terminal_output.get():
@@ -798,46 +832,53 @@ async def _custom_execute_tool(
                     output = result.get("output", "")
                     exit_code = result.get("exit_code")
                     incremental = result.get("incremental")
-                    
+
                     if isinstance(incremental, list):
                         # Send each incremental chunk
                         for chunk in incremental:
                             if chunk:
-                                await ws.send_json(_acp_ws_envelope({
+                                await ws.send_json(
+                                    _acp_ws_envelope(
+                                        {
+                                            "type": "sessionUpdate",
+                                            "_meta": {
+                                                "terminal_output": {
+                                                    "terminal_id": terminal_id,
+                                                    "data": chunk,
+                                                    "incremental": True,
+                                                }
+                                            },
+                                        }
+                                    )
+                                )
+                    elif output:
+                        # Send entire output as one chunk
+                        await ws.send_json(
+                            _acp_ws_envelope(
+                                {
                                     "type": "sessionUpdate",
                                     "_meta": {
                                         "terminal_output": {
                                             "terminal_id": terminal_id,
-                                            "data": chunk,
-                                            "incremental": True
+                                            "data": output,
+                                            "incremental": False,
                                         }
-                                    }
-                                }))
-                    elif output:
-                        # Send entire output as one chunk
-                        await ws.send_json(_acp_ws_envelope({
-                            "type": "sessionUpdate",
-                            "_meta": {
-                                "terminal_output": {
-                                    "terminal_id": terminal_id,
-                                    "data": output,
-                                    "incremental": False
+                                    },
                                 }
-                            }
-                        }))
-                    
+                            )
+                        )
+
                     # Send exit code notification if available
                     if exit_code is not None:
-                        await ws.send_json(_acp_ws_envelope({
-                            "type": "sessionUpdate",
-                            "_meta": {
-                                "terminal_exit": {
-                                    "terminal_id": terminal_id,
-                                    "exit_code": exit_code
+                        await ws.send_json(
+                            _acp_ws_envelope(
+                                {
+                                    "type": "sessionUpdate",
+                                    "_meta": {"terminal_exit": {"terminal_id": terminal_id, "exit_code": exit_code}},
                                 }
-                            }
-                        }))
-            
+                            )
+                        )
+
             return result
         except asyncio.TimeoutError:
             logger.error(
@@ -913,9 +954,7 @@ async def _load_acp_history_by_owner(session_id: str, user_id: uuid.UUID) -> lis
         return [{"role": m.role, "content": m.content} for m in rows]
 
 
-async def _resolve_agent_override(
-    override: str, user_id: uuid.UUID
-) -> tuple[AgentModel, LLMModel] | None:
+async def _resolve_agent_override(override: str, user_id: uuid.UUID) -> tuple[AgentModel, LLMModel] | None:
     """O5: Look up agent by UUID or name, return (agent, model) or None if not found."""
     async with async_session() as db:
         # Try UUID first, fall back to name
@@ -940,9 +979,7 @@ async def _resolve_agent_override(
         return agent, model
 
 
-async def _load_acp_history_from_db(
-    session_id: str, agent_id: uuid.UUID, user_id: uuid.UUID
-) -> list[dict]:
+async def _load_acp_history_from_db(session_id: str, agent_id: uuid.UUID, user_id: uuid.UUID) -> list[dict]:
     try:
         sid_uuid = uuid.UUID(session_id)
     except ValueError:
@@ -973,9 +1010,7 @@ async def _load_acp_history_from_db(
         return [{"role": m.role, "content": m.content} for m in rows]
 
 
-async def _list_acp_chat_sessions(
-    user_id: uuid.UUID, agent_id: uuid.UUID, limit: int = 50
-) -> list[ChatSession]:
+async def _list_acp_chat_sessions(user_id: uuid.UUID, agent_id: uuid.UUID, limit: int = 50) -> list[ChatSession]:
     async with async_session() as db:
         r = await db.execute(
             select(ChatSession)
@@ -1007,9 +1042,7 @@ async def acp_websocket(
         return
     except Exception:
         logger.exception("ACP WebSocket auth error")
-        await websocket.send_json(
-            _acp_ws_envelope({"type": "error", "content": "Unauthorized"})
-        )
+        await websocket.send_json(_acp_ws_envelope({"type": "error", "content": "Unauthorized"}))
         await websocket.close(code=4001)
         return
 
@@ -1020,13 +1053,13 @@ async def acp_websocket(
             ar = await db.execute(select(AgentModel).where(AgentModel.id == agent_uuid))
         else:
             ar = await db.execute(select(AgentModel).where(AgentModel.name == agent_id))
-        
+
         agent_obj = ar.scalar_one_or_none()
         if not agent_obj:
             await websocket.send_json({"type": "error", "content": "Agent not found"})
             await websocket.close(code=4004)
             return
-            
+
         mr = await db.execute(select(LLMModel).where(LLMModel.id == agent_obj.primary_model_id))
         model_obj = mr.scalar_one_or_none()
         if not model_obj:
@@ -1050,7 +1083,7 @@ async def acp_websocket(
     current_acp_pending_permissions.set(pending_permissions)
 
     session_messages: dict[str, list] = {}
-    main_queue: asyncio.Queue = asyncio.Queue()
+    main_queue: asyncio.Queue = asyncio.Queue(maxsize=1024)
 
     async def receive_loop() -> None:
         try:
@@ -1163,10 +1196,12 @@ async def acp_websocket(
                     # Currently a placeholder - future extensions can register handlers here
                     result: dict[str, Any] = {}
                     await websocket.send_json(
-                        _acp_ws_envelope({
-                            "type": "ext_method_result",
-                            "result": result,
-                        })
+                        _acp_ws_envelope(
+                            {
+                                "type": "ext_method_result",
+                                "result": result,
+                            }
+                        )
                     )
                     continue
 
@@ -1198,11 +1233,13 @@ async def acp_websocket(
                     current_acp_session_config.set(current_config)
                     # Send acknowledgment back to client
                     await websocket.send_json(
-                        _acp_ws_envelope({
-                            "type": "current_mode_update",
-                            "session_id": session_id,
-                            "current_mode": mode_id,
-                        })
+                        _acp_ws_envelope(
+                            {
+                                "type": "current_mode_update",
+                                "session_id": session_id,
+                                "current_mode": mode_id,
+                            }
+                        )
                     )
                     continue
 
@@ -1217,11 +1254,13 @@ async def acp_websocket(
                     current_acp_session_config.set(current_config)
                     # Send acknowledgment back to client
                     await websocket.send_json(
-                        _acp_ws_envelope({
-                            "type": "current_model_update",
-                            "session_id": session_id,
-                            "current_model_id": model_id,
-                        })
+                        _acp_ws_envelope(
+                            {
+                                "type": "current_model_update",
+                                "session_id": session_id,
+                                "current_model_id": model_id,
+                            }
+                        )
                     )
                     continue
 
@@ -1230,8 +1269,13 @@ async def acp_websocket(
                     session_id = data.get("session_id")
                     config_id = data.get("config_id")
                     value = data.get("value")
-                    logger.info("[ACP] set_session_config_option requested session_id={} config_id={} value={}", session_id, config_id, value)
-                    
+                    logger.info(
+                        "[ACP] set_session_config_option requested session_id={} config_id={} value={}",
+                        session_id,
+                        config_id,
+                        value,
+                    )
+
                     # Handle common config IDs specially
                     if config_id == "mode" and isinstance(value, str):
                         # Update mode
@@ -1239,11 +1283,13 @@ async def acp_websocket(
                         current_config["mode"] = value
                         current_acp_session_config.set(current_config)
                         await websocket.send_json(
-                            _acp_ws_envelope({
-                                "type": "current_mode_update",
-                                "session_id": session_id,
-                                "current_mode": value,
-                            })
+                            _acp_ws_envelope(
+                                {
+                                    "type": "current_mode_update",
+                                    "session_id": session_id,
+                                    "current_mode": value,
+                                }
+                            )
                         )
                     elif config_id == "model" and isinstance(value, str):
                         # Update model
@@ -1251,18 +1297,20 @@ async def acp_websocket(
                         current_config["model"] = value
                         current_acp_session_config.set(current_config)
                         await websocket.send_json(
-                            _acp_ws_envelope({
-                                "type": "current_model_update",
-                                "session_id": session_id,
-                                "current_model_id": value,
-                            })
+                            _acp_ws_envelope(
+                                {
+                                    "type": "current_model_update",
+                                    "session_id": session_id,
+                                    "current_model_id": value,
+                                }
+                            )
                         )
                     else:
                         # Generic config update - store it
                         current_config = current_acp_session_config.get() or {}
                         current_config[config_id] = value
                         current_acp_session_config.set(current_config)
-                    
+
                     continue
 
                 await main_queue.put(data)
@@ -1286,6 +1334,8 @@ async def acp_websocket(
             await main_queue.put({"type": "__acp_shutdown__"})
 
     recv_task = asyncio.create_task(receive_loop())
+    _acp_background_tasks.add(recv_task)
+    recv_task.add_done_callback(_acp_background_tasks.discard)
 
     try:
         while True:
@@ -1348,7 +1398,7 @@ async def acp_websocket(
                     supports_terminal_output = meta.get("terminal_output") is True
                     # Check _meta.structured_diff === true
                     supports_structured_diff = meta.get("structured_diff") is True
-                
+
                 # Store in context var for this connection
                 _acp_supports_terminal_output.set(supports_terminal_output)
                 _acp_supports_structured_diff.set(supports_structured_diff)
@@ -1359,7 +1409,7 @@ async def acp_websocket(
                         supports_structured_diff,
                         data.get("session_id"),
                     )
-                
+
                 # The initialize response is handled by the acp library upstream
                 continue
 
@@ -1377,25 +1427,29 @@ async def acp_websocket(
                 async with async_session() as db:
                     # If agent has specific enabled models configured, filter to those
                     query = select(LLMModel).where(LLMModel.enabled)
-                    
+
                     # Check if agent_obj has public_enabled_models attribute and it's not empty
-                    if (hasattr(agent_obj, 'public_enabled_models') and 
-                        agent_obj.public_enabled_models and 
-                        isinstance(agent_obj.public_enabled_models, list) and
-                        len(agent_obj.public_enabled_models) > 0):
+                    if (
+                        hasattr(agent_obj, "public_enabled_models")
+                        and agent_obj.public_enabled_models
+                        and isinstance(agent_obj.public_enabled_models, list)
+                        and len(agent_obj.public_enabled_models) > 0
+                    ):
                         query = query.where(LLMModel.id.in_(agent_obj.public_enabled_models))
-                    
+
                     result = await db.execute(query)
                     for model in result.scalars():
-                        models_out.append({
-                            "model_id": str(model.id),
-                            "id": str(model.id),
-                            "name": model.label,
-                            "display_name": model.label,
-                            "description": f"{model.provider} - {model.model}",
-                            "is_enabled": model.enabled,
-                        })
-                    
+                        models_out.append(
+                            {
+                                "model_id": str(model.id),
+                                "id": str(model.id),
+                                "name": model.label,
+                                "display_name": model.label,
+                                "description": f"{model.provider} - {model.model}",
+                                "is_enabled": model.enabled,
+                            }
+                        )
+
                     # If we got any models, pick the first one as default
                     if models_out:
                         current_model_id = models_out[0]["model_id"]
@@ -1415,7 +1469,7 @@ async def acp_websocket(
                 session_id = data.get("session_id")
                 session_cwd = (data.get("cwd") or "").strip() or "/"
                 parent_session_id = (data.get("parent_session_id") or "").strip() or None  # O4
-                agent_override_id = (data.get("agent_override") or "").strip() or None      # O5
+                agent_override_id = (data.get("agent_override") or "").strip() or None  # O5
                 # N9: session mode from client (set by set_session_mode)
                 session_mode = data.get("mode")
                 # N10: session config options from client
@@ -1428,10 +1482,14 @@ async def acp_websocket(
                     # If mode or model was updated dynamically, use those
                     if "mode" in current_conn_config:
                         session_mode = current_conn_config["mode"]
-                        logger.info("[ACP] session_mode from dynamic update: session_id={} mode={}", session_id, session_mode)
+                        logger.info(
+                            "[ACP] session_mode from dynamic update: session_id={} mode={}", session_id, session_mode
+                        )
                     if "model" in current_conn_config:
                         agent_override_id = current_conn_config["model"]
-                        logger.info("[ACP] model from dynamic update: session_id={} model_id={}", session_id, agent_override_id)
+                        logger.info(
+                            "[ACP] model from dynamic update: session_id={} model_id={}", session_id, agent_override_id
+                        )
                 # Store session mode and config in the connection state
                 if session_mode and "mode" not in current_conn_config:
                     logger.info("[ACP] session_mode received: session_id={} mode={}", session_id, session_mode)
@@ -1455,7 +1513,10 @@ async def acp_websocket(
                         turn_agent, turn_model = resolved
                         logger.info(
                             "ACP agent_override session_id={} override={} -> agent={} model={}",
-                            session_id, agent_override_id, turn_agent.name, turn_model.id,
+                            session_id,
+                            agent_override_id,
+                            turn_agent.name,
+                            turn_model.id,
                         )
 
                 # O4: hydrate history, seeding from parent for forked sessions
@@ -1490,9 +1551,7 @@ async def acp_websocket(
                                 session_id,
                                 len(text),
                             )
-                        await websocket.send_json(
-                            _acp_ws_envelope({"type": "thinking", "content": text})
-                        )
+                        await websocket.send_json(_acp_ws_envelope({"type": "thinking", "content": text}))
 
                 async def on_tool_call(tdata: dict):
                     status = tdata.get("status")
@@ -1583,10 +1642,10 @@ async def acp_websocket(
                     "去读取 `.png` `.jpg` 等二进制图片路径来「看图」。\n"
                     "遇到需要修改代码或查看本地**源码文本**时，请优先使用这些 `ide_` 开头的工具！\n"
                     "当你需要删除整个文件时，**请直接使用 `delete_file` 工具**，不要告诉用户手动删除！\n"
-                "当你需要探索项目结构、查找文件位置时，**请先用 `ide_list_files` 列出目录**，不要用后端的 `list_files`。\n"
-                "当你需要创建新目录时，请直接使用 `ide_mkdir`。\n"
-                "当你需要移动文件或重命名文件时，请直接使用 `ide_move`。\n"
-                "当你需要追加内容到文件末尾时，请直接使用 `ide_append`。\n"
+                    "当你需要探索项目结构、查找文件位置时，**请先用 `ide_list_files` 列出目录**，不要用后端的 `list_files`。\n"
+                    "当你需要创建新目录时，请直接使用 `ide_mkdir`。\n"
+                    "当你需要移动文件或重命名文件时，请直接使用 `ide_move`。\n"
+                    "当你需要追加内容到文件末尾时，请直接使用 `ide_append`。\n"
                 )
                 # Add session mode prompt if available
                 if session_mode:
@@ -1695,8 +1754,9 @@ async def acp_websocket(
                     # 检测任务创建意图
                     if not cancelled and user_content and reply:
                         task_match = re.search(
-                            r'(?:创建|新建|添加|建一个|帮我建|create|add)(?:一个|a )?(?:任务|待办|todo|task)[，,：：:\\s]*(.+)',
-                            user_content, re.IGNORECASE
+                            r"(?:创建|新建|添加|建一个|帮我建|create|add)(?:一个|a )?(?:任务|待办|todo|task)[，,：：:\\s]*(.+)",
+                            user_content,
+                            re.IGNORECASE,
                         )
                         if task_match:
                             task_title = task_match.group(1).strip()
@@ -1714,7 +1774,9 @@ async def acp_websocket(
                                         await _tsk_db.commit()
                                         await _tsk_db.refresh(task)
                                         _task_id = task.id
-                                    asyncio.create_task(_execute_task(_task_id, str(turn_agent.id)))
+                                    _et = asyncio.create_task(_execute_task(_task_id, str(turn_agent.id)))
+                                    _acp_background_tasks.add(_et)
+                                    _et.add_done_callback(_acp_background_tasks.discard)
                                     logger.info("[ACP] Task created: id={} title={}", _task_id, task_title)
                                 except Exception as _te:
                                     logger.warning("[ACP] Task creation failed: {}", _te)
@@ -1733,9 +1795,7 @@ async def acp_websocket(
 
                     if cancelled:
                         logger.info("ACP outbound cancelled session_id={}", session_id)
-                        await websocket.send_json(
-                            _acp_ws_envelope({"type": "cancelled", "session_id": session_id})
-                        )
+                        await websocket.send_json(_acp_ws_envelope({"type": "cancelled", "session_id": session_id}))
                     else:
                         logger.info(
                             "[ACP] ws-send type=done session_id={} reply_len={} chunks_out={}",
@@ -1744,11 +1804,15 @@ async def acp_websocket(
                             stream_stats["chunks"],
                         )
                         # N3: send usage stats before done so thin client can show IDE token meter
-                        await websocket.send_json(_acp_ws_envelope({
-                            "type": "usage",
-                            "used": stream_stats["chars"] // 4,   # output chars → token estimate
-                            "size": 200000,                        # approx context window (tokens)
-                        }))
+                        await websocket.send_json(
+                            _acp_ws_envelope(
+                                {
+                                    "type": "usage",
+                                    "used": stream_stats["chars"] // 4,  # output chars → token estimate
+                                    "size": 200000,  # approx context window (tokens)
+                                }
+                            )
+                        )
                         await websocket.send_json(_acp_ws_envelope({"type": "done"}))
                         logger.info("[ACP] ws-send type=done COMPLETE session_id={}", session_id)
                 except Exception as e:
@@ -1773,10 +1837,16 @@ async def acp_websocket(
             await recv_task
         current_acp_ws.set(None)
 
+
 async def _persist_acp_tool_call(
-    agent_id, user_id, session_id: str,
-    tool_name: str, parameters: dict | None,
-    results: Any, tool_call_id: str, status: str = "FINISHED",
+    agent_id,
+    user_id,
+    session_id: str,
+    tool_name: str,
+    parameters: dict | None,
+    results: Any,
+    tool_call_id: str,
+    status: str = "FINISHED",
 ) -> None:
     """持久化单次工具调用到 DB（fire-and-forget）。
 
@@ -1795,14 +1865,16 @@ async def _persist_acp_tool_call(
                 "tool_call_id": tool_call_id,
                 "status": status,
             }
-            db.add(ChatMessage(
-                agent_id=agent_id,
-                user_id=user_id,
-                role="tool_call",
-                content=json.dumps(payload, ensure_ascii=False, default=str),
-                conversation_id=str(sid_uuid),
-                created_at=datetime.now(tz_.utc),
-            ))
+            db.add(
+                ChatMessage(
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    role="tool_call",
+                    content=json.dumps(payload, ensure_ascii=False, default=str),
+                    conversation_id=str(sid_uuid),
+                    created_at=datetime.now(tz_.utc),
+                )
+            )
             await db.commit()
             logger.info("[ACP] tool_call persisted: session={} tool={}", session_id, tool_name)
     except Exception:
@@ -1824,7 +1896,7 @@ async def _persist_chat_turn(agent_id, session_id: str, user_text: str, reply_te
             sess = sr.scalar_one_or_none()
             now = datetime.now(tz_.utc)
             local_now = datetime.now()
-            
+
             if not sess:
                 sess = ChatSession(
                     id=sid_uuid,
@@ -1833,17 +1905,33 @@ async def _persist_chat_turn(agent_id, session_id: str, user_text: str, reply_te
                     title=f"IDE {local_now.strftime('%m-%d %H:%M')}",
                     source_channel="ide_acp",
                     created_at=now,
-                    last_message_at=now
+                    last_message_at=now,
                 )
                 db.add(sess)
             else:
                 sess.last_message_at = now
 
             if user_text:
-                db.add(ChatMessage(agent_id=agent_id, user_id=user_id, role="user", content=user_text, conversation_id=str(sid_uuid)))
+                db.add(
+                    ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="user",
+                        content=user_text,
+                        conversation_id=str(sid_uuid),
+                    )
+                )
 
             if reply_text:
-                db.add(ChatMessage(agent_id=agent_id, user_id=user_id, role="assistant", content=reply_text, conversation_id=str(sid_uuid)))
+                db.add(
+                    ChatMessage(
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=reply_text,
+                        conversation_id=str(sid_uuid),
+                    )
+                )
 
             await db.commit()
 
@@ -1859,6 +1947,7 @@ async def _persist_chat_turn(agent_id, session_id: str, user_text: str, reply_te
                 logger.debug("ACP persist: frontend notify failed: {}", _fe)
 
             from app.services.activity_logger import log_activity
+
             await log_activity(
                 agent_id=agent_id,
                 action_type="chat_reply",

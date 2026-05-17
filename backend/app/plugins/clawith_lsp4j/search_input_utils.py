@@ -149,5 +149,5 @@ def collect_android_values_xml_hits(root: Path, resource_name: str, max_files_to
             if pattern.search(text):
                 hits.append({"fileName": p.name, "path": str(p.resolve())})
     except OSError:
-        pass
+        logger.warning("[LSP4J-SEARCH] Directory traversal failed for pattern search")
     return hits

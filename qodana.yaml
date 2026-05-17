@@ -1,0 +1,39 @@
+#-------------------------------------------------------------------------------#
+#               Qodana analysis is configured by qodana.yaml file               #
+#             https://www.jetbrains.com/help/qodana/qodana-yaml.html            #
+#-------------------------------------------------------------------------------#
+version: "1.0"
+
+profile:
+  name: qodana.starter
+
+projectJDK: "21"
+
+# 排除不需要检查的目录和文件
+exclude:
+  - name: All
+    paths:
+      - frontend          # React/TS，独立检查
+      - .data             # 运行时数据（日志/DB）
+      - .venv
+      - venv
+      - __pycache__
+      - .git
+      - helm
+      - scripts           # 参考代码
+
+failureConditions:
+  severityThresholds:
+    any: 100
+    critical: 1
+  testCoverageThresholds:
+    fresh: 70
+    total: 50
+
+linter: jetbrains/qodana-python:2026.1
+
+# ── CLI 运行（持久化报告）─────────────────────────────────────
+# qodana scan \
+#   --results-dir backend/build/qodana-results \
+#   --save-report
+# 报告输出: backend/build/qodana-results/qodana.sarif.json

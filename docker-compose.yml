@@ -6,7 +6,7 @@ services:
       - default
     environment:
       POSTGRES_USER: clawith
-      POSTGRES_PASSWORD: clawith
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clawith}
       POSTGRES_DB: clawith
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -84,11 +84,6 @@ services:
     restart: unless-stopped
     ports:
       - "${FRONTEND_PORT:-3008}:3000"
-    environment:
-      VITE_API_URL: http://localhost:8000
-    volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/public:/app/public
     networks:
       - default
     depends_on:

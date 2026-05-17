@@ -29,6 +29,7 @@ Continue / Android Studio SSE 配置示例:
       ]
     }
 """
+
 import asyncio as _asyncio
 import uuid as _uuid
 from datetime import datetime, timezone
@@ -49,6 +50,7 @@ router = APIRouter(tags=["mcp"])
 
 # ── JSON-RPC 2.0 帮助函数 ───────────────────────────────────────────────────
 
+
 def _ok(req_id, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
@@ -58,6 +60,7 @@ def _err(req_id, code: int, message: str) -> dict:
 
 
 # ── 方法分发 ────────────────────────────────────────────────────────────────
+
 
 async def _dispatch(method: str, params: dict, user: User, db: AsyncSession) -> dict:
     """分发单个 JSON-RPC 方法，返回 result dict。"""
@@ -87,9 +90,7 @@ async def _execute_tool(name: str, arguments: dict, user: User, db: AsyncSession
     from app.models.agent import Agent
 
     if name == "list_agents":
-        result = await db.execute(
-            select(Agent).where(Agent.creator_id == user.id).order_by(Agent.name)
-        )
+        result = await db.execute(select(Agent).where(Agent.creator_id == user.id).order_by(Agent.name))
         agents = result.scalars().all()
         if not agents:
             lines = ["暂无可用智能体"]
@@ -114,6 +115,7 @@ async def _execute_tool(name: str, arguments: dict, user: User, db: AsyncSession
 
         # 解析 agent（UUID 或名称）
         from app.models.agent import Agent as AgentModel
+
         agent = None
         if agent_id_raw:
             try:
@@ -121,23 +123,16 @@ async def _execute_tool(name: str, arguments: dict, user: User, db: AsyncSession
                 r = await db.execute(select(AgentModel).where(AgentModel.id == aid))
                 agent = r.scalar_one_or_none()
             except ValueError:
-                r = await db.execute(
-                    select(AgentModel).where(
-                        _func.lower(AgentModel.name) == agent_id_raw.lower()
-                    )
-                )
+                r = await db.execute(select(AgentModel).where(_func.lower(AgentModel.name) == agent_id_raw.lower()))
                 agent = r.scalar_one_or_none()
 
         if not agent:
-            raise ValueError(
-                f"Agent '{agent_id_raw}' not found. Use list_agents to see available agents."
-            )
+            raise ValueError(f"Agent '{agent_id_raw}' not found. Use list_agents to see available agents.")
 
         # 加载 LLM 模型
         from app.models.llm import LLMModel
-        model_result = await db.execute(
-            select(LLMModel).where(LLMModel.id == agent.primary_model_id)
-        )
+
+        model_result = await db.execute(select(LLMModel).where(LLMModel.id == agent.primary_model_id))
         llm_model = model_result.scalar_one_or_none()
         if not llm_model or not llm_model.enabled:
             raise ValueError("Agent LLM model is unavailable")
@@ -186,25 +181,24 @@ async def _execute_tool(name: str, arguments: dict, user: User, db: AsyncSession
             .limit(20)
         )
         history = list(reversed(hist_r.scalars().all()))
-        messages = [
-            {"role": m.role, "content": m.content or ""}
-            for m in history
-            if m.role in ("user", "assistant")
-        ]
+        messages = [{"role": m.role, "content": m.content or ""} for m in history if m.role in ("user", "assistant")]
         messages.append({"role": "user", "content": message})
 
         # 保存用户消息
-        db.add(ChatMessage(
-            agent_id=agent.id,
-            user_id=user.id,
-            role="user",
-            content=message,
-            conversation_id=session_id_str,
-        ))
+        db.add(
+            ChatMessage(
+                agent_id=agent.id,
+                user_id=user.id,
+                role="user",
+                content=message,
+                conversation_id=session_id_str,
+            )
+        )
         await db.commit()
 
         # 调用 LLM
         from app.api.websocket import call_llm
+
         reply = await call_llm(
             model=llm_model,
             messages=messages,
@@ -216,16 +210,16 @@ async def _execute_tool(name: str, arguments: dict, user: User, db: AsyncSession
         )
 
         # 保存回复 + 更新会话时间
-        db.add(ChatMessage(
-            agent_id=agent.id,
-            user_id=user.id,
-            role="assistant",
-            content=reply,
-            conversation_id=session_id_str,
-        ))
-        sess_upd = await db.execute(
-            select(ChatSession).where(ChatSession.id == _uuid.UUID(session_id_str))
+        db.add(
+            ChatMessage(
+                agent_id=agent.id,
+                user_id=user.id,
+                role="assistant",
+                content=reply,
+                conversation_id=session_id_str,
+            )
         )
+        sess_upd = await db.execute(select(ChatSession).where(ChatSession.id == _uuid.UUID(session_id_str)))
         sess_obj = sess_upd.scalar_one_or_none()
         if sess_obj:
             sess_obj.last_message_at = datetime.now(timezone.utc)
@@ -238,6 +232,7 @@ async def _execute_tool(name: str, arguments: dict, user: User, db: AsyncSession
 
 
 # ── 路由处理器 ───────────────────────────────────────────────────────────────
+
 
 @router.post("/mcp")
 async def mcp_handler(
@@ -257,6 +252,7 @@ async def mcp_handler(
     try:
         body = await request.json()
     except Exception:
+        logger.warning("[MCP] JSON parse error in request body")
         return JSONResponse(
             {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
             status_code=400,
@@ -292,7 +288,15 @@ async def mcp_handler(
 # ── SSE 传输（旧协议，供 Continue / Android Studio 使用）─────────────────────
 
 # session_id → asyncio.Queue（用于 SSE 响应推送）
+_MAX_SSE_SESSIONS = 256
 _sse_sessions: dict[str, _asyncio.Queue] = {}
+
+
+def _add_sse_session(session_id: str, queue: _asyncio.Queue) -> None:
+    if len(_sse_sessions) >= _MAX_SSE_SESSIONS:
+        oldest = next(iter(_sse_sessions))
+        _sse_sessions.pop(oldest, None)
+    _sse_sessions[session_id] = queue
 
 
 @router.get("/mcp/sse")
@@ -305,8 +309,8 @@ async def mcp_sse_connect(
     适用于: Android Studio + Continue 插件, 旧版 Cursor, 任何使用 SSE MCP 的客户端。
     """
     session_id = str(_uuid.uuid4())
-    queue: _asyncio.Queue = _asyncio.Queue()
-    _sse_sessions[session_id] = queue
+    queue: _asyncio.Queue = _asyncio.Queue(maxsize=1024)
+    _add_sse_session(session_id, queue)
 
     # POST URL 告知客户端在哪里发消息
     post_url = f"/mcp/messages?session_id={session_id}"
@@ -323,6 +327,7 @@ async def mcp_sse_connect(
                     # 等待来自 /mcp/messages 的响应推送
                     message = await _asyncio.wait_for(queue.get(), timeout=30.0)
                     import json as _json
+
                     yield f"event: message\ndata: {_json.dumps(message)}\n\n"
                 except _asyncio.TimeoutError:
                     # 心跳，保持连接
@@ -352,6 +357,7 @@ async def mcp_sse_messages(
     try:
         body = await request.json()
     except Exception:
+        logger.warning("[MCP-SSE] JSON parse error in request body")
         return JSONResponse(
             {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
             status_code=400,

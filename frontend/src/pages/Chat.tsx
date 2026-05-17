@@ -539,6 +539,9 @@ export default function Chat() {
             };
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
+                // #167 修复：过滤 LSP4J 广播消息，防止 IDE 会话内容污染 WebUI 聊天界面。
+                // 任务类型工具（add_tasks/update_tasks/todo_write）的广播走独立通道，不受此影响。
+                if (data.source === 'lsp4j') return;
                 if (['thinking', 'chunk', 'tool_call', 'done', 'error', 'quota_exceeded'].includes(data.type)) {
                     setIsWaiting(false);
                 }

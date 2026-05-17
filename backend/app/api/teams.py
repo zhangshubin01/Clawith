@@ -104,8 +104,8 @@ async def _get_teams_access_token(config: ChannelConfig) -> str | None:
                     error_description = error_json.get("error_description", "No description")
                     error_code = error_json.get("error", "unknown")
                     logger.error(f"Teams: OAuth token request failed for agent {agent_id}: status={resp.status_code}, error={error_code}, description={error_description}")
-                except:
-                    logger.error(f"Teams: OAuth token request failed for agent {agent_id}: status={resp.status_code}, response={error_body[:500]}")
+                except Exception:
+                    logger.error(f"Teams: OAuth token request failed for agent {agent_id}: status={resp.status_code}, response={error_body[:500]}", exc_info=True)
                 logger.error(f"Teams: Token URL={token_url}, tenant_id={tenant_id}, client_id={app_id[:20]}...")
                 return None
             token_data = resp.json()
@@ -126,8 +126,8 @@ async def _get_teams_access_token(config: ChannelConfig) -> str | None:
                 error_description = error_json.get("error_description", "No description")
                 error_code = error_json.get("error", "unknown")
                 logger.error(f"Teams: OAuth token HTTP error for agent {agent_id}: status={e.response.status_code}, error={error_code}, description={error_description}")
-        except:
-            logger.error(f"Teams: OAuth token HTTP error for agent {agent_id}: status={e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'}, response={error_body[:500]}")
+        except Exception:
+            logger.error(f"Teams: OAuth token HTTP error for agent {agent_id}: status={e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'}, response={error_body[:500]}", exc_info=True)
         logger.error(f"Teams: Token URL={token_url}, tenant_id={tenant_id}, client_id={app_id[:20]}...")
         return None
     except Exception as e:
@@ -190,8 +190,8 @@ async def _send_teams_message_single_chunk(access_token: str, service_url: str, 
                     error_description = error_json.get("error", {}).get("message", error_json.get("message", "No description"))
                     error_code = error_json.get("error", {}).get("code", "unknown")
                     logger.error(f"Teams: Failed to send message: status={resp.status_code}, error={error_code}, description={error_description}")
-                except:
-                    logger.error(f"Teams: Failed to send message: status={resp.status_code}, response={error_body[:500]}")
+                except Exception:
+                    logger.error(f"Teams: Failed to send message: status={resp.status_code}, response={error_body[:500]}", exc_info=True)
                 logger.error(f"Teams: POST URL={post_url}, conversation_id={conversation_id}, service_url={service_url}")
             resp.raise_for_status()
             logger.info(f"Teams: Sent message to conversation {conversation_id}")
@@ -203,8 +203,8 @@ async def _send_teams_message_single_chunk(access_token: str, service_url: str, 
                 error_description = error_json.get("error", {}).get("message", error_json.get("message", "No description"))
                 error_code = error_json.get("error", {}).get("code", "unknown")
                 logger.error(f"Teams: HTTP error sending message: status={e.response.status_code}, error={error_code}, description={error_description}")
-        except:
-            logger.error(f"Teams: HTTP error sending message: status={e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'}, response={error_body[:500]}")
+        except Exception:
+            logger.error(f"Teams: HTTP error sending message: status={e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'}, response={error_body[:500]}", exc_info=True)
         logger.error(f"Teams: POST URL={post_url}, conversation_id={conversation_id}, service_url={service_url}")
         raise
 

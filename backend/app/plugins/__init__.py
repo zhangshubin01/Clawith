@@ -15,6 +15,7 @@ def load_plugins(app: FastAPI) -> None:
     """扫描 plugins/ 目录，加载每个含 plugin.json 的插件。"""
     from app.plugins.base import ClawithPlugin
 
+    _failed_count = 0
     for item in sorted(_PLUGINS_DIR.iterdir()):
         if not item.is_dir() or item.name.startswith("_"):
             continue
@@ -54,4 +55,8 @@ def load_plugins(app: FastAPI) -> None:
             _loaded_plugins.add(item.name)
             logger.info(f"[plugin] 已加载: {plugin_instance.name} v{plugin_instance.version}")
         except Exception as exc:
+            _failed_count += 1
             logger.exception(f"[plugin] 加载 {item.name} 失败: {exc}")
+
+    if _failed_count:
+        logger.error("[plugin] {} 个插件加载失败，请检查上方异常日志", _failed_count)

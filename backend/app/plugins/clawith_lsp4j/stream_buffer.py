@@ -88,7 +88,7 @@ class StreamBufferManager:
         except asyncio.CancelledError:
             pass
         except Exception:
-            pass
+            logger.warning("[LSP4J-BUFFER] Buffer flush failed, connection may be closed", exc_info=True)
 
     async def flush(self, force: bool = False) -> None:
         """发送缓冲区中的就绪文本。

@@ -30,7 +30,16 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         set({ user: null, token: null });
     },
 
-    isAuthenticated: () => !!get().token,
+    isAuthenticated: () => {
+        const t = get().token;
+        if (!t) return false;
+        // 解码 JWT payload 检查过期时间，避免用已过期 token 发送请求
+        try {
+            const payload = JSON.parse(atob(t.split('.')[1]));
+            const exp = payload.exp ? payload.exp * 1000 : 0;
+            return exp > Date.now();
+        } catch { return false; }
+    },
 }));
 
 interface AppStore {

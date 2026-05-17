@@ -17,6 +17,9 @@ from sqlalchemy import select, update
 
 from app.services.llm.finish import FINISH_PROTOCOL_REMINDER, find_finish_call, parse_tool_arguments
 
+# 后台心跳任务强引用集合，防止 fire-and-forget task 被 GC 回收
+_heartbeat_background_tasks: set[asyncio.Task] = set()
+
 # Default heartbeat instruction used when HEARTBEAT.md doesn't exist
 DEFAULT_HEARTBEAT_INSTRUCTION = """[Heartbeat Check]
 
@@ -210,7 +213,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
 - Do NOT post trivial or repetitive content
 """
                 except Exception:
-                    pass
+                    logger.warning(f"Failed to read {hb_file}, using default heartbeat instruction")
             if agent_is_private:
                 heartbeat_instruction += PRIVATE_AGENT_HEARTBEAT_APPEND
 
@@ -316,7 +319,8 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                     max_tokens=get_max_tokens(model_provider, model_model, model_max_output_tokens),
                 )
             except LLMError as e:
-                logger.error(f"LLM error in heartbeat: {e}")
+                # LLM 服务暂时不可用属于外部故障，非代码缺陷，使用 WARNING 级别避免刷屏 ERROR
+                logger.warning(f"[Heartbeat] LLM API 不可用: {e}")
                 reply = ""
                 break
             except Exception as e:
@@ -369,7 +373,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                     fn = tc["function"]
                     tool_name = fn["name"]
                     raw_args = fn.get("arguments", "{}")
-                    logger.info(f"[Heartbeat] Raw arguments for {tool_name} (len={len(raw_args) if raw_args else 0}): {repr(raw_args[:300]) if raw_args else 'None'}")
+                    logger.debug(f"[Heartbeat] Raw arguments for {tool_name} (len={len(raw_args) if raw_args else 0}): {repr(raw_args[:300]) if raw_args else 'None'}")
                     try:
                         args = parse_tool_arguments(raw_args)
                     except json.JSONDecodeError as je:
@@ -501,7 +505,10 @@ async def _heartbeat_tick():
                 # Fire heartbeat
                 logger.info(f"💓 Triggering heartbeat for {agent.name}")
                 await write_audit_log("heartbeat_fire", {"agent_name": agent.name}, agent_id=agent.id)
-                asyncio.create_task(_execute_heartbeat(agent.id))
+                # 保存强引用防止 GC 回收 fire-and-forget task，done 时自动移除
+                task = asyncio.create_task(_execute_heartbeat(agent.id))
+                _heartbeat_background_tasks.add(task)
+                task.add_done_callback(_heartbeat_background_tasks.discard)
                 triggered += 1
 
             if triggered:
@@ -512,12 +519,26 @@ async def _heartbeat_tick():
         await write_audit_log("heartbeat_error", {"error": str(e)[:300]})
 
 
+_shutdown_event = asyncio.Event()
+
 async def start_heartbeat():
     """Start the background heartbeat loop. Call from FastAPI startup."""
     logger.info("💓 Agent heartbeat service started (60s tick)")
-    while True:
-        await _heartbeat_tick()
-        await asyncio.sleep(60)
+    try:
+        while not _shutdown_event.is_set():
+            await _heartbeat_tick()
+            try:
+                await asyncio.wait_for(_shutdown_event.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                pass
+    except asyncio.CancelledError:
+        logger.info("💓 Heartbeat service cancelled, shutting down")
+    finally:
+        logger.info("💓 Heartbeat service stopped")
+
+async def shutdown_heartbeat():
+    """Signal heartbeat loop to stop gracefully."""
+    _shutdown_event.set()
 
 
 async def _notify_oneshot_error(
@@ -725,7 +746,7 @@ async def run_agent_oneshot(
                     except json.JSONDecodeError:
                         args = {}
 
-                    logger.info(f"[Oneshot:{agent_name}] Tool call: {tool_name}({list(args.keys())})")
+                    logger.debug(f"[Oneshot:{agent_name}] Tool call: {tool_name}({list(args.keys())})")
                     tool_result = await execute_tool(tool_name, args, agent_id, agent_creator_id)
 
                     llm_messages.append(LLMMessage(
@@ -758,7 +779,7 @@ async def run_agent_oneshot(
                     detail={"reply": reply[:500], "triggered_by": str(triggered_by_user_id)},
                 )
             except Exception:
-                pass
+                logger.warning("Failed to write activity log for heartbeat of agent_id={}", str(agent_id))
 
         # ── Phase 4: Clear any previous error notifications ──────────
         if triggered_by_user_id:

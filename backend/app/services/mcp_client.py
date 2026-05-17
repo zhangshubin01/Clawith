@@ -108,7 +108,7 @@ class MCPClient:
                 headers=self._headers(),
             )
         except Exception:
-            pass  # initialization failure is non-fatal — server may be stateless
+            logger.debug("[MCP] Streamable init skipped — server may be stateless")
 
     async def _streamable_request(self, method: str, params: dict | None = None) -> dict:
         """Send a JSON-RPC request via Streamable HTTP transport."""

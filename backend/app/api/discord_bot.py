@@ -1,5 +1,6 @@
 """Discord Bot Channel API routes (slash command interactions)."""
 
+import asyncio
 import os
 import uuid
 
@@ -9,13 +10,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator
+# 模块级后台任务集合，保存 create_task 返回值防止 GC 回收（放在导入之后避免 E402）
+_bg_tasks: set[asyncio.Task] = set()
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
 from app.schemas.schemas import ChannelConfigOut
 
+
 router = APIRouter(tags=["discord"])
+
+# 后台任务强引用集合（放在 router 定义之后避免 E402）
+_discord_bg: set[asyncio.Task] = set()
 
 DISCORD_MSG_LIMIT = 2000  # Discord message char limit
 
@@ -142,7 +149,7 @@ async def delete_discord_channel(
         from app.services.discord_gateway import discord_gateway_manager
         await discord_gateway_manager.stop_client(agent_id)
     except Exception:
-        pass
+        logger.warning("[Discord] Failed to stop gateway for agent {}", agent_id, exc_info=True)
     await db.delete(config)
 
 
@@ -266,7 +273,6 @@ async def discord_interaction_webhook(
             return {"type": 4, "data": {"content": "⚠️ 请提供消息内容。Usage: `/ask message:<你的问题>`"}}
 
         interaction_token = body.get("token", "")
-        application_id = config.app_id or ""
         sender_id = body.get("member", {}).get("user", {}).get("id") or body.get("user", {}).get("id", "")
         channel_id = body.get("channel_id", "")
         # Discord: guild interactions are group chats, DM interactions are P2P
@@ -367,7 +373,11 @@ async def discord_interaction_webhook(
                     except Exception as e:
                         logger.error(f"[Discord] Failed to send follow-up: {e}")
 
-        asyncio.create_task(handle_in_background())
+        _t = asyncio.create_task(handle_in_background())
+        _discord_bg.add(_t)
+        _t.add_done_callback(_discord_bg.discard)
+        _bg_tasks.add(_t)
+        _t.add_done_callback(_bg_tasks.discard)
         # Return DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE — shows "thinking..." to user
         return {"type": 5}
 

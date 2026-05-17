@@ -44,13 +44,13 @@ async def get_desktop_screenshot(agent_id: uuid.UUID, session_id: str = "") -> O
                 key_agent_id, _, key_type = key
                 if str(key_agent_id) == str(agent_id) and key_type == "computer":
                     cache_key = key
-                    logger.info(f"[AgentBay_DEBUG] Fuzzy-matched computer session for agent {agent_id}")
+                    logger.debug(f"[AgentBay_DEBUG] Fuzzy-matched computer session for agent {agent_id}")
                     break
             else:
-                logger.info(f"[AgentBay_DEBUG] No computer session for agent {agent_id}. Keys available: {list(_agentbay_sessions.keys())}")
+                logger.debug(f"[AgentBay_DEBUG] No computer session for agent {agent_id}. Keys available: {list(_agentbay_sessions.keys())}")
                 return None
 
-    logger.info(f"[AgentBay_DEBUG] Found computer session for {agent_id}!")
+    logger.debug(f"[AgentBay_DEBUG] Found computer session for {agent_id}!")
     client, _last_used = _agentbay_sessions[cache_key]
     return await client.get_desktop_snapshot_base64()
 
@@ -79,13 +79,13 @@ async def get_browser_snapshot(agent_id: uuid.UUID, session_id: str = "") -> Opt
                 key_agent_id, _, key_type = key
                 if str(key_agent_id) == str(agent_id) and key_type == "browser":
                     cache_key = key
-                    logger.info(f"[AgentBay_DEBUG] Fuzzy-matched browser session for agent {agent_id}")
+                    logger.debug(f"[AgentBay_DEBUG] Fuzzy-matched browser session for agent {agent_id}")
                     break
             else:
-                logger.info(f"[AgentBay_DEBUG] No browser session for agent {agent_id} (searchstr: {str(agent_id)}). Keys available: {list(_agentbay_sessions.keys())}")
+                logger.debug(f"[AgentBay_DEBUG] No browser session for agent {agent_id} (searchstr: {str(agent_id)}). Keys available: {list(_agentbay_sessions.keys())}")
                 return None
 
-    logger.info(f"[AgentBay_DEBUG] Found browser session for {agent_id}! Calling get_browser_snapshot_base64...")
+    logger.debug(f"[AgentBay_DEBUG] Found browser session for {agent_id}! Calling get_browser_snapshot_base64...")
     client, _last_used = _agentbay_sessions[cache_key]
     return await client.get_browser_snapshot_base64()
 

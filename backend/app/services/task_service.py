@@ -8,7 +8,7 @@
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Select, and_, func, or_, select
@@ -207,7 +207,7 @@ class TaskService:
 
         # 即将到期的任务（未来7天内）
         from datetime import timedelta
-        upcoming_deadline = datetime.utcnow() + timedelta(days=7)
+        upcoming_deadline = datetime.now(timezone.utc) + timedelta(days=7)
         upcoming_query = select(func.count(Task.id)).where(
             Task.agent_id == agent_id,
             Task.status != "done",

@@ -45,7 +45,7 @@ async def _get_tenant_setting(tenant_id: str | None, key: str) -> str:
                 if setting and setting.value.get("token"):
                     return setting.value["token"]
         except Exception:
-            pass
+            logger.debug("[Skills] Failed to get tenant setting token")
     return ""
 
 

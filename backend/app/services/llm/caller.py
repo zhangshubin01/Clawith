@@ -194,16 +194,19 @@ def _get_model_timeout(model: "LLMModel") -> float:
     return float(getattr(model, "request_timeout", None) or 120.0)
 
 
-def _get_thinking_kwargs(model: "LLMModel") -> dict:
+def _get_thinking_kwargs(model: "LLMModel", round_i: int | None = None) -> dict:
     """DeepSeek V4 思考模式参数检测。
 
     DeepSeek V4（deepseek-v4-pro / deepseek-v4-flash）需要显式传入
     thinking={"type": "enabled"} 开启思考模式，否则 API 返回 400 错误。
     参考：https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
 
+    全程保持 thinking=enabled。中途切换 disabled→enabled 会导致 API 400：
+    历史 assistant 消息中部分有 reasoning_content、部分无，API 拒绝不一致的对话历史。
+
     Returns:
-        如果是 DeepSeek V4 模型，返回 {"thinking": {"type": "enabled"}}；
-        否则返回空字典，不影响其他模型。
+        DeepSeek V4: {"thinking": {"type": "enabled"}}
+        其他模型: {}
     """
     model_name = getattr(model, "model", "") or ""
     if "deepseek-v4" in model_name or "deepseek_v4" in model_name:
@@ -437,7 +440,9 @@ async def _process_tool_call(
                 LLMMessage(
                     role="tool",
                     tool_call_id=tc["id"],
-                    content=cached_result,
+                    # #119 修复：注入重复调用反馈，让 LLM 感知跳过原因
+                    content="⛔ 该工具调用与之前重复，已跳过执行。请基于已有结果直接推进任务，不要重复相同调用。\n\n"
+                    + (cached_result if isinstance(cached_result, str) else str(cached_result)),
                 )
             )
             return ""
@@ -608,16 +613,19 @@ async def call_llm(
         if cancel_event and cancel_event.is_set():
             logger.info("[LLM] cancel_event 已设置，中断工具循环（round={}）", round_i)
             break
-        # Dynamic tool-call limit warning
-        _warn_threshold_80 = int(_max_tool_rounds * 0.8)
+        # Dynamic tool-call limit warning（#119 修复：LSP4J 模式阈值前移）
+        if tool_warning_mode == "lsp4j":
+            _warn_first = 8  # LSP4J: 第 8 轮即警告收敛
+        else:
+            _warn_first = int(_max_tool_rounds * 0.8)  # 默认: 80% 时警告
         _warn_threshold_96 = _max_tool_rounds - 2
-        if round_i == _warn_threshold_80:
+        if round_i == _warn_first:
             if tool_warning_mode == "lsp4j":
                 api_messages.append(
                     LLMMessage(
                         role="user",
                         content=(
-                            f"⚠️ 已使用 {round_i}/{_max_tool_rounds} 轮工具调用。"
+                            f"⏱️ 已消耗 {round_i} 轮工具调用（上限 {_max_tool_rounds}）。"
                             "请直接评估当前进度：\n"
                             "1. 已获取的信息是否足够？足够则立即给出最终回复\n"
                             "2. 多个独立的只读工具（search/read/list）可同时调用以减少轮数\n"
@@ -645,8 +653,9 @@ async def call_llm(
                 )
             )
 
-        # 上下文截断：每轮结束后估算 token 数，超出窗口时保留 system + 最近 3 轮——#84 修复
-        MAX_CTX_TOKENS = 8000
+        # 上下文截断：每轮结束后估算 token 数，超出窗口时保留 system + 最近 3 轮
+        # #121 修复：8000 → 12000，DeepSeek V4 支持 128K 上下文，充分利用长窗口避免截断
+        MAX_CTX_TOKENS = 12000
         _total_est = 0
         for _m in api_messages:
             _c = _m.content or ""
@@ -670,8 +679,8 @@ async def call_llm(
             )
 
         try:
-            # DeepSeek V4 思考模式参数
-            _thinking_kwargs = _get_thinking_kwargs(model)
+            # DeepSeek V4 思考模式参数（#118：按轮数分级开关）
+            _thinking_kwargs = _get_thinking_kwargs(model, round_i)
 
             # ★ Timing: measure LLM stream round latency
             _llm_round_start = asyncio.get_event_loop().time()
