@@ -27,6 +27,10 @@ export default defineConfig({
             '@': path.resolve(__dirname, './src'),
         },
     },
+    // 生产构建时自动移除 console.* 和 debugger 语句
+    esbuild: {
+        drop: ['console', 'debugger'],
+    },
     server: {
         port: 3008,
         host: '0.0.0.0',
