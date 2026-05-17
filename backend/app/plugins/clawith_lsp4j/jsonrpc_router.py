@@ -2625,6 +2625,25 @@ class JSONRPCRouter:
 
         logger.info("[LSP4J] tool/invoke: tool={} requestId={} sessionId={}", tool_name, request_id, session_id)
 
+        # 0. 工具执行速率限制（per-session）：防止 Agent 失控时无限循环调用工具
+        from app.core.rate_limit import check_session_rate_limit, is_write_tool
+        try:
+            # 写操作工具更严格的频率限制
+            limit_key = "tool_write" if is_write_tool(tool_name) else "tool_execute"
+            await check_session_rate_limit(session_id or "unknown", limit_key)
+        except RuntimeError as rate_err:
+            logger.warning("[LSP4J] tool/invoke rate limited: tool={} sessionId={}", tool_name, session_id)
+            await self._send_response(
+                msg_id,
+                {
+                    "requestId": request_id,
+                    "errorCode": "RATE_LIMITED",
+                    "errorMessage": str(rate_err),
+                    "result": None,
+                },
+            )
+            return
+
         # 特殊工具处理（纯 UI 工具）
         if tool_name in ("add_tasks", "todo_write"):
             # 直接返回成功响应，插件 AddTasksToolDetailPanel 会自动渲染任务树

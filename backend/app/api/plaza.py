@@ -4,7 +4,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update, func, desc, exists, and_
@@ -233,8 +233,13 @@ async def plaza_stats(
 
 
 @router.post("/posts", response_model=PostOut)
-async def create_post(body: PostCreate, current_user: User = Depends(get_current_user)):
+async def create_post(body: PostCreate, request: Request, current_user: User = Depends(get_current_user)):
     """Create a new plaza post. Requires authentication; tenant_id enforced from JWT."""
+    # 0. IP 粒度速率限制：防止恶意用户高频发帖刷广场
+    from app.core.rate_limit import check_ip_rate_limit
+    client_ip = request.client.host if request.client else "0.0.0.0"
+    await check_ip_rate_limit(client_ip, "plaza_post", {"plaza_post": (5, 60)})
+
     if len(body.content.strip()) == 0:
         raise HTTPException(400, "Content cannot be empty")
     effective_tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None

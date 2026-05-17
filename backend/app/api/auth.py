@@ -51,17 +51,35 @@ from sqlalchemy.orm import selectinload
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# ── In-memory rate limiter for auth endpoints ──────────────────────────
-# 注意：多 gunicorn worker 部署时，内存字典不跨 worker 共享，速率限制会在各 worker
-# 独立计数。生产环境高并发场景建议迁移至 Redis 实现（如 redis-py + Lua 脚本）。
+# ── 速率限制器（Redis 优先 + 内存回退）──────────────────────────────
+# 多 gunicorn worker 部署时，内存字典不跨 worker 共享。优先使用 Redis 滑动窗口
+# 实现跨 worker 一致的速率限制；Redis 不可用时回退到内存实现（单 worker 有效）。
+
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
 _rate_lock = asyncio.Lock()
 
 _RATE_LIMITS: dict[str, tuple[int, int]] = {
     "login": (5, 60),  # 5 attempts per 60s
-    "email_hint": (3, 60),  # 3 attempts per 60s (low: exposes account existence)
+    "email_hint": (3, 60),  # 3 attempts per 60s (低值：暴露账号存在性）
     "forgot_password": (3, 300),  # 3 attempts per 5min
 }
+
+# 尝试初始化 Redis 客户端（用于跨 worker 速率限制）
+_redis_client: "Redis | None" = None  # type: ignore[name-defined]
+try:
+    from app.config import get_settings
+    _cfg = get_settings()
+    if _cfg.REDIS_URL:
+        import redis.asyncio as aioredis
+        _redis_client = aioredis.from_url(
+            _cfg.REDIS_URL,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+            decode_responses=True,
+        )
+        logger.info("Redis rate limiter enabled: %s", _cfg.REDIS_URL)
+except Exception:
+    logger.warning("Redis rate limiter unavailable, falling back to in-memory")
 
 
 def _client_ip(request: Request) -> str:
@@ -76,9 +94,32 @@ def _client_ip(request: Request) -> str:
 async def _check_rate_limit(request: Request, endpoint_key: str) -> None:
     max_attempts, window_s = _RATE_LIMITS.get(endpoint_key, (10, 60))
     ip = _client_ip(request)
-    bucket_key = f"{endpoint_key}:{ip}"
+    redis_key = f"rl:{endpoint_key}:{ip}"
     now = time.time()
 
+    # 优先使用 Redis 滑动窗口（跨 worker 一致），不可用时回退内存
+    if _redis_client is not None:
+        try:
+            cutoff = now - window_s
+            # 原子操作：移除过期时间戳 + 添加当前时间戳 + 计数
+            async with _redis_client.pipeline(transaction=True) as pipe:
+                pipe.zremrangebyscore(redis_key, "-inf", cutoff)
+                pipe.zadd(redis_key, {str(now): now})
+                pipe.zcard(redis_key)
+                pipe.expire(redis_key, window_s + 1)
+                _, _, count, _ = await pipe.execute()
+            if count > max_attempts:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many attempts. Please try again later.",
+                    headers={"Retry-After": str(window_s)},
+                )
+            return
+        except Exception:
+            logger.debug("Redis rate limit failed, falling back to memory")
+
+    # 内存回退（单 worker 有效）
+    bucket_key = f"{endpoint_key}:{ip}"
     async with _rate_lock:
         ts_list = _rate_limit_store[bucket_key]
         cutoff = now - window_s
@@ -88,6 +129,7 @@ async def _check_rate_limit(request: Request, endpoint_key: str) -> None:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many attempts. Please try again later.",
+                headers={"Retry-After": str(window_s)},
             )
         ts_list.append(now)
 

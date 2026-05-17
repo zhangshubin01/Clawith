@@ -3,16 +3,44 @@
 This module provides a centralized way to manage and instantiate auth providers.
 """
 
+import logging
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
+from app.core.security import decrypt_data
 from app.models.identity import IdentityProvider
 from app.services.auth_provider import (
     PROVIDER_CLASSES,
     BaseAuthProvider,
 )
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+# 需要解密的 config 敏感字段（与 enterprise.py 中 _SENSITIVE_CONFIG_KEYS 保持一致）
+_SENSITIVE_CONFIG_KEYS = {"client_secret", "app_secret"}
+
+
+def _decrypt_config_secrets(config: dict) -> dict:
+    """对 provider config 中被加密的敏感字段进行解密，供 auth provider 使用。
+
+    encrypt_data 加密的密文以 Base64 编码且带 \\x01\\xca\\xfe 魔数头，
+    解码后以 "AW" 开头。未加密的旧数据或解密失败时直接返回原值。
+    """
+    if not config:
+        return config
+    for field in _SENSITIVE_CONFIG_KEYS:
+        value = config.get(field)
+        if value and isinstance(value, str):
+            try:
+                config[field] = decrypt_data(value, settings.SECRET_KEY)
+            except Exception:
+                # 可能是未加密的旧数据或解密失败，保持原值
+                pass
+    return config
 
 
 class AuthProviderRegistry:
@@ -77,6 +105,8 @@ class AuthProviderRegistry:
             return None
 
         config = provider_model.config if provider_model else {}
+        # 解密 DB 中加密存储的 OAuth2 client_secret/app_secret，恢复明文供 auth provider 使用（#82 修复）
+        config = _decrypt_config_secrets(config)
         return provider_class(provider=provider_model, config=config)
 
     async def list_providers(

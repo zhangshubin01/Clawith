@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
 _bg_tasks: set[asyncio.Task] = set()
 
+from app.core.rate_limit import check_ip_rate_limit
 from app.core.security import decode_access_token, get_current_user
 from app.core.permissions import check_agent_access, is_agent_expired
 from app.database import async_session, get_db
@@ -130,6 +131,15 @@ async def websocket_chat(
     6. Server calls the agent's configured LLM and sends response back
     7. Messages are persisted to chat_messages table under the session
     """
+    # 0. IP 粒度速率限制：防止恶意客户端高频创建 WebSocket 连接消耗资源
+    client_ip = websocket.client.host if websocket.client else "0.0.0.0"
+    try:
+        await check_ip_rate_limit(client_ip, "ws_connect")
+    except HTTPException as e:
+        logger.warning("[WS] rate limited: ip={}", client_ip)
+        await websocket.close(code=4001, reason=str(e.detail))
+        return
+
     # Accept immediately so browser sees onopen without waiting for DB setup
     await websocket.accept()
 

@@ -19,6 +19,7 @@ from typing import Any
 from loguru import logger
 from contextvars import ContextVar
 
+from app.core.rate_limit import check_ip_rate_limit
 from app.core.security import verify_api_key_or_token
 from app.database import async_session
 from app.models.agent import Agent as AgentModel
@@ -1029,6 +1030,15 @@ async def acp_websocket(
     agent_id: str = Query(...),
     token: str = Query(None),
 ):
+    # 0. IP 粒度速率限制：防止恶意客户端高频创建 WebSocket 连接
+    client_ip = websocket.client.host if websocket.client else "0.0.0.0"
+    try:
+        await check_ip_rate_limit(client_ip, "ws_connect_acp")
+    except HTTPException as e:
+        logger.warning("ACP WS rate limited: ip={}", client_ip)
+        await websocket.close(code=4001, reason=str(e.detail))
+        return
+
     await websocket.accept()
 
     # 验证 token（query 已由 Starlette 解码；瘦客户端应对 token 做 URL 编码）

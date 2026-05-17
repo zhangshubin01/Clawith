@@ -37,7 +37,7 @@ class DummyResult:
 
 class MockRedis:
     def __init__(self, initial_data=None):
-        self._data = initial_data or {}
+        self._data = dict(initial_data or {})
         self.deleted = []
         self.setex_calls = []
 
@@ -48,7 +48,8 @@ class MockRedis:
         self.deleted.append(key)
         self._data.pop(key, None)
 
-    async def setex(self, key, ttl, value):
+    # setex 必须是同步方法：Redis pipeline 中 setex 同步排队命令，await pipe.execute() 才真正执行
+    def setex(self, key, ttl, value):
         self.setex_calls.append((key, ttl, value))
         self._data[key] = value
 

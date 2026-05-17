@@ -2523,6 +2523,26 @@ async def execute_tool(
         content = arguments.get("content", "")
         return content if isinstance(content, str) else str(content)
 
+    # 0. 工具执行速率限制（per-session）：防止 Agent 失控时无限循环调用工具
+    # 写操作工具（write_file/delete_file 等）使用更严格的频率限制
+    # 参考 jsonrpc_router.py L2628-2645 的 LSP4J 端限流实现
+    from app.core.rate_limit import check_session_rate_limit, is_write_tool
+    try:
+        limit_key = "tool_write" if is_write_tool(tool_name) else "tool_execute"
+        await check_session_rate_limit(session_id or "unknown", limit_key)
+    except RuntimeError as rate_err:
+        logger.warning(
+            "[ToolRateLimit] session={} tool={} exceeded: {}",
+            session_id, tool_name, rate_err,
+        )
+        return (
+            "⚠️ Tool execution rate limit reached. "
+            f"Your session has exceeded the allowed rate for '{tool_name}' operations. "
+            f"Please wait a moment before making additional tool calls, "
+            f"or consolidate multiple operations into fewer calls. "
+            f"({rate_err})"
+        )
+
     _agent_tenant_id = await _get_agent_tenant_id(agent_id)
 
     ws = await ensure_workspace(agent_id, tenant_id=_agent_tenant_id)

@@ -23,7 +23,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
-from app.services.agent_tools import AGENT_TOOLS, execute_tool, get_agent_tools_for_llm
+# 延迟导入 agent_tools 以避免循环依赖（agent_tools → llm.finish → llm.caller → agent_tools）
+# 实际导入在函数体内按需执行
 from app.services.token_tracker import (
     TokenUsage,
     record_token_usage,
@@ -369,6 +370,7 @@ async def _process_tool_call(
     allowed_tool_names: set[str],
     tool_result_cache: dict[str, str | list] | None = None,
 ) -> str:
+    from app.services.agent_tools import execute_tool  # 延迟导入，避免循环依赖
     """Process a single tool call and return result."""
     fn = tc["function"]
     tool_name = fn["name"]
@@ -540,6 +542,7 @@ async def call_llm(
     parallel_tools_extra_readonly: set[str] | None = None,
     tool_warning_mode: str = "default",
 ) -> str:
+    from app.services.agent_tools import AGENT_TOOLS, get_agent_tools_for_llm  # 延迟导入，避免循环依赖
     """Call LLM via unified client with function-calling tool loop.
 
     Args:
@@ -911,11 +914,13 @@ async def call_llm_with_failover(
     skip_tools: bool = False,
     parallel_tools_extra_readonly: set[str] | None = None,
     tool_warning_mode: str = "default",
+    max_tool_rounds_override: int | None = None,
 ) -> str:
     """Call LLM with automatic failover support.
 
     Args:
         cancel_event: 可选的取消事件，透传至 call_llm。
+        max_tool_rounds_override: 覆盖最大工具调用轮数（IDE 场景限制为 20 轮）。
     """
     guard = FailoverGuard()
 
@@ -958,6 +963,7 @@ async def call_llm_with_failover(
         skip_tools=skip_tools,
         parallel_tools_extra_readonly=parallel_tools_extra_readonly,
         tool_warning_mode=tool_warning_mode,
+        max_tool_rounds_override=max_tool_rounds_override,
     )
 
     # Check if we need to failover
@@ -1032,6 +1038,7 @@ async def call_llm_with_failover(
         skip_tools=skip_tools,
         parallel_tools_extra_readonly=parallel_tools_extra_readonly,
         tool_warning_mode=tool_warning_mode,
+        max_tool_rounds_override=max_tool_rounds_override,
     )
 
     # Combine error messages if fallback also failed

@@ -192,7 +192,10 @@ async def test_get_me_returns_user():
     )
 
     with patch("app.api.auth.UserOut") as MockUserOut:
-        MockUserOut.model_validate.return_value = {"id": str(user.id), "email": user.email}
+        # model_validate 返回 SimpleNamespace 而非 dict，避免 get_me 中 setattr 失败
+        MockUserOut.model_validate.return_value = SimpleNamespace(
+            id=str(user.id), email=user.email, is_platform_admin=False
+        )
         result = await auth_api.get_me(current_user=user)
     MockUserOut.model_validate.assert_called_once_with(user)
 
@@ -202,6 +205,7 @@ async def test_oauth_callback_passes_redirect_uri():
     """OAuth callback should forward redirect_uri for providers like Google."""
     identity = _make_identity()
     user = _make_user(identity.id)
+    user.is_active = True  # OAuth 回调检查用户激活状态
     provider = AsyncMock()
     provider.exchange_code_for_token = AsyncMock(return_value={"access_token": "provider-token"})
     provider.get_user_info = AsyncMock(return_value=SimpleNamespace())
@@ -210,7 +214,7 @@ async def test_oauth_callback_passes_redirect_uri():
 
     with patch("app.services.auth_registry.auth_provider_registry.get_provider", new=AsyncMock(return_value=provider)):
         with patch("app.api.auth.UserOut") as MockUserOut:
-            MockUserOut.model_validate.return_value = {"id": str(user.id)}
+            MockUserOut.model_validate.return_value = SimpleNamespace(id=str(user.id))
             with patch.object(auth_api, "create_access_token", return_value="jwt-token"):
                 result = await auth_api.oauth_callback("google", data, RecordingDB())
 

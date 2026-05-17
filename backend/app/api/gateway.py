@@ -90,39 +90,42 @@ def _verify_key(api_key: str, stored_hash: str) -> bool:
 async def _get_agent_by_key(api_key: str, db: AsyncSession) -> Agent:
     """通过 API Key 认证 OpenClaw agent。
 
-    支持两种存储格式:
-    - PBKDF2-HMAC-SHA256（新格式，安全）
-    - 纯 SHA-256（旧格式，兼容）
+    查找策略（按优先级）:
+    1. 旧格式 SHA-256 哈希 → O(1) 索引精确匹配
+    2. PBKDF2 格式 → 全表扫描 + 600K 迭代验证（无索引可用，PBKDF2 盐值随机）
+
+    注：第 2 步在 agent 数量大时可能成为 CPU 瓶颈。长期方案是为 PBKDF2 agent
+    增加 api_key_lookup 字段存储 sha256[:16] 前缀加速查找（#81 修复）。
     """
-    # 首先按原文查找（明文模式，新行为）
+    # 预计算 SHA-256，用于旧格式 O(1) 索引查找
+    sha256_hash = hashlib.sha256(api_key.encode()).hexdigest()
+
+    # 步骤 1: O(1) 索引查找 — 匹配旧格式 SHA-256 哈希
     result = await db.execute(
         select(Agent).where(
-            Agent.api_key_hash == api_key,
+            Agent.api_key_hash == sha256_hash,
             Agent.agent_type == "openclaw",
         )
     )
     agent = result.scalar_one_or_none()
 
     if agent:
+        # 旧格式验证成功 → 自动升级为 PBKDF2
+        agent.api_key_hash = _hash_key_pbkdf2(api_key)
+        logger.info("[Gateway] 自动升级旧式 SHA-256 哈希为 PBKDF2，agent_id={}", agent.id)
         return agent
 
-    # 遍历所有 openclaw agent 进行哈希验证（支持混合存储格式）
+    # 步骤 2: PBKDF2 验证 — 仅扫描 api_key_hash 含版本头的 agent（跳过已升级和空哈希）
     result = await db.execute(
         select(Agent).where(
             Agent.agent_type == "openclaw",
+            Agent.api_key_hash.startswith(_PBKDF2_PREFIX),
         )
     )
     agents = result.scalars().all()
 
     for candidate in agents:
-        stored = candidate.api_key_hash
-        if not stored:
-            continue
-        if _verify_key(api_key, stored):
-            # 如果是旧格式验证成功，自动升级为 PBKDF2
-            if not stored.startswith(_PBKDF2_PREFIX):
-                candidate.api_key_hash = _hash_key_pbkdf2(api_key)
-                logger.info("[Gateway] 自动升级旧式 SHA-256 哈希为 PBKDF2，agent_id={}", candidate.id)
+        if _verify_key(api_key, candidate.api_key_hash):
             return candidate
 
     raise HTTPException(status_code=401, detail="Invalid API key")

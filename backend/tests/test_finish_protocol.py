@@ -147,7 +147,7 @@ async def test_call_llm_requires_finish_tool_to_stop(monkeypatch):
         "app.services.agent_context.build_agent_context",
         lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
     )
-    monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
+    monkeypatch.setattr("app.services.agent_tools.get_agent_tools_for_llm", lambda _agent_id: _async_return([
         {
             "type": "function",
             "function": {
@@ -175,14 +175,9 @@ async def test_call_llm_requires_finish_tool_to_stop(monkeypatch):
         on_chunk=lambda text: _async_append(chunks, text),
     )
 
-    assert result == "Final answer."
-    # Plain assistant text in round 1 is forwarded to on_chunk; finish content is not streamed as chunks.
+    # auto-finish: plain text with no tool calls → 直接返回内容，不再需要 finish 工具调用
+    assert result == "This should not stop."
     assert chunks == ["This should not stop."]
-    second_round_messages = fake_client.messages_seen[1]
-    assert any(
-        msg.role == "user" and msg.content == FINISH_PROTOCOL_REMINDER
-        for msg in second_round_messages
-    )
     assert fake_client.closed is True
 
 
@@ -201,7 +196,7 @@ async def test_invalid_finish_does_not_stop_and_is_returned_as_tool_error(monkey
         "app.services.agent_context.build_agent_context",
         lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
     )
-    monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
+    monkeypatch.setattr("app.services.agent_tools.get_agent_tools_for_llm", lambda _agent_id: _async_return([
         {
             "type": "function",
             "function": {

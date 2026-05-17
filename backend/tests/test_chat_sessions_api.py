@@ -74,10 +74,11 @@ async def test_org_admin_can_list_all_sessions(monkeypatch):
     )
     db = RecordingDB(
         responses=[
-            DummyResult([agent]),
-            DummyResult([session]),
-            DummyResult([(str(session.id), 3)]),
-            DummyResult([(owner_id, "Alice")]),
+            DummyResult([agent]),                              # 1. agent 查询
+            DummyResult(scalar_value=1),                       # 2. count 查询
+            DummyResult([session]),                            # 3. session 列表查询
+            DummyResult([(str(session.id), 3)]),               # 4. message count 批量查询
+            DummyResult([(owner_id, "Alice")]),                # 5. user name 批量查询
         ]
     )
 
@@ -86,11 +87,14 @@ async def test_org_admin_can_list_all_sessions(monkeypatch):
 
     monkeypatch.setattr(chat_sessions_api, "check_agent_access", fake_check_agent_access)
 
+    # 显式传递 skip/limit：测试直接调用时 FastAPI Query 默认值不会自动解析为 int
     sessions = await chat_sessions_api.list_sessions(
         agent_id=agent_id,
         scope="all",
         current_user=current_user,
         db=db,
+        skip=0,
+        limit=50,
     )
 
     assert len(sessions) == 1
@@ -139,6 +143,8 @@ async def test_creator_can_list_all_sessions(monkeypatch):
         scope="all",
         current_user=current_user,
         db=db,
+        skip=0,
+        limit=50,
     )
 
     assert len(sessions) == 1

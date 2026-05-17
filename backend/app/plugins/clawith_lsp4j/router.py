@@ -22,6 +22,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Qu
 from loguru import logger
 from sqlalchemy import select
 
+from app.core.rate_limit import check_ip_rate_limit
 from app.core.security import verify_api_key_or_token
 from app.core.permissions import check_agent_access
 from app.database import async_session
@@ -108,6 +109,16 @@ async def lsp4j_websocket_endpoint(
     - 4001: token 无效或缺失
     - 4002: agent 未找到
     """
+    # 0. IP 粒度速率限制：防止恶意客户端高频创建 WebSocket 连接消耗资源
+    client_ip = websocket.client.host if websocket.client else "0.0.0.0"
+    try:
+        await check_ip_rate_limit(client_ip, "ws_connect_lsp4j")
+    except HTTPException as e:
+        # 429 时 WebSocket 尚未 accept，直接返回 HTTP 429
+        logger.warning("[LSP4J-LIFE] WS rate limited: ip={}", client_ip)
+        await websocket.close(code=4001, reason=str(e.detail))
+        return
+
     # 先 accept 再认证（LSP4J 框架要求）
     logger.info("[LSP4J-LIFE] WS accepting connection from {}:{}", websocket.client.host if websocket.client else "unknown", websocket.client.port if websocket.client else "unknown")
     await websocket.accept()

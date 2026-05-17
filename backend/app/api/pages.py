@@ -3,7 +3,7 @@
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,8 +30,13 @@ def _agent_base_dir(agent_id: uuid.UUID) -> Path:
 # ── Public render (NO auth) ────────────────────────────
 
 @public_router.get("/p/{short_id}")
-async def render_page(short_id: str, db: AsyncSession = Depends(get_db)):
+async def render_page(short_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Serve a published HTML page. No authentication required."""
+    # 0. IP 粒度速率限制：防止恶意客户端高频请求公开页面消耗资源
+    from app.core.rate_limit import check_ip_rate_limit
+    client_ip = request.client.host if request.client else "0.0.0.0"
+    await check_ip_rate_limit(client_ip, "pages_render", {"pages_render": (30, 60)})
+
     result = await db.execute(
         select(PublishedPage).where(PublishedPage.short_id == short_id)
     )

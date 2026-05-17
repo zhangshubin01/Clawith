@@ -19,7 +19,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.plugins.clawith_acp import router as acp_router
+import app.plugins.clawith_acp  # 先加载 __init__（确保模块正确注册到 sys.modules）
+import sys
+acp_router = sys.modules["app.plugins.clawith_acp.router"]  # 模块对象（含所有函数定义）
+from app.plugins.clawith_acp.router import router as acp_router_api  # APIRouter 实例
 from app.plugins.clawith_acp.router import _acp_ws_envelope, ACP_WS_SCHEMA_VERSION
 
 # Repo root: backend/tests/plugins -> … -> Clawith

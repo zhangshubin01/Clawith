@@ -378,7 +378,9 @@ async def create_agent(
     # For OpenClaw agents: skip file system and container setup, generate API key
     if agent.agent_type == "openclaw":
         raw_key = f"oc-{secrets.token_urlsafe(32)}"
-        agent.api_key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        # 使用 PBKDF2-HMAC-SHA256 存储 API Key 哈希（600K 迭代，符合 OWASP 2024），替代旧式 SHA-256（#81 修复）
+        from app.api.gateway import _hash_key_pbkdf2
+        agent.api_key_hash = _hash_key_pbkdf2(raw_key)
         agent.status = "idle"
         await db.commit()
 
@@ -1092,7 +1094,9 @@ async def generate_or_reset_api_key(
         raise HTTPException(status_code=400, detail="API keys are only available for OpenClaw agents")
 
     raw_key = f"oc-{secrets.token_urlsafe(32)}"
-    agent.api_key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    # 使用 PBKDF2-HMAC-SHA256 存储 API Key 哈希，替代旧式 SHA-256（#81 修复）
+    from app.api.gateway import _hash_key_pbkdf2
+    agent.api_key_hash = _hash_key_pbkdf2(raw_key)
     await db.commit()
 
     return {"api_key": raw_key, "message": "Key configured successfully."}
