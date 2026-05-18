@@ -981,16 +981,16 @@ async def websocket_chat(
             # Final 'done' packet
             await websocket.send_json({"type": "done", "role": "assistant", "content": assistant_response})
 
-            # #142 修复：工具循环结束后处理排队消息，而非静默丢弃。
-            # 取最后一条排队消息（最新用户意图）作为下一轮输入，
-            # 通过 _replay_data 标记重入消息处理循环。
+            # #142 + NEW-045：FIFO 处理排队消息，避免只重放最后一条导致更早消息丢失
             if queued_messages:
+                _next_queued = queued_messages.pop(0)
                 logger.info(
-                    "[WS] 处理排队消息: session={} queue_size={} msg_lengths={}",
-                    conv_id, len(queued_messages),
-                    [len(str(m.get("content", ""))) for m in queued_messages],
+                    "[WS] 处理排队消息(FIFO): session={} remaining={} msg_len={}",
+                    conv_id,
+                    len(queued_messages),
+                    len(str(_next_queued.get("content", ""))),
                 )
-                _replay_data = queued_messages[-1]
+                _replay_data = _next_queued
                 continue
 
     except WebSocketDisconnect:

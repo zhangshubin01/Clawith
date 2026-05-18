@@ -329,27 +329,32 @@ When installing or importing an MCP server via `discover_resources` / `import_mc
 
     dynamic_parts = []
 
-    # --- Feishu Built-in Tools (only injected when agent has Feishu configured) ---
-    _has_feishu = False
-    try:
-        from sqlalchemy import select
-        from app.models.channel_config import ChannelConfig
-        from app.database import async_session as _ctx_session
-        async with _ctx_session() as _ctx_db:
-            _cfg_r = await _ctx_db.execute(
-                select(ChannelConfig).where(
-                    ChannelConfig.agent_id == agent_id,
-                    ChannelConfig.channel_type == "feishu",
-                    ChannelConfig.is_configured == True,
-                )
-            )
-            _has_feishu = _cfg_r.scalar_one_or_none() is not None
-    except Exception:
-        # #146 修复：Feishu 通道配置加载失败时记录警告，优雅降级（不影响 Agent 核心功能）
-        logger.warning("无法加载 Feishu 通道配置（非关键，Agent 仍可正常工作）", exc_info=True)
+    # IDE 会话不注入 IM 通道工具说明，减少 token 与工具混淆（NEW-011）
+    _inject_im_channel_tools = not _is_ide_session.get()
 
-    if _has_feishu:
-        static_parts.append("""
+    # --- Feishu Built-in Tools (only injected when agent has Feishu configured) ---
+    if _inject_im_channel_tools:
+        _has_feishu = False
+        try:
+            from sqlalchemy import select
+            from app.models.channel_config import ChannelConfig
+            from app.database import async_session as _ctx_session
+
+            async with _ctx_session() as _ctx_db:
+                _cfg_r = await _ctx_db.execute(
+                    select(ChannelConfig).where(
+                        ChannelConfig.agent_id == agent_id,
+                        ChannelConfig.channel_type == "feishu",
+                        ChannelConfig.is_configured == True,
+                    )
+                )
+                _has_feishu = _cfg_r.scalar_one_or_none() is not None
+        except Exception:
+            # #146 修复：Feishu 通道配置加载失败时记录警告，优雅降级（不影响 Agent 核心功能）
+            logger.warning("无法加载 Feishu 通道配置（非关键，Agent 仍可正常工作）", exc_info=True)
+
+        if _has_feishu:
+            static_parts.append("""
 ## ⚡ Pre-installed Feishu Tools
 
 The following tools are available in your toolset. **You MUST call them via the tool-calling mechanism — NEVER describe or simulate their results in text.**
@@ -404,7 +409,7 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
 → Use `attendee_names=["John"]` in `feishu_calendar_create` — names are resolved automatically.
 → Or use `attendee_open_ids=["ou_xxx"]` if you already have the open_id.""")
 
-    # --- DingTalk Built-in Tools ---
+        # --- DingTalk Built-in Tools ---
     # 注：DingTalk 上下文模块（app.services.agent.context.dingtalk）尚未实现。
     # 实现后取消注释下方代码并在 try 内添加相应的 import。
     # try:
@@ -415,22 +420,23 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
     # except Exception:
     #     logger.warning("无法加载 DingTalk 上下文（非关键，Agent 仍可正常工作）", exc_info=True)
 
-    # --- Atlassian Rovo Tools (injected when Atlassian channel is configured) ---
-    try:
-        from app.database import async_session
-        from app.models.channel_config import ChannelConfig
-        from sqlalchemy import select as sa_select
-        async with async_session() as db:
-            result = await db.execute(
-                sa_select(ChannelConfig).where(
-                    ChannelConfig.agent_id == agent_id,
-                    ChannelConfig.channel_type == "atlassian",
-                    ChannelConfig.is_configured == True,
+        # --- Atlassian Rovo Tools (injected when Atlassian channel is configured) ---
+        try:
+            from app.database import async_session
+            from app.models.channel_config import ChannelConfig
+            from sqlalchemy import select as sa_select
+
+            async with async_session() as db:
+                result = await db.execute(
+                    sa_select(ChannelConfig).where(
+                        ChannelConfig.agent_id == agent_id,
+                        ChannelConfig.channel_type == "atlassian",
+                        ChannelConfig.is_configured == True,
+                    )
                 )
-            )
-            atlassian_config = result.scalar_one_or_none()
-            if atlassian_config:
-                static_parts.append("""
+                atlassian_config = result.scalar_one_or_none()
+                if atlassian_config:
+                    static_parts.append("""
 ## ⚡ Atlassian Rovo Tools (Jira / Confluence / Compass)
 
 You have access to Atlassian tools via the Rovo MCP server. **Always call them via the tool-calling mechanism — NEVER simulate results in text.**
@@ -466,8 +472,8 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
 - Make up Jira issue IDs, Confluence page URLs, or component names
 - Report success without a tool result
 - Ask the user for their Atlassian credentials — they are pre-configured""")
-    except Exception:
-        logger.warning("无法加载 Atlassian 工具列表（非关键功能，Agent 仍可正常工作）", exc_info=True)
+        except Exception:
+            logger.warning("无法加载 Atlassian 工具列表（非关键功能，Agent 仍可正常工作）", exc_info=True)
 
     # --- Company Intro (from system settings) ---
     try:

@@ -40,7 +40,7 @@ from datetime import datetime, timezone as tz_utc
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
@@ -457,6 +457,18 @@ async def _build_project_file_index(project_path: str) -> None:
         logger.error("[FILE-INDEX] build failed: {}", e, exc_info=True)
 
 
+def _search_file_hint_items(query: str, pattern: str, *, reason: str = "index_miss") -> list[dict]:
+    """文件名搜索无结果时生成 IDE ToolPanel 可展示的 hint 条目（NEW-039）。"""
+    hint_query = (query or pattern.replace("*", "").replace(".", "")).strip()[:60]
+    msg = "按文件名搜索无结果"
+    if reason and reason != "none":
+        msg += f"（{reason}）"
+    msg += "。"
+    if hint_query:
+        msg += f' 请改用 grep_code(regex="{hint_query}") 搜索文件内容。'
+    return [{"type": "hint", "hint": msg}]
+
+
 def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "") -> tuple[str, list[dict]]:
     """本地执行搜索工具，返回 (result_json_str, results_list).
 
@@ -605,20 +617,10 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                 _neg_key = "|".join(p for p in _neg_key_parts if p)
                 _search_zero_result_cache[_neg_key] = (time.monotonic(), "index_miss")
                 logger.info("[FILE-INDEX] search_file miss: query={} pattern={}", query, pattern)
-                # 提示换用内容搜索（项目使用混淆文件名，按名称搜不到）
-                _hint_query = query or pattern.replace("*", "").replace(".", "")
-                result_str = json.dumps(
-                    [
-                        {
-                            "hint": "按文件名搜索无结果（项目使用混淆名称）。"
-                            f"请改用 grep_code(regex) 搜索文件内容: "
-                            f'grep_code(regex="{_hint_query[:60]}")'
-                        }
-                    ],
-                    ensure_ascii=False,
-                    default=str,
-                )
-                return result_str, []
+                # hint 必须进入 results，否则 IDE ToolPanel 只收到空列表（NEW-039）
+                hint_items = _search_file_hint_items(query, pattern, reason="index_miss")
+                result_str = json.dumps(hint_items, ensure_ascii=False, default=str)
+                return result_str, hint_items
 
         scanned_count = 0
         path_filtered = 0
@@ -738,6 +740,10 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
         # 负缓存写入: 0 结果搜索
         if not items and _neg_key:
             _search_zero_result_cache[_neg_key] = (time.monotonic(), zero_result_reason)
+        if not items:
+            hint_items = _search_file_hint_items(query, pattern, reason=zero_result_reason)
+            result_str = json.dumps(hint_items, ensure_ascii=False, default=str)
+            return result_str, hint_items
         result_str = json.dumps(items, ensure_ascii=False, default=str)
         return result_str, items
 
@@ -854,16 +860,17 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
             _iter_source = (cwd / rel for rel in _file_idx.all_files if (cwd / rel).is_file())
         else:
             _iter_source = _iter_project_files()
+        # 辅助函数：构造搜索结果项，补齐 itemName/type 使插件 ToolResultListCellRender 可正确渲染
+        def _sym_item(file_name: str, file_path: str, sym_type: str = "") -> dict:
+            stem = file_name.rsplit(".", 1)[0] if "." in file_name else file_name
+            itype = sym_type or ("resource" if _is_android_resource_path(file_path) else "file")
+            return {"fileName": file_name, "path": file_path, "itemName": stem, "type": itype}
+
         for p in _iter_source:
             if len(items) >= _MAX_RESULTS:
                 break
             if query_lower in p.name.lower():
-                items.append(
-                    {
-                        "fileName": p.name,
-                        "path": str(p.absolute()),
-                    }
-                )
+                items.append(_sym_item(p.name, str(p.absolute())))
                 continue
             if declaration_pattern is None:
                 if not (is_resource_query and resource_ref_pattern):
@@ -874,12 +881,10 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                 continue
             if declaration_pattern and declaration_pattern.search(text):
                 declaration_hits += 1
-                items.append(
-                    {
-                        "fileName": p.name,
-                        "path": str(p.absolute()),
-                    }
-                )
+                # 从声明匹配中提取类型名（class/interface/object/typealias）
+                m = declaration_pattern.search(text)
+                decl_kw = (m.group(1) or "class").lower() if m else "class"
+                items.append(_sym_item(p.name, str(p.absolute()), decl_kw))
                 continue
             if (
                 is_resource_query
@@ -887,21 +892,11 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                 and _is_android_resource_path(str(p))
                 and p.stem.lower() == resource_name.lower()
             ):
-                items.append(
-                    {
-                        "fileName": p.name,
-                        "path": str(p.absolute()),
-                    }
-                )
+                items.append(_sym_item(p.name, str(p.absolute()), "resource"))
                 continue
             if resource_ref_pattern and resource_ref_pattern.search(text):
                 resource_ref_hits += 1
-                items.append(
-                    {
-                        "fileName": p.name,
-                        "path": str(p.absolute()),
-                    }
-                )
+                items.append(_sym_item(p.name, str(p.absolute()), "file"))
         seen_paths_sym = {str(x.get("path")) for x in items}
         if is_resource_query and resource_name and len(items) < _MAX_RESULTS:
             for hit in collect_android_values_xml_hits(cwd, resource_name):
@@ -910,7 +905,7 @@ def _execute_local_tool(tool_name: str, arguments: dict, project_path: str = "")
                 pth = hit.get("path", "")
                 if pth and pth not in seen_paths_sym:
                     seen_paths_sym.add(pth)
-                    items.append({"fileName": hit["fileName"], "path": pth})
+                    items.append(_sym_item(hit["fileName"], pth, "resource"))
         if not items and resource_name:
             probe = resource_name.lower()
             # ★ 快路径: 使用文件索引
@@ -1686,8 +1681,38 @@ class JSONRPCRouter:
             # ★ 性能计时: JSON-RPC 响应发送
             _t0 = self._log_perf("JSONRPC_RESPONSE", _ask_start, _t0)
 
-            # 1. 发送思考状态（ChatThinkingParams 格式）
-            await self._send_chat_think(session_id, "思考中...", "start", request_id)
+            # 1. 发送会话级"生成中"状态（ChatThinkingParams 格式）
+            # 此状态持续到会话完全结束，让插件端显示会话正在进行中
+
+            # ★ 提前声明思考计时器变量（后续在 LLM 调用前赋值，在闭包中使用）
+            _thinking_started: bool = False
+            _thinking_start_time: float = 0.0
+
+            await self._send_chat_think(
+                session_id,
+                "生成中",
+                "start",
+                request_id,
+                extra={"timer_type": "session_generating"},
+            )
+            logger.info(f"[LSP4J] 会话级生成中状态已发送: request_id={request_id[:8]}")
+
+            # ★ 发送思考计时器开始通知（所有模型通用，不依赖 reasoning_content）
+            # 插件端收到后创建 ChatThinkingPanel 并启动计时器显示"思考中 0秒"
+            # 若模型有 reasoning_content，on_thinking 推送思考文本但不重启计时器
+            # 若模型无 reasoning_content，计时器持续到 on_chunk 发送 done 为止
+            _thinking_started = True
+            _thinking_start_time = time.time()
+            await self._send_chat_think(
+                session_id,
+                "思考中",
+                "start",
+                request_id,
+                extra={
+                    "timer_type": "thinking_timer",
+                    "start_time": str(int(_thinking_start_time * 1000)),
+                },
+            )
 
             # ★ 性能计时: 发送 think start
             _t0 = self._log_perf("THINK_START", _ask_start, _t0)
@@ -1837,7 +1862,6 @@ class JSONRPCRouter:
             # 3. 定义流式回调
             reply_parts: list[str] = []
             thinking_chunks: list[str] = []
-            _thinking_started: bool = False
 
             # ★ 流式输出缓冲：按"完整行"发送；Markdown 表格按整块发送，避免被拆成半截列。
             buffer = StreamBufferManager(
@@ -1850,11 +1874,24 @@ class JSONRPCRouter:
                 使用缓冲区累积小 chunk，按行或阈值发送，避免 markdown 表格被拆分成单个字符，
                 导致 MarkdownStreamPanel 无法正确解析。
                 """
-                nonlocal _thinking_started
+                nonlocal _thinking_started, _thinking_start_time
                 # 思考结束标记：收到首个正文 chunk 即表示思考阶段结束
                 if _thinking_started:
                     _thinking_started = False
-                    await self._send_chat_think(session_id, "", "done", request_id)
+                    # ★ 计算思考耗时并发送完成通知
+                    # 插件端根据这些信息停止计时器，显示"思考完成 共计X秒"
+                    thinking_elapsed_ms = int((time.time() - _thinking_start_time) * 1000)
+                    await self._send_chat_think(
+                        session_id,
+                        f"思考完成",
+                        "done",
+                        request_id,
+                        extra={
+                            "timer_type": "thinking_timer",
+                            "elapsed_ms": str(thinking_elapsed_ms),
+                        },
+                    )
+                    logger.debug(f"[LSP4J] 思考计时结束: request_id={request_id[:8]} elapsed_ms={thinking_elapsed_ms}")
 
                 # 检查取消事件
                 if self._cancel_event and self._cancel_event.is_set():
@@ -1872,16 +1909,13 @@ class JSONRPCRouter:
                     await buffer.flush()
 
             async def on_thinking(text: str) -> None:
-                """推理过程回调 — 逐步推送 DeepSeek reasoning_content 到 IDE。
+                """推理过程回调 — 逐步推送 reasoning_content 到 IDE 思考面板。
 
-                插件 ChatThinkingProcessor 监听 chat/think 通知并渲染到思考面板。
-                避免前端在 LLM 推理期间（28s-41s）完全静止。
+                思考计时器已在 _handle_chat_ask 入口处启动（所有模型通用）。
+                此处仅负责推送推理文本内容，不重复发送计时器通知。
                 """
-                nonlocal _thinking_started
+                nonlocal _thinking_started, _thinking_start_time
                 thinking_chunks.append(text)
-                if not _thinking_started:
-                    _thinking_started = True
-                    await self._send_chat_think(session_id, "思考中...", "start", request_id)
                 # ★ 逐步推送推理文本：每 15 chunk 或遇换行时发送一次
                 # 避免每个 token 都发一条通知（过多 RPC 开销），同时保证前端持续有内容更新
                 if len(thinking_chunks) % 15 == 0 or "\n" in text:
@@ -1995,14 +2029,19 @@ class JSONRPCRouter:
                             # #94 修复：延迟 100ms 发送 INIT 卡片，快速工具可跳过卡片避免闪烁
                             tool_markdown = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
 
-                        # ★ 插件 ChatToolEventProcessor 采用 buffer+replay 机制：
-                        # 事件先于 panel 注册到达时自动缓冲，registerPanel 时 replay。
-                        # 后端无需等待，yield 控制权即可。
-                        await asyncio.sleep(0)
+                        # ★ 通过聊天流发送 INIT markdown，MarkdownStreamPanel 解析后创建 ToolPanel 卡片
+                        # 注意：tool/call/sync 中的 markdown 字段仅作为辅助数据，
+                        # ToolPanel 的创建依赖聊天流中的 toolCall:: markdown 块。
+                        if tool_markdown:
+                            await self._send_chat_answer(
+                                session_id,
+                                tool_markdown,
+                                request_id,
+                                overwrite=True,
+                            )
 
-                        # 将 INIT markdown 合并到 PENDING tool/call/sync 中，减少一次 WebSocket 往返
-                        # IDE 端 ChatToolEventProcessor 收到携带 markdown 的 PENDING sync 后，
-                        # 可直接创建 ToolPanel 卡片，无需等待独立的 INIT markdown 流式到达。
+                        # 将 INIT markdown 也合并到 PENDING tool/call/sync 的 markdown 字段中，
+                        # 供 IDE 端备用（ChatToolEventProcessor 当前不使用此字段创建 panel）。
                         if tool_name in _UI_HEAVY_SEARCH_TOOLS:
                             logger.info(
                                 "[LSP4J-TRACE] 跳过 PENDING（高频搜索降噪）: req={} call={} tool={}",
@@ -2303,7 +2342,30 @@ class JSONRPCRouter:
             # 此处仅兜底处理纯思考无正文的场景（_thinking_started=True）。
             if _thinking_started:
                 _thinking_started = False
-                await self._send_chat_think(session_id, "", "done", request_id)
+                # ★ 计算思考耗时并发送完成通知（兜底场景）
+                thinking_elapsed_ms = int((time.time() - _thinking_start_time) * 1000)
+                await self._send_chat_think(
+                    session_id,
+                    "思考完成",
+                    "done",
+                    request_id,
+                    extra={
+                        "timer_type": "thinking_timer",
+                        "elapsed_ms": str(thinking_elapsed_ms),
+                    },
+                )
+                logger.debug(f"[LSP4J] 思考计时结束(兜底): request_id={request_id[:8]} elapsed_ms={thinking_elapsed_ms}")
+
+            # ★ 发送会话级"生成中"状态结束通知
+            # 会话完全结束，清除插件端的生成中指示器
+            await self._send_chat_think(
+                session_id,
+                "",
+                "done",
+                request_id,
+                extra={"timer_type": "session_generating"},
+            )
+            logger.info(f"[LSP4J] 会话级生成中状态已结束: request_id={request_id[:8]}")
 
             # 发送步骤结束通知（chat/process_step_callback）
             await self._send_process_step_callback(
@@ -3336,8 +3398,9 @@ class JSONRPCRouter:
         )
         _tool_invoke_start = time.monotonic()
 
-        # ★ 本地工具（list_dir, search_file, add_tasks, todo_write）：后端本地执行，不发送到 IDE
-        if tool_name in ("list_dir", "search_file", "add_tasks", "todo_write"):
+        # ★ 本地工具（list_dir, add_tasks, todo_write）：后端本地执行，不发送到 IDE
+        # search_file 改走 IDE VirtualFile 索引（NEW-041），避免 git 索引与混淆工程文件名不一致
+        if tool_name in ("list_dir", "add_tasks", "todo_write"):
             try:
                 if tool_name in ("add_tasks", "todo_write"):
                     # ★ 纯 UI 工具：任务数据在 arguments.tasks 中，需注入 results
@@ -3470,11 +3533,13 @@ class JSONRPCRouter:
         # 用 parameters["file_path"] 渲染文件链接。
         sync_parameters = dict(arguments)
         # ToolPanel 链接构建优先取 parameters["file_path"]，补齐避免"查看文件无链接"。
-        if tool_name == "read_file":
+        # 覆盖所有文件操作工具：read_file / edit_file / create_file / save_file / delete_file / search_replace
+        # 这些工具的 ToolPanel 均依赖 parameters["file_path"] 来渲染文件链接或构建 AIDevFilePanel
+        if tool_name in ("read_file", "edit_file", "create_file", "save_file", "delete_file", "search_replace"):
             fp = sync_parameters.get("file_path") or sync_parameters.get("path") or sync_parameters.get("filePath")
             if fp and "file_path" not in sync_parameters:
                 sync_parameters["file_path"] = fp
-        elif tool_name == "run_in_terminal":
+        if tool_name == "run_in_terminal":
             bg = sync_parameters.get("is_background")
             if bg is None:
                 bg = sync_parameters.get("isBackground")
@@ -3626,11 +3691,21 @@ class JSONRPCRouter:
                 # {"results": [{fileName, path, ...}]} JSON 字符串，需解析提取内层列表
                 # 否则 _wrap_results 会将整个 JSON 串包装为 [{"content": "..."}]
                 # 导致插件端 CodeItem 反序列化时拿到 content 而非 fileName → truncateFirst null
-                if tool_name in ("grep_code", "search_codebase", "search_symbol") and result:
+                if tool_name in ("grep_code", "search_codebase", "search_symbol", "search_file") and result:
                     try:
                         parsed = json.loads(result) if isinstance(result, str) else result
                         if isinstance(parsed, dict) and "results" in parsed:
                             results = parsed["results"]
+                            if tool_name == "search_file" and not results:
+                                reason = str(parsed.get("zero_result_reason") or "no_match")
+                                hint_items = _search_file_hint_items(
+                                    str(arguments.get("query") or ""),
+                                    str(arguments.get("file_pattern") or ""),
+                                    reason=reason,
+                                )
+                                results = hint_items
+                                parsed = {**parsed, "results": hint_items, "hint": hint_items[0].get("hint", "")}
+                                result = json.dumps(parsed, ensure_ascii=False)
                         else:
                             results = [{"raw": str(result)[:500]}]
                     except (json.JSONDecodeError, TypeError):
@@ -4068,7 +4143,14 @@ class JSONRPCRouter:
             },
         )
 
-    async def _send_chat_think(self, session_id: str | None, text: str, step: str, request_id: str) -> None:
+    async def _send_chat_think(
+        self,
+        session_id: str | None,
+        text: str,
+        step: str,
+        request_id: str,
+        extra: dict[str, str] | None = None,
+    ) -> None:
         """发送 chat/think（ChatThinkingParams 格式）。
 
         ⚠️ 字段名必须严格匹配：
@@ -4077,11 +4159,23 @@ class JSONRPCRouter:
         - requestId（必须携带）
         - timestamp（毫秒时间戳）
         - extra: Map<String,String>（含 sessionType）
+
+        参数:
+            session_id: 会话ID
+            text: 思考文本内容
+            step: 步骤状态（"start" 或 "done"）
+            request_id: 请求ID
+            extra: 额外参数，用于传递扩展信息（如 timer_type、start_time 等）
         """
-        extra: dict[str, str] = {}
+        # 合并默认 extra 和传入的 extra
+        merged_extra: dict[str, str] = {}
         session_type = getattr(self, "_current_session_type", "")
         if session_type:
-            extra["sessionType"] = session_type
+            merged_extra["sessionType"] = session_type
+        # 合并传入的 extra 参数（传入的会覆盖默认值）
+        if extra:
+            merged_extra.update(extra)
+
         await self._send_client_request(
             "chat/think",
             {
@@ -4090,7 +4184,7 @@ class JSONRPCRouter:
                 "text": text,
                 "step": step,  # "start" 或 "done"
                 "timestamp": int(time.time() * 1000),
-                "extra": extra,
+                "extra": merged_extra,
             },
         )
 
@@ -4237,7 +4331,13 @@ class JSONRPCRouter:
                             (_text[:160].replace("\n", "↵") if _text else ""),
                         )
                 else:
-                    logger.info("[LSP4J →] method={} id={} params_keys={}", _method, message.get("id"), _pkeys)
+                    # chat/think 消息打印 extra 内容便于排查思考面板显示问题
+                    if _method == "chat/think":
+                        _extra = _params.get("extra", {})
+                        logger.info("[LSP4J →] method={} id={} step={} text={!r} extra={}",
+                            _method, message.get("id"), _params.get("step"), _params.get("text"), _extra)
+                    else:
+                        logger.info("[LSP4J →] method={} id={} params_keys={}", _method, message.get("id"), _pkeys)
             elif "result" in message:
                 logger.debug(
                     "[LSP4J →] response id={} result_type={}", message.get("id"), type(message["result"]).__name__
@@ -4560,7 +4660,7 @@ class JSONRPCRouter:
             await self._send_response(msg_id, {"errorCode": "operate_failed", "errorMessage": str(e)})
 
     async def _handle_chat_list_all_sessions(self, params: dict, msg_id: Any) -> None:
-        """chat/listAllSessions → 用户会话列表（跨端共享，排除 agent/trigger 内部渠道）。"""
+        """chat/listAllSessions → IDE 侧会话列表（仅 ide_lsp4j，不含 Web 线程）。"""
         project_uri = params.get("projectUri") or ""
         try:
             async with async_session() as db:
@@ -4568,39 +4668,49 @@ class JSONRPCRouter:
                     select(ChatSession)
                     .where(ChatSession.user_id == self._user_id)
                     .where(ChatSession.agent_id == self._agent_id)
-                    .where(ChatSession.source_channel.notin_(["agent", "trigger"]))
+                    .where(ChatSession.source_channel == "ide_lsp4j")
                     .order_by(ChatSession.created_at.desc())
                     .limit(50)
                 )
                 sessions = list(r.scalars().all())
+                out: list[dict[str, Any]] = []
+                for sess in sessions:
+                    last_read = sess.last_read_at_by_user
+                    total = sess.message_count or 0
+                    if last_read is None:
+                        unread = total
+                    else:
+                        cnt_r = await db.execute(
+                            select(func.count())
+                            .select_from(ChatMessage)
+                            .where(
+                                ChatMessage.conversation_id == str(sess.id),
+                                ChatMessage.created_at > last_read,
+                            )
+                        )
+                        unread = int(cnt_r.scalar() or 0)
+                    out.append(
+                        {
+                            "sessionId": str(sess.id),
+                            "sessionTitle": sess.title or "Chat",
+                            "chatRecords": [],
+                            "gmtCreate": self._epoch_ms(sess.created_at),
+                            "gmtModified": self._epoch_ms(sess.last_message_at or sess.created_at),
+                            "sessionType": "ASSISTANT",
+                            "userId": str(sess.user_id),
+                            "userName": "",
+                            "projectId": "",
+                            "projectUri": project_uri,
+                            "projectName": "",
+                            "messageCount": total,
+                            "unreadCount": unread,
+                        }
+                    )
         except SQLAlchemyError as e:
             logger.warning("[LSP4J] chat/listAllSessions DB error: {}", e)
             await self._send_response(msg_id, [])
             return
 
-        out: list[dict[str, Any]] = []
-        for sess in sessions:
-            last_read = sess.last_read_at_by_user
-            total = sess.message_count or 0
-            # 简化未读计算：上次已读后有新消息则认为有未读
-            unread = total if last_read is None else max(0, total - 1)
-            out.append(
-                {
-                    "sessionId": str(sess.id),
-                    "sessionTitle": sess.title or "Chat",
-                    "chatRecords": [],
-                    "gmtCreate": self._epoch_ms(sess.created_at),
-                    "gmtModified": self._epoch_ms(sess.last_message_at or sess.created_at),
-                    "sessionType": "ASSISTANT",
-                    "userId": str(sess.user_id),
-                    "userName": "",
-                    "projectId": "",
-                    "projectUri": project_uri,
-                    "projectName": "",
-                    "messageCount": total,
-                    "unreadCount": unread,
-                }
-            )
         await self._send_response(msg_id, out)
 
     def _format_tool_call_record(self, msg, session_id: str) -> dict[str, Any]:
@@ -5939,7 +6049,7 @@ async def invoke_lsp4j_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID
         params_str = json.dumps(arguments, sort_keys=True, default=str)
         params_hash = hashlib.md5(params_str.encode()).hexdigest()[:12]
         # 加上 user/agent 隔离，防止跨用户/跨 agent 的工具结果缓存污染
-        cache_key = f"{self._user_id}:{self._agent_id}:{tool_name}:{params_hash}"
+        cache_key = f"{str(user_id)}:{str(agent_id)}:{tool_name}:{params_hash}"
         if cache_key in _lsp4j_tool_cache:
             ts, cached = _lsp4j_tool_cache[cache_key]
             if time.monotonic() - ts < _LSP4J_TOOL_CACHE_TTL:
@@ -6192,11 +6302,11 @@ async def _persist_lsp4j_chat_turn(
                 (1 if user_text else 0) + (1 if reply_text else 0),
             )
 
-            # #116 修复：按 agent_id 广播到所有连接的 WebUI 客户端，而非仅投递到单个 session
+            # NEW-036：仅通知当前用户的 WebUI 连接，避免同 agent 多用户串会话
             try:
                 _push_msg = {"type": "done", "role": "assistant", "content": reply_text, "source": "lsp4j"}
-                await manager.send_message(str(agent_id), _push_msg)
-                logger.debug("[LSP4J] 前端通知已广播: agent_id={}", agent_id)
+                await manager.send_to_user(str(agent_id), str(user_id), _push_msg)
+                logger.debug("[LSP4J] 前端通知已发送: agent_id={} user_id={}", agent_id, user_id)
             except websockets.exceptions.ConnectionClosed as _fe:
                 logger.debug("LSP4J persist: 前端通知失败: {}", _fe)
 
