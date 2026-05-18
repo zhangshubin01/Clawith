@@ -663,8 +663,17 @@ def install_lsp4j_tool_hooks() -> None:
             _agent_key = (str(user_id), str(agent_id))
             _active = await get_active_router(_agent_key)
             _proj_path = _active._project_path if _active and hasattr(_active, "_project_path") else ""
-            result_str, _ = _execute_local_tool(tool_name, args, _proj_path or "")
-            logger.info("[LSP4J-TOOL] 本地搜索执行: tool={} result_len={}", tool_name, len(result_str))
+            result_str, results_list = _execute_local_tool(tool_name, args, _proj_path or "")
+            if _active and results_list:
+                _req_id = getattr(_active, "_current_request_id", None) or ""
+                _sess_id = getattr(_active, "_session_id", None) or session_id or ""
+                await _active._accumulate_search_result(_sess_id, _req_id, tool_name, args, results_list)
+            logger.info(
+                "[LSP4J-TOOL] 本地搜索执行: tool={} result_len={} results_count={}",
+                tool_name,
+                len(result_str),
+                len(results_list),
+            )
             return result_str
 
         # ACP 原路径（或 LSP4J 工具回退到本地执行）

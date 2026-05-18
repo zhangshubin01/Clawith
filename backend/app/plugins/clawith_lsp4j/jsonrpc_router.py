@@ -111,6 +111,9 @@ _UI_HEAVY_SEARCH_TOOLS = frozenset(
     }
 )
 
+# 汇总检索卡 debounce：边搜边更新时合并短时间内的多次推送，减轻 IDE EDT 压力
+_SEARCH_SUMMARY_DEBOUNCE_SEC = 0.25
+
 # 高频工具步骤回调节流窗口（秒）。
 # 同一 request 内重复的 (step,status,description) 在窗口内仅发送一次，
 # 避免 process_step_callback 事件风暴压垮插件 EDT。
@@ -1311,6 +1314,13 @@ class JSONRPCRouter:
         # request_id -> {"sig": (step, status, description), "ts": monotonic_ts}
         self._process_step_last_emit: dict[str, dict[str, Any]] = {}
 
+        # 代码检索结果累积：按 request_id 收集高频搜索工具结果，边搜边推一张 search_codebase 汇总卡
+        # 格式: {request_id: [{"tool": "grep_code", "query": "...", "results": [...]}, ...]}
+        self._search_results_store: dict[str, list[dict[str, Any]]] = {}
+        self._search_summary_call_id: dict[str, str] = {}
+        self._search_summary_push_task: dict[str, asyncio.Task] = {}
+        self._search_summary_finalized: set[str] = set()
+
         # ★ 性能计时: 当前请求的基准时间戳（在 _handle_chat_ask 中设置）
         self._perf_start: float = 0.0
 
@@ -1577,8 +1587,13 @@ class JSONRPCRouter:
         if not await self._ensure_project_path_ready(msg_id, "chat/ask"):
             return
 
+        # ★ NEW-046: 生成 trace_id 贯穿三端日志（backend → IDE → Web）
+        _trace_id = str(uuid.uuid4())[:8]
+        self._current_trace_id = _trace_id
+
         logger.info(
-            "[LSP4J] chat/ask 开始处理: requestId={} sessionId={} stream={} chatTask={} mode={}",
+            "[LSP4J] chat/ask 开始处理: traceId={} requestId={} sessionId={} stream={} chatTask={} mode={}",
+            _trace_id,
             request_id,
             session_id,
             ask.stream,
@@ -2588,6 +2603,9 @@ class JSONRPCRouter:
                 finish_reason = "error"
             await self._send_chat_finish(session_id, finish_reason, reply, request_id, status_code=error_status_code)
 
+            # 合并本轮搜索结果为一张摘要卡（边搜边更新后的最终 FINISHED）
+            await self._finalize_search_summary(session_id, request_id)
+
             # 发送 REQUEST_FINISHED 清理通知（tool/call/sync）
             await self._send_tool_call_sync(
                 session_id,
@@ -2612,6 +2630,7 @@ class JSONRPCRouter:
             # 7. JSON-RPC 响应已在 call_llm 之前发送（避免 IDE 超时）
             # 完成状态通过 chat/finish 通知传递
 
+            self._teardown_search_summary_request(request_id)
             self._current_request_id = None
 
             # #101 修复：处理排队中的下一个请求
@@ -3118,6 +3137,208 @@ class JSONRPCRouter:
         # 字符串结果包装为标准对象
         return [{"content": results[:500]}]
 
+    # ── 代码检索摘要卡（边搜边更新，固定 toolCallId）──
+
+    def _format_search_tool_counts(self, request_id: str) -> str:
+        """统计本轮各搜索工具调用次数，用于汇总卡副标题。"""
+        store = self._search_results_store.get(request_id) or []
+        counts: dict[str, int] = {}
+        for entry in store:
+            tool = str(entry.get("tool") or "")
+            if tool:
+                counts[tool] = counts.get(tool, 0) + 1
+        if not counts:
+            return ""
+        _labels = {
+            "search_codebase": "代码库",
+            "search_file": "文件",
+            "grep_code": "代码",
+            "search_symbol": "符号",
+            "list_dir": "目录",
+        }
+        return "、".join(f"{_labels.get(k, k)} {v} 次" for k, v in counts.items())
+
+    def _merge_search_code_items(self, request_id: str) -> list[dict]:
+        """合并去重本轮所有搜索命中，输出插件 CodeItem 列表。"""
+        store = self._search_results_store.get(request_id)
+        if not store:
+            return []
+        seen: set[str] = set()
+        all_items: list[dict] = []
+        for entry in store:
+            for item in entry.get("results", []):
+                if not isinstance(item, dict):
+                    continue
+                path = str(item.get("path") or item.get("fileName") or "").strip()
+                if not path or path in seen:
+                    continue
+                seen.add(path)
+                all_items.append(
+                    {
+                        "fileName": item.get("fileName") or "",
+                        "path": path,
+                        "startLine": item.get("startLine"),
+                        "endLine": item.get("endLine"),
+                    }
+                )
+        return all_items
+
+    def _teardown_search_summary_request(self, request_id: str) -> None:
+        """取消 debounce 并清理指定 request 的汇总卡状态（防泄漏）。"""
+        if not request_id:
+            return
+        task = self._search_summary_push_task.pop(request_id, None)
+        if task and not task.done():
+            task.cancel()
+        self._search_results_store.pop(request_id, None)
+        self._search_summary_call_id.pop(request_id, None)
+        self._search_summary_finalized.discard(request_id)
+
+    async def _accumulate_search_result(
+        self,
+        session_id: str,
+        request_id: str,
+        tool_name: str,
+        arguments: dict,
+        results_list: list[dict],
+    ) -> None:
+        """累积单次搜索工具结果，debounce 后推送汇总卡更新。"""
+        if not request_id or request_id in self._search_summary_finalized:
+            return
+        if tool_name not in _UI_HEAVY_SEARCH_TOOLS or not results_list:
+            return
+        filtered = [r for r in results_list if isinstance(r, dict) and r.get("type") != "hint"]
+        if not filtered:
+            return
+        query = (
+            arguments.get("query")
+            or arguments.get("path")
+            or arguments.get("relative_workspace_path")
+            or ""
+        )
+        self._search_results_store.setdefault(request_id, []).append(
+            {"tool": tool_name, "query": str(query), "results": filtered}
+        )
+        logger.info(
+            "[LSP4J-SEARCH-SUMMARY] accumulate request={} tool={} batch={} total_entries={}",
+            request_id[:8],
+            tool_name,
+            len(filtered),
+            len(self._search_results_store.get(request_id, [])),
+        )
+        await self._schedule_search_summary_push(session_id, request_id)
+
+    async def _schedule_search_summary_push(self, session_id: str, request_id: str) -> None:
+        """debounce 后推送汇总卡，避免连续搜索打爆 EDT。"""
+        if not request_id or request_id in self._search_summary_finalized:
+            return
+        if self._cancel_event and self._cancel_event.is_set():
+            return
+        existing = self._search_summary_push_task.get(request_id)
+        if existing and not existing.done():
+            existing.cancel()
+
+        async def _run() -> None:
+            try:
+                await asyncio.sleep(_SEARCH_SUMMARY_DEBOUNCE_SEC)
+                await self._push_search_summary_update(session_id, request_id)
+            except asyncio.CancelledError:
+                pass
+
+        task = asyncio.create_task(_run())
+        self._search_summary_push_task[request_id] = task
+        _lsp4j_background_tasks.add(task)
+        task.add_done_callback(_lsp4j_background_tasks.discard)
+
+    async def _push_search_summary_update(self, session_id: str, request_id: str) -> None:
+        """将当前合并结果推到 IDE：首次发 INIT + RUNNING，后续同 callId 更新 RUNNING。"""
+        if not request_id or request_id in self._search_summary_finalized:
+            return
+        if self._cancel_event and self._cancel_event.is_set():
+            return
+        all_items = self._merge_search_code_items(request_id)
+        if not all_items:
+            return
+
+        first_summary_push = False
+        call_id = self._search_summary_call_id.get(request_id)
+        if call_id is None:
+            first_summary_push = True
+            call_id = str(uuid.uuid4())
+            self._search_summary_call_id[request_id] = call_id
+            init_md = f"```toolCall::search_codebase::{call_id}::INIT\n```"
+            await self._send_chat_answer(session_id, init_md, request_id, overwrite=False)
+            await asyncio.sleep(0.05)
+
+        tool_summary = self._format_search_tool_counts(request_id)
+        # 首次 RUNNING 同步附带 INIT markdown，IDE 在 offerEvent 前即可注册 ToolPanel
+        summary_init_md = (
+            f"```toolCall::search_codebase::{call_id}::INIT\n```" if first_summary_push else ""
+        )
+        await self._send_tool_call_sync(
+            session_id,
+            request_id,
+            call_id,
+            "RUNNING",
+            tool_name="search_codebase",
+            parameters={"query": tool_summary},
+            results=all_items,
+            markdown=summary_init_md,
+        )
+        logger.info(
+            "[LSP4J-SEARCH-SUMMARY] push RUNNING request={} call={} files={} tools={}",
+            request_id[:8],
+            call_id[:8],
+            len(all_items),
+            tool_summary,
+        )
+
+    async def _finalize_search_summary(self, session_id: str, request_id: str) -> None:
+        """本轮收尾：取消 debounce，发 FINISHED sync，清理 store。"""
+        if not request_id:
+            return
+        self._search_summary_finalized.add(request_id)
+        task = self._search_summary_push_task.pop(request_id, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        tool_summary = self._format_search_tool_counts(request_id)
+        all_items = self._merge_search_code_items(request_id)
+        call_id = self._search_summary_call_id.get(request_id)
+        self._search_results_store.pop(request_id, None)
+        self._search_summary_call_id.pop(request_id, None)
+
+        if not all_items:
+            return
+
+        # 若 debounce 未触发就收尾，仍需创建汇总卡
+        if call_id is None:
+            call_id = str(uuid.uuid4())
+            init_md = f"```toolCall::search_codebase::{call_id}::INIT\n```"
+            await self._send_chat_answer(session_id, init_md, request_id, overwrite=False)
+            await asyncio.sleep(0.05)
+
+        if call_id:
+            await self._send_tool_call_sync(
+                session_id,
+                request_id,
+                call_id,
+                "FINISHED",
+                tool_name="search_codebase",
+                parameters={"query": tool_summary},
+                results=all_items,
+            )
+            logger.info(
+                "[LSP4J-SEARCH-SUMMARY] finalize FINISHED request={} call={} files={}",
+                request_id[:8],
+                call_id[:8],
+                len(all_items),
+            )
+
     async def _send_tool_call_sync(
         self,
         session_id: str | None,
@@ -3155,6 +3376,10 @@ class JSONRPCRouter:
             "errorCode": error_code,
             "errorMsg": error_msg,
         }
+        # NEW-046: 注入 trace_id 贯穿三端日志
+        trace_id = getattr(self, "_current_trace_id", None)
+        if trace_id:
+            payload["traceId"] = trace_id
         if markdown:
             payload["markdown"] = markdown
         await self._send_client_request("tool/call/sync", payload)
@@ -3422,6 +3647,14 @@ class JSONRPCRouter:
                     result_str, results_list = _execute_local_tool(
                         tool_name, arguments, project_path=self._project_path or ""
                     )
+                    if tool_name in _UI_HEAVY_SEARCH_TOOLS and results_list:
+                        await self._accumulate_search_result(
+                            self._session_id or "",
+                            request_id,
+                            tool_name,
+                            arguments,
+                            results_list,
+                        )
                 if not queue_matched:
                     # 队列未匹配 → on_tool_call 未被调用 → 没有 markdown_block → 没有 ToolPanel
                     # 发送 FINISHED sync 只会导致消费线程阻塞等待不存在的 panel
@@ -3774,6 +4007,15 @@ class JSONRPCRouter:
                             trace_key,
                         )
 
+                if tool_name in _UI_HEAVY_SEARCH_TOOLS and isinstance(results, list) and results:
+                    await self._accumulate_search_result(
+                        self._session_id or "",
+                        request_id,
+                        tool_name,
+                        arguments,
+                        results,
+                    )
+
                 if queue_matched:
                     logger.info(
                         "[LSP4J-TOOL] ✅ 准备发送 FINISHED sync: tool={} callId={} results_count={}",
@@ -4110,6 +4352,10 @@ class JSONRPCRouter:
         session_type = getattr(self, "_current_session_type", "")
         if session_type:
             extra["sessionType"] = session_type
+        # NEW-046: 注入 trace_id 贯穿三端日志
+        trace_id = getattr(self, "_current_trace_id", None)
+        if trace_id:
+            extra["traceId"] = trace_id
 
         # chat/answer 发送追踪（INFO：排障时须在 backend.log 可见）
         logger.info(
@@ -4172,6 +4418,10 @@ class JSONRPCRouter:
         session_type = getattr(self, "_current_session_type", "")
         if session_type:
             merged_extra["sessionType"] = session_type
+        # NEW-046: 注入 trace_id 贯穿三端日志
+        trace_id = getattr(self, "_current_trace_id", None)
+        if trace_id:
+            merged_extra["traceId"] = trace_id
         # 合并传入的 extra 参数（传入的会覆盖默认值）
         if extra:
             merged_extra.update(extra)
@@ -4496,6 +4746,13 @@ class JSONRPCRouter:
         # 清理图片缓存
         self._image_cache.clear()
         self._tool_call_history_by_session.clear()
+        self._search_results_store.clear()
+        self._search_summary_call_id.clear()
+        for _task in list(self._search_summary_push_task.values()):
+            if not _task.done():
+                _task.cancel()
+        self._search_summary_push_task.clear()
+        self._search_summary_finalized.clear()
 
         # 清理已取消请求记录
         self._cancelled_requests.clear()
@@ -4993,6 +5250,13 @@ class JSONRPCRouter:
 
         self._session_id = None
         self._tool_call_history_by_session.clear()
+        self._search_results_store.clear()
+        self._search_summary_call_id.clear()
+        for _task in list(self._search_summary_push_task.values()):
+            if not _task.done():
+                _task.cancel()
+        self._search_summary_push_task.clear()
+        self._search_summary_finalized.clear()
         await self._ws_file_service.clear()
         await self._send_response(msg_id, None)
 
