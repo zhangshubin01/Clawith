@@ -258,6 +258,18 @@ async def _get_agent_config(agent_id) -> tuple[int, str | None]:
     return 50, None
 
 
+def format_tool_rounds_limit_reply(max_rounds: int) -> str:
+    """工具循环触顶时返回给用户的双语说明（不依赖 IDE 是否传 locale）。"""
+    return (
+        f"已达到本智能体的工具调用上限（{max_rounds} 轮）。"
+        "建议将任务拆成更小的步骤，或开启新对话后继续；"
+        "也可在 Clawith 智能体设置中调整「最大工具调用轮次」。\n\n"
+        f"The tool call limit for this agent has been reached ({max_rounds} rounds). "
+        "Try splitting the task into smaller steps or starting a new chat; "
+        'you can also raise "Max tool call rounds" in the agent settings.'
+    )
+
+
 async def _get_user_name(user_id) -> str | None:
     """Get user's display name for personalized context."""
     if not user_id:
@@ -536,7 +548,6 @@ async def call_llm(
     on_tool_delta=None,
     on_thinking=None,
     supports_vision=False,
-    max_tool_rounds_override: int | None = None,
     cancel_event: asyncio.Event | None = None,
     skip_tools: bool = False,
     parallel_tools_extra_readonly: set[str] | None = None,
@@ -554,8 +565,7 @@ async def call_llm(
     _max_tool_rounds, _token_limit_msg = await _get_agent_config(agent_id)
     if _token_limit_msg:
         return _token_limit_msg
-    if max_tool_rounds_override and max_tool_rounds_override < _max_tool_rounds:
-        _max_tool_rounds = max_tool_rounds_override
+    logger.info("[LLM] max_tool_rounds={} agent_id={}", _max_tool_rounds, agent_id)
 
     # Get user's name for personalized context
     _user_name = await _get_user_name(user_id)
@@ -892,7 +902,8 @@ async def call_llm(
     if agent_id and _accumulated_usage.total_tokens > 0:
         await record_token_usage(agent_id, _accumulated_usage)
     await client.close()
-    return "[Error] Too many tool call rounds"
+    logger.warning("[LLM] tool rounds exhausted: max={} agent_id={}", _max_tool_rounds, agent_id)
+    return format_tool_rounds_limit_reply(_max_tool_rounds)
 
 
 async def call_llm_with_failover(
@@ -914,13 +925,11 @@ async def call_llm_with_failover(
     skip_tools: bool = False,
     parallel_tools_extra_readonly: set[str] | None = None,
     tool_warning_mode: str = "default",
-    max_tool_rounds_override: int | None = None,
 ) -> str:
     """Call LLM with automatic failover support.
 
     Args:
         cancel_event: 可选的取消事件，透传至 call_llm。
-        max_tool_rounds_override: 覆盖最大工具调用轮数（IDE 场景限制为 20 轮）。
     """
     guard = FailoverGuard()
 
@@ -963,7 +972,6 @@ async def call_llm_with_failover(
         skip_tools=skip_tools,
         parallel_tools_extra_readonly=parallel_tools_extra_readonly,
         tool_warning_mode=tool_warning_mode,
-        max_tool_rounds_override=max_tool_rounds_override,
     )
 
     # Check if we need to failover
@@ -1038,7 +1046,6 @@ async def call_llm_with_failover(
         skip_tools=skip_tools,
         parallel_tools_extra_readonly=parallel_tools_extra_readonly,
         tool_warning_mode=tool_warning_mode,
-        max_tool_rounds_override=max_tool_rounds_override,
     )
 
     # Combine error messages if fallback also failed
@@ -1295,7 +1302,8 @@ async def call_agent_llm_with_tools(
             if agent_id and _accumulated_usage.total_tokens > 0:
                 await record_token_usage(agent_id, _accumulated_usage)
             await client.close()
-            return "[Error] Too many tool call rounds", False, tool_executed
+            logger.warning("[LLM] tool rounds exhausted: max={} agent_id={}", max_rounds, agent_id)
+            return format_tool_rounds_limit_reply(max_rounds), False, tool_executed
 
         except Exception as e:
             if agent_id and _accumulated_usage.total_tokens > 0:

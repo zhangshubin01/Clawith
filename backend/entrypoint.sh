@@ -11,6 +11,14 @@ if [ "$(id -u)" = '0' ]; then
     echo "[entrypoint] Detected root user, fixing permissions..."
     chown -R clawith:clawith ${AGENT_DATA_DIR}
 
+    # Fix Docker socket access for sandbox (agent_manager)
+    # gosu does not propagate supplementary groups, so we make docker.sock world-readable
+    # inside the container. The container is already privileged, so this adds no extra risk.
+    if [ -S /var/run/docker.sock ]; then
+        chmod a+rw /var/run/docker.sock
+        echo "[entrypoint] Docker socket made accessible (chmod a+rw)"
+    fi
+
     echo "[entrypoint] Dropping privileges to 'clawith' and re-executing..."
     exec gosu clawith /bin/bash "$0" "$@"
 fi

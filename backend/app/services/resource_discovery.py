@@ -1,3 +1,4 @@
+import asyncio
 """Resource discovery — search Smithery & ModelScope registries and import MCP servers."""
 
 import uuid

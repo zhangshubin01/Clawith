@@ -157,7 +157,7 @@ async def lsp4j_websocket_endpoint(
         msg = e.detail if isinstance(e.detail, str) else "Unauthorized"
         # token_expired 使用 debug 级别，避免客户端重连时日志风暴
         if msg == "token_expired":
-            logger.debug("[LSP4J-LIFE] WS auth failed: token_expired")
+            logger.warning("[LSP4J-LIFE] WS auth failed: token_expired (client should refresh JWT)")
         else:
             logger.warning("[LSP4J-LIFE] WS auth failed: {}", msg)
         code = 4003 if msg == "token_expired" else 4001

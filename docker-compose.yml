@@ -38,6 +38,7 @@ services:
     restart: unless-stopped
     command: ["/bin/bash", "/app/entrypoint.sh"]
     environment:
+      DEBUG: "true"
       DATABASE_URL: postgresql+asyncpg://clawith:clawith@postgres:5432/clawith
       REDIS_URL: redis://redis:6379/0
       AGENT_DATA_DIR: /data/agents
@@ -58,15 +59,13 @@ services:
     volumes:
       - ./backend:/app
       - ./backend/agent_data:/data/agents
-      # ⚠️ docker.sock 挂载仅用于沙箱代码执行场景；非沙箱部署请移除下行
-      # - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
-    # ⚠️ 以下权限仅用于沙箱代码执行场景（需要容器内启动 Docker 容器）
-    # privileged: true
-    # cap_add:
-    #   - SYS_ADMIN
-    # security_opt:
-    #   - seccomp=unconfined
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
     networks:
       - default
     depends_on:

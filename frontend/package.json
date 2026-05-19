@@ -15,6 +15,7 @@
     "@tsparticles/engine": "^3.9.1",
     "@tsparticles/react": "^3.0.0",
     "@tsparticles/slim": "^3.9.1",
+    "dompurify": "^3.4.5",
     "i18next": "^24.0.0",
     "i18next-browser-languagedetector": "^8.2.1",
     "qrcode": "^1.5.4",
@@ -26,6 +27,7 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@types/dompurify": "^3.0.5",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.0.0",

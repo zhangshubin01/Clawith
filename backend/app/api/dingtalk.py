@@ -1,3 +1,4 @@
+import asyncio
 """DingTalk Channel API routes.
 
 Provides Config CRUD and message handling for DingTalk bots using Stream mode.

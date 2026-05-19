@@ -2392,7 +2392,6 @@ class JSONRPCRouter:
                         "get_terminal_output",
                     },
                     tool_warning_mode="lsp4j",
-                    max_tool_rounds_override=20,  # #119: IDE 场景 5-8 轮足够
                 )
             except asyncio.CancelledError:
                 cancelled = True

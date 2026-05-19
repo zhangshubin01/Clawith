@@ -20,6 +20,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.database import get_db
+from app.models.user import User
 
 settings = get_settings()
 
@@ -210,7 +211,6 @@ async def get_authenticated_user(
     db: AsyncSession = Depends(get_db),
 ):
     """Dependency to get the current authenticated user (even if not active yet)."""
-    from app.models.user import User
 
     if not credentials:
         raise HTTPException(
@@ -238,7 +238,6 @@ async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
     让 IDE 插件收到 token_expired 后可以尝试调用 /api/auth/refresh 换新 token。
     """
     from app.database import async_session
-    from app.models.user import User
 
     if not token or not str(token).strip():
         raise HTTPException(

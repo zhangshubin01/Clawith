@@ -9,7 +9,7 @@ from app.models.user import User
 from app.models.agent import Agent
 from app.models.llm import LLMModel
 from app.core.security import verify_api_key_or_token
-from app.core.permissions import check_agent_access
+from app.core.permissions import build_visible_agents_query
 
 router = APIRouter(prefix="/api/ide-plugin", tags=["ide-plugin"])
 
@@ -31,18 +31,11 @@ async def list_agents_for_ide(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # 获取所有智能体并过滤有权限的
-    agent_result = await db.execute(select(Agent))
+    # 与 Web UI /agents 列表使用同一可见性规则，避免全表扫描后逐条 403 过滤
+    agent_result = await db.execute(
+        build_visible_agents_query(user).order_by(Agent.created_at.desc())
+    )
     agents = agent_result.scalars().all()
-
-    accessible_agents = []
-    for agent in agents:
-        try:
-            # 复用 check_agent_access 进行完整权限校验
-            await check_agent_access(db, user, agent.id)
-            accessible_agents.append(agent)
-        except HTTPException:
-            continue
 
     return [
         {
@@ -52,7 +45,7 @@ async def list_agents_for_ide(
             "role_description": agent.role_description,
             "primary_model_id": str(agent.primary_model_id) if agent.primary_model_id else None
         }
-        for agent in accessible_agents
+        for agent in agents
     ]
 
 

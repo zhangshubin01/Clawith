@@ -41,7 +41,6 @@ async def call_llm(
     on_tool_call=None,
     on_thinking=None,
     supports_vision=False,
-    max_tool_rounds_override: int | None = None,
 ) -> str:
 ```
 
@@ -189,7 +188,6 @@ async def call_llm(
     on_tool_call=None,
     on_thinking=None,
     supports_vision=False,
-    max_tool_rounds_override: int | None = None,
     cancel_event: asyncio.Event | None = None,  # ← 新增
 ) -> str:
 ```
@@ -393,7 +391,6 @@ if not sess:
 async def call_llm(
     # ... 现有参数 ...
     supports_vision=False,
-    max_tool_rounds_override: int | None = None,
     cancel_event: asyncio.Event | None = None,  # ← 新增
 ) -> str:
 ```
