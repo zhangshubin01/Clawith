@@ -1,13 +1,12 @@
 """LSP4J 工具调用钩子 — 执行路径 + 注册路径。
 
-扩展 ACP 已安装的 _custom_execute_tool 和 _custom_get_tools，
-增加 LSP4J ContextVar 判断，使两条通道（ACP + LSP4J）共存。
+直接包裹 agent_tools.execute_tool 和 get_agent_tools_for_llm，
+通过 ContextVar(current_lsp4j_ws) 在 IDE 会话中将 IDE 原生工具路由到插件执行。
 
 关键设计：
-1. LSP4J 工具名使用**插件原生名称**（read_file, run_in_terminal 等），
-   不使用 ACP 的 ide_ 前缀名称（ide_read_file 等）。
-   原因：插件 ToolInvokeProcessor 只识别 8 个原生名称，
-   发送 ide_read_file 会触发 default 分支返回 "tool not support yet"。
+1. LSP4J 工具名使用**插件原生名称**（read_file, run_in_terminal 等）。
+   原因：插件 ToolInvokeProcessor 只识别 17 个原生 switch 分支，
+   发送其他名称会触发 default 分支返回 "tool not support yet"。
 
 2. 必须同时补丁执行路径和注册路径：
    - 执行路径：_lsp4j_aware_execute_tool — IDE 工具调用路由到 LSP4J
@@ -15,7 +14,7 @@
    缺一不可：若只补丁执行路径不补丁注册路径，LLM 看不到 IDE 工具，永远不会调用。
 
 3. 安装时机：install_lsp4j_tool_hooks() 在 __init__.py 的 register() 中调用，
-   晚于 ACP 的模块级导入安装（router.py:854），保证获取到 ACP 的引用。
+   此时捕获的 agent_tools.execute_tool 即为基础实现。
 """
 
 from __future__ import annotations
@@ -471,12 +470,16 @@ _LSP4J_IDE_TOOLS = [
 # ──────────────────────────────────────────────
 
 # ★ 涉及文件路径读取/写入的工具（需判断路径是否指向 IDE 项目）
+# Phase 5.2 P1 修复：list_dir / search_file 加入路径感知，避免相对路径误指向 IDE
+# 同名目录（例如 list_dir("skills/") 应返回 Agent 工作空间的 skills/，而非 IDE 项目同名目录）
 _LSP4J_FILE_PATH_TOOLS = frozenset({
     "read_file",
     "replace_text_by_path",
     "create_file_with_text",
     "delete_file_by_path",
     "save_file",
+    "list_dir",
+    "search_file",
 })
 
 # 搜索类工具始终在本地后端通过 ripgrep 执行，比走 IDE PSI 索引快 10-100 倍
@@ -502,11 +505,17 @@ def _extract_file_path(tool_name: str, args: dict) -> str | None:
     """从工具参数中提取文件路径。
 
     LLM 可能使用不同的参数名调用同一工具：
-      - filePath  (camelCase) — 插件原生协议
-      - file_path (snake_case) — ACP 基础工具
+      - filePath              (camelCase) — 插件原生协议
+      - file_path             (snake_case) — 后端基础工具
       - path                  — LLM 常用，最终兜底
+      - relative_workspace_path — list_dir 专用（Phase 5.2 P1 修复）
     """
-    return args.get("filePath") or args.get("file_path") or args.get("path")
+    return (
+        args.get("filePath")
+        or args.get("file_path")
+        or args.get("path")
+        or args.get("relative_workspace_path")
+    )
 
 
 def _is_agent_internal_path(file_path: str) -> bool:
@@ -566,9 +575,8 @@ _installed = False
 def install_lsp4j_tool_hooks() -> None:
     """安装 LSP4J 工具钩子（idempotent）。
 
-    在 __init__.py 的 register() 中调用，晚于 ACP 的模块级安装。
-    获取 ACP 已安装的 _custom_execute_tool / _custom_get_tools 引用，
-    包裹增强后替换为 LSP4J 感知版本。
+    在 __init__.py 的 register() 中调用，直接捕获 agent_tools 的基础实现，
+    包裹后增加 LSP4J 路由感知。
     """
     global _installed
     if _installed:
@@ -576,11 +584,10 @@ def install_lsp4j_tool_hooks() -> None:
         logger.debug("[LSP4J-TOOL] 工具钩子已安装，跳过")
         return
 
-    # 获取当前 ACP 已安装的钩子引用
-    # ACP 在模块导入时调用 install_acp_tool_hooks()（router.py:854），
-    # 此时 agent_tools.execute_tool 和 get_agent_tools_for_llm 已被替换为 ACP 版本
-    acp_execute_tool = agent_tools.execute_tool
-    acp_get_tools = agent_tools.get_agent_tools_for_llm
+    # 捕获基础工具入口（未被任何插件包裹的原始实现）
+    # ACP 通道已删除后，此处直接拿到 agent_tools.execute_tool / get_agent_tools_for_llm 原型
+    _base_execute_tool = agent_tools.execute_tool
+    _base_get_tools = agent_tools.get_agent_tools_for_llm
 
     # 定义增强版钩子
     async def _lsp4j_aware_execute_tool(
@@ -594,7 +601,8 @@ def install_lsp4j_tool_hooks() -> None:
 
         优先级：
         1. 若 current_lsp4j_ws 活跃 且 tool_name 在 LSP4J_IDE_TOOL_NAMES 中 → 走 LSP4J 路径
-        2. 否则走 ACP 原路径（ACP 的降级处理兜底：双 ContextVar 均 None 时返回中文提示）
+        2. 搜索类工具（grep_code/search_codebase/search_symbol） → 本地 ripgrep
+        3. 其余 → 走基础工具入口（agent_tools.execute_tool 原实现）
         """
         lsp4j_ws = current_lsp4j_ws.get()
         is_lsp4j_tool = tool_name in LSP4J_IDE_TOOL_NAMES
@@ -616,6 +624,18 @@ def install_lsp4j_tool_hooks() -> None:
         # LLM 用相对路径读 agent 工作空间文件却被误路由到 IDE 插件的问题
         _should_route = _should_route_to_ide(tool_name, args)
         if lsp4j_ws is not None and is_lsp4j_tool and _should_route:
+            # ★ P2-1 修复：LSP4J 路径前置 autonomy 闸门。
+            # 历史漏洞：delete_file_by_path / run_in_terminal / apply_patch 等高敏工具
+            # 走 LSP4J 直达 IDE，完全绕过了 agent_tools.execute_tool 内部的检查，
+            # 等同于无门槛运行。此处与本地路径共享同一道闸门。
+            _autonomy_block = await agent_tools.check_tool_autonomy(tool_name, args, agent_id, user_id)
+            if _autonomy_block is not None:
+                logger.warning(
+                    "[LSP4J-TOOL] autonomy 拦截: tool={} agent={} reason={}",
+                    tool_name, str(agent_id)[:8], _autonomy_block[:80],
+                )
+                return _autonomy_block
+
             # ★ 参数校验：read_file 的 file_path 不能为空
             if tool_name == "read_file":
                 file_path = args.get("file_path") or args.get("filePath")
@@ -658,12 +678,13 @@ def install_lsp4j_tool_hooks() -> None:
 
         # 本地搜索工具：后端 ripgrep 直行，比 IDE PSI 索引快 10-100 倍
         if tool_name in _LOCAL_SEARCH_TOOLS:
-            from .jsonrpc_router import _execute_local_tool, get_active_router
+            # ★ Phase 3：通过 agent_tools 门面访问搜索能力，避免直接耦合到 jsonrpc_router
+            from .jsonrpc_router import get_active_router
             # 尝试从活跃路由获取 IDE 项目路径，否则回退到 CWD
             _agent_key = (str(user_id), str(agent_id))
             _active = await get_active_router(_agent_key)
             _proj_path = _active._project_path if _active and hasattr(_active, "_project_path") else ""
-            result_str, results_list = _execute_local_tool(tool_name, args, _proj_path or "")
+            result_str, results_list = agent_tools.search_local_tool(tool_name, args, _proj_path or "")
             if _active and results_list:
                 _req_id = getattr(_active, "_current_request_id", None) or ""
                 _sess_id = getattr(_active, "_session_id", None) or session_id or ""
@@ -676,27 +697,27 @@ def install_lsp4j_tool_hooks() -> None:
             )
             return result_str
 
-        # ACP 原路径（或 LSP4J 工具回退到本地执行）
+        # 走基础工具入口（agent_tools.execute_tool 原实现）
         # ★ 本地回退参数名映射：IDE 工具参数名 → 基础工具参数名
         # 例如 read_file 的 file_path → path，list_dir 的 relative_workspace_path → path
         if is_lsp4j_tool and tool_name in _LOCAL_FALLBACK_PARAM_MAP:
             fallback_map = _LOCAL_FALLBACK_PARAM_MAP[tool_name]
             args = {fallback_map.get(k, k): v for k, v in args.items()}
             logger.debug("[LSP4J-TOOL] 本地回退参数映射: tool={} map={}", tool_name, fallback_map)
-        logger.debug("[LSP4J-TOOL] 走 ACP 路径: tool={}", tool_name)
-        return await acp_execute_tool(tool_name, args, agent_id, user_id, session_id)
+        logger.debug("[LSP4J-TOOL] 走基础工具路径: tool={}", tool_name)
+        return await _base_execute_tool(tool_name, args, agent_id, user_id, session_id)
 
     async def _lsp4j_aware_get_tools(agent_id: uuid.UUID) -> list[dict]:
         """LSP4J 感知的工具注册路由。
 
         优先级：
         1. 若 current_lsp4j_ws 活跃 → 返回基础工具 + _LSP4J_IDE_TOOLS（插件原生名称）
-        2. 否则走 ACP 原路径（ACP 的 _custom_get_tools 会在 current_acp_ws 活跃时追加 IDE_TOOLS）
+        2. 否则走基础工具入口（agent_tools.get_agent_tools_for_llm 原实现）
         """
         lsp4j_ws = current_lsp4j_ws.get()
         if lsp4j_ws is not None:
             # LSP4J 活跃：使用插件原生名称的工具定义
-            tools = await acp_get_tools(agent_id)
+            tools = await _base_get_tools(agent_id)
             # ★ 过滤掉基础工具中与 IDE 工具重名/重叠的（只保留 IDE 版本）
             tools = [t for t in tools
                      if t.get("function", {}).get("name", "") not in _LSP4J_OVERLAP_BASE_TOOL_NAMES]
@@ -704,8 +725,8 @@ def install_lsp4j_tool_hooks() -> None:
             logger.info("[LSP4J-TOOL] 注册工具: base_count={} ide_tools={}", len(tools), ide_tool_names)
             return tools + _LSP4J_IDE_TOOLS
 
-        # ACP 原路径
-        return await acp_get_tools(agent_id)
+        # Web 会话：走基础工具入口
+        return await _base_get_tools(agent_id)
 
     # 替换 agent_tools 中的引用
     agent_tools.execute_tool = _lsp4j_aware_execute_tool
@@ -722,4 +743,4 @@ def install_lsp4j_tool_hooks() -> None:
         logger.warning("[LSP4J-TOOL] failed to patch caller module: {}", _patch_e)
 
     _installed = True
-    logger.info("[LSP4J-TOOL] tool hooks installed (wrapping ACP hooks)")
+    logger.info("[LSP4J-TOOL] tool hooks installed (wrapping agent_tools base entry)")

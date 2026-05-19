@@ -64,9 +64,9 @@ class TestIpRateLimit:
         ip = f"192.168.2.{int(time.time() * 1000) % 255}"
         for _ in range(5):
             await check_ip_rate_limit(ip, "ws_connect")
-        # ws_connect_acp 计数独立
+        # ws_connect_lsp4j 计数独立
         for _ in range(5):
-            await check_ip_rate_limit(ip, "ws_connect_acp")
+            await check_ip_rate_limit(ip, "ws_connect_lsp4j")
 
 
 class TestSessionRateLimit:
@@ -132,7 +132,6 @@ class TestDefaultLimits:
         """WebSocket 连接限流配置存在且合理。"""
         assert "ws_connect" in _DEFAULT_IP_LIMITS
         assert "ws_connect_lsp4j" in _DEFAULT_IP_LIMITS
-        assert "ws_connect_acp" in _DEFAULT_IP_LIMITS
         max_calls, window = _DEFAULT_IP_LIMITS["ws_connect"]
         assert max_calls == 10
         assert window == 60

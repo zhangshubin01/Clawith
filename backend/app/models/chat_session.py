@@ -70,7 +70,7 @@ class ChatSession(Base):
 
     # IDE 插件上下文（迁移 29f3f8de3ca0 + 25811072c8fd 添加，SQLAlchemy 模型需显式映射）
     client_type: Mapped[str] = mapped_column(String(20), nullable=False, default="web", server_default="web")
-    # 客户端类型: 'web' | 'ide_plugin' | 'ide_lsp4j' — 区分 Web UI、ACP、LSP4J 来源
+    # 客户端类型: 'web' | 'ide_lsp4j'（ide_plugin 为历史值，兼容已下线 ACP 通道的旧 session）
     project_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # IDE 项目根路径，用于文件索引构建和相对路径解析
     current_file: Mapped[str | None] = mapped_column(String(500), nullable=True)

@@ -18,6 +18,7 @@ import os
 import queue
 import uuid
 import unicodedata
+import weakref
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2424,7 +2425,66 @@ _TOOL_AUTONOMY_MAP = {
     "web_search": "web_search",
     "execute_code": "execute_code",
     "execute_code_e2b": "execute_code",
+    # ★ P2-1 修复：IDE 高敏工具（LSP4J 路径下也必须走 autonomy 检查）
+    # 历史问题：LSP4J 工具调用绕过 execute_tool 内部检查直达 IDE，相当于无门槛运行。
+    # 这些工具会修改用户磁盘或执行任意命令，必须与本地等效工具共享同一道审批闸门。
+    "delete_file_by_path": "delete_files",          # 删除 IDE 项目文件
+    "run_in_terminal": "execute_code",               # 终端命令执行
+    "create_file_with_text": "write_workspace_files",
+    "replace_text_by_path": "write_workspace_files",
+    "search_replace": "write_workspace_files",
+    "apply_patch": "write_workspace_files",
+    "save_file": "write_workspace_files",
 }
+
+
+async def check_tool_autonomy(
+    tool_name: str,
+    arguments: dict,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> str | None:
+    """前置 autonomy 检查 —— 高敏工具在任何执行路径之前调用。
+
+    Phase P2-1 修复：抽离原 execute_tool 内部的 autonomy 块，使 LSP4J 路由也能复用。
+
+    Returns:
+        - None: 检查通过，可继续执行
+        - str: 已拒绝/待审批，调用方应直接返回该字符串作为工具结果
+    """
+    action_type = _TOOL_AUTONOMY_MAP.get(tool_name)
+    if not action_type:
+        return None
+
+    try:
+        from app.services.autonomy_service import autonomy_service
+        from app.models.agent import Agent as AgentModel
+        async with async_session() as _adb:
+            _ar = await _adb.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            _agent = _ar.scalar_one_or_none()
+            if not _agent:
+                return None
+            result_check = await autonomy_service.check_and_enforce(
+                _adb,
+                _agent,
+                action_type,
+                {"tool": tool_name, "args": str(arguments)[:200], "requested_by": str(user_id)},
+            )
+            await _adb.commit()
+            if result_check.get("allowed"):
+                return None
+            level = result_check.get("level", "L3")
+            logger.info("[Autonomy] Tool {} denied, level: {}", tool_name, level)
+            if level == "L3":
+                return (
+                    "⏳ This action requires approval. An approval request has been sent. "
+                    "Please wait for approval before retrying. "
+                    f"(Approval ID: {result_check.get('approval_id', 'N/A')})"
+                )
+            return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
+    except Exception as e:
+        logger.exception("[Autonomy] Check failed: {}", e)
+        return f"⚠️ Autonomy check failed ({e}). Operation blocked for safety. Please retry or contact admin."
 
 
 def _is_enterprise_info_path(path: str | None) -> bool:
@@ -2581,29 +2641,10 @@ async def execute_tool(
 
     ws = await ensure_workspace(agent_id, tenant_id=_agent_tenant_id)
 
-    # ── Autonomy boundary check ──
-    action_type = _TOOL_AUTONOMY_MAP.get(tool_name)
-    if action_type:
-        try:
-            from app.services.autonomy_service import autonomy_service
-            from app.models.agent import Agent as AgentModel
-            async with async_session() as _adb:
-                _ar = await _adb.execute(select(AgentModel).where(AgentModel.id == agent_id))
-                _agent = _ar.scalar_one_or_none()
-                if _agent:
-                    result_check = await autonomy_service.check_and_enforce(
-                        _adb, _agent, action_type, {"tool": tool_name, "args": str(arguments)[:200], "requested_by": str(user_id)}
-                    )
-                    await _adb.commit()
-                    if not result_check.get("allowed"):
-                        level = result_check.get("level", "L3")
-                        logger.info(f"[Autonomy] Tool {tool_name} denied, level: {level}")
-                        if level == "L3":
-                            return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
-                        return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
-        except Exception as e:
-            logger.exception(f"[Autonomy] Check failed: {e}")
-            return f"⚠️ Autonomy check failed ({e}). Operation blocked for safety. Please retry or contact admin."
+    # ── Autonomy boundary check ──（提取到 check_tool_autonomy，与 LSP4J 路径复用同一闸门）
+    _autonomy_blocked = await check_tool_autonomy(tool_name, arguments, agent_id, user_id)
+    if _autonomy_blocked is not None:
+        return _autonomy_blocked
 
     # Pre-inject session_id into arguments for AgentBay tools so each
     # _agentbay_* handler can pass it to get_agentbay_client_for_agent()
@@ -2671,6 +2712,12 @@ async def execute_tool(
                 return "❌ Missing required argument 'path' for read_document"
             max_chars = min(int(arguments.get("max_chars", 8000)), 20000)
             result = await _read_document(ws, path, max_chars=max_chars, tenant_id=_agent_tenant_id)
+        elif tool_name == "add_tasks":
+            # Phase 5.3：任务规划落盘到 Agent 工作空间 tasks.json（追加语义）
+            result = await _handle_add_tasks(agent_id, arguments)
+        elif tool_name == "todo_write":
+            # Phase 5.3：任务列表覆写到 Agent 工作空间 tasks.json（替换语义）
+            result = await _handle_todo_write(agent_id, arguments)
         elif tool_name == "write_file":
             path = arguments.get("path")
             content = arguments.get("content")
@@ -13735,3 +13782,205 @@ async def _upsert_member_daily_report(agent_id: uuid.UUID | None, arguments: dic
     except Exception as e:
         logger.exception("[OKR] upsert_member_daily_report failed")
         return f"Failed to upsert member daily report: {str(e)[:200]}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 搜索能力统一门面（Phase 3 — 搜索工具归位）
+#
+# 设计目标：agent_tools.py 作为搜索能力的对外统一入口，外部代码（如 tool_hooks）
+#          通过此处的门面访问，而非直接耦合到 clawith_lsp4j.jsonrpc_router。
+#
+# 实现策略：懒导入（运行期再 import）— 避免与 jsonrpc_router 形成模块级
+#          循环依赖（jsonrpc_router 间接被 tool_hooks 加载，tool_hooks 已 import
+#          agent_tools）。
+#
+# 后续工作：物理迁移 _rg_search / _execute_local_tool 等 ~700 行到本模块，
+#          目前先建立门面契约，避免一次性大规模搬迁带来的回归风险。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def search_local_tool(tool_name: str, arguments: dict, project_path: str = "") -> tuple[str, list[dict]]:
+    """本地搜索工具门面 — 转发到 LSP4J 模块内的实现。
+
+    Args:
+        tool_name: 工具名（list_dir / search_file / search_codebase / grep_code / search_symbol）
+        arguments: 工具参数
+        project_path: IDE 项目根路径；为空时退回当前 CWD
+
+    Returns:
+        (result_json_str, results_list) — 与底层实现签名一致
+    """
+    from app.plugins.clawith_lsp4j.jsonrpc_router import _execute_local_tool
+    return _execute_local_tool(tool_name, arguments, project_path)
+
+
+def rg_search(project_root: str, pattern: str, max_results: int = 50) -> list[dict] | None:
+    """ripgrep 搜索门面 — 转发到 LSP4J 模块内的实现。
+
+    Returns:
+        [{"fileName", "path", "startLine", "endLine", "matchLine"}] 或 None（rg 不可用）
+    """
+    from app.plugins.clawith_lsp4j.jsonrpc_router import _rg_search
+    return _rg_search(project_root, pattern, max_results)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 任务工具后端实现（Phase 5.3 — add_tasks / todo_write）
+#
+# 目标：将任务规划落盘到 Agent 工作空间的 tasks.json，使 LLM 制定的任务计划
+#       在跨会话/重启场景下持久化，且与 IDE 端 TaskItem schema 兼容。
+#
+# 数据格式：[{"id": str, "content": str, "status": str, "summary": str}, ...]
+#         字段名与 IDE 端 TodoTaskPayloadNormalizer / TaskItem 保持一致：
+#         - id: 任务唯一标识（LLM 提供或自动生成）
+#         - content: 任务正文（兼容 LLM 常用的 summary/description）
+#         - status: pending / in_progress / completed / cancelled
+#
+# 注意：本实现不删除已有任务（与 add_tasks 语义一致），todo_write 视为整列表覆写。
+#
+# 并发安全（P1 修复）：
+#   读-合并-写 序列在多协程并发下存在 lost-update 风险（典型场景：LLM 同一会话
+#   并行调用多次 add_tasks）。用 per-agent asyncio.Lock 串行化同一 Agent 的
+#   tasks.json 读写。锁按 agent_id 分片，跨 agent 不互相阻塞。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Per-agent 任务文件锁（避免读-合并-写 lost-update）
+# WeakValueDictionary 在 agent 长时间无活动后允许 GC 回收锁对象，避免内存泄漏
+_TASKS_FILE_LOCKS: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
+_TASKS_LOCKS_REGISTRY_LOCK = asyncio.Lock()
+
+
+async def _get_tasks_file_lock(agent_id: uuid.UUID) -> asyncio.Lock:
+    """获取指定 Agent 的 tasks.json 文件锁（per-agent 串行）。"""
+    key = str(agent_id)
+    # 注册阶段加锁，避免并发首访问时创建多把锁
+    async with _TASKS_LOCKS_REGISTRY_LOCK:
+        lock = _TASKS_FILE_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _TASKS_FILE_LOCKS[key] = lock
+        return lock
+
+
+def _normalize_task_entry(entry: dict, fallback_idx: int) -> dict:
+    """规范化单条任务条目，兼容多种 LLM 输出格式。"""
+    if not isinstance(entry, dict):
+        return {
+            "id": str(fallback_idx + 1),
+            "content": str(entry),
+            "status": "pending",
+        }
+    # ID 兜底：LLM 可能给出 id / taskId / 数字，缺失时用索引
+    raw_id = entry.get("id") or entry.get("taskId") or entry.get("task_id")
+    task_id = str(raw_id) if raw_id is not None else str(fallback_idx + 1)
+    # 内容兜底：content > summary > description > title
+    content = (
+        entry.get("content")
+        or entry.get("summary")
+        or entry.get("description")
+        or entry.get("title")
+        or ""
+    )
+    # 状态兜底：默认 pending；允许字段缺失或大小写不规范
+    status = str(entry.get("status") or "pending").lower()
+    if status not in ("pending", "in_progress", "completed", "cancelled"):
+        status = "pending"
+    normalized = {
+        "id": task_id,
+        "content": str(content),
+        "status": status,
+    }
+    # 保留可选字段（priority / summary）便于 UI 富展示
+    if entry.get("priority"):
+        normalized["priority"] = str(entry["priority"])
+    if entry.get("summary") and entry.get("summary") != content:
+        normalized["summary"] = str(entry["summary"])
+    return normalized
+
+
+def _atomic_write_tasks(tasks_path: Path, data: list[dict]) -> None:
+    """原子写入 tasks.json — 先写临时文件再 os.replace，避免中断导致文件损坏。"""
+    tmp_path = tasks_path.with_suffix(tasks_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, tasks_path)
+
+
+async def _handle_add_tasks(agent_id: uuid.UUID, arguments: dict) -> str:
+    """add_tasks 后端实现：追加任务到 Agent 工作空间 tasks.json。
+
+    Args:
+        agent_id: Agent UUID
+        arguments: {"tasks": [...]} — 任务列表（dict 或 JSON 字符串）
+
+    并发安全：通过 per-agent asyncio.Lock 串行化同一 Agent 的读-合并-写序列，
+    避免多协程并行调用时的 lost-update 数据丢失。
+    """
+    raw_tasks = arguments.get("tasks", [])
+    if isinstance(raw_tasks, str):
+        try:
+            raw_tasks = json.loads(raw_tasks)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("[add_tasks] tasks 参数解析失败，回退空列表: type={}", type(raw_tasks).__name__)
+            raw_tasks = []
+    if not isinstance(raw_tasks, list):
+        return "❌ add_tasks: tasks 参数必须为 JSON 数组"
+
+    _tenant_id = await _get_agent_tenant_id(agent_id)
+    ws = await ensure_workspace(agent_id, tenant_id=_tenant_id)
+    tasks_path = ws / "tasks.json"
+
+    # ★ 并发锁：保护"读已有 + 合并 + 写回"原子性
+    lock = await _get_tasks_file_lock(agent_id)
+    async with lock:
+        # 读已有任务，做并集追加（按 id 去重，新条目覆盖旧条目）
+        existing: list[dict] = []
+        if tasks_path.exists():
+            try:
+                existing = json.loads(tasks_path.read_text(encoding="utf-8"))
+                if not isinstance(existing, list):
+                    existing = []
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("[add_tasks] tasks.json 读取失败，重置为空: {}", e)
+                existing = []
+
+        new_items = [_normalize_task_entry(t, i) for i, t in enumerate(raw_tasks)]
+        new_ids = {item["id"] for item in new_items}
+        merged = [item for item in existing if item.get("id") not in new_ids] + new_items
+
+        _atomic_write_tasks(tasks_path, merged)
+        logger.info("[add_tasks] agent={} 写入 {} 项任务（追加 {} / 总计 {}）",
+                    str(agent_id)[:8], len(new_items), len(new_items), len(merged))
+        return f"✅ Added {len(new_items)} task(s); total {len(merged)}."
+
+
+async def _handle_todo_write(agent_id: uuid.UUID, arguments: dict) -> str:
+    """todo_write 后端实现：整列表覆写 Agent 工作空间 tasks.json。
+
+    Args:
+        agent_id: Agent UUID
+        arguments: {"tasks": [...]} — 完整任务列表（替换式语义）
+
+    并发安全：与 add_tasks 共享同一 per-agent 文件锁，防止 todo_write 与 add_tasks
+    并发时互相覆盖。
+    """
+    raw_tasks = arguments.get("tasks", [])
+    if isinstance(raw_tasks, str):
+        try:
+            raw_tasks = json.loads(raw_tasks)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("[todo_write] tasks 参数解析失败，回退空列表: type={}", type(raw_tasks).__name__)
+            raw_tasks = []
+    if not isinstance(raw_tasks, list):
+        return "❌ todo_write: tasks 参数必须为 JSON 数组"
+
+    _tenant_id = await _get_agent_tenant_id(agent_id)
+    ws = await ensure_workspace(agent_id, tenant_id=_tenant_id)
+    tasks_path = ws / "tasks.json"
+
+    # ★ 并发锁：与 add_tasks 共享同把锁，覆写也要串行化
+    lock = await _get_tasks_file_lock(agent_id)
+    async with lock:
+        normalized = [_normalize_task_entry(t, i) for i, t in enumerate(raw_tasks)]
+        _atomic_write_tasks(tasks_path, normalized)
+        logger.info("[todo_write] agent={} 覆写 {} 项任务", str(agent_id)[:8], len(normalized))
+        return f"✅ Wrote {len(normalized)} task(s) to tasks.json."

@@ -286,6 +286,19 @@ _WRITE_TOOLS = frozenset(
     }
 )
 
+# 需要 IDE 端用户确认的高敏工具（Phase 2.1 权限审批）
+# delete_file_by_path：删除文件，不可逆
+# run_in_terminal：执行任意命令，可能产生副作用
+# apply_patch：批量补丁应用，影响面大
+# 注：当前 IDE 端 UI 弹窗未实现，字段仅作为协议位下发；UI 工作由 IDE 团队后续补全
+_TOOLS_REQUIRING_APPROVAL = frozenset(
+    {
+        "delete_file_by_path",
+        "run_in_terminal",
+        "apply_patch",
+    }
+)
+
 # 终端只读命令前缀：匹配的命令插件端可走 ProcessBuilder 快径，免去 invokeAndWait + Ctrl+C 开销
 _TERMINAL_READONLY_PREFIXES = (
     "git show",
@@ -1028,6 +1041,11 @@ def _sanitize_lang(lang: str) -> str:
 def _build_lsp4j_ide_prompt(params: ChatAskParam) -> str:
     """基于 ChatAskParam 字段构建 IDE 环境提示，注入 role_description。
 
+    ⚠️ Phase 4.2 迁移状态：**未实现（pending）**
+    本函数仍由 LSP4J 协议层独占调用。计划迁移到 app/services/agent_context.py 作为
+    LLM 上下文组装统一入口的一部分；LSP4J 仅传递结构化字段，由 agent_context 决定
+    token 编排注入。本次 PR 不动代码，仅以注释标注现状。由独立 issue 跟踪。
+
     将 chatTask、codeLanguage、mode、chatContext、extra.context、shellType 等
     未被 Clawith 核心逻辑消费的字段，以结构化提示的方式传递给 LLM。
     包含 2000 字符 token 预算控制（P2-1）。
@@ -1550,6 +1568,18 @@ class JSONRPCRouter:
 
     async def _handle_chat_ask(self, params: dict, msg_id: Any) -> None:
         """处理 chat/ask 请求 — 核心聊天流程。
+
+        ⚠️ Phase 4 迁移状态：**未实现（pending）**
+        本次 PR 仅在文档/注释中说明计划，**代码未做任何移动**。
+        本方法 ~1100 行的 LLM 编排循环、工具迭代、策略提示注入仍原地保留。
+        评审结论：计划状态从 completed 更正为 pending，由独立 issue 跟踪。
+        ────────────────────────────────────────────────────────────────────
+        重构规划（待开 issue 跟踪）：
+        - 目标：本方法迁移到 app/api/websocket.py 复用 Web 通道的统一 LLM 编排框架；
+                LSP4J 仅保留协议编解码 + 流缓冲 + 转发能力。
+        - 风险：迁移涉及 1100+ 行业务逻辑，按计划文档"风险与回滚"建议作为单独 PR 推进，
+                需先抽象 ChatOrchestrator 接口、覆盖 Web/LSP4J 两个适配器测试，再切流。
+        - 当前实现：所有 LSP4J 会话仍在本路径运行，本方法是事实上的 single source of truth。
 
         流程：
         1. 发送 chat/think(step="start") 通知 IDE 进入思考状态
@@ -3686,14 +3716,23 @@ class JSONRPCRouter:
         if tool_name in ("list_dir", "add_tasks", "todo_write"):
             try:
                 if tool_name in ("add_tasks", "todo_write"):
-                    # ★ 纯 UI 工具：任务数据在 arguments.tasks 中，需注入 results
-                    # 否则 ToolPanel.syncToolCall() 检查 results 为空 → 跳过任务列表渲染
+                    # Phase 5.3：后端落盘到 Agent 工作空间 tasks.json（持久化跨会话任务）
                     raw_tasks = arguments.get("tasks", [])
                     if isinstance(raw_tasks, str):
                         try:
                             raw_tasks = json.loads(raw_tasks)
                         except (json.JSONDecodeError, TypeError):
                             raw_tasks = []
+                    # 调用统一的后端实现写盘；失败时仍向 IDE 推 UI 数据，避免影响渲染
+                    try:
+                        from app.services import agent_tools as _at
+                        _handler = _at._handle_add_tasks if tool_name == "add_tasks" else _at._handle_todo_write
+                        _persist_result = await _handler(self._agent_id, {"tasks": raw_tasks})
+                        logger.info("[LSP4J-TOOL] {} 落盘结果: {}", tool_name, _persist_result)
+                    except Exception as _persist_err:
+                        logger.warning("[LSP4J-TOOL] {} 落盘失败（不影响 UI 渲染）: {}", tool_name, _persist_err)
+                    # ★ 纯 UI 工具：任务数据在 arguments.tasks 中，需注入 results
+                    # 否则 ToolPanel.syncToolCall() 检查 results 为空 → 跳过任务列表渲染
                     if isinstance(raw_tasks, list):
                         results_list = [{"tasks": raw_tasks}]
                     else:
@@ -3951,6 +3990,27 @@ class JSONRPCRouter:
         # 真实结果通过 tool/invokeResult 异步回传
         _t0 = time.monotonic()
         rpc_id = self._next_request_id()
+        # ── 协议字段下发（后端智能决策） ─────────────────────────────────────
+        # readonly:        IDE 端据此选择 SEARCH_EXECUTOR vs LSP_EXECUTOR 线程池
+        # cacheable:       IDE 端据此决定是否走 SearchResultCache
+        # timeoutMs:       后端下发统一超时值，避免 IDE 端硬编码 120s
+        # requireApproval: 高敏写工具触发，autonomy 闸门已在后端前置拦截；
+        #                  IDE 端 UI 审批框为后续工作
+        #
+        # 注意 — showPanel 已从 tool/invoke 移除（P2-4 修复）：
+        #   IDE 端 panel 可见性决策发生在 tool/call/sync 消息流的
+        #   ChatToolEventProcessor / ChatProcessStepCallbackParamsProcessor 中，
+        #   它们读不到 tool/invoke 的字段。在此下发 showPanel 会产生"字段已配置但
+        #   永远不生效"的误导。当前 IDE 端通过 HEAVY_SEARCH_TOOLS_WITHOUT_PANEL
+        #   等 hardcode 列表自行判定，待后续协议层引入 tool/call/sync.showPanel
+        #   字段时再补齐后端下发。
+        _readonly = invoke_tool_name in _SESSION_READONLY_TOOLS or invoke_tool_name in {
+            "read_file", "grep_code", "search_codebase", "search_symbol",
+            "search_file", "list_dir", "get_problems", "get_terminal_output",
+        }
+        _cacheable = invoke_tool_name in _CACHEABLE_TOOLS
+        _timeout_ms = int(timeout * 1000)
+        _require_approval = invoke_tool_name in _TOOLS_REQUIRING_APPROVAL
         await self._send_message(
             {
                 "jsonrpc": "2.0",
@@ -3962,8 +4022,16 @@ class JSONRPCRouter:
                     "name": invoke_tool_name,  # 实际调用名（search_replace 在此降级为 replace_text_by_path）
                     "parameters": params,  # 已转换参数名（如 path → filePath）
                     "async": True,  # 异步执行，结果通过 invokeResult 回传
+                    "readonly": _readonly,
+                    "cacheable": _cacheable,
+                    "timeoutMs": _timeout_ms,
+                    "requireApproval": _require_approval,
                 },
             }
+        )
+        logger.info(
+            "[LSP4J-TOOL] 协议字段下发: tool={} readonly={} cacheable={} timeoutMs={} requireApproval={}",
+            invoke_tool_name, _readonly, _cacheable, _timeout_ms, _require_approval,
         )
         _t1 = time.monotonic()
         logger.info(

@@ -1,7 +1,7 @@
 """clawith-lsp4j - LSP4J WebSocket bridge for Tongyi Lingma IDE plugin.
 
 将开源通义灵码 JetBrains IDE 插件适配连接到 Clawith AI 后端。
-基于 LSP Base Protocol + JSON-RPC 2.0，与现有 ACP 插件共存。
+基于 LSP Base Protocol + JSON-RPC 2.0，是 IDE 插件接入后端的唯一通道。
 
 已实现的协议方法：
 - 生命周期: initialize, shutdown, exit
@@ -56,12 +56,12 @@ class ClawithLsp4jPlugin(ClawithPlugin):
     def register(self, app: FastAPI) -> None:
         """注册 WebSocket 路由和工具钩子。
 
-        工具钩子必须在 register() 中安装（晚于 ACP 的模块级导入安装），
-        以保证获取到 ACP 已安装的 _custom_execute_tool / _custom_get_tools 引用。
+        工具钩子直接包裹 agent_tools.execute_tool / get_agent_tools_for_llm，
+        通过 ContextVar(current_lsp4j_ws) 区分 IDE 会话和 Web 会话。
         """
         logger.info("[LSP4J-INIT] 插件注册中: version={}", self.version)
 
-        # 安装 LSP4J 工具钩子（扩展 ACP 的执行路径和注册路径）
+        # 安装 LSP4J 工具钩子（包裹 agent_tools 的执行/注册路径）
         install_lsp4j_tool_hooks()
 
         # 注册 WebSocket 路由

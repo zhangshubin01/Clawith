@@ -48,7 +48,7 @@ class SessionOut(BaseModel):
     is_group: bool = False
     group_name: Optional[str] = None
     # IDE 插件会话上下文字段（#55 模型映射后可用）
-    client_type: Optional[str] = "web"      # 'web' | 'ide_plugin' | 'ide_lsp4j'
+    client_type: Optional[str] = "web"      # 'web' | 'ide_lsp4j'（ide_plugin 为历史值，兼容旧 session）
     project_path: Optional[str] = None      # IDE 项目根路径
     current_file: Optional[str] = None      # 当前活动编辑文件
     open_files: Optional[list] = None       # 打开文件列表

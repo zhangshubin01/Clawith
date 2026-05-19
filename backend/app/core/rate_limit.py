@@ -59,7 +59,6 @@ def _get_redis():
 _DEFAULT_IP_LIMITS: dict[str, tuple[int, int]] = {
     "ws_connect": (10, 60),       # WebSocket 连接：10次/60s
     "ws_connect_lsp4j": (10, 60), # LSP4J WebSocket：10次/60s
-    "ws_connect_acp": (10, 60),   # ACP WebSocket：10次/60s
 }
 
 _DEFAULT_SESSION_LIMITS: dict[str, tuple[int, int]] = {

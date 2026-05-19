@@ -118,7 +118,7 @@ async def websocket_chat(
     token: str = Query(...),
     session_id: str = Query(None),
     lang: str = Query("en"),
-    client_type: str = Query("web", description="客户端类型: web / ide_plugin / ide_lsp4j (#99 修复)"),
+    client_type: str = Query("web", description="客户端类型: web / ide_lsp4j（ide_plugin 为历史兼容值，新会话不再使用）"),
 ):
     """WebSocket endpoint for real-time chat with an agent.
 
@@ -254,6 +254,7 @@ async def websocket_chat(
                         )
             if not conv_id:
                 # 根据客户端类型确定 source_channel（#132 修复：不再硬编码 "web"）
+                # ide_plugin 保留为历史值兼容（旧 session 来自已下线的 ACP 通道），新会话只用 web / ide_lsp4j
                 _channel = client_type if client_type in ("web", "ide_plugin", "ide_lsp4j") else "web"
                 # Prefer the user's designated primary platform session. This keeps agent-initiated
                 # conversations and ongoing long-form context anchored in one stable thread, while
