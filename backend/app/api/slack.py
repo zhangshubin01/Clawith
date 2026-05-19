@@ -325,7 +325,7 @@ async def slack_event_webhook(
         if not _url:
             continue
         try:
-            async with _httpx.AsyncClient(timeout=30, follow_redirects=True) as _hc:
+            async with _httpx.AsyncClient(timeout=30, follow_redirects=False) as _hc:
                 _r = await _hc.get(_url, headers={"Authorization": f"Bearer {_bot_token}"})
                 _r.raise_for_status()
                 # Detect Slack SSO redirect returning HTML instead of actual file

@@ -18,6 +18,7 @@ from sqlalchemy.dialects.postgresql import insert
 from app.config import get_settings
 from app.database import async_session
 from app.models.focus import AgentFocusItem as AgentFocusItemModel
+from app.models.trigger import AgentTrigger
 
 
 _settings = get_settings()
@@ -343,6 +344,7 @@ async def ensure_focus_item(
 
 
 async def complete_focus_item(agent_id: uuid.UUID, *, key: str) -> dict | None:
+    # NEW-012: Focus 完成时自动清理关联触发器，避免孤儿触发器累积
     await migrate_legacy_focus_file(agent_id)
     async with async_session() as db:
         result = await db.execute(
@@ -356,6 +358,26 @@ async def complete_focus_item(agent_id: uuid.UUID, *, key: str) -> dict | None:
             return None
         item.status = "completed"
         item.completed_at = datetime.now(timezone.utc)
+
+        # NEW-012: 自动取消与 Focus 关联的触发器，避免孤儿触发器累积
+        focus_ref = key
+        trigger_result = await db.execute(
+            select(AgentTrigger).where(
+                AgentTrigger.agent_id == agent_id,
+                AgentTrigger.focus_ref == focus_ref,
+                AgentTrigger.is_enabled == True,
+            )
+        )
+        related_triggers = trigger_result.scalars().all()
+        for trigger in related_triggers:
+            trigger.is_enabled = False
+        disabled_count = len(related_triggers)
+        if disabled_count:
+            from loguru import logger
+            logger.info(
+                f"[Focus] complete_focus_item: key={key} → 自动禁用 {disabled_count} 个关联触发器"
+            )
+
         await db.commit()
         await db.refresh(item)
         return _serialize_focus_item(item)

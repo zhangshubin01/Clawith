@@ -50,7 +50,7 @@ async def _get_media_download_url(
 async def _download_file(url: str) -> Optional[bytes]:
     """Download a file from a URL and return its bytes."""
     try:
-        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=False) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             return resp.content

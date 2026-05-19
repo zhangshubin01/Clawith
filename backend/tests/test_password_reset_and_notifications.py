@@ -2,6 +2,7 @@ import contextlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -10,9 +11,32 @@ from starlette.background import BackgroundTasks
 from app.api import auth as auth_api
 from app.api.notification import BroadcastRequest, broadcast_notification
 from app.core.security import verify_password
-from app.models.user import User
+from app.models.user import Identity, User
 from app.schemas.schemas import ForgotPasswordRequest, ResetPasswordRequest
 from app.services import password_reset_service, system_email_service
+
+
+def _make_email_config():
+    """构造有效的邮件配置，避免测试中因缺少邮件服务器而报错。"""
+    return system_email_service.SystemEmailConfig(
+        from_address="test@example.com",
+        from_name="Test",
+        smtp_host="smtp.example.com",
+        smtp_port=587,
+        smtp_username="user",
+        smtp_password="pass",
+        smtp_ssl=False,
+        smtp_timeout_seconds=5,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _patch_email_config(monkeypatch):
+    """全局 patch resolve_email_config_async，避免测试因缺少邮件配置而失败。"""
+    async def _fake_resolve(*_args, **_kwargs):
+        return _make_email_config()
+    monkeypatch.setattr(system_email_service, "resolve_email_config_async", _fake_resolve)
+    yield
 
 
 class DummyScalars:
@@ -99,11 +123,23 @@ def _make_request():
 
 
 def make_user(**overrides):
+    """创建测试 User，避免触发 association_proxy 的 creator 不兼容问题。
+
+    User 模型的 email/username/password_hash 是 association_proxy，
+    直接传参会触发 sqlalchemy.ext.associationproxy 的 creator 调用。
+    Python 3.14 + SA 2.0 下 creator 签名不匹配导致 TypeError。
+    绕过方式：先构造 Identity 对象，再通过 identity 关系传入 User。
+    """
+    identity = Identity(
+        id=uuid.uuid4(),
+        email="alice@example.com",
+        username="alice",
+        password_hash="old-hash",
+        email_verified=True,
+    )
     values = {
         "id": uuid.uuid4(),
-        "username": "alice",
-        "email": "alice@example.com",
-        "password_hash": "old-hash",
+        "identity": identity,
         "display_name": "Alice",
         "role": "member",
         "tenant_id": uuid.uuid4(),

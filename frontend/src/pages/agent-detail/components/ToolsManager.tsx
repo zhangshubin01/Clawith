@@ -1,36 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-    IconBrowser,
-    IconChevronDown,
-    IconClock,
-    IconFileText,
-    IconMessageCircle,
-    IconSearch,
-    IconSettings,
-    IconTerminal2,
-    IconTools,
-} from '@tabler/icons-react';
+import { IconBrowser, IconChevronDown, IconClock, IconFileText, IconMessageCircle, IconSearch, IconSettings, IconTerminal2, IconTools } from '@tabler/icons-react';
 
 import { useDialog } from '../../../components/Dialog/DialogProvider';
 import { useToast } from '../../../components/Toast/ToastProvider';
 import { useAuthStore } from '../../../stores';
-
-const getCategoryLabels = (t: any): Record<string, string> => ({
-    file: t('agent.toolCategories.file'),
-    task: t('agent.toolCategories.task'),
-    communication: t('agent.toolCategories.communication'),
-    search: t('agent.toolCategories.search'),
-    aware: t('agent.toolCategories.aware', 'Aware & Triggers'),
-    social: t('agent.toolCategories.social', 'Social'),
-    code: t('agent.toolCategories.code', 'Code & Execution'),
-    discovery: t('agent.toolCategories.discovery', 'Discovery'),
-    email: t('agent.toolCategories.email', 'Email'),
-    feishu: t('agent.toolCategories.feishu', 'Feishu / Lark'),
-    custom: t('agent.toolCategories.custom'),
-    general: t('agent.toolCategories.general'),
-    agentbay: t('agent.toolCategories.agentbay', 'AgentBay'),
-});
+import { getCategoryLabels, CATEGORY_CONFIG_SCHEMAS, SENSITIVE_KEYS_BASE, getSensitiveKeys, applyConfigDefaults, switchTrack, switchKnob } from './toolConstants';
+import { categoryDescriptions, renderCategoryIcon, getToolGroupMeta } from './toolCategoryUtils';
+import ToolSourceTabs from './ToolSourceTabs';
+import ToolSearchBar from './ToolSearchBar';
 
 export default function ToolsManager({ agentId, canManage = false }: { agentId: string; canManage?: boolean }) {
     const { t } = useTranslation();
@@ -53,23 +31,6 @@ export default function ToolsManager({ agentId, canManage = false }: { agentId: 
     // Global (company-level) config for the currently open modal — used to show
     // lock hints and prevent agent from overriding company-set fields.
     const [configGlobalData, setConfigGlobalData] = useState<Record<string, any>>({});
-
-    const CATEGORY_CONFIG_SCHEMAS: Record<string, any> = {
-        agentbay: {
-            title: 'AgentBay Settings',
-            fields: [
-                { key: 'api_key', label: 'API Key (from AgentBay)', type: 'password', placeholder: 'Enter your AgentBay API key' },
-                { key: 'os_type', label: 'Cloud Computer OS', type: 'select', default: 'windows', options: [{ value: 'linux', label: 'Linux' }, { value: 'windows', label: 'Windows' }] },
-            ]
-        },
-        atlassian: {
-            title: 'Atlassian Connectivity Settings',
-            fields: [
-                { key: 'api_key', label: 'API Key (Atlassian API Token)', type: 'password', placeholder: 'Enter your Atlassian API key' },
-                { key: 'cloud_id', label: 'Cloud ID (Optional)', type: 'text', placeholder: 'e.g. bcc01-abc-123' }
-            ]
-        }
-    };
 
     const loadTools = async () => {
         try {
@@ -99,30 +60,6 @@ export default function ToolsManager({ agentId, canManage = false }: { agentId: 
                 body: JSON.stringify([{ tool_id: toolId, enabled }]),
             });
         } catch (e) { console.error(e); }
-    };
-
-    // Sensitive field keys that should not be pre-filled from masked global config.
-    // Hardcoded fallback set + dynamic extraction from config_schema password-type fields.
-    const SENSITIVE_KEYS_BASE = new Set(['api_key', 'private_key', 'auth_code', 'password', 'secret']);
-
-    const getSensitiveKeys = (schema: any): Set<string> => {
-        const keys = new Set(SENSITIVE_KEYS_BASE);
-        if (schema?.fields) {
-            for (const field of schema.fields) {
-                if (field.type === 'password') keys.add(field.key);
-            }
-        }
-        return keys;
-    };
-
-    const applyConfigDefaults = (fields: any[] = [], config: Record<string, any> = {}) => {
-        const next = { ...config };
-        for (const field of fields) {
-            if (field.default !== undefined && (next[field.key] === undefined || next[field.key] === null || next[field.key] === '')) {
-                next[field.key] = field.default;
-            }
-        }
-        return next;
     };
 
     const openConfig = (tool: any) => {
@@ -237,86 +174,12 @@ export default function ToolsManager({ agentId, canManage = false }: { agentId: 
             : (tool.category || 'general');
     };
 
-    const getToolGroupMeta = (groupKey: string, toolsInGroup: any[]) => {
-        const first = toolsInGroup.find((tool) => tool.type === 'mcp' && tool.mcp_server_name) || toolsInGroup[0];
-        if (groupKey.startsWith('mcp:') && first?.mcp_server_name) {
-            return {
-                label: first.mcp_server_name,
-                description: t('agent.tools.mcpGroupDescription', 'Tools from {{name}}', { name: first.mcp_server_name }),
-                iconCategory: 'custom',
-                configCategory: first.category || 'custom',
-            };
-        }
-        return {
-            label: categoryLabels[groupKey] || groupKey,
-            description: categoryDescriptions[groupKey] || 'Tools in this category',
-            iconCategory: groupKey,
-            configCategory: groupKey,
-        };
-    };
-
     const groupByCategory = (toolList: any[]) =>
         toolList.reduce((acc: Record<string, any[]>, t) => {
             const cat = mcpGroupKey(t);
             (acc[cat] = acc[cat] || []).push(t);
             return acc;
         }, {});
-
-    const categoryLabels = getCategoryLabels(t);
-    const categoryDescriptions: Record<string, string> = {
-        agentbay: 'Browser and cloud computer automation',
-        file: 'Read, write, convert, and manage workspace files',
-        communication: 'Messages and cross-channel collaboration',
-        search: 'Web and knowledge search tools',
-        code: 'Code execution and development utilities',
-        aware: 'Triggers, reminders, and awareness workflows',
-        email: 'Email reading and sending tools',
-        feishu: 'Feishu / Lark messaging and collaboration',
-        okr: 'Objectives, key results, and progress reporting',
-        social: 'Social publishing and community workflows',
-        discovery: 'Tool and capability discovery',
-        custom: 'Company-added or MCP tools',
-        general: 'General purpose tools',
-    };
-    const renderCategoryIcon = (category: string, size = 15) => {
-        const style = { color: 'var(--text-tertiary)' };
-        switch (category) {
-            case 'agentbay': return <IconBrowser size={size} stroke={1.8} style={style} />;
-            case 'file': return <IconFileText size={size} stroke={1.8} style={style} />;
-            case 'communication':
-            case 'feishu':
-            case 'email':
-            case 'social':
-                return <IconMessageCircle size={size} stroke={1.8} style={style} />;
-            case 'search':
-            case 'discovery':
-                return <IconSearch size={size} stroke={1.8} style={style} />;
-            case 'code': return <IconTerminal2 size={size} stroke={1.8} style={style} />;
-            case 'aware': return <IconClock size={size} stroke={1.8} style={style} />;
-            case 'custom': return <IconSettings size={size} stroke={1.8} style={style} />;
-            default: return <IconTools size={size} stroke={1.8} style={style} />;
-        }
-    };
-
-    const switchTrack = (enabled: boolean, mixed = false) => ({
-        position: 'absolute' as const,
-        inset: 0,
-        background: enabled ? 'var(--accent-primary)' : mixed ? 'var(--border-default)' : 'var(--bg-tertiary)',
-        borderRadius: '11px',
-        transition: 'background 0.2s',
-    });
-
-    const switchKnob = (enabled: boolean) => ({
-        position: 'absolute' as const,
-        left: enabled ? '20px' : '2px',
-        top: '2px',
-        width: '18px',
-        height: '18px',
-        background: '#fff',
-        borderRadius: '50%',
-        transition: 'left 0.2s',
-        boxShadow: '0 1px 3px rgba(0,0,0,0.12)',
-    });
 
     const toggleCategoryExpanded = (category: string) => {
         setExpandedCategories(prev => {
@@ -434,13 +297,13 @@ export default function ToolsManager({ agentId, canManage = false }: { agentId: 
     const renderToolGroup = (groupedTools: Record<string, any[]>, allGroupedTools: Record<string, any[]>) =>
         Object.entries(groupedTools)
             .sort(([a, aTools], [b, bTools]) => {
-                const aMeta = getToolGroupMeta(a, allGroupedTools[a] || aTools);
-                const bMeta = getToolGroupMeta(b, allGroupedTools[b] || bTools);
+                const aMeta = getToolGroupMeta(a, allGroupedTools[a] || aTools, t);
+                const bMeta = getToolGroupMeta(b, allGroupedTools[b] || bTools, t);
                 return aMeta.label.localeCompare(bMeta.label);
             })
             .map(([category, catTools]) => {
                 const allCatTools = allGroupedTools[category] || catTools;
-                const meta = getToolGroupMeta(category, allCatTools);
+                const meta = getToolGroupMeta(category, allCatTools, t);
                 const label = meta.label;
                 const enabledCount = allCatTools.filter((tool: any) => tool.enabled).length;
                 const configuredCount = allCatTools.filter((tool: any) => tool.agent_config && Object.keys(tool.agent_config).length > 0).length;
@@ -559,7 +422,7 @@ export default function ToolsManager({ agentId, canManage = false }: { agentId: 
             tool.description,
             tool.mcp_server_name,
             category,
-            categoryLabels[category],
+            getCategoryLabels(t)[category],
         ].filter(Boolean).join(' ').toLowerCase();
         return haystack.includes(normalizedToolSearch);
     };
@@ -577,89 +440,9 @@ export default function ToolsManager({ agentId, canManage = false }: { agentId: 
     return (
         <>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <div className="tool-source-tabs" role="tablist" aria-label={t('agent.tools.sourceTabs', 'Tool sources')}>
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={toolTab === 'company'}
-                        className={toolTab === 'company' ? 'active' : ''}
-                        onClick={() => setToolTab('company')}
-                    >
-                        <span>{t('agent.tools.companyTools', 'Company Tools')}</span>
-                        <span className="tool-source-tab-count">{companyTools.length}</span>
-                    </button>
-                    <button
-                        type="button"
-                        role="tab"
-                        aria-selected={toolTab === 'installed'}
-                        className={toolTab === 'installed' ? 'active' : ''}
-                        onClick={() => setToolTab('installed')}
-                    >
-                        <span>{t('agent.tools.agentInstalled', 'Agent Self-Installed Tools')}</span>
-                        <span className="tool-source-tab-count">{agentInstalledTools.length}</span>
-                    </button>
-                </div>
+                <ToolSourceTabs toolTab={toolTab} setToolTab={setToolTab} companyCount={companyTools.length} installedCount={agentInstalledTools.length} />
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                    <div style={{ position: 'relative', flex: '1 1 260px', minWidth: '220px' }}>
-                        <IconSearch size={15} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
-                        <input
-                            value={toolSearch}
-                            onChange={(e) => setToolSearch(e.target.value)}
-                            placeholder={t('agent.tools.searchTools', 'Search tools...')}
-                            style={{
-                                width: '100%',
-                                boxSizing: 'border-box',
-                                border: '1px solid var(--border-subtle)',
-                                borderRadius: '8px',
-                                background: 'var(--bg-primary)',
-                                color: 'var(--text-primary)',
-                                padding: '8px 10px 8px 32px',
-                                fontSize: '13px',
-                                outline: 'none',
-                            }}
-                        />
-                    </div>
-                    {(['all', 'enabled', 'disabled', 'configured'] as const).map(filter => (
-                        <button
-                            key={filter}
-                            type="button"
-                            onClick={() => setToolStatusFilter(filter)}
-                            style={{
-                                border: '1px solid var(--border-subtle)',
-                                borderRadius: '999px',
-                                background: toolStatusFilter === filter ? 'var(--text-primary)' : 'var(--bg-primary)',
-                                color: toolStatusFilter === filter ? 'var(--bg-primary)' : 'var(--text-secondary)',
-                                padding: '6px 10px',
-                                fontSize: '11px',
-                                cursor: 'pointer',
-                            }}
-                        >
-                            {filter === 'all' ? t('common.all', 'All')
-                                : filter === 'enabled' ? t('common.enabled', 'Enabled')
-                                    : filter === 'disabled' ? t('common.disabled', 'Disabled')
-                                        : t('agent.tools.configured', 'Configured')}
-                        </button>
-                    ))}
-                    <button
-                        type="button"
-                        onClick={() => {
-                            const categories = Object.keys(groupedActiveTools);
-                            setExpandedCategories(prev => prev.size >= categories.length ? new Set() : new Set(categories));
-                        }}
-                        style={{
-                            border: '1px solid var(--border-subtle)',
-                            borderRadius: '8px',
-                            background: 'var(--bg-primary)',
-                            color: 'var(--text-secondary)',
-                            padding: '6px 10px',
-                            fontSize: '11px',
-                            cursor: 'pointer',
-                        }}
-                    >
-                        {expandedCategories.size >= Object.keys(groupedActiveTools).length ? t('agent.tools.collapseAll', 'Collapse all') : t('agent.tools.expandAll', 'Expand all')}
-                    </button>
-                </div>
+                <ToolSearchBar toolSearch={toolSearch} setToolSearch={setToolSearch} toolStatusFilter={toolStatusFilter} setToolStatusFilter={setToolStatusFilter} expandedCount={expandedCategories.size} totalCategories={Object.keys(groupedActiveTools).length} onToggleExpand={() => { const categories = Object.keys(groupedActiveTools); setExpandedCategories(prev => prev.size >= categories.length ? new Set() : new Set(categories)); }} />
 
                 {/* Tool List */}
                 {filteredTools.length > 0 ? (

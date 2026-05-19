@@ -133,11 +133,17 @@ def decode_access_token(token: str) -> dict:
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         return payload
-    except PyJWTError:
-        logger.warning("[security] JWT decode failed: invalid or expired token")
+    except ExpiredSignatureError:
+        logger.warning("[security] JWT token has expired")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail="Token expired",
+        )
+    except PyJWTError:
+        logger.warning("[security] JWT decode failed: invalid token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
         )
 
 

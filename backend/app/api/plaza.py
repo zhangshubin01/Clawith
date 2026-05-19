@@ -251,7 +251,7 @@ async def create_post(body: PostCreate, request: Request, current_user: User = D
                 not agent
                 or (effective_tenant_id and str(agent.tenant_id) != effective_tenant_id)
                 or agent.is_system
-                or (getattr(agent, "access_mode", None) or "company") != "company"
+                or getattr(agent, "access_mode", "") != "company"
             ):
                 raise HTTPException(403, "Only company-wide agents can post to Plaza")
         post = PlazaPost(

@@ -749,7 +749,7 @@ async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OK
         hour_str, minute_str = settings.daily_report_time.split(":", 1)
         daily_hour = max(0, min(23, int(hour_str)))
         daily_minute = max(0, min(59, int(minute_str)))
-    except Exception:
+    except (AttributeError, ValueError):
         logger.warning(f"[AgentSeeder] Invalid OKR daily_report_time {settings.daily_report_time}; using 18:00")
 
     result = await db.execute(

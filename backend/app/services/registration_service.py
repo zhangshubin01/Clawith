@@ -8,6 +8,7 @@ This module handles user registration including:
 
 import re
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -468,13 +469,19 @@ class RegistrationService:
                 )
             )
             inv = result.scalar_one_or_none()
-            if inv and inv.used_count < inv.max_uses:
+            if not inv:
+                return None, "Invalid invitation code"
+            # 检查邀请码是否已过期（expires_at 为 None 的历史数据永不过期）
+            if inv.expires_at is not None and inv.expires_at < datetime.now(timezone.utc):
+                return None, "Invitation code has expired"
+            if inv.used_count < inv.max_uses:
                 # Get tenant from invitation
                 tenant_result = await db.execute(select(Tenant).where(Tenant.id == inv.tenant_id))
                 tenant = tenant_result.scalar_one_or_none()
                 if tenant and tenant.is_active:
                     return tenant, None
                 return None, "Invitation code tenant is inactive"
+            return None, "Invitation code has reached maximum uses"
 
         # Try email domain matching
         if email:

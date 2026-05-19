@@ -328,7 +328,7 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({ content, 
                 className={className}
                 style={{ lineHeight: 1.6, fontSize: 'inherit', ...style, wordBreak: 'break-word' }}
                 onClick={handleContainerClick}
-                dangerouslySetInnerHTML={{ __html: html }}
+                dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html, { ALLOWED_TAGS: ['a', 'code', 'pre', 'span', 'div', 'br', 'strong', 'em', 'img', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'p', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'blockquote', 'hr', 'del', 'ins', 'sup', 'sub'], ALLOWED_ATTR: ['href', 'target', 'class', 'style', 'src', 'alt', 'data-markdown-image-src', 'data-markdown-image-alt', 'data-markdown-image-download'] }) }}
             />
             {lightbox && createPortal(
                 <div className="markdown-image-lightbox" onClick={closeLightbox}>

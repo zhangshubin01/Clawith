@@ -111,6 +111,13 @@ _UI_HEAVY_SEARCH_TOOLS = frozenset(
     }
 )
 
+# 并发调用场景下需延迟发 PENDING 的工具集合。
+# LLM 可能同时发起多个此类工具调用，on_tool_call 会立即发所有 PENDING，
+# 但 invoke_tool_on_ide 串行执行，后续调用要等前面完成后才 invoke。
+# 这导致 PENDING 早于 toolInvoke 到达 IDE，消费者等不到 panel 而超时阻塞。
+# 解决方案：跳过 on_tool_call 中的 PENDING，改在 invoke_tool_on_ide 中发。
+_TOOLS_DELAY_PENDING_TO_INVOKE = frozenset({"read_file"})
+
 # 汇总检索卡 debounce：边搜边更新时合并短时间内的多次推送，减轻 IDE EDT 压力
 _SEARCH_SUMMARY_DEBOUNCE_SEC = 0.25
 
@@ -1283,6 +1290,10 @@ class JSONRPCRouter:
         # 确保插件端点击工具卡片可获取文件路径并打开文件。
         self._tool_params: dict[str, dict] = {}
 
+        # ★ 同一 request 中 read_file 卡片去重：
+        # 集合存储 (request_id, file_path)，同一文件只创建一张卡片
+        self._read_file_card_seen: set[tuple[str, str]] = set()
+
         # ★ call_id → tool_call_id 映射：LLM 的 call_id → 后端生成的工具调用 ID，
         # 用于 on_tool_call done 时获取与 PENDING/RUNNING sync 一致的 toolCallId。
         self._call_id_to_tool_id: dict[str, str] = {}
@@ -1663,6 +1674,8 @@ class JSONRPCRouter:
 
             # ★ 重置 toolCallId 队列（新请求开始时清空）
             self._tool_call_id_queue = []
+            # ★ 重置 read_file 卡片去重集合
+            self._read_file_card_seen = set()
 
             # ★ 创建 snapshot 并发送 snapshot/syncAll（diff 卡片支持）
             await self._ws_file_service.get_or_create_snapshot(session_id, request_id)
@@ -2041,18 +2054,37 @@ class JSONRPCRouter:
                         if tool_name in _UI_HEAVY_SEARCH_TOOLS:
                             tool_markdown = ""
                         else:
-                            # #94 修复：延迟 100ms 发送 INIT 卡片，快速工具可跳过卡片避免闪烁
-                            tool_markdown = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
+                            # ★ read_file 去重：同一 request 内多次读同一文件只显示一张卡片
+                            _skip_duplicate_card = False
+                            if tool_name == "read_file":
+                                _rf_path = params.get("file_path") or params.get("path") or ""
+                                _dedup_key = (request_id, _rf_path)
+                                if _rf_path and _dedup_key in self._read_file_card_seen:
+                                    _skip_duplicate_card = True
+                                    logger.info(
+                                        "[LSP4J-TOOL] read_file 去重，跳过重复卡片: path={} callId={}",
+                                        _rf_path, tool_call_id[:8],
+                                    )
+                                elif _rf_path:
+                                    self._read_file_card_seen.add(_dedup_key)
+
+                            if _skip_duplicate_card:
+                                tool_markdown = ""
+                            else:
+                                tool_markdown = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
 
                         # ★ 通过聊天流发送 INIT markdown，MarkdownStreamPanel 解析后创建 ToolPanel 卡片
                         # 注意：tool/call/sync 中的 markdown 字段仅作为辅助数据，
                         # ToolPanel 的创建依赖聊天流中的 toolCall:: markdown 块。
+                        # ★ overwrite=False：多个工具并发时，每个 INIT 追加到 buffer，
+                        # MarkdownStreamPanel.parseBlock 可同时识别所有 toolCall 块并为每个创建 ToolPanel。
+                        # 若用 overwrite=True 会导致后到的 INIT 清掉前面的工具卡片。
                         if tool_markdown:
                             await self._send_chat_answer(
                                 session_id,
                                 tool_markdown,
                                 request_id,
-                                overwrite=True,
+                                overwrite=False,
                             )
 
                         # 将 INIT markdown 也合并到 PENDING tool/call/sync 的 markdown 字段中，
@@ -2060,6 +2092,18 @@ class JSONRPCRouter:
                         if tool_name in _UI_HEAVY_SEARCH_TOOLS:
                             logger.info(
                                 "[LSP4J-TRACE] 跳过 PENDING（高频搜索降噪）: req={} call={} tool={}",
+                                request_id[:8],
+                                tool_call_id[:8],
+                                tool_name,
+                            )
+                        elif tool_name in _TOOLS_DELAY_PENDING_TO_INVOKE:
+                            # LLM 可能并发调用此类工具（如多个 read_file），on_tool_call 会批量触发，
+                            # 但 invoke_tool_on_ide 串行执行，后续工具的 toolInvoke 可能在数秒后才到达。
+                            # 若在此处发 PENDING，消费者会等不到 panel 而超时（panel 在 EDT 处理 INIT markdown 后注册）。
+                            # 故跳过此处，改在 invoke_tool_on_ide 中（toolInvoke 发出前）发 PENDING，
+                            # 确保 PENDING 到达时 panel 已注册，消费者可立即处理。
+                            logger.info(
+                                "[LSP4J-TRACE] 跳过 on_tool_call PENDING（延迟到 invoke 时发）: req={} call={} tool={}",
                                 request_id[:8],
                                 tool_call_id[:8],
                                 tool_name,
@@ -2075,19 +2119,22 @@ class JSONRPCRouter:
                                 markdown=tool_markdown,
                             )
 
-                    await self._send_process_step_callback(
-                        session_id,
-                        request_id,
-                        step=f"tool_{tool_name}",
-                        description=f"正在执行: {tool_name}",
-                        status="doing",
-                    )
-                    await self._send_chat_think(
-                        session_id,
-                        f"正在调用工具: {tool_name}",
-                        "start",
-                        request_id,
-                    )
+                    # 有专属 ToolPanel 卡片的工具不再刷步骤条，避免卡片与步骤条重复
+                    # 高频搜索走汇总卡也不刷步骤条
+                    if tool_name not in _UI_HEAVY_SEARCH_TOOLS and tool_name not in LSP4J_IDE_TOOL_NAMES:
+                        await self._send_process_step_callback(
+                            session_id,
+                            request_id,
+                            step=f"tool_{tool_name}",
+                            description=f"正在执行: {tool_name}",
+                            status="doing",
+                        )
+                        await self._send_chat_think(
+                            session_id,
+                            f"正在调用工具: {tool_name}",
+                            "start",
+                            request_id,
+                        )
                 elif status == "done":
                     # ★ 应用工具名映射（与 running 分支一致）
                     original_name = tool_name
@@ -2142,19 +2189,21 @@ class JSONRPCRouter:
                                 parameters=done_params,
                             )
 
-                    await self._send_process_step_callback(
-                        session_id,
-                        request_id,
-                        step=f"tool_{tool_name}",
-                        description=f"已完成: {tool_name}",
-                        status="done",
-                    )
-                    await self._send_chat_think(
-                        session_id,
-                        f"工具 {tool_name} 执行完成",
-                        "done",
-                        request_id,
-                    )
+                    # 有专属卡片的工具已通过 ToolPanel 状态流转展示完成态，不再刷步骤条
+                    if tool_name not in _UI_HEAVY_SEARCH_TOOLS and tool_name not in LSP4J_IDE_TOOL_NAMES:
+                        await self._send_process_step_callback(
+                            session_id,
+                            request_id,
+                            step=f"tool_{tool_name}",
+                            description=f"已完成: {tool_name}",
+                            status="done",
+                        )
+                        await self._send_chat_think(
+                            session_id,
+                            f"工具 {tool_name} 执行完成",
+                            "done",
+                            request_id,
+                        )
                     # 持久化 tool_call 消息（与 Web 通道 JSON 字段一致）
                     try:
                         async with async_session() as _tc_db:
@@ -3183,6 +3232,15 @@ class JSONRPCRouter:
                 )
         return all_items
 
+    def _should_skip_individual_heavy_search_sync(self, request_id: str, tool_call_id: str, tool_name: str) -> bool:
+        """高频搜索工具无独立 ToolPanel；仅汇总卡 callId 需要向插件发 sync。"""
+        if tool_name not in _UI_HEAVY_SEARCH_TOOLS or not tool_call_id:
+            return False
+        summary_call_id = self._search_summary_call_id.get(request_id)
+        if summary_call_id and tool_call_id == summary_call_id:
+            return False
+        return True
+
     def _teardown_search_summary_request(self, request_id: str) -> None:
         """取消 debounce 并清理指定 request 的汇总卡状态（防泄漏）。"""
         if not request_id:
@@ -3271,17 +3329,16 @@ class JSONRPCRouter:
             await asyncio.sleep(0.05)
 
         tool_summary = self._format_search_tool_counts(request_id)
-        # 首次 RUNNING 同步附带 INIT markdown，IDE 在 offerEvent 前即可注册 ToolPanel
-        summary_init_md = (
-            f"```toolCall::search_codebase::{call_id}::INIT\n```" if first_summary_push else ""
-        )
+        # 仅 chat/answer 发 INIT 块即可建卡；sync 不再重复带 markdown，避免 IDE 双通道各建一张摘要卡
+        summary_init_md = ""
+        # 摘要卡仅展示标题 +「N 个结果」，不下发分项 query（如「文件 2 次、代码 1 次」）
         await self._send_tool_call_sync(
             session_id,
             request_id,
             call_id,
             "RUNNING",
             tool_name="search_codebase",
-            parameters={"query": tool_summary},
+            parameters={},
             results=all_items,
             markdown=summary_init_md,
         )
@@ -3329,14 +3386,15 @@ class JSONRPCRouter:
                 call_id,
                 "FINISHED",
                 tool_name="search_codebase",
-                parameters={"query": tool_summary},
+                parameters={},
                 results=all_items,
             )
             logger.info(
-                "[LSP4J-SEARCH-SUMMARY] finalize FINISHED request={} call={} files={}",
+                "[LSP4J-SEARCH-SUMMARY] finalize FINISHED request={} call={} files={} tools={}",
                 request_id[:8],
                 call_id[:8],
                 len(all_items),
+                tool_summary,
             )
 
     async def _send_tool_call_sync(
@@ -3663,6 +3721,12 @@ class JSONRPCRouter:
                         tool_name,
                         tool_call_id[:8],
                     )
+                elif self._should_skip_individual_heavy_search_sync(request_id, tool_call_id, tool_name):
+                    logger.info(
+                        "[LSP4J-TOOL] 跳过本地高频搜索 FINISHED sync（已并入汇总卡）: tool={} callId={}",
+                        tool_name,
+                        tool_call_id[:8],
+                    )
                 else:
                     # 插件采用 buffer+replay，后端无需等待 panel 注册
                     await asyncio.sleep(0)
@@ -3679,7 +3743,9 @@ class JSONRPCRouter:
                 return result_str
             except Exception as e:
                 logger.exception("[LSP4J-TOOL] 本地工具执行失败: tool={}", tool_name)
-                if queue_matched:
+                if queue_matched and not self._should_skip_individual_heavy_search_sync(
+                    request_id, tool_call_id, tool_name
+                ):
                     await self._send_tool_call_sync(
                         self._session_id,
                         request_id,
@@ -3795,6 +3861,18 @@ class JSONRPCRouter:
                     tool_name,
                 )
             else:
+                # 对延迟 PENDING 的工具，在 RUNNING 之前补发 PENDING。
+                # 此时 toolInvoke 即将发出，EDT 已有充足时间处理 INIT markdown 并注册 panel，
+                # 消费者可立即匹配，不再需要等待。
+                if tool_name in _TOOLS_DELAY_PENDING_TO_INVOKE:
+                    await self._send_tool_call_sync(
+                        self._session_id,
+                        request_id,
+                        tool_call_id,
+                        "PENDING",
+                        tool_name=original_name,
+                        parameters=sync_parameters,
+                    )
                 await self._send_tool_call_sync(
                     self._session_id,
                     request_id,
@@ -3804,14 +3882,36 @@ class JSONRPCRouter:
                     parameters=sync_parameters,
                 )
         else:
-            # 未匹配到 markdown 注册的 ToolPanel 时，禁止把兜底 UUID 发给前端事件流，
-            # 否则 ChatToolEventProcessor 会持续等待不存在的 panel 并阻塞后续事件。
-            logger.warning(
-                "[LSP4J-TOOL] 队列未匹配，跳过 RUNNING sync（避免幽灵事件）: tool={} callId={} requestId={}",
-                tool_name,
-                tool_call_id[:8],
-                request_id[:8],
-            )
+            # 队列未匹配：on_tool_call 未能入队（可能 args 不完整或时序竞争），
+            # 此时 ToolPanel 尚不存在。对非搜索类工具，补发 INIT markdown + RUNNING sync
+            # 创建兜底卡片，避免用户只看到步骤条而无专属工具卡。
+            if tool_name not in _UI_HEAVY_SEARCH_TOOLS:
+                fallback_display = TOOL_DISPLAY_NAME_MAP.get(tool_name, original_name)
+                fallback_init_md = f"```toolCall::{fallback_display}::{tool_call_id}::INIT\n```"
+                await self._send_chat_answer(
+                    self._session_id, fallback_init_md, request_id, overwrite=False
+                )
+                await self._send_tool_call_sync(
+                    self._session_id,
+                    request_id,
+                    tool_call_id,
+                    "RUNNING",
+                    tool_name=original_name,
+                    parameters=sync_parameters,
+                )
+                logger.info(
+                    "[LSP4J-TOOL] 队列未匹配，已补发 INIT+RUNNING 兜底: tool={} callId={} requestId={}",
+                    tool_name,
+                    tool_call_id[:8],
+                    request_id[:8],
+                )
+            else:
+                logger.warning(
+                    "[LSP4J-TOOL] 队列未匹配，跳过（高频搜索走汇总卡）: tool={} callId={} requestId={}",
+                    tool_name,
+                    tool_call_id[:8],
+                    request_id[:8],
+                )
 
         # #113 修复：清理超时未响应的 toolCallId Future（>300s 自动移除，避免累积）
         _now_ts = time.time()
@@ -4017,35 +4117,60 @@ class JSONRPCRouter:
                     )
 
                 if queue_matched:
-                    logger.info(
-                        "[LSP4J-TOOL] ✅ 准备发送 FINISHED sync: tool={} callId={} results_count={}",
-                        tool_name,
-                        tool_call_id[:8],
-                        len(results) if results else 0,
-                    )
-                    await self._send_tool_call_sync(
-                        self._session_id,
-                        request_id,
-                        tool_call_id,
-                        "FINISHED",
-                        tool_name=original_name,
-                        parameters=arguments,
-                        results=results,
-                    )
-                    logger.info(
-                        "[LSP4J-TRACE] FINISHED 已发送 trace={} backfilled={} results={}",
-                        trace_key,
-                        finished_backfilled,
-                        json.dumps(results, ensure_ascii=False)[:200] if results else "None",
-                    )
+                    if self._should_skip_individual_heavy_search_sync(request_id, tool_call_id, tool_name):
+                        logger.info(
+                            "[LSP4J-TOOL] 跳过 IDE 高频搜索 FINISHED sync（已并入汇总卡）: tool={} callId={}",
+                            tool_name,
+                            tool_call_id[:8],
+                        )
+                    else:
+                        logger.info(
+                            "[LSP4J-TOOL] ✅ 准备发送 FINISHED sync: tool={} callId={} results_count={}",
+                            tool_name,
+                            tool_call_id[:8],
+                            len(results) if results else 0,
+                        )
+                        await self._send_tool_call_sync(
+                            self._session_id,
+                            request_id,
+                            tool_call_id,
+                            "FINISHED",
+                            tool_name=original_name,
+                            parameters=arguments,
+                            results=results,
+                        )
+                        logger.info(
+                            "[LSP4J-TRACE] FINISHED 已发送 trace={} backfilled={} results={}",
+                            trace_key,
+                            finished_backfilled,
+                            json.dumps(results, ensure_ascii=False)[:200] if results else "None",
+                        )
                 else:
-                    logger.warning(
-                        "[LSP4J-TOOL] ❌ 队列未匹配，跳过 FINISHED sync（避免幽灵事件）: tool={} callId={} requestId={} queue_size={}",
-                        tool_name,
-                        tool_call_id[:8],
-                        request_id[:8],
-                        len(self._tool_call_id_queue),
-                    )
+                    # 队列未匹配但已在 RUNNING 阶段补发了 INIT markdown（非搜索类工具），
+                    # 此处同样需要发送 FINISHED sync 以更新 ToolPanel 状态。
+                    if tool_name not in _UI_HEAVY_SEARCH_TOOLS:
+                        await self._send_tool_call_sync(
+                            self._session_id,
+                            request_id,
+                            tool_call_id,
+                            "FINISHED",
+                            tool_name=original_name,
+                            parameters=arguments,
+                            results=results,
+                        )
+                        logger.info(
+                            "[LSP4J-TOOL] 队列未匹配但已补发 FINISHED: tool={} callId={} requestId={}",
+                            tool_name,
+                            tool_call_id[:8],
+                            request_id[:8],
+                        )
+                    else:
+                        logger.warning(
+                            "[LSP4J-TOOL] ❌ 队列未匹配，跳过 FINISHED sync（高频搜索走汇总）: tool={} callId={} requestId={}",
+                            tool_name,
+                            tool_call_id[:8],
+                            request_id[:8],
+                        )
 
                 # ★ 文件编辑工具完成后发送 workingSpaceFile/sync 通知（APPLIED 状态）
                 # 必须在 toolCallSync FINISHED 之后发送，确保 ToolPanel 已创建 AIDevFilePanel
@@ -4109,7 +4234,9 @@ class JSONRPCRouter:
             self._cancelled_requests[rpc_id] = None
             if len(self._cancelled_requests) > self._MAX_CANCELLED_REQUESTS_SIZE:
                 self._cancelled_requests.pop(next(iter(self._cancelled_requests)))
-            if queue_matched:
+            if queue_matched and not self._should_skip_individual_heavy_search_sync(
+                request_id, tool_call_id, tool_name
+            ):
                 await self._send_tool_call_sync(
                     self._session_id,
                     request_id,
@@ -4126,6 +4253,12 @@ class JSONRPCRouter:
                         "sessionId": self._session_id or "",
                         "statusCode": 408,
                     },
+                )
+            elif queue_matched:
+                logger.info(
+                    "[LSP4J-TOOL] 跳过高频搜索超时 ERROR sync（已并入汇总卡）: tool={} callId={}",
+                    tool_name,
+                    tool_call_id[:8],
                 )
             else:
                 logger.warning(

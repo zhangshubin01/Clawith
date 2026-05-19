@@ -730,7 +730,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession
                                     if _cache.exists():
                                         try:
                                             _existing = _cj.loads(_cache.read_text())
-                                        except Exception:
+                                        except (OSError, ValueError):
                                             pass
                                     # Key by user_id when available (tenant-stable), fallback to open_id
                                     _users = {}

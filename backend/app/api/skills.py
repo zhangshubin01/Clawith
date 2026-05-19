@@ -217,7 +217,7 @@ async def _fetch_clawhub_skill_archive(
     last_error = ""
     for base_url in _candidate_clawhub_bases(preferred_base):
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
                 resp = await client.get(
                     _clawhub_download_url(base_url),
                     params=params,

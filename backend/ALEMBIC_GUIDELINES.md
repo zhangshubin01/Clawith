@@ -58,7 +58,7 @@
 
 ### 4.2 性能优化
 
-- **索引创建**：在迁移中合理创建索引，提高查询性能
+- **索引创建必须使用 CONCURRENTLY**：生产环境大表创建索引时，必须使用 `CREATE INDEX CONCURRENTLY IF NOT EXISTS` 替代 `CREATE INDEX IF NOT EXISTS`，避免写锁阻塞业务操作。注意 `CONCURRENTLY` 不能在事务块内执行，需要先 `commit` 再执行
 - **分批处理**：对于大型表的变更，使用分批处理避免锁表
 - **事务管理**：合理使用事务，确保迁移的原子性
 

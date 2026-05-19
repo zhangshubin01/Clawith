@@ -105,7 +105,7 @@ async def check_ip_rate_limit(
         except Exception as e:
             if "429" in str(type(e).__name__) or "rate" in str(e).lower():
                 raise
-            logger.warning("[RateLimit] Redis 限流异常，回退到内存: {}", e)
+            logger.info("[RateLimit] Redis 不可用，回退到内存限流（开发环境正常）: {}", e)
 
     # 内存回退（单 worker 有效）
     bucket_key = f"{endpoint_key}:{ip}"
@@ -151,7 +151,7 @@ async def check_session_rate_limit(
         except Exception as e:
             if "rate" in str(e).lower():
                 raise
-            logger.warning("[RateLimit] Redis session 限流异常，回退到内存: {}", e)
+            logger.info("[RateLimit] Redis 不可用，回退到内存限流（开发环境正常）: {}", e)
 
     # 内存回退
     bucket_key = f"session:{endpoint_key}:{session_id}"

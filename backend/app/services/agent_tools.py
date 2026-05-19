@@ -1666,6 +1666,40 @@ AGENT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "unpublish_page",
+            "description": "Unpublish and delete a previously published public page. Use this to remove a page that is no longer needed or contains incorrect content. Requires the short_id from list_published_pages.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "short_id": {
+                        "type": "string",
+                        "description": "The short ID of the page to unpublish (e.g. 'aB3xY7kM'). Get this from list_published_pages.",
+                    },
+                },
+                "required": ["short_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_published_page",
+            "description": "Delete a previously published public page. Alias for unpublish_page — same behavior. Requires the short_id from list_published_pages.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "short_id": {
+                        "type": "string",
+                        "description": "The short ID of the page to delete (e.g. 'aB3xY7kM'). Get this from list_published_pages.",
+                    },
+                },
+                "required": ["short_id"],
+            },
+        },
+    },
     # --- Skill Management ---
     {
         "type": "function",
@@ -2927,6 +2961,8 @@ async def execute_tool(
             result = await _publish_page(agent_id, user_id, ws, arguments)
         elif tool_name == "list_published_pages":
             result = await _list_published_pages(agent_id)
+        elif tool_name in ("unpublish_page", "delete_published_page"):
+            result = await _unpublish_page(agent_id, arguments)
         # ── AgentBay Tools ──
         elif tool_name == "agentbay_browser_navigate":
             result = await _agentbay_browser_navigate(agent_id, ws, arguments)
@@ -3101,7 +3137,7 @@ async def _search_duckduckgo(query: str, max_results: int) -> str:
     last_error = None
     for attempt in range(3):
         try:
-            async with httpx.AsyncClient(follow_redirects=True) as client:
+            async with httpx.AsyncClient(follow_redirects=False) as client:
                 resp = await client.get(
                     "https://html.duckduckgo.com/html/",
                     params={"q": query},
@@ -3179,7 +3215,7 @@ async def _jina_search(arguments: dict) -> str:
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=30) as client:
             resp = await client.get(
                 f"https://s.jina.ai/{__import__('urllib.parse', fromlist=['quote']).quote(query)}",
                 headers=headers,
@@ -3229,7 +3265,7 @@ async def _jina_read(arguments: dict) -> str:
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=30) as client:
             resp = await client.get(
                 f"https://r.jina.ai/{url}",
                 headers=headers,
@@ -3360,7 +3396,7 @@ async def _read_webpage(arguments: dict) -> str:
     }
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
             async with client.stream("GET", url, headers=headers) as resp:
                 content_length = resp.headers.get("content-length")
                 if content_length and content_length.isdigit() and int(content_length) > max_bytes:
@@ -4075,7 +4111,7 @@ async def _execute_via_smithery_connect(mcp_url: str, tool_name: str, arguments:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
             # Call the tool via the existing connection
             tool_resp = await client.post(
                 f"https://api.smithery.ai/connect/{namespace}/{connection_id}/mcp",
@@ -10697,22 +10733,29 @@ async def _publish_page(agent_id: uuid.UUID, user_id: uuid.UUID, ws: Path, argum
     except Exception:
         pass
 
-    # Create record
+    # Create record with short_id collision retry
     from app.models.published_page import PublishedPage
-    try:
-        async with async_session() as db:
-            page = PublishedPage(
-                short_id=short_id,
-                agent_id=agent_id,
-                user_id=user_id,
-                tenant_id=tenant_id,
-                source_path=path,
-                title=title,
-            )
-            db.add(page)
-            await db.commit()
-    except Exception as e:
-        return f"Failed to publish: {e}"
+    from sqlalchemy.exc import IntegrityError
+    max_retries = 3
+    for attempt in range(max_retries):
+        short_id = secrets.token_urlsafe(6)[:8]
+        try:
+            async with async_session() as db:
+                page = PublishedPage(
+                    short_id=short_id,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    source_path=path,
+                    title=title,
+                )
+                db.add(page)
+                await db.commit()
+            break  # 成功，退出重试循环
+        except IntegrityError:
+            if attempt == max_retries - 1:
+                raise  # 重试耗尽
+            await asyncio.sleep(0.05)  # 短暂等待后重试
 
     # Build public URL from the same settings loader used by the app. Reading
     # os.environ directly misses values that come from the local .env file.
@@ -10776,6 +10819,38 @@ async def _list_published_pages(agent_id: uuid.UUID) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Failed to list pages: {e}"
+
+
+async def _unpublish_page(agent_id: uuid.UUID, arguments: dict) -> str:
+    """取消发布一个已发布的页面。根据 short_id 查找并删除。
+
+    这是 unpublish_page 和 delete_published_page 工具的后端实现，
+    两个工具名对应同一操作，方便 LLM 理解不同语义的调用。
+    """
+    short_id = arguments.get("short_id", "").strip()
+    if not short_id:
+        return "Missing required argument 'short_id'"
+
+    from app.models.published_page import PublishedPage
+
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(PublishedPage).where(
+                    PublishedPage.short_id == short_id,
+                    PublishedPage.agent_id == agent_id,
+                )
+            )
+            page = result.scalar_one_or_none()
+            if not page:
+                return f"No published page found with short_id '{short_id}' for this agent. Use list_published_pages to see available pages."
+
+            title = page.title or "Untitled"
+            await db.delete(page)
+            await db.commit()
+            return f"Page '{title}' (short_id: {short_id}) has been unpublished and deleted."
+    except Exception as e:
+        return f"Failed to unpublish page: {e}"
 
 
 # ─── AgentBay Tool Handlers ─────────────────────────────────────

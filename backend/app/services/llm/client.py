@@ -317,7 +317,7 @@ class OpenAICompatibleClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None, verify=_create_ssl_context())
+            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=False, proxy=None, verify=_create_ssl_context())
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
@@ -765,7 +765,7 @@ class OpenAIResponsesClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None, verify=_create_ssl_context())
+            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=False, proxy=None, verify=_create_ssl_context())
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
@@ -1072,7 +1072,7 @@ class GeminiClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None, verify=_create_ssl_context())
+            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=False, proxy=None, verify=_create_ssl_context())
         return self._client
 
     async def _get_openai_fallback_client(self) -> OpenAICompatibleClient:
@@ -1568,7 +1568,7 @@ class AnthropicClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, proxy=None, verify=_create_ssl_context())
+            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=False, proxy=None, verify=_create_ssl_context())
         return self._client
 
     def _get_headers(self) -> dict[str, str]:

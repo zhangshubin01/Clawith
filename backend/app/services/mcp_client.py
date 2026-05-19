@@ -112,7 +112,7 @@ class MCPClient:
 
     async def _streamable_request(self, method: str, params: dict | None = None) -> dict:
         """Send a JSON-RPC request via Streamable HTTP transport."""
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
             if not self._session_id:
                 await self._streamable_initialize(client)
 
@@ -142,7 +142,7 @@ class MCPClient:
 
         messages_url = None
 
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             async with client.stream("GET", sse_url, headers=headers) as resp:
                 if resp.status_code != 200:
                     raise Exception(f"SSE connect failed: HTTP {resp.status_code}")
@@ -191,7 +191,7 @@ class MCPClient:
 
         timeout = 60 if method == "tools/call" else 30
 
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             # Open the SSE stream
             async with client.stream("GET", sse_url, headers=headers_sse) as sse_resp:
                 if sse_resp.status_code != 200:

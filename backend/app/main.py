@@ -290,6 +290,9 @@ async def lifespan(app: FastAPI):
                 import traceback
                 traceback.print_exception(type(exc), exc, exc.__traceback__)
 
+        from app.api.gateway import start_openclaw_offline_detector
+        from app.services.cleanup import start_audit_log_cleanup
+
         for name, coro in [
             ("trigger_daemon", start_trigger_daemon()),
             ("feishu_ws", feishu_ws_manager.start_all()),
@@ -297,6 +300,8 @@ async def lifespan(app: FastAPI):
             ("wecom_stream", wecom_stream_manager.start_all()),
             ("wechat_poll", wechat_poll_manager.start_all()),
             ("discord_gw", discord_gateway_manager.start_all()),
+            ("openclaw_offline", start_openclaw_offline_detector()),
+            ("audit_cleanup", start_audit_log_cleanup()),
         ]:
             task = asyncio.create_task(coro, name=name)
             task.add_done_callback(_bg_task_error)

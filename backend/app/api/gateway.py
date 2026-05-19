@@ -8,16 +8,37 @@ import asyncio
 import hashlib
 import hmac
 import os
+import time
 import uuid
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Header, HTTPException, Depends
+from fastapi import APIRouter, Header, HTTPException, Depends, Request
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, async_session
 from app.core.permissions import evaluate_agent_relationship_status, evaluate_human_relationship_status
+
+# NEW-016: 内存滑动窗口速率限制器（P2 级，防止 Gateway 端点被滥用）
+# 每 key 每分钟最多允许指定次数请求
+_gateway_rate_windows: dict[str, list[float]] = defaultdict(list)
+_GATEWAY_RATE_LIMIT = 30       # 每分钟最多 30 次
+_GATEWAY_RATE_WINDOW_S = 60    # 窗口 60 秒
+
+
+def _check_gateway_rate_limit(key: str) -> None:
+    """检查并更新速率限制，超出限制抛出 HTTPException 429。"""
+    now = time.time()
+    window = _gateway_rate_windows[key]
+    # 清理过期条目
+    cutoff = now - _GATEWAY_RATE_WINDOW_S
+    while window and window[0] < cutoff:
+        window.pop(0)
+    if len(window) >= _GATEWAY_RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Max 30 requests/min.")
+    window.append(now)
 from app.models.agent import Agent
 from app.models.gateway_message import GatewayMessage
 from app.models.user import User
@@ -144,6 +165,7 @@ async def poll_messages(
     Returns all pending messages and marks them as delivered.
     Also updates openclaw_last_seen for online status tracking.
     """
+    _check_gateway_rate_limit(f"poll:{x_api_key[:16]}")
     logger.debug(f"[Gateway] poll called, key_prefix={x_api_key[:8]}...")
     agent = await _get_agent_by_key(x_api_key, db)
 
@@ -151,10 +173,32 @@ async def poll_messages(
     agent.openclaw_last_seen = datetime.now(timezone.utc)
     agent.status = "running"
 
-    # Fetch pending messages
+    now = datetime.now(timezone.utc)
+
+    # 清理已过期的 pending 消息，防止离线节点消息永久堆积
+    # expires_at 为 NULL 的历史数据不清理（向后兼容）
+    cleanup_result = await db.execute(
+        delete(GatewayMessage).where(
+            GatewayMessage.agent_id == agent.id,
+            GatewayMessage.status == "pending",
+            GatewayMessage.expires_at.isnot(None),
+            GatewayMessage.expires_at <= now,
+        )
+    )
+    if cleanup_result.rowcount:
+        logger.info(
+            f"[Gateway] Cleaned up {cleanup_result.rowcount} expired pending messages for agent {agent.id}"
+        )
+
+    # 查询 pending 消息时跳过已过期的消息
+    # expires_at 为 NULL（历史数据）视为永不过期
     result = await db.execute(
         select(GatewayMessage)
-        .where(GatewayMessage.agent_id == agent.id, GatewayMessage.status == "pending")
+        .where(
+            GatewayMessage.agent_id == agent.id,
+            GatewayMessage.status == "pending",
+            or_(GatewayMessage.expires_at.is_(None), GatewayMessage.expires_at > now),
+        )
         .order_by(GatewayMessage.created_at.asc())
     )
     messages = result.scalars().all()
@@ -282,7 +326,8 @@ async def report_result(
 ):
     """OpenClaw agent reports the result of a processed message."""
     if not x_api_key:
-        raise HTTPException(status_code=401, detail="Missing X-Api-Key header")
+        raise HTTPException(status_code=401, detail="Missing X-Api-Key")
+    _check_gateway_rate_limit(f"report:{x_api_key[:16]}")
     logger.debug(f"[Gateway] report called, key_prefix={x_api_key[:8]}..., msg_id={body.message_id}")
     agent = await _get_agent_by_key(x_api_key, db)
 
@@ -435,7 +480,7 @@ async def _send_to_agent_background(
             existing = await db.execute(select(ChatSession).where(ChatSession.id == session_uuid))
             session = existing.scalar_one_or_none()
             if not session:
-                from datetime import datetime, timezone
+                from datetime import datetime, timedelta, timezone
 
                 session = ChatSession(
                     id=session_uuid,
@@ -462,7 +507,7 @@ async def _send_to_agent_background(
                 await db.commit()
 
             # Update last_message_at
-            from datetime import datetime, timezone
+            from datetime import datetime, timedelta, timezone
 
             session.last_message_at = datetime.now(timezone.utc)
 
@@ -834,3 +879,43 @@ For humans, the message is delivered via their available channel (e.g. Feishu).
         "skill_content": skill_content,
         "heartbeat_addition": heartbeat_line,
     }
+
+
+async def start_openclaw_offline_detector():
+    """后台任务：每 60 秒检测失联的 OpenClaw 节点，将超时的标记为 offline。
+
+    判定逻辑：openclaw_last_seen 超过 5 分钟未更新的 running 节点 → status 降级为 "offline"。
+    节点恢复后，下一次 poll/heartbeat 会自动将 status 设回 "running"。
+
+    问题 #NEW-024：节点失联后 openclaw_last_seen 滞后，但 status 仍为 running。
+    """
+    OFFLINE_TIMEOUT_SECONDS = 300  # 5 分钟无心跳视为离线
+    CHECK_INTERVAL_SECONDS = 60
+
+    # 等待服务启动稳定后开始检测
+    await asyncio.sleep(30)
+
+    while True:
+        try:
+            async with async_session() as db:
+                cutoff = datetime.now(timezone.utc) - timedelta(seconds=OFFLINE_TIMEOUT_SECONDS)
+                result = await db.execute(
+                    select(Agent).where(
+                        Agent.status == "running",
+                        Agent.openclaw_last_seen.is_not(None),
+                        Agent.openclaw_last_seen < cutoff,
+                    )
+                )
+                offline_agents = result.scalars().all()
+                for agent in offline_agents:
+                    agent.status = "offline"
+                    logger.info(
+                        f"[OpenClaw] Agent {agent.name} ({agent.id}) marked offline — "
+                        f"last seen {agent.openclaw_last_seen.isoformat()}"
+                    )
+                if offline_agents:
+                    await db.commit()
+        except Exception:
+            logger.exception("[OpenClaw] Offline detector iteration failed")
+
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)

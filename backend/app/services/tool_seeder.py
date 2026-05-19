@@ -2383,6 +2383,40 @@ BUILTIN_TOOLS = [
         "config": {},
         "config_schema": {},
     },
+    {
+        "name": "unpublish_page",
+        "display_name": "Unpublish Page",
+        "description": "Unpublish and delete a previously published public page. Requires the short_id from list_published_pages.",
+        "category": "pages",
+        "icon": "🗑️",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "short_id": {"type": "string", "description": "The short ID of the page to unpublish (e.g. 'aB3xY7kM')"},
+            },
+            "required": ["short_id"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "delete_published_page",
+        "display_name": "Delete Published Page",
+        "description": "Delete a previously published public page. Alias for unpublish_page — same behavior. Requires the short_id from list_published_pages.",
+        "category": "pages",
+        "icon": "🗑️",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "short_id": {"type": "string", "description": "The short ID of the page to delete (e.g. 'aB3xY7kM')"},
+            },
+            "required": ["short_id"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
     # --- Skill Management ---
     {
         "name": "search_clawhub",

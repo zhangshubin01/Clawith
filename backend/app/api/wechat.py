@@ -161,7 +161,7 @@ async def get_wechat_qrcode_image(
         raise HTTPException(status_code=403, detail="Only creator can configure channel")
 
     target_url = _validate_qrcode_proxy_url(url)
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
         resp = await client.get(target_url)
         if resp.status_code >= 400:
             raise HTTPException(status_code=resp.status_code, detail="Failed to fetch WeChat QR image")

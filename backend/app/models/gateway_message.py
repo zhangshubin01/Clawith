@@ -1,13 +1,22 @@
 """Gateway messages for OpenClaw agent communication."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+
+
+def _default_expires_at() -> datetime:
+    """消息默认过期时间：创建后 7 天。
+
+    用于 GatewayMessage.expires_at 的 Python 层默认值，
+    确保通过 ORM 创建的消息自动获得过期时间。
+    """
+    return datetime.now(timezone.utc) + timedelta(days=7)
 
 
 class GatewayMessage(Base):
@@ -31,6 +40,9 @@ class GatewayMessage(Base):
     # Status tracking
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)  # pending | delivered | completed
     result: Mapped[str | None] = mapped_column(Text)
+    # 消息过期时间：创建后 7 天自动过期，防止离线节点消息永久堆积
+    # None 表示永不过期（仅用于已迁移的历史数据，新消息始终设置此值）
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), default=_default_expires_at)
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

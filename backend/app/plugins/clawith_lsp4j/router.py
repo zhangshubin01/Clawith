@@ -66,8 +66,22 @@ async def _resolve_agent_override(
             if agent is None:
                 ar = await db.execute(select(AgentModel).where(AgentModel.name == override))
                 agent = ar.scalar_one_or_none()
+            # 兜底：IDE 可能以 "clawith" 等通用名连接，DB 中无此名称时回退到用户创建的最新 agent
             if agent is None:
-                logger.warning("[LSP4J-LIFE] agent_override %r not found", override)
+                ar = await db.execute(
+                    select(AgentModel)
+                    .where(AgentModel.creator_id == user_id)
+                    .order_by(AgentModel.created_at.desc())
+                    .limit(1)
+                )
+                agent = ar.scalar_one_or_none()
+                if agent is not None:
+                    logger.info(
+                        "[LSP4J-LIFE] agent_override {!r} not found, fallback to user's agent: id={} name={}",
+                        override, agent.id, agent.name,
+                    )
+            if agent is None:
+                logger.warning("[LSP4J-LIFE] agent_override {!r} not found and user has no agents", override)
                 return None
 
             # 权限校验：复用 check_agent_access，检查用户是否有权访问该 agent

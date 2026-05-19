@@ -923,7 +923,7 @@ async def read_enterprise_file(
     try:
         content = target.read_text(encoding="utf-8", errors="replace")
         return {"path": path, "content": content}
-    except Exception:
+    except OSError:
         return {"path": path, "content": f"[二进制文件: {target.name}, {target.stat().st_size} bytes]"}
 
 

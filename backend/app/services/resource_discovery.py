@@ -68,7 +68,7 @@ async def _search_smithery_api(query: str, max_results: int, api_key: str) -> li
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             resp = await client.get(
                 f"{SMITHERY_API_BASE}/servers",
                 params={"q": query, "pageSize": max_results},
@@ -131,7 +131,7 @@ async def _search_modelscope_api(query: str, max_results: int, agent_id: uuid.UU
         "User-Agent": "modelscope-mcp-server/1.0",
     }
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             resp = await client.put(
                 f"{MODELSCOPE_API_BASE}/openapi/v1/mcp/servers",
                 json={"page_size": max_results, "page_number": 1, "search": query, "filter": {}},
@@ -229,7 +229,7 @@ async def _ensure_smithery_connection(api_key: str, mcp_url: str, display_name: 
     """
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
             # Get or create namespace
             ns_resp = await client.get("https://api.smithery.ai/namespaces", headers=headers)
             namespaces = ns_resp.json().get("namespaces", []) if ns_resp.status_code == 200 else []
@@ -364,7 +364,7 @@ async def import_mcp_from_smithery(
     headers = {"Accept": "application/json"}
 
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             resp = await client.get(
                 f"{SMITHERY_API_BASE}/servers",
                 params={"q": server_id.lstrip("@"), "pageSize": 5},
@@ -403,7 +403,7 @@ async def import_mcp_from_smithery(
     tools_discovered = []
     deployment_url = None
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
             detail_resp = await client.get(
                 f"{SMITHERY_API_BASE}/servers/{qualified_name}",
                 headers=headers,

@@ -51,6 +51,23 @@ async def render_page(short_id: str, request: Request, db: AsyncSession = Depend
 
     html_content = file_path.read_text(encoding="utf-8", errors="replace")
 
+    # 服务端 HTML 净化：移除危险标签和属性，配合 CSP sandbox 形成深度防御
+    import bleach
+    html_content = bleach.clean(
+        html_content,
+        tags=bleach.ALLOWED_TAGS | {'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'span',
+                                     'pre', 'code', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+                                     'img', 'svg', 'path', 'circle', 'rect', 'line', 'polyline',
+                                     'g', 'defs', 'use', 'marker', 'pattern', 'text', 'tspan'},
+        attributes={'*': ['class', 'id', 'style', 'data-*'],
+                    'img': ['src', 'alt', 'width', 'height'],
+                    'a': ['href', 'target', 'rel'],
+                    'svg': ['xmlns', 'viewBox', 'width', 'height', 'fill', 'stroke'],
+                    'path': ['d', 'fill', 'stroke', 'stroke-width'],
+                    'use': ['href', 'x', 'y', 'width', 'height']},
+        strip=True,
+    )
+
     # Increment view count
     await db.execute(
         update(PublishedPage)

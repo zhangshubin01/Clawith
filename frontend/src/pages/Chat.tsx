@@ -508,6 +508,8 @@ export default function Chat() {
         if (!id || !token) return;
 
         let cancelled = false;
+        let retryCount = 0;
+        const MAX_RETRY_DELAY = 60000;
 
         const connect = () => {
             if (cancelled) return;
@@ -517,7 +519,9 @@ export default function Chat() {
             }
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const lang = (i18n.language || 'en').toLowerCase().startsWith('zh') ? 'zh' : 'en';
-            const wsUrl = `${protocol}//${window.location.host}/ws/chat/${id}?token=${token}&lang=${lang}`;
+            const wsUrl = wsSessionId
+                ? `${protocol}//${window.location.host}/ws/chat/${id}?token=${token}&lang=${lang}&session_id=${wsSessionId}`
+                : `${protocol}//${window.location.host}/ws/chat/${id}?token=${token}&lang=${lang}`;
             const ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
@@ -525,13 +529,18 @@ export default function Chat() {
                     ws.close();
                     return;
                 }
+                retryCount = 0;
                 setConnected(true);
                 wsRef.current = ws;
             };
-            ws.onclose = () => {
+            ws.onclose = (event) => {
                 if (!cancelled) {
                     setConnected(false);
-                    setTimeout(() => connect(), 2000);
+                    // 认证失败不重试
+                    if (event.code === 4001 || event.code === 4002) return;
+                    const delay = Math.min(2000 * Math.pow(2, retryCount), MAX_RETRY_DELAY);
+                    retryCount++;
+                    setTimeout(() => connect(), delay);
                 }
             };
             ws.onerror = () => {
@@ -726,6 +735,20 @@ export default function Chat() {
             setTimeout(() => textareaRef.current?.focus(), 50);
         }
     }, [connected]);
+
+    // 会话切换时清理状态，防止多 Agent 间状态污染 (NEW-017)
+    useEffect(() => {
+        pendingToolCalls.current = [];
+        streamContent.current = '';
+        thinkingContent.current = '';
+        historyLoaded.current = false;
+        onboardingKickoffSent.current = false;
+        setMessages([]);
+        setConnected(false);
+        setStreaming(false);
+        setIsWaiting(false);
+        setWsSessionId('');
+    }, [id]);
 
     const handleMessagesScroll = () => {
         const el = messagesContainerRef.current;
