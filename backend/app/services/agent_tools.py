@@ -70,6 +70,8 @@ from app.services.llm.finish import (
 
 _settings = get_settings()
 WORKSPACE_ROOT = Path(_settings.AGENT_DATA_DIR)
+MAX_EXEC_STDOUT_CAPTURE_BYTES = 1_000_000
+MAX_EXEC_STDERR_CAPTURE_BYTES = 500_000
 
 # ─── Tool Config Cache ──────────────────────────────────────────
 # Cache tool configurations to avoid frequent DB queries
@@ -6289,8 +6291,12 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
         # ── Inject file-delivery message into A2A chat session ──
         # This ensures the target agent sees the file delivery in its
         # conversation context when send_message_to_agent is called next.
-        print(f"[A2A-File-TRACE] About to inject file delivery msg: from={source_name} to={target_name} file={delivered_name}", flush=True)
-        logger.warning(f"[A2A-File-TRACE] About to inject file delivery msg: from={source_name} to={target_name} file={delivered_name}")
+        logger.info(
+            "[A2A-File] Injecting file delivery message: from=%s to=%s file=%s",
+            source_name,
+            target_name,
+            delivered_name,
+        )
         try:
             from app.models.audit import ChatMessage
             from app.models.chat_session import ChatSession
@@ -6324,13 +6330,13 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
                     await db2.flush()
 
                 file_msg_content = (
-                    f"[文件投递通知 from {source_name}]\n"
-                    f"已向你发送文件：{delivered_name}\n"
-                    f"文件路径：{target_rel_path}\n"
-                    f"请使用 read_file(path=\"{target_rel_path}\") 阅读此文件。"
+                    f"[File delivery from {source_name}]\n"
+                    f"{source_name} sent you a file: {delivered_name}\n"
+                    f"File path: {target_rel_path}\n"
+                    f"Use read_file(path=\"{target_rel_path}\") to inspect it."
                 )
                 if delivery_note:
-                    file_msg_content += f"\n附言：{delivery_note}"
+                    file_msg_content += f"\nNote: {delivery_note}"
 
                 # Resolve sender participant for proper attribution
                 src_part_r2 = await db2.execute(
@@ -6348,10 +6354,12 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
                 ))
                 chat_session.last_message_at = ts
                 await db2.commit()
-                print(f"[A2A-File] Injected file delivery message into session {chat_session.id} for {target_name}", flush=True)
-                logger.warning(f"[A2A-File] OK: Injected file delivery message into session {chat_session.id} for {target_name}")
+                logger.info(
+                    "[A2A-File] Injected file delivery message into session %s for %s",
+                    chat_session.id,
+                    target_name,
+                )
         except Exception as e:
-            print(f"[A2A-File] FAILED to inject file delivery message: {e}", flush=True)
             logger.error(f"[A2A-File] FAILED to inject file delivery message: {e}")
 
         return (
@@ -7583,11 +7591,14 @@ async def _execute_code_legacy(ws: Path, arguments: dict, allow_network: bool = 
         stderr_data = bytearray()
 
         async def read_stream(stream, out, label="stdout"):
+            capture_limit = MAX_EXEC_STDERR_CAPTURE_BYTES if label == "stderr" else MAX_EXEC_STDOUT_CAPTURE_BYTES
             while True:
                 chunk = await stream.read(4096)
                 if not chunk:
                     break
-                out.extend(chunk)
+                remaining = capture_limit - len(out)
+                if remaining > 0:
+                    out.extend(chunk[:remaining])
                 # Real-time streaming: push each chunk to the WebSocket
                 if on_output:
                     try:

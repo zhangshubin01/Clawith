@@ -10,7 +10,7 @@ import type { FileBrowserApi } from '../../components/FileBrowser';
 import FileBrowser from '../../components/FileBrowser';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
 import PromptModal from '../../components/PromptModal';
-import type { LivePreviewState } from '../../components/AgentBayLivePanel';
+import { appendLiveCodeOutput, type LivePreviewState } from '../../components/AgentBayLivePanel';
 import AgentSidePanel, { SidePanelTab } from '../../components/AgentSidePanel';
 import type { WorkspaceActivity, WorkspaceLiveDraft } from '../../components/WorkspaceOperationPanel';
 import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, focusApi, scheduleApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress } from '../../services/api';
@@ -3190,7 +3190,12 @@ export default function AgentDetailPage() {
                 } else if (d.env === 'code' && d.output) {
                     setLiveState(prev => ({
                         ...prev,
-                        code: { output: (prev.code?.output || '') + d.output },
+                        code: {
+                            output: appendLiveCodeOutput(
+                                prev.code?.output || '',
+                                `${d.stream === 'stderr' ? '⚠️ ' : ''}${d.output}`
+                            ),
+                        },
                     }));
                     if (allowLivePanelAutoFocus()) {
                         setSidePanelTab('code');

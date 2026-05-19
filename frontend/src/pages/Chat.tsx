@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 import MarkdownRenderer from '../components/MarkdownRenderer';
-import AgentBayLivePanel, { LivePreviewState } from '../components/AgentBayLivePanel';
+import AgentBayLivePanel, { appendLiveCodeOutput, LivePreviewState } from '../components/AgentBayLivePanel';
 import ModelSwitcher from '../components/ModelSwitcher';
 import { agentApi, enterpriseApi, tenantApi, uploadFileWithProgress } from '../services/api';
 import { IconPaperclip, IconSend } from '@tabler/icons-react';
@@ -293,6 +293,7 @@ export default function Chat() {
     const pendingToolCalls = useRef<ToolCall[]>([]);
     const streamContent = useRef('');
     const thinkingContent = useRef('');
+    const liveCodeSeen = useRef(false);
     // Track history load + whether we've already fired the one-shot onboarding
     // trigger so the agent greets the user at most once per mount.
     const historyLoaded = useRef(false);
@@ -512,6 +513,7 @@ export default function Chat() {
                 // ── AgentBay live preview events ──
                 if (data.type === 'agentbay_live') {
                     console.log('[LivePreview] Received:', data.env, 'url:', data.screenshot_url?.substring(0, 60));
+                    let shouldOpenLivePanel = data.env !== 'code';
                     setLiveState(prev => {
                         const next = { ...prev };
                         if ((data.env === 'desktop' || data.env === 'browser') && data.screenshot_url) {
@@ -523,13 +525,17 @@ export default function Chat() {
                             // Real-time streaming: concatenate chunks directly
                             const existing = prev.code?.output || '';
                             const prefix = data.stream === 'stderr' ? '⚠️ ' : '';
-                            next.code = { output: existing + prefix + data.output };
+                            next.code = { output: appendLiveCodeOutput(existing, prefix + data.output) };
                         }
                         return next;
                     });
+                    if (data.env === 'code' && data.output) {
+                        shouldOpenLivePanel = !liveCodeSeen.current;
+                        liveCodeSeen.current = true;
+                    }
                     // Auto-expand the live panel on first data arrival
                     // (for desktop/browser screenshots, or the first code chunk only)
-                    if (data.env !== 'code' || !liveState.code) {
+                    if (shouldOpenLivePanel) {
                         setLivePanelVisible(true);
                     }
                     return;
@@ -1105,6 +1111,7 @@ export default function Chat() {
                             }));
                         }}
                         onClearCode={() => {
+                            liveCodeSeen.current = false;
                             setLiveState(prev => {
                                 const next = { ...prev };
                                 delete next.code;
