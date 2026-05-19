@@ -381,6 +381,7 @@ async def _process_tool_call(
     full_reasoning_content: str,
     allowed_tool_names: set[str],
     tool_result_cache: dict[str, str | list] | None = None,
+    on_code_output=None,
 ) -> str:
     from app.services.agent_tools import execute_tool  # 延迟导入，避免循环依赖
     """Process a single tool call and return result."""
@@ -476,13 +477,15 @@ async def _process_tool_call(
         except Exception as _e:
             logger.warning(f"[LLM] on_tool_call running error: {_e}")
 
-    # Execute tool
+    # Execute tool — pass on_output for execute_code streaming
+    _on_output = on_code_output if tool_name in ("execute_code", "execute_code_e2b") else None
     result = await execute_tool(
         tool_name,
         args,
         agent_id=agent_id,
         user_id=user_id or agent_id,
         session_id=session_id,
+        on_output=_on_output,
     )
     logger.debug(f"[LLM] Tool result: {result[:100]}")
 
@@ -552,6 +555,7 @@ async def call_llm(
     skip_tools: bool = False,
     parallel_tools_extra_readonly: set[str] | None = None,
     tool_warning_mode: str = "default",
+    on_code_output=None,
 ) -> str:
     from app.services.agent_tools import AGENT_TOOLS, get_agent_tools_for_llm  # 延迟导入，避免循环依赖
     """Call LLM via unified client with function-calling tool loop.
@@ -836,6 +840,7 @@ async def call_llm(
                 session_id=session_id,
                 supports_vision=supports_vision,
                 on_tool_call=on_tool_call,
+                on_code_output=on_code_output,
                 full_reasoning_content=full_reasoning_content,
                 allowed_tool_names=allowed_tool_names,
                 tool_result_cache=tool_result_cache,
@@ -925,6 +930,7 @@ async def call_llm_with_failover(
     skip_tools: bool = False,
     parallel_tools_extra_readonly: set[str] | None = None,
     tool_warning_mode: str = "default",
+    on_code_output=None,
 ) -> str:
     """Call LLM with automatic failover support.
 
@@ -972,6 +978,7 @@ async def call_llm_with_failover(
         skip_tools=skip_tools,
         parallel_tools_extra_readonly=parallel_tools_extra_readonly,
         tool_warning_mode=tool_warning_mode,
+        on_code_output=on_code_output,
     )
 
     # Check if we need to failover
@@ -1046,6 +1053,7 @@ async def call_llm_with_failover(
         skip_tools=skip_tools,
         parallel_tools_extra_readonly=parallel_tools_extra_readonly,
         tool_warning_mode=tool_warning_mode,
+        on_code_output=on_code_output,
     )
 
     # Combine error messages if fallback also failed

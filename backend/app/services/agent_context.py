@@ -750,7 +750,7 @@ If no search or webpage-reading tool is available, say that web lookup is not en
         if focus.strip():
             dynamic_parts.append(f"\n## Focus\n{focus}")
     except Exception:
-        # #146 修复：Focus 上下文加载失败时记录警告，优雅降级
+        # 优雅降级：Focus 上下文加载失败不影响主流程
         logger.warning("无法加载 Focus 上下文（非关键，Agent 仍可正常工作）", exc_info=True)
 
     # --- Active Triggers ---
