@@ -8,7 +8,6 @@ import asyncio
 import threading
 import uuid
 from collections import OrderedDict
-from contextvars import ContextVar
 from pathlib import Path
 
 from loguru import logger
@@ -18,11 +17,6 @@ from app.config import get_settings
 settings = get_settings()
 
 PERSISTENT_DATA = Path(settings.AGENT_DATA_DIR)
-
-# ─── IDE 会话标记 ContextVar ───────────────────────────────────────────────
-# 由 LSP4J router 在 _handle_chat_ask 中设置，build_agent_context 检测此标记
-# 以区分 IDE 插件模式（需项目优先）和 Web UI 模式（Agent 自主模式）。
-_is_ide_session: ContextVar[bool] = ContextVar("_is_ide_session", default=False)
 
 # ─── Context File Cache (LRU + mtime invalidation) ───────────────────────────────
 _MAX_CONTEXT_CACHE_SIZE = 100
@@ -239,14 +233,9 @@ def _build_skills_index(agent_id: uuid.UUID) -> str:
 
     lines.append("")
     lines.append("⚠️ SKILL USAGE RULES:")
-    if _is_ide_session.get():
-        lines.append("1. Skills are reference material — work on the user's project directly first.")
-        lines.append("2. Load a skill's full instructions ONLY when you specifically need its guidance.")
-        lines.append("3. Do NOT load all skills upfront — only load those relevant to the current task.")
-    else:
-        lines.append("1. When a user request matches a skill, FIRST call `read_file` with the File path above to load the full instructions.")
-        lines.append("2. Follow the loaded instructions to complete the task.")
-        lines.append("3. Do NOT guess what the skill contains — always read it first.")
+    lines.append("1. When a user request matches a skill, FIRST call `read_file` with the File path above to load the full instructions.")
+    lines.append("2. Follow the loaded instructions to complete the task.")
+    lines.append("3. Do NOT guess what the skill contains — always read it first.")
     lines.append("4. Folder-based skills may contain auxiliary files (scripts/, references/, examples/). Use `list_files` on the skill folder to discover them.")
 
     return "\n".join(lines)
@@ -329,32 +318,30 @@ When installing or importing an MCP server via `discover_resources` / `import_mc
 
     dynamic_parts = []
 
-    # IDE 会话不注入 IM 通道工具说明，减少 token 与工具混淆（NEW-011）
-    _inject_im_channel_tools = not _is_ide_session.get()
-
     # --- Feishu Built-in Tools (only injected when agent has Feishu configured) ---
-    if _inject_im_channel_tools:
-        _has_feishu = False
-        try:
-            from sqlalchemy import select
-            from app.models.channel_config import ChannelConfig
-            from app.database import async_session as _ctx_session
+    # 注：原 `_inject_im_channel_tools = not _is_ide_session.get()` 闸门已移除
+    # 让 IDE 与 Web 在 IM 通道注入上行为一致，按 agent 实际配置注入
+    _has_feishu = False
+    try:
+        from sqlalchemy import select
+        from app.models.channel_config import ChannelConfig
+        from app.database import async_session as _ctx_session
 
-            async with _ctx_session() as _ctx_db:
-                _cfg_r = await _ctx_db.execute(
-                    select(ChannelConfig).where(
-                        ChannelConfig.agent_id == agent_id,
-                        ChannelConfig.channel_type == "feishu",
-                        ChannelConfig.is_configured == True,
-                    )
+        async with _ctx_session() as _ctx_db:
+            _cfg_r = await _ctx_db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "feishu",
+                    ChannelConfig.is_configured == True,
                 )
-                _has_feishu = _cfg_r.scalar_one_or_none() is not None
-        except Exception:
-            # #146 修复：Feishu 通道配置加载失败时记录警告，优雅降级（不影响 Agent 核心功能）
-            logger.warning("无法加载 Feishu 通道配置（非关键，Agent 仍可正常工作）", exc_info=True)
+            )
+            _has_feishu = _cfg_r.scalar_one_or_none() is not None
+    except Exception:
+        # #146 修复：Feishu 通道配置加载失败时记录警告，优雅降级（不影响 Agent 核心功能）
+        logger.warning("无法加载 Feishu 通道配置（非关键，Agent 仍可正常工作）", exc_info=True)
 
-        if _has_feishu:
-            static_parts.append("""
+    if _has_feishu:
+        static_parts.append("""
 ## ⚡ Pre-installed Feishu Tools
 
 The following tools are available in your toolset. **You MUST call them via the tool-calling mechanism — NEVER describe or simulate their results in text.**
@@ -409,7 +396,7 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
 → Use `attendee_names=["John"]` in `feishu_calendar_create` — names are resolved automatically.
 → Or use `attendee_open_ids=["ou_xxx"]` if you already have the open_id.""")
 
-        # --- DingTalk Built-in Tools ---
+    # --- DingTalk Built-in Tools ---
     # 注：DingTalk 上下文模块（app.services.agent.context.dingtalk）尚未实现。
     # 实现后取消注释下方代码并在 try 内添加相应的 import。
     # try:
@@ -420,23 +407,23 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
     # except Exception:
     #     logger.warning("无法加载 DingTalk 上下文（非关键，Agent 仍可正常工作）", exc_info=True)
 
-        # --- Atlassian Rovo Tools (injected when Atlassian channel is configured) ---
-        try:
-            from app.database import async_session
-            from app.models.channel_config import ChannelConfig
-            from sqlalchemy import select as sa_select
+    # --- Atlassian Rovo Tools (injected when Atlassian channel is configured) ---
+    try:
+        from app.database import async_session
+        from app.models.channel_config import ChannelConfig
+        from sqlalchemy import select as sa_select
 
-            async with async_session() as db:
-                result = await db.execute(
-                    sa_select(ChannelConfig).where(
-                        ChannelConfig.agent_id == agent_id,
-                        ChannelConfig.channel_type == "atlassian",
-                        ChannelConfig.is_configured == True,
-                    )
+        async with async_session() as db:
+            result = await db.execute(
+                sa_select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "atlassian",
+                    ChannelConfig.is_configured == True,
                 )
-                atlassian_config = result.scalar_one_or_none()
-                if atlassian_config:
-                    static_parts.append("""
+            )
+            atlassian_config = result.scalar_one_or_none()
+            if atlassian_config:
+                static_parts.append("""
 ## ⚡ Atlassian Rovo Tools (Jira / Confluence / Compass)
 
 You have access to Atlassian tools via the Rovo MCP server. **Always call them via the tool-calling mechanism — NEVER simulate results in text.**
@@ -472,8 +459,8 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
 - Make up Jira issue IDs, Confluence page URLs, or component names
 - Report success without a tool result
 - Ask the user for their Atlassian credentials — they are pre-configured""")
-        except Exception:
-            logger.warning("无法加载 Atlassian 工具列表（非关键功能，Agent 仍可正常工作）", exc_info=True)
+    except Exception:
+        logger.warning("无法加载 Atlassian 工具列表（非关键功能，Agent 仍可正常工作）", exc_info=True)
 
     # --- Company Intro (from system settings) ---
     try:
@@ -527,42 +514,6 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
                 static_parts.append(f"\n## Company Information\n{company_intro}")
     except Exception:
         logger.warning("无法加载 Company Intro（数据库不可用或查询失败，非关键功能）", exc_info=True)
-
-    if _is_ide_session.get():
-        static_parts.append("""
-
-## ⚡ IDE 连接模式
-
-你当前通过 IDE 插件与用户的本地项目交互。项目根路径已在 Role 段中标注。
-- **项目文件操作优先**：收到任务后，直接使用 IDE 工具（read_file、replace_text_by_path 等）操作项目文件。
-- **不要在任务开始时加载 Agent 内部文件**：memory/、skills/、workspace/ 是你的内部资源。先处理项目任务，按需查阅内部文件。
-- **修改项目文件时**必须使用 Role 段中标注的项目根路径或绝对路径，不要使用 workspace/ 前缀。
-- **🔴 禁止使用 execute_code 加载索引脚本**：不要运行 Python 脚本去加载项目索引器。IDE 工具直接访问项目文件，无需索引。
-- **🔴 禁止使用 search_codebase**：这是 Agent 内部索引搜索工具，对 IDE 项目无效。请用 search_file（文件名匹配）、grep_code（代码内容搜索）、list_dir（目录浏览）替代。
-
-## 🪨 IDE 极简回复规则（减少延迟 60-75%）
-
-IDE 模式下响应延迟直接影响用户体验。你必须大幅压缩输出，保持技术精度。
-
-**删除**: 冠词(a/an/the)、废话词(just/really/basically/actually)、客套话(sure/certainly/of course/happy to/I'd recommend)、犹豫词(it might be worth/you could consider)
-**保留**: 技术术语完整、代码块不变、错误消息/命令原文引用、文件路径绝对精确
-**模式**: `[诊断] → [原因] → [修复]`。三个短句内讲清核心。
-
-示例对比：
-❌ "Sure! I'd be happy to help you with that. The issue you're experiencing is likely caused by the authentication middleware not properly validating the token expiry. Let me take a look and suggest a fix."
-✅ "Token 过期校验 < 改 <=。修复 auth.py 第 42 行。"
-
-❌ "I analyzed the codebase and found the following issues. First, let me explain the architecture. The application uses a layered architecture where..."
-✅ "3 个问题：(1) Cache key 未加 version 前缀 → 切换环境时命中脏缓存 (2) DB pool size=5 → 高并发时排队 (3) 缺少超时中断"
-
-**思考过程也需精简**: 每轮工具调用前不要在 thinking 中展开长篇分析。读文件→确认问题→返回修复。
-
-**自动恢复完整模式**（以下情况可展开详述）:
-- 安全漏洞警告（XSS、SQL注入、路径遍历等）
-- 不可逆操作确认（delete_file、DROP TABLE、git push --force）
-- 用户明确要求详细解释
-
-""")
 
     static_parts.append("""
 

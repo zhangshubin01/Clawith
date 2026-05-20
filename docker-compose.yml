@@ -56,8 +56,12 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       # Password reset token lifetime in minutes (default: 30)
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
+    ports:
+      - "${BACKEND_PORT:-8008}:8000"
     volumes:
       - ./backend:/app
+      # debug mode：NDJSON 同步到 workspace .cursor/debug-7c2fa2.log
+      - ../.cursor:/agent-cursor:rw
       - ./backend/agent_data:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro

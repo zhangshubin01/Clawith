@@ -14,9 +14,36 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+# #region agent log
+from app.debug_trace import dbg as _dbg_llm
+
+
+def _audit_tool_pairing(api_messages: list) -> dict:
+    """统计 assistant tool_calls 与后续 tool 消息的配对缺口。"""
+    gaps: list[dict] = []
+    for i, msg in enumerate(api_messages):
+        if msg.role != "assistant" or not msg.tool_calls:
+            continue
+        expected = [tc.get("id") for tc in msg.tool_calls if tc.get("id")]
+        found: set[str] = set()
+        j = i + 1
+        while j < len(api_messages) and api_messages[j].role == "tool":
+            tid = api_messages[j].tool_call_id
+            if tid:
+                found.add(tid)
+            j += 1
+        missing = [x for x in expected if x not in found]
+        if missing:
+            gaps.append({"idx": i, "expected": len(expected), "missing": missing[:5]})
+    return {"msg_count": len(api_messages), "gap_count": len(gaps), "gaps": gaps[:3]}
+
+
+# #endregion
 
 from loguru import logger
 from sqlalchemy import select
@@ -398,7 +425,14 @@ async def _process_tool_call(
     # Guard: check if tool requires arguments
     should_execute, error_msg = _check_tool_requires_args(tool_name, args)
     if not should_execute:
-        return error_msg
+        api_messages.append(
+            LLMMessage(
+                role="tool",
+                tool_call_id=tc.get("id", ""),
+                content=error_msg or "[工具参数无效，已跳过]",
+            )
+        )
+        return ""
 
     if tool_name not in allowed_tool_names:
         result = _tool_not_enabled_message(tool_name)
@@ -479,14 +513,48 @@ async def _process_tool_call(
 
     # Execute tool — pass on_output for execute_code streaming
     _on_output = on_code_output if tool_name in ("execute_code", "execute_code_e2b") else None
-    result = await execute_tool(
-        tool_name,
-        args,
-        agent_id=agent_id,
-        user_id=user_id or agent_id,
-        session_id=session_id,
-        on_output=_on_output,
+    # #region agent log
+    _dbg_llm(
+        "B",
+        "caller.py:_process_tool_call:before_execute",
+        "execute_tool",
+        {"tool": tool_name, "call_id": tc.get("id"), "has_on_output_kw": _on_output is not None},
     )
+    # #endregion
+    try:
+        result = await execute_tool(
+            tool_name,
+            args,
+            agent_id=agent_id,
+            user_id=user_id or agent_id,
+            session_id=session_id,
+            on_output=_on_output,
+        )
+    except Exception as exc:
+        # #region agent log
+        _dbg_llm(
+            "B",
+            "caller.py:_process_tool_call:execute_failed",
+            type(exc).__name__,
+            {"tool": tool_name, "call_id": tc.get("id"), "err": str(exc)[:200]},
+        )
+        # #endregion
+        api_messages.append(
+            LLMMessage(
+                role="tool",
+                tool_call_id=tc.get("id", ""),
+                content=f"[工具执行失败] {type(exc).__name__}: {str(exc)[:200]}",
+            )
+        )
+        return ""
+    # #region agent log
+    _dbg_llm(
+        "B",
+        "caller.py:_process_tool_call:after_execute",
+        "ok",
+        {"tool": tool_name, "call_id": tc.get("id"), "result_len": len(str(result)) if result else 0},
+    )
+    # #endregion
     logger.debug(f"[LLM] Tool result: {result[:100]}")
 
     # ── Vision injection for screenshot tools ──
@@ -531,6 +599,95 @@ async def _process_tool_call(
     if tool_result_cache is not None and cache_key:
         tool_result_cache[cache_key] = tool_content
     return ""
+
+
+def _assistant_tool_call_ids(msg: LLMMessage) -> set[str]:
+    """从 assistant 消息提取 tool_call id 集合。"""
+    if msg.role != "assistant" or not msg.tool_calls:
+        return set()
+    return {tc.get("id") for tc in msg.tool_calls if tc.get("id")}
+
+
+def _find_tool_calls_owner(api_messages: list, tool_index: int) -> tuple[LLMMessage, int] | None:
+    """定位 tool 消息对应的 assistant（允许连续多条 tool 跟在同一个 assistant 后）。"""
+    j = tool_index - 1
+    while j >= 0 and api_messages[j].role == "tool":
+        j -= 1
+    if j >= 0 and api_messages[j].role == "assistant" and api_messages[j].tool_calls:
+        return api_messages[j], j
+    return None
+
+
+def _sanitize_orphan_tool_messages(api_messages: list) -> int:
+    """移除没有前置 assistant tool_calls 的孤立 tool 消息，避免 OpenAI 400。"""
+    removed = 0
+    i = 0
+    while i < len(api_messages):
+        msg = api_messages[i]
+        if msg.role != "tool":
+            i += 1
+            continue
+        owner_info = _find_tool_calls_owner(api_messages, i)
+        tool_call_id = msg.tool_call_id or ""
+        owner = owner_info[0] if owner_info else None
+        if owner and tool_call_id in _assistant_tool_call_ids(owner):
+            i += 1
+            continue
+        logger.warning(
+            "[LLM] removed orphan tool message: tool_call_id={} owner={}",
+            tool_call_id,
+            owner is not None,
+        )
+        api_messages.pop(i)
+        removed += 1
+    return removed
+
+
+def _repair_openai_tool_call_pairing(api_messages: list) -> None:
+    """规范化 tool 消息序列：先删孤立 tool，再补齐缺失的 tool 结果。"""
+    removed = _sanitize_orphan_tool_messages(api_messages)
+    if removed:
+        logger.warning("[LLM] sanitized {} orphan tool message(s)", removed)
+    i = 0
+    while i < len(api_messages):
+        msg = api_messages[i]
+        if msg.role != "assistant" or not msg.tool_calls:
+            i += 1
+            continue
+        expected_ids = [tc.get("id") for tc in msg.tool_calls if tc.get("id")]
+        if not expected_ids:
+            i += 1
+            continue
+        found_ids: set[str] = set()
+        j = i + 1
+        while j < len(api_messages) and api_messages[j].role == "tool":
+            tool_call_id = api_messages[j].tool_call_id
+            if tool_call_id:
+                found_ids.add(tool_call_id)
+            j += 1
+        missing_ids = [call_id for call_id in expected_ids if call_id not in found_ids]
+        if missing_ids:
+            # #region agent log
+            _dbg_llm(
+                "C",
+                "caller.py:_repair_openai_tool_call_pairing",
+                "repair_insert",
+                {"missing_ids": missing_ids[:5], "expected_count": len(expected_ids)},
+            )
+            # #endregion
+            insert_at = j
+            for call_id in missing_ids:
+                api_messages.insert(
+                    insert_at,
+                    LLMMessage(
+                        role="tool",
+                        content="[工具未返回结果，已跳过]",
+                        tool_call_id=call_id,
+                    ),
+                )
+                insert_at += 1
+            logger.warning("[LLM] repaired missing tool results: {}", missing_ids)
+        i = j if j > i else i + 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -603,6 +760,14 @@ async def call_llm(
                 reasoning_content=msg.get("reasoning_content"),
             )
         )
+    # #region agent log
+    _dbg_llm(
+        "D",
+        "caller.py:call_llm:history_loaded",
+        "initial_messages",
+        _audit_tool_pairing(api_messages),
+    )
+    # #endregion
 
     # Vision format conversion
     api_messages = _convert_messages_for_vision(api_messages, supports_vision)
@@ -685,15 +850,48 @@ async def call_llm(
             # 在消息序列中，tool_call(role="assistant", tool_calls=[...]) 在前，
             # tool_result(role="tool", tool_call_id=...) 在后。
             # 截断时若尾块起始是 tool_result，需向前扩展包含对应的 tool_call。
-            _new_tail_start = len(api_messages) - 6
-            while _new_tail_start > 2 and api_messages[_new_tail_start].role == "tool":
-                _new_tail_start -= 1
-            api_messages = api_messages[:2] + api_messages[_new_tail_start:]
+            _tail_start = max(2, len(api_messages) - 6)
+            while _tail_start > 2 and api_messages[_tail_start].role == "tool":
+                _tail_start -= 1
+            # 尾块若以 tool 开头，尽量把对应的 assistant(tool_calls) 一并保留进尾块
+            while _tail_start < len(api_messages) and api_messages[_tail_start].role == "tool":
+                owner_info = _find_tool_calls_owner(api_messages, _tail_start)
+                tool_call_id = api_messages[_tail_start].tool_call_id or ""
+                if owner_info:
+                    owner, owner_idx = owner_info
+                    if tool_call_id in _assistant_tool_call_ids(owner):
+                        if owner_idx < _tail_start:
+                            _tail_start = owner_idx
+                        break
+                if _tail_start > 2:
+                    prev = api_messages[_tail_start - 1]
+                    if prev.role == "assistant" and prev.tool_calls:
+                        _tail_start -= 1
+                        continue
+                logger.warning(
+                    "[LLM-CTX] 截断跳过孤立 tool: tool_call_id={} tail_start={}",
+                    tool_call_id,
+                    _tail_start,
+                )
+                _tail_start += 1
+            tail = api_messages[_tail_start:]
+            api_messages = api_messages[:2] + tail
             logger.info(
                 "[LLM-CTX] 上下文截断: estimated_tokens={} messages={}",
                 _total_est,
                 len(api_messages),
             )
+
+        _repair_openai_tool_call_pairing(api_messages)
+        # #region agent log
+        _audit = _audit_tool_pairing(api_messages)
+        _dbg_llm(
+            "C_E",
+            "caller.py:call_llm:before_stream",
+            "pairing_audit",
+            {"round": round_i + 1, **_audit},
+        )
+        # #endregion
 
         try:
             # DeepSeek V4 思考模式参数（#118：按轮数分级开关）
@@ -739,6 +937,19 @@ async def call_llm(
                 len(response.content or ""),
             )
         except LLMError as e:
+            # #region agent log
+            _dbg_llm(
+                "E",
+                "caller.py:call_llm:LLMError",
+                "http_error",
+                {
+                    "round": round_i + 1,
+                    "err": str(e)[:300],
+                    "insufficient_tool": "insufficient tool" in str(e).lower(),
+                    **_audit_tool_pairing(api_messages),
+                },
+            )
+            # #endregion
             logger.error(
                 f"[LLM] LLMError: provider={getattr(model, 'provider', '?')} model={getattr(model, 'model', '?')} {e}"
             )
@@ -849,16 +1060,14 @@ async def call_llm(
         # Execute read-only tools in parallel
         if readonly_calls:
             if cancel_event and cancel_event.is_set():
+                _repair_openai_tool_call_pairing(api_messages)
                 break
-            results = await asyncio.gather(*[_exec_tool(tc) for tc in readonly_calls], return_exceptions=True)
-            for tc, result in zip(readonly_calls, results):
-                if isinstance(result, Exception):
-                    result = str(result)
-                if result:
-                    api_messages.append(LLMMessage(role="tool", content=result, tool_call_id=tc.get("id", "")))
+            # _process_tool_call 已负责把 tool 结果写入 api_messages，此处勿重复 append
+            await asyncio.gather(*[_exec_tool(tc) for tc in readonly_calls], return_exceptions=True)
 
         # 按文件路径分组——同文件串行，不同文件并行（#89 修复）
         if cancel_event and cancel_event.is_set():
+            _repair_openai_tool_call_pairing(api_messages)
             break
         file_groups: dict[str, list[dict]] = {}
         for tc in write_calls:
@@ -869,19 +1078,35 @@ async def call_llm(
             """串行执行同一文件路径下的写工具，返回 (tc, error_or_None) 列表。"""
             results: list[tuple[dict, str | None]] = []
             for t in tools:
-                err = await _process_tool_call(
-                    tc=t,
-                    api_messages=api_messages,
-                    agent_id=agent_id,
-                    user_id=user_id,
-                    session_id=session_id,
-                    supports_vision=supports_vision,
-                    on_tool_call=on_tool_call,
-                    full_reasoning_content=full_reasoning_content,
-                    allowed_tool_names=allowed_tool_names,
-                    tool_result_cache=tool_result_cache,
-                )
-                results.append((t, err))
+                try:
+                    err = await _process_tool_call(
+                        tc=t,
+                        api_messages=api_messages,
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        supports_vision=supports_vision,
+                        on_tool_call=on_tool_call,
+                        full_reasoning_content=full_reasoning_content,
+                        allowed_tool_names=allowed_tool_names,
+                        tool_result_cache=tool_result_cache,
+                    )
+                    results.append((t, err))
+                except Exception as exc:
+                    logger.error(
+                        "[LLM] 写工具执行失败: tool={} call_id={} err={}",
+                        (t.get("function") or {}).get("name"),
+                        t.get("id"),
+                        exc,
+                    )
+                    api_messages.append(
+                        LLMMessage(
+                            role="tool",
+                            content=f"[工具执行失败] {type(exc).__name__}: {str(exc)[:200]}",
+                            tool_call_id=t.get("id", ""),
+                        )
+                    )
+                    results.append((t, str(exc)))
             return results
 
         if file_groups:
@@ -893,14 +1118,13 @@ async def call_llm(
                 if isinstance(grp, Exception):
                     logger.error("[LLM] write group 执行异常: {}", grp)
                     continue
+                # _process_tool_call 已在内部写入 tool 消息；此处仅记录 group 级异常
                 for tc, tool_error in grp:
                     if tool_error:
-                        api_messages.append(
-                            LLMMessage(
-                                role="tool",
-                                content=tool_error,
-                                tool_call_id=tc.get("id", ""),
-                            )
+                        logger.warning(
+                            "[LLM] write tool returned error string (already appended): tool={} call_id={}",
+                            (tc.get("function") or {}).get("name"),
+                            tc.get("id"),
                         )
 
     # Record tokens even on "too many rounds" exit

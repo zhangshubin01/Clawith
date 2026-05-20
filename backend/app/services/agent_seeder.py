@@ -1042,6 +1042,16 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
                     f"[AgentSeeder] OKR tool '{tool_name}' not found — run tool seeder first"
                 )
 
+        # 先提交 Agent 本体，再创建 trigger/focus。
+        # ensure_focus_item 使用独立 DB session；若 Agent 尚未 commit，
+        # 写入 agent_focus_items 会触发 agent_id 外键违反（OKR 开关打开时报错）。
+        await db.commit()
+        logger.info(
+            "[AgentSeeder] OKR Agent core records committed for tenant {} ({})",
+            tenant_id,
+            okr_agent.id,
+        )
+
         # ── Create system cron triggers ──
         await _seed_okr_triggers(db, okr_agent.id)
         await _sync_okr_triggers_with_settings(db, okr_agent.id, okr_settings)

@@ -143,7 +143,13 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "replace_text_by_path",
-            "description": "替换文件内容为指定文本（全文替换）。",
+            "description": (
+                "全量替换文件内容为指定文本。路径规则与 create_file_with_text 一致："
+                "绝对路径写 IDE 项目；memory/、skills/、enterprise_info/ 前缀或 "
+                "soul.md/focus.md/memory.md/tasks.json 文件名的相对路径写 Agent 自身文件；"
+                "其余相对路径（含 workspace/）落在 IDE 项目根目录下。"
+                "对长文件做局部修改请先 read_file 拿到全文，构造新全文再调用本工具。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -164,7 +170,14 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "create_file_with_text",
-            "description": "创建新文件并写入内容。",
+            "description": (
+                "创建新文件并写入内容（也可全量覆盖已有文件）。路径规则："
+                "（1）绝对路径（如 /Users/xx/project/src/Main.java）→ 写 IDE 项目文件；"
+                "（2）相对路径中以 memory/、skills/、enterprise_info/ 开头，"
+                "或文件名为 soul.md / focus.md / memory.md / tasks.json 的 → 写 Agent 自身文件（由后端兜底执行）；"
+                "（3）其余相对路径（含 workspace/）→ 落在 IDE 项目根目录下。"
+                "局部修改请优先用 replace_text_by_path 避免全文重写。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -185,7 +198,11 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "delete_file_by_path",
-            "description": "删除 IDE 本地文件系统中的文件。",
+            "description": (
+                "删除文件。支持绝对路径（IDE 项目文件）与相对路径（Agent 自身文件）。"
+                "**禁止删除** soul.md、tasks.json、enterprise_info/ 下的文件，"
+                "以及任何 IDE 项目下的关键配置（.git/、.idea/）。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -596,7 +613,22 @@ def install_lsp4j_tool_hooks() -> None:
         agent_id: uuid.UUID,
         user_id: uuid.UUID,
         session_id: str = "",
+        on_output=None,
     ) -> str:
+        # #region agent log
+        from app.debug_trace import dbg as _dbg_tool
+
+        _dbg_tool(
+            "A",
+            "tool_hooks.py:_lsp4j_aware_execute_tool:entry",
+            "hook_entry",
+            {
+                "tool": tool_name,
+                "on_output_is_none": on_output is None,
+                "has_on_output_param": True,
+            },
+        )
+        # #endregion
         """LSP4J 感知的工具执行路由。
 
         优先级：
@@ -705,7 +737,9 @@ def install_lsp4j_tool_hooks() -> None:
             args = {fallback_map.get(k, k): v for k, v in args.items()}
             logger.debug("[LSP4J-TOOL] 本地回退参数映射: tool={} map={}", tool_name, fallback_map)
         logger.debug("[LSP4J-TOOL] 走基础工具路径: tool={}", tool_name)
-        return await _base_execute_tool(tool_name, args, agent_id, user_id, session_id)
+        return await _base_execute_tool(
+            tool_name, args, agent_id, user_id, session_id, on_output=on_output
+        )
 
     async def _lsp4j_aware_get_tools(agent_id: uuid.UUID) -> list[dict]:
         """LSP4J 感知的工具注册路由。

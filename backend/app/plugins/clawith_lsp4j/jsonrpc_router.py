@@ -51,7 +51,6 @@ from app.models.chat_session import ChatSession
 from app.models.audit import ChatMessage
 from app.models.task import Task as TaskModel
 from app.services.llm.caller import call_llm_with_failover
-from app.services.agent_context import _is_ide_session
 from app.services.task_executor import execute_task as _execute_task
 from app.services.connection_manager import manager
 
@@ -98,6 +97,47 @@ _LSP4J_FILE_EDIT_TOOLS = frozenset(
         "save_file",
     }
 )
+
+# WS 断线后迟到 invokeResult 的元数据（toolCallId → (meta, expires_at)）
+# 重连时无 pending Future，靠此表补发 FINISHED sync，避免工具卡/「生成中」悬挂。
+_ORPHAN_INVOKE_REGISTRY: dict[str, tuple[dict[str, Any], float]] = {}
+_ORPHAN_INVOKE_TTL_SEC = 120.0
+
+
+def _prune_orphan_invoke_registry() -> None:
+    now = time.time()
+    stale = [cid for cid, (_, exp) in _ORPHAN_INVOKE_REGISTRY.items() if exp <= now]
+    for cid in stale:
+        _ORPHAN_INVOKE_REGISTRY.pop(cid, None)
+
+
+def _register_orphan_invoke(tool_call_id: str, meta: dict[str, Any], session_id: str | None) -> None:
+    if not tool_call_id:
+        return
+    _prune_orphan_invoke_registry()
+    payload = dict(meta)
+    if session_id:
+        payload["session_id"] = session_id
+    _ORPHAN_INVOKE_REGISTRY[str(tool_call_id)] = (payload, time.time() + _ORPHAN_INVOKE_TTL_SEC)
+
+
+def _take_orphan_invoke(tool_call_id: str) -> dict[str, Any] | None:
+    _prune_orphan_invoke_registry()
+    entry = _ORPHAN_INVOKE_REGISTRY.pop(str(tool_call_id), None)
+    return entry[0] if entry else None
+
+
+def _normalize_tool_file_path(params: dict, project_path: str = "") -> str:
+    """归一化工具参数中的文件路径，供同 request 内文件编辑卡片去重。"""
+    fp = params.get("filePath") or params.get("file_path") or params.get("path") or ""
+    if not fp:
+        return ""
+    fp = str(fp).strip().replace("\\", "/")
+    if fp.startswith("workspace/"):
+        fp = fp[len("workspace/") :]
+    if project_path and not fp.startswith("/"):
+        fp = str(Path(project_path) / fp).replace("\\", "/")
+    return fp
 
 # 高频搜索类工具：在同一请求内会被连续调用很多次。
 # 为避免插件 UI（EDT）被中间态事件风暴淹没，对其 PENDING/RUNNING 做降噪处理。
@@ -291,13 +331,8 @@ _WRITE_TOOLS = frozenset(
 # run_in_terminal：执行任意命令，可能产生副作用
 # apply_patch：批量补丁应用，影响面大
 # 注：当前 IDE 端 UI 弹窗未实现，字段仅作为协议位下发；UI 工作由 IDE 团队后续补全
-_TOOLS_REQUIRING_APPROVAL = frozenset(
-    {
-        "delete_file_by_path",
-        "run_in_terminal",
-        "apply_patch",
-    }
-)
+# Clawith IDE 默认自动执行：requireApproval 仅作协议占位，不在插件侧阻断工具
+_TOOLS_REQUIRING_APPROVAL: frozenset[str] = frozenset()
 
 # 终端只读命令前缀：匹配的命令插件端可走 ProcessBuilder 快径，免去 invokeAndWait + Ctrl+C 开销
 _TERMINAL_READONLY_PREFIXES = (
@@ -1278,6 +1313,8 @@ class JSONRPCRouter:
         # pending tool 元数据：toolCallId → {request_id, tool_name, created_at}
         # 用于 tool/invokeResult 缺少 toolCallId 时的兜底匹配。
         self._pending_tool_meta: dict[str, dict[str, Any]] = {}
+        # 已向 IDE 发出 tool/invoke、等待 invokeResult 的 callId（断线/取消时保留迟到窗口）
+        self._invokes_sent_to_ide: set[str] = set()
 
         # pending JSON-RPC 响应 Futures: request_id → asyncio.Future
         self._pending_responses: dict[int, asyncio.Future] = {}
@@ -1311,6 +1348,8 @@ class JSONRPCRouter:
         # ★ 同一 request 中 read_file 卡片去重：
         # 集合存储 (request_id, file_path)，同一文件只创建一张卡片
         self._read_file_card_seen: set[tuple[str, str]] = set()
+        # ★ 同一 request 中文件编辑卡片去重：(request_id, norm_path) → 首张卡片 toolCallId
+        self._file_edit_card_primary: dict[tuple[str, str], str] = {}
 
         # ★ call_id → tool_call_id 映射：LLM 的 call_id → 后端生成的工具调用 ID，
         # 用于 on_tool_call done 时获取与 PENDING/RUNNING sync 一致的 toolCallId。
@@ -1704,8 +1743,9 @@ class JSONRPCRouter:
 
             # ★ 重置 toolCallId 队列（新请求开始时清空）
             self._tool_call_id_queue = []
-            # ★ 重置 read_file 卡片去重集合
+            # ★ 重置 read_file / 文件编辑卡片去重状态
             self._read_file_card_seen = set()
+            self._file_edit_card_primary = {}
 
             # ★ 创建 snapshot 并发送 snapshot/syncAll（diff 卡片支持）
             await self._ws_file_service.get_or_create_snapshot(session_id, request_id)
@@ -2002,6 +2042,7 @@ class JSONRPCRouter:
                     is_lsp4j_tool = tool_name in LSP4J_IDE_TOOL_NAMES
                     tool_call_id = ""
                     _should_create_ide_card = False
+                    _skip_file_edit_card = False
                     if is_lsp4j_tool:
                         from .tool_hooks import _should_route_to_ide as _route_check
 
@@ -2017,53 +2058,85 @@ class JSONRPCRouter:
                                     if k in ("path", "file_path", "filePath", "relative_workspace_path")
                                 },
                             )
+                    _skip_file_edit_card = False
                     if _should_create_ide_card:
-                        tool_call_id = str(uuid.uuid4())
-                        # ★ 队列存储 3 元组：(显示名, 插件原生名称, UUID)
-                        # display_name 供 markdown 块使用（ToolPanel 需要 LLM 侧名称识别文件工具）
-                        # tool_name 供 invoke_tool_on_ide 按插件原生名称匹配
-                        self._tool_call_id_queue.append((display_name, tool_name, tool_call_id))
                         raw_args = data.get("args", {})
                         # ★ 保留原始 snake_case 参数（不做 camelCase 转换）
-                        # sync 通知的 parameters 需用 snake_case（ToolPanel.constructFileItem() 读取 file_path 键），
-                        # tool/invoke 的 camelCase 转换统一在 invoke_tool_on_ide 中集中处理。
-                        # 此前分散在此处的转换逻辑已全部移除。
                         params = dict(raw_args)
-                        # read_file 的链接渲染依赖 parameters["file_path"]，
-                        # 但模型常传 "path"；这里统一补齐给 ToolPanel 用。
                         if tool_name == "read_file":
                             fp = params.get("file_path") or params.get("path") or params.get("filePath")
                             if fp and "file_path" not in params:
                                 params["file_path"] = fp
-                        self._tool_params[tool_call_id] = params
-                        # run_in_terminal: 确保 run_mode 有默认值，避免客户端 PENDING sync 时收到 null
-                        if tool_name == "run_in_terminal" and "run_mode" not in params:
-                            params["run_mode"] = "autoRun"
                         llm_call_id = data.get("call_id", "")
-                        if llm_call_id:
-                            self._call_id_to_tool_id[llm_call_id] = tool_call_id
-                        logger.debug(
-                            "[LSP4J] toolCallId 入队: name={} callId={} queue_len={}",
-                            tool_name,
-                            tool_call_id[:8],
-                            len(self._tool_call_id_queue),
+                        _norm_path = _normalize_tool_file_path(params, self._project_path)
+                        _file_dedup_key = (
+                            (request_id, _norm_path) if _norm_path and tool_name in _LSP4J_FILE_EDIT_TOOLS else None
                         )
-                        logger.info(
-                            "[LSP4J-TOOL] toolCall 入队: display={} mapped={} callId={} queue_len={}",
-                            display_name,
-                            tool_name,
-                            tool_call_id[:8],
-                            len(self._tool_call_id_queue),
-                        )
-                        logger.info(
-                            "[LSP4J-TRACE] 入队 trace=req={} call={} logical={} invoke={}",
-                            request_id[:8],
-                            tool_call_id[:8],
-                            display_name,
-                            tool_name,
-                        )
+                        if _file_dedup_key and _file_dedup_key in self._file_edit_card_primary:
+                            _skip_file_edit_card = True
+                            primary_id = self._file_edit_card_primary[_file_dedup_key]
+                            if llm_call_id:
+                                self._call_id_to_tool_id[llm_call_id] = primary_id
+                            if primary_id in self._tool_params:
+                                self._tool_params[primary_id].update(params)
+                            else:
+                                self._tool_params[primary_id] = params
+                            logger.info(
+                                "[LSP4J-TOOL] 文件编辑去重，跳过重复卡片: path={} primary={} tool={}",
+                                _norm_path,
+                                primary_id[:8],
+                                tool_name,
+                            )
+                            # #region agent log
+                            from app.debug_trace import dbg as _dbg_dedup
 
-                    if _should_create_ide_card:
+                            _dbg_dedup(
+                                "G",
+                                "jsonrpc_router.py:on_tool_call:file_edit_dedup",
+                                "skip_duplicate_card",
+                                {
+                                    "path": _norm_path,
+                                    "primaryCallId": primary_id[:8],
+                                    "tool": tool_name,
+                                    "llmCallId": (llm_call_id or "")[:16],
+                                },
+                            )
+                            # #endregion
+                        else:
+                            tool_call_id = str(uuid.uuid4())
+                            self._tool_call_id_queue.append((display_name, tool_name, tool_call_id))
+                            self._tool_params[tool_call_id] = params
+                            if tool_name == "run_in_terminal":
+                                if "run_mode" not in params:
+                                    params["run_mode"] = "autoRun"
+                                if "has_risk" not in params:
+                                    params["has_risk"] = True
+                            if llm_call_id:
+                                self._call_id_to_tool_id[llm_call_id] = tool_call_id
+                            if _file_dedup_key:
+                                self._file_edit_card_primary[_file_dedup_key] = tool_call_id
+                            logger.debug(
+                                "[LSP4J] toolCallId 入队: name={} callId={} queue_len={}",
+                                tool_name,
+                                tool_call_id[:8],
+                                len(self._tool_call_id_queue),
+                            )
+                            logger.info(
+                                "[LSP4J-TOOL] toolCall 入队: display={} mapped={} callId={} queue_len={}",
+                                display_name,
+                                tool_name,
+                                tool_call_id[:8],
+                                len(self._tool_call_id_queue),
+                            )
+                            logger.info(
+                                "[LSP4J-TRACE] 入队 trace=req={} call={} logical={} invoke={}",
+                                request_id[:8],
+                                tool_call_id[:8],
+                                display_name,
+                                tool_name,
+                            )
+
+                    if _should_create_ide_card and not _skip_file_edit_card:
                         # ★ 发送 toolCall markdown 块（双通道之 markdown 通道）
                         # 插件 MarkdownStreamPanel 解析此格式创建工具卡片 UI
                         # 插件正则：```([\w#+.-]+)::([^\n]+)::([^\n]+)\n+(.*?)```
@@ -2351,8 +2424,6 @@ class JSONRPCRouter:
 
             cancelled = False
             error_status_code = 200  # 默认成功
-            # ★ 设置 IDE 会话标记，使 build_agent_context 注入项目优先指令
-            _ide_token = _is_ide_session.set(True)
 
             # ★ 性能计时: 准备进入 call_llm
             _t_call_llm_start = time.monotonic()
@@ -2366,6 +2437,21 @@ class JSONRPCRouter:
                 len(message_history),
                 _context_chars,
             )
+            # #region agent log
+            from app.debug_trace import dbg as _dbg_chat
+
+            _dbg_chat(
+                "F",
+                "jsonrpc_router.py:_handle_chat_ask:pre_call_llm",
+                "chat_ask_entered",
+                {
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "historyCount": len(message_history),
+                    "traceId": _trace_id,
+                },
+            )
+            # #endregion
             try:
                 reply = await call_llm_with_failover(
                     primary_model=model_obj,
@@ -2401,8 +2487,6 @@ class JSONRPCRouter:
                 logger.exception("LSP4J call_llm error")
                 error_status_code = 500
                 reply = f"[错误] {type(e).__name__}: {str(e)[:200]}"
-            finally:
-                _is_ide_session.reset(_ide_token)
 
             # 检测 LLM 调用返回的错误字符串（call_llm 内部 catch LLMError 后返回
             # 字符串 "[LLM Error] HTTP <code>: ..." 而非抛出异常，导致 error_status_code
@@ -2411,6 +2495,21 @@ class JSONRPCRouter:
             if isinstance(reply, str) and reply.startswith("[LLM Error]"):
                 _m = re.search(r"HTTP (\d{3})", reply)
                 error_status_code = int(_m.group(1)) if _m else 500
+                # #region agent log
+                from app.debug_trace import dbg as _dbg_chat_err
+
+                _dbg_chat_err(
+                    "E",
+                    "jsonrpc_router.py:_handle_chat_ask:llm_error_reply",
+                    "llm_error_string",
+                    {
+                        "requestId": request_id,
+                        "sessionId": session_id,
+                        "statusCode": error_status_code,
+                        "preview": reply[:200],
+                    },
+                )
+                # #endregion
                 logger.info(
                     "[LSP4J] LLM error string detected: statusCode={} preview={}...",
                     error_status_code,
@@ -2931,6 +3030,101 @@ class JSONRPCRouter:
 
         await self._send_response(msg_id, {})
 
+    def _parse_invoke_result_payload(self, tool_name: str, params: dict) -> tuple[list[dict] | str | None, str]:
+        """将 invokeResult 参数解析为 tool/call/sync 可用的 results。"""
+        if not params.get("success", True):
+            return None, str(params.get("errorMessage") or "Tool execution failed")
+        result = params.get("result", {})
+        if isinstance(result, dict):
+            if tool_name == "read_file" and "content" in result:
+                result_str = result["content"]
+            else:
+                result_str = json.dumps(result, ensure_ascii=False)
+        else:
+            result_str = str(result)
+        if tool_name in ("grep_code", "search_codebase", "search_symbol", "search_file") and result_str:
+            try:
+                parsed = json.loads(result_str) if isinstance(result_str, str) else result_str
+                if isinstance(parsed, dict) and "results" in parsed:
+                    return parsed["results"], ""
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return result_str[:500] if result_str else None, ""
+
+    async def _finalize_orphan_invoke_result(self, params: dict, *, source: str) -> bool:
+        """断线重连后无 pending Future 时，仍向 IDE 补发终态 sync，解除 UI 悬挂。"""
+        tool_call_id = str(params.get("toolCallId") or "")
+        request_id = str(params.get("requestId") or "")
+        tool_name = str(params.get("name") or "")
+        if not tool_call_id or not request_id:
+            return False
+
+        meta = _take_orphan_invoke(tool_call_id) or {}
+        session_id = meta.get("session_id") or self._session_id
+        original_name = meta.get("original_name") or tool_name
+        arguments = meta.get("arguments") if isinstance(meta.get("arguments"), dict) else {}
+
+        if params.get("success", True):
+            results, err = self._parse_invoke_result_payload(tool_name, params)
+            if err:
+                await self._send_tool_call_sync(
+                    session_id,
+                    request_id,
+                    tool_call_id,
+                    "ERROR",
+                    tool_name=original_name,
+                    parameters=arguments,
+                    error_msg=err,
+                )
+                status = "ERROR"
+            else:
+                await self._send_tool_call_sync(
+                    session_id,
+                    request_id,
+                    tool_call_id,
+                    "FINISHED",
+                    tool_name=original_name,
+                    parameters=arguments,
+                    results=results,
+                )
+                status = "FINISHED"
+        else:
+            error_msg = str(params.get("errorMessage") or "Tool execution failed")
+            await self._send_tool_call_sync(
+                session_id,
+                request_id,
+                tool_call_id,
+                "ERROR",
+                tool_name=original_name,
+                parameters=arguments,
+                error_msg=error_msg,
+            )
+            status = "ERROR"
+
+        from app.debug_trace import dbg as _dbg_orphan
+
+        _dbg_orphan(
+            "H",
+            "jsonrpc_router.py:_finalize_orphan_invoke_result",
+            "orphan_invoke_ui_sync",
+            {
+                "source": source,
+                "toolCallId": tool_call_id[:8],
+                "requestId": request_id[:8],
+                "tool": tool_name,
+                "status": status,
+                "hadMeta": bool(meta),
+            },
+        )
+        logger.info(
+            "[LSP4J-RESULT] 孤儿 invokeResult 已补发 UI sync: source={} callId={} tool={} status={}",
+            source,
+            tool_call_id[:8],
+            tool_name,
+            status,
+        )
+        return True
+
     async def _handle_tool_invoke_result(self, params: dict, msg_id: Any) -> None:
         """处理 tool/invokeResult 请求 — 异步工具执行结果回传。
 
@@ -3118,6 +3312,7 @@ class JSONRPCRouter:
                     request_id[:8],
                     tool_name,
                 )
+                await self._finalize_orphan_invoke_result(params, source="no_future_no_candidate")
 
         # tool/invokeResult 是 @JsonRequest，需要返回 OperateCommonResult 格式
         # 插件 ToolService.invokeResult() 期望返回 OperateCommonResult {errorCode, errorMessage}
@@ -3677,6 +3872,19 @@ class JSONRPCRouter:
                 )
                 break
         queue_matched = bool(tool_call_id)
+        if not tool_call_id and tool_name in _LSP4J_FILE_EDIT_TOOLS:
+            _invoke_path = _normalize_tool_file_path(arguments, self._project_path)
+            if _invoke_path:
+                _primary = self._file_edit_card_primary.get((request_id, _invoke_path))
+                if _primary:
+                    tool_call_id = _primary
+                    queue_matched = True
+                    logger.info(
+                        "[LSP4J-TOOL] invoke 复用文件编辑主卡片: path={} callId={} tool={}",
+                        _invoke_path,
+                        tool_call_id[:8],
+                        tool_name,
+                    )
         if not tool_call_id:
             # 队列失配时按工具名称回退匹配，避免生成僵尸 UUID
             # 遍历队列剩余条目，按 mapped_name 匹配当前工具名称
@@ -3889,6 +4097,12 @@ class JSONRPCRouter:
                 sync_parameters["run_mode"] = "autoRun"
             if "run_mode" not in arguments:
                 arguments["run_mode"] = "autoRun"
+            # 插件在 autoRun 且 has_risk/potential_risk 均为 false 时会显示「命令在禁用列表」；
+            # Clawith IDE 默认全权执行，标记为可自动执行的高风险命令以走审批面板的自动「运行」路径。
+            if "has_risk" not in sync_parameters:
+                sync_parameters["has_risk"] = True
+            if "has_risk" not in arguments:
+                arguments["has_risk"] = True
 
         if queue_matched:
             if tool_name in _UI_HEAVY_SEARCH_TOOLS:
@@ -3975,6 +4189,8 @@ class JSONRPCRouter:
         self._pending_tool_meta[tool_call_id] = {
             "request_id": request_id,
             "tool_name": tool_name,
+            "original_name": original_name,
+            "arguments": dict(arguments) if arguments else {},
             "created_at": time.time(),
         }
         logger.info(
@@ -4040,6 +4256,7 @@ class JSONRPCRouter:
             tool_call_id[:8],
             invoke_tool_name,
         )
+        self._invokes_sent_to_ide.add(tool_call_id)
 
         # 等待异步结果（同时监听取消事件，避免 cancel 在 wait_for 期间触发时无法及时响应）
         file_path_for_id = arguments.get("file_path") or arguments.get("filePath")
@@ -4347,15 +4564,21 @@ class JSONRPCRouter:
             # 插件端可能因 SearchResultCache 或 terminal 上报链路延迟，
             # 在超时后几秒～几十秒才发回 invokeResult。
             # 保留期间 invokeResult 可通过补偿匹配命中，完成 UI 更新。
+            sent_to_ide = tool_call_id in self._invokes_sent_to_ide
+            self._invokes_sent_to_ide.discard(tool_call_id)
             existing_future = self._pending_tools.get(tool_call_id)
-            if existing_future and existing_future.done():
-                # wait_for 超时取消了 Future → 替换为新 Future 供迟到结果匹配
+            need_late_window = sent_to_ide or (existing_future and existing_future.done())
+            if need_late_window:
                 loop = asyncio.get_running_loop()
                 late_future: asyncio.Future = loop.create_future()
                 self._pending_tools[tool_call_id] = late_future
+                if sent_to_ide:
+                    _register_orphan_invoke(
+                        tool_call_id,
+                        self._pending_tool_meta.get(tool_call_id, {}),
+                        self._session_id,
+                    )
 
-                # 保留 meta 供补偿匹配使用（requestId + tool_name）
-                # 60s 后清理
                 async def _cleanup_late_window(cid: str):
                     await asyncio.sleep(60.0)
                     self._pending_tools.pop(cid, None)
@@ -4926,12 +5149,28 @@ class JSONRPCRouter:
         resp_count = len(self._pending_responses)
         # 连接断开清理
         logger.info("[LSP4J-LIFE] 连接断开清理: pending_tools={} pending_responses={}", tool_count, resp_count)
+        # 断线前登记孤儿元数据，供重连后迟到 invokeResult 补发 FINISHED sync
+        for call_id, meta in list(self._pending_tool_meta.items()):
+            _register_orphan_invoke(call_id, meta, self._session_id)
+        from app.debug_trace import dbg as _dbg_cleanup
+
+        _dbg_cleanup(
+            "H",
+            "jsonrpc_router.py:cleanup",
+            "disconnect_orphan_registry",
+            {
+                "pendingTools": tool_count,
+                "sessionId": (self._session_id or "")[:8],
+                "orphanRegistrySize": len(_ORPHAN_INVOKE_REGISTRY),
+            },
+        )
         # 清理 pending tool Futures
         for call_id, future in list(self._pending_tools.items()):
             if not future.done():
                 future.set_result("[连接断开] 工具调用未完成")
         self._pending_tools.clear()
         self._pending_tool_meta.clear()
+        self._invokes_sent_to_ide.clear()
 
         # 清理 pending response Futures
         for req_id, future in list(self._pending_responses.items()):

@@ -533,7 +533,18 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
     if body.enabled and not settings.okr_agent_id:
         from app.services.agent_seeder import seed_okr_agent_for_tenant
         logger.info(f"[OKR] OKR enabled for tenant {user.tenant_id} — auto-seeding OKR Agent")
-        await seed_okr_agent_for_tenant(user.tenant_id, user.id)
+        try:
+            await seed_okr_agent_for_tenant(user.tenant_id, user.id)
+        except Exception as exc:
+            logger.exception(
+                "[OKR] seed_okr_agent_for_tenant failed for tenant {}: {}",
+                user.tenant_id,
+                exc,
+            )
+            raise HTTPException(
+                500,
+                "Failed to initialize OKR Agent. Please retry enabling OKR or contact an administrator.",
+            ) from exc
 
         # 重新读取 settings 以获取 seed 写入的 okr_agent_id（需要独立会话）
         async with async_session() as db2:
