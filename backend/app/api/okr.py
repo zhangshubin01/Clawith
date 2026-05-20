@@ -1,4 +1,3 @@
-import asyncio
 """OKR REST API — objectives, key results, settings, reports and periods.
 
 All endpoints are tenant-scoped: data is filtered by the requesting user's
@@ -18,6 +17,7 @@ GET       /api/okr/members-without-okr             (P4 onboarding: admin view)
 POST      /api/okr/trigger-member-outreach         (P4 onboarding: fire OKR Agent)
 """
 
+import asyncio
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
 from app.database import async_session, get_db
+from app.models.agent import Agent
 from app.models.identity import IdentityProvider
 from app.models.okr import (
     CompanyReport,
@@ -127,6 +128,21 @@ async def _get_or_create_settings(db, tenant_id: uuid.UUID) -> OKRSettings:
         db.add(settings)
         await db.flush()
     return settings
+
+
+async def _clear_stale_okr_agent_id(db, settings: OKRSettings) -> None:
+    """若 okr_agent_id 指向已删除的 Agent，清空以免 _sync 触发无效 focus 写入。"""
+    if not settings.okr_agent_id:
+        return
+    exists = await db.execute(select(Agent.id).where(Agent.id == settings.okr_agent_id).limit(1))
+    if exists.scalar_one_or_none() is None:
+        logger.warning(
+            "[OKR] Clearing stale okr_agent_id {} for tenant {}",
+            settings.okr_agent_id,
+            settings.tenant_id,
+        )
+        settings.okr_agent_id = None
+        await db.flush()
 
 
 async def _sync_okr_report_triggers(db, settings: OKRSettings) -> None:
@@ -522,15 +538,18 @@ async def update_okr_settings(body: OKRSettingsUpdate, user=Depends(get_current_
     if body.enabled is True and settings.first_enabled_at is None:
         settings.first_enabled_at = datetime.now(timezone.utc)
 
-    await _sync_okr_report_triggers(db, settings)
+    await _clear_stale_okr_agent_id(db, settings)
+    needs_seed = bool(body.enabled and not settings.okr_agent_id)
+
+    # 首次开启时先 seed 再 sync，避免 _sync 对尚未提交的 Agent 写 focus/trigger
+    if not needs_seed:
+        await _sync_okr_report_triggers(db, settings)
     await db.commit()
 
     # ── Auto-create OKR Agent when first enabled ──────────────────────────
-    # If OKR was just turned on and no agent exists yet for this tenant,
-    # seed one so the user doesn't see "OKR Agent not found".
     okr_agent_id_str: str | None = str(settings.okr_agent_id) if settings.okr_agent_id else None
 
-    if body.enabled and not settings.okr_agent_id:
+    if needs_seed:
         from app.services.agent_seeder import seed_okr_agent_for_tenant
         logger.info(f"[OKR] OKR enabled for tenant {user.tenant_id} — auto-seeding OKR Agent")
         try:

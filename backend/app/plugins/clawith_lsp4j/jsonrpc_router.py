@@ -3853,6 +3853,8 @@ class JSONRPCRouter:
         - 只注册 toolCallId 到 _pending_tools（等待 invokeResult 回传真实结果）
         - 插件的 ack 响应会被 _handle_response 静默忽略（无匹配 Future）
         """
+        request_id = self._current_request_id or str(uuid.uuid4())
+
         # ★ 从 toolCallId 队列中按序匹配消费（3 元组格式）
         # tool_name 已是插件原生名称（由 tool_hooks 映射），与队列中的 mapped_name 匹配。
         # 匹配成功后提取 original_name（LLM 侧名称），供后续 sync 通知使用。
@@ -3906,7 +3908,6 @@ class JSONRPCRouter:
                 logger.info(
                     "[LSP4J-TOOL] toolCallId 队列未匹配，新建兜底: name={} callId={}", tool_name, tool_call_id[:8]
                 )
-        request_id = self._current_request_id or str(uuid.uuid4())
 
         logger.info(
             "[LSP4J-TOOL] invoke_tool_on_ide: tool={} callId={} requestId={} timeout={} queue_matched={}",

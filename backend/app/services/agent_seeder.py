@@ -1,5 +1,6 @@
 """Seed default agents (Morty & Meeseeks) on first platform startup."""
 
+import asyncio
 import shutil
 import uuid
 from pathlib import Path
@@ -21,6 +22,17 @@ from app.models.okr import OKRSettings
 from app.config import get_settings
 
 settings = get_settings()
+
+# 按租户串行化 OKR Agent 创建，避免并发 PUT /okr/settings 重复 seed
+_okr_seed_locks: dict[uuid.UUID, asyncio.Lock] = {}
+
+
+def _okr_seed_lock(tenant_id: uuid.UUID) -> asyncio.Lock:
+    lock = _okr_seed_locks.get(tenant_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _okr_seed_locks[tenant_id] = lock
+    return lock
 
 
 # ── Soul definitions ────────────────────────────────────────────
@@ -911,152 +923,152 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
         tenant_id:  The tenant to create the OKR Agent for.
         creator_id: The user (org admin) who enabled OKR — becomes the agent creator.
     """
-    async with async_session() as db:
-        # ── Idempotency check: abort if OKR Agent already exists for this tenant ──
-        existing = await db.execute(
-            select(Agent).where(
-                Agent.tenant_id == tenant_id,
-                Agent.name == "OKR Agent",
-                Agent.is_system == True,  # noqa: E712
-            ).limit(1)
-        )
-        if existing.scalar_one_or_none():
-            logger.info(
-                f"[AgentSeeder] OKR Agent already exists for tenant {tenant_id}, skipping"
+    async with _okr_seed_lock(tenant_id):
+        async with async_session() as db:
+            # ── Idempotency: 已有 OKR Agent 时补全 okr_settings.okr_agent_id ──
+            existing = await db.execute(
+                select(Agent).where(
+                    Agent.tenant_id == tenant_id,
+                    Agent.name == "OKR Agent",
+                    Agent.is_system == True,  # noqa: E712
+                ).limit(1)
             )
-            return
+            existing_agent = existing.scalar_one_or_none()
+            if existing_agent:
+                settings_res = await db.execute(
+                    select(OKRSettings).where(OKRSettings.tenant_id == tenant_id)
+                )
+                okr_settings = settings_res.scalar_one_or_none()
+                if okr_settings and okr_settings.okr_agent_id != existing_agent.id:
+                    okr_settings.okr_agent_id = existing_agent.id
+                    await db.commit()
+                logger.info(
+                    f"[AgentSeeder] OKR Agent already exists for tenant {tenant_id}, skipping"
+                )
+                return
 
-        # ── Create OKR Agent ──
-        okr_agent = Agent(
-            name="OKR Agent",
-            role_description=(
-                "OKR system coordinator — monitors team Objectives and Key Results, "
-                "collects progress updates, and generates daily/weekly reports"
-            ),
-            bio=(
-                "I am the OKR Agent. I help this team stay aligned on goals by tracking "
-                "Objectives and Key Results, collecting progress from team members, and "
-                "generating clear reports. My job is to surface insights and flag risks early."
-            ),
-            avatar_url="",
-            creator_id=creator_id,
-            tenant_id=tenant_id,
-            status="idle",
-            is_system=True,
-            heartbeat_enabled=False,
-        )
-        db.add(okr_agent)
-        await db.flush()
-
-        # ── Participant identity record ──
-        from app.models.participant import Participant  # noqa: F401
-        db.add(Participant(
-            type="agent",
-            ref_id=okr_agent.id,
-            display_name=okr_agent.name,
-            avatar_url=okr_agent.avatar_url,
-        ))
-        await db.flush()
-
-        # ── Permission: company-wide 'use' access ──
-        db.add(AgentPermission(
-            agent_id=okr_agent.id,
-            scope_type="company",
-            access_level="use",
-        ))
-
-        # ── Link OKR Agent ID to OKRSettings ──
-        settings_res = await db.execute(
-            select(OKRSettings).where(OKRSettings.tenant_id == tenant_id)
-        )
-        okr_settings = settings_res.scalar_one_or_none()
-        if not okr_settings:
-            okr_settings = OKRSettings(tenant_id=tenant_id)
-            db.add(okr_settings)
-        okr_settings.okr_agent_id = okr_agent.id
-        await db.flush()
-
-        # ── Workspace setup ──
-        template_dir = Path(settings.AGENT_TEMPLATE_DIR)
-        agent_dir = Path(settings.AGENT_DATA_DIR) / str(okr_agent.id)
-
-        if template_dir.exists():
-            shutil.copytree(
-                str(template_dir),
-                str(agent_dir),
-                ignore=shutil.ignore_patterns("tasks.json", "todo.json", "enterprise_info"),
+            # ── Create OKR Agent ──
+            okr_agent = Agent(
+                name="OKR Agent",
+                role_description=(
+                    "OKR system coordinator — monitors team Objectives and Key Results, "
+                    "collects progress updates, and generates daily/weekly reports"
+                ),
+                bio=(
+                    "I am the OKR Agent. I help this team stay aligned on goals by tracking "
+                    "Objectives and Key Results, collecting progress from team members, and "
+                    "generating clear reports. My job is to surface insights and flag risks early."
+                ),
+                avatar_url="",
+                creator_id=creator_id,
+                tenant_id=tenant_id,
+                status="idle",
+                is_system=True,
+                heartbeat_enabled=False,
             )
-        else:
-            agent_dir.mkdir(parents=True, exist_ok=True)
-            for sub in ("skills", "workspace", "workspace/reports", "memory"):
-                (agent_dir / sub).mkdir(parents=True, exist_ok=True)
+            db.add(okr_agent)
+            await db.flush()
 
-        (agent_dir / "soul.md").write_text(OKR_AGENT_SOUL.strip() + "\n", encoding="utf-8")
+            from app.models.participant import Participant  # noqa: F401
+            db.add(Participant(
+                type="agent",
+                ref_id=okr_agent.id,
+                display_name=okr_agent.name,
+                avatar_url=okr_agent.avatar_url,
+            ))
+            await db.flush()
 
-        mem_path = agent_dir / "memory" / "memory.md"
-        if not mem_path.exists():
-            mem_path.write_text(
-                "# Memory\n\n"
-                "## OKR System State\n"
-                "- Last report generated: (none)\n"
-                "- Last progress collection: (none)\n"
-                "- Team members tracked: (pending)\n",
+            db.add(AgentPermission(
+                agent_id=okr_agent.id,
+                scope_type="company",
+                access_level="use",
+            ))
+
+            settings_res = await db.execute(
+                select(OKRSettings).where(OKRSettings.tenant_id == tenant_id)
+            )
+            okr_settings = settings_res.scalar_one_or_none()
+            if not okr_settings:
+                okr_settings = OKRSettings(tenant_id=tenant_id)
+                db.add(okr_settings)
+            okr_settings.okr_agent_id = okr_agent.id
+            await db.flush()
+
+            template_dir = Path(settings.AGENT_TEMPLATE_DIR)
+            agent_dir = Path(settings.AGENT_DATA_DIR) / str(okr_agent.id)
+
+            if template_dir.exists():
+                shutil.copytree(
+                    str(template_dir),
+                    str(agent_dir),
+                    ignore=shutil.ignore_patterns("tasks.json", "todo.json", "enterprise_info"),
+                )
+            else:
+                agent_dir.mkdir(parents=True, exist_ok=True)
+                for sub in ("skills", "workspace", "workspace/reports", "memory"):
+                    (agent_dir / sub).mkdir(parents=True, exist_ok=True)
+
+            (agent_dir / "soul.md").write_text(OKR_AGENT_SOUL.strip() + "\n", encoding="utf-8")
+
+            mem_path = agent_dir / "memory" / "memory.md"
+            if not mem_path.exists():
+                mem_path.write_text(
+                    "# Memory\n\n"
+                    "## OKR System State\n"
+                    "- Last report generated: (none)\n"
+                    "- Last progress collection: (none)\n"
+                    "- Team members tracked: (pending)\n",
+                    encoding="utf-8",
+                )
+
+            (agent_dir / "relationships.md").write_text(
+                "# Relationships\n\n"
+                "## Team Members (OKR tracking)\n\n"
+                "_Team members will be added here as they are onboarded into the OKR system._\n",
                 encoding="utf-8",
             )
 
-        (agent_dir / "relationships.md").write_text(
-            "# Relationships\n\n"
-            "## Team Members (OKR tracking)\n\n"
-            "_Team members will be added here as they are onboarded into the OKR system._\n",
-            encoding="utf-8",
-        )
+            default_tools_result = await db.execute(
+                select(Tool).where(Tool.is_default == True)  # noqa: E712
+            )
+            for tool in default_tools_result.scalars().all():
+                db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
 
-        # ── Assign default tools ──
-        default_tools_result = await db.execute(
-            select(Tool).where(Tool.is_default == True)  # noqa: E712
-        )
-        for tool in default_tools_result.scalars().all():
-            db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
-
-        # ── Assign OKR-specific tools ──
-        okr_tool_names = [
-            "get_okr", "get_my_okr", "update_kr_progress", "update_kr_content",
-            "collect_okr_progress", "generate_okr_report", "get_okr_settings",
-            "create_objective", "create_key_result", "update_objective",
-            "update_any_kr_progress", "upsert_member_daily_report", "generate_monthly_okr_report",
-        ]
-        tools_by_name = await _ensure_okr_tool_rows_exist(okr_tool_names)
-        for tool_name in okr_tool_names:
-            tool = tools_by_name.get(tool_name)
-            if tool:
-                existing_at = await db.execute(
-                    select(AgentTool).where(
-                        AgentTool.agent_id == okr_agent.id,
-                        AgentTool.tool_id == tool.id,
+            okr_tool_names = [
+                "get_okr", "get_my_okr", "update_kr_progress", "update_kr_content",
+                "collect_okr_progress", "generate_okr_report", "get_okr_settings",
+                "create_objective", "create_key_result", "update_objective",
+                "update_any_kr_progress", "upsert_member_daily_report", "generate_monthly_okr_report",
+            ]
+            tools_by_name = await _ensure_okr_tool_rows_exist(okr_tool_names)
+            for tool_name in okr_tool_names:
+                tool = tools_by_name.get(tool_name)
+                if tool:
+                    existing_at = await db.execute(
+                        select(AgentTool).where(
+                            AgentTool.agent_id == okr_agent.id,
+                            AgentTool.tool_id == tool.id,
+                        )
                     )
-                )
-                if not existing_at.scalar_one_or_none():
-                    db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
-            else:
-                logger.warning(
-                    f"[AgentSeeder] OKR tool '{tool_name}' not found — run tool seeder first"
-                )
+                    if not existing_at.scalar_one_or_none():
+                        db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
+                else:
+                    logger.warning(
+                        f"[AgentSeeder] OKR tool '{tool_name}' not found — run tool seeder first"
+                    )
 
-        # 先提交 Agent 本体，再创建 trigger/focus。
-        # ensure_focus_item 使用独立 DB session；若 Agent 尚未 commit，
-        # 写入 agent_focus_items 会触发 agent_id 外键违反（OKR 开关打开时报错）。
-        await db.commit()
-        logger.info(
-            "[AgentSeeder] OKR Agent core records committed for tenant {} ({})",
-            tenant_id,
-            okr_agent.id,
-        )
+            # 先提交 Agent 本体，再创建 trigger/focus（ensure_focus_item 使用独立 session）
+            await db.commit()
+            logger.info(
+                "[AgentSeeder] OKR Agent core records committed for tenant {} ({})",
+                tenant_id,
+                okr_agent.id,
+            )
 
-        # ── Create system cron triggers ──
-        await _seed_okr_triggers(db, okr_agent.id)
-        await _sync_okr_triggers_with_settings(db, okr_agent.id, okr_settings)
-        from app.services.okr_agent_hook import sync_okr_agent_platform_members
-        await sync_okr_agent_platform_members(db, tenant_id)
-        await db.commit()
-        logger.info(f"[AgentSeeder] Created OKR Agent for tenant {tenant_id} ({okr_agent.id})")
-        logger.info(f"[AgentSeeder] OKR triggers created for tenant {tenant_id}")
+            await _seed_okr_triggers(db, okr_agent.id)
+            await _sync_okr_triggers_with_settings(db, okr_agent.id, okr_settings)
+            from app.services.okr_agent_hook import sync_okr_agent_platform_members
+            await sync_okr_agent_platform_members(db, tenant_id)
+            await db.commit()
+            logger.info(f"[AgentSeeder] Created OKR Agent for tenant {tenant_id} ({okr_agent.id})")
+            logger.info(f"[AgentSeeder] OKR triggers created for tenant {tenant_id}")
