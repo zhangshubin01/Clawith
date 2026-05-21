@@ -174,6 +174,12 @@ class AgentManager:
             agent.last_active_at = datetime.now(timezone.utc)
             return None
 
+        # Native agents run in-process — no Docker container needed
+        if agent.agent_type == "native":
+            agent.status = "idle"
+            agent.last_active_at = datetime.now(timezone.utc)
+            return None
+
         agent_dir = self._agent_dir(agent.id)
 
         # Get model config
