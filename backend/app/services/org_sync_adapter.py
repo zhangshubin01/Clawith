@@ -166,6 +166,14 @@ class ExternalUser:
     raw_data: dict = field(default_factory=dict)
 
 
+def _bearer_headers(token: str) -> dict[str, str]:
+    """构建合法的 Authorization Bearer 头；空 token 或含换行会导致 httpx 抛 Illegal header value。"""
+    normalized = (token or "").strip()
+    if not normalized:
+        raise ValueError("Access token is empty; check provider credentials and token API response")
+    return {"Authorization": f"Bearer {normalized}"}
+
+
 class BaseOrgSyncAdapter(ABC):
     """Abstract base class for organization sync adapters."""
 
@@ -770,21 +778,33 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
 
     def __init__(self, provider: IdentityProvider | None = None, config: dict | None = None, tenant_id: uuid.UUID | None = None):
         super().__init__(provider, config, tenant_id)
-        self.app_id = self.config.get("app_id")
-        self.app_secret = self.config.get("app_secret")
+        self.app_id = (self.config.get("app_id") or "").strip()
+        self.app_secret = (self.config.get("app_secret") or "").strip()
 
     @property
     def api_base_url(self) -> str:
         return "https://open.feishu.cn/open-apis"
 
     async def get_access_token(self) -> str:
+        app_id = (self.app_id or self.config.get("app_id") or "").strip()
+        app_secret = (self.app_secret or self.config.get("app_secret") or "").strip()
+        if not app_id or not app_secret:
+            raise ValueError("Feishu app_id and app_secret are required in provider config")
+
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 self.FEISHU_APP_TOKEN_URL,
-                json={"app_id": self.app_id, "app_secret": self.app_secret},
+                json={"app_id": app_id, "app_secret": app_secret},
             )
             data = resp.json()
-            return data.get("tenant_access_token") or data.get("app_access_token") or ""
+            if data.get("code") != 0:
+                raise RuntimeError(
+                    f"Feishu token error: code={data.get('code')}, msg={data.get('msg', '')}"
+                )
+            token = (data.get("tenant_access_token") or data.get("app_access_token") or "").strip()
+            if not token:
+                raise RuntimeError(f"Feishu token error: empty access token in response: {data}")
+            return token
 
     async def fetch_departments(self) -> list[ExternalDepartment]:
         """Fetch all departments from Feishu using concurrent recursive calls to get parent-child relationships."""
@@ -818,9 +838,9 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
 
                     async with sem:
                         resp = await client.get(
-                            f"{self.FEISHU_DEPT_URL}/{parent_id}/children", 
-                            params=params, 
-                            headers={"Authorization": f"Bearer {token}"}
+                            f"{self.FEISHU_DEPT_URL}/{parent_id}/children",
+                            params=params,
+                            headers=_bearer_headers(token),
                         )
                     data = resp.json()
 
@@ -897,7 +917,7 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                 resp = await client.get(
                     self.FEISHU_USERS_URL,
                     params=params,
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers=_bearer_headers(token),
                 )
                 data = resp.json()
 
@@ -1484,7 +1504,7 @@ class GoogleWorkspaceOrgSyncAdapter(BaseOrgSyncAdapter):
             resp = await client.get(
                 f"{self.GOOGLE_DIRECTORY_BASE_URL}/customer/{customer_id}/orgunits",
                 params={"type": "all"},
-                headers={"Authorization": f"Bearer {token}"},
+                headers=_bearer_headers(token),
             )
             data = resp.json()
             if resp.status_code >= 400:
@@ -1555,7 +1575,7 @@ class GoogleWorkspaceOrgSyncAdapter(BaseOrgSyncAdapter):
                 resp = await client.get(
                     f"{self.GOOGLE_DIRECTORY_BASE_URL}/users",
                     params=params,
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers=_bearer_headers(token),
                 )
                 data = resp.json()
                 if resp.status_code >= 400:
@@ -1645,5 +1665,7 @@ async def get_org_sync_adapter(
     if not adapter_class:
         return None
 
-    config = provider.config if provider else {}
+    from app.services.auth_registry import _decrypt_config_secrets
+
+    config = _decrypt_config_secrets(dict(provider.config or {})) if provider else {}
     return adapter_class(provider=provider, config=config, tenant_id=tenant_id)

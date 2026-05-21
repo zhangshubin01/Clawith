@@ -6,6 +6,7 @@
       <sourceFolder url="file://$MODULE_DIR$/backend" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/backend/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/clawith_mcp/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/backend/agent_data/82e3e5d0-6899-4c49-acb8-7d1ee5baab5a/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

@@ -1370,9 +1370,33 @@ class JSONRPCRouter:
         self._tool_call_history_by_session: dict[str, list[dict[str, Any]]] = {}
         self._tool_call_history_limit: int = 200
         self._MAX_TOOL_CALL_HISTORY_SESSIONS: int = 100
+        # 最近一次终端上下文（用于 get_terminal_output 缺失 terminalId 时兜底回填）
+        self._last_terminal_id_by_request: dict[str, str] = {}
+        self._last_terminal_id_by_session: dict[str, str] = {}
 
         # 已取消请求的 RPC ID 集合（防止超时后迟达响应干扰，OrderedDict 保证 FIFO）
         self._cancelled_requests: dict[int, None] = {}
+
+    @staticmethod
+    def _extract_terminal_id_from_result(result: Any) -> str:
+        """从 run_in_terminal 结果中提取 terminalId。"""
+        if result is None:
+            return ""
+        if isinstance(result, dict):
+            tid = result.get("terminalId") or result.get("terminal_id")
+            return str(tid).strip() if tid else ""
+        if isinstance(result, str):
+            text = result.strip()
+            if not text:
+                return ""
+            try:
+                parsed = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                return ""
+            if isinstance(parsed, dict):
+                tid = parsed.get("terminalId") or parsed.get("terminal_id")
+                return str(tid).strip() if tid else ""
+        return ""
         self._MAX_CANCELLED_REQUESTS_SIZE: int = 100
 
         # 工作区文件服务（diff 卡片支持）
@@ -1701,7 +1725,12 @@ class JSONRPCRouter:
                 return
             # 只存储 (params, msg_id)，_handle_chat_ask 会从 params 重新派生所需字段
             await self._chat_queue.put((params, msg_id))
-            logger.info("[LSP4J] chat/ask queued: requestId={} queue_depth={}", request_id, self._chat_queue.qsize())
+            logger.info(
+                "[LSP4J] chat/ask queued: requestId={} sessionId={} queue_depth={}",
+                request_id,
+                session_id,
+                self._chat_queue.qsize(),
+            )
             await self._send_response(msg_id, {"isSuccess": True, "requestId": request_id, "status": "queued"})
             return
 
@@ -2115,10 +2144,12 @@ class JSONRPCRouter:
                                 self._call_id_to_tool_id[llm_call_id] = tool_call_id
                             if _file_dedup_key:
                                 self._file_edit_card_primary[_file_dedup_key] = tool_call_id
-                            logger.debug(
-                                "[LSP4J] toolCallId 入队: name={} callId={} queue_len={}",
+                            logger.info(
+                                "[LSP4J] toolCallId 入队: name={} callId={} requestId={} sessionId={} queue_len={}",
                                 tool_name,
                                 tool_call_id[:8],
+                                request_id[:8],
+                                (session_id or "")[:8],
                                 len(self._tool_call_id_queue),
                             )
                             logger.info(
@@ -2970,6 +3001,22 @@ class JSONRPCRouter:
                 len(replace_text),
             )
             new_content = await self._fetch_and_replace_file(file_path, search_text, replace_text)
+            if new_content is None:
+                await self._send_response(
+                    msg_id,
+                    {
+                        "requestId": request_id,
+                        "errorCode": "TOOL_INVOKE_FAILED",
+                        "errorMessage": "search_replace failed: searchText not found or file read failed",
+                        "result": None,
+                    },
+                )
+                logger.warning(
+                    "[LSP4J] tool/invoke: search_replace failed, filePath={} requestId={}",
+                    file_path,
+                    request_id,
+                )
+                return
             parameters = {"filePath": file_path, "text": new_content if new_content else replace_text}
             tool_name = "replace_text_by_path"
 
@@ -4035,7 +4082,7 @@ class JSONRPCRouter:
             if new_content is not None:
                 params["text"] = new_content
             elif "text" not in params:
-                params["text"] = replace_text
+                raise ValueError("search_replace failed: searchText not found or file read failed")
         if tool_name in _LSP4J_FILE_EDIT_TOOLS:
             if "file_path" in params and "filePath" not in params:
                 params["filePath"] = params.pop("file_path")
@@ -4059,6 +4106,21 @@ class JSONRPCRouter:
                 _cmd = str(params["command"]).strip()
                 if any(_cmd.startswith(kw) for kw in _TERMINAL_READONLY_PREFIXES):
                     params["is_readonly"] = True
+        elif tool_name == "get_terminal_output":
+            _tid = params.get("terminalId") or params.get("terminal_id")
+            if not _tid:
+                fallback_tid = self._last_terminal_id_by_request.get(request_id) or self._last_terminal_id_by_session.get(self._session_id or "")
+                if fallback_tid:
+                    params["terminalId"] = fallback_tid
+                    params["terminal_id"] = fallback_tid
+                    arguments["terminalId"] = fallback_tid
+                    arguments["terminal_id"] = fallback_tid
+                    logger.info(
+                        "[LSP4J-TOOL] get_terminal_output 自动回填 terminalId={} requestId={} sessionId={}",
+                        fallback_tid,
+                        request_id[:8],
+                        (self._session_id or "")[:8],
+                    )
 
         # 相对路径解析：将非绝对路径拼接到 IDE 项目根路径
         # ★ 剥离 LLM 常用的 workspace/ 前缀，避免在项目根下创建多余的 workspace/ 目录
@@ -4296,6 +4358,18 @@ class JSONRPCRouter:
                     )
                     raise asyncio.TimeoutError()
                 result = tool_future.result()
+                if tool_name == "run_in_terminal":
+                    terminal_id = self._extract_terminal_id_from_result(result)
+                    if terminal_id:
+                        self._last_terminal_id_by_request[request_id] = terminal_id
+                        if self._session_id:
+                            self._last_terminal_id_by_session[self._session_id] = terminal_id
+                        logger.info(
+                            "[LSP4J-TOOL] run_in_terminal 记录 terminalId={} requestId={} sessionId={}",
+                            terminal_id,
+                            request_id[:8],
+                            (self._session_id or "")[:8],
+                        )
                 logger.info(
                     "[LSP4J-TIMING] tool={} send={:.0f}ms wait={:.0f}ms total={:.0f}ms trace={}",
                     tool_name,

@@ -135,7 +135,7 @@ _LSP4J_IDE_TOOLS = [
                         "description": "终端 ID",
                     },
                 },
-                "required": [],
+                "required": ["terminalId"],
             },
         },
     },

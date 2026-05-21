@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 from app.models.identity import IdentityProvider
+from app.services.auth_registry import _decrypt_config_secrets
 
 
 class OrgSyncService:
@@ -26,10 +27,33 @@ class OrgSyncService:
         if not adapter:
             return {"error": f"Provider type '{provider.provider_type}' not supported for org sync"}
 
-        # Configure adapter
+        # Configure adapter — 解密 DB 中加密的 app_secret/client_secret，与 SSO 路径一致
+        decrypted_config = _decrypt_config_secrets(dict(provider.config or {}))
         adapter.provider = provider
         adapter.provider_id = provider.id
-        adapter.config = provider.config
+        adapter.config = decrypted_config
+        if hasattr(adapter, "app_id"):
+            adapter.app_id = (decrypted_config.get("app_id") or "").strip()
+        if hasattr(adapter, "app_secret"):
+            adapter.app_secret = (decrypted_config.get("app_secret") or "").strip()
+        if hasattr(adapter, "app_key"):
+            adapter.app_key = (
+                decrypted_config.get("app_key")
+                or decrypted_config.get("appkey")
+                or decrypted_config.get("app_id")
+                or ""
+            ).strip()
+        if hasattr(adapter, "corp_id"):
+            adapter.corp_id = (
+                decrypted_config.get("corp_id") or decrypted_config.get("app_id") or decrypted_config.get("corpid") or ""
+            ).strip()
+        if hasattr(adapter, "secret"):
+            adapter.secret = (
+                decrypted_config.get("secret")
+                or decrypted_config.get("app_secret")
+                or decrypted_config.get("corpsecret")
+                or ""
+            ).strip()
 
         if not provider.tenant_id:
             return {"error": "Identity provider must be bound to a tenant"}

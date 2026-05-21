@@ -486,7 +486,6 @@ async def feishu_event_webhook(
 
 async def process_feishu_event(agent_id: uuid.UUID, body: dict, db: AsyncSession):
     """Core logic to process feishu events from both webhook and WS client."""
-    import json as _json
     logger.info(f"[Feishu] Event processing for {agent_id}: event_type={body.get('header', {}).get('event_type', 'N/A')}")
 
     # Deduplicate — Feishu retries on slow responses

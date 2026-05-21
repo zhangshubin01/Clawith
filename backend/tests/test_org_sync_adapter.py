@@ -2,16 +2,23 @@ import asyncio
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.config import get_settings
+from app.core.security import encrypt_data
+from app.services.auth_registry import _decrypt_config_secrets
 from app.services.org_sync_adapter import (
     BaseOrgSyncAdapter,
     ExternalUser,
+    FeishuOrgSyncAdapter,
     GoogleWorkspaceOrgSyncAdapter,
     SYNC_ADAPTER_CLASSES,
+    _bearer_headers,
     build_department_path_map,
 )
+from app.services.org_sync_service import OrgSyncService
 
 
 class _DummyAdapter(BaseOrgSyncAdapter):
@@ -164,6 +171,96 @@ def test_build_department_path_map_reconstructs_name_chain_from_internal_tree():
     assert path_map[root_id] == "总部"
     assert path_map[child_id] == "总部/研发部"
     assert path_map[leaf_id] == "总部/研发部/平台组"
+
+
+def test_bearer_headers_rejects_empty_token():
+    with pytest.raises(ValueError, match="Access token is empty"):
+        _bearer_headers("")
+
+    with pytest.raises(ValueError, match="Access token is empty"):
+        _bearer_headers("  \n  ")
+
+
+def test_bearer_headers_strips_whitespace():
+    assert _bearer_headers("  tok\n") == {"Authorization": "Bearer tok"}
+
+
+def test_feishu_get_access_token_raises_on_api_error():
+    adapter = FeishuOrgSyncAdapter(config={"app_id": "cli_test", "app_secret": "secret_test"})
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"code": 10003, "msg": "invalid app secret"}
+
+    with patch("app.services.org_sync_adapter.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        with pytest.raises(RuntimeError, match="Feishu token error: code=10003"):
+            asyncio.run(adapter.get_access_token())
+
+
+def test_feishu_get_access_token_returns_stripped_token():
+    adapter = FeishuOrgSyncAdapter(config={"app_id": "cli_test", "app_secret": "secret_test"})
+
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"code": 0, "tenant_access_token": "t-abc\n"}
+
+    with patch("app.services.org_sync_adapter.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+
+        token = asyncio.run(adapter.get_access_token())
+        assert token == "t-abc"
+
+
+def test_decrypt_config_secrets_restores_plain_app_secret_for_org_sync():
+    plain_secret = "feishu-secret-plain"
+    encrypted = encrypt_data(plain_secret, get_settings().SECRET_KEY)
+    config = _decrypt_config_secrets({"app_id": "cli_x", "app_secret": encrypted})
+    assert config["app_secret"] == plain_secret
+
+    adapter = FeishuOrgSyncAdapter(config=config)
+    assert adapter.app_secret == plain_secret
+
+
+def test_org_sync_service_applies_decrypted_config_to_adapter():
+    plain_secret = "sync-secret"
+    encrypted = encrypt_data(plain_secret, get_settings().SECRET_KEY)
+    provider = SimpleNamespace(
+        id=uuid.uuid4(),
+        provider_type="feishu",
+        tenant_id=uuid.uuid4(),
+        config={"app_id": "cli_sync", "app_secret": encrypted},
+    )
+
+    adapter = FeishuOrgSyncAdapter(provider=provider, config=provider.config)
+    assert adapter.app_secret != plain_secret
+
+    mock_db = MagicMock()
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = provider
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db.commit = AsyncMock()
+
+    sync_adapter = FeishuOrgSyncAdapter(provider=provider, config=provider.config)
+    sync_adapter.sync_org_structure = AsyncMock(return_value={"departments": 1, "members": 2, "errors": []})
+
+    with patch(
+        "app.services.org_sync_adapter.get_org_sync_adapter",
+        new=AsyncMock(return_value=sync_adapter),
+    ):
+        result = asyncio.run(OrgSyncService().sync_provider(mock_db, str(provider.id)))
+
+    assert "error" not in result
+    assert sync_adapter.app_secret == plain_secret
+    assert sync_adapter.config["app_secret"] == plain_secret
+    mock_db.commit.assert_awaited_once()
 
 
 def test_build_department_path_map_treats_external_zero_root_as_empty_path():
