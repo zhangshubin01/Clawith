@@ -1003,6 +1003,20 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             "triggers": [{"name": t.name, "type": t.type} for t in triggers],
         }, agent_id=agent_id)
 
+        from app.services.activity_logger import log_activity
+        await log_activity(
+            agent_id,
+            "schedule_run",
+            f"触发器执行: {', '.join(t.name for t in triggers)[:60]}",
+            detail={
+                "triggers": [
+                    {"name": t.name, "type": t.type, "id": str(t.id)} for t in triggers
+                ],
+                "reply_preview": (final_reply or "")[:500],
+                "source": "trigger_daemon",
+            },
+        )
+
         logger.info(f"⚡ Triggers fired for {agent.name}: {[t.name for t in triggers]}")
 
     except Exception as e:

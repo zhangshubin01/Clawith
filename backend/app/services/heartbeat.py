@@ -435,14 +435,29 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
             )
             await db.commit()
 
-        # Log activity if not empty
+        # 每次心跳均写入工作日志，便于「后端服务 → 心跳」页追踪（含 HEARTBEAT_OK 空跑）
         is_ok = "HEARTBEAT_OK" in reply.upper().replace(" ", "_") if reply else False
-        if not is_ok and reply:
-            from app.services.activity_logger import log_activity
+        from app.services.activity_logger import log_activity
+        if is_ok:
             await log_activity(
-                agent_id, "heartbeat",
+                agent_id,
+                "heartbeat",
+                "心跳检查完成（无待办）",
+                detail={"status": "ok"},
+            )
+        elif reply:
+            await log_activity(
+                agent_id,
+                "heartbeat",
                 f"Heartbeat: {reply[:80]}",
                 detail={"reply": reply[:500]},
+            )
+        else:
+            await log_activity(
+                agent_id,
+                "heartbeat",
+                "心跳检查异常或无回复",
+                detail={"status": "error"},
             )
 
         logger.info(f"💓 Heartbeat for {agent_name}: {'OK' if is_ok else reply[:60]}")
@@ -774,9 +789,14 @@ async def run_agent_oneshot(
             try:
                 from app.services.activity_logger import log_activity
                 await log_activity(
-                    agent_id, "oneshot_task",
+                    agent_id,
+                    "task_updated",
                     f"Oneshot task completed: {reply[:80]}",
-                    detail={"reply": reply[:500], "triggered_by": str(triggered_by_user_id)},
+                    detail={
+                        "kind": "oneshot",
+                        "reply": reply[:500],
+                        "triggered_by": str(triggered_by_user_id),
+                    },
                 )
             except Exception:
                 logger.warning("Failed to write activity log for heartbeat of agent_id={}", str(agent_id))

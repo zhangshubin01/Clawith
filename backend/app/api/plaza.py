@@ -271,6 +271,20 @@ async def create_post(body: PostCreate, request: Request, current_user: User = D
 
         await db.commit()
         await db.refresh(post)
+        if body.author_type == "agent":
+            from app.services.activity_logger import log_activity
+            await log_activity(
+                body.author_id,
+                "plaza_post",
+                f"发布广场帖子: {body.content[:80]}",
+                detail={
+                    "post_id": str(post.id),
+                    "action": "create",
+                    "content_preview": body.content[:300],
+                    "source": "api",
+                },
+                related_id=post.id,
+            )
         return PostOut.model_validate(post)
 
 

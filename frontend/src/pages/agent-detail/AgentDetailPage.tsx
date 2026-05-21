@@ -72,6 +72,25 @@ const WORKSPACE_TOOLS = new Set([
 ]);
 
 const AWARE_TOOLS = new Set(['set_trigger', 'update_trigger', 'cancel_trigger', 'list_triggers', 'list_focus_items', 'upsert_focus_item', 'complete_focus_item']);
+
+const PLAZA_TOOL_NAMES = new Set(['plaza_create_post', 'plaza_add_comment']);
+
+/** 广场发帖/评论：新数据为 plaza_post，历史数据可能仍是 tool_call */
+function isPlazaActivity(log: { action_type?: string; summary?: string; detail?: { tool?: string } }): boolean {
+    if (log.action_type === 'plaza_post') return true;
+    if (log.action_type !== 'tool_call') return false;
+    const tool = log.detail?.tool;
+    if (tool && PLAZA_TOOL_NAMES.has(tool)) return true;
+    return /plaza_(create_post|add_comment)/.test(log.summary || '');
+}
+
+function isHeartbeatActivity(log: { action_type?: string; summary?: string; detail?: { tool?: string } }): boolean {
+    return log.action_type === 'heartbeat' || isPlazaActivity(log);
+}
+
+function isPlazaToolCallOnly(log: { action_type?: string; summary?: string; detail?: { tool?: string } }): boolean {
+    return log.action_type === 'tool_call' && isPlazaActivity(log);
+}
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
 const trimLeadingPictograph = (value: string) => value.replace(/^\p{Extended_Pictographic}\s*/u, '');
 const formatReflectionTitle = (value: string | undefined, isZh: boolean) => {
@@ -5092,9 +5111,9 @@ export default function AgentDetailPage() {
                         triggerNameToFocus[trig.name] = trig.focus_ref || focusKeyFromTrigger(trig);
                     }
                     const triggerRelatedLogs = activityLogs.filter((log: any) =>
-                        log.action_type === 'trigger_fired' || log.action_type === 'trigger_created' ||
-                        log.action_type === 'trigger_updated' || log.action_type === 'trigger_cancelled' ||
-                        log.summary?.includes('trigger')
+                        log.action_type === 'schedule_run'
+                        || (log.detail?.triggers && Array.isArray(log.detail.triggers))
+                        || (log.summary && String(log.summary).includes('触发器执行'))
                     );
                     for (const log of triggerRelatedLogs) {
                         // Try to match log to a focus item via trigger name in the summary
@@ -6488,17 +6507,20 @@ export default function AgentDetailPage() {
                     activeTab === 'activityLog' && (() => {
                         // Category definitions
                         const userActionTypes = ['chat_reply', 'tool_call', 'task_created', 'task_updated', 'file_written', 'error'];
-                        const heartbeatTypes = ['heartbeat', 'plaza_post'];
                         const scheduleTypes = ['schedule_run'];
                         const messageTypes = ['feishu_msg_sent', 'agent_msg_sent', 'web_msg_sent'];
 
                         let filteredLogs = activityLogs;
                         if (logFilter === 'user') {
-                            filteredLogs = activityLogs.filter((l: any) => userActionTypes.includes(l.action_type));
+                            filteredLogs = activityLogs.filter((l: any) =>
+                                userActionTypes.includes(l.action_type) && !isPlazaToolCallOnly(l),
+                            );
                         } else if (logFilter === 'backend') {
-                            filteredLogs = activityLogs.filter((l: any) => !userActionTypes.includes(l.action_type));
+                            filteredLogs = activityLogs.filter((l: any) =>
+                                !userActionTypes.includes(l.action_type) || isPlazaToolCallOnly(l),
+                            );
                         } else if (logFilter === 'heartbeat') {
-                            filteredLogs = activityLogs.filter((l: any) => heartbeatTypes.includes(l.action_type));
+                            filteredLogs = activityLogs.filter((l: any) => isHeartbeatActivity(l));
                         } else if (logFilter === 'schedule') {
                             filteredLogs = activityLogs.filter((l: any) => scheduleTypes.includes(l.action_type));
                         } else if (logFilter === 'messages') {

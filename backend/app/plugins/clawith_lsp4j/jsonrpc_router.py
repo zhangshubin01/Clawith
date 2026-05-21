@@ -102,6 +102,30 @@ _LSP4J_FILE_EDIT_TOOLS = frozenset(
 # 重连时无 pending Future，靠此表补发 FINISHED sync，避免工具卡/「生成中」悬挂。
 _ORPHAN_INVOKE_REGISTRY: dict[str, tuple[dict[str, Any], float]] = {}
 _ORPHAN_INVOKE_TTL_SEC = 120.0
+_DEBUG_LOG_PATH = "/Users/shubinzhang/Documents/agent/.cursor/debug-59be27.log"
+_DEBUG_LOG_PATH_FALLBACK = "/agent-cursor/debug-59be27.log"
+_DEBUG_SESSION_ID = "59be27"
+
+
+def _agent_debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    payload = {
+        "sessionId": _DEBUG_SESSION_ID,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        _target = _DEBUG_LOG_PATH
+        if not os.path.isdir(os.path.dirname(_target)) and os.path.isdir(os.path.dirname(_DEBUG_LOG_PATH_FALLBACK)):
+            # 容器内宿主机路径不可见时，写入挂载目录，最终仍会落回宿主机 .cursor。
+            _target = _DEBUG_LOG_PATH_FALLBACK
+        with open(_target, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _prune_orphan_invoke_registry() -> None:
@@ -488,9 +512,27 @@ def _rg_search(project_root: str, pattern: str, max_results: int = 50) -> list[d
                 }
             )
         logger.info("[RG-SEARCH] grep_code pattern={} results={}", pattern[:80], len(items))
+        # #region agent log
+        _agent_debug_log(
+            "session_quality_v1",
+            "S1",
+            "jsonrpc_router.py:_rg_search",
+            "rg_search_done",
+            {"patternPreview": pattern[:80], "resultCount": len(items), "projectRoot": project_root},
+        )
+        # #endregion
         return items
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         logger.info("[RG-SEARCH] unavailable: {}", e)
+        # #region agent log
+        _agent_debug_log(
+            "session_quality_v1",
+            "S1",
+            "jsonrpc_router.py:_rg_search",
+            "rg_search_unavailable",
+            {"reason": str(e), "projectRoot": project_root},
+        )
+        # #endregion
         return None
 
 
@@ -1376,6 +1418,24 @@ class JSONRPCRouter:
 
         # 已取消请求的 RPC ID 集合（防止超时后迟达响应干扰，OrderedDict 保证 FIFO）
         self._cancelled_requests: dict[int, None] = {}
+        self._MAX_CANCELLED_REQUESTS_SIZE: int = 100
+
+        # 工作区文件服务（diff 卡片支持）
+        self._ws_file_service = WorkspaceFileService()
+
+        # process_step_callback 去重节流缓存：
+        # request_id -> {"sig": (step, status, description), "ts": monotonic_ts}
+        self._process_step_last_emit: dict[str, dict[str, Any]] = {}
+
+        # 代码检索结果累积：按 request_id 收集高频搜索工具结果，边搜边推一张 search_codebase 汇总卡
+        # 格式: {request_id: [{"tool": "grep_code", "query": "...", "results": [...]}, ...]}
+        self._search_results_store: dict[str, list[dict[str, Any]]] = {}
+        self._search_summary_call_id: dict[str, str] = {}
+        self._search_summary_push_task: dict[str, asyncio.Task] = {}
+        self._search_summary_finalized: set[str] = set()
+
+        # ★ 性能计时: 当前请求的基准时间戳（在 _handle_chat_ask 中设置）
+        self._perf_start: float = 0.0
 
     @staticmethod
     def _extract_terminal_id_from_result(result: Any) -> str:
@@ -1397,24 +1457,6 @@ class JSONRPCRouter:
                 tid = parsed.get("terminalId") or parsed.get("terminal_id")
                 return str(tid).strip() if tid else ""
         return ""
-        self._MAX_CANCELLED_REQUESTS_SIZE: int = 100
-
-        # 工作区文件服务（diff 卡片支持）
-        self._ws_file_service = WorkspaceFileService()
-
-        # process_step_callback 去重节流缓存：
-        # request_id -> {"sig": (step, status, description), "ts": monotonic_ts}
-        self._process_step_last_emit: dict[str, dict[str, Any]] = {}
-
-        # 代码检索结果累积：按 request_id 收集高频搜索工具结果，边搜边推一张 search_codebase 汇总卡
-        # 格式: {request_id: [{"tool": "grep_code", "query": "...", "results": [...]}, ...]}
-        self._search_results_store: dict[str, list[dict[str, Any]]] = {}
-        self._search_summary_call_id: dict[str, str] = {}
-        self._search_summary_push_task: dict[str, asyncio.Task] = {}
-        self._search_summary_finalized: set[str] = set()
-
-        # ★ 性能计时: 当前请求的基准时间戳（在 _handle_chat_ask 中设置）
-        self._perf_start: float = 0.0
 
     # ──────────────────────────────────────────
     # 性能计时工具
@@ -1472,6 +1514,21 @@ class JSONRPCRouter:
         method = msg.get("method", "")
         params = msg.get("params", {})
         msg_id = msg.get("id")
+        if method == "chat/ask":
+            # #region agent log
+            _agent_debug_log(
+                "chat_stall_probe_v1",
+                "H1",
+                "jsonrpc_router.py:_dispatch",
+                "chat_ask_received_by_dispatch",
+                {
+                    "msgId": str(msg_id),
+                    "paramsKeys": list(params.keys()) if isinstance(params, dict) else [],
+                    "wsConnected": self._ws_connected,
+                    "closed": self._closed,
+                },
+            )
+            # #endregion
 
         # 协议追踪日志：记录收到的每条请求/通知
         # 心跳/探活消息降级为 DEBUG，避免污染 INFO 日志（#2 修复）
@@ -1678,6 +1735,23 @@ class JSONRPCRouter:
         session_id = ask.sessionId
         question_text = (ask.questionText or "").strip() or (str(ask.chatContext or "")).strip()
         chat_context = str(ask.chatContext or "")
+        # #region agent log
+        _agent_debug_log(
+            "chat_stall_probe_v1",
+            "H2",
+            "jsonrpc_router.py:_handle_chat_ask",
+            "chat_ask_parsed",
+            {
+                "requestId": request_id,
+                "sessionId": session_id,
+                "msgId": str(msg_id),
+                "questionLen": len(question_text),
+                "lockLocked": self._chat_lock.locked(),
+                "queueSize": self._chat_queue.qsize(),
+                "projectPathReady": bool(self._project_path),
+            },
+        )
+        # #endregion
 
         # 保存流式模式和会话类型（供后续回调使用）
         self._stream_mode = ask.stream
@@ -1725,6 +1799,19 @@ class JSONRPCRouter:
                 return
             # 只存储 (params, msg_id)，_handle_chat_ask 会从 params 重新派生所需字段
             await self._chat_queue.put((params, msg_id))
+            # #region agent log
+            _agent_debug_log(
+                "chat_stall_probe_v1",
+                "H3",
+                "jsonrpc_router.py:_handle_chat_ask",
+                "chat_ask_queued_response",
+                {
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "queueDepthAfterPut": self._chat_queue.qsize(),
+                },
+            )
+            # #endregion
             logger.info(
                 "[LSP4J] chat/ask queued: requestId={} sessionId={} queue_depth={}",
                 request_id,
@@ -1796,6 +1883,21 @@ class JSONRPCRouter:
             # chat/ask 是 @JsonRequest，LSP4J 框架会等待响应；但 call_llm 可能运行数分钟，
             # 所以必须先返回响应确认收到请求，后续内容通过通知推送。
             # 这与 commitMsg/generate 的模式一致。
+            # #region agent log
+            _agent_debug_log(
+                "chat_stall_probe_v1",
+                "H3",
+                "jsonrpc_router.py:_handle_chat_ask",
+                "chat_ask_ack_before_send",
+                {
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "msgId": str(msg_id),
+                    "wsConnected": self._ws_connected,
+                    "closed": self._closed,
+                },
+            )
+            # #endregion
             await self._send_response(
                 msg_id,
                 {
@@ -1804,6 +1906,19 @@ class JSONRPCRouter:
                     "status": "processing",
                 },
             )
+            # #region agent log
+            _agent_debug_log(
+                "chat_stall_probe_v1",
+                "H3",
+                "jsonrpc_router.py:_handle_chat_ask",
+                "chat_ask_ack_sent",
+                {
+                    "requestId": request_id,
+                    "sessionId": session_id,
+                    "msgId": str(msg_id),
+                },
+            )
+            # #endregion
 
             # ★ 性能计时: JSON-RPC 响应发送
             _t0 = self._log_perf("JSONRPC_RESPONSE", _ask_start, _t0)
@@ -1983,6 +2098,15 @@ class JSONRPCRouter:
                     logger.info("[CODE-MAP] injected: project={} map_len={}", self._project_path, len(_code_map))
                 else:
                     logger.warning("[CODE-MAP] empty: project={}", self._project_path)
+                    # #region agent log
+                    _agent_debug_log(
+                        "session_quality_v1",
+                        "S1",
+                        "jsonrpc_router.py:_handle_chat_ask",
+                        "code_map_empty",
+                        {"projectPath": self._project_path, "requestId": request_id},
+                    )
+                    # #endregion
 
             message_history.append({"role": "user", "content": full_text})
 
@@ -1995,13 +2119,30 @@ class JSONRPCRouter:
                 send_fn=lambda payload: self._send_chat_answer(session_id, payload, request_id)
             )
 
+            _first_answer_chunk_logged = False
+
             async def on_chunk(text: str) -> None:
                 """流式文本回调 — 推送 chat/answer（ChatAnswerParams 格式）
 
                 使用缓冲区累积小 chunk，按行或阈值发送，避免 markdown 表格被拆分成单个字符，
                 导致 MarkdownStreamPanel 无法正确解析。
                 """
-                nonlocal _thinking_started, _thinking_start_time
+                nonlocal _thinking_started, _thinking_start_time, _first_answer_chunk_logged
+                if not _first_answer_chunk_logged and text:
+                    _first_answer_chunk_logged = True
+                    # #region agent log
+                    _agent_debug_log(
+                        "session_quality_v1",
+                        "P1",
+                        "jsonrpc_router.py:on_chunk",
+                        "first_answer_chunk",
+                        {
+                            "requestId": request_id,
+                            "elapsedMs": int((time.monotonic() - _ask_start) * 1000),
+                            "chunkLen": len(text),
+                        },
+                    )
+                    # #endregion
                 # 思考结束标记：收到首个正文 chunk 即表示思考阶段结束
                 if _thinking_started:
                     _thinking_started = False
@@ -4388,6 +4529,20 @@ class JSONRPCRouter:
                         parsed = json.loads(result) if isinstance(result, str) else result
                         if isinstance(parsed, dict) and "results" in parsed:
                             results = parsed["results"]
+                            # #region agent log
+                            _agent_debug_log(
+                                "session_quality_v1",
+                                "S1",
+                                "jsonrpc_router.py:invoke_tool_on_ide",
+                                "ide_search_result",
+                                {
+                                    "tool": tool_name,
+                                    "requestId": request_id,
+                                    "resultCount": len(results) if isinstance(results, list) else -1,
+                                    "zeroReason": parsed.get("zero_result_reason"),
+                                },
+                            )
+                            # #endregion
                             if tool_name == "search_file" and not results:
                                 reason = str(parsed.get("zero_result_reason") or "no_match")
                                 hint_items = _search_file_hint_items(
@@ -5050,6 +5205,20 @@ class JSONRPCRouter:
         """发送 LSP Base Protocol 格式的消息到 WebSocket。"""
         # 连接已断开或不活跃，不再发送（_ws_connected 用于快速判断，_closed 用于兜底）
         if not self._ws_connected or self._closed:
+            if "result" in message and "id" in message:
+                # #region agent log
+                _agent_debug_log(
+                    "chat_stall_probe_v1",
+                    "H4",
+                    "jsonrpc_router.py:_send_message",
+                    "response_dropped_due_to_ws_state",
+                    {
+                        "msgId": str(message.get("id")),
+                        "wsConnected": self._ws_connected,
+                        "closed": self._closed,
+                    },
+                )
+                # #endregion
             return
         try:
             # 协议追踪日志：记录发出的每条响应/通知/请求
@@ -5301,6 +5470,19 @@ class JSONRPCRouter:
                 file_path,
                 current_content.count(search_text),
             )
+            # #region agent log
+            _agent_debug_log(
+                "session_quality_v1",
+                "F1",
+                "jsonrpc_router.py:_fetch_and_replace_file",
+                "search_replace_matched",
+                {
+                    "filePath": file_path,
+                    "occurrences": current_content.count(search_text),
+                    "fileLen": len(current_content),
+                },
+            )
+            # #endregion
             return new_content
         if current_content and search_text:
             logger.warning(
@@ -5308,6 +5490,19 @@ class JSONRPCRouter:
                 file_path,
                 search_text[:80],
             )
+            # #region agent log
+            _agent_debug_log(
+                "session_quality_v1",
+                "F1",
+                "jsonrpc_router.py:_fetch_and_replace_file",
+                "search_replace_not_found",
+                {
+                    "filePath": file_path,
+                    "searchPreview": search_text[:120],
+                    "fileLen": len(current_content),
+                },
+            )
+            # #endregion
         return None
 
     # 存根与扩展方法

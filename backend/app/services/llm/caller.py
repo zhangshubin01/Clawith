@@ -794,6 +794,12 @@ async def call_llm(
         # 取消检查：若 cancel_event 已设置，立即中断工具循环
         if cancel_event and cancel_event.is_set():
             logger.info("[LLM] cancel_event 已设置，中断工具循环（round={}）", round_i)
+            _dbg_llm(
+                "T1",
+                "caller.py:call_llm:cancel_break",
+                "llm_cancelled",
+                {"round": round_i, "agentId": str(agent_id)},
+            )
             break
         # Dynamic tool-call limit warning（#119 修复：LSP4J 模式阈值前移）
         if tool_warning_mode == "lsp4j":
@@ -1131,7 +1137,16 @@ async def call_llm(
     if agent_id and _accumulated_usage.total_tokens > 0:
         await record_token_usage(agent_id, _accumulated_usage)
     await client.close()
-    logger.warning("[LLM] tool rounds exhausted: max={} agent_id={}", _max_tool_rounds, agent_id)
+    _exit_reason = "cancelled" if cancel_event and cancel_event.is_set() else "rounds_exhausted"
+    logger.warning("[LLM] tool loop exit: reason={} max={} agent_id={}", _exit_reason, _max_tool_rounds, agent_id)
+    _dbg_llm(
+        "T1",
+        "caller.py:call_llm:loop_exit",
+        "llm_loop_exit",
+        {"reason": _exit_reason, "maxRounds": _max_tool_rounds, "agentId": str(agent_id)},
+    )
+    if _exit_reason == "cancelled":
+        return "[Cancelled] The request was stopped before completion."
     return format_tool_rounds_limit_reply(_max_tool_rounds)
 
 

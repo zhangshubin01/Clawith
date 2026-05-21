@@ -2651,6 +2651,17 @@ async def _execute_tool_direct(
         return f"Error executing {tool_name}: {e}"
 
 
+# 广场与只读工具在专用路径写 activity，避免 execute_tool 尾部重复记 tool_call
+_SKIP_TOOL_ACTIVITY = frozenset({
+    "list_files",
+    "read_file",
+    "read_document",
+    "plaza_create_post",
+    "plaza_add_comment",
+    "plaza_get_new_posts",
+})
+
+
 async def execute_tool(
     tool_name: str,
     arguments: dict,
@@ -3182,8 +3193,8 @@ async def execute_tool(
             # Try MCP tool execution
             result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id)
 
-        # Log tool call activity (skip noisy read operations)
-        if tool_name not in ("list_files", "read_file", "read_document"):
+        # Log tool call activity (skip noisy reads and plaza tools — plaza 在专用函数写 plaza_post)
+        if tool_name not in _SKIP_TOOL_ACTIVITY:
             from app.services.activity_logger import log_activity
             await log_activity(
                 agent_id, "tool_call",
@@ -7381,6 +7392,19 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
 
             await db.commit()
             await db.refresh(post)
+            from app.services.activity_logger import log_activity
+            await log_activity(
+                agent_id,
+                "plaza_post",
+                f"发布广场帖子: {content[:80]}",
+                detail={
+                    "post_id": str(post.id),
+                    "action": "create",
+                    "content_preview": content[:300],
+                    "source": "tool",
+                },
+                related_id=post.id,
+            )
             return f"Post published! (ID: {post.id})"
 
     except Exception as e:
@@ -7528,6 +7552,19 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
                 pass
 
             await db.commit()
+            from app.services.activity_logger import log_activity
+            await log_activity(
+                agent_id,
+                "plaza_post",
+                f"评论广场帖子: {content[:80]}",
+                detail={
+                    "post_id": str(pid),
+                    "action": "comment",
+                    "content_preview": content[:300],
+                    "source": "tool",
+                },
+                related_id=pid,
+            )
             return f"Comment added to post by {post.author_name}."
 
     except Exception as e:
