@@ -352,7 +352,9 @@ run_docker_mode() {
 
         cd "$ROOT"
 
-        # 查找空闲端口
+        # 先停旧容器释放端口，再检测空闲端口，避免端口漂移
+        docker compose down 2>/dev/null || docker-compose down 2>/dev/null || true
+
         FRONTEND_PORT=3008
         while true; do
             if docker ps 2>/dev/null | grep -q ":$FRONTEND_PORT->"; then
@@ -370,7 +372,6 @@ run_docker_mode() {
         echo -e "  Allocated Frontend Port: ${GREEN}$FRONTEND_PORT${NC}"
         export FRONTEND_PORT
 
-        docker compose down 2>/dev/null || docker-compose down 2>/dev/null || true
         docker compose up -d --build 2>/dev/null || docker-compose up -d --build
 
         echo -e "${GREEN}✅ Deployed via Docker. Port: $FRONTEND_PORT${NC}"
