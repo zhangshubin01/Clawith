@@ -970,10 +970,10 @@ async def push_default_skills_to_existing_agents():
                         pushed += 1
                         logger.info(f"[SkillSeeder] Pushed '{skill.name}' to agent {agent.id}")
 
-        if pushed or updated or removed_legacy:
+        if pushed or updated:
             logger.info(
                 f"[SkillSeeder] Pushed {pushed} new + {updated} updated skill files "
-                f"to existing agents; removed {removed_legacy} legacy MCP installer files"
+                f"to existing agents"
             )
         else:
             logger.info("[SkillSeeder] All existing agents already have up-to-date default skills")
