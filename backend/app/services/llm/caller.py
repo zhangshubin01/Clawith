@@ -1116,13 +1116,28 @@ async def call_llm(
             return results
 
         if file_groups:
+            _group_list = list(file_groups.values())
             group_results = await asyncio.gather(
-                *(_run_write_group(group) for group in file_groups.values()),
+                *(_run_write_group(group) for group in _group_list),
                 return_exceptions=True,
             )
-            for grp in group_results:
+            for group_tools, grp in zip(_group_list, group_results):
                 if isinstance(grp, Exception):
                     logger.error("[LLM] write group 执行异常: {}", grp)
+                    # NEW-060：组级异常时须为每个 tool_call_id 补 tool 消息，避免下一轮 400
+                    for tc in group_tools:
+                        _tid = tc.get("id") or ""
+                        if not _tid:
+                            continue
+                        api_messages.append(
+                            LLMMessage(
+                                role="tool",
+                                content=(
+                                    f"[工具执行失败] write group: {type(grp).__name__}: {str(grp)[:200]}"
+                                ),
+                                tool_call_id=_tid,
+                            )
+                        )
                     continue
                 # _process_tool_call 已在内部写入 tool 消息；此处仅记录 group 级异常
                 for tc, tool_error in grp:

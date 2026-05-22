@@ -2258,35 +2258,21 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             # Track tools included via is_default fallback (no AgentTool record)
             default_included_names = []
 
-            # Key insight: if the agent already has ANY AgentTool assignments,
-            # its tool panel has been configured by the user. In that case,
-            # only include tools with an explicit AgentTool(enabled=True)
-            # record.  Tools without any AgentTool record are NOT included
-            # (they will be provided by _always_tools if they are core tools).
-            #
-            # For agents with ZERO assignments (brand-new, never configured),
-            # fall back to is_default so they get a reasonable starting set.
-            agent_is_configured = len(assignments) > 0
-
             for t in all_tools:
                 tid = str(t.id)
                 at = assignments.get(tid)
-
-                if agent_is_configured:
-                    # Configured agent: require explicit AgentTool record
-                    if at is None:
-                        # No assignment → not included (unless _always_tools adds it)
-                        default_included_names.append(t.name)
-                        continue
-                    enabled = at.enabled
-                else:
-                    # Unconfigured agent: use is_default as fallback
-                    enabled = at.enabled if at else t.is_default
+                # 无 AgentTool 记录时回退 is_default；已配置工具面板的 Agent 仍带全套默认工具（回退 71fc2c3b）
+                enabled = at.enabled if at else t.is_default
 
                 if not enabled:
+                    # 用户显式 enabled=False 时记录，避免 _always_tools 循环再次注入
                     if at and not at.enabled:
                         explicitly_disabled_names.add(t.name)
                     continue
+
+                # 记录通过 is_default 注入、尚无 AgentTool 记录的工具，便于日志排查
+                if at is None and t.is_default:
+                    default_included_names.append(t.name)
 
                 # Skip feishu tools if the agent has no Feishu channel configured
                 if t.category == "feishu" and not has_feishu:
@@ -2328,9 +2314,8 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     f"{sorted(explicitly_disabled_names)}"
                 )
             if default_included_names:
-                logger.info(
-                    f"[Tools] agent={agent_id} skipped (no AgentTool record, "
-                    f"agent_configured={agent_is_configured}): "
+                logger.debug(
+                    f"[Tools] agent={agent_id} included via is_default (no AgentTool record): "
                     f"{sorted(default_included_names)}"
                 )
 
@@ -2714,6 +2699,15 @@ async def execute_tool(
     _agent_tenant_id = await _get_agent_tenant_id(agent_id)
 
     ws = await ensure_workspace(agent_id, tenant_id=_agent_tenant_id)
+
+    # IDE 删除：已连接 LSP4J 时改走插件内 PENDING 审批，避免 L3 只回文本、IDE 无授权按钮
+    if tool_name in ("delete_file_by_path", "delete_file"):
+        from app.plugins.clawith_lsp4j.jsonrpc_router import get_active_router, invoke_lsp4j_tool
+
+        agent_key = (str(user_id), str(agent_id))
+        if await get_active_router(agent_key) is not None:
+            _invoke_name = "delete_file_by_path" if tool_name == "delete_file" else tool_name
+            return await invoke_lsp4j_tool(_invoke_name, arguments, agent_id, user_id)
 
     # ── Autonomy boundary check ──（提取到 check_tool_autonomy，与 LSP4J 路径复用同一闸门）
     _autonomy_blocked = await check_tool_autonomy(tool_name, arguments, agent_id, user_id)
@@ -6355,7 +6349,12 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
                 rel_r = await db.execute(
                     select(AgentModel.name).join(
                         AgentAgentRelationship,
-                        (AgentAgentRelationship.target_agent_id == AgentModel.id) & (AgentAgentRelationship.agent_id == from_agent_id)
+                        or_(
+                            (AgentAgentRelationship.target_agent_id == AgentModel.id)
+                            & (AgentAgentRelationship.agent_id == from_agent_id),
+                            (AgentAgentRelationship.agent_id == AgentModel.id)
+                            & (AgentAgentRelationship.target_agent_id == from_agent_id),
+                        ),
                     )
                 )
                 rel_names = [n for (n,) in rel_r.all()]
@@ -6364,11 +6363,11 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
             if target_agent.is_expired or (target_agent.expires_at and datetime.now(timezone.utc) >= target_agent.expires_at):
                 return f"⚠️ {target_agent.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
 
-            # Enforce relationship: only allow file transfer with agents in relationships
+            # 关系校验：任一方向存在即可（与 main 对齐，支持专家→WL4 回传）
             rel_check = await db.execute(
                 select(AgentAgentRelationship).where(
-                    AgentAgentRelationship.agent_id == from_agent_id,
-                    AgentAgentRelationship.target_agent_id == target_agent.id,
+                    ((AgentAgentRelationship.agent_id == from_agent_id) & (AgentAgentRelationship.target_agent_id == target_agent.id))
+                    | ((AgentAgentRelationship.agent_id == target_agent.id) & (AgentAgentRelationship.target_agent_id == from_agent_id))
                 ).limit(1)
             )
             rel = rel_check.scalar_one_or_none()
@@ -6531,6 +6530,18 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, ws: Path, args: dict) ->
                     chat_session.id,
                     target_name,
                 )
+                # 文件投递后唤醒目标 Agent，否则仅写入会话不会触发专家执行
+                try:
+                    await _wake_agent_async(
+                        target_id,
+                        file_msg_content,
+                        from_agent_id=from_agent_id,
+                        skip_dedup=True,
+                        a2a_session_id=str(chat_session.id),
+                    )
+                    logger.info("[A2A-File] Woke target agent %s after file delivery", target_name)
+                except Exception as wake_err:
+                    logger.warning(f"[A2A-File] Failed to wake {target_name}: {wake_err}")
         except Exception as e:
             logger.error(f"[A2A-File] FAILED to inject file delivery message: {e}")
 
@@ -6573,7 +6584,12 @@ async def _resolve_a2a_target(
         rel_r = await db.execute(
             select(AgentModel.name).join(
                 AgentAgentRelationship,
-                (AgentAgentRelationship.target_agent_id == AgentModel.id) & (AgentAgentRelationship.agent_id == from_agent_id)
+                or_(
+                    (AgentAgentRelationship.target_agent_id == AgentModel.id)
+                    & (AgentAgentRelationship.agent_id == from_agent_id),
+                    (AgentAgentRelationship.agent_id == AgentModel.id)
+                    & (AgentAgentRelationship.target_agent_id == from_agent_id),
+                ),
             )
         )
         rel_names = [n for (n,) in rel_r.all()]
@@ -6769,7 +6785,12 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 rel_r = await db.execute(
                     select(AgentModel.name).join(
                         AgentAgentRelationship,
-                        (AgentAgentRelationship.target_agent_id == AgentModel.id) & (AgentAgentRelationship.agent_id == from_agent_id)
+                        or_(
+                            (AgentAgentRelationship.target_agent_id == AgentModel.id)
+                            & (AgentAgentRelationship.agent_id == from_agent_id),
+                            (AgentAgentRelationship.agent_id == AgentModel.id)
+                            & (AgentAgentRelationship.target_agent_id == from_agent_id),
+                        ),
                     )
                 )
                 rel_names = [n for (n,) in rel_r.all()]
@@ -6780,12 +6801,11 @@ async def _send_message_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
             if target.is_expired or (target.expires_at and datetime.now(timezone.utc) >= target.expires_at):
                 return f"⚠️ {target.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
 
-            # Enforce relationship: only allow communication with agents in relationships
-            # (AgentAgentRelationship is imported at module level — no local import needed)
+            # 关系校验：任一方向存在即可（与 main 对齐，支持专家→WL4 回传）
             rel_check = await db.execute(
                 select(AgentAgentRelationship).where(
-                    AgentAgentRelationship.agent_id == from_agent_id,
-                    AgentAgentRelationship.target_agent_id == target.id,
+                    ((AgentAgentRelationship.agent_id == from_agent_id) & (AgentAgentRelationship.target_agent_id == target.id))
+                    | ((AgentAgentRelationship.agent_id == target.id) & (AgentAgentRelationship.target_agent_id == from_agent_id))
                 ).limit(1)
             )
             rel = rel_check.scalar_one_or_none()
@@ -8004,6 +8024,19 @@ async def _handle_set_trigger(
 
     try:
         async with async_session() as db:
+            if ttype == "on_message":
+                from app.services.trigger_daemon import normalize_on_message_trigger_config, _debug_log_5f0250
+
+                before = dict(config)
+                config = await normalize_on_message_trigger_config(db, config)
+                if config != before:
+                    _debug_log_5f0250(
+                        "agent_tools.py:_handle_set_trigger",
+                        "on_message_config_normalized_at_create",
+                        {"trigger_name": name, "before": before, "after": config},
+                        "C",
+                    )
+
             # Load agent to get per-agent trigger limit
             from app.models.agent import Agent as _AgentModel
             _a_result = await db.execute(select(_AgentModel).where(_AgentModel.id == agent_id))
@@ -8113,6 +8146,10 @@ async def _handle_update_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
             if new_config is not None:
                 if not isinstance(new_config, dict):
                     return "❌ 'config' must be a JSON object (dict), not a string or other type"
+                if trigger.type == "on_message":
+                    from app.services.trigger_daemon import normalize_on_message_trigger_config
+
+                    new_config = await normalize_on_message_trigger_config(db, new_config)
                 old_config = trigger.config
                 trigger.config = new_config
                 changes.append(f"config: {old_config} → {new_config}")

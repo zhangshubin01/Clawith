@@ -25,6 +25,56 @@ from app.database import async_session
 from app.models.trigger import AgentTrigger
 from app.models.agent import Agent
 
+_DEBUG_LOG_PATH = "/Users/shubinzhang/Documents/agent/.cursor/debug-5f0250.log"
+
+
+def _debug_log_5f0250(location: str, message: str, data: dict, hypothesis_id: str) -> None:
+    # #region agent log
+    try:
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as _f:
+            _f.write(
+                _json.dumps(
+                    {
+                        "sessionId": "5f0250",
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "hypothesisId": hypothesis_id,
+                        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
+
+
+async def normalize_on_message_trigger_config(db, config: dict) -> dict:
+    """若 from_user_name 实际匹配数字员工，改写为 from_agent_name（LLM 常混淆两者）。"""
+    if not isinstance(config, dict):
+        return config
+    if config.get("from_agent_name") or not config.get("from_user_name"):
+        return config
+    raw_name = str(config.get("from_user_name", "")).strip()
+    if not raw_name:
+        return config
+    safe_name = raw_name.replace("%", "").replace("_", r"\_")
+    agent_r = await db.execute(select(Agent).where(Agent.name.ilike(f"%{safe_name}%")).limit(1))
+    matched = agent_r.scalar_one_or_none()
+    if not matched:
+        return config
+    normalized = dict(config)
+    normalized["from_agent_name"] = matched.name
+    normalized.pop("from_user_name", None)
+    _debug_log_5f0250(
+        "trigger_daemon.py:normalize_on_message_trigger_config",
+        "normalized_from_user_to_agent",
+        {"raw_name": raw_name, "agent_id": str(matched.id), "agent_name": matched.name},
+        "C",
+    )
+    return normalized
 
 
 # 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
@@ -445,10 +495,25 @@ async def _check_new_agent_messages(trigger: AgentTrigger) -> bool:
     cfg = trigger.config or {}
     if not isinstance(cfg, dict):
         return False
+
+    try:
+        async with async_session() as _norm_db:
+            cfg = await normalize_on_message_trigger_config(_norm_db, cfg)
+            if cfg is not trigger.config:
+                trigger.config = cfg
+    except Exception:
+        pass
+
     from_agent_name = cfg.get("from_agent_name")
     from_user_name = cfg.get("from_user_name")
 
     if not from_agent_name and not from_user_name:
+        _debug_log_5f0250(
+            "trigger_daemon.py:_check_new_agent_messages",
+            "no_source_configured",
+            {"trigger_name": trigger.name, "agent_id": str(trigger.agent_id)},
+            "C",
+        )
         return False
 
     since = trigger.last_fired_at or trigger.created_at
@@ -499,9 +564,25 @@ async def _check_new_agent_messages(trigger: AgentTrigger) -> bool:
                 )
                 msg = result.scalar_one_or_none()
                 if not msg:
+                    _debug_log_5f0250(
+                        "trigger_daemon.py:_check_new_agent_messages",
+                        "agent_path_no_new_message",
+                        {
+                            "trigger_name": trigger.name,
+                            "from_agent_name": from_agent_name,
+                            "since": since.isoformat() if since else None,
+                        },
+                        "C",
+                    )
                     return False
                 cfg["_matched_message"] = (msg.content or "")[:2000]
                 cfg["_matched_from"] = from_agent_name
+                _debug_log_5f0250(
+                    "trigger_daemon.py:_check_new_agent_messages",
+                    "agent_path_matched",
+                    {"trigger_name": trigger.name, "from_agent_name": from_agent_name},
+                    "C",
+                )
                 return True
 
             elif from_user_name:
