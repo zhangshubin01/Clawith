@@ -262,6 +262,38 @@ start_postgres() {
 }
 
 # ═══════════════════════════════════════════════════════
+# 确保 Redis 运行
+# ═══════════════════════════════════════════════════════
+REDIS_PORT=6379
+ensure_redis() {
+    if command -v redis-cli &>/dev/null && redis-cli -p $REDIS_PORT ping &>/dev/null 2>&1; then
+        echo -e "${GREEN}📦 Redis already running (port $REDIS_PORT)${NC}"
+        return 0
+    fi
+    # 检查是否已有 clawith redis 容器
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'clawith-redis'; then
+        echo -e "${GREEN}📦 Redis container already running${NC}"
+        return 0
+    fi
+    # 尝试启动已存在的 redis 容器
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q 'clawith-redis'; then
+        echo -e "${YELLOW}📦 Starting existing Redis container...${NC}"
+        docker start clawith-redis-1 2>/dev/null || docker start clawith-redis 2>/dev/null || true
+        sleep 1
+        return 0
+    fi
+    # 新建 Redis 容器
+    if command -v docker &>/dev/null; then
+        echo -e "${YELLOW}📦 Starting Redis via Docker...${NC}"
+        docker run -d --name clawith-redis-1 -p $REDIS_PORT:6379 redis:7-alpine 2>/dev/null && \
+            echo -e "${GREEN}📦 Redis started (port $REDIS_PORT)${NC}" || \
+            echo -e "${RED}📦 Failed to start Redis${NC}"
+    else
+        echo -e "${RED}📦 Redis not running and Docker not available — realtime features will fail${NC}"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════
 # 启动后端
 # ═══════════════════════════════════════════════════════
 start_backend() {
@@ -410,6 +442,7 @@ main() {
     cleanup
     sync_version
     start_postgres
+    ensure_redis
     start_backend
     start_frontend
     verify_proxy
