@@ -47,11 +47,18 @@ services:
       DOCKER_NETWORK: clawith_network
     volumes:
       - agent_data:/data/agents
+      # docker.sock 挂载：backend 需要创建/管理 Agent 子容器（代码执行沙箱）。
+      # 安全影响：容器可获得宿主机 Docker 控制权。
       - /var/run/docker.sock:/var/run/docker.sock
+    # privileged + SYS_ADMIN + seccomp=unconfined：
+    # Agent 子容器运行代码（bubblewrap/bwrap 沙箱）需要这些权限创建嵌套命名空间。
     cap_add:
       - SYS_ADMIN
     security_opt:
       - seccomp=unconfined
+    dns:
+      - 114.114.114.114
+      - 8.8.8.8
     networks:
       - default
     depends_on:
@@ -76,6 +83,16 @@ services:
       - default
     depends_on:
       - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   pgdata:
