@@ -43,6 +43,10 @@ class RealtimeRouter:
     ) -> str:
         connection_id = uuid.uuid4().hex
         redis = await get_redis()
+        if redis is None:
+            logger.warning("[RealtimeRouter] Redis unavailable — skipping presence registration")
+            setattr(websocket.state, "realtime_connection_id", connection_id)
+            return connection_id
         payload = {
             "agent_id": agent_id,
             "session_id": session_id or "",
@@ -63,6 +67,8 @@ class RealtimeRouter:
         if not connection_id:
             return
         redis = await get_redis()
+        if redis is None:
+            return
         async with redis.pipeline(transaction=True) as pipe:
             pipe.srem(self._agent_index_key(agent_id), connection_id)
             pipe.delete(self._connection_key(connection_id))
@@ -119,6 +125,8 @@ class RealtimeRouter:
             return
 
         redis = await get_redis()
+        if redis is None:
+            return
         envelope = json.dumps(
             {
                 "message": message,
@@ -181,6 +189,8 @@ class RealtimeRouter:
 
     async def _list_presence(self, agent_id: str) -> list[dict[str, str]]:
         redis = await get_redis()
+        if redis is None:
+            return []
         connection_ids = await redis.smembers(self._agent_index_key(agent_id))
         if not connection_ids:
             return []
