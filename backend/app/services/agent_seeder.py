@@ -1026,41 +1026,41 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
         )
 
 
-            okr_tool_names = [
-                "get_okr", "get_my_okr", "update_kr_progress", "update_kr_content",
-                "collect_okr_progress", "generate_okr_report", "get_okr_settings",
-                "create_objective", "create_key_result", "update_objective",
-                "update_any_kr_progress", "upsert_member_daily_report", "generate_monthly_okr_report",
-            ]
-            tools_by_name = await _ensure_okr_tool_rows_exist(okr_tool_names)
-            for tool_name in okr_tool_names:
-                tool = tools_by_name.get(tool_name)
-                if tool:
-                    existing_at = await db.execute(
-                        select(AgentTool).where(
-                            AgentTool.agent_id == okr_agent.id,
-                            AgentTool.tool_id == tool.id,
-                        )
+        okr_tool_names = [
+            "get_okr", "get_my_okr", "update_kr_progress", "update_kr_content",
+            "collect_okr_progress", "generate_okr_report", "get_okr_settings",
+            "create_objective", "create_key_result", "update_objective",
+            "update_any_kr_progress", "upsert_member_daily_report", "generate_monthly_okr_report",
+        ]
+        tools_by_name = await _ensure_okr_tool_rows_exist(okr_tool_names)
+        for tool_name in okr_tool_names:
+            tool = tools_by_name.get(tool_name)
+            if tool:
+                existing_at = await db.execute(
+                    select(AgentTool).where(
+                        AgentTool.agent_id == okr_agent.id,
+                        AgentTool.tool_id == tool.id,
                     )
-                    if not existing_at.scalar_one_or_none():
-                        db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
-                else:
-                    logger.warning(
-                        f"[AgentSeeder] OKR tool '{tool_name}' not found — run tool seeder first"
-                    )
+                )
+                if not existing_at.scalar_one_or_none():
+                    db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
+            else:
+                logger.warning(
+                    f"[AgentSeeder] OKR tool '{tool_name}' not found — run tool seeder first"
+                )
 
-            # 先提交 Agent 本体，再创建 trigger/focus（ensure_focus_item 使用独立 session）
-            await db.commit()
-            logger.info(
-                "[AgentSeeder] OKR Agent core records committed for tenant {} ({})",
-                tenant_id,
-                okr_agent.id,
-            )
+        # 先提交 Agent 本体，再创建 trigger/focus（ensure_focus_item 使用独立 session）
+        await db.commit()
+        logger.info(
+            "[AgentSeeder] OKR Agent core records committed for tenant {} ({})",
+            tenant_id,
+            okr_agent.id,
+        )
 
-            await _seed_okr_triggers(db, okr_agent.id)
-            await _sync_okr_triggers_with_settings(db, okr_agent.id, okr_settings)
-            from app.services.okr_agent_hook import sync_okr_agent_platform_members
-            await sync_okr_agent_platform_members(db, tenant_id)
-            await db.commit()
-            logger.info(f"[AgentSeeder] Created OKR Agent for tenant {tenant_id} ({okr_agent.id})")
-            logger.info(f"[AgentSeeder] OKR triggers created for tenant {tenant_id}")
+        await _seed_okr_triggers(db, okr_agent.id)
+        await _sync_okr_triggers_with_settings(db, okr_agent.id, okr_settings)
+        from app.services.okr_agent_hook import sync_okr_agent_platform_members
+        await sync_okr_agent_platform_members(db, tenant_id)
+        await db.commit()
+        logger.info(f"[AgentSeeder] Created OKR Agent for tenant {tenant_id} ({okr_agent.id})")
+        logger.info(f"[AgentSeeder] OKR triggers created for tenant {tenant_id}")
