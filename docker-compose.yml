@@ -6,7 +6,7 @@ services:
       - default
     environment:
       POSTGRES_USER: clawith
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clawith}
+      POSTGRES_PASSWORD: clawith
       POSTGRES_DB: clawith
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -38,13 +38,15 @@ services:
     restart: unless-stopped
     command: ["/bin/bash", "/app/entrypoint.sh"]
     environment:
-      DEBUG: "true"
       DATABASE_URL: postgresql+asyncpg://clawith:clawith@postgres:5432/clawith
       REDIS_URL: redis://redis:6379/0
       AGENT_DATA_DIR: /data/agents
       AGENT_TEMPLATE_DIR: /app/agent_template
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      STORAGE_LOCAL_ROOT: /data/agents
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-jwt-secret}
+      PROCESS_ROLE: all
       CORS_ORIGINS: '["*"]'
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
@@ -56,12 +58,8 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       # Password reset token lifetime in minutes (default: 30)
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
-    ports:
-      - "${BACKEND_PORT:-8008}:8000"
     volumes:
       - ./backend:/app
-      # debug mode：NDJSON 同步到 workspace .cursor/debug-7c2fa2.log
-      - ../.cursor:/agent-cursor:rw
       - ./backend/agent_data:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
@@ -87,6 +85,11 @@ services:
     restart: unless-stopped
     ports:
       - "${FRONTEND_PORT:-3008}:3000"
+    environment:
+      VITE_API_URL: http://localhost:8000
+      API_UPSTREAM: ${API_UPSTREAM:-backend:8000}
+    volumes:
+      - ./frontend/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
     networks:
       - default
     depends_on:

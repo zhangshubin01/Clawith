@@ -49,6 +49,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import async_session
 # 延迟导入 agent_tools 以避免循环依赖（agent_tools → llm.finish → llm.caller → agent_tools）
 # 实际导入在函数体内按需执行
@@ -565,7 +566,7 @@ async def _process_tool_call(
             from app.config import get_settings
 
             settings = get_settings()
-            ws_path = Path(settings.AGENT_DATA_DIR) / str(agent_id)
+            ws_path = Path(settings.STORAGE_LOCAL_ROOT or settings.AGENT_DATA_DIR) / str(agent_id)
             vision_content = try_inject_screenshot_vision(tool_name, str(result), ws_path)
             if vision_content:
                 tool_content = vision_content

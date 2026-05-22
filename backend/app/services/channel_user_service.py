@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.agent import Agent
 from app.models.identity import IdentityProvider
@@ -491,7 +492,15 @@ async def get_platform_user_by_org_member(
     """
     # Case 1: OrgMember already linked to User
     if org_member.user_id:
-        user = await db.get(User, org_member.user_id)
+        query = (
+            select(User)
+            .where(User.id == org_member.user_id)
+            .options(selectinload(User.identity))
+        )
+        if agent_tenant_id:
+            query = query.where(User.tenant_id == agent_tenant_id)
+        user_res = await db.execute(query)
+        user = user_res.scalar_one_or_none()
         if user:
             return user
 
@@ -506,7 +515,11 @@ async def get_platform_user_by_org_member(
         # Link existing User to OrgMember
         org_member.user_id = user.id
         await db.flush()
-        return user
+        # Eagerly load/refresh User.identity before returning
+        user_res = await db.execute(
+            select(User).where(User.id == user.id).options(selectinload(User.identity))
+        )
+        return user_res.scalar_one()
 
     # Case 3: Create new User and link to OrgMember
     # Determine channel type from provider
@@ -555,7 +568,7 @@ async def get_platform_user_by_org_member(
 
 
     user = User(
-        identity_id=identity.id,
+        identity=identity,
         display_name=name,
         avatar_url=org_member.avatar_url,
         role="member",
@@ -572,4 +585,9 @@ async def get_platform_user_by_org_member(
     await db.flush()
 
     logger.info(f"[channel_user_service] Created User {user.id} for OrgMember {org_member.id} ({name})")
-    return user
+    
+    # Eagerly load/refresh User.identity before returning
+    user_res = await db.execute(
+        select(User).where(User.id == user.id).options(selectinload(User.identity))
+    )
+    return user_res.scalar_one()

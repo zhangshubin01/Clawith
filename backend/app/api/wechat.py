@@ -6,15 +6,13 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
-# 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
-_bg_tasks: set[asyncio.Task] = set()
-
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.core.permissions import check_agent_access, is_agent_creator
 from app.core.security import get_current_user
 from app.database import get_db
@@ -23,12 +21,15 @@ from app.models.user import User
 from app.schemas.schemas import ChannelConfigOut
 from app.services.wechat_channel import WECHAT_CHANNEL_VERSION, WECHAT_ILINK_BASE_URL, wechat_poll_manager
 
-# 后台任务强引用集合
-_wechat_bg: set[asyncio.Task] = set()
-
-
 
 router = APIRouter(tags=["wechat"])
+settings = get_settings()
+
+
+def _role_enabled(*required: str) -> bool:
+    raw = (settings.PROCESS_ROLE or "all").strip().lower()
+    roles = {part.strip() for part in raw.split(",") if part.strip()} or {"all"}
+    return "all" in roles or any(role in roles for role in required)
 
 
 def _route_tag(data: dict | None = None) -> str | None:
@@ -140,11 +141,8 @@ async def get_wechat_qrcode_status(
             await db.flush()
 
         await db.commit()
-        _t = asyncio.create_task(wechat_poll_manager.start_client(agent_id))
-        _wechat_bg.add(_t)
-        _t.add_done_callback(_wechat_bg.discard)
-        _bg_tasks.add(_t)
-        _t.add_done_callback(_bg_tasks.discard)
+        if _role_enabled("connector"):
+            asyncio.create_task(wechat_poll_manager.start_client(agent_id))
 
     return payload
 
@@ -161,7 +159,7 @@ async def get_wechat_qrcode_image(
         raise HTTPException(status_code=403, detail="Only creator can configure channel")
 
     target_url = _validate_qrcode_proxy_url(url)
-    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
         resp = await client.get(target_url)
         if resp.status_code >= 400:
             raise HTTPException(status_code=resp.status_code, detail="Failed to fetch WeChat QR image")
