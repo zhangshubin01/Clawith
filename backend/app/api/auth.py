@@ -569,6 +569,16 @@ async def login(data: UserLogin, background_tasks: BackgroundTasks, db: AsyncSes
     )
 
 
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token(current_user: User = Depends(get_current_user)):
+    """用过期但未吊销的 JWT 换取新令牌（IDE 插件重连时使用）。"""
+    token = create_access_token(str(current_user.id), current_user.role)
+    return TokenResponse(
+        access_token=token,
+        user=UserOut.model_validate(current_user),
+    )
+
+
 @router.get("/email-hint")
 async def get_email_hint(username: str, db: AsyncSession = Depends(get_db)):
     """Return a hinted email address for a given username."""
