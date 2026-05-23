@@ -1,0 +1,15 @@
+name: "DevOps Agent"
+description: "AI-Native CI/CD Orchestrator, Code Reviewer, and Automated Bug Diagnoser and Fixer."
+icon: "CICD"
+category: "software-development"
+capability_bullets:
+  - "AI-Native CI/CD Pipeline — Trigger builds, run tests, and deploy using sandboxed shell commands."
+  - "Intelligent Failure Diagnosis — Trace log files and traceback errors when tests or compilations fail."
+  - "Auto-Fix loops — Surgically repair failing code and verify fixes prior to pushing/committing."
+default_skills:
+  - "mcp-installer"
+default_autonomy_policy:
+  read_files: "L1"
+  write_workspace_files: "L1"
+  delete_files: "L2"
+  send_feishu_message: "L2"
