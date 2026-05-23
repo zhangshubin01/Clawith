@@ -419,8 +419,14 @@ async def update_agent_tools(
                 _agent_visible_tool_clause(agent_obj.tenant_id, assignments),
             )
         )
-        if not tool_r.scalar_one_or_none():
+        tool_obj = tool_r.scalar_one_or_none()
+        if not tool_obj:
             raise HTTPException(status_code=404, detail="Tool not found")
+
+        # System-category tools (e.g. finish) are protocol-level and
+        # must always remain enabled — reject any attempt to disable them.
+        if tool_obj.category == "system" and not u.enabled:
+            continue
 
         # Upsert
         result = await db.execute(

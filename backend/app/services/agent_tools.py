@@ -302,6 +302,10 @@ AGENT_TOOLS = [
                         "type": "string",
                         "description": "Stable short identifier, snake_case preferred. If omitted, the system derives one from description.",
                     },
+                    "title": {
+                        "type": "string",
+                        "description": "Short title (Focus名称). Use this for a quick summary of the focus. Keep it brief. New focus items should have both a title and a description.",
+                    },
                     "description": {
                         "type": "string",
                         "description": "Clear human-readable description of what is being tracked.",
@@ -2930,7 +2934,10 @@ async def execute_tool(
                 for item in items:
                     label = "completed" if item["status"] == "completed" else "in_progress"
                     kind = f", {item['kind']}" if item.get("kind") == "system" else ""
-                    lines.append(f"- {item['key']} [{label}{kind}]: {item['description']}")
+                    if item.get("title"):
+                        lines.append(f"- {item['title']} ({item['key']}) [{label}{kind}]: {item['description']}")
+                    else:
+                        lines.append(f"- {item['key']} [{label}{kind}]: {item['description']}")
                 result = "\n".join(lines)
         elif tool_name == "upsert_focus_item":
             description = (arguments.get("description") or "").strip()
@@ -2939,13 +2946,14 @@ async def execute_tool(
             item = await upsert_focus_item(
                 agent_id,
                 key=arguments.get("key"),
+                title=arguments.get("title"),
                 description=description,
                 status="in_progress",
                 kind=arguments.get("kind") or "normal",
                 source=arguments.get("source") or "user",
                 metadata={"tool": "upsert_focus_item"},
             )
-            result = f"✅ Focus item saved: {item['key']} — {item['description']}"
+            result = f"✅ Focus item saved: {item['key']} (title: {item['title']}) — {item['description']}" if item.get("title") else f"✅ Focus item saved: {item['key']} — {item['description']}"
         elif tool_name == "complete_focus_item":
             key = (arguments.get("key") or "").strip()
             if not key:

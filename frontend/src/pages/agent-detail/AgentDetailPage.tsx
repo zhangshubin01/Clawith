@@ -86,6 +86,7 @@ const safeDisplayIcon = (icon?: string | null, fallback: React.ReactNode = <Icon
 type FocusItem = {
     id: string;
     name: string;
+    title?: string | null;
     description: string;
     done: boolean;
     inProgress: boolean;
@@ -100,6 +101,7 @@ function focusItemFromApi(item: FocusApiItem): FocusItem {
     return {
         id: item.id,
         name: item.key,
+        title: item.title,
         description: item.description || item.key,
         done,
         inProgress: !done,
@@ -4357,19 +4359,34 @@ export default function AgentDetailPage() {
         const renderFocusItem = (item: FocusItem) => {
             const isExpanded = expandedFocusIds.has(item.id);
             const itemTriggers = triggersByFocus[item.name] || [];
+            
+            const hasTitle = !!item.title;
+            const displayTitle = hasTitle ? item.title : item.name;
+            const displaySubtitle = hasTitle ? item.name : null;
+            const displayDescription = item.description;
+
             return (
                 <div key={item.id} className={`aware-side-focus ${item.done ? 'done' : ''}`}>
                     <button className="aware-side-focus-head" type="button" onClick={() => toggleExpandedFocus(item.id)}>
                         <div className="aware-side-trigger-main">
-                            <div className="aware-side-item-title">
-                                <span>{item.description || item.name}</span>
+                            <div className="aware-side-item-title" style={{ fontWeight: 500 }}>
+                                <span>{displayTitle}</span>
                                 {item.done && (
                                     <span className="aware-side-focus-badge done">
                                         {t('agent.aware.completed')}
                                     </span>
                                 )}
                             </div>
-                            {item.description && <div className="aware-side-item-meta">{item.name}</div>}
+                            {displaySubtitle && (
+                                <div className="aware-side-item-meta" style={{ fontFamily: 'monospace' }}>
+                                    {displaySubtitle}
+                                </div>
+                            )}
+                            {displayDescription && (
+                                <div className="aware-side-item-desc">
+                                    {displayDescription}
+                                </div>
+                            )}
                         </div>
                         <span className="aware-side-count">
                             {isZh ? `${itemTriggers.length} 个` : itemTriggers.length}
@@ -5123,8 +5140,11 @@ export default function AgentDetailPage() {
                         const isExpanded = expandedFocusIds.has(item.id);
                         const itemTriggers = triggersByFocus[item.name] || [];
                         const itemLogs = triggerLogsByFocus[item.name] || [];
-                        const displayTitle = item.description || item.name;
-                        const displaySubtitle = item.description ? item.name : null;
+                        
+                        const hasTitle = !!item.title;
+                        const displayTitle = hasTitle ? item.title : item.name;
+                        const displaySubtitle = hasTitle ? item.name : null;
+                        const displayDescription = item.description;
 
                         return (
                             <div key={item.id} style={{
@@ -5169,6 +5189,11 @@ export default function AgentDetailPage() {
                                         {displaySubtitle && (
                                             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', fontFamily: 'monospace', marginTop: '2px' }}>
                                                 {displaySubtitle}
+                                            </div>
+                                        )}
+                                        {displayDescription && (
+                                            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px', whiteSpace: 'pre-wrap' }}>
+                                                {displayDescription}
                                             </div>
                                         )}
                                     </div>
