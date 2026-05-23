@@ -81,7 +81,9 @@ async def check_ip_rate_limit(
 
     # localhost/loopback 豁免：IDE 插件、本地调试工具从 127.0.0.1/::1 连接，
     # 不应受速率限制。IDE 插件重连（6 次/12s）会触发 10/60s 阈值。
-    if ip in ("127.0.0.1", "::1", "0:0:0:0:0:0:0:1", "localhost"):
+    # localhost/loopback + Docker Desktop 主机 IP 豁免：
+    # IDE 插件重连（6 次/12s）会触发 10/60s 阈值；Docker Desktop macOS 通过 192.168.65.1 转发
+    if ip in ("127.0.0.1", "::1", "0:0:0:0:0:0:0:1", "localhost", "192.168.65.1"):
         return
 
     max_attempts, window_s = _DEFAULT_IP_LIMITS.get(endpoint_key, (10, 60))
@@ -104,6 +106,9 @@ async def check_ip_rate_limit(
         except Exception as e:
             if "429" in str(type(e).__name__) or "rate" in str(e).lower():
                 raise
+            global _redis_client, _redis_last_fail_time
+            _redis_client = None
+            _redis_last_fail_time = time.time()
             logger.info("[RateLimit] Redis 不可用，回退到内存限流（开发环境正常）: {}", e)
 
     # 内存回退（单 worker 有效）
@@ -150,6 +155,9 @@ async def check_session_rate_limit(
         except Exception as e:
             if "rate" in str(e).lower():
                 raise
+            global _redis_client, _redis_last_fail_time
+            _redis_client = None
+            _redis_last_fail_time = time.time()
             logger.info("[RateLimit] Redis 不可用，回退到内存限流（开发环境正常）: {}", e)
 
     # 内存回退

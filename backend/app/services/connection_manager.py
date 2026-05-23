@@ -54,8 +54,19 @@ class ConnectionManager:
 
     def __init__(self):
         self.active_connections: dict[str, dict[str, _ConnectionInfo]] = {}
+        self._lsp4j_agents: set[str] = set()
         self._cleanup_task: asyncio.Task | None = None
         self._cleanup_started: bool = False
+
+    def register_lsp4j_connection(self, agent_id: str) -> None:
+        """注册 LSP4J IDE 插件连接，防止清理循环误判 WebUI 为半死连接。"""
+        self._lsp4j_agents.add(agent_id)
+        logger.debug("[WS] LSP4J 连接已注册: agent={}", agent_id)
+
+    def unregister_lsp4j_connection(self, agent_id: str) -> None:
+        """注销 LSP4J IDE 插件连接。"""
+        self._lsp4j_agents.discard(agent_id)
+        logger.debug("[WS] LSP4J 连接已注销: agent={}", agent_id)
 
     @property
     def total_connections(self) -> int:
@@ -128,6 +139,15 @@ class ConnectionManager:
                             info.last_ping_ts = _now
                             info.ping_count += 1
                             if info.ping_count > 5:
+                                # F01 修复：agent 有活跃 LSP4J 连接时跳过 WebUI 清理
+                                if agent_id in self._lsp4j_agents:
+                                    logger.info(
+                                        "[WS] 半死连接跳过清理（LSP4J 活跃）: agent={} session={} user={} ping_count={}",
+                                        agent_id, info.session_id, info.user_id, info.ping_count,
+                                    )
+                                    info.ping_count = 0
+                                    info.last_activity = _now
+                                    continue
                                 logger.info(
                                     "[WS] 半死连接清理: agent={} session={} user={} ping_count={}",
                                     agent_id, info.session_id, info.user_id, info.ping_count,

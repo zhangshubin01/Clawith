@@ -163,6 +163,9 @@ class RealtimeRouter:
 
     async def _subscriber_loop(self, deliver_local) -> None:
         redis = await get_redis()
+        if redis is None:
+            logger.warning("[Realtime] Redis 不可用 — 订阅循环未启动")
+            return
         pubsub = redis.pubsub()
         await pubsub.subscribe(self._instance_channel())
         try:
