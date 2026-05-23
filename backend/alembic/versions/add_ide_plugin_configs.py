@@ -19,6 +19,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Skip if table already exists (may be pre-created by Base.metadata.create_all)
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    if 'ide_plugin_configs' in inspector.get_table_names():
+        return
     op.create_table(
         'ide_plugin_configs',
         sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False),
