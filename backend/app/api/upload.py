@@ -2,19 +2,16 @@
 
 import base64
 import os
-import shlex
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form
+from loguru import logger
 from app.core.security import get_current_user
 from app.models.user import User
-from app.config import get_settings
+from app.services.storage import ensure_local_path, get_storage_backend, guess_content_type, normalize_storage_key
 
 router = APIRouter(prefix="/chat", tags=["chat"])
-
-_settings = get_settings()
-WORKSPACE_ROOT = Path(_settings.AGENT_DATA_DIR)
 
 # Supported extensions and their text extraction method
 TEXT_EXTENSIONS = {
@@ -37,7 +34,7 @@ def extract_text(file_path: Path, extension: str) -> str:
     if extension in TEXT_EXTENSIONS:
         try:
             return file_path.read_text(encoding="utf-8", errors="replace")
-        except UnicodeDecodeError:
+        except Exception:
             return file_path.read_text(encoding="gbk", errors="replace")
 
     if extension == ".pdf":
@@ -48,13 +45,13 @@ def extract_text(file_path: Path, extension: str) -> str:
 import sys
 try:
     import PyPDF2
-    reader = PyPDF2.PdfReader({shlex.quote(str(file_path))})
+    reader = PyPDF2.PdfReader('{file_path}')
     text = '\\n'.join(page.extract_text() or '' for page in reader.pages)
     print(text[:8000])
 except ImportError:
     # Fallback: use pdftotext if available
     import subprocess as sp
-    r = sp.run(['pdftotext', {shlex.quote(str(file_path))}, '-'], capture_output=True, text=True)
+    r = sp.run(['pdftotext', '{file_path}', '-'], capture_output=True, text=True)
     print(r.stdout[:8000] if r.returncode == 0 else '[无法解析PDF]')
 """],
                 capture_output=True, text=True, timeout=30,
@@ -70,7 +67,7 @@ except ImportError:
                 ["python3", "-c", f"""
 try:
     from docx import Document
-    doc = Document({shlex.quote(str(file_path))})
+    doc = Document('{file_path}')
     text = '\\n'.join(p.text for p in doc.paragraphs)
     print(text[:8000])
 except ImportError:
@@ -89,7 +86,7 @@ except ImportError:
                 ["python3", "-c", f"""
 try:
     import openpyxl
-    wb = openpyxl.load_workbook({shlex.quote(str(file_path))}, read_only=True)
+    wb = openpyxl.load_workbook('{file_path}', read_only=True)
     lines = []
     for ws in wb.worksheets[:3]:
         lines.append(f'## Sheet: {{ws.title}}')
@@ -114,12 +111,6 @@ async def upload_file(
     agent_id: str = Form(""),
     current_user: User = Depends(get_current_user),
 ):
-    # 校验 agent_id 为合法 UUID，防止路径遍历
-    if agent_id:
-        try:
-            uuid.UUID(agent_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid agent_id format")
     """Upload a file for chat context. Saves to agent workspace/uploads/ and returns extracted text."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename")
@@ -131,26 +122,25 @@ async def upload_file(
     # Determine save directory
     workspace_path = ""
     if agent_id:
-        # Save to agent's workspace/uploads/
-        uploads_dir = WORKSPACE_ROOT / agent_id / "workspace" / "uploads"
-        uploads_dir.mkdir(parents=True, exist_ok=True)
-        save_path = uploads_dir / Path(file.filename).name  # 仅用文件名，防止路径遍历
-        # Avoid overwriting: add suffix if file exists
-        if save_path.exists():
-            stem = save_path.stem
-            suffix = save_path.suffix
-            counter = 1
-            while save_path.exists():
-                save_path = uploads_dir / f"{stem}_{counter}{suffix}"
-                counter += 1
-        save_path.write_bytes(content)
-        workspace_path = f"workspace/uploads/{save_path.name}"
+        storage = get_storage_backend()
+        filename = file.filename.replace("/", "_").replace("\\", "_")
+        workspace_path = f"workspace/uploads/{filename}"
+        key = normalize_storage_key(f"{agent_id}/{workspace_path}")
+        counter = 1
+        while await storage.exists(key):
+            stem, ext = os.path.splitext(filename)
+            filename = f"{stem}_{counter}{ext}"
+            workspace_path = f"workspace/uploads/{filename}"
+            key = normalize_storage_key(f"{agent_id}/{workspace_path}")
+            counter += 1
+        await storage.write_bytes(key, content, content_type=guess_content_type(filename))
+        save_path = await ensure_local_path(key)
     else:
         # Fallback: save to /tmp (legacy behavior)
         fallback_dir = Path("/tmp/clawith_uploads")
         fallback_dir.mkdir(exist_ok=True)
         file_id = str(uuid.uuid4())[:8]
-        save_path = fallback_dir / f"{file_id}_{Path(file.filename).name}"
+        save_path = fallback_dir / f"{file_id}_{file.filename}"
         save_path.write_bytes(content)
 
     # Extract text (only for known formats)

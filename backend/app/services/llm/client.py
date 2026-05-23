@@ -709,7 +709,7 @@ class OpenAICompatibleClient(LLMClient):
 
                 break  # Success
 
-            except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout) as e:
+            except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
                 if attempt < max_retries - 1:
                     wait = (attempt + 1) * 1
                     logger.warning(f"Stream attempt {attempt + 1} failed ({type(e).__name__}), retrying in {wait}s...")
@@ -1523,7 +1523,7 @@ class GeminiClient(LLMClient):
                                 },
                             })
 
-        except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout) as e:
+        except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
             raise LLMError(f"Connection failed: {e}")
 
         return LLMResponse(
@@ -1884,7 +1884,7 @@ class AnthropicClient(LLMClient):
                     elif current_event == "message_stop":
                         break
 
-        except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout) as e:
+        except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
             raise LLMError(f"Connection failed: {e}")
 
         # Normalize stop reason to OpenAI style (optional but helpful for consistency)

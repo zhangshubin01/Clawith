@@ -1,11 +1,4 @@
-import asyncio
 """Clawith Backend — FastAPI Application Entry Point."""
-
-import os as _os
-
-import certifi as _certifi
-
-_os.environ.setdefault("SSL_CERT_FILE", _certifi.where())
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,11 +10,27 @@ from loguru import logger
 
 from app.config import get_settings
 from app.core.events import close_redis
-from app.core.logging_config import configure_logging, configure_file_logging, intercept_standard_logging
+from app.core.logging_config import configure_logging, intercept_standard_logging
 from app.core.middleware import TraceIdMiddleware
 from app.schemas.schemas import HealthResponse
+from app.services.realtime import realtime_router
 
 settings = get_settings()
+
+
+def _process_roles() -> set[str]:
+    raw = (settings.PROCESS_ROLE or "all").strip().lower()
+    if not raw:
+        return {"all"}
+    roles = {part.strip() for part in raw.split(",") if part.strip()}
+    return roles or {"all"}
+
+
+def _role_enabled(*required: str) -> bool:
+    roles = _process_roles()
+    if "all" in roles:
+        return True
+    return any(role in roles for role in required)
 
 
 def _log_bwrap_startup_status() -> None:
@@ -40,7 +49,7 @@ def _log_bwrap_startup_status() -> None:
         return
 
     if in_container:
-        logger.info(
+        logger.warning(
             "[startup] bubblewrap (bwrap) is not installed in the backend container. "
             "The service will still start, but execute_code will fail closed unless "
             "SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true is explicitly set."
@@ -48,12 +57,12 @@ def _log_bwrap_startup_status() -> None:
         return
 
     if settings.SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING:
-        logger.info(
+        logger.warning(
             "[startup] bubblewrap (bwrap) is not installed on the host. "
             "Local execute_code will use the reduced-isolation fallback."
         )
     else:
-        logger.info(
+        logger.warning(
             "[startup] bubblewrap (bwrap) is not installed on the host. "
             "execute_code will fail closed unless SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING=true is set."
         )
@@ -61,23 +70,22 @@ def _log_bwrap_startup_status() -> None:
 
 async def _start_ss_local() -> None:
     """Start ss-local SOCKS5 proxy for Discord API calls. Tries nodes in priority order."""
-    import asyncio
-    import json
-    import os
-    import shutil
-    import tempfile
+    import asyncio, json, os, shutil, tempfile
     if not shutil.which("ss-local"):
         logger.info("[Proxy] ss-local not found — Discord proxy disabled")
         return
     # Load proxy nodes from config file (gitignored, mounted as Docker volume)
+    import json as _json
     cfg_file = os.environ.get("SS_CONFIG_FILE", "/data/ss-nodes.json")
     if os.path.exists(cfg_file):
+        # Guard against empty or malformed config file — both produce a clear
+        # warning and a clean exit rather than an unhandled JSONDecodeError.
         try:
-            raw = Path(cfg_file).read_text().strip()
+            raw = open(cfg_file).read().strip()
             if not raw:
                 logger.warning(f"[Proxy] {cfg_file} exists but is empty — skipping proxy")
                 return
-            nodes = json.loads(raw)
+            nodes = _json.loads(raw)
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning(f"[Proxy] Failed to parse {cfg_file}: {exc} — skipping proxy")
             return
@@ -93,7 +101,6 @@ async def _start_ss_local() -> None:
                "local_port": 1080, "password": node["password"], "method": node["method"], "timeout": 10}
         tf = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
         json.dump(cfg, tf); tf.close()
-        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ss-local", "-c", tf.name,
@@ -103,40 +110,31 @@ async def _start_ss_local() -> None:
                 os.environ["DISCORD_PROXY"] = "socks5h://127.0.0.1:1080"
                 logger.info(f"[Proxy] ss-local → {node['label']} ({node['server']}:{node['port']})")
                 return
-            err = (await proc.stderr.read()).decode("utf-8", errors="replace")[:120]
+            err = (await proc.stderr.read()).decode()[:120]
             logger.warning(f"[Proxy] {node['label']} failed: {err}")
         except Exception as e:
             logger.error(f"[Proxy] {node['label']} error: {e}")
-        finally:
-            if proc is None or proc.returncode is not None:
-                Path(tf.name).unlink(missing_ok=True)
     logger.warning("[Proxy] All SS nodes failed — Discord API calls will run without proxy")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown events."""
-    # Configure logging first (stdout + file)
+    # Configure logging first
     configure_logging()
-    configure_file_logging(settings)
     intercept_standard_logging()
-    logger.info("[startup] Logging configured (stdout + file)")
+    logger.info("[startup] Logging configured")
     _log_bwrap_startup_status()
 
-    # 安全加固：生产环境未设置 JWT_SECRET_KEY 时拒绝启动
-    secret_key = (settings.JWT_SECRET_KEY or "").strip()
-    if not secret_key or "change-me" in secret_key.lower():
-        msg = (
-            "JWT_SECRET_KEY 未设置或使用默认值，token 可被伪造。"
-            "生产环境请通过环境变量 JWT_SECRET_KEY 设置至少 32 字符的随机密钥。"
+    # Warn about default JWT secrets in production
+    if "change-me" in settings.SECRET_KEY.lower() or "change-me" in settings.JWT_SECRET_KEY.lower():
+        logger.warning(
+            "[startup] WARNING: SECRET_KEY or JWT_SECRET_KEY contains default 'change-me' value. "
+            "This is insecure for production. Set unique secrets in your .env file."
         )
-        if not settings.DEBUG:
-            logger.error("[startup] SECURITY FATAL: {}", msg)
-            raise RuntimeError(f"拒绝启动：{msg}")
-        else:
-            logger.warning("[startup] SECURITY WARNING: {}", msg)
 
     import asyncio
+    import sys
     import os
     from app.services.trigger_daemon import start_trigger_daemon
     from app.services.tool_seeder import seed_builtin_tools
@@ -147,134 +145,139 @@ async def lifespan(app: FastAPI):
     from app.services.wechat_channel import wechat_poll_manager
     from app.services.discord_gateway import discord_gateway_manager
 
-    # ── Step 0: Ensure all DB tables exist (idempotent, safe to run on every startup) ──
-    try:
-        from app.database import Base, engine
-        # Import all models so Base.metadata is fully populated
-        import app.models.user           # noqa
-        import app.models.agent          # noqa
-        import app.models.task           # noqa
-        import app.models.llm            # noqa
-        import app.models.tool           # noqa
-        import app.models.audit          # noqa
-        import app.models.skill          # noqa
-        import app.models.channel_config  # noqa
-        import app.models.schedule       # noqa
-        import app.models.plaza          # noqa
-        import app.models.activity_log   # noqa
-        import app.models.org            # noqa
-        import app.models.system_settings  # noqa
-        import app.models.invitation_code  # noqa
-        import app.models.tenant         # noqa
-        import app.models.tenant_setting  # noqa
-        import app.models.participant    # noqa
-        import app.models.chat_session   # noqa
-        import app.models.trigger        # noqa
-        import app.models.focus          # noqa
-        import app.models.notification   # noqa
-        import app.models.gateway_message # noqa
-        import app.models.agent_credential  # noqa
-        import app.models.okr            # noqa  OKR system tables
-        import app.models.onboarding     # noqa
+    if _role_enabled("all", "bootstrap"):
+        # ── Step 0: Ensure all DB tables exist (idempotent, safe to run on every startup) ──
+        try:
+            from app.database import Base, engine
+            # Import all models so Base.metadata is fully populated
+            import app.models.user           # noqa
+            import app.models.agent          # noqa
+            import app.models.task           # noqa
+            import app.models.llm            # noqa
+            import app.models.tool           # noqa
+            import app.models.audit          # noqa
+            import app.models.skill          # noqa
+            import app.models.channel_config  # noqa
+            import app.models.schedule       # noqa
+            import app.models.plaza          # noqa
+            import app.models.activity_log   # noqa
+            import app.models.org            # noqa
+            import app.models.system_settings  # noqa
+            import app.models.invitation_code  # noqa
+            import app.models.tenant         # noqa
+            import app.models.tenant_setting  # noqa
+            import app.models.participant    # noqa
+            import app.models.chat_session   # noqa
+            import app.models.trigger        # noqa
+            import app.models.trigger_execution  # noqa
+            import app.models.focus          # noqa
+            import app.models.notification   # noqa
+            import app.models.gateway_message # noqa
+            import app.models.agent_credential  # noqa
+            import app.models.okr            # noqa
+            import app.models.onboarding     # noqa
 
-        import app.models.identity       # noqa
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("[startup] Database tables ready")
-    except Exception as e:
-        logger.warning(f"[startup] create_all failed: {e}")
-    # Startup: seed data — each step isolated so one failure doesn't block others
-    logger.info("[startup] seeding...")
+            import app.models.identity       # noqa
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("[startup] Database tables ready")
+        except Exception as e:
+            logger.warning(f"[startup] create_all failed: {e}")
+        logger.info("[startup] seeding...")
 
-    # Seed default company (Tenant) — required before users can register
-    try:
-        from app.models.tenant import Tenant
-        from app.database import async_session as _session
-        from sqlalchemy import select as _select
-        async with _session() as _db:
-            _existing = await _db.execute(_select(Tenant).where(Tenant.slug == "default"))
-            if not _existing.scalar_one_or_none():
-                _db.add(Tenant(name="Default", slug="default", im_provider="web_only"))
-                await _db.commit()
-                logger.info("[startup] Default company created")
-    except Exception as e:
-        logger.warning(f"[startup] Default company seed failed: {e}")
+        try:
+            from app.models.tenant import Tenant
+            from app.database import async_session as _session
+            from sqlalchemy import select as _select
+            async with _session() as _db:
+                _existing = await _db.execute(_select(Tenant).where(Tenant.slug == "default"))
+                if not _existing.scalar_one_or_none():
+                    _db.add(Tenant(name="Default", slug="default", im_provider="web_only"))
+                    await _db.commit()
+                    logger.info("[startup] Default company created")
+        except Exception as e:
+            logger.warning(f"[startup] Default company seed failed: {e}")
 
-    # Migrate old shared enterprise_info/ → enterprise_info_{first_tenant_id}/
-    try:
-        import shutil
-        from pathlib import Path as _Path
-        from app.config import get_settings as _gs
-        from app.models.tenant import Tenant as _T
-        from app.database import async_session as _ses
-        from sqlalchemy import select as _sel
-        _data_dir = _Path(_gs().AGENT_DATA_DIR)
-        _old_dir = _data_dir / "enterprise_info"
-        if _old_dir.exists() and any(_old_dir.iterdir()):
-            async with _ses() as _db:
-                _first = await _db.execute(_sel(_T).order_by(_T.created_at).limit(1))
-                _tenant = _first.scalar_one_or_none()
-                if _tenant:
-                    _new_dir = _data_dir / f"enterprise_info_{_tenant.id}"
-                    if not _new_dir.exists():
-                        shutil.copytree(str(_old_dir), str(_new_dir))
-                        logger.info(f"[startup] Migrated enterprise_info → enterprise_info_{_tenant.id}")
-                    else:
-                        logger.info(f"[startup] enterprise_info_{_tenant.id} already exists, skipping migration")
-    except Exception as e:
-        logger.warning(f"[startup] enterprise_info migration failed: {e}")
+        try:
+            import shutil
+            from pathlib import Path as _Path
+            from app.config import get_settings as _gs
+            from app.models.tenant import Tenant as _T
+            from app.database import async_session as _ses
+            from sqlalchemy import select as _sel
+            _data_dir = _Path(_gs().AGENT_DATA_DIR)
+            _old_dir = _data_dir / "enterprise_info"
+            if _old_dir.exists() and any(_old_dir.iterdir()):
+                async with _ses() as _db:
+                    _first = await _db.execute(_sel(_T).order_by(_T.created_at).limit(1))
+                    _tenant = _first.scalar_one_or_none()
+                    if _tenant:
+                        _new_dir = _data_dir / f"enterprise_info_{_tenant.id}"
+                        if not _new_dir.exists():
+                            shutil.copytree(str(_old_dir), str(_new_dir))
+                            print(f"[startup] ✅ Migrated enterprise_info → enterprise_info_{_tenant.id}", flush=True)
+                        else:
+                            print(f"[startup] ℹ️ enterprise_info_{_tenant.id} already exists, skipping migration", flush=True)
+        except Exception as e:
+            print(f"[startup] ⚠️ enterprise_info migration failed: {e}", flush=True)
 
-    try:
-        from app.services.tool_seeder import seed_builtin_tools, clean_orphaned_mcp_tools
-        await seed_builtin_tools()
-        await clean_orphaned_mcp_tools()
-    except Exception as e:
-        logger.warning(f"[startup] Builtin tools seed or cleanup failed: {e}")
+        try:
+            from app.services.tool_seeder import seed_builtin_tools, clean_orphaned_mcp_tools
+            await seed_builtin_tools()
+            await clean_orphaned_mcp_tools()
+        except Exception as e:
+            logger.warning(f"[startup] Builtin tools seed or cleanup failed: {e}")
 
-    try:
-        from app.services.tool_seeder import seed_atlassian_rovo_config, get_atlassian_api_key
-        await seed_atlassian_rovo_config()
-        # Auto-import Atlassian Rovo tools if an API key is already configured
-        _rovo_key = await get_atlassian_api_key()
-        if _rovo_key:
-            from app.services.resource_discovery import seed_atlassian_rovo_tools
-            await seed_atlassian_rovo_tools(_rovo_key)
-    except Exception as e:
-        logger.warning(f"[startup] Atlassian tools seed failed: {e}")
+        try:
+            from app.services.tool_seeder import seed_atlassian_rovo_config, get_atlassian_api_key
+            await seed_atlassian_rovo_config()
+            _rovo_key = await get_atlassian_api_key()
+            if _rovo_key:
+                from app.services.resource_discovery import seed_atlassian_rovo_tools
+                await seed_atlassian_rovo_tools(_rovo_key)
+        except Exception as e:
+            logger.warning(f"[startup] Atlassian tools seed failed: {e}")
 
-    try:
-        await seed_agent_templates()
-    except Exception as e:
-        logger.warning(f"[startup] Agent templates seed failed: {e}")
+        try:
+            await seed_agent_templates()
+        except Exception as e:
+            logger.warning(f"[startup] Agent templates seed failed: {e}")
 
-    try:
-        from app.services.skill_seeder import seed_skills, push_default_skills_to_existing_agents
-        await seed_skills()
-        await push_default_skills_to_existing_agents()
-    except Exception as e:
-        logger.warning(f"[startup] Skills seed failed: {e}")
+        try:
+            from app.services.skill_seeder import seed_skills, push_default_skills_to_existing_agents
+            await seed_skills()
+            await push_default_skills_to_existing_agents()
+        except Exception as e:
+            logger.warning(f"[startup] Skills seed failed: {e}")
 
-    try:
-        from app.services.agent_seeder import seed_default_agents
-        await seed_default_agents()
-    except Exception as e:
-        logger.warning(f"[startup] Default agents seed failed: {e}")
+        try:
+            from app.services.agent_seeder import seed_default_agents
+            await seed_default_agents()
+        except Exception as e:
+            logger.warning(f"[startup] Default agents seed failed: {e}")
 
-    try:
-        # Seed OKR Agent independently (supports retroactive creation on existing deployments)
-        from app.services.agent_seeder import seed_okr_agent
-        await seed_okr_agent()
-    except Exception as e:
-        logger.warning(f"[startup] OKR Agent seed failed: {e}")
+        try:
+            from app.services.agent_seeder import seed_okr_agent
+            await seed_okr_agent()
+        except Exception as e:
+            logger.warning(f"[startup] OKR Agent seed failed: {e}")
 
-    try:
-        # Patch existing OKR Agent with new fields/tools/triggers added in later versions
-        from app.services.agent_seeder import patch_existing_okr_agent
-        await patch_existing_okr_agent()
-    except Exception as e:
-        logger.warning(f"[startup] OKR Agent patch failed: {e}")
+        try:
+            from app.services.agent_seeder import patch_existing_okr_agent
+            await patch_existing_okr_agent()
+        except Exception as e:
+            logger.warning(f"[startup] OKR Agent patch failed: {e}")
+    else:
+        logger.info(f"[startup] bootstrap skipped for PROCESS_ROLE={settings.PROCESS_ROLE}")
 
-    # Start background tasks (always, even if seeding failed)
+    if _role_enabled("all", "api"):
+        try:
+            from app.api.websocket import manager as ws_manager
+            await realtime_router.start(ws_manager.deliver_pubsub_message)
+            logger.info("[startup] realtime router subscriber started")
+        except Exception as e:
+            logger.error(f"[startup] realtime router start failed: {e}")
+
     try:
         logger.info("[startup] starting background tasks...")
         from app.services.audit_logger import write_audit_log
@@ -291,19 +294,19 @@ async def lifespan(app: FastAPI):
                 import traceback
                 traceback.print_exception(type(exc), exc, exc.__traceback__)
 
-        from app.api.gateway import start_openclaw_offline_detector
-        from app.services.cleanup import start_audit_log_cleanup
+        task_specs = []
+        if _role_enabled("all", "worker"):
+            task_specs.append(("trigger_daemon", start_trigger_daemon()))
+        if _role_enabled("all", "connector"):
+            task_specs.extend([
+                ("feishu_ws", feishu_ws_manager.start_all()),
+                ("dingtalk_stream", dingtalk_stream_manager.start_all()),
+                ("wecom_stream", wecom_stream_manager.start_all()),
+                ("wechat_poll", wechat_poll_manager.start_all()),
+                ("discord_gw", discord_gateway_manager.start_all()),
+            ])
 
-        for name, coro in [
-            ("trigger_daemon", start_trigger_daemon()),
-            ("feishu_ws", feishu_ws_manager.start_all()),
-            ("dingtalk_stream", dingtalk_stream_manager.start_all()),
-            ("wecom_stream", wecom_stream_manager.start_all()),
-            ("wechat_poll", wechat_poll_manager.start_all()),
-            ("discord_gw", discord_gateway_manager.start_all()),
-            ("openclaw_offline", start_openclaw_offline_detector()),
-            ("audit_cleanup", start_audit_log_cleanup()),
-        ]:
+        for name, coro in task_specs:
             task = asyncio.create_task(coro, name=name)
             task.add_done_callback(_bg_task_error)
             logger.info(f"[startup] created bg task: {name}")
@@ -320,9 +323,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    from app.services.connection_manager import manager
-    ss_task.cancel()
-    await manager.shutdown()
+    await realtime_router.stop()
     await close_redis()
 
 
@@ -342,8 +343,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=_allow_creds,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Register API routes
@@ -388,12 +389,10 @@ from app.api.admin import router as admin_router
 from app.api.pages import router as pages_router, public_router as pages_public_router
 from app.api.agent_credentials import router as credentials_router
 from app.api.agentbay_control import router as agentbay_control_router
-from app.api.ide_plugin import router as ide_plugin_router
 from app.api.okr import router as okr_router
-from app.api.onboarding import router as onboarding_router
-
-# ★ LSP4J 插件路由
+from app.api.ide_plugin import router as ide_plugin_router
 from app.plugins.clawith_lsp4j.router import router as lsp4j_router
+from app.api.onboarding import router as onboarding_router
 
 app.include_router(auth_router, prefix=settings.API_PREFIX)
 app.include_router(agents_router, prefix=settings.API_PREFIX)
@@ -438,20 +437,11 @@ app.include_router(pages_router, prefix=settings.API_PREFIX)
 app.include_router(pages_public_router)  # Public endpoint for /p/{short_id}, no API prefix
 app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
-app.include_router(okr_router, prefix=settings.API_PREFIX)
+app.include_router(okr_router)  # OKR — self-prefixed at /api/okr
+app.include_router(ide_plugin_router)  # IDE Plugin — self-prefixed at /api/ide-plugin
+app.include_router(lsp4j_router, prefix="/api/plugins/clawith-lsp4j")  # LSP4J WebSocket endpoint
 app.include_router(onboarding_router, prefix=settings.API_PREFIX)
 
-# Register IDE Plugin API (used by Tongyi Lingma IDE plugin for agent listing)
-app.include_router(ide_plugin_router)
-
-# ★ Register LSP4J WebSocket router (Tongyi Lingma IDE plugin)
-# Expected path: /api/plugins/clawith-lsp4j/ws
-# LSP4J router defines /ws endpoint, so prefix should be /api/plugins/clawith-lsp4j
-app.include_router(lsp4j_router, prefix="/api/plugins/clawith-lsp4j")
-
-# Load plugins (LSP4J, MCP, etc.)
-from app.plugins import load_plugins
-load_plugins(app)
 
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])
 async def health_check():
@@ -462,18 +452,18 @@ async def health_check():
 # ── Version endpoint (public, no auth required) ──
 def _load_version_info() -> dict[str, str]:
     """Read version + commit hash once at startup."""
-    import subprocess
+    import os, subprocess
     version = "unknown"
     for candidate in ["../frontend/VERSION", "frontend/VERSION", "VERSION"]:
         try:
-            version = Path(candidate).read_text().strip()
+            version = open(candidate).read().strip()
             break
         except FileNotFoundError:
             continue
     commit = ""
     for commit_file in ["../COMMIT", "COMMIT", "../frontend/COMMIT"]:
         try:
-            commit = Path(commit_file).read_text().strip()
+            commit = open(commit_file).read().strip()
             break
         except FileNotFoundError:
             continue
@@ -482,9 +472,9 @@ def _load_version_info() -> dict[str, str]:
             commit = subprocess.check_output(
                 ["git", "rev-parse", "--short", "HEAD"],
                 stderr=subprocess.DEVNULL, timeout=3,
-            ).decode("utf-8", errors="replace").strip()
-        except Exception as e:
-            logger.debug("Failed to resolve git commit: {}", e)
+            ).decode().strip()
+        except Exception:
+            pass
     return {"version": version, "commit": commit}
 
 _version_cache = _load_version_info()

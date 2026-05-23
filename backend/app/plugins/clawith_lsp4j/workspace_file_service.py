@@ -428,6 +428,9 @@ class WorkspaceFileService:
             return "APPLYING"
         if "APPLIED" in status_set:
             return "APPLIED"
+        # 删除类变更已在 IDE 执行完毕，快照不再停留在「已应用待保留全部」
+        if status_set == {"DELETED"} or (status_set <= {"DELETED", "ACCEPTED"} and "APPLIED" not in status_set):
+            return "ACCEPTED"
         if status_set == {"ACCEPTED"}:
             return "ACCEPTED"
         if "ACCEPTED" in status_set and "REJECTED" in status_set:

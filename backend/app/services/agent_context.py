@@ -4,89 +4,21 @@ Loads soul, memory, skills summary, and relationships from the agent's
 workspace files and composes a comprehensive system prompt.
 """
 
-import asyncio
-import threading
 import uuid
-from collections import OrderedDict
 from pathlib import Path
 
-from loguru import logger
-
 from app.config import get_settings
+from app.services.storage import get_storage_backend, normalize_storage_key
 
 settings = get_settings()
 
-PERSISTENT_DATA = Path(settings.AGENT_DATA_DIR)
-
-# ─── Context File Cache (LRU + mtime invalidation) ───────────────────────────────
-_MAX_CONTEXT_CACHE_SIZE = 100
-_context_file_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()  # key: "agent_id:filename", value: (content, mtime)
-_context_cache_lock = threading.Lock()
-
-# ─── Skills Index Cache (separate, per-agent) ───────────────────────────────────────────
-_MAX_SKILLS_CACHE_SIZE = 100
-_skills_index_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()  # key: agent_id, value: (index_text, dir_mtime)
-
-
-def _agent_workspace(agent_id: uuid.UUID) -> Path:
-    """Return the canonical persistent workspace path for an agent."""
-    return PERSISTENT_DATA / str(agent_id)
-
-
-def _read_file_cached(agent_id: uuid.UUID, filename: str, max_chars: int = 3000) -> str:
-    """Read a file with LRU cache + mtime invalidation.
-
-    Only caches static files (soul.md, memory.md, skills/, relationships.md, focus.md).
-    Dynamic content (Feishu context, Tenant settings, Triggers) is NOT cached.
-    """
-    cache_key = f"{agent_id}:{filename}"
-    ws = _agent_workspace(agent_id)
-    filepath = ws / filename
-
-    # 持有锁进行读写操作，避免协程并发时 OrderedDict 的竞态条件
-    with _context_cache_lock:
-        if cache_key in _context_file_cache:
-            content, cached_mtime = _context_file_cache[cache_key]
-            if filepath.exists():
-                current_mtime = filepath.stat().st_mtime
-                if current_mtime == cached_mtime:
-                    try:
-                        _context_file_cache.move_to_end(cache_key)
-                    except KeyError:
-                        pass  # Already removed, fall through
-                    return content
-            # mtime changed, invalidate
-            try:
-                del _context_file_cache[cache_key]
-            except KeyError:
-                pass
-    if not filepath.exists():
-        return ""
-
-    try:
-        content = filepath.read_text(encoding="utf-8", errors="replace").strip()
-        if len(content) > max_chars:
-            content = content[:max_chars] + "\n...(truncated)"
-    except Exception:
-        return ""
-
-    mtime = filepath.stat().st_mtime if filepath.exists() else 0
-
-    # Evict oldest if at capacity
-    while len(_context_file_cache) >= _MAX_CONTEXT_CACHE_SIZE:
-        _context_file_cache.popitem(last=False)
-
-    # Store in cache
-    _context_file_cache[cache_key] = (content, mtime)
-    return content
-
-
-def _read_file_safe(path: Path, max_chars: int = 3000) -> str:
-    """Read a file, return empty string if missing. Truncate if too long."""
-    if not path.exists():
+async def _read_file_safe(key: str, max_chars: int = 3000) -> str:
+    """Read a storage-backed text file, return empty string if missing."""
+    storage = get_storage_backend()
+    if not await storage.exists(key) or not await storage.is_file(key):
         return ""
     try:
-        content = path.read_text(encoding="utf-8", errors="replace").strip()
+        content = (await storage.read_text(key, encoding="utf-8", errors="replace")).strip()
         if len(content) > max_chars:
             content = content[:max_chars] + "\n...(truncated)"
         return content
@@ -138,38 +70,8 @@ def _parse_skill_frontmatter(content: str, filename: str) -> tuple[str, str]:
     return name, description
 
 
-def _load_skills_index(agent_id: uuid.UUID) -> str:
-    """Load skill index with LRU cache + mtime invalidation."""
-    cache_key = str(agent_id)
-    ws_root = _agent_workspace(agent_id)
-    skills_dir = ws_root / "skills"
-
-    # Check cache hit with mtime validation
-    if skills_dir.exists() and cache_key in _skills_index_cache:
-        index_text, cached_mtime = _skills_index_cache[cache_key]
-        dir_mtime = skills_dir.stat().st_mtime
-        if dir_mtime == cached_mtime:
-            # Move to end (most recently used)
-            _skills_index_cache.move_to_end(cache_key)
-            return index_text
-    elif cache_key in _skills_index_cache:
-        # Skills directory was deleted, invalidate cache
-        del _skills_index_cache[cache_key]
-
-    # Build skills index
-    index_text = _build_skills_index(agent_id)
-    dir_mtime = skills_dir.stat().st_mtime if skills_dir.exists() else 0
-
-    # Evict oldest if at capacity
-    while len(_skills_index_cache) >= _MAX_SKILLS_CACHE_SIZE:
-        _skills_index_cache.popitem(last=False)
-
-    _skills_index_cache[cache_key] = (index_text, dir_mtime)
-    return index_text
-
-
-def _build_skills_index(agent_id: uuid.UUID) -> str:
-    """Build skills index table from skills/ directory.
+async def _load_skills_index(agent_id: uuid.UUID) -> str:
+    """Load skill index (name + description) from skills/ directory.
 
     Supports two formats:
     - Flat file:   skills/my-skill.md
@@ -179,36 +81,36 @@ def _build_skills_index(agent_id: uuid.UUID) -> str:
     prompt. The model is instructed to call read_file to load full content
     when a skill is relevant.
     """
-    ws_root = _agent_workspace(agent_id)
     skills: list[tuple[str, str, str]] = []  # (name, description, path_relative_to_skills)
-    skills_dir = ws_root / "skills"
-    if skills_dir.exists():
-        for entry in sorted(skills_dir.iterdir()):
+    storage = get_storage_backend()
+    skills_prefix = normalize_storage_key(f"{agent_id}/skills")
+    if await storage.exists(skills_prefix) and await storage.is_dir(skills_prefix):
+        for entry in await storage.list_dir(skills_prefix):
             if entry.name.startswith("."):
                 continue
+            entry_key = entry.key
 
             # Case 1: Folder-based skill — skills/<folder>/SKILL.md
-            if entry.is_dir():
-                skill_md = entry / "SKILL.md"
-                if not skill_md.exists():
-                    # Also try lowercase skill.md
-                    skill_md = entry / "skill.md"
-                if skill_md.exists():
+            if entry.is_dir:
+                skill_md_key = f"{entry_key}/SKILL.md"
+                if not await storage.exists(skill_md_key):
+                    skill_md_key = f"{entry_key}/skill.md"
+                if await storage.exists(skill_md_key):
                     try:
-                        content = skill_md.read_text(encoding="utf-8", errors="replace").strip()
+                        content = (await storage.read_text(skill_md_key, encoding="utf-8", errors="replace")).strip()
                         name, desc = _parse_skill_frontmatter(content, entry.name)
                         skills.append((name, desc, f"{entry.name}/SKILL.md"))
                     except Exception:
                         skills.append((entry.name, "", f"{entry.name}/SKILL.md"))
 
             # Case 2: Flat file — skills/<name>.md
-            elif entry.suffix == ".md" and entry.is_file():
+            elif Path(entry.name).suffix == ".md" and not entry.is_dir:
                 try:
-                    content = entry.read_text(encoding="utf-8", errors="replace").strip()
-                    name, desc = _parse_skill_frontmatter(content, entry.stem)
+                    content = (await storage.read_text(entry_key, encoding="utf-8", errors="replace")).strip()
+                    name, desc = _parse_skill_frontmatter(content, Path(entry.name).stem)
                     skills.append((name, desc, entry.name))
                 except Exception:
-                    skills.append((entry.stem, "", entry.name))
+                    skills.append((Path(entry.name).stem, "", entry.name))
 
     # Deduplicate by name
     seen: set[str] = set()
@@ -250,34 +152,35 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
     - skills/ → skill names + summaries
     - relationships.md → relationship descriptions
     """
-    ws_root = _agent_workspace(agent_id)
-
-    # --- Soul (cached, static) ---
-    soul = _read_file_cached(agent_id, "soul.md", 2000)
+    # --- Soul ---
+    soul = await _read_file_safe(normalize_storage_key(f"{agent_id}/soul.md"), 2000)
     # Strip markdown heading if present
     if soul.startswith("# "):
         soul = "\n".join(soul.split("\n")[1:]).strip()
 
-    # --- Memory (NOT cached - dynamic) ---
-    memory = _read_file_safe(ws_root / "memory" / "memory.md", 2000) or _read_file_safe(ws_root / "memory.md", 2000)
+    # --- Memory ---
+    memory = await _read_file_safe(normalize_storage_key(f"{agent_id}/memory/memory.md"), 2000)
+    if not memory:
+        memory = await _read_file_safe(normalize_storage_key(f"{agent_id}/memory.md"), 2000)
     if memory.startswith("# "):
         memory = "\n".join(memory.split("\n")[1:]).strip()
 
-    # --- Skills index (cached, progressive disclosure) ---
-    skills_text = _load_skills_index(agent_id)
+    # --- Skills index (progressive disclosure) ---
+    skills_text = await _load_skills_index(agent_id)
 
-    # --- Relationships (cached, static) ---
-    relationships = _read_file_cached(agent_id, "relationships.md", 2000)
+    # --- Relationships ---
+    relationships = await _read_file_safe(normalize_storage_key(f"{agent_id}/relationships.md"), 2000)
     if relationships.startswith("# "):
         relationships = "\n".join(relationships.split("\n")[1:]).strip()
 
     # --- Compose static and dynamic system prompt blocks ---
+    from datetime import datetime, timezone as _tz
     from app.services.timezone_utils import get_agent_timezone, now_in_timezone
     agent_tz_name = await get_agent_timezone(agent_id)
     agent_local_now = now_in_timezone(agent_tz_name)
     now_str = agent_local_now.strftime(f"%Y-%m-%d %H:%M:%S ({agent_tz_name})")
     
-    static_parts = [f"【重要规则】你必须始终使用中文回复用户，即使用户使用其他语言提问。所有输出（包括工具调用参数、广场帖子、消息通知等）必须使用中文。\n\n你是{agent_name}，一位企业数字员工。"]
+    static_parts = [f"You are {agent_name}, an enterprise digital employee."]
 
 
     if role_description:
@@ -319,14 +222,10 @@ When installing or importing an MCP server via `discover_resources` / `import_mc
     dynamic_parts = []
 
     # --- Feishu Built-in Tools (only injected when agent has Feishu configured) ---
-    # 注：原 `_inject_im_channel_tools = not _is_ide_session.get()` 闸门已移除
-    # 让 IDE 与 Web 在 IM 通道注入上行为一致，按 agent 实际配置注入
     _has_feishu = False
     try:
-        from sqlalchemy import select
         from app.models.channel_config import ChannelConfig
         from app.database import async_session as _ctx_session
-
         async with _ctx_session() as _ctx_db:
             _cfg_r = await _ctx_db.execute(
                 select(ChannelConfig).where(
@@ -337,8 +236,7 @@ When installing or importing an MCP server via `discover_resources` / `import_mc
             )
             _has_feishu = _cfg_r.scalar_one_or_none() is not None
     except Exception:
-        # #146 修复：Feishu 通道配置加载失败时记录警告，优雅降级（不影响 Agent 核心功能）
-        logger.warning("无法加载 Feishu 通道配置（非关键，Agent 仍可正常工作）", exc_info=True)
+        pass
 
     if _has_feishu:
         static_parts.append("""
@@ -396,23 +294,20 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
 → Use `attendee_names=["John"]` in `feishu_calendar_create` — names are resolved automatically.
 → Or use `attendee_open_ids=["ou_xxx"]` if you already have the open_id.""")
 
-    # --- DingTalk Built-in Tools ---
-    # 注：DingTalk 上下文模块（app.services.agent.context.dingtalk）尚未实现。
-    # 实现后取消注释下方代码并在 try 内添加相应的 import。
-    # try:
-    #     from app.services.agent.context.dingtalk import get_dingtalk_context
-    #     dingtalk_context = await get_dingtalk_context(agent_id)
-    #     if dingtalk_context:
-    #         static_parts.append(dingtalk_context)
-    # except Exception:
-    #     logger.warning("无法加载 DingTalk 上下文（非关键，Agent 仍可正常工作）", exc_info=True)
+    # --- DingTalk Built-in Tools (only injected when agent has DingTalk configured) ---
+    try:
+        from app.services.agent.context.dingtalk import get_dingtalk_context
+        dingtalk_context = await get_dingtalk_context(agent_id)
+        if dingtalk_context:
+            static_parts.append(dingtalk_context)
+    except Exception:
+        pass
 
     # --- Atlassian Rovo Tools (injected when Atlassian channel is configured) ---
     try:
         from app.database import async_session
         from app.models.channel_config import ChannelConfig
         from sqlalchemy import select as sa_select
-
         async with async_session() as db:
             result = await db.execute(
                 sa_select(ChannelConfig).where(
@@ -460,13 +355,12 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
 - Report success without a tool result
 - Ask the user for their Atlassian credentials — they are pre-configured""")
     except Exception:
-        logger.warning("无法加载 Atlassian 工具列表（非关键功能，Agent 仍可正常工作）", exc_info=True)
+        pass
 
     # --- Company Intro (from system settings) ---
     try:
         from app.database import async_session
         from app.models.system_settings import SystemSetting
-        from app.models.agent import Agent as _AgentModel
         from sqlalchemy import select as sa_select
         async with async_session() as db:
             # Resolve agent's tenant_id
@@ -489,7 +383,7 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
                     if ts and ts.value and ts.value.get("content"):
                         company_intro = ts.value["content"].strip()
                 except Exception:
-                    logger.warning("无法从 tenant_settings 加载 Company Intro（非关键）", exc_info=True)
+                    pass
 
             # Priority 2: system_settings with tenant-scoped key (backward compat)
             if not company_intro and _agent_tenant_id:
@@ -513,7 +407,7 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
             if company_intro:
                 static_parts.append(f"\n## Company Information\n{company_intro}")
     except Exception:
-        logger.warning("无法加载 Company Intro（数据库不可用或查询失败，非关键功能）", exc_info=True)
+        pass  # Don't break agent if DB is unavailable
 
     static_parts.append("""
 
@@ -643,31 +537,12 @@ Default visual style for generated HTML or rich visual documents:
    - **Do NOT use `send_channel_message` to notify someone about a file — use `send_channel_file` which sends the actual file attachment.**
    - Just send it directly — don't ask the recipient how they want to receive it.
 
-10. **你必须始终使用中文回复用户，即使用户使用其他语言提问。**
+10. **Reply in the same language the user uses.**
 
-11. **🪨 极简回复规则（ultra 级别）**（#120 修复：从一行扩展为完整正反例）
-
-**删除**: 冠词(a/an/the)、废话词(just/really/basically/actually/simply)、客套话(sure/certainly/happy to/I'd recommend)、犹豫词(it might be worth/you could consider)
-**保留**: 技术术语完整、代码块不变、错误消息/命令原文引用、文件路径绝对精确
-**模式**: `[诊断] → [原因] → [修复]`。三个短句内讲清核心。
-**缩写**: DB/auth/config/req/res/fn/impl 等通用词允许缩写。箭头(→)替代因果连词。
-
-示例对比：
-❌ "Sure! I'd be happy to help you with that. The issue is likely caused by the authentication middleware not properly validating the token expiry."
-✅ "Token 过期校验 < 改 <=。修复 auth.py 行 42。"
-
-❌ "数据库连接池复用已打开的连接，避免每次请求新建连接的开销"
-✅ "池 reuse DB conn。Skip handshake → fast under load。"
-
-❌ "I analyzed the codebase and found the following issues. First, let me explain the architecture..."
-✅ "3 个问题：(1) Cache key 未加 version 前缀 (2) DB pool size=5 高并发排队 (3) 缺少超时中断"
-
-**不要用 emoji**。工具结果中的 emoji 不复制到最终回复。用 Success/Warning/Error 代替 emoji 前缀。
-
-**自动恢复完整模式**（以下情况可展开详述）:
-- 安全漏洞警告（XSS、SQL注入、路径遍历等）
-- 不可逆操作确认（delete_file、DROP TABLE、git push --force）
-- 用户明确要求详细解释
+11. **Keep user-facing replies clean and restrained.**
+   - Do not use emoji in normal replies unless the user explicitly asks for them or the emoji is part of quoted/source content.
+   - Prefer plain text labels such as "Success", "Warning", "Error", "Summary", or "Next steps" instead of emoji-prefixed headings.
+   - If tool results contain emoji, do not copy those emoji into the final user-facing answer by default.
 
 12. **Never assume a file exists — always verify with `list_files` first.**
 
@@ -694,15 +569,16 @@ If no search or webpage-reading tool is available, say that web lookup is not en
     if memory and memory not in ("_这里记录重要的信息和学到的知识。_", "_Record important information and knowledge here._"):
         dynamic_parts.append(f"\n## Memory\n{memory}")
 
-    # --- Focus (working memory) ---
-    try:
-        from app.services.focus_service import render_focus_context
-        focus = await render_focus_context(agent_id)
-        if focus.strip():
-            dynamic_parts.append(f"\n## Focus\n{focus}")
-    except Exception:
-        # 优雅降级：Focus 上下文加载失败不影响主流程
-        logger.warning("无法加载 Focus 上下文（非关键，Agent 仍可正常工作）", exc_info=True)
+    # --- Focus (working memory) --- DISABLED: injecting completed focus items
+    # into the system prompt was reinforcing stale workflow patterns over updated
+    # soul.md instructions.  Agents can still query focus via list_focus_items.
+    # try:
+    #     from app.services.focus_service import render_focus_context
+    #     focus = await render_focus_context(agent_id)
+    #     if focus.strip():
+    #         dynamic_parts.append(f"\n## Focus\n{focus}")
+    # except Exception:
+    #     pass
 
     # --- Active Triggers ---
     try:
@@ -726,8 +602,7 @@ If no search or webpage-reading tool is available, say that web lookup is not en
                     lines.append(f"\n- **{t.name}** [{t.type}]{ref_str}\n  Config: `{config_str}`\n  Reason: {reason_str}")
                 dynamic_parts.append("\n## Active Triggers\n" + "\n".join(lines))
     except Exception:
-        # #146 修复：Trigger 上下文加载失败时记录警告，优雅降级
-        logger.warning("无法加载活跃触发器上下文（非关键，Agent 仍可正常工作）", exc_info=True)
+        pass
 
     # --- Time Info ---
 
@@ -739,8 +614,5 @@ If no search or webpage-reading tool is available, say that web lookup is not en
     # Inject current user identity
     if current_user_name:
         dynamic_parts.append(f"\n## Current Conversation\nYou are currently chatting with **{current_user_name}**. Address them by name when appropriate.")
-
-    # 【最终强调】在 prompt 末尾再次强制中文规则（LLM 对首尾内容最敏感）
-    dynamic_parts.append("\n## ⚠️ 语言规则（必须遵守）\n你必须始终使用中文回复用户，即使用户使用其他语言提问。所有输出（回复、工具调用参数、广场帖子、消息等）必须使用中文。英文技术术语可保留原文，但解释和描述必须用中文。")
 
     return "\n".join(static_parts), "\n".join(dynamic_parts)

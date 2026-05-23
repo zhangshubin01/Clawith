@@ -49,6 +49,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import async_session
 # 延迟导入 agent_tools 以避免循环依赖（agent_tools → llm.finish → llm.caller → agent_tools）
 # 实际导入在函数体内按需执行
@@ -565,7 +566,7 @@ async def _process_tool_call(
             from app.config import get_settings
 
             settings = get_settings()
-            ws_path = Path(settings.AGENT_DATA_DIR) / str(agent_id)
+            ws_path = Path(settings.STORAGE_LOCAL_ROOT or settings.AGENT_DATA_DIR) / str(agent_id)
             vision_content = try_inject_screenshot_vision(tool_name, str(result), ws_path)
             if vision_content:
                 tool_content = vision_content
@@ -1116,13 +1117,28 @@ async def call_llm(
             return results
 
         if file_groups:
+            _group_list = list(file_groups.values())
             group_results = await asyncio.gather(
-                *(_run_write_group(group) for group in file_groups.values()),
+                *(_run_write_group(group) for group in _group_list),
                 return_exceptions=True,
             )
-            for grp in group_results:
+            for group_tools, grp in zip(_group_list, group_results):
                 if isinstance(grp, Exception):
                     logger.error("[LLM] write group 执行异常: {}", grp)
+                    # NEW-060：组级异常时须为每个 tool_call_id 补 tool 消息，避免下一轮 400
+                    for tc in group_tools:
+                        _tid = tc.get("id") or ""
+                        if not _tid:
+                            continue
+                        api_messages.append(
+                            LLMMessage(
+                                role="tool",
+                                content=(
+                                    f"[工具执行失败] write group: {type(grp).__name__}: {str(grp)[:200]}"
+                                ),
+                                tool_call_id=_tid,
+                            )
+                        )
                     continue
                 # _process_tool_call 已在内部写入 tool 消息；此处仅记录 group 级异常
                 for tc, tool_error in grp:

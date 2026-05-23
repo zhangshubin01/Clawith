@@ -1,28 +1,17 @@
 """Authentication API routes."""
 
-import asyncio
-import time
 import uuid
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+import uuid
 
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
-from fastapi.security import HTTPAuthorizationCredentials
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import (
-    create_access_token,
-    decode_access_token_soft,
-    get_authenticated_user,
-    get_current_user,
-    hash_password,
-    verify_password,
-    security,
-)
+from app.core.security import create_access_token, get_authenticated_user, get_current_user, hash_password_async, verify_password_async
 from app.database import get_db
 from app.models.user import Identity, User
 from app.schemas.schemas import (
@@ -39,8 +28,11 @@ from app.schemas.schemas import (
     UserUpdate,
     VerifyEmailRequest,
     ResendVerificationRequest,
+    NeedsVerificationResponse,
     RegisterInitRequest,
     RegisterInitResponse,
+    RegisterCompleteRequest,
+    RegisterCompleteResponse,
     SSORegisterRequest,
     TenantChoice,
     MultiTenantResponse,
@@ -52,94 +44,11 @@ from sqlalchemy.orm import selectinload
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# ── 速率限制器（Redis 优先 + 内存回退）──────────────────────────────
-# 多 gunicorn worker 部署时，内存字典不跨 worker 共享。优先使用 Redis 滑动窗口
-# 实现跨 worker 一致的速率限制；Redis 不可用时回退到内存实现（单 worker 有效）。
-
-_rate_limit_store: dict[str, list[float]] = defaultdict(list)
-_rate_lock = asyncio.Lock()
-
-_RATE_LIMITS: dict[str, tuple[int, int]] = {
-    "login": (5, 60),  # 5 attempts per 60s
-    "email_hint": (3, 60),  # 3 attempts per 60s (低值：暴露账号存在性）
-    "forgot_password": (3, 300),  # 3 attempts per 5min
-}
-
-# 尝试初始化 Redis 客户端（用于跨 worker 速率限制）
-_redis_client: "Redis | None" = None  # type: ignore[name-defined]
-try:
-    from app.config import get_settings
-    _cfg = get_settings()
-    if _cfg.REDIS_URL:
-        import redis.asyncio as aioredis
-        _redis_client = aioredis.from_url(
-            _cfg.REDIS_URL,
-            socket_connect_timeout=2,
-            socket_timeout=2,
-            decode_responses=True,
-        )
-        logger.info("Redis rate limiter enabled: %s", _cfg.REDIS_URL)
-except Exception:
-    logger.warning("Redis rate limiter unavailable, falling back to in-memory")
-
-
-def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return "0.0.0.0"
-
-
-async def _check_rate_limit(request: Request, endpoint_key: str) -> None:
-    max_attempts, window_s = _RATE_LIMITS.get(endpoint_key, (10, 60))
-    ip = _client_ip(request)
-    redis_key = f"rl:{endpoint_key}:{ip}"
-    now = time.time()
-
-    # 优先使用 Redis 滑动窗口（跨 worker 一致），不可用时回退内存
-    if _redis_client is not None:
-        try:
-            cutoff = now - window_s
-            # 原子操作：移除过期时间戳 + 添加当前时间戳 + 计数
-            async with _redis_client.pipeline(transaction=True) as pipe:
-                pipe.zremrangebyscore(redis_key, "-inf", cutoff)
-                pipe.zadd(redis_key, {str(now): now})
-                pipe.zcard(redis_key)
-                pipe.expire(redis_key, window_s + 1)
-                _, _, count, _ = await pipe.execute()
-            if count > max_attempts:
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Too many attempts. Please try again later.",
-                    headers={"Retry-After": str(window_s)},
-                )
-            return
-        except Exception:
-            logger.debug("Redis rate limit failed, falling back to memory")
-
-    # 内存回退（单 worker 有效）
-    bucket_key = f"{endpoint_key}:{ip}"
-    async with _rate_lock:
-        ts_list = _rate_limit_store[bucket_key]
-        cutoff = now - window_s
-        while ts_list and ts_list[0] < cutoff:
-            ts_list.pop(0)
-        if len(ts_list) >= max_attempts:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many attempts. Please try again later.",
-                headers={"Retry-After": str(window_s)},
-            )
-        ts_list.append(now)
-
 
 @router.get("/registration-config")
 async def get_registration_config(db: AsyncSession = Depends(get_db)):
     """Public endpoint — returns registration requirements (no auth needed)."""
     from app.models.system_settings import SystemSetting
-
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == "invitation_code_enabled"))
     setting = result.scalar_one_or_none()
     enabled = setting.value.get("enabled", False) if setting else False
@@ -153,13 +62,14 @@ async def check_duplicate(
     db: AsyncSession = Depends(get_db),
 ):
     """Check if email or username already exists."""
-    from app.models.user import Identity
-
+    from app.models.user import Identity, User
     result = {"email_exists": False, "username_exists": False, "conflicts": []}
 
     if email:
         # Check Identity email
-        existing = await db.execute(select(Identity).where(Identity.email == email))
+        existing = await db.execute(
+            select(Identity).where(Identity.email == email)
+        )
         if existing.scalar_one_or_none():
             result["email_exists"] = True
             result["conflicts"].append({"type": "email", "scope": "global", "message": "Email already registered"})
@@ -184,7 +94,6 @@ async def _send_verification_email_task(
     # Check if email is configured — either via DB (platform settings UI) or env vars.
     # We must check the DB config too, since most users configure SMTP via the UI.
     from app.services.system_email_service import resolve_email_config_async
-
     email_config = await resolve_email_config_async(db)
     if not email_config:
         logger.debug("No email config found (env or DB), skipping verification email")
@@ -201,11 +110,9 @@ async def _send_verification_email_task(
             logger.warning(f"No identity found for user {user.id} ({user.email}). Cannot send verification.")
             return
 
-        raw_code, expires_at = await email_verification_service.create_email_verification_token(
-            identity.id, identity.email
-        )
+        raw_code, expires_at = await email_verification_service.create_email_verification_token(identity.id, identity.email)
         expiry_minutes = int((expires_at - datetime.now(timezone.utc)).total_seconds() // 60)
-
+        
         background_tasks.add_task(
             email_verification_service.send_verification_email,
             identity.email,
@@ -232,7 +139,6 @@ async def register(
     - /verify-email - Step 3: Verify email
     """
     from app.config import get_settings
-
     settings = get_settings()
 
     # Handle SSO registration if provider info provided
@@ -241,8 +147,6 @@ async def register(
 
     # Regular username/password registration - delegate to new flow
     return await _handle_normal_register(data, background_tasks, db, settings)
-
-
 @router.post("/register/init", response_model=RegisterInitResponse, status_code=status.HTTP_201_CREATED)
 async def register_init(
     data: RegisterInitRequest,
@@ -254,24 +158,28 @@ async def register_init(
     Creates/finds a global Identity and a tenant-scoped User.
     """
     from app.config import get_settings
-
     settings = get_settings()
     from app.services.registration_service import registration_service
     from app.models.user import Identity, User
 
     logger.info(f"[REGISTER_INIT] Starting registration for email={data.email}")
 
-    # Check if this is the first user (platform admin setup)
-    from sqlalchemy import func
+    # Resolve email config once
+    from app.services.system_email_service import resolve_email_config_async
+    email_config = await resolve_email_config_async(db)
 
-    ident_count_result = await db.execute(select(func.count()).select_from(Identity))
-    is_first_user = ident_count_result.scalar() == 0
+    # Check if this is the first user (platform admin setup) - Optimize with EXISTS
+    is_first_user = (await db.execute(select(Identity.id).limit(1))).scalar() is None
 
     # Find or Create Identity
     identity = await registration_service.find_or_create_identity(
-        db, email=data.email, username=data.username, password=data.password, is_platform_admin=is_first_user
+        db,
+        email=data.email,
+        username=data.username,
+        password=data.password,
+        is_platform_admin=is_first_user,
+        email_config=email_config,
     )
-
     # Defense-in-depth: verify the returned identity actually belongs to the
     # submitted email. Under normal circumstances this should never trigger
     # (find_or_create_identity no longer uses username as a lookup key), but
@@ -288,16 +196,16 @@ async def register_init(
         )
 
     # If identity existed, verify password
-    if identity.password_hash and not verify_password(data.password, identity.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Email already registered. Incorrect password."
+    if identity.password_hash and not await verify_password_async(data.password, identity.password_hash):
+         raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email already registered. Incorrect password."
         )
 
     # For first user: auto-create/get default tenant
     tenant_uuid = None
     if is_first_user:
         from app.models.tenant import Tenant
-
         default = await db.execute(select(Tenant).where(Tenant.slug == "default"))
         tenant = default.scalar_one_or_none()
         if not tenant:
@@ -316,7 +224,7 @@ async def register_init(
     else:
         # Check for a "tenant-less" user (pending company setup)
         existing_user_res = await db.execute(
-            select(User).where(User.identity_id == identity.id, User.tenant_id.is_(None))
+            select(User).where(User.identity_id == identity.id, User.tenant_id == None)
         )
         user = existing_user_res.scalar_one_or_none()
 
@@ -329,7 +237,7 @@ async def register_init(
             tenant_id=tenant_uuid,
         )
         # Set initial status
-        user.is_active = is_first_user  # Active immediately if first user
+        user.is_active = is_first_user # Active immediately if first user
         user.email_verified = identity.email_verified
         await db.flush()
 
@@ -345,9 +253,7 @@ async def register_init(
         email=identity.email,
         access_token=token,
         user=UserOut.model_validate(user),
-        message="Registration initiated. Please verify your email."
-        if not identity.email_verified
-        else "Registration successful.",
+        message="Registration initiated. Please verify your email." if not identity.email_verified else "Registration successful.",
         needs_company_setup=user.tenant_id is None,
         target_tenant_id=data.target_tenant_id,
     )
@@ -373,7 +279,9 @@ async def register_sso(
         raise HTTPException(status_code=400, detail=f"Provider '{data.provider}' not supported")
 
     # Perform SSO registration
-    user, is_new, error = await registration_service.register_with_sso(db, data.provider, data.code, auth_provider)
+    user, is_new, error = await registration_service.register_with_sso(
+        db, data.provider, data.code, auth_provider
+    )
 
     if error:
         raise HTTPException(status_code=400, detail=error)
@@ -406,15 +314,17 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
     from app.services.registration_service import registration_service
     from sqlalchemy import func
 
-    # Check if first user
-    user_count_result = await db.execute(select(func.count()).select_from(User))
-    is_first_user = user_count_result.scalar() == 0
+    # Resolve email config once
+    from app.services.system_email_service import resolve_email_config_async
+    email_config = await resolve_email_config_async(db)
+
+    # Check if first user - Optimize with EXISTS
+    is_first_user = (await db.execute(select(User.id).limit(1))).scalar() is None
 
     # Resolve tenant
     tenant_uuid = None
     if is_first_user:
         from app.models.tenant import Tenant
-
         default = await db.execute(select(Tenant).where(Tenant.slug == "default"))
         tenant = default.scalar_one_or_none()
         if not tenant:
@@ -433,7 +343,7 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
 
     # 1. Check for existing Identity/Tenant-User
     from app.services.registration_service import registration_service
-
+    
     # Check if this email is already registered globally
     identity_query = select(Identity).where(Identity.email == data.email)
     ident_res = await db.execute(identity_query)
@@ -441,9 +351,10 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
 
     if identity:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Email already registered, please login directly."
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered, please login directly."
         )
-
+    
     # 2. Uniqueness Check (Already handled by Identity lookup above, but let's be explicit for Phone if needed)
     # conflicts = await registration_service.check_duplicate_identity(db, email=data.email)
     # ...
@@ -451,7 +362,12 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
     # 3. Resolve or create Identity
     # If it's the first user, we auto-verify (trusted admin)
     identity = await registration_service.find_or_create_identity(
-        db, email=data.email, username=data.username, password=data.password, is_platform_admin=is_first_user
+        db,
+        email=data.email,
+        username=data.username,
+        password=data.password,
+        is_platform_admin=is_first_user,
+        email_config=email_config,
     )
 
     # Defense-in-depth: verify the returned identity actually belongs to the
@@ -467,7 +383,7 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
             status_code=status.HTTP_409_CONFLICT,
             detail="Username already taken. Please choose a different username.",
         )
-
+    
     if is_first_user:
         identity.email_verified = True
         identity.is_active = True
@@ -481,6 +397,7 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
         role=role,
         tenant_id=tenant_uuid,
         registration_source="web",
+        email_config=email_config,
     )
 
     # Seed default agents for first user
@@ -488,7 +405,6 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
         await db.commit()
         try:
             from app.services.agent_seeder import seed_default_agents
-
             await seed_default_agents()
         except Exception as e:
             logger.warning(f"Failed to seed default agents: {e}")
@@ -504,9 +420,7 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
         email=user.email,
         access_token=create_access_token(str(user.id), user.role),
         user=UserOut.model_validate(user),
-        message="Registration successful. Please verify your email."
-        if not identity.email_verified
-        else "Registration successful.",
+        message="Registration successful. Please verify your email." if not identity.email_verified else "Registration successful.",
         needs_company_setup=user.tenant_id is None,
     )
 
@@ -514,37 +428,37 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
 async def _handle_sso_register(data: UserRegister, db: AsyncSession):
     """Legacy SSO registration handler - delegates to new SSO endpoint logic."""
     # Redirect to new SSO flow
-    sso_data = SSORegisterRequest(provider=data.provider, code=data.provider_code, invitation_code=data.invitation_code)
+    sso_data = SSORegisterRequest(
+        provider=data.provider,
+        code=data.provider_code,
+        invitation_code=data.invitation_code
+    )
     return await register_sso(sso_data, db)
 
 
+
 @router.post("/login", response_model=Any)
-async def login(
-    request: Request, data: UserLogin, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)
-):
+async def login(data: UserLogin, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
     """Login with email/phone/username and password. Supports multi-tenant selection."""
-    await _check_rate_limit(request, "login")
     from app.models.tenant import Tenant
     from app.models.user import Identity, User
 
     # 1. Query Identity
     query = select(Identity).where(
-        (Identity.email == data.login_identifier)
-        | (Identity.phone == data.login_identifier)
-        | (Identity.username == data.login_identifier)
+        (Identity.email == data.login_identifier) |
+        (Identity.phone == data.login_identifier) |
+        (Identity.username == data.login_identifier)
     )
     result = await db.execute(query)
     identity = result.scalar_one_or_none()
 
-    if not identity or not identity.password_hash or not verify_password(data.password, identity.password_hash):
-        logger.warning(
-            f"[LOGIN] Invalid credentials for {data.login_identifier} identity_id={identity.id if identity else 'None'}"
-        )
+    if not identity or not identity.password_hash or not await verify_password_async(data.password, identity.password_hash):
+        logger.warning(f"[LOGIN] Invalid credentials for {data.login_identifier} identity_id={identity.id if identity else 'None'}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     # 2. Check Global Activity & Verification
     if not identity.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account has been disabled.")
+         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account has been disabled.")
 
     if not identity.email_verified:
         from app.config import get_settings
@@ -555,25 +469,29 @@ async def login(
         if not email_config:
             identity.email_verified = True
             identity.is_active = True
-            await db.execute(update(User).where(User.identity_id == identity.id).values(is_active=True))
+            await db.execute(
+                update(User)
+                .where(User.identity_id == identity.id)
+                .values(is_active=True)
+            )
             await db.flush()
         else:
             # Find any user record (just for the task)
             user_res = await db.execute(select(User).where(User.identity_id == identity.id).limit(1))
             user = user_res.scalar_one_or_none()
-
+            
             # Trigger email delivery in background
             if user:
                 await _send_verification_email_task(user, background_tasks, get_settings(), db)
-
+            
             # Consistent with identity-first flow: Return 403 Forbidden with verification intent
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={
                     "needs_verification": True,
                     "email": identity.email,
-                    "message": "Please verify your email to continue.",
-                },
+                    "message": "Please verify your email to continue."
+                }
             )
 
     # 3. Find all User records (tenants)
@@ -585,9 +503,7 @@ async def login(
         # Create a "tenant-less" user if needed, or redirect to company setup
         # For now, if no users, they need company setup.
         # But wait, register_init should have created one.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="No organization associated with this account."
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No organization associated with this account.")
 
     # 4. Handle Tenant Selection
     if not data.tenant_id:
@@ -596,20 +512,20 @@ async def login(
             tenant_ids = [u.tenant_id for u in valid_users if u.tenant_id]
             tenants_map = {}
             if tenant_ids:
-                tenants_result = await db.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))
+                tenants_result = await db.execute(
+                    select(Tenant).where(Tenant.id.in_(tenant_ids))
+                )
                 tenants_map = {str(t.id): t for t in tenants_result.scalars().all()}
 
             tenant_choices = []
             for u in valid_users:
                 tenant = tenants_map.get(str(u.tenant_id)) if u.tenant_id else None
-                tenant_choices.append(
-                    TenantChoice(
-                        tenant_id=u.tenant_id,
-                        tenant_name=tenant.name if tenant else "Create or Join Organization",
-                        tenant_slug=tenant.slug if tenant else "",
-                        logo_url=tenant.logo_url if tenant else None,
-                    )
-                )
+                tenant_choices.append(TenantChoice(
+                    tenant_id=u.tenant_id,
+                    tenant_name=tenant.name if tenant else "Create or Join Organization",
+                    tenant_slug=tenant.slug if tenant else "",
+                    logo_url=tenant.logo_url if tenant else None,
+                ))
 
             return MultiTenantResponse(
                 requires_tenant_selection=True,
@@ -623,15 +539,16 @@ async def login(
         # Specific tenant requested (Dedicated Link flow)
         # Search for the user record in that tenant
         user = next((u for u in valid_users if u.tenant_id == data.tenant_id), None)
-
+        
         # Cross-tenant access check
         if not user:
-            # Even platform admins must have a valid record in the targeted tenant
-            # when logging in via a dedicated tenant URL / tenant_id.
-            raise HTTPException(
+             # Even platform admins must have a valid record in the targeted tenant 
+             # when logging in via a dedicated tenant URL / tenant_id.
+             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="This account does not belong to the selected organization.",
             )
+
 
     if user.tenant_id:
         t_result = await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
@@ -652,80 +569,37 @@ async def login(
     )
 
 
-# #217 修复：JWT 刷新端点，允许客户端用过期但有效的 token 换取新 token
-@router.post("/refresh", response_model=Any)
-async def refresh_token(
-    request: Request,
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
-    db: AsyncSession = Depends(get_db),
-):
-    """刷新 JWT 访问令牌。
-
-    接受已过期（但签名有效）的 Bearer token，返回新 token。
-    有效期 24h，比登录 token 更长，适合长期运行的 IDE 插件。
-    """
-    from app.models.user import User
-
-    if not credentials:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-
-    # 软解码：容忍过期，仅验证签名和格式
-    try:
-        payload = decode_access_token_soft(credentials.credentials)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.warning("[Auth] refresh token 解码异常", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    try:
-        user_uuid = uuid.UUID(str(user_id))
-    except (ValueError, AttributeError):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-
-    result = await db.execute(select(User).where(User.id == user_uuid))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    if not user.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is inactive")
-
-    # 生成新 token，有效期 24h（IDE 插件长期使用）
-    new_token = create_access_token(str(user.id), user.role, expires_delta=timedelta(hours=24))
-    return {
-        "access_token": new_token,
-        "token_type": "bearer",
-    }
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token(current_user: User = Depends(get_current_user)):
+    """用过期但未吊销的 JWT 换取新令牌（IDE 插件重连时使用）。"""
+    token = create_access_token(str(current_user.id), current_user.role)
+    return TokenResponse(
+        access_token=token,
+        user=UserOut.model_validate(current_user),
+    )
 
 
 @router.get("/email-hint")
-async def get_email_hint(request: Request, username: str, db: AsyncSession = Depends(get_db)):
+async def get_email_hint(username: str, db: AsyncSession = Depends(get_db)):
     """Return a hinted email address for a given username."""
-    await _check_rate_limit(request, "email_hint")
     from app.models.user import Identity
-
     result = await db.execute(select(Identity).where(Identity.username == username))
     identity = result.scalar_one_or_none()
-
-    # Return a dummy hint for non-existent accounts to prevent user enumeration.
-    # The hint is always the same format so an attacker cannot distinguish
-    # "account exists" from "account does not exist" by response shape.
+    
     if not identity or not identity.email:
-        return {"hint": "u***r@e***e.com"}
-
+        raise HTTPException(status_code=404, detail="Account not found.")
+        
     email = identity.email
     parts = email.split("@")
     if len(parts) == 2:
         name, domain = parts
-
+        
         # Obfuscate name
         if len(name) <= 2:
             obs_name = name[0] + "***"
         else:
             obs_name = name[:2] + "***" + name[-1]
-
+            
         # Obfuscate domain
         domain_parts = domain.split(".")
         if len(domain_parts) >= 2:
@@ -740,27 +614,24 @@ async def get_email_hint(request: Request, username: str, db: AsyncSession = Dep
             hint = f"{obs_name}@{domain}"
     else:
         hint = email[:3] + "***"
-
+        
     return {"hint": hint}
 
 
 @router.post("/forgot-password")
 async def forgot_password(
-    request: Request,
     data: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """Request a password reset link for a global Identity."""
-    await _check_rate_limit(request, "forgot_password")
     from app.services.system_email_service import resolve_email_config_async
-
     email_config = await resolve_email_config_async(db)
 
     if not email_config:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password reset is currently unavailable (no mail server configured).",
+            detail="Password reset is currently unavailable (no mail server configured)."
         )
 
     generic_response = {
@@ -772,7 +643,7 @@ async def forgot_password(
     identity_query = select(Identity).where(Identity.email == data.email)
     identity_result = await db.execute(identity_query)
     identity = identity_result.scalar_one_or_none()
-
+    
     if not identity or not identity.is_active:
         return generic_response
 
@@ -811,11 +682,11 @@ async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(
     identity_id = token_data["identity_id"]
     result = await db.execute(select(Identity).where(Identity.id == identity_id))
     identity = result.scalar_one_or_none()
-
+    
     if not identity or not identity.is_active:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
 
-    new_hash = hash_password(data.new_password)
+    new_hash = await hash_password_async(data.new_password)
     identity.password_hash = new_hash
 
     await db.flush()
@@ -886,7 +757,6 @@ async def update_me(
     # Sync email/phone to OrgMember if changed
     if "email" in update_data or "primary_mobile" in update_data:
         from app.services.registration_service import registration_service
-
         await registration_service.sync_org_member_contact_from_user(
             db,
             current_user,
@@ -906,7 +776,9 @@ async def get_my_tenants(
     from app.models.tenant import Tenant
 
     # 1. Get all user records for this identity
-    result = await db.execute(select(User).where(User.identity_id == current_user.identity_id))
+    result = await db.execute(
+        select(User).where(User.identity_id == current_user.identity_id)
+    )
     users = result.scalars().all()
 
     # 2. Extract tenant IDs
@@ -915,7 +787,9 @@ async def get_my_tenants(
         return []
 
     # 3. Get tenant details
-    result = await db.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))
+    result = await db.execute(
+        select(Tenant).where(Tenant.id.in_(tenant_ids))
+    )
     tenants = result.scalars().all()
 
     return [
@@ -924,8 +798,7 @@ async def get_my_tenants(
             tenant_name=t.name,
             tenant_slug=t.slug,
             logo_url=t.logo_url,
-        )
-        for t in tenants
+        ) for t in tenants
     ]
 
 
@@ -938,16 +811,21 @@ async def switch_tenant(
 ):
     """Switch to a different tenant and return a new token and redirect URL."""
     from app.models.tenant import Tenant
+    from app.models.system_settings import SystemSetting
 
     # 1. Verify membership
     result = await db.execute(
-        select(User).where(User.identity_id == current_user.identity_id, User.tenant_id == data.tenant_id)
+        select(User).where(
+            User.identity_id == current_user.identity_id,
+            User.tenant_id == data.tenant_id
+        )
     )
     target_user = result.scalar_one_or_none()
 
     if not target_user:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this organization."
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this organization."
         )
 
     # 2. Get tenant details
@@ -955,7 +833,10 @@ async def switch_tenant(
     tenant = result.scalar_one_or_none()
 
     if not tenant or not tenant.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This organization is currently unavailable.")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This organization is currently unavailable."
+        )
 
     # 3. Generate new token
     token = create_access_token(str(target_user.id), target_user.role)
@@ -964,7 +845,7 @@ async def switch_tenant(
     # Determine redirect URL (Priority: sso_domain > ENV > Request > Fallback)
     from app.services.platform_service import platform_service
     from app.models.system_settings import SystemSetting
-
+    
     # Check if custom domain SSO redirect is enabled globally
     setting_result = await db.execute(
         select(SystemSetting).where(SystemSetting.key == "sso_custom_domain_redirect_enabled")
@@ -977,12 +858,17 @@ async def switch_tenant(
     else:
         redirect_url = await platform_service.get_tenant_sso_base_url(db, tenant, request)
 
+
     # Include token in redirect URL for cross-domain switching if needed
     if redirect_url:
         separator = "&" if "?" in redirect_url else "?"
         redirect_url = f"{redirect_url}{separator}token={token}"
 
-    return TenantSwitchResponse(access_token=token, redirect_url=redirect_url, message="Switching organization...")
+    return TenantSwitchResponse(
+        access_token=token,
+        redirect_url=redirect_url,
+        message="Switching organization..."
+    )
 
 
 @router.put("/me/password")
@@ -1006,12 +892,12 @@ async def change_password(
     user = res.scalar_one()
     identity = user.identity
 
-    if not identity or not identity.password_hash or not verify_password(old_password, identity.password_hash):
+    if not identity or not identity.password_hash or not await verify_password_async(old_password, identity.password_hash):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
-    new_hash = hash_password(new_password)
+    new_hash = await hash_password_async(new_password)
     identity.password_hash = new_hash
-
+    
     await db.flush()
     await db.commit()
     return {"ok": True}
@@ -1029,9 +915,43 @@ async def list_providers(
     from app.services.auth_registry import auth_provider_registry
 
     providers = await auth_provider_registry.list_providers(db, str(tenant_id) if tenant_id else None)
-    return [
-        {"id": str(p.id), "provider_type": p.provider_type, "name": p.name, "is_active": p.is_active} for p in providers
-    ]
+    return [{"id": str(p.id), "provider_type": p.provider_type, "name": p.name, "is_active": p.is_active} for p in providers]
+
+
+# Redis keys for OAuth two-step tenant selection
+_OAUTH_PENDING_PREFIX = "oauth_pending:"
+_OAUTH_PENDING_TTL = 600  # 10 minutes
+
+
+async def _cache_oauth_pending(
+    pending_token: str,
+    provider_type: str,
+    user_info_dict: dict,
+    token_data: dict,
+) -> None:
+    """Store OAuth intermediate data in Redis for the two-step tenant-selection flow."""
+    import json
+    from app.core.events import get_redis
+    r = await get_redis()
+    payload = json.dumps({
+        "provider_type": provider_type,
+        "user_info": user_info_dict,
+        "token_data": token_data,
+    })
+    await r.set(f"{_OAUTH_PENDING_PREFIX}{pending_token}", payload, ex=_OAUTH_PENDING_TTL)
+
+
+async def _get_oauth_pending(pending_token: str) -> dict | None:
+    """Retrieve (and delete) cached OAuth data from Redis. Returns None if expired/missing."""
+    import json
+    from app.core.events import get_redis
+    r = await get_redis()
+    raw = await r.get(f"{_OAUTH_PENDING_PREFIX}{pending_token}")
+    if not raw:
+        return None
+    # Single-use: delete immediately after retrieval
+    await r.delete(f"{_OAUTH_PENDING_PREFIX}{pending_token}")
+    return json.loads(raw)
 
 
 @router.get("/{provider}/authorize", response_model=OAuthAuthorizeResponse)
@@ -1043,6 +963,7 @@ async def authorize(
 ):
     """Start OAuth authorization flow for a provider."""
     from app.services.auth_registry import auth_provider_registry
+    from app.services.sso_service import sso_service
 
     # Get provider
     auth_provider = await auth_provider_registry.get_provider(db, provider)
@@ -1061,36 +982,75 @@ async def authorize(
     return OAuthAuthorizeResponse(authorization_url=auth_url)
 
 
-@router.post("/{provider}/callback", response_model=TokenResponse)
+@router.post("/{provider}/callback", response_model=Any)
 async def oauth_callback(
     provider: str,
     data: OAuthCallbackRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Handle OAuth callback and login/register user."""
+    """Handle OAuth callback — supports a two-step flow for multi-tenant selection.
+
+    Step 1 (code provided): exchange code with provider, detect multiple tenants,
+    cache user_info in Redis, return MultiTenantResponse with opaque pending_token.
+
+    Step 2 (pending_token + tenant_id provided): retrieve cached user_info from Redis,
+    call find_or_create_user with the chosen tenant_id, return TokenResponse.
+    """
+    import uuid as _uuid
+    from app.models.tenant import Tenant
     from app.services.auth_registry import auth_provider_registry
 
-    # Get provider
+    # ── Step 2: User has selected a tenant ───────────────────────────────────
+    if data.pending_token and data.tenant_id:
+        pending = await _get_oauth_pending(data.pending_token)
+        if not pending:
+            raise HTTPException(
+                status_code=400,
+                detail="OAuth session expired or invalid. Please sign in again.",
+            )
+
+        auth_provider = await auth_provider_registry.get_provider(db, pending["provider_type"])
+        if not auth_provider:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Provider '{pending['provider_type']}' not supported",
+            )
+
+        from app.services.auth_provider import ExternalUserInfo
+        user_info = ExternalUserInfo(**pending["user_info"])
+
+        user, _ = await auth_provider.find_or_create_user(db, user_info, tenant_id=data.tenant_id)
+        if not user:
+            raise HTTPException(status_code=500, detail="Failed to create user")
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="Account is disabled")
+
+        jwt_token = create_access_token(str(user.id), user.role)
+        return TokenResponse(
+            access_token=jwt_token,
+            user=UserOut.model_validate(user),
+            needs_company_setup=user.tenant_id is None,
+        )
+
+    # ── Step 1: Exchange code, detect multi-tenant ────────────────────────────
+    if not data.code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
+
     auth_provider = await auth_provider_registry.get_provider(db, provider)
     if not auth_provider:
         raise HTTPException(status_code=404, detail=f"Provider '{provider}' not supported")
 
     try:
-        # Exchange code for token
         token_data = await auth_provider.exchange_code_for_token(data.code, data.redirect_uri)
         access_token = token_data.get("access_token")
         if not access_token:
             raise HTTPException(status_code=400, detail="Failed to get access token from provider")
 
-        # Get user info
         user_info = await auth_provider.get_user_info(access_token)
-
-        # Find or create user
         user, is_new = await auth_provider.find_or_create_user(db, user_info)
 
         if not user:
             raise HTTPException(status_code=500, detail="Failed to create user")
-
         if not user.is_active:
             raise HTTPException(status_code=403, detail="Account is disabled")
 
@@ -1100,9 +1060,56 @@ async def oauth_callback(
         logger.error(f"OAuth callback failed for {provider}: {e}")
         raise HTTPException(status_code=500, detail="OAuth authentication failed")
 
-    # Generate JWT token
-    jwt_token = create_access_token(str(user.id), user.role)
+    # Check if this identity has multiple tenant memberships
+    if user.identity_id:
+        all_users_result = await db.execute(
+            select(User).where(User.identity_id == user.identity_id)
+        )
+        all_users = list(all_users_result.scalars().all())
+        tenant_users = [u for u in all_users if u.tenant_id is not None]
 
+        if len(tenant_users) > 1:
+            # Cache the full user_info in Redis so Step 2 can reconstruct it
+            pending_token = _uuid.uuid4().hex
+            await _cache_oauth_pending(
+                pending_token,
+                provider,
+                {
+                    "provider_type": user_info.provider_type,
+                    "provider_union_id": user_info.provider_union_id,
+                    "provider_user_id": user_info.provider_user_id,
+                    "name": user_info.name,
+                    "email": user_info.email,
+                    "avatar_url": user_info.avatar_url,
+                    "mobile": user_info.mobile,
+                    "raw_data": user_info.raw_data,
+                },
+                token_data,
+            )
+
+            tenant_ids = [u.tenant_id for u in tenant_users]
+            tenants_result = await db.execute(select(Tenant).where(Tenant.id.in_(tenant_ids)))
+            tenants_map = {str(t.id): t for t in tenants_result.scalars().all()}
+
+            tenant_choices = [
+                TenantChoice(
+                    tenant_id=u.tenant_id,
+                    tenant_name=tenants_map[str(u.tenant_id)].name if str(u.tenant_id) in tenants_map else "Unknown",
+                    tenant_slug=tenants_map[str(u.tenant_id)].slug if str(u.tenant_id) in tenants_map else "",
+                    logo_url=tenants_map[str(u.tenant_id)].logo_url if str(u.tenant_id) in tenants_map else None,
+                )
+                for u in tenant_users
+            ]
+
+            return MultiTenantResponse(
+                requires_tenant_selection=True,
+                login_identifier=user_info.email or "",
+                tenants=tenant_choices,
+                pending_token=pending_token,
+            )
+
+    # Single tenant (or new user with no tenant yet) — issue token directly
+    jwt_token = create_access_token(str(user.id), user.role)
     return TokenResponse(
         access_token=jwt_token,
         user=UserOut.model_validate(user),
@@ -1204,7 +1211,7 @@ async def verify_email(data: VerifyEmailRequest, db: AsyncSession = Depends(get_
     identity_id = token_data.get("identity_id")
     if not identity_id:
         raise HTTPException(status_code=400, detail="Token does not contain identity information")
-
+    
     # 1. Update Identity
     identity_result = await db.execute(select(Identity).where(Identity.id == identity_id))
     identity = identity_result.scalar_one_or_none()
@@ -1213,13 +1220,16 @@ async def verify_email(data: VerifyEmailRequest, db: AsyncSession = Depends(get_
 
     identity.email_verified = True
     identity.is_active = True
-
+    
     # 2. Activate all linked User accounts
     # email_verified is a proxy to Identity, so only update physical is_active column
     from sqlalchemy import update
-
-    await db.execute(update(User).where(User.identity_id == identity.id).values(is_active=True))
-
+    await db.execute(
+        update(User)
+        .where(User.identity_id == identity.id)
+        .values(is_active=True)
+    )
+    
     await db.flush()
     await db.commit()
 
@@ -1228,7 +1238,10 @@ async def verify_email(data: VerifyEmailRequest, db: AsyncSession = Depends(get_
 
     # 3. Find a representative user for the token (for immediate login)
     user_result = await db.execute(
-        select(User).where(User.identity_id == identity.id).order_by(User.created_at.desc()).limit(1)
+        select(User)
+        .where(User.identity_id == identity.id)
+        .order_by(User.created_at.desc())
+        .limit(1)
     )
     user = user_result.scalar_one_or_none()
 
@@ -1280,7 +1293,7 @@ async def resend_verification(
         select(User).where(User.identity_id == identity.id).order_by(User.created_at.desc()).limit(1)
     )
     user = u_result.scalar_one_or_none()
-
+    
     if user:
         await _send_verification_email_task(user, background_tasks, settings, db)
 

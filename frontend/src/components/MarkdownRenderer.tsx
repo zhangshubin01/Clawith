@@ -76,7 +76,7 @@ function triggerImageDownload(url: string, alt: string) {
 function renderInline(text: string): string {
     const tokens: string[] = [];
     const stash = (html: string) => {
-        const key = `@@MDTOKEN${tokens.length}@@`;
+        const key = `@@CLAWITHMDTOKEN${tokens.length}@@`;
         tokens.push(html);
         return key;
     };
@@ -116,7 +116,7 @@ function renderInline(text: string): string {
 
     working = autolinkBareUrls(working);
     tokens.forEach((html, i) => {
-        working = working.replace(new RegExp(`@@MDTOKEN${i}@@`, 'g'), html);
+        working = working.replace(new RegExp(`@@CLAWITHMDTOKEN${i}@@`, 'g'), html);
     });
     return working;
 }

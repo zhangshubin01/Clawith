@@ -105,7 +105,7 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "run_in_terminal",
-            "description": "在 IDE 终端中执行命令。注意：读取文件内容请使用 read_file（快 20 倍），搜索代码请使用 grep_code/search_codebase（支持缓存）。仅在编译、git 操作、包管理等需要 shell 环境时才使用终端命令。",
+            "description": "在 IDE 终端中执行命令。注意：读取文件请用 read_file；搜索/清理类任务优先 grep_code（IDE 索引）而非终端 grep/find。仅在编译、git、包管理等需要 shell 环境时使用本工具。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -662,11 +662,34 @@ def install_lsp4j_tool_hooks() -> None:
             # 等同于无门槛运行。此处与本地路径共享同一道闸门。
             _autonomy_block = await agent_tools.check_tool_autonomy(tool_name, args, agent_id, user_id)
             if _autonomy_block is not None:
-                logger.warning(
-                    "[LSP4J-TOOL] autonomy 拦截: tool={} agent={} reason={}",
-                    tool_name, str(agent_id)[:8], _autonomy_block[:80],
+                # 删除工具 L3：由 IDE FileDeleteToolApprovalPanel 展示按钮，不能把审批文案当工具终态返回
+                _is_l3_pending = (
+                    "requires approval" in _autonomy_block or "Approval ID" in _autonomy_block
                 )
-                return _autonomy_block
+                if tool_name in ("delete_file_by_path", "delete_file") and _is_l3_pending:
+                    # #region agent log
+                    from app.plugins.clawith_lsp4j.jsonrpc_router import _agent_debug_log
+
+                    _agent_debug_log(
+                        "delete-no-btn",
+                        "H-F",
+                        "tool_hooks.py:_lsp4j_aware_execute_tool",
+                        "delete_l3_bypass_hook_early_return",
+                        {"tool": tool_name, "preview": _autonomy_block[:80]},
+                    )
+                    # #endregion
+                    logger.info(
+                        "[LSP4J-TOOL] 删除 L3 改走 IDE 审批 UI，跳过 hook 早退: tool={}",
+                        tool_name,
+                    )
+                else:
+                    logger.warning(
+                        "[LSP4J-TOOL] autonomy 拦截: tool={} agent={} reason={}",
+                        tool_name,
+                        str(agent_id)[:8],
+                        _autonomy_block[:80],
+                    )
+                    return _autonomy_block
 
             # ★ 参数校验：read_file 的 file_path 不能为空
             if tool_name == "read_file":

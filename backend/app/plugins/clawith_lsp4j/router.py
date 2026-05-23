@@ -175,6 +175,8 @@ async def lsp4j_websocket_endpoint(
         return
 
     agent_obj, model_obj = resolved
+    # F01 修复：注册 LSP4J 连接到 ConnectionManager，防止 WebUI 空闲被清理
+    manager.register_lsp4j_connection(str(agent_obj.id))
 
     logger.info(
         "[LSP4J-LIFE] WS connected agent_id={} agent_name={} user_id={} model_id={}",
@@ -331,6 +333,8 @@ async def lsp4j_websocket_endpoint(
                     t.cancel()
             logger.info("[LSP4J-TASK-CLEANUP] Cancelled {} pending tasks on disconnect", pending_count)
 
+        # F01 修复：注销 LSP4J 连接
+        manager.unregister_lsp4j_connection(str(agent_obj.id))
         # 5. 清理（按顺序）
         # 5.1 重置 ContextVar
         current_lsp4j_ws.set(None)

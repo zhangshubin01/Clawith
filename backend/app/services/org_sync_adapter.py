@@ -9,7 +9,7 @@ import json
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from sqlalchemy import func, or_, select, update
 
@@ -48,6 +48,10 @@ from app.core.security import decrypt_data
 from app.services.auth_provider import GoogleWorkspaceAuthProvider
 from app.services.google_workspace_oauth import GOOGLE_HTTP_PROXY
 import jwt
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def build_department_path_map(departments: list[OrgDepartment]) -> dict[uuid.UUID, str]:
@@ -246,7 +250,7 @@ class BaseOrgSyncAdapter(ABC):
         member_count = 0
         user_count = 0
         profile_count = 0
-        sync_start = datetime.now()
+        sync_start = _utcnow()
         partial_failure = False
 
         # Ensure provider exists
@@ -298,7 +302,7 @@ class BaseOrgSyncAdapter(ABC):
             # Update provider metadata if possible
             if self.provider:
                 config = (self.provider.config or {}).copy()
-                config["last_synced_at"] = datetime.now().isoformat()
+                config["last_synced_at"] = _utcnow().isoformat()
                 self.provider.config = config
                 await db.flush()
                 
@@ -328,7 +332,7 @@ class BaseOrgSyncAdapter(ABC):
             "profiles_synced": profile_count,
             "errors": errors,
             "provider": self.provider_type,
-            "synced_at": datetime.now().isoformat()
+            "synced_at": _utcnow().isoformat()
         }
 
     async def _reconcile(self, db: AsyncSession, provider_id: uuid.UUID, sync_start: datetime):
@@ -340,7 +344,8 @@ class BaseOrgSyncAdapter(ABC):
             .where(OrgMember.provider_id == provider_id)
             .where(OrgMember.synced_at < sync_start)
             .where(OrgMember.status != "deleted")
-            .values(status="deleted", synced_at=datetime.now())
+            .values(status="deleted", synced_at=_utcnow())
+            .execution_options(synchronize_session=False)
         )
         
         # 2. Departments reconciled
@@ -349,7 +354,8 @@ class BaseOrgSyncAdapter(ABC):
             .where(OrgDepartment.provider_id == provider_id)
             .where(OrgDepartment.synced_at < sync_start)
             .where(OrgDepartment.status != "deleted")
-            .values(status="deleted", synced_at=datetime.now())
+            .values(status="deleted", synced_at=_utcnow())
+            .execution_options(synchronize_session=False)
         )
 
     async def _update_member_counts(self, db: AsyncSession, provider_id: uuid.UUID):
@@ -464,7 +470,7 @@ class BaseOrgSyncAdapter(ABC):
         )
         existing = result.scalars().first()
 
-        now = datetime.now()
+        now = _utcnow()
         # Path is rebuilt from the internal department tree after sync.
         path = dept.name
 
@@ -576,7 +582,7 @@ class BaseOrgSyncAdapter(ABC):
 
         existing_member = await self._find_existing_member(db, provider, user)
 
-        now = datetime.now()
+        now = _utcnow()
 
         # Note: Platform user creation is disabled - just sync OrgMember
         # Users will be linked to platform users manually or via SSO login

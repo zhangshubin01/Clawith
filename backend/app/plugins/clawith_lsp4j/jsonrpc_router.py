@@ -175,12 +175,23 @@ _UI_HEAVY_SEARCH_TOOLS = frozenset(
     }
 )
 
+# IDE 已有独立 ToolPanel 卡片时，不再在 chat/answer 插入意图行，避免与卡片标题重复（S12 去重）
+_TOOLS_SKIP_INTENT_LINE = frozenset(
+    {
+        "run_in_terminal",
+        "read_file",
+        "delete_file_by_path",
+        "delete_file",
+    }
+) | _UI_HEAVY_SEARCH_TOOLS
+
 # 并发调用场景下需延迟发 PENDING 的工具集合。
 # LLM 可能同时发起多个此类工具调用，on_tool_call 会立即发所有 PENDING，
 # 但 invoke_tool_on_ide 串行执行，后续调用要等前面完成后才 invoke。
 # 这导致 PENDING 早于 toolInvoke 到达 IDE，消费者等不到 panel 而超时阻塞。
 # 解决方案：跳过 on_tool_call 中的 PENDING，改在 invoke_tool_on_ide 中发。
-_TOOLS_DELAY_PENDING_TO_INVOKE = frozenset({"read_file"})
+# delete_* 与 read_file 相同：禁止 on_tool_call 过早 PENDING，须在 invoke 内注册审批 waiter 后再发（S18）
+_TOOLS_DELAY_PENDING_TO_INVOKE = frozenset({"read_file", "delete_file_by_path", "delete_file"})
 
 # 汇总检索卡 debounce：边搜边更新时合并短时间内的多次推送，减轻 IDE EDT 压力
 _SEARCH_SUMMARY_DEBOUNCE_SEC = 0.25
@@ -369,6 +380,7 @@ _TERMINAL_READONLY_PREFIXES = (
     "head ",
     "tail ",
     "grep ",
+    "rg ",
     "find ",
     "wc ",
     "pwd",
@@ -534,6 +546,23 @@ def _rg_search(project_root: str, pattern: str, max_results: int = 50) -> list[d
         )
         # #endregion
         return None
+
+
+def _tool_intent_line_for_ide_card(tool_name: str, args: dict) -> str:
+    """工具 INIT 前的一行轻量说明，改善 Qoder 式交错展示（S12）。
+
+    已有 ToolPanel 的工具（终端/读取/检索/删除审批）由卡片承载语义，此处返回空串。
+    """
+    if tool_name in _TOOLS_SKIP_INTENT_LINE:
+        return ""
+    fp = str(args.get("file_path") or args.get("filePath") or args.get("path") or "").strip()
+    if tool_name in ("replace_text_by_path", "edit_file", "search_replace", "apply_patch"):
+        return f"准备修改 `{fp}`…" if fp else "准备修改文件…"
+    if tool_name in ("create_file_with_text", "create_file", "write_file"):
+        return f"准备创建 `{fp}`…" if fp else "准备创建文件…"
+    if tool_name == "get_problems":
+        return "正在检查问题与诊断…"
+    return ""
 
 
 def _get_code_map_for_session(project_path: str) -> str:
@@ -1352,6 +1381,10 @@ class JSONRPCRouter:
         # pending tool Futures: toolCallId → asyncio.Future
         # 从 ContextVar 读取（由 router.py 的 WebSocket 端点设置）
         self._pending_tools: dict[str, asyncio.Future] = {}
+        # IDE 内删除审批：toolCallId → Future[bool]，由 tool/call/approve 唤醒
+        self._ide_approval_waiters: dict[str, asyncio.Future] = {}
+        # 用户点击早于 waiter 注册时的早到审批（S18）
+        self._early_ide_approvals: dict[str, bool] = {}
         # pending tool 元数据：toolCallId → {request_id, tool_name, created_at}
         # 用于 tool/invokeResult 缺少 toolCallId 时的兜底匹配。
         self._pending_tool_meta: dict[str, dict[str, Any]] = {}
@@ -2098,6 +2131,16 @@ class JSONRPCRouter:
                     logger.info("[CODE-MAP] injected: project={} map_len={}", self._project_path, len(_code_map))
                 else:
                     logger.warning("[CODE-MAP] empty: project={}", self._project_path)
+                    message_history.insert(
+                        0,
+                        {
+                            "role": "system",
+                            "content": (
+                                "[代码索引] 项目 CODE-MAP 尚未就绪。清理/批量删除前须先用 read_file 或 "
+                                "grep_code 确认文件内容；勿仅凭路径猜测批量删除。"
+                            ),
+                        },
+                    )
                     # #region agent log
                     _agent_debug_log(
                         "session_quality_v1",
@@ -2130,6 +2173,7 @@ class JSONRPCRouter:
                 nonlocal _thinking_started, _thinking_start_time, _first_answer_chunk_logged
                 if not _first_answer_chunk_logged and text:
                     _first_answer_chunk_logged = True
+                    _first_elapsed_ms = int((time.monotonic() - _ask_start) * 1000)
                     # #region agent log
                     _agent_debug_log(
                         "session_quality_v1",
@@ -2138,11 +2182,19 @@ class JSONRPCRouter:
                         "first_answer_chunk",
                         {
                             "requestId": request_id,
-                            "elapsedMs": int((time.monotonic() - _ask_start) * 1000),
+                            "elapsedMs": _first_elapsed_ms,
                             "chunkLen": len(text),
                         },
                     )
                     # #endregion
+                    if _first_elapsed_ms > 30000:
+                        await self._send_process_step_callback(
+                            session_id,
+                            request_id,
+                            step="first_answer_slow",
+                            description="正在检索代码库并生成回复，请稍候…",
+                            status="doing",
+                        )
                 # 思考结束标记：收到首个正文 chunk 即表示思考阶段结束
                 if _thinking_started:
                     _thinking_started = False
@@ -2348,6 +2400,40 @@ class JSONRPCRouter:
                             else:
                                 tool_markdown = f"```toolCall::{display_name}::{tool_call_id}::INIT\n```"
 
+                        # S12：先发已缓冲正文，再发工具 INIT，避免图1式「先工具后大段说明」
+                        _had_model_prose = buffer.pending_length > 0
+                        await buffer.flush(force=True)
+                        if tool_markdown and _should_create_ide_card:
+                            _intent = ""
+                            if not _had_model_prose:
+                                _intent = _tool_intent_line_for_ide_card(
+                                    tool_name, raw_args if is_lsp4j_tool else {}
+                                )
+                            if _intent:
+                                await self._send_chat_answer(
+                                    session_id,
+                                    _intent + "\n\n",
+                                    request_id,
+                                    overwrite=False,
+                                )
+                                logger.info(
+                                    "[LSP4J-UI] intent before tool INIT: tool={} callId={}",
+                                    tool_name,
+                                    tool_call_id[:8] if tool_call_id else "",
+                                )
+                            else:
+                                logger.debug(
+                                    "[LSP4J-UI] skip intent line: tool={} had_prose={} callId={}",
+                                    tool_name,
+                                    _had_model_prose,
+                                    tool_call_id[:8] if tool_call_id else "",
+                                )
+                            logger.info(
+                                "[LSP4J-UI] buffer flushed before tool INIT: tool={} callId={}",
+                                tool_name,
+                                tool_call_id[:8] if tool_call_id else "",
+                            )
+
                         # ★ 通过聊天流发送 INIT markdown，MarkdownStreamPanel 解析后创建 ToolPanel 卡片
                         # 注意：tool/call/sync 中的 markdown 字段仅作为辅助数据，
                         # ToolPanel 的创建依赖聊天流中的 toolCall:: markdown 块。
@@ -2377,6 +2463,19 @@ class JSONRPCRouter:
                             # 若在此处发 PENDING，消费者会等不到 panel 而超时（panel 在 EDT 处理 INIT markdown 后注册）。
                             # 故跳过此处，改在 invoke_tool_on_ide 中（toolInvoke 发出前）发 PENDING，
                             # 确保 PENDING 到达时 panel 已注册，消费者可立即处理。
+                            # #region agent log
+                            if tool_name in ("delete_file_by_path", "delete_file"):
+                                _agent_debug_log(
+                                    "delete-no-btn",
+                                    "H-C",
+                                    "jsonrpc_router.py:on_tool_call",
+                                    "delete_on_tool_call_skip_pending",
+                                    {
+                                        "tool": tool_name,
+                                        "callId": tool_call_id[:8] if tool_call_id else "",
+                                    },
+                                )
+                            # #endregion
                             logger.info(
                                 "[LSP4J-TRACE] 跳过 on_tool_call PENDING（延迟到 invoke 时发）: req={} call={} tool={}",
                                 request_id[:8],
@@ -2527,6 +2626,10 @@ class JSONRPCRouter:
                 "\n同一轮禁止重复调用相同工具+相同参数；已有结果优先复用。"
                 "\n优先使用 read_file / replace_text_by_path / create_file_with_text / delete_file_by_path / list_dir / search_file / run_in_terminal。"
                 "\n不要先输出大段'开始重构/步骤说明'代码块再改文件，优先直接执行工具并回传结果。"
+                "\n[展示顺序] 每次调用工具前用 1-2 句中文说明当前意图；禁止先连续执行大量工具再在末尾一次性总结。"
+                "\n勿在正文重复与工具卡片同义的句式（如「正在终端执行」「正在查看 xxx 文件」「正在检索代码库」）；"
+                "终端/读文件/检索/删除等由 IDE 卡片展示，正文只写更高层意图（如「核对 colors 与 layout 是否一致」）。"
+                "\n清理/审计类任务按「说明 → 工具组 → 说明 → 工具组」分步推进。"
                 "\n目标展示应为工具卡片链路（toolCall + tool/call/sync + workingSpaceFile/sync），而不是纯 markdown 代码块。"
                 "\n仅当工具调用不可用或明确失败时，才允许输出 CODE_EDIT_BLOCK 作为兜底。"
                 "\n[路径规则] 修改代码时必须使用绝对路径或项目相对路径（如 app/src/main/Main.kt），禁止使用 workspace/ 前缀。"
@@ -2896,19 +2999,54 @@ class JSONRPCRouter:
                 cancelled,
             )
             if _sync_plan.text is not None:
-                await self._send_chat_answer(
-                    session_id,
-                    _sync_plan.text,
-                    request_id,
-                    overwrite=_sync_plan.overwrite,
-                )
-                logger.info(
-                    "[LSP4J-UI] answer_sync_sent requestId={} branch={} send_len={} overwrite={}",
-                    request_id,
-                    _sync_plan.branch,
-                    len(_sync_plan.text),
-                    _sync_plan.overwrite,
-                )
+                _sync_text = _sync_plan.text
+                _sync_overwrite = _sync_plan.overwrite
+                # finish_only 时分段发送，避免单条超长 overwrite 砸在工具卡底部
+                if _sync_plan.branch == "finish_only" and len(_sync_text) > 480:
+                    _chunk_size = 400
+                    for _off in range(0, len(_sync_text), _chunk_size):
+                        await self._send_chat_answer(
+                            session_id,
+                            _sync_text[_off : _off + _chunk_size],
+                            request_id,
+                            overwrite=False,
+                        )
+                    logger.info(
+                        "[LSP4J-UI] answer_sync_sent requestId={} branch={} send_len={} chunks={}",
+                        request_id,
+                        _sync_plan.branch,
+                        len(_sync_text),
+                        (len(_sync_text) + _chunk_size - 1) // _chunk_size,
+                    )
+                elif _sync_plan.branch == "overwrite_mismatch" and len(_sync_text) > len(_streamed_plain):
+                    _tail = _sync_text[len(_streamed_plain) :]
+                    if _tail:
+                        await self._send_chat_answer(
+                            session_id,
+                            _tail,
+                            request_id,
+                            overwrite=False,
+                        )
+                    logger.info(
+                        "[LSP4J-UI] answer_sync_sent requestId={} branch={} send_len={} overwrite=false",
+                        request_id,
+                        _sync_plan.branch,
+                        len(_tail) if _tail else 0,
+                    )
+                else:
+                    await self._send_chat_answer(
+                        session_id,
+                        _sync_text,
+                        request_id,
+                        overwrite=_sync_overwrite,
+                    )
+                    logger.info(
+                        "[LSP4J-UI] answer_sync_sent requestId={} branch={} send_len={} overwrite={}",
+                        request_id,
+                        _sync_plan.branch,
+                        len(_sync_text),
+                        _sync_overwrite,
+                    )
                 if _sync_plan.branch == "overwrite_mismatch":
                     # #112 修复：仅长度差异超过 20% 时才 WARNING，小差异降级为 INFO
                     _reply_len = len(reply or "")
@@ -3215,6 +3353,26 @@ class JSONRPCRouter:
                 tool_call_id[:8] if tool_call_id else "",
                 params.get("name"),
             )
+
+        # 删除文件等 IDE 审批闸门：唤醒 invoke_tool_on_ide 中等待的协程
+        if tool_call_id:
+            _tc_key = str(tool_call_id)
+            _approval_waiter = self._ide_approval_waiters.get(_tc_key)
+            if _approval_waiter is not None and not _approval_waiter.done():
+                _approval_waiter.set_result(bool(approved))
+                logger.info(
+                    "[LSP4J-TOOL] IDE 删除审批已唤醒: toolCallId={} approved={}",
+                    tool_call_id[:8],
+                    approved,
+                )
+            else:
+                # waiter 尚未注册（on_tool_call 曾过早 PENDING 或用户极快点击）
+                self._early_ide_approvals[_tc_key] = bool(approved)
+                logger.info(
+                    "[LSP4J-TOOL] IDE 删除审批早到缓冲: toolCallId={} approved={}",
+                    tool_call_id[:8],
+                    approved,
+                )
 
         await self._send_response(msg_id, {})
 
@@ -4007,19 +4165,67 @@ class JSONRPCRouter:
         # 计算 DiffInfo 并存储（大文件 difflib 可能较慢，避免阻塞事件循环）
         await self._ws_file_service.set_content(file_path, last_stable, full_content)
 
-        # 设置状态为 APPLIED
-        await self._ws_file_service.update_status(file_path, "APPLIED")
+        # 删除已在 ToolPanel 审批后落盘，工作区标 DELETED 终态，避免仍显示「已应用/保留全部」
+        _final_status = "DELETED" if mode == "DELETE" else "APPLIED"
+        await self._ws_file_service.update_status(file_path, _final_status)
+        # #region agent log
+        _agent_debug_log(
+            "delete-ws-state",
+            "H-WS1",
+            "jsonrpc_router.py:_handle_file_edit_finished",
+            "workspace_file_final_status",
+            {
+                "tool": tool_name,
+                "mode": mode,
+                "finalStatus": _final_status,
+                "path": file_path[-80:] if file_path else "",
+            },
+        )
+        # #endregion
 
         logger.info(
-            "[WS-FILE] 文件编辑完成: tool={} path={} mode={} wsId={} +{} -{}",
+            "[WS-FILE] 文件编辑完成: tool={} path={} mode={} status={} wsId={} +{} -{}",
             tool_name,
             file_path,
             mode,
+            _final_status,
             ws_file.id[:8],
             ws_file.diff_info.add,
             ws_file.diff_info.delete,
         )
         return ws_file
+
+    def _register_ide_approval_waiter(self, tool_call_id: str) -> asyncio.Future:
+        """注册 IDE 审批 Future；若已有早到 approve 则立即完成。"""
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future = loop.create_future()
+        tc_key = str(tool_call_id)
+        self._ide_approval_waiters[tc_key] = waiter
+        early = self._early_ide_approvals.pop(tc_key, None)
+        if early is not None and not waiter.done():
+            waiter.set_result(bool(early))
+            logger.info(
+                "[LSP4J-TOOL] IDE 删除审批消费早到决策: toolCallId={} approved={}",
+                tool_call_id[:8],
+                early,
+            )
+        return waiter
+
+    async def _wait_ide_user_approval(self, tool_call_id: str, timeout: float) -> bool:
+        """等待插件 tool/call/approve，用于 delete_file_by_path 等 IDE 内审批。"""
+        waiter = self._register_ide_approval_waiter(tool_call_id)
+        tc_key = str(tool_call_id)
+        try:
+            return bool(await asyncio.wait_for(waiter, timeout=timeout))
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[LSP4J-TOOL] IDE 删除审批超时: toolCallId={} timeout={}s",
+                tool_call_id[:8],
+                timeout,
+            )
+            return False
+        finally:
+            self._ide_approval_waiters.pop(tc_key, None)
 
     async def invoke_tool_on_ide(self, tool_name: str, arguments: dict, timeout: float = 120.0) -> str:
         """通过 LSP4J 协议调用 IDE 端工具（异步模式）。
@@ -4247,6 +4453,8 @@ class JSONRPCRouter:
                 _cmd = str(params["command"]).strip()
                 if any(_cmd.startswith(kw) for kw in _TERMINAL_READONLY_PREFIXES):
                     params["is_readonly"] = True
+                    params["is_background"] = False
+                    params["isBackground"] = False
         elif tool_name == "get_terminal_output":
             _tid = params.get("terminalId") or params.get("terminal_id")
             if not _tid:
@@ -4289,12 +4497,23 @@ class JSONRPCRouter:
             if fp and "file_path" not in sync_parameters:
                 sync_parameters["file_path"] = fp
         if tool_name == "run_in_terminal":
+            _cmd = str(sync_parameters.get("command") or arguments.get("command") or "").strip()
+            if _cmd and any(_cmd.startswith(kw) for kw in _TERMINAL_READONLY_PREFIXES):
+                sync_parameters["is_background"] = False
+                sync_parameters["isBackground"] = False
+                arguments["is_background"] = False
+                arguments["isBackground"] = False
+                sync_parameters["is_readonly"] = True
             bg = sync_parameters.get("is_background")
             if bg is None:
                 bg = sync_parameters.get("isBackground")
             if bg is None:
                 bg = False
             sync_parameters["is_background"] = bg
+            if "isBackground" not in sync_parameters:
+                sync_parameters["isBackground"] = bg
+            arguments["is_background"] = bg
+            arguments["isBackground"] = bg
             # 插件 RunInTerminalToolContextProvider 从 parameters 读取 run_mode
             # 缺失时日志 warn "run_mode is null"，补齐为 autoRun（允许自动执行）
             if "run_mode" not in sync_parameters:
@@ -4307,6 +4526,110 @@ class JSONRPCRouter:
                 sync_parameters["has_risk"] = True
             if "has_risk" not in arguments:
                 arguments["has_risk"] = True
+
+        # 删除文件：L3 autonomy 需在 IDE 内展示同意/拒绝，不能仅把「等待审批」丢给 LLM
+        if tool_name in ("delete_file_by_path", "delete_file"):
+            from app.services.agent_tools import check_tool_autonomy
+
+            _autonomy_block = await check_tool_autonomy(
+                tool_name if tool_name != "delete_file" else "delete_file_by_path",
+                arguments,
+                self._agent_id,
+                self._user_id,
+            )
+            # #region agent log
+            _agent_debug_log(
+                "delete-no-btn",
+                "H-A",
+                "jsonrpc_router.py:invoke_tool_on_ide",
+                "delete_autonomy_checked",
+                {
+                    "tool": tool_name,
+                    "callId": tool_call_id[:8] if tool_call_id else "",
+                    "autonomyBlocked": _autonomy_block is not None,
+                    "autonomyPreview": (_autonomy_block or "")[:80],
+                    "queueMatched": queue_matched,
+                },
+            )
+            # #endregion
+            # 硬拒绝（非 L3 待审批）直接返回；其余一律在 IDE 展示删除审批按钮（含 L1/L2 自动策略）
+            _is_l3_pending = bool(
+                _autonomy_block
+                and (
+                    "requires approval" in _autonomy_block
+                    or "Approval ID" in _autonomy_block
+                )
+            )
+            _hard_deny = _autonomy_block is not None and not _is_l3_pending
+            if _hard_deny:
+                if queue_matched:
+                    await self._send_tool_call_sync(
+                        self._session_id,
+                        request_id,
+                        tool_call_id,
+                        "CANCELLED",
+                        tool_name=original_name,
+                        parameters=sync_parameters,
+                    )
+                return _autonomy_block
+
+            # S18：先注册 waiter（可消费早到 approve），再发 PENDING，避免点击空转
+            _approval_waiter = self._register_ide_approval_waiter(tool_call_id)
+            await self._send_tool_call_sync(
+                self._session_id,
+                request_id,
+                tool_call_id,
+                "PENDING",
+                tool_name=original_name,
+                parameters=sync_parameters,
+            )
+            # #region agent log
+            _agent_debug_log(
+                "delete-no-btn",
+                "H-B",
+                "jsonrpc_router.py:invoke_tool_on_ide",
+                "delete_pending_sync_sent",
+                {
+                    "tool": tool_name,
+                    "callId": tool_call_id[:8] if tool_call_id else "",
+                    "requestId": request_id[:8] if request_id else "",
+                },
+            )
+            # #endregion
+            _tc_key = str(tool_call_id)
+            _approval_timed_out = False
+            try:
+                _approved = bool(
+                    await asyncio.wait_for(_approval_waiter, timeout=min(timeout, 180.0))
+                )
+            except asyncio.TimeoutError:
+                _approval_timed_out = True
+                logger.warning(
+                    "[LSP4J-TOOL] IDE 删除审批超时: toolCallId={} timeout={}s",
+                    tool_call_id[:8],
+                    min(timeout, 180.0),
+                )
+                _approved = False
+            finally:
+                self._ide_approval_waiters.pop(_tc_key, None)
+            if not _approved:
+                if queue_matched:
+                    await self._send_tool_call_sync(
+                        self._session_id,
+                        request_id,
+                        tool_call_id,
+                        "CANCELLED",
+                        tool_name=original_name,
+                        parameters=sync_parameters,
+                    )
+                if _approval_timed_out:
+                    return "[审批超时] 删除操作已取消，请在插件中重新确认"
+                return "[用户拒绝] 删除操作已取消"
+            logger.info(
+                "[LSP4J-TOOL] IDE 删除审批通过，继续 invoke: callId={} tool={}",
+                tool_call_id[:8],
+                tool_name,
+            )
 
         if queue_matched:
             if tool_name in _UI_HEAVY_SEARCH_TOOLS:
@@ -4321,14 +4644,16 @@ class JSONRPCRouter:
                 # 此时 toolInvoke 即将发出，EDT 已有充足时间处理 INIT markdown 并注册 panel，
                 # 消费者可立即匹配，不再需要等待。
                 if tool_name in _TOOLS_DELAY_PENDING_TO_INVOKE:
-                    await self._send_tool_call_sync(
-                        self._session_id,
-                        request_id,
-                        tool_call_id,
-                        "PENDING",
-                        tool_name=original_name,
-                        parameters=sync_parameters,
-                    )
+                    # 删除已在 autonomy 闸门发过 PENDING，此处勿重复
+                    if tool_name not in ("delete_file_by_path", "delete_file"):
+                        await self._send_tool_call_sync(
+                            self._session_id,
+                            request_id,
+                            tool_call_id,
+                            "PENDING",
+                            tool_name=original_name,
+                            parameters=sync_parameters,
+                        )
                 await self._send_tool_call_sync(
                     self._session_id,
                     request_id,
