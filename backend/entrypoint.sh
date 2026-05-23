@@ -18,6 +18,11 @@ role_contains() {
 if [ "$(id -u)" = '0' ]; then
     echo "[entrypoint] Detected root user, fixing permissions..."
     chown -R clawith:clawith ${AGENT_DATA_DIR}
+    # Fix docker.sock permissions so the non-root app user can access Docker
+    if [ -S /var/run/docker.sock ]; then
+        chmod 666 /var/run/docker.sock || true
+        echo "[entrypoint] Fixed docker.sock permissions"
+    fi
 
     echo "[entrypoint] Dropping privileges to 'clawith' and re-executing..."
     exec gosu clawith /bin/bash "$0" "$@"

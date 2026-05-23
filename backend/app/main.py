@@ -228,6 +228,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"[startup] Builtin tools seed or cleanup failed: {e}")
 
+        # ── Install LSP4J tool hooks (wrap agent_tools for IDE plugin support) ──
+        try:
+            from app.plugins.clawith_lsp4j.tool_hooks import install_lsp4j_tool_hooks
+            install_lsp4j_tool_hooks()
+            logger.info("[startup] LSP4J tool hooks installed")
+        except Exception as e:
+            logger.warning(f"[startup] LSP4J tool hooks install failed: {e}")
+
         try:
             from app.services.tool_seeder import seed_atlassian_rovo_config, get_atlassian_api_key
             await seed_atlassian_rovo_config()
