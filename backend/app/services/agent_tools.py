@@ -2193,10 +2193,14 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             assigned_tool_ids = [uuid.UUID(tool_id) for tool_id in assignments]
 
             visible_clauses = [Tool.source == "builtin"]
+            # Admin tools: visible if they are global (tenant_id is NULL) or belong to the agent's tenant
+            admin_cond = (Tool.tenant_id == None)
             if agent_tenant_id:
-                visible_clauses.append((Tool.source == "admin") & (Tool.tenant_id == agent_tenant_id))
+                admin_cond = admin_cond | (Tool.tenant_id == agent_tenant_id)
+            visible_clauses.append((Tool.source == "admin") & admin_cond)
+            # Explicitly assigned tools: always visible regardless of source (builtin, admin, agent)
             if assigned_tool_ids:
-                visible_clauses.append((Tool.source == "agent") & Tool.id.in_(assigned_tool_ids))
+                visible_clauses.append(Tool.id.in_(assigned_tool_ids))
 
             # Get all tools visible within this agent's tenant boundary.
             all_tools_r = await db.execute(
@@ -2213,30 +2217,15 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             # Track tools included via is_default fallback (no AgentTool record)
             default_included_names = []
 
-            # Key insight: if the agent already has ANY AgentTool assignments,
-            # its tool panel has been configured by the user. In that case,
-            # only include tools with an explicit AgentTool(enabled=True)
-            # record.  Tools without any AgentTool record are NOT included
-            # (they will be provided by _always_tools if they are core tools).
-            #
-            # For agents with ZERO assignments (brand-new, never configured),
-            # fall back to is_default so they get a reasonable starting set.
-            agent_is_configured = len(assignments) > 0
-
             for t in all_tools:
                 tid = str(t.id)
                 at = assignments.get(tid)
 
-                if agent_is_configured:
-                    # Configured agent: require explicit AgentTool record
-                    if at is None:
-                        # No assignment → not included (unless _always_tools adds it)
-                        default_included_names.append(t.name)
-                        continue
-                    enabled = at.enabled
-                else:
-                    # Unconfigured agent: use is_default as fallback
-                    enabled = at.enabled if at else t.is_default
+                # If no explicit assignment, fallback to t.is_default
+                enabled = at.enabled if at is not None else t.is_default
+
+                if at is None and t.is_default:
+                    default_included_names.append(t.name)
 
                 if not enabled:
                     if at and not at.enabled:
@@ -2284,8 +2273,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 )
             if default_included_names:
                 logger.info(
-                    f"[Tools] agent={agent_id} skipped (no AgentTool record, "
-                    f"agent_configured={agent_is_configured}): "
+                    f"[Tools] agent={agent_id} included via default fallback (no AgentTool record): "
                     f"{sorted(default_included_names)}"
                 )
 
@@ -2317,6 +2305,11 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     f"{final_names}"
                 )
                 return result
+            # If DB loading fails, do not expose the full hardcoded tool catalog: that
+            # can leak disabled tools (for example search tools) into the LLM. Keep only
+            # the minimal always-available core/channel tools.
+            # (Note: we fall through to the except-clause fallback below if result is empty or exception is raised)
+            raise ValueError("No tools found for agent in DB")
     except Exception as e:
         logger.error(f"[Tools] DB load failed, using fallback: {e}")
 

@@ -10,8 +10,8 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision: str = '043e5f59eb8a'
-down_revision: Union[str, None] = 'add_user_tenant_onboarding'
+revision: str = 'add_title_to_agent_focus_items'
+down_revision: Union[str, None] = 'merge_heads_20260521'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
