@@ -11,7 +11,7 @@ from typing import Sequence, Union
 revision: str = "merge_heads_20260521"
 down_revision: Union[str, Sequence[str], None] = (
     "add_user_tenant_onboarding",
-    "perf_indexes_20260512",
+    "perf_indexes",
 )
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

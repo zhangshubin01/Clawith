@@ -318,6 +318,10 @@ AGENT_TOOLS = [
                         "type": "string",
                         "description": "Stable short identifier, snake_case preferred. If omitted, the system derives one from description.",
                     },
+                    "title": {
+                        "type": "string",
+                        "description": "Short title (Focus名称). Use this for a quick summary of the focus. Keep it brief. New focus items should have both a title and a description.",
+                    },
                     "description": {
                         "type": "string",
                         "description": "Clear human-readable description of what is being tracked.",
@@ -2248,10 +2252,14 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             assigned_tool_ids = [uuid.UUID(tool_id) for tool_id in assignments]
 
             visible_clauses = [Tool.source == "builtin"]
+            # Admin tools: visible if they are global (tenant_id is NULL) or belong to the agent's tenant
+            admin_cond = (Tool.tenant_id == None)
             if agent_tenant_id:
-                visible_clauses.append((Tool.source == "admin") & (Tool.tenant_id == agent_tenant_id))
+                admin_cond = admin_cond | (Tool.tenant_id == agent_tenant_id)
+            visible_clauses.append((Tool.source == "admin") & admin_cond)
+            # Explicitly assigned tools: always visible regardless of source (builtin, admin, agent)
             if assigned_tool_ids:
-                visible_clauses.append((Tool.source == "agent") & Tool.id.in_(assigned_tool_ids))
+                visible_clauses.append(Tool.id.in_(assigned_tool_ids))
 
             # Get all tools visible within this agent's tenant boundary.
             all_tools_r = await db.execute(
@@ -2271,8 +2279,12 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             for t in all_tools:
                 tid = str(t.id)
                 at = assignments.get(tid)
-                # 无 AgentTool 记录时回退 is_default；已配置工具面板的 Agent 仍带全套默认工具（回退 71fc2c3b）
-                enabled = at.enabled if at else t.is_default
+
+                # If no explicit assignment, fallback to t.is_default
+                enabled = at.enabled if at is not None else t.is_default
+
+                if at is None and t.is_default:
+                    default_included_names.append(t.name)
 
                 if not enabled:
                     # 用户显式 enabled=False 时记录，避免 _always_tools 循环再次注入
@@ -2324,8 +2336,8 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     f"{sorted(explicitly_disabled_names)}"
                 )
             if default_included_names:
-                logger.debug(
-                    f"[Tools] agent={agent_id} included via is_default (no AgentTool record): "
+                logger.info(
+                    f"[Tools] agent={agent_id} included via default fallback (no AgentTool record): "
                     f"{sorted(default_included_names)}"
                 )
 
@@ -2364,6 +2376,11 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     f"{final_names}"
                 )
                 return result
+            # If DB loading fails, do not expose the full hardcoded tool catalog: that
+            # can leak disabled tools (for example search tools) into the LLM. Keep only
+            # the minimal always-available core/channel tools.
+            # (Note: we fall through to the except-clause fallback below if result is empty or exception is raised)
+            raise ValueError("No tools found for agent in DB")
     except Exception as e:
         logger.error(f"[Tools] DB load failed, using fallback: {e}")
 
@@ -3061,7 +3078,10 @@ async def execute_tool(
                 for item in items:
                     label = "completed" if item["status"] == "completed" else "in_progress"
                     kind = f", {item['kind']}" if item.get("kind") == "system" else ""
-                    lines.append(f"- {item['key']} [{label}{kind}]: {item['description']}")
+                    if item.get("title"):
+                        lines.append(f"- {item['title']} ({item['key']}) [{label}{kind}]: {item['description']}")
+                    else:
+                        lines.append(f"- {item['key']} [{label}{kind}]: {item['description']}")
                 result = "\n".join(lines)
         elif tool_name == "upsert_focus_item":
             description = (arguments.get("description") or "").strip()
@@ -3070,13 +3090,14 @@ async def execute_tool(
             item = await upsert_focus_item(
                 agent_id,
                 key=arguments.get("key"),
+                title=arguments.get("title"),
                 description=description,
                 status="in_progress",
                 kind=arguments.get("kind") or "normal",
                 source=arguments.get("source") or "user",
                 metadata={"tool": "upsert_focus_item"},
             )
-            result = f"✅ Focus item saved: {item['key']} — {item['description']}"
+            result = f"✅ Focus item saved: {item['key']} (title: {item['title']}) — {item['description']}" if item.get("title") else f"✅ Focus item saved: {item['key']} — {item['description']}"
         elif tool_name == "complete_focus_item":
             key = (arguments.get("key") or "").strip()
             if not key:

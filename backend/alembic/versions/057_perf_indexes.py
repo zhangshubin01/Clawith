@@ -8,7 +8,7 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision = 'perf_indexes_20260512'
+revision = 'perf_indexes'
 down_revision = 'add_agent_focus_items'
 branch_labels = None
 depends_on = None

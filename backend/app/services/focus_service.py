@@ -191,6 +191,7 @@ def _serialize_focus_item(item: AgentFocusItemModel) -> dict:
         "id": str(item.id),
         "agent_id": str(item.agent_id),
         "key": item.key,
+        "title": item.title,
         "description": item.description or item.key,
         "status": item.status,
         "kind": item.kind,
@@ -285,6 +286,7 @@ async def upsert_focus_item(
     agent_id: uuid.UUID,
     *,
     key: str | None,
+    title: str | None = None,
     description: str,
     status: str = "in_progress",
     kind: str = "normal",
@@ -304,15 +306,16 @@ async def upsert_focus_item(
         kind = "normal"
 
     if db is not None:
-        return await _upsert_focus_item_impl(db, agent_id, item_key, desc, status, kind, source, metadata, should_commit=False)
+        return await _upsert_focus_item_impl(db, agent_id, item_key, title, desc, status, kind, source, metadata, should_commit=False)
     async with async_session() as new_db:
-        return await _upsert_focus_item_impl(new_db, agent_id, item_key, desc, status, kind, source, metadata, should_commit=True)
+        return await _upsert_focus_item_impl(new_db, agent_id, item_key, title, desc, status, kind, source, metadata, should_commit=True)
 
 
 async def _upsert_focus_item_impl(
     db,
     agent_id: uuid.UUID,
     item_key: str,
+    title: str | None,
     desc: str,
     status: str,
     kind: str,
@@ -328,6 +331,8 @@ async def _upsert_focus_item_impl(
     )
     item = result.scalar_one_or_none()
     if item:
+        if title is not None:
+            item.title = title
         item.description = desc or item.description or item_key
         item.status = status
         item.kind = kind
@@ -342,6 +347,7 @@ async def _upsert_focus_item_impl(
         item = AgentFocusItemModel(
             agent_id=agent_id,
             key=item_key,
+            title=title,
             description=desc or item_key,
             status=status,
             kind=kind,
@@ -363,6 +369,7 @@ async def ensure_focus_item(
     agent_id: uuid.UUID,
     *,
     focus_ref: str | None,
+    title: str | None = None,
     description: str,
     system: bool = False,
     source: str = "trigger",
@@ -371,6 +378,7 @@ async def ensure_focus_item(
     item = await upsert_focus_item(
         agent_id,
         key=focus_ref,
+        title=title,
         description=description,
         status="in_progress",
         kind="system" if system else "normal",
@@ -428,15 +436,27 @@ async def render_focus_context(agent_id: uuid.UUID) -> str:
     lines: list[str] = []
     if active:
         lines.append("In Progress")
-        lines.extend(f"- {i['key']}: {i['description']}" for i in active)
+        for i in active:
+            if i.get("title"):
+                lines.append(f"- {i['title']} ({i['key']}): {i['description']}")
+            else:
+                lines.append(f"- {i['key']}: {i['description']}")
     if system:
         if lines:
             lines.append("")
         lines.append("System Focus")
-        lines.extend(f"- {i['key']}: {i['description']}" for i in system)
+        for i in system:
+            if i.get("title"):
+                lines.append(f"- {i['title']} ({i['key']}): {i['description']}")
+            else:
+                lines.append(f"- {i['key']}: {i['description']}")
     if completed:
         if lines:
             lines.append("")
         lines.append("Recently Completed")
-        lines.extend(f"- {i['key']}: {i['description']}" for i in completed)
+        for i in completed:
+            if i.get("title"):
+                lines.append(f"- {i['title']} ({i['key']}): {i['description']}")
+            else:
+                lines.append(f"- {i['key']}: {i['description']}")
     return "\n".join(lines)
