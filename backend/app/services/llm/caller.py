@@ -235,21 +235,22 @@ def _get_thinking_kwargs(model: "LLMModel", round_i: int | None = None) -> dict:
     """DeepSeek V4 思考模式参数检测。
 
     DeepSeek V4（deepseek-v4-pro / deepseek-v4-flash）需要显式传入
-    thinking={"type": "enabled"} 开启思考模式，否则 API 返回 400 错误。
-    参考：https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+    thinking 参数。参考：https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
 
-    全程保持 thinking=enabled。中途切换 disabled→enabled 会导致 API 400：
+    全程保持 thinking 状态不变。中途切换 disabled→enabled 会导致 API 400：
     历史 assistant 消息中部分有 reasoning_content、部分无，API 拒绝不一致的对话历史。
 
     Returns:
-        DeepSeek V4: {"thinking": {"type": "enabled"}}
+        DeepSeek V4 pro: {"thinking": {"type": "enabled"}}
+        DeepSeek V4 flash: {"thinking": {"type": "disabled"}}  flash 版 think 重度重复无决策价值
         其他模型: {}
     """
     model_name = getattr(model, "model", "") or ""
+    if "deepseek-v4-flash" in model_name:
+        return {"thinking": {"type": "disabled"}}
     if "deepseek-v4" in model_name or "deepseek_v4" in model_name:
         return {"thinking": {"type": "enabled"}}
     return {}
-
 
 def _usage_from_response_or_estimate(response, api_messages: list[LLMMessage]) -> TokenUsage:
     usage = extract_token_usage(response.usage)
@@ -852,8 +853,8 @@ async def call_llm(
             )
 
         # 上下文截断：每轮结束后估算 token 数，超出窗口时保留 system + 最近 3 轮
-        # #121 修复：8000 → 12000，DeepSeek V4 支持 128K 上下文，充分利用长窗口避免截断
-        MAX_CTX_TOKENS = 12000
+        # #121/#123: 8000→12000→48000，DeepSeek V4 128K，12K 过保守导致每轮截断丢上下文
+        MAX_CTX_TOKENS = 48000
         _total_est = 0
         for _m in api_messages:
             _c = _m.content or ""

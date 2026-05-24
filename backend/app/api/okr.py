@@ -43,7 +43,7 @@ from app.models.okr import (
 # 后台任务强引用集合
 _okr_bg: set[asyncio.Task] = set()
 
-router = APIRouter(prefix="/okr", tags=["okr"])
+router = APIRouter(prefix="/api/okr", tags=["okr"])
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
