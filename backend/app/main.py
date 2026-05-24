@@ -90,6 +90,9 @@ async def _start_ss_local() -> None:
             logger.warning(f"[Proxy] Failed to parse {cfg_file}: {exc} — skipping proxy")
             return
         logger.info(f"[Proxy] Loaded {len(nodes)} node(s) from {cfg_file}")
+        if not nodes:
+            logger.info("[Proxy] No nodes configured — skipping proxy")
+            return
     elif os.environ.get("SS_SERVER") and os.environ.get("SS_PASSWORD"):
         nodes = [{"server": os.environ["SS_SERVER"], "port": int(os.environ.get("SS_PORT", "1080")),
                   "password": os.environ["SS_PASSWORD"], "method": os.environ.get("SS_METHOD", "chacha20-ietf-poly1305"), "label": "env"}]

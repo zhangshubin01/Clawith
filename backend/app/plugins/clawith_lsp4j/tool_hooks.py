@@ -105,7 +105,21 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "run_in_terminal",
-            "description": "在 IDE 终端中执行命令。注意：读取文件请用 read_file；搜索/清理类任务优先 grep_code（IDE 索引）而非终端 grep/find。仅在编译、git、包管理等需要 shell 环境时使用本工具。",
+            "description": (
+                "在 IDE 终端中执行命令。\n"
+                "⚠️ 严格限制 —— 仅用于以下场景:\n"
+                "✅ 构建: ./gradlew build / assembleDebug / assembleRelease\n"
+                "✅ 测试: ./gradlew test / connectedAndroidTest\n"
+                "✅ Git: git log / git diff / git show / git status\n"
+                "✅ 包管理: adb install, brew, npm, pip\n"
+                "❌ 禁止读文件: cat / head / tail / less → 请用 read_file\n"
+                "❌ 禁止搜文件: find / ls -R → 请用 search_file\n"
+                "❌ 禁止搜内容: grep -r / rg → 请用 grep_code\n"
+                "❌ 禁止写文件: sed -i / echo >> / tee → 请用 edit_file 或 write_file\n"
+                "❌ 禁止 xxd / hexdump 读二进制 → 请用 read_file\n"
+                "终端命令的结果不进入 IDE 索引，文件变更不被 IDE 感知。"
+                "持续违规使用会导致上下文爆炸和 token 浪费。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -142,10 +156,11 @@ _LSP4J_IDE_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "replace_text_by_path",
+            "name": "edit_file",
             "description": (
-                "全量替换文件内容为指定文本。路径规则与 create_file_with_text 一致："
-                "绝对路径写 IDE 项目；memory/、skills/、enterprise_info/ 前缀或 "
+                "全量替换文件内容为指定文本。路径规则："
+                "绝对路径写 IDE 项目文件；"
+                "memory/、skills/、enterprise_info/ 前缀或 "
                 "soul.md/focus.md/memory.md/tasks.json 文件名的相对路径写 Agent 自身文件；"
                 "其余相对路径（含 workspace/）落在 IDE 项目根目录下。"
                 "对长文件做局部修改请先 read_file 拿到全文，构造新全文再调用本工具。"
@@ -169,14 +184,13 @@ _LSP4J_IDE_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "create_file_with_text",
+            "name": "write_file",
             "description": (
                 "创建新文件并写入内容（也可全量覆盖已有文件）。路径规则："
-                "（1）绝对路径（如 /Users/xx/project/src/Main.java）→ 写 IDE 项目文件；"
-                "（2）相对路径中以 memory/、skills/、enterprise_info/ 开头，"
-                "或文件名为 soul.md / focus.md / memory.md / tasks.json 的 → 写 Agent 自身文件（由后端兜底执行）；"
-                "（3）其余相对路径（含 workspace/）→ 落在 IDE 项目根目录下。"
-                "局部修改请优先用 replace_text_by_path 避免全文重写。"
+                "（1）绝对路径 → 写 IDE 项目文件；"
+                "（2）memory/、skills/、enterprise_info/ 前缀的相对路径 → Agent 自身文件；"
+                "（3）其余相对路径（含 workspace/）→ IDE 项目根目录。"
+                "局部修改请优先用 edit_file 避免全文重写。"
             ),
             "parameters": {
                 "type": "object",
@@ -197,11 +211,11 @@ _LSP4J_IDE_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "delete_file_by_path",
+            "name": "delete_file",
             "description": (
                 "删除文件。支持绝对路径（IDE 项目文件）与相对路径（Agent 自身文件）。"
-                "**禁止删除** soul.md、tasks.json、enterprise_info/ 下的文件，"
-                "以及任何 IDE 项目下的关键配置（.git/、.idea/）。"
+                "**禁止删除** soul.md、tasks.json、enterprise_info/ 下的文件、"
+                ".git/、.idea/ 等关键配置。"
             ),
             "parameters": {
                 "type": "object",
@@ -254,7 +268,11 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_file",
-            "description": "搜索指定目录下的文件（支持 glob 模式匹配）。用于查找文件。",
+            "description": (
+                "按文件名模式搜索 IDE 项目文件（支持 glob 匹配）。"
+                "用于快速定位文件位置，比 run_in_terminal find/grep 快 10-50 倍。"
+                "示例：search_file(file_pattern='**/*Activity.kt') 查找所有 Activity 文件"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -395,7 +413,7 @@ _LSP4J_IDE_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_replace",
-            "description": "在文件中搜索指定文本并替换。适用于精确的文本搜索替换操作。注意：这会将搜索和替换文本发送到 IDE 执行，比 replace_text_by_path（全文替换）更适合局部修改。",
+            "description": "在文件中搜索指定文本并替换。适用于精确的文本搜索替换操作。注意：这会将搜索和替换文本发送到 IDE 执行，比 edit_file（全文替换）更适合局部修改。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -506,6 +524,12 @@ _LOCAL_SEARCH_TOOLS = frozenset({
     "search_symbol",
 })
 
+# 始终路由到 IDE 的工具（不检查文件路径参数）
+# search_file 使用 query+file_pattern 参数，list_dir 使用 relative_workspace_path 参数，
+# 二者均非 _extract_file_path 查找的 file_path/filePath/path 键名，
+# 会导致 _should_route_to_ide 返回 False 而误路由到 MCP（返回 "Unknown tool"）
+_NO_PATH_FILE_TOOLS: frozenset[str] = frozenset({"search_file", "list_dir"})
+
 # Agent 内部文件 — 始终在本地后端执行，不路由到 IDE
 _AGENT_INTERNAL_FILE_NAMES = frozenset({
     "soul.md", "focus.md", "tasks.json", "memory.md",
@@ -551,13 +575,17 @@ def _should_route_to_ide(tool_name: str, args: dict) -> bool:
 
     规则：
     1. 非文件工具始终路由
-    2. 绝对路径（/ 开头）→ IDE
-    3. Agent 内部文件（soul.md, memory.md, workspace/xxx, skills/xxx）→ 本地
-    4. 其余相对路径 → IDE（由 invoke_tool_on_ide 解析为绝对路径）
+    2. search_file / list_dir 无文件路径参数要求，始终路由 IDE
+    3. 绝对路径（/ 开头）→ IDE
+    4. Agent 内部文件（soul.md, memory.md, workspace/xxx, skills/xxx）→ 本地
+    5. 其余相对路径 → IDE（由 invoke_tool_on_ide 解析为绝对路径）
     """
     # 搜索类工具走本地 ripgrep，比 IDE PSI 索引快 10-100 倍，且避免 65s 超时
     if tool_name in _LOCAL_SEARCH_TOOLS:
         return False
+    # 无文件路径要求的工具始终路由 IDE
+    if tool_name in _NO_PATH_FILE_TOOLS:
+        return True
     if tool_name not in _LSP4J_FILE_PATH_TOOLS:
         return True
 
@@ -759,7 +787,9 @@ def install_lsp4j_tool_hooks() -> None:
             fallback_map = _LOCAL_FALLBACK_PARAM_MAP[tool_name]
             args = {fallback_map.get(k, k): v for k, v in args.items()}
             logger.debug("[LSP4J-TOOL] 本地回退参数映射: tool={} map={}", tool_name, fallback_map)
-        logger.debug("[LSP4J-TOOL] 走基础工具路径: tool={}", tool_name)
+        # ★ 记录回退到基础工具的调用，便于排查路由问题
+        logger.info("[LSP4J-TOOL] 基础工具回退: tool={} agent={} lsp4j_ws={} is_lsp4j_tool={}",
+                    tool_name, str(agent_id)[:8], lsp4j_ws is not None, is_lsp4j_tool)
         return await _base_execute_tool(
             tool_name, args, agent_id, user_id, session_id, on_output=on_output
         )

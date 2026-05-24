@@ -81,18 +81,30 @@ from .search_input_utils import (
     sanitize_search_input as _sanitize_search_input,
 )
 
+from app.services.storage import get_storage_backend, normalize_storage_key
+
 # ──────────────────────────────────────────────
 # LSP4J IDE 工具名称（直接导入自 tool_constants，与 tool_hooks 保持一致）
 # ──────────────────────────────────────────────
 
 # LSP4J 文件编辑工具（需要 filePath 转换 + fileId 注入）
 # 这些工具在 invoke_tool_on_ide 中统一处理参数转换和 results 注入
+# 文件编辑工具集合 — 包含插件原生名和 LLM 标准名。
+# TOOL_NAME_MAP 映射后的原生名和 LLM 直调的标准名均需命中此集合，
+# 确保 invoke_tool_on_ide 的文件路径解析、sync 发送等逻辑正常执行。
 _LSP4J_FILE_EDIT_TOOLS = frozenset(
     {
+        # 插件原生名
         "replace_text_by_path",
-        "search_replace",
         "create_file_with_text",
         "delete_file_by_path",
+        # LLM 标准名
+        "edit_file",
+        "write_file",
+        "create_file",
+        "delete_file",
+        # 其他
+        "search_replace",
         "apply_patch",
         "save_file",
     }
@@ -2611,6 +2623,26 @@ class JSONRPCRouter:
             role_desc = self._agent_obj.role_description or ""
             if ide_prompt:
                 role_desc = role_desc + ide_prompt
+
+            # ★ 注入 soul.md 核心工作流规则（工具选择策略）—— LSP4J 通道修复
+            # deepseek-v4-flash 等模型不会自主遵守工具选择原则，
+            # 必须通过 system prompt 显式注入 soul.md 中的强制性规则。
+            try:
+                storage = get_storage_backend()
+                soul_key = normalize_storage_key(f"{self._agent_id}/soul.md")
+                if await storage.is_file(soul_key):
+                    soul_text = await storage.read_text(soul_key, encoding="utf-8", errors="replace")
+                    workflow_start = soul_text.find("## 核心工作流")
+                    if workflow_start >= 0:
+                        workflow_rules = soul_text[workflow_start:]
+                        workflow_end = workflow_rules.find("\n## ")
+                        if workflow_end > 0:
+                            workflow_rules = workflow_rules[:workflow_end]
+                        if workflow_rules.strip():
+                            role_desc = workflow_rules.strip() + "\n\n" + role_desc
+            except Exception:
+                pass  # soul.md 读取失败时静默回退
+
             # 注入工具可用性提示和项目路径
             tool_hint = "\n[工具可用性] 已连接本地 IDE 环境，可直接使用 read_file、replace_text_by_path、run_in_terminal、get_terminal_output、create_file_with_text、delete_file_by_path、get_problems 等工具访问项目文件。"
             if self._project_path:

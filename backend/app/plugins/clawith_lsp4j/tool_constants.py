@@ -9,14 +9,21 @@ from __future__ import annotations
 # ── IDE 工具名称集合 ──────────────────────────────────────────────
 # LSP4J 插件端（通义灵码 IDE 插件）能识别并处理的工具名称。
 # 用于 toolCall/sync 的合法性校验，不在集合中的工具名会被标记为 UNKNOWN。
+# 包含插件原生名（如 replace_text_by_path）和 LLM 标准名（如 edit_file），
+# 确保 _lsp4j_aware_execute_tool 的 is_lsp4j_tool 判断在 TOOL_NAME_MAP
+# 映射前后均能正确命中。
 LSP4J_IDE_TOOL_NAMES = frozenset(
     {
         "read_file",              # 读取文件
         "run_in_terminal",        # 终端运行命令
         "get_terminal_output",    # 获取终端输出
-        "replace_text_by_path",   # 路径替换文本（edit_file 的插件原生实现）
-        "create_file_with_text",  # 创建文件并写入文本
-        "delete_file_by_path",    # 按路径删除文件
+        "replace_text_by_path",   # 插件原生名 — 路径替换文本
+        "edit_file",              # LLM 标准名 — 编辑文件
+        "create_file_with_text",  # 插件原生名 — 创建文件并写入文本
+        "write_file",             # LLM 标准名 — 写入文件
+        "create_file",            # LLM 标准名 — 创建文件
+        "delete_file_by_path",    # 插件原生名 — 按路径删除文件
+        "delete_file",            # LLM 标准名 — 删除文件
         "get_problems",           # 获取 IDE 诊断问题
         "add_tasks",              # 添加任务
         "todo_write",             # 写入待办事项
