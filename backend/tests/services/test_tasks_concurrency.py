@@ -27,18 +27,15 @@ from app.services.agent_tools import _handle_add_tasks, _handle_todo_write
 def tmp_workspace(monkeypatch):
     """临时工作空间 + mock ensure_workspace / _get_agent_tenant_id，避免 DB 依赖。"""
     tmpdir = tempfile.mkdtemp()
-
-    async def fake_ensure(agent_id, tenant_id=None):
-        p = pathlib.Path(tmpdir) / "ws"
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+    _ws_root = pathlib.Path(tmpdir) / "ws"
+    _ws_root.mkdir(parents=True, exist_ok=True)
 
     async def fake_tenant(agent_id):
         return uuid.UUID("00000000-0000-0000-0000-000000000002")
 
-    monkeypatch.setattr(at, "ensure_workspace", fake_ensure)
+    monkeypatch.setattr(at, "_agent_workspace_root", lambda aid: _ws_root)
     monkeypatch.setattr(at, "_get_agent_tenant_id", fake_tenant)
-    return pathlib.Path(tmpdir) / "ws"
+    return _ws_root
 
 
 class TestTasksConcurrency:
@@ -95,12 +92,7 @@ class TestTasksConcurrency:
         agents = [uuid.UUID(f"00000000-0000-0000-0000-{i:012d}") for i in range(1, 4)]
 
         # 每个 agent 用独立 workspace 子目录，避免共用 tasks.json
-        async def fake_ensure_per_agent(agent_id, tenant_id=None):
-            p = tmp_workspace / str(agent_id)
-            p.mkdir(parents=True, exist_ok=True)
-            return p
-
-        monkeypatch.setattr(at, "ensure_workspace", fake_ensure_per_agent)
+        monkeypatch.setattr(at, "_agent_workspace_root", lambda aid: tmp_workspace / str(aid))
 
         # 三 agent 并发写入，互不干扰
         await asyncio.gather(*(

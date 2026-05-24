@@ -14635,7 +14635,8 @@ async def _handle_add_tasks(agent_id: uuid.UUID, arguments: dict) -> str:
         return "❌ add_tasks: tasks 参数必须为 JSON 数组"
 
     _tenant_id = await _get_agent_tenant_id(agent_id)
-    ws = await ensure_workspace(agent_id, tenant_id=_tenant_id)
+    ws = _agent_workspace_root(agent_id)
+    ws.mkdir(parents=True, exist_ok=True)
     tasks_path = ws / "tasks.json"
 
     # ★ 并发锁：保护"读已有 + 合并 + 写回"原子性
@@ -14683,7 +14684,8 @@ async def _handle_todo_write(agent_id: uuid.UUID, arguments: dict) -> str:
         return "❌ todo_write: tasks 参数必须为 JSON 数组"
 
     _tenant_id = await _get_agent_tenant_id(agent_id)
-    ws = await ensure_workspace(agent_id, tenant_id=_tenant_id)
+    ws = _agent_workspace_root(agent_id)
+    ws.mkdir(parents=True, exist_ok=True)
     tasks_path = ws / "tasks.json"
 
     # ★ 并发锁：与 add_tasks 共享同把锁，覆写也要串行化
