@@ -2640,11 +2640,20 @@ class JSONRPCRouter:
                             workflow_rules = workflow_rules[:workflow_end]
                         if workflow_rules.strip():
                             role_desc = workflow_rules.strip() + "\n\n" + role_desc
-            except Exception:
-                pass  # soul.md 读取失败时静默回退
+                            logger.info(
+                                "[LSP4J-SOUL] injected soul.md workflow rules into system prompt for agent=%s, len=%d",
+                                self._agent_id, len(workflow_rules.strip()))
+                        else:
+                            logger.debug("[LSP4J-SOUL] '## 核心工作流' section is empty for agent=%s", self._agent_id)
+                    else:
+                        logger.debug("[LSP4J-SOUL] '## 核心工作流' section not found in soul.md for agent=%s", self._agent_id)
+                else:
+                    logger.debug("[LSP4J-SOUL] soul.md not found for agent=%s", self._agent_id)
+            except Exception as e:
+                logger.warning("[LSP4J-SOUL] failed to read soul.md for agent=%s: %s", self._agent_id, e)
 
             # 注入工具可用性提示和项目路径
-            tool_hint = "\n[工具可用性] 已连接本地 IDE 环境，可直接使用 read_file、replace_text_by_path、run_in_terminal、get_terminal_output、create_file_with_text、delete_file_by_path、get_problems 等工具访问项目文件。"
+            tool_hint = "\n[工具可用性] 已连接本地 IDE 环境，可直接使用 read_file、edit_file、run_in_terminal、get_terminal_output、write_file、delete_file、get_problems 等工具访问项目文件。"
             if self._project_path:
                 tool_hint += f"\n[项目根路径] {self._project_path}"
 
@@ -2656,7 +2665,7 @@ class JSONRPCRouter:
                 "若 0 结果则按回退链路自动放宽。"
                 "\n先给出'读取清单'（3-8 个关键文件）再批量读取，不要边搜边读反复循环。"
                 "\n同一轮禁止重复调用相同工具+相同参数；已有结果优先复用。"
-                "\n优先使用 read_file / replace_text_by_path / create_file_with_text / delete_file_by_path / list_dir / search_file / run_in_terminal。"
+                "\n优先使用 read_file / edit_file / write_file / delete_file / list_dir / search_file / run_in_terminal。"
                 "\n不要先输出大段'开始重构/步骤说明'代码块再改文件，优先直接执行工具并回传结果。"
                 "\n[展示顺序] 每次调用工具前用 1-2 句中文说明当前意图；禁止先连续执行大量工具再在末尾一次性总结。"
                 "\n勿在正文重复与工具卡片同义的句式（如「正在终端执行」「正在查看 xxx 文件」「正在检索代码库」）；"
@@ -2665,7 +2674,7 @@ class JSONRPCRouter:
                 "\n目标展示应为工具卡片链路（toolCall + tool/call/sync + workingSpaceFile/sync），而不是纯 markdown 代码块。"
                 "\n仅当工具调用不可用或明确失败时，才允许输出 CODE_EDIT_BLOCK 作为兜底。"
                 "\n[路径规则] 修改代码时必须使用绝对路径或项目相对路径（如 app/src/main/Main.kt），禁止使用 workspace/ 前缀。"
-                "\nlist_dir/search_file 返回的路径可直接用于后续 read_file/replace_text_by_path 调用。"
+                "\nlist_dir/search_file 返回的路径可直接用于后续 read_file/edit_file 调用。"
                 "\n相对路径仅用于 Agent 自身文件（soul.md, memory.md, focus.md, skills/）。"
             )
 
