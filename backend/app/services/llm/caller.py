@@ -12,6 +12,7 @@ All paths now support:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -413,6 +414,7 @@ async def call_llm(
     on_thinking=None,
     supports_vision=False,
     max_tool_rounds_override: int | None = None,
+    cancel_event: asyncio.Event | None = None,
     skip_tools: bool = False,
     on_code_output=None,
 ) -> str:
@@ -472,6 +474,11 @@ async def call_llm(
 
     # Tool-calling loop
     for round_i in range(_max_tool_rounds):
+        # 取消检查：若 cancel_event 已设置，立即中断工具循环
+        if cancel_event and cancel_event.is_set():
+            logger.info("[LLM] cancel_event 已设置，中断工具循环（round={}）", round_i)
+            break
+
         # Dynamic tool-call limit warning
         _warn_threshold_80 = int(_max_tool_rounds * 0.8)
         _warn_threshold_96 = _max_tool_rounds - 2
@@ -609,10 +616,15 @@ async def call_llm_with_failover(
     on_tool_delta=None,
     supports_vision=False,
     on_failover=None,
+    cancel_event: asyncio.Event | None = None,
     skip_tools: bool = False,
     on_code_output=None,
 ) -> str:
-    """Call LLM with automatic failover support."""
+    """Call LLM with automatic failover support.
+
+    Args:
+        cancel_event: 可选的取消事件，透传至 call_llm 中断工具循环和流式输出。
+    """
     guard = FailoverGuard()
 
     # Config-level fallback: if no primary, use fallback directly
@@ -650,6 +662,7 @@ async def call_llm_with_failover(
         on_tool_delta=on_tool_delta,
         on_thinking=on_thinking,
         supports_vision=supports_vision,
+        cancel_event=cancel_event,
         skip_tools=skip_tools,
         on_code_output=on_code_output,
     )
@@ -713,6 +726,7 @@ async def call_llm_with_failover(
         on_tool_delta=on_tool_delta,
         on_thinking=on_thinking,
         supports_vision=getattr(fallback_model, 'supports_vision', False),
+        cancel_event=cancel_event,
         skip_tools=skip_tools,
         on_code_output=on_code_output,
     )
