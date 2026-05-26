@@ -17,6 +17,8 @@ const now = new Date()
 const buildTimestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}.${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`
 const version = `${majorVersion}+${buildTimestamp}`
 
+const backendPort = process.env.BACKEND_PORT || '8000'
+
 export default defineConfig({
     plugins: [react()],
     define: {
@@ -44,11 +46,11 @@ export default defineConfig({
         host: '0.0.0.0',
         proxy: {
             '/api': {
-                target: 'http://localhost:8000',
+                target: `http://localhost:${backendPort}`,
                 changeOrigin: true,
             },
             '/ws': {
-                target: 'ws://localhost:8000',
+                target: `ws://localhost:${backendPort}`,
                 ws: true,
             },
         },

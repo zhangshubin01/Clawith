@@ -197,11 +197,17 @@ async def _get_user_name(user_id) -> str | None:
         return None
     try:
         from app.models.user import User as _UserModel
+        from app.models.agent import Agent as _AgentModel
         async with async_session() as _udb:
             _ur = await _udb.execute(select(_UserModel).where(_UserModel.id == user_id))
             _u = _ur.scalar_one_or_none()
             if _u:
                 return _u.display_name or _u.username
+            # Check Agent name fallback
+            _ar = await _udb.execute(select(_AgentModel).where(_AgentModel.id == user_id))
+            _a = _ar.scalar_one_or_none()
+            if _a:
+                return _a.name
     except Exception:
         pass
     return None
@@ -415,6 +421,7 @@ async def call_llm(
     max_tool_rounds_override: int | None = None,
     skip_tools: bool = False,
     on_code_output=None,
+    current_user_name_override: str | None = None,
 ) -> str:
     """Call LLM via unified client with function-calling tool loop."""
     # Get agent config for tool rounds
@@ -425,7 +432,10 @@ async def call_llm(
         _max_tool_rounds = max_tool_rounds_override
 
     # Get user's name for personalized context
-    _user_name = await _get_user_name(user_id)
+    if current_user_name_override:
+        _user_name = current_user_name_override
+    else:
+        _user_name = await _get_user_name(user_id)
 
     # Build rich prompt with soul, memory, skills, relationships
     from app.services.agent_context import build_agent_context
@@ -611,6 +621,7 @@ async def call_llm_with_failover(
     on_failover=None,
     skip_tools: bool = False,
     on_code_output=None,
+    current_user_name_override: str | None = None,
 ) -> str:
     """Call LLM with automatic failover support."""
     guard = FailoverGuard()
@@ -652,6 +663,7 @@ async def call_llm_with_failover(
         supports_vision=supports_vision,
         skip_tools=skip_tools,
         on_code_output=on_code_output,
+        current_user_name_override=current_user_name_override,
     )
 
     # Check if we need to failover
@@ -715,6 +727,7 @@ async def call_llm_with_failover(
         supports_vision=getattr(fallback_model, 'supports_vision', False),
         skip_tools=skip_tools,
         on_code_output=on_code_output,
+        current_user_name_override=current_user_name_override,
     )
 
     # Combine error messages if fallback also failed
