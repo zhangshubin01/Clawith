@@ -211,12 +211,22 @@ async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, 
 
     _last_invoke[agent_id] = now
 
+    from_agent_name = ""
+    if from_agent_id:
+        try:
+            async with async_session() as db:
+                from app.models.agent import Agent as AgentModel
+                r = await db.execute(select(AgentModel.name).where(AgentModel.id == from_agent_id))
+                from_agent_name = r.scalar() or ""
+        except Exception as e:
+            logger.warning(f"Failed to lookup sender agent name: {e}")
+
     dummy_trigger = AgentTrigger(
         id=uuid.uuid4(),
         agent_id=agent_id,
         name="a2a_wake",
         type="on_message",
-        config={"from_agent_name": "", "_matched_message": message_context[:2000], "_matched_from": "agent", "_a2a_session_id": a2a_session_id},
+        config={"from_agent_name": from_agent_name, "_matched_message": message_context[:2000], "_matched_from": "agent", "_a2a_session_id": a2a_session_id},
         reason=(
             "You received a notification from another agent. "
             "Read the message content above, update your focus and memory if needed, "

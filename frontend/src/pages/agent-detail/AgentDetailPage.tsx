@@ -4469,11 +4469,6 @@ export default function AgentDetailPage() {
                                     {displaySubtitle}
                                 </div>
                             )}
-                            {displayDescription && (
-                                <div className="aware-side-item-desc">
-                                    {displayDescription}
-                                </div>
-                            )}
                         </div>
                         <span className="aware-side-count">
                             {isZh ? `${itemTriggers.length} 个` : itemTriggers.length}
@@ -4481,19 +4476,52 @@ export default function AgentDetailPage() {
                         <span className={`aware-side-chevron ${isExpanded ? 'open' : ''}`}>▶</span>
                     </button>
                     {isExpanded && (
-                        <div className="aware-side-nested">
-                            {itemTriggers.length === 0 ? (
-                                <div className="aware-side-empty compact">{t('agent.aware.noTriggers')}</div>
-                            ) : itemTriggers.map((trig: any) => (
-                                <div key={trig.id} className={`aware-side-trigger ${trig.is_enabled ? '' : 'done'}`}>
-                                    {renderTriggerDot(!trig.is_enabled, trig.is_enabled ? t('agent.aware.inProgress') : t('agent.aware.completed'))}
-                                    <div className="aware-side-trigger-main">
-                                        <div className="aware-side-item-title">{triggerTitle(trig)}</div>
-                                        <div className="aware-side-item-meta">{triggerMeta(trig)}</div>
+                        <>
+                            {displayDescription && (
+                                <div className="aware-side-focus-desc" style={{
+                                    borderLeft: '2px solid var(--border-strong)',
+                                    paddingLeft: '10px',
+                                    marginLeft: '12px',
+                                    marginRight: '12px',
+                                    marginTop: '8px',
+                                    marginBottom: '12px',
+                                    fontSize: '11px',
+                                    lineHeight: '1.5',
+                                    color: 'var(--text-secondary)',
+                                    whiteSpace: 'pre-wrap',
+                                    textAlign: 'left'
+                                }}>
+                                    <div style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '4px',
+                                        fontSize: '9px',
+                                        fontWeight: 600,
+                                        color: 'var(--text-tertiary)',
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.05em',
+                                        marginBottom: '6px'
+                                    }}>
+                                        <IconFileText size={10} stroke={2} />
+                                        <span>{isZh ? 'Focus 描述' : 'Focus Description'}</span>
                                     </div>
+                                    {displayDescription}
                                 </div>
-                            ))}
-                        </div>
+                            )}
+                            <div className="aware-side-nested" style={{ paddingTop: 0 }}>
+                                {itemTriggers.length === 0 ? (
+                                    <div className="aware-side-empty compact">{t('agent.aware.noTriggers')}</div>
+                                ) : itemTriggers.map((trig: any) => (
+                                    <div key={trig.id} className={`aware-side-trigger ${trig.is_enabled ? '' : 'done'}`}>
+                                        {renderTriggerDot(!trig.is_enabled, trig.is_enabled ? t('agent.aware.inProgress') : t('agent.aware.completed'))}
+                                        <div className="aware-side-trigger-main">
+                                            <div className="aware-side-item-title">{triggerTitle(trig)}</div>
+                                            <div className="aware-side-item-meta">{triggerMeta(trig)}</div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </>
                     )}
                 </div>
             );
@@ -4587,9 +4615,9 @@ export default function AgentDetailPage() {
                         const isToday = day.getTime() === today.getTime();
                         return (
                             <div key={day.toISOString()} className={`aware-calendar-day ${isToday ? 'is-today' : ''}`}>
-                                <div className="aware-calendar-day-label">
-                                    {day.toLocaleDateString(undefined, awareCalendarMode === 'month' ? { day: 'numeric' } : { weekday: 'short', month: 'numeric', day: 'numeric' })}
-                                    {isToday && <span className="aware-calendar-today-pill">{isZh ? '今天' : 'Today'}</span>}
+                                <div className="aware-calendar-day-label" style={isToday ? { color: 'var(--accent-primary)', fontWeight: 600 } : {}}>
+                                    {day.toLocaleDateString(undefined, awareCalendarMode === 'month' ? { day: 'numeric' } : (awareCalendarMode === 'week' ? { weekday: 'short', day: 'numeric' } : { weekday: 'short', month: 'numeric', day: 'numeric' }))}
+                                    {isToday && awareCalendarMode === 'day' && <span className="aware-calendar-today-pill">{isZh ? '今天' : 'Today'}</span>}
                                 </div>
                                 {items.length === 0 ? (
                                     <div className="aware-calendar-empty">-</div>

@@ -370,7 +370,6 @@ async def check_new_agent_messages(trigger: AgentTrigger) -> bool:
                     .where(
                         ChatMessage.participant_id == from_participant,
                         ChatMessage.created_at > since,
-                        ChatMessage.role == "assistant",
                     )
                     .order_by(ChatMessage.created_at.desc())
                     .limit(1)
