@@ -2292,10 +2292,6 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                         explicitly_disabled_names.add(t.name)
                     continue
 
-                # 记录通过 is_default 注入、尚无 AgentTool 记录的工具，便于日志排查
-                if at is None and t.is_default:
-                    default_included_names.append(t.name)
-
                 # Skip feishu tools if the agent has no Feishu channel configured
                 if t.category == "feishu" and not has_feishu:
                     continue

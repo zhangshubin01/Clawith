@@ -7,11 +7,20 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import create_access_token, get_authenticated_user, get_current_user, hash_password_async, verify_password_async
+from app.core.security import (
+    create_access_token,
+    decode_access_token_soft,
+    get_authenticated_user,
+    get_current_user,
+    hash_password_async,
+    security,
+    verify_password_async,
+)
 from app.database import get_db
 from app.models.user import Identity, User
 from app.schemas.schemas import (
@@ -569,9 +578,42 @@ async def login(data: UserLogin, background_tasks: BackgroundTasks, db: AsyncSes
     )
 
 
+async def get_current_user_allow_expired(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """获取当前用户，允许已过期的 JWT（仅用于 refresh 端点）。
+
+    与 get_current_user 不同，此函数使用 decode_access_token_soft
+    容忍 exp 已过期的 token，只验证签名和格式正确性。
+    """
+    from app.models.user import User as UserModel
+
+    if not credentials:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    payload = decode_access_token_soft(credentials.credentials)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    result = await db.execute(
+        select(UserModel).where(UserModel.id == uuid.UUID(str(user_id))).options(selectinload(UserModel.identity))
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is inactive")
+    return user
+
+
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(current_user: User = Depends(get_current_user)):
-    """用过期但未吊销的 JWT 换取新令牌（IDE 插件重连时使用）。"""
+async def refresh_token(current_user: User = Depends(get_current_user_allow_expired)):
+    """用过期但未吊销的 JWT 换取新令牌（IDE 插件重连时使用）。
+
+    使用 decode_access_token_soft 容忍过期 token，仅验证签名和格式正确性。
+    """
     token = create_access_token(str(current_user.id), current_user.role)
     return TokenResponse(
         access_token=token,
