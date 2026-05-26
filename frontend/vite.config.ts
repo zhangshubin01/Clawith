@@ -27,20 +27,28 @@ export default defineConfig({
             '@': path.resolve(__dirname, './src'),
         },
     },
-    // 生产构建时自动移除 console.* 和 debugger 语句
-    esbuild: {
-        drop: ['console', 'debugger'],
+    build: {
+        rollupOptions: {
+            output: {
+                manualChunks: {
+                    'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+                    'vendor-charts': ['recharts'],
+                    'vendor-i18n': ['i18next', 'react-i18next', 'i18next-browser-languagedetector'],
+                    'vendor-icons': ['@tabler/icons-react'],
+                },
+            },
+        },
     },
     server: {
         port: 3008,
         host: '0.0.0.0',
         proxy: {
             '/api': {
-                target: 'http://localhost:8008',
+                target: 'http://localhost:8000',
                 changeOrigin: true,
             },
             '/ws': {
-                target: 'ws://localhost:8008',
+                target: 'ws://localhost:8000',
                 ws: true,
             },
         },
