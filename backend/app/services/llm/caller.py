@@ -417,6 +417,8 @@ async def call_llm(
     cancel_event: asyncio.Event | None = None,
     skip_tools: bool = False,
     on_code_output=None,
+    parallel_tools_extra_readonly: set[str] | None = None,
+    tool_warning_mode: str = "default",
 ) -> str:
     """Call LLM via unified client with function-calling tool loop."""
     # Get agent config for tool rounds
@@ -618,6 +620,8 @@ async def call_llm_with_failover(
     on_failover=None,
     cancel_event: asyncio.Event | None = None,
     skip_tools: bool = False,
+    parallel_tools_extra_readonly: set[str] | None = None,
+    tool_warning_mode: str = "default",
     on_code_output=None,
 ) -> str:
     """Call LLM with automatic failover support.
@@ -664,6 +668,8 @@ async def call_llm_with_failover(
         supports_vision=supports_vision,
         cancel_event=cancel_event,
         skip_tools=skip_tools,
+        parallel_tools_extra_readonly=parallel_tools_extra_readonly,
+        tool_warning_mode=tool_warning_mode,
         on_code_output=on_code_output,
     )
 
@@ -728,6 +734,8 @@ async def call_llm_with_failover(
         supports_vision=getattr(fallback_model, 'supports_vision', False),
         cancel_event=cancel_event,
         skip_tools=skip_tools,
+        parallel_tools_extra_readonly=parallel_tools_extra_readonly,
+        tool_warning_mode=tool_warning_mode,
         on_code_output=on_code_output,
     )
 
