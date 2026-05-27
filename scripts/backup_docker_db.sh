@@ -3,8 +3,9 @@
 # 直接通过 docker exec 备份，不依赖宿主机端口映射
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BACKUP_DIR="${BACKUP_DIR:-$ROOT_DIR/backups}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Default backup dir is the project's backups/ (script may live outside the repo, e.g. in ~/Library)
+BACKUP_DIR="${BACKUP_DIR:-/Users/android/Documents/UGit/Clawith/backups}"
 STAMP="$(date +%F_%H%M%S)"
 OUT_DIR="$BACKUP_DIR/snapshot_${STAMP}"
 
