@@ -107,10 +107,10 @@ services:
 volumes:
   pgdata:
     external: true
-    name: clawith-agent_pgdata
+    name: clawith_pgdata
   redisdata:
     external: true
-    name: clawith-agent_redisdata
+    name: clawith_redisdata
 
 
 networks:
