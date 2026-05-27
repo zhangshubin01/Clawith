@@ -50,7 +50,7 @@ from app.models.llm import LLMModel
 from app.models.chat_session import ChatSession
 from app.models.audit import ChatMessage
 from app.models.task import Task as TaskModel
-from app.services.llm.caller import call_llm_with_failover
+from app.services.llm.caller import call_llm_with_failover, _format_friendly_error
 from app.services.task_executor import execute_task as _execute_task
 from app.services.connection_manager import manager
 
@@ -1974,6 +1974,9 @@ class JSONRPCRouter:
             # ★ 提前声明思考计时器变量（后续在 LLM 调用前赋值，在闭包中使用）
             _thinking_started: bool = False
             _thinking_start_time: float = 0.0
+            _thinking_last_flush: float = 0.0
+            _thinking_buffer: list[str] = []
+            _thinking_full: list[str] = []  # 永不清理的累加器，供持久化使用
 
             await self._send_chat_think(
                 session_id,
@@ -2167,7 +2170,6 @@ class JSONRPCRouter:
 
             # 3. 定义流式回调
             reply_parts: list[str] = []
-            thinking_chunks: list[str] = []
 
             # ★ 流式输出缓冲：按"完整行"发送；Markdown 表格按整块发送，避免被拆成半截列。
             buffer = StreamBufferManager(
@@ -2245,13 +2247,28 @@ class JSONRPCRouter:
 
                 思考计时器已在 _handle_chat_ask 入口处启动（所有模型通用）。
                 此处仅负责推送推理文本内容，不重复发送计时器通知。
+
+                采用时间驱动 + 阈值兜底 + 换行触发策略（参考 hermes-agent 模式）。
+                - 时间驱动：每 100ms 强制发送（原 50ms 导致 deepseek micro-chunks 逐个发送）
+                - 阈值兜底：累积 200 字符时发送（原 80 字符导致单个英文句被拆成多个 think 消息）
+                - 换行触发：保留，防止表格/代码块撕裂
                 """
                 nonlocal _thinking_started, _thinking_start_time
-                thinking_chunks.append(text)
-                # ★ 逐步推送推理文本：每 15 chunk 或遇换行时发送一次
-                # 避免每个 token 都发一条通知（过多 RPC 开销），同时保证前端持续有内容更新
-                if len(thinking_chunks) % 15 == 0 or "\n" in text:
-                    await self._send_chat_think(session_id, "".join(thinking_chunks), "start", request_id)
+                nonlocal _thinking_last_flush, _thinking_buffer
+
+                _thinking_buffer.append(text)
+                _thinking_full.append(text)
+                now = time.monotonic()
+                elapsed = now - _thinking_last_flush
+                buf_size = sum(len(t) for t in _thinking_buffer)
+
+                # 缓冲阈值提升: 50ms→100ms, 80chars→200chars
+                # 减少 deepseek 逐词发送导致的 ~50 think 消息/轮 → ~15 think 消息/轮
+                if elapsed >= 0.10 or buf_size >= 200 or "\n" in text:
+                    full_text = "".join(_thinking_buffer)
+                    await self._send_chat_think(session_id, full_text, "start", request_id)
+                    _thinking_buffer.clear()
+                    _thinking_last_flush = now
 
             async def on_tool_call(data: dict) -> None:
                 """工具调用回调 — 推送状态通知给 IDE + step callback + toolCall markdown"""
@@ -2831,7 +2848,20 @@ class JSONRPCRouter:
                     error_status_code,
                     reply[:120],
                 )
+                # 转换为友好提示并用 Markdown 展示
+                reply = f"> {_format_friendly_error(reply)}  \n"
 
+            # 检测友好化错误回复（来自 caller._format_friendly_error），使用 Markdown 展示
+            _ERR_EMOJI_TO_STATUS = {
+                '💰': 402, '🔑': 401, '⏳': 429, '⏱️': 408,
+                '🔌': 502, '📏': 400, '🖥️': 500, '⚠️': 500,
+            }
+            if isinstance(reply, str):
+                for _emoji, _ec in _ERR_EMOJI_TO_STATUS.items():
+                    if reply.startswith(_emoji):
+                        error_status_code = _ec
+                        reply = f"> {reply}  \n"
+                        break
             # ★ 性能计时: call_llm 完成
             _t_call_llm_elapsed = time.monotonic() - _t_call_llm_start
             logger.info(
@@ -2841,6 +2871,11 @@ class JSONRPCRouter:
                 cancelled,
                 len(reply),
             )
+            # ★ 尾部强制 flush：发送 thinking_buffer 中残留的推理内容
+            if _thinking_buffer:
+                full_text = "".join(_thinking_buffer)
+                await self._send_chat_think(session_id, full_text, "start", request_id)
+                _thinking_buffer.clear()
 
             # ★ 性能计时: 思考完成
             _t0 = self._log_perf("THINK_DONE", _ask_start, _t0)
@@ -2958,7 +2993,7 @@ class JSONRPCRouter:
                         user_text=full_text,
                         reply_text=reply,
                         user_id=self._user_id,
-                        thinking_text="".join(thinking_chunks) if thinking_chunks else None,
+                        thinking_text="".join(_thinking_full) if _thinking_full else None,
                         project_path=_ide_project_path or None,
                         current_file=_ide_current_file or None,
                         open_files=_ide_open_files,
@@ -4020,6 +4055,7 @@ class JSONRPCRouter:
         error_code: str = "",
         error_msg: str = "",
         markdown: str = "",
+        elapsed_ms: int | None = None,
     ) -> None:
         """发送 tool/call/sync 通知（ToolCallSyncResult 格式）。
 
@@ -4051,6 +4087,8 @@ class JSONRPCRouter:
             payload["traceId"] = trace_id
         if markdown:
             payload["markdown"] = markdown
+        if elapsed_ms is not None:
+            payload["elapsedMs"] = elapsed_ms
         await self._send_client_request("tool/call/sync", payload)
 
         # 记录历史，供 tool/call/results 拉取。
@@ -4470,7 +4508,45 @@ class JSONRPCRouter:
             if new_content is not None:
                 params["text"] = new_content
             elif "text" not in params:
-                raise ValueError("search_replace failed: searchText not found or file read failed")
+                # 自动回退: searchText 未匹配时, 改用 replace_text_by_path 直接写新内容
+                # 避免 ValueError 传播导致 session code=500 异常结束
+                try:
+                    logger.warning(
+                        "[LSP4J-TOOL] search_replace: searchText 未命中, 回退为 read_file + replace_text_by_path "
+                        "file_path={} search_len={} replace_len={}",
+                        file_path, len(search_text), len(replace_text),
+                    )
+                    from app.services.storage_runtime import get_storage_backend
+                    storage = get_storage_backend()
+                    full_path = file_path
+                    if full_path and not full_path.startswith("/") and self._project_path:
+                        full_path = str(Path(self._project_path) / full_path)
+                    if full_path and os.path.isfile(full_path):
+                        with open(full_path, "r", encoding="utf-8", errors="replace") as _f:
+                            _current_content = _f.read()
+                        _new_content = _current_content.replace(search_text, replace_text, 1)
+                        if _new_content != _current_content:
+                            params["text"] = _new_content
+                            logger.info(
+                                "[LSP4J-TOOL] search_replace fallback 成功: "
+                                "file={} old_len={} new_len={}",
+                                file_path, len(_current_content), len(_new_content),
+                            )
+                        else:
+                            raise ValueError(
+                                f"search_replace failed: searchText not found in {file_path}"
+                            )
+                    else:
+                        raise ValueError(
+                            f"search_replace failed: file not found at {file_path}"
+                        )
+                except ValueError:
+                    raise
+                except Exception as _fb_e:
+                    logger.error("[LSP4J-TOOL] search_replace fallback 失败: {}", _fb_e)
+                    raise ValueError(
+                        f"search_replace failed: searchText not found or file read failed"
+                    ) from _fb_e
         if tool_name in _LSP4J_FILE_EDIT_TOOLS:
             if "file_path" in params and "filePath" not in params:
                 params["filePath"] = params.pop("file_path")
@@ -4865,6 +4941,7 @@ class JSONRPCRouter:
                     )
                     raise asyncio.TimeoutError()
                 result = tool_future.result()
+                _tool_invoke_elapsed = time.monotonic() - _tool_invoke_start
                 if tool_name == "run_in_terminal":
                     terminal_id = self._extract_terminal_id_from_result(result)
                     if terminal_id:
@@ -5018,6 +5095,7 @@ class JSONRPCRouter:
                             tool_name=original_name,
                             parameters=arguments,
                             results=results,
+                            elapsed_ms=int(_tool_invoke_elapsed * 1000),
                         )
                         logger.info(
                             "[LSP4J-TRACE] FINISHED 已发送 trace={} backfilled={} results={}",
@@ -5037,6 +5115,7 @@ class JSONRPCRouter:
                             tool_name=original_name,
                             parameters=arguments,
                             results=results,
+                            elapsed_ms=int(_tool_invoke_elapsed * 1000),
                         )
                         logger.info(
                             "[LSP4J-TOOL] 队列未匹配但已补发 FINISHED: tool={} callId={} requestId={}",
@@ -7443,7 +7522,7 @@ async def invoke_lsp4j_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID
         if any(kw in command for kw in _BUILD_KEYWORDS):
             timeout = 600.0  # 编译/构建: 10 分钟
         elif any(kw in command for kw in _READONLY_KEYWORDS):
-            timeout = 30.0  # 读操作: 30 秒
+            timeout = 15.0  # 读操作: 15 秒（实际耗时 <20ms，30s 过度冗余）
         else:
             timeout = 180.0  # 其他命令: 3 分钟
     logger.info("[LSP4J-TOOL] 调用 IDE 工具: tool={} agent_key={} timeout={}", tool_name, agent_key, timeout)

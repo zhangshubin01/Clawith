@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+import re
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -150,6 +152,38 @@ def is_retryable_error(result: str) -> bool:
         return False
         
     return classify_error(Exception(result)) != FailoverErrorType.NON_RETRYABLE
+
+def _format_friendly_error(error_text: str) -> str:
+    """将 LLM 原始错误转换为用户可理解的中文提示。
+
+    按优先级匹配错误模式，返回带 emoji 的中文提示。
+    无法识别时返回简短摘要。
+    """
+    text_lower = error_text.lower()
+
+    # 按优先级从高到低匹配
+    patterns: list[tuple[str, str]] = [
+        (r'insufficient\s*balance', '💰 API 余额不足，请前往控制台充值后重试。'),
+        (r'invalid.*api[\s_-]*key|unauthorized', '🔑 API 密钥无效或已过期，请检查 API 设置。'),
+        (r'rate[\s_-]*limit|too\s*many\s*request', '⏳ 请求过于频繁，请稍后重试。'),
+        (r'connection[\s_-]*refused', '🔌 无法连接到模型服务，请检查网络或服务状态。'),
+        (r'time[-\s]?out|timed\s*out', '⏱️ 模型响应超时，请稍后重试。'),
+        (r'context[\s_-]*length[\s_-]*exceed', '📏 上下文超过模型限制，请缩短对话或减少附加内容。'),
+        (r'internal[\s_-]*server[\s_-]*error|internal\s+error', '🖥️ 模型服务暂时异常，请稍后重试或联系管理员。'),
+    ]
+
+    for pattern, friendly in patterns:
+        if re.search(pattern, text_lower):
+            return friendly
+
+    # 5xx 状态码兜底
+    status_match = re.search(r'HTTP\s+(\d{3})', error_text)
+    if status_match and status_match.group(1).startswith('5'):
+        return f'🖥️ 模型服务暂时异常（HTTP {status_match.group(1)}），请稍后重试或联系管理员。'
+
+    # 无法识别时返回简短摘要
+    short = error_text[:200].replace('\n', ' ')
+    return f'⚠️ 调用模型出错，请联系管理员。错误摘要: {short}'
 
 
 def _get_model_timeout(model: "LLMModel") -> float:
@@ -350,6 +384,7 @@ async def _process_tool_call(
 
     # Execute tool — pass on_output for execute_code streaming
     _on_output = on_code_output if tool_name in ("execute_code", "execute_code_e2b") else None
+    tool_start = time.monotonic()
     result = await execute_tool(
         tool_name, args,
         agent_id=agent_id,
@@ -357,6 +392,8 @@ async def _process_tool_call(
         session_id=session_id,
         on_output=_on_output,
     )
+    tool_elapsed = time.monotonic() - tool_start
+    logger.info("[LSP4J-PERF] tool: {} elapsed={:.3f}s", tool_name, tool_elapsed)
     logger.debug(f"[LLM] Tool result: {result[:100]}")
 
     # ── Vision injection for screenshot tools ──
@@ -480,6 +517,9 @@ async def call_llm(
         if cancel_event and cancel_event.is_set():
             logger.info("[LLM] cancel_event 已设置，中断工具循环（round={}）", round_i)
             break
+        # [LSP4J-PERF] 轮次开始计时
+        round_start = time.monotonic()
+        logger.info("[LSP4J-PERF] Round {}/{} start, context_tokens={}", round_i + 1, _max_tool_rounds, _accumulated_usage.input_tokens)
 
         # Dynamic tool-call limit warning
         _warn_threshold_80 = int(_max_tool_rounds * 0.8)
@@ -513,6 +553,16 @@ async def call_llm(
                 on_chunk=_buffer_chunk,
                 on_tool_delta=on_tool_delta,
                 on_thinking=on_thinking,
+            )
+            # [LSP4J-PERF] LLM stream 完成
+            llm_time = time.monotonic() - round_start
+            logger.info(
+                "[LSP4J-PERF] Round {}: LLM stream done "
+                "llm_time={:.2f}s tool_calls={} "
+                "input_tokens={} output_tokens={}",
+                round_i + 1, llm_time, len(response.tool_calls or []),
+                getattr(response.usage, "input_tokens", 0) if response.usage else 0,
+                getattr(response.usage, "output_tokens", 0) if response.usage else 0,
             )
         except LLMError as e:
             logger.error(f"[LLM] LLMError: provider={getattr(model, 'provider', '?')} model={getattr(model, 'model', '?')} {e}")
@@ -595,6 +645,13 @@ async def call_llm(
                     content=tool_error,
                     tool_call_id=tc.get("id", ""),
                 ))
+            # [LSP4J-PERF] 所有工具执行完成
+            tool_time = time.monotonic() - round_start - llm_time
+            logger.info(
+                "[LSP4J-PERF] Round {}: tools done "
+                "tool_time={:.2f}s total={:.2f}s",
+                round_i + 1, tool_time, time.monotonic() - round_start,
+            )
 
     # Record tokens even on "too many rounds" exit
     if agent_id and _accumulated_usage.total_tokens > 0:
@@ -676,6 +733,8 @@ async def call_llm_with_failover(
     # Check if we need to failover
     if not is_retryable_error(primary_result):
         logger.warning(f"[Failover] Canceled: Primary model returned a non-retryable error: {primary_result[:150]}")
+        if primary_result.startswith(("[LLM Error]", "[LLM call error]", "[Error]")):
+            return _format_friendly_error(primary_result)
         return primary_result
 
     # Check guard conditions
@@ -741,7 +800,7 @@ async def call_llm_with_failover(
 
     # Combine error messages if fallback also failed
     if is_retryable_error(fallback_result) or fallback_result.startswith("⚠️") or fallback_result.startswith("[Error]"):
-        return f"⚠️ 调用模型出错: Primary: {primary_result[:80]} | Fallback: {fallback_result[:80]}"
+        return _format_friendly_error(primary_result)
 
     return fallback_result
 
@@ -821,7 +880,7 @@ async def call_agent_llm(
     except Exception as e:
         error_msg = str(e) or repr(e)
         logger.error(f"[call_agent_llm] Unexpected error: {error_msg}")
-        return f"⚠️ 调用模型出错: {error_msg[:150]}"
+        return _format_friendly_error(error_msg)
 
 
 async def call_agent_llm_with_tools(

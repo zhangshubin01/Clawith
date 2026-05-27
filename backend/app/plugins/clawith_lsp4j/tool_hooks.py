@@ -69,6 +69,41 @@ _LSP4J_OVERLAP_BASE_TOOL_NAMES = frozenset({
     "read_file", "list_files",
 })
 
+# ★ IDE 会话无关工具：这些工具在 IDE 代码编辑场景完全不相关
+# 过滤后可减少 ~16K tokens/轮的工具定义开销（从 43→15 个工具）
+_LSP4J_IRRELEVANT_TOOL_NAMES = frozenset({
+    # ── 文档转换类（需浏览器渲染引擎，IDE 无此能力）──
+    "convert_csv_to_xlsx",      # CSV→Excel 转换，IDE 不会操作表格文件
+    "convert_html_to_pdf",      # HTML→PDF，需 headless 浏览器
+    "convert_html_to_pptx",     # HTML→PPT，同上
+    "convert_markdown_to_docx", # Markdown→Word，非 IDE 场景
+    "convert_markdown_to_pdf",  # Markdown→PDF，同上
+    # ── 社交媒体/发布类（IDE 无社交功能入口）──
+    "plaza_add_comment",        # Plaza 评论，IDE 无社交面板
+    "plaza_create_post",        # Plaza 发帖，IDE 无社交面板
+    "plaza_get_new_posts",      # Plaza 拉取动态，IDE 不需要
+    "publish_page",             # 发布页面到 Web，IDE 不涉及
+    "delete_published_page",    # 删除已发布页面，IDE 不涉及
+    "unpublish_page",           # 取消发布，IDE 不涉及
+    "list_published_pages",     # 列出已发布页面，IDE 不涉及
+    # ── 图片生成类（需 GPU/外部 API，IDE 无此场景）──
+    "generate_image_custom",    # 自定义图片生成
+    "generate_image_google",    # Google Imagen 图片生成
+    "generate_image_openai",    # OpenAI DALL-E 图片生成
+    "generate_image_siliconflow", # SiliconFlow 图片生成
+    # ── OKR/目标管理类（IDE 不参与组织管理）──
+    "get_my_okr",               # 获取个人 OKR，IDE 无组织管理入口
+    "get_okr",                  # 获取团队 OKR，同上
+    "update_kr_content",        # 更新 KR 内容，同上
+    "update_kr_progress",       # 更新 KR 进度，同上
+    # ── 平台消息类（IDE 无通知发送能力）──
+    "send_channel_file",        # 频道文件发送，IDE 无频道
+    "send_platform_message",    # 平台消息推送，IDE 不涉及
+    # ── 仅 Web 场景有用的工具 ──
+    "read_webpage",             # 网页读取，IDE 内通常无此需求（需浏览器）
+    "read_document",            # 文档读取（向量检索），IDE 不涉及 RAG
+})
+
 # ──────────────────────────────────────────────
 # LSP4J IDE 工具定义（OpenAI function-calling 格式）
 # ──────────────────────────────────────────────
@@ -808,6 +843,10 @@ def install_lsp4j_tool_hooks() -> None:
             # ★ 过滤掉基础工具中与 IDE 工具重名/重叠的（只保留 IDE 版本）
             tools = [t for t in tools
                      if t.get("function", {}).get("name", "") not in _LSP4J_OVERLAP_BASE_TOOL_NAMES]
+            # ★ 过滤 IDE 场景无关工具（文档转换、社交发布、图片生成、OKR 管理等）
+            # 减少 ~16K tokens/轮的工具定义浪费
+            tools = [t for t in tools
+                     if t.get("function", {}).get("name", "") not in _LSP4J_IRRELEVANT_TOOL_NAMES]
             ide_tool_names = [t["function"]["name"] for t in _LSP4J_IDE_TOOLS]
             logger.info("[LSP4J-TOOL] 注册工具: base_count={} ide_tools={}", len(tools), ide_tool_names)
             return tools + _LSP4J_IDE_TOOLS
