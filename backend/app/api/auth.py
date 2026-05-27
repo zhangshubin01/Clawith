@@ -900,6 +900,9 @@ async def switch_tenant(
     else:
         redirect_url = await platform_service.get_tenant_sso_base_url(db, tenant, request)
 
+    # 若当前请求来自 localhost/开发环境，跳过 SSO 域重定向
+    if redirect_url and request.url.hostname in ('localhost', '127.0.0.1', '0.0.0.0'):
+        redirect_url = None
 
     # Include token in redirect URL for cross-domain switching if needed
     if redirect_url:
