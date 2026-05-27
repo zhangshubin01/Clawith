@@ -8,7 +8,8 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/android/Documents/UGit/Clawith/scripts/backup_docker_db.sh</string>
+        <!-- NOTE: Script must live outside ~/Documents/ on macOS, otherwise TCC will block launchd. -->
+        <string>/Users/android/Library/Application Support/Clawith/scripts/backup_docker_db.sh</string>
     </array>
 
     <!-- 每 6 小时执行一次（从加载时开始计时） -->
@@ -24,8 +25,9 @@
         <integer>0</integer>
     </dict>
 
+    <!-- WorkingDirectory 同样避开 ~/Documents -->
     <key>WorkingDirectory</key>
-    <string>/Users/android/Documents/UGit/Clawith</string>
+    <string>/Users/android/Library/Application Support/Clawith</string>
 
     <key>StandardOutPath</key>
     <string>/tmp/clawith_backup.log</string>
