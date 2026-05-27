@@ -515,6 +515,9 @@ export default function Layout() {
             return;
         }
         const data = await res.json();
+        console.log('[switch-tenant] redirect_url:', data.redirect_url);
+        console.log('[switch-tenant] access_token preview:', data.access_token?.substring(0, 20) + '...');
+        console.log('[switch-tenant] current hostname:', window.location.hostname);
         if (data.redirect_url) {
             localStorage.setItem('token', data.access_token);
             const targetUrl = new URL(data.redirect_url, window.location.origin);

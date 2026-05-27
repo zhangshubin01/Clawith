@@ -31,6 +31,7 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
             || url.startsWith('/auth/forgot-password')
             || url.startsWith('/auth/reset-password');
         if (res.status === 401 && !isAuthEndpoint) {
+            console.warn('[api] 401 auto-logout triggered for:', url, 'status:', res.status);
             localStorage.removeItem('token');
             localStorage.removeItem('user');
             window.location.href = '/login';

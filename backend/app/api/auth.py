@@ -905,6 +905,10 @@ async def switch_tenant(
     if redirect_url:
         separator = "&" if "?" in redirect_url else "?"
         redirect_url = f"{redirect_url}{separator}token={token}"
+    logger.info(f"switch-tenant: user={current_user.id}, from_tenant={current_user.tenant_id}, "
+                f"to_tenant={data.tenant_id}, to_tenant_slug={tenant.slug}, "
+                f"sso_domain={repr(tenant.sso_domain)}, sso_redirect_enabled={sso_redirect_enabled}, "
+                f"redirect_url={redirect_url}")
 
     return TenantSwitchResponse(
         access_token=token,

@@ -4,6 +4,8 @@ import os
 import re
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models.system_settings import SystemSetting
 
 class PlatformService:
     """Service to handle platform-wide settings and URL resolution."""
