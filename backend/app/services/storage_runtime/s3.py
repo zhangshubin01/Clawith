@@ -177,13 +177,16 @@ class S3StorageBackend(StorageBackend):
         return await asyncio.to_thread(body.read)
 
     async def write_bytes(self, key: str, data: bytes, content_type: str | None = None) -> None:
+        # GCS S3-compatible API requires an explicit Content-Type; without it
+        # the V4 signature body-hash is calculated on an empty content-type,
+        # but GCS applies a different default — causing SignatureDoesNotMatch.
+        resolved_ct = content_type or "application/octet-stream"
         kwargs: dict[str, Any] = {
             "Bucket": self.bucket,
             "Key": self._object_key(key),
             "Body": data,
+            "ContentType": resolved_ct,
         }
-        if content_type:
-            kwargs["ContentType"] = content_type
         async with self._async_client() as client:
             await client.put_object(**kwargs)
 
@@ -302,8 +305,10 @@ class S3StorageBackend(StorageBackend):
             parsed_url = urlparse(url)
             parsed_endpoint = urlparse(self.endpoint_url)
             if parsed_url.netloc == parsed_endpoint.netloc:
+                # MinIO-style endpoint: rewrite path with /minio prefix
                 new_path = "/minio" + parsed_url.path
                 url = urlunparse(("", "", new_path, parsed_url.params, parsed_url.query, parsed_url.fragment))
+            # GCS (storage.googleapis.com): presigned URLs are already correct, no rewrite needed
         return url
 
 
