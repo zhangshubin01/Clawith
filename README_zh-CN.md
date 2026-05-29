@@ -105,19 +105,30 @@ bash restart.sh
 
 ### Docker 部署
 
+项目提供三个环境模板，按需选择：
+
+| 环境 | 模板文件 | 说明 |
+|------|----------|------|
+| 本地开发 | `env.local.example` | `PUBLIC_BASE_URL=http://localhost:3008`，固定开发密钥 |
+| 测试/预发布 | `env.staging.example` | 独立数据库，测试域名 |
+| 生产环境 | `env.production.example` | HTTPS 域名，须填入强随机密钥 |
 ```bash
 git clone https://github.com/dataelement/Clawith.git
-cd Clawith && cp .env.example .env
+cd Clawith
+# 选择对应环境，复制为 .env:
+cp env.local.example .env         # 本地开发
+cp env.staging.example .env       # 测试/预发布（记得改域名）
+cp env.production.example .env    # 生产环境（记得改密钥和域名）
 docker compose up -d
 # → http://localhost:3008
 ```
+> `docker compose` 默认读取 `.env`。也可直接指定：`docker compose --env-file .env.production up -d`
 
 **更新已有部署：**
 ```bash
 git pull
 docker compose up -d --build
 ```
-
 > **🇨🇳 Docker 镜像加速（国内用户）：** 如果 `docker compose up -d` 拉取镜像失败或超时，请先配置 Docker 镜像加速源：
 > ```bash
 > sudo tee /etc/docker/daemon.json > /dev/null <<EOF
@@ -287,8 +298,23 @@ data: {"type": "error", "message": "..."}
 欢迎各种形式的贡献！无论是修复 Bug、添加功能、改进文档还是翻译——请查看我们的[贡献指南](CONTRIBUTING.md)开始参与。新手可以关注 [`good first issue`](https://github.com/dataelement/Clawith/labels/good%20first%20issue) 标签。
 
 ## 🔒 安全清单
-
 修改默认密码 · 设置强 `SECRET_KEY` / `JWT_SECRET_KEY` · 启用 HTTPS · 生产环境使用 PostgreSQL · 定期备份 · 限制 Docker socket 访问。
+
+## 📧 系统邮件与 PUBLIC_BASE_URL
+
+密码重置、邮箱验证等系统邮件依赖 SMTP 配置和 `PUBLIC_BASE_URL`。
+
+**配置 SMTP：** 以平台管理员登录 → 管理后台 → 平台配置 → 系统邮件配置 → 填入 SMTP 参数（Gmail / QQ 邮箱 / 阿里企业邮等）→ 先保存，再发送测试邮件。
+
+**`PUBLIC_BASE_URL`** 用于生成密码重置链接、OAuth 回调和 webhook 地址：
+
+| 环境 | 设置 |
+|------|------|
+| 本地开发 | `http://localhost:3008`（`env.local.example` 已预设） |
+| 测试/预发布 | `https://staging.your-domain.com`（编辑 `env.staging.example`） |
+| 生产环境 | `https://your-domain.com`（编辑 `env.production.example`） |
+
+> 不设置时，后端自动从浏览器请求推断；非浏览器调用（curl、后台任务）将 fallback 到 `https://try.clawith.ai`，导致邮件链接指向错误域名。
 
 ## 💬 社区
 

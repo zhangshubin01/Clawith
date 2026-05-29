@@ -116,20 +116,27 @@ bash restart.sh
 # → Backend:  http://localhost:8008
 ```
 
-### Docker
+### Docker 部署
 
+项目提供三个环境模板，按需选择：
+
+| 环境 | 模板文件 | 说明 |
+|------|----------|------|
+| 本地开发 | `env.local.example` | `PUBLIC_BASE_URL=http://localhost:3008`，固定开发密钥 |
+| 测试/预发布 | `env.staging.example` | 独立数据库，测试域名 |
+| 生产环境 | `env.production.example` | HTTPS 域名，须填入强随机密钥 |
 ```bash
 git clone https://github.com/dataelement/Clawith.git
-cd Clawith && cp .env.example .env
+cd Clawith
+# 选择对应环境，复制为 .env:
+cp env.local.example .env         # 本地开发
+cp env.staging.example .env       # 测试/预发布（记得改域名）
+cp env.production.example .env    # 生产环境（记得改密钥和域名）
 docker compose up -d
 # → http://localhost:3008
 ```
+> `docker compose` 默认读取 `.env`。也可直接指定：`docker compose --env-file .env.production up -d`
 
-**To update an existing deployment:**
-```bash
-git pull
-docker compose up -d --build
-```
 
 **Agent workspace data storage:**
 Agent workspace files (soul.md, memory, skills, workspace files) are stored in `./backend/agent_data/` on the host filesystem. Each agent has its own directory named by its UUID (e.g., `backend/agent_data/<agent-id>/`). This directory is mounted into the backend container at `/data/agents/`, making agent data directly accessible from your local filesystem.
@@ -174,8 +181,15 @@ You can configure the SMTP server settings directly from the web interface:
 2. Navigate to **Admin -> Platform Settings**.
 3. Under the **Platform** tab, locate the **System Email Configuration** section and enter your SMTP details.
 
-`PUBLIC_BASE_URL` must point to the user-facing frontend because reset links are generated as `/reset-password?token=...`.
-In production, set it to your public HTTPS domain (for example `https://app.example.com`), not a localhost address.
+> **`PUBLIC_BASE_URL`** must point to the user-facing frontend (password reset links, OAuth callbacks, webhooks).
+>
+> | 环境 | `PUBLIC_BASE_URL` 设置 |
+> |------|------------------------|
+> | 本地开发 | `http://localhost:3008`（`env.local.example` 已预设） |
+> | 测试/预发布 | `https://staging.your-domain.com`（编辑 `env.staging.example` 后复制为 `.env`） |
+> | 生产环境 | `https://your-domain.com`（编辑 `env.production.example` 后复制为 `.env`） |
+>
+> 不设置时，后端自动从浏览器请求推断；非浏览器调用（curl、后台任务）将 fallback 到 `https://try.clawith.ai`，导致邮件链接指向错误域名。
 
 Quick local validation:
 

@@ -1,7 +1,8 @@
 #!/bin/bash
 # Clawith — Restart Script
-# Usage: ./restart.sh [--source]
+# Usage: ./restart.sh [--source] [--env-file FILE]
 #   --source  Force source (non-Docker) mode even if Docker is available
+#   --env-file Use alternative env file (default: .env)
 
 set -e
 
@@ -25,12 +26,14 @@ FRONTEND_PID="$PID_DIR/frontend.pid"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-# Parse arguments
-FORCE_SOURCE=false
+ENV_FILE="$ROOT/.env"
 for arg in "$@"; do
     case $arg in
         --source) FORCE_SOURCE=true ;;
+        --env-file) ENV_FILE="$2"; shift ;;
+        --env-file=*) ENV_FILE="${arg#*=}" ;;
     esac
+    shift
 done
 
 # ═══════════════════════════════════════════════════════
@@ -44,10 +47,14 @@ init_dirs() {
 # 加载环境变量
 # ═══════════════════════════════════════════════════════
 load_env() {
-    if [ -f "$ROOT/.env" ]; then
+    if [ -f "$ENV_FILE" ]; then
+        echo -e "  ${CYAN}📄${NC} Loading env from: $ENV_FILE"
         set -a
-        source "$ROOT/.env"
+        source "$ENV_FILE"
         set +a
+    elif [ "$ENV_FILE" != "$ROOT/.env" ]; then
+        echo -e "  ${RED}✗${NC} Env file not found: $ENV_FILE"
+        exit 1
     fi
 
     : "${DATABASE_URL:=postgresql+asyncpg://clawith:clawith@localhost:5432/clawith?ssl=disable}"

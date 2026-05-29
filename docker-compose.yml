@@ -57,7 +57,8 @@ services:
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       DOCKER_NETWORK: clawith_yaojin_network
       SS_CONFIG_FILE: /data/ss-nodes.json
-      # Public base URL for constructing OAuth callback URLs and email links.
+# 环境选择: cp env.local.example .env | cp env.staging.example .env | cp env.production.example .env
+# 手动指定: docker compose --env-file .env.production up -d
       # Required when deployed behind a reverse proxy (e.g. Nginx, Cloudflare).
       # If not set, the server infers the URL from the incoming request host.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
