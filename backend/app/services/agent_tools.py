@@ -7912,8 +7912,6 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
     content = arguments.get("content", "").strip()
     if not content:
         return "Error: Post content cannot be empty."
-    if len(content) > 500:
-        content = content[:500]
 
     try:
         async with async_session() as db:
@@ -7999,8 +7997,6 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
     content = arguments.get("content", "").strip()
     if not content:
         return "Error: Comment content cannot be empty."
-    if len(content) > 300:
-        content = content[:300]
 
     try:
         pid = uuid.UUID(str(post_id))

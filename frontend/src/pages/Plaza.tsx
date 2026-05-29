@@ -75,6 +75,18 @@ const Icons = {
             <path d="M3 4h10M6 4V3a1 1 0 011-1h2a1 1 0 011 1v1M13 4v9a2 2 0 01-2 2H5a2 2 0 01-2-2V4" />
         </svg>
     ),
+    chevronDown: (
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+             strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 5l3 3 3-3" />
+        </svg>
+    ),
+    chevronUp: (
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+             strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 7l3-3 3 3" />
+        </svg>
+    ),
 };
 
 /* ────── Helpers ────── */
@@ -125,35 +137,68 @@ const linkifyContent = (text: string) => {
     });
 };
 
-// Simple markdown-like rendering: **bold**, `code`, line breaks
-const renderContent = (text: string) => {
-    const elements: any[] = [];
-    const lines = text.split('\n');
-    lines.forEach((line, li) => {
+/* ────── Constants ────── */
+
+const MAX_POST_LINES = 8;
+const MAX_COMMENT_LINES = 5;
+
+/* ────── Helpers ────── */
+
+// Auto-detect URLs, #hashtags, and @mentions in text
+// Simple markdown-like rendering: **bold**, `code`, line breaks.
+// When maxLines is set and content exceeds it, rendering is truncated.
+// Does NOT include fold/expand toggle — that belongs at the call site.
+const renderContent = (
+    text: string,
+    maxLines?: number,
+): React.ReactNode[] => {
+    const elements: React.ReactNode[] = [];
+    const allLines = text.split('\n');
+    const visibleLines = maxLines ? allLines.slice(0, maxLines) : allLines;
+    visibleLines.forEach((line, li) => {
         const parts = line.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
         parts.forEach((part, pi) => {
             if (part.startsWith('**') && part.endsWith('**')) {
-                elements.push(<strong key={`${li}-${pi}`}>{part.slice(2, -2)}</strong>);
+                elements.push(
+                    <strong key={`${li}-${pi}`}>{part.slice(2, -2)}</strong>
+                );
             } else if (part.startsWith('`') && part.endsWith('`')) {
                 elements.push(
-                    <code key={`${li}-${pi}`} style={{
-                        background: 'var(--bg-tertiary)', padding: '1px 5px',
-                        borderRadius: 'var(--radius-sm)', fontSize: 'var(--text-xs)',
-                        fontFamily: 'var(--font-mono)',
-                    }}>{part.slice(1, -1)}</code>
+                    <code
+                        key={`${li}-${pi}`}
+                        style={{
+                            background: 'var(--bg-tertiary)',
+                            padding: '1px 5px',
+                            borderRadius: 'var(--radius-sm)',
+                            fontSize: 'var(--text-xs)',
+                            fontFamily: 'var(--font-mono)',
+                        }}
+                    >
+                        {part.slice(1, -1)}
+                    </code>
                 );
             } else {
                 const linked = linkifyContent(part);
                 if (Array.isArray(linked)) {
-                    elements.push(...linked.map((el, ei) =>
-                        typeof el === 'string' ? <span key={`${li}-${pi}-${ei}`}>{el}</span> : el
-                    ));
+                    elements.push(
+                        ...linked.map((el, ei) =>
+                            typeof el === 'string' ? (
+                                <span key={`${li}-${pi}-${ei}`}>{el}</span>
+                            ) : (
+                                el
+                            )
+                        )
+                    );
                 } else {
-                    elements.push(<span key={`${li}-${pi}`}>{linked}</span>);
+                    elements.push(
+                        <span key={`${li}-${pi}`}>{linked}</span>
+                    );
                 }
             }
         });
-        if (li < lines.length - 1) elements.push(<br key={`br-${li}`} />);
+        if (li < visibleLines.length - 1) {
+            elements.push(<br key={`br-${li}`} />);
+        }
     });
     return elements;
 };
@@ -480,6 +525,66 @@ export default function Plaza() {
     const [deleteModalPostId, setDeleteModalPostId] = useState<string | null>(null);
     const tenantId = localStorage.getItem('current_tenant_id') || '';
 
+    // ── 内容折叠状态 ──
+    const [expandedPosts, setExpandedPosts] = useState<Set<string>>(() => {
+        const raw = searchParams.get('expand_post');
+        return raw ? new Set(raw.split(',').filter(Boolean)) : new Set();
+    });
+    const [expandedComments, setExpandedComments] = useState<Set<string>>(() => {
+        const raw = searchParams.get('expand_comment');
+        return raw ? new Set(raw.split(',').filter(Boolean)) : new Set();
+    });
+
+    // URL 同步
+    useEffect(() => {
+        const params = new URLSearchParams(searchParams);
+        if (expandedPosts.size > 0) {
+            params.set('expand_post', [...expandedPosts].join(','));
+        } else {
+            params.delete('expand_post');
+        }
+        if (expandedComments.size > 0) {
+            params.set('expand_comment', [...expandedComments].join(','));
+        } else {
+            params.delete('expand_comment');
+        }
+        const qs = params.toString();
+        const cur = window.location.search.replace(/^\?/, '');
+        if (qs !== cur) {
+            window.history.replaceState(
+                null,
+                '',
+                window.location.pathname + (qs ? '?' + qs : '')
+            );
+        }
+    }, [expandedPosts, expandedComments, searchParams]);
+
+    const togglePostExpand = useCallback((id: string) => {
+        setExpandedPosts((prev) => {
+            const wasExpanded = prev.has(id);
+            const next = new Set(prev);
+            if (wasExpanded) {
+                next.delete(id);
+            } else {
+                next.add(id);
+                requestAnimationFrame(() => {
+                    document
+                        .getElementById(`post-${id}`)
+                        ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                });
+            }
+            return next;
+        });
+    }, []);
+
+    const toggleCommentExpand = useCallback((id: string) => {
+        setExpandedComments((prev) => {
+            const next = new Set(prev);
+            next.has(id) ? next.delete(id) : next.add(id);
+            return next;
+        });
+    }, []);
+
     useEffect(() => {
         const p = searchParams.get('post');
         if (p) {
@@ -641,7 +746,7 @@ export default function Plaza() {
                                 onChange={setNewPost}
                                 mentionables={mentionables}
                                 placeholder={t('plaza.writeSomething', "What's on your mind?")}
-                                maxLength={500}
+                                maxLength={10000}
                                 multiline
                             />
                         </div>
@@ -650,7 +755,7 @@ export default function Plaza() {
                             alignItems: 'center', marginTop: '10px', paddingLeft: '42px',
                         }}>
                             <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-tertiary)' }}>
-                                {newPost.length}/500 · {t('plaza.hashtagTip', 'Use #hashtags and @mentions')}
+                                {newPost.length}/10000 · {t('plaza.hashtagTip', 'Use #hashtags and @mentions')}
                             </span>
                             <button
                                 className={`btn ${newPost.trim() ? 'btn-primary' : 'btn-secondary'}`}
@@ -734,14 +839,84 @@ export default function Plaza() {
                                     </div>
 
                                     {/* Content */}
-                                    <div style={{
-                                        fontSize: 'var(--text-sm)', lineHeight: 1.65,
-                                        color: 'var(--text-primary)',
-                                        marginBottom: '10px', whiteSpace: 'pre-wrap',
-                                        wordBreak: 'break-word', paddingLeft: '40px',
-                                    }}>
-                                        {renderContent(post.content)}
+                                    <div
+                                        id={`post-${post.id}`}
+                                        style={{
+                                            fontSize: 'var(--text-sm)', lineHeight: 1.65,
+                                            color: 'var(--text-primary)',
+                                            whiteSpace: 'pre-wrap',
+                                            wordBreak: 'break-word', paddingLeft: '40px',
+                                            position: 'relative',
+                                        }}
+                                    >
+                                        {renderContent(
+                                            post.content,
+                                            expandedPosts.has(post.id)
+                                                ? undefined
+                                                : MAX_POST_LINES,
+                                        )}
+                                        {/* Gradient fade overlay (collapsed only) */}
+                                        {!expandedPosts.has(post.id) &&
+                                            post.content.split('\n').length >
+                                                MAX_POST_LINES && (
+                                                <div
+                                                    aria-hidden="true"
+                                                    style={{
+                                                        position: 'absolute', bottom: 0, left: 0,
+                                                        right: 0, height: '40px',
+                                                        background: 'linear-gradient(to bottom, transparent, var(--bg-primary))',
+                                                        pointerEvents: 'none',
+                                                    }}
+                                                />
+                                            )}
                                     </div>
+
+                                    {/* ── Fold/expand toggle (SEPARATE block) ── */}
+                                    {post.content.split('\n').length >
+                                        MAX_POST_LINES && (
+                                        <div
+                                            style={{
+                                                paddingLeft: '40px',
+                                                marginTop: '8px',
+                                                marginBottom: '4px',
+                                            }}
+                                        >
+                                            <button
+                                                type="button"
+                                                aria-expanded={expandedPosts.has(post.id)}
+                                                style={{
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px',
+                                                    background: 'none',
+                                                    border: 'none',
+                                                    cursor: 'pointer',
+                                                    fontSize: 'var(--text-xs)',
+                                                    color: 'var(--text-tertiary)',
+                                                    padding: '4px 8px',
+                                                    borderRadius: 'var(--radius-sm)',
+                                                    transition: 'all var(--transition-fast)',
+                                                }}
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    togglePostExpand(post.id);
+                                                }}
+                                                onMouseOver={e => {
+                                                    e.currentTarget.style.background = 'var(--bg-hover)';
+                                                    e.currentTarget.style.color = 'var(--text-secondary)';
+                                                }}
+                                                onMouseOut={e => {
+                                                    e.currentTarget.style.background = 'none';
+                                                    e.currentTarget.style.color = 'var(--text-tertiary)';
+                                                }}
+                                            >
+                                                {expandedPosts.has(post.id) ? Icons.chevronUp : Icons.chevronDown}
+                                                {expandedPosts.has(post.id)
+                                                    ? t('plaza.collapseHint', '收起')
+                                                    : t('plaza.expandHint', '展开全文')}
+                                            </button>
+                                        </div>
+                                    )}
 
                                     {/* Actions */}
                                     <div style={{
@@ -802,9 +977,66 @@ export default function Plaza() {
                                                         <div style={{
                                                             fontSize: 'var(--text-sm)', marginTop: '2px',
                                                             lineHeight: 1.5, color: 'var(--text-secondary)',
+                                                            position: 'relative',
                                                         }}>
-                                                            {renderContent(c.content)}
+                                                            {renderContent(
+                                                                c.content,
+                                                                expandedComments.has(c.id)
+                                                                    ? undefined
+                                                                    : MAX_COMMENT_LINES,
+                                                            )}
+                                                            {/* Gradient fade */}
+                                                            {!expandedComments.has(c.id) &&
+                                                                c.content.split('\n').length >
+                                                                    MAX_COMMENT_LINES && (
+                                                                    <div aria-hidden="true" style={{
+                                                                        position: 'absolute', bottom: 0, left: 0,
+                                                                        right: 0, height: '36px',
+                                                                        background: 'linear-gradient(to bottom, transparent, var(--bg-secondary))',
+                                                                        pointerEvents: 'none',
+                                                                    }} />
+                                                                )}
                                                         </div>
+                                                        {/* ── Comment fold toggle ── */}
+                                                        {c.content.split('\n').length >
+                                                            MAX_COMMENT_LINES && (
+                                                            <div style={{ marginTop: '6px', marginBottom: '4px' }}>
+                                                                <button
+                                                                    type="button"
+                                                                    aria-expanded={expandedComments.has(c.id)}
+                                                                    style={{
+                                                                        display: 'inline-flex',
+                                                                        alignItems: 'center',
+                                                                        gap: '4px',
+                                                                        background: 'none',
+                                                                        border: 'none',
+                                                                        cursor: 'pointer',
+                                                                        fontSize: 'var(--text-xs)',
+                                                                        color: 'var(--text-tertiary)',
+                                                                        padding: '4px 8px',
+                                                                        borderRadius: 'var(--radius-sm)',
+                                                                        transition: 'all var(--transition-fast)',
+                                                                    }}
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        toggleCommentExpand(c.id);
+                                                                    }}
+                                                                    onMouseOver={e => {
+                                                                        e.currentTarget.style.background = 'var(--bg-hover)';
+                                                                        e.currentTarget.style.color = 'var(--text-secondary)';
+                                                                    }}
+                                                                    onMouseOut={e => {
+                                                                        e.currentTarget.style.background = 'none';
+                                                                        e.currentTarget.style.color = 'var(--text-tertiary)';
+                                                                    }}
+                                                                >
+                                                                    {expandedComments.has(c.id) ? Icons.chevronUp : Icons.chevronDown}
+                                                                    {expandedComments.has(c.id)
+                                                                        ? t('plaza.collapseHint', '收起')
+                                                                        : t('plaza.expandHint', '展开全文')}
+                                                                </button>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 </div>
                                             ))}
@@ -819,7 +1051,7 @@ export default function Plaza() {
                                                     }}
                                                     mentionables={mentionables}
                                                     placeholder={t('plaza.writeComment', 'Write a comment...')}
-                                                    maxLength={300}
+                                                    maxLength={10000}
                                                     style={{ height: '32px' }}
                                                 />
                                                 <button

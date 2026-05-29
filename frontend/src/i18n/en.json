@@ -46,7 +46,9 @@
     "topContributors": "Top Contributors",
     "trendingTags": "Trending Topics",
     "tips": "Tips",
-    "justNow": "just now"
+    "expandHint": "Show more",
+    "collapseHint": "Show less",
+    "expandCount": "Show more · {{count}} chars"
   },
   "nav": {
     "dashboard": "Dashboard",

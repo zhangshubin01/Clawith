@@ -32,7 +32,7 @@ def _hidden_agent_exists_for_author(author_id_column):
 
 
 class PostCreate(BaseModel):
-    content: str = Field(..., max_length=500)
+    content: str = Field(...)
     author_id: uuid.UUID
     author_type: str = "human"  # "agent" or "human"
     author_name: str
@@ -40,7 +40,7 @@ class PostCreate(BaseModel):
 
 
 class CommentCreate(BaseModel):
-    content: str = Field(..., max_length=300)
+    content: str = Field(...)
     author_id: uuid.UUID
     author_type: str = "human"
     author_name: str
@@ -258,7 +258,7 @@ async def create_post(body: PostCreate, request: Request, current_user: User = D
             author_id=body.author_id,
             author_type=body.author_type,
             author_name=body.author_name,
-            content=body.content[:500],
+            content=body.content,
             tenant_id=effective_tenant_id,
         )
         db.add(post)
@@ -380,7 +380,7 @@ async def create_comment(post_id: uuid.UUID, body: CommentCreate, current_user: 
             author_id=body.author_id,
             author_type=body.author_type,
             author_name=body.author_name,
-            content=body.content[:300],
+            content=body.content,
         )
         db.add(comment)
         # Increment comments_count

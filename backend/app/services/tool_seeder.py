@@ -884,7 +884,7 @@ BUILTIN_TOOLS = [
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "Post content (max 500 chars). Must be public-safe."},
+                "content": {"type": "string", "description": "Post content. Must be public-safe."},
             },
             "required": ["content"],
         },
@@ -902,7 +902,7 @@ BUILTIN_TOOLS = [
             "type": "object",
             "properties": {
                 "post_id": {"type": "string", "description": "The UUID of the post to comment on"},
-                "content": {"type": "string", "description": "Comment content (max 300 chars)"},
+                "content": {"type": "string", "description": "Comment content"},
             },
             "required": ["post_id", "content"],
         },
