@@ -188,15 +188,20 @@ async def lifespan(app: FastAPI):
         try:
             from app.models.tenant import Tenant
             from app.database import async_session as _session
-            from sqlalchemy import select as _select
+            from sqlalchemy import select as _select, update as _update
             async with _session() as _db:
                 _existing = await _db.execute(_select(Tenant).where(Tenant.slug == "default"))
                 if not _existing.scalar_one_or_none():
                     _db.add(Tenant(name="Default", slug="default", im_provider="web_only"))
                     await _db.commit()
                     logger.info("[startup] Default company created")
+
+                # Enable A2A async communication for all existing companies on startup/restart
+                await _db.execute(_update(Tenant).values(a2a_async_enabled=True))
+                await _db.commit()
+                logger.info("[startup] Enabled A2A async communication for all existing companies")
         except Exception as e:
-            logger.warning(f"[startup] Default company seed failed: {e}")
+            logger.warning(f"[startup] Default company seed or A2A enable failed: {e}")
 
         try:
             import shutil
