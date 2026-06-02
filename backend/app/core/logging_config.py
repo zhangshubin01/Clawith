@@ -96,6 +96,15 @@ def _request_noise_filter(record) -> bool:
         return False
 
     return True
+def _disable_agentbay_logger_override():
+    """Disable AgentBay SDK's logging override to prevent it from resetting loguru."""
+    if "agentbay._common.logger" in sys.modules:
+        try:
+            from agentbay._common.logger import AgentBayLogger
+            AgentBayLogger._initialized = True
+            AgentBayLogger.setup = classmethod(lambda cls, *args, **kwargs: None)
+        except Exception:
+            pass
 
 
 def configure_logging():
@@ -113,6 +122,11 @@ def configure_logging():
 
         # Remove default handler
         logger.remove()
+
+        # DISABLE AgentBay SDK logger override BEFORE adding our handlers.
+        # AgentBay SDK aggressively resets Python's root logger on import,
+        # which can destroy loguru's handler configuration.
+        _disable_agentbay_logger_override()
 
         # Add stdout handler with hardcoded defaults (safe for early import)
         logger.add(
