@@ -13,13 +13,16 @@ import uuid
 from datetime import datetime, timezone, timedelta
 
 from loguru import logger
-from sqlalchemy import select, update, exists, and_
+
+from app.core.logging_config import new_trace_id
+from sqlalchemy import select, update, or_
 from app.services.storage import agent_storage_key, get_storage_backend
 
 from app.services.llm.finish import FINISH_PROTOCOL_REMINDER, find_finish_call, parse_tool_arguments
 
 # 后台心跳任务强引用集合，防止 fire-and-forget task 被 GC 回收
 _heartbeat_background_tasks: set[asyncio.Task] = set()
+_HEARTBEAT_SEMAPHORE = asyncio.Semaphore(10)
 
 # Default heartbeat instruction used when HEARTBEAT.md doesn't exist
 DEFAULT_HEARTBEAT_INSTRUCTION = """[Heartbeat Check]
@@ -138,8 +141,10 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
     during long-running LLM calls:
       Phase 1: Read agent, model, context, notifications → commit
       Phase 2: LLM tool loop (no DB connection held)
-      Phase 3: Write token usage + last_heartbeat_at → commit
+      Phase 3: Write token usage → commit
     """
+    new_trace_id()
+    await _HEARTBEAT_SEMAPHORE.acquire()
     try:
         from app.database import async_session
         from app.models.agent import Agent
@@ -423,14 +428,6 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
             # Record accumulated heartbeat token usage
             if _hb_accumulated_usage and _hb_accumulated_usage.total_tokens > 0:
                 await record_token_usage(agent_id, _hb_accumulated_usage)
-
-            # Update last_heartbeat_at
-            # Using an update statement is safer to avoid state drift if the object was updated elsewhere
-            await db.execute(
-                update(Agent)
-                .where(Agent.id == agent_id)
-                .values(last_heartbeat_at=datetime.now(timezone.utc))
-            )
             await db.commit()
 
         # 每次心跳均写入工作日志，便于「后端服务 → 心跳」页追踪（含 HEARTBEAT_OK 空跑）
@@ -462,6 +459,8 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
 
     except Exception as e:
         logger.exception(f"Heartbeat error for agent {agent_id}: {e}")
+    finally:
+        _HEARTBEAT_SEMAPHORE.release()
 
 
 async def _heartbeat_tick():
@@ -472,6 +471,7 @@ async def _heartbeat_tick():
     from app.services.timezone_utils import get_agent_timezone_sync
     from app.models.tenant import Tenant
 
+    new_trace_id()
     now = datetime.now(timezone.utc)
 
     try:
@@ -515,17 +515,41 @@ async def _heartbeat_tick():
                 if agent.last_heartbeat_at and (now - agent.last_heartbeat_at) < interval:
                     continue
 
-                # Fire heartbeat
+                # Atomically claim this heartbeat slot before scheduling work.
+                claim_result = await db.execute(
+                    update(Agent)
+                    .where(
+                        Agent.id == agent.id,
+                        Agent.heartbeat_enabled == True,
+                        Agent.status.in_(["running", "idle"]),
+                        or_(
+                            Agent.last_heartbeat_at.is_(None),
+                            Agent.last_heartbeat_at <= now - interval,
+                        ),
+                    )
+                    .values(last_heartbeat_at=now)
+                )
+                if (claim_result.rowcount or 0) != 1:
+                    continue
+
+                await db.commit()
+
+                # Fire heartbeat only after the DB claim has been committed.
                 logger.info(f"💓 Triggering heartbeat for {agent.name}")
-                await write_audit_log("heartbeat_fire", {"agent_name": agent.name}, agent_id=agent.id)
-                # 保存强引用防止 GC 回收 fire-and-forget task，done 时自动移除
-                task = asyncio.create_task(_execute_heartbeat(agent.id))
-                _heartbeat_background_tasks.add(task)
-                task.add_done_callback(_heartbeat_background_tasks.discard)
+                try:
+                    await write_audit_log("heartbeat_fire", {"agent_name": agent.name}, agent_id=agent.id)
+                except Exception as e:
+                    logger.warning(f"Failed to write heartbeat_fire audit log for {agent.name}: {e}")
+                asyncio.create_task(_execute_heartbeat(agent.id))
                 triggered += 1
 
+            await db.commit()
+
             if triggered:
-                await write_audit_log("heartbeat_tick", {"eligible_agents": len(agents), "triggered": triggered})
+                try:
+                    await write_audit_log("heartbeat_tick", {"eligible_agents": len(agents), "triggered": triggered})
+                except Exception as e:
+                    logger.warning(f"Failed to write heartbeat_tick audit log: {e}")
 
     except Exception as e:
         logger.exception(f"Heartbeat tick error: {e}")
@@ -599,6 +623,7 @@ async def run_agent_oneshot(
 
     Returns the final reply string (for logging purposes).
     """
+    new_trace_id()
     try:
         from app.database import async_session
         from app.models.agent import Agent

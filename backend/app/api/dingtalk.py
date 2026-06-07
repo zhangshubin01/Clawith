@@ -184,7 +184,6 @@ async def process_dingtalk_message(
     from app.models.audit import ChatMessage
     from app.services.channel_session import find_or_create_channel_session
     from app.services.channel_user_service import channel_user_service
-    from app.api.feishu import _call_agent_llm
 
     async with async_session() as db:
         sender_staff_id = (sender_staff_id or "").strip()
@@ -269,7 +268,28 @@ async def process_dingtalk_message(
             )
         )
         sess.last_message_at = datetime.now(timezone.utc)
+
+        # Also load DingTalk credentials and agent/model config in this transaction
+        _dt_cfg_r = await db.execute(
+            _select(ChannelConfig).where(
+                ChannelConfig.agent_id == agent_id,
+                ChannelConfig.channel_type == "dingtalk",
+            )
+        )
+        _dt_cfg = _dt_cfg_r.scalar_one_or_none()
+        _dt_app_key = _dt_cfg.app_id if _dt_cfg else None
+        _dt_app_secret = _dt_cfg.app_secret if _dt_cfg else None
+
+        # Pre-load agent/model for LLM call
+        from app.api.feishu import _load_agent_and_model
+        _agent_model, _llm_model, _fallback_model = await _load_agent_and_model(db, agent_id)
+
+        # Extract agent name before closing session
+        _agent_name = agent_obj.name
+
         await db.commit()
+        # ── Phase 1 complete: release connection before slow LLM/HTTP work ──
+        await db.close()
 
         # Build LLM input text: for images, inject base64 markers so vision models can see them
         llm_user_text = user_text
@@ -283,17 +303,6 @@ async def process_dingtalk_message(
             _upload_dingtalk_media,
             _send_dingtalk_media_message,
         )
-
-        # Load DingTalk credentials from ChannelConfig
-        _dt_cfg_r = await db.execute(
-            _select(ChannelConfig).where(
-                ChannelConfig.agent_id == agent_id,
-                ChannelConfig.channel_type == "dingtalk",
-            )
-        )
-        _dt_cfg = _dt_cfg_r.scalar_one_or_none()
-        _dt_app_key = _dt_cfg.app_id if _dt_cfg else None
-        _dt_app_secret = _dt_cfg.app_secret if _dt_cfg else None
 
         _cfs_token = None
         if _dt_app_key and _dt_app_secret:
@@ -367,14 +376,13 @@ async def process_dingtalk_message(
 
             _cfs_token = _cfs.set(_dingtalk_file_sender)
 
-        # Call LLM
+        # Call LLM (no DB session needed)
+        from app.api.feishu import _call_llm_with_config
         try:
-            reply_text = await _call_agent_llm(
-                db,
-                agent_id,
-                llm_user_text,
-                history=history,
-                user_id=platform_user_id,
+            reply_text = await _call_llm_with_config(
+                _agent_model, _llm_model, _fallback_model,
+                agent_id, llm_user_text,
+                history=history, user_id=platform_user_id,
             )
         finally:
             # Reset ContextVar
@@ -400,14 +408,11 @@ async def process_dingtalk_message(
         # Reply via session webhook (markdown)
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                await client.post(
-                    session_webhook,
-                    json={
-                        "msgtype": "markdown",
-                        "markdown": {
-                            "title": agent_obj.name or "AI Reply",
-                            "text": reply_text,
-                        },
+                await client.post(session_webhook, json={
+                    "msgtype": "markdown",
+                    "markdown": {
+                        "title": _agent_name or "AI Reply",
+                        "text": reply_text,
                     },
                 )
         except Exception as e:
@@ -425,18 +430,22 @@ async def process_dingtalk_message(
             except Exception as e2:
                 logger.error(f"[DingTalk] Fallback text reply also failed: {e2}")
 
-        # Save assistant reply
-        db.add(
-            ChatMessage(
-                agent_id=agent_id,
-                user_id=platform_user_id,
-                role="assistant",
-                content=reply_text,
+        # Save assistant reply (new short transaction)
+        async with async_session() as _save_db:
+            _save_db.add(ChatMessage(
+                agent_id=agent_id, user_id=platform_user_id,
+                role="assistant", content=reply_text,
                 conversation_id=session_conv_id,
+            ))
+            # Reload session object to update last_message_at
+            from app.models.chat_session import ChatSession
+            _sess_r = await _save_db.execute(
+                _select(ChatSession).where(ChatSession.id == uuid.UUID(session_conv_id))
             )
-        )
-        sess.last_message_at = datetime.now(timezone.utc)
-        await db.commit()
+            _sess_fresh = _sess_r.scalar_one_or_none()
+            if _sess_fresh:
+                _sess_fresh.last_message_at = datetime.now(timezone.utc)
+            await _save_db.commit()
 
         # Log activity
         from app.services.activity_logger import log_activity
