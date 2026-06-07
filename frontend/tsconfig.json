@@ -19,6 +19,8 @@
         "noUnusedLocals": false,
         "noUnusedParameters": false,
         "noFallthroughCasesInSwitch": true,
+        "noUncheckedIndexedAccess": false,
+        "noImplicitReturns": false,
         "forceConsistentCasingInFileNames": true,
         "baseUrl": ".",
         "paths": {

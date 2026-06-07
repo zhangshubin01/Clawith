@@ -129,7 +129,7 @@ async def list_sessions(
                 .where(
                     ChatSession.id.in_(session_uuid_ids),
                     ChatSession.user_id == current_user.id,
-                    ChatSession.source_channel.notin_(["agent", "trigger"]),
+                    ChatSession.source_channel.notin_(["agent", "trigger", "acp"]),
                     ChatSession.is_group == False,
                     ChatMessage.role.in_(["assistant", "system", "tool_call"]),
                     ChatMessage.created_at > func.coalesce(
@@ -223,7 +223,7 @@ async def list_sessions(
                 ChatSession.agent_id == agent_id,
                 ChatSession.user_id == current_user.id,
                 ChatSession.is_group == False,
-                ChatSession.source_channel.notin_(["agent", "trigger"]),
+                ChatSession.source_channel.notin_(["agent", "trigger", "acp"]),
             )
         )
         total = count_result.scalar() or 0
@@ -234,7 +234,7 @@ async def list_sessions(
                 ChatSession.agent_id == agent_id,
                 ChatSession.user_id == current_user.id,
                 ChatSession.is_group == False,
-                ChatSession.source_channel.notin_(["agent", "trigger"]),
+                ChatSession.source_channel.notin_(["agent", "trigger", "acp"]),
             )
             .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
             .offset(skip).limit(limit)  # #70 修复：分页支持
@@ -452,7 +452,7 @@ async def get_session_messages(
     messages = list(reversed(msgs_result.scalars().all()))
 
     # Reading your own first-party/channel session should clear its unread state.
-    if str(session.user_id) == str(current_user.id) and not session.is_group and session.source_channel not in ("agent", "trigger"):
+    if str(session.user_id) == str(current_user.id) and not session.is_group and session.source_channel not in ("agent", "trigger", "acp"):
         session.last_read_at_by_user = datetime.now(tz.utc)
         await db.commit()
 

@@ -38,6 +38,9 @@ services:
       args:
         CLAWITH_PIP_INDEX_URL: ${CLAWITH_PIP_INDEX_URL:-}
         CLAWITH_PIP_TRUSTED_HOST: ${CLAWITH_PIP_TRUSTED_HOST:-}
+    dns:
+      - 8.8.8.8
+      - 114.114.114.114
     restart: unless-stopped
     command: ["/bin/bash", "/app/entrypoint.sh"]
     environment:
@@ -66,6 +69,7 @@ services:
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
     volumes:
       - ./backend:/app
+      - ${IDE_WORKSPACE_DIR:-/tmp/ide-workspace}:${IDE_WORKSPACE_DIR:-/tmp/ide-workspace}
       - ./backend/agent_data:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
@@ -107,12 +111,7 @@ services:
 
 volumes:
   pgdata:
-    external: true
-    name: clawith_pgdata
   redisdata:
-    external: true
-    name: clawith_redisdata
-
 
 networks:
   default:

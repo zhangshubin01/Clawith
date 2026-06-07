@@ -6931,6 +6931,34 @@ select:focus {
   border-color: rgba(255, 255, 255, 0.08);
 }
 
+.chat-msg-file-chip-text {
+  font-weight: 500;
+  color: var(--text-primary);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-msg-image-wrap {
+  margin-bottom: 4px;
+}
+
+.chat-msg-image {
+  max-width: 200px;
+  max-height: 150px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  object-fit: cover;
+}
+
+.chat-msg-inline-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
 /* Empty state */
 .chat-empty-state {
   text-align: center;

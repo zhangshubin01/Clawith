@@ -49,9 +49,8 @@ async def acp_endpoint(websocket: WebSocket):
         return
 
     await websocket.accept()
-    logger.info(f"[ACP] 连接成功: user_id={user_id}")
-
     handler = AcpHandler(websocket, str(user_id))
+    logger.info(f"[ACP] 连接成功: user_id={user_id} conn={handler.conn_id}")
     try:
         await handler.run()
     except Exception as e:

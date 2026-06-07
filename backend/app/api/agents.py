@@ -158,7 +158,7 @@ async def _build_unread_count_by_agent(
             ChatSession.agent_id.in_(agent_ids),
             ChatSession.user_id == current_user.id,
             ChatSession.is_group.is_(False),
-            ChatSession.source_channel.notin_(["agent", "trigger"]),
+            ChatSession.source_channel.notin_(["agent", "trigger", "acp"]),
             ChatMessage.role.in_(["assistant", "system", "tool_call"]),
             ChatMessage.created_at > func.coalesce(
                 ChatSession.last_read_at_by_user,

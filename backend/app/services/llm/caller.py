@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import re
 import uuid
@@ -25,6 +26,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import async_session
+
+
+def _perf_channel_suffix() -> str:
+    """ACP 会话在共用 caller 里打 channel=acp，便于 agentbay 筛选。"""
+    try:
+        from app.plugins.clawith_acp.tool_bridge import current_acp_handler
+
+        if current_acp_handler.get() is not None:
+            return " channel=acp"
+    except Exception:
+        pass
+    return ""
 
 # NOTE: agent_tools imports are deferred to function bodies to avoid circular
 # import: agent_tools → llm.finish → llm/__init__ → caller → agent_tools
@@ -399,7 +412,7 @@ async def _process_tool_call(
         on_output=_on_output,
     )
     tool_elapsed = time.monotonic() - tool_start
-    logger.info("[LSP4J-PERF] tool: {} elapsed={:.3f}s", tool_name, tool_elapsed)
+    logger.info("[LSP4J-PERF] tool: {} elapsed={:.3f}s{}", tool_name, tool_elapsed, _perf_channel_suffix())
     logger.debug(f"[LLM] Tool result: {result[:100]}")
 
     # ── Vision injection for screenshot tools ──
@@ -430,6 +443,18 @@ async def _process_tool_call(
         except Exception:
             pass
     
+    # 工具结果截断：防止大结果（git 20KB+、构建日志 8KB+）膨胀 LLM 上下文
+    # 来自 openhuman DEFAULT_TOOL_RESULT_BUDGET_BYTES = 16384
+    _TOOL_RESULT_BUDGET_BYTES = 16384
+    if isinstance(tool_content, str):
+        _original_len = len(tool_content.encode("utf-8"))
+        if _original_len > _TOOL_RESULT_BUDGET_BYTES:
+            tool_content = tool_content[:16384] + f"\n…(截断 {_original_len - 16384} 字节)"
+            logger.info(
+                f"[TOOL-BUDGET] 截断 tool={tool_name} original_bytes={_original_len} "
+                f"→ {_TOOL_RESULT_BUDGET_BYTES} session={session_id}"
+            )
+
     api_messages.append(LLMMessage(
         role="tool",
         tool_call_id=tc["id"],
@@ -538,6 +563,7 @@ async def call_llm(
 
     max_tokens = get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None))
     _accumulated_usage = TokenUsage()
+    _consecutive_guard_failures = 0
 
     # Tool-calling loop
     for round_i in range(_max_tool_rounds):
@@ -545,9 +571,28 @@ async def call_llm(
         if cancel_event and cancel_event.is_set():
             logger.info("[LLM] cancel_event 已设置，中断工具循环（round={}）", round_i)
             break
+
+        # P0: 最后一轮仅允许 finish 工具，防止 Agent 无限制工具循环
+        _is_last_round = (round_i == _max_tool_rounds - 1)
+        _round_tools = tools_for_llm
+        if _is_last_round and tools_for_llm:
+            _finish_tool = next((t for t in tools_for_llm if isinstance(t, dict) and t.get("function", {}).get("name") == "finish"), None)
+            if _finish_tool is None:
+                _finish_tool = next((t for t in tools_for_llm if hasattr(t, 'function') and getattr(t.function, 'name', None) == "finish"), None)
+            _round_tools = [_finish_tool] if _finish_tool else tools_for_llm
+            logger.warning(
+                f"[LAST-ROUND] round={round_i + 1}/{_max_tool_rounds} "
+                f"tools_before={len(tools_for_llm)} tools_after={len(_round_tools)} session={session_id}"
+            )
         # [LSP4J-PERF] 轮次开始计时
         round_start = time.monotonic()
-        logger.info("[LSP4J-PERF] Round {}/{} start, context_tokens={}", round_i + 1, _max_tool_rounds, _accumulated_usage.input_tokens)
+        logger.info(
+            "[LSP4J-PERF] Round {}/{} start, context_tokens={}{}",
+            round_i + 1,
+            _max_tool_rounds,
+            _accumulated_usage.input_tokens,
+            _perf_channel_suffix(),
+        )
 
         # Dynamic tool-call limit warning
         _warn_threshold_80 = int(_max_tool_rounds * 0.8)
@@ -568,30 +613,67 @@ async def call_llm(
             ))
 
         try:
-            # Use streaming API for real-time responses
-            async def _buffer_chunk(_text: str) -> None:
-                # Final user-facing text must come through finish(content=...).
-                return None
-
-            response = await client.stream(
-                messages=api_messages,
-                tools=tools_for_llm if tools_for_llm else None,
-                temperature=model.temperature,
-                max_tokens=max_tokens,
-                on_chunk=_buffer_chunk,
-                on_tool_delta=on_tool_delta,
-                on_thinking=on_thinking,
+            # 上下文利用率检查：来自 openhuman COMPACTION_TRIGGER_THRESHOLD=0.90
+            _ctx_window = int(os.getenv("ACP_CTX_WINDOW_TOKENS", "1000000"))
+            _ctx_ratio = _accumulated_usage.input_tokens / _ctx_window
+            if _ctx_ratio >= 0.90:
+                logger.warning(
+                    f"[CTX-GUARD] context 90%: input_tokens={_accumulated_usage.input_tokens} "
+                    f"/ {_ctx_window} ratio={_ctx_ratio:.1%} session={session_id}"
+                )
+                if _ctx_ratio >= 0.95:
+                    _consecutive_guard_failures += 1
+                    if _consecutive_guard_failures >= 3:
+                        logger.error(
+                            f"[CTX-GUARD] BREAKER: {_consecutive_guard_failures} consecutive failures, forcing finish"
+                        )
+                        api_messages.append(LLMMessage(
+                            role="user",
+                            content="上下文已严重超限，请立即调用 finish 结束。",
+                        ))
+                    else:
+                        _half = max(2, len(api_messages) // 2)
+                        api_messages = api_messages[:_half] + api_messages[-_half:]
+                        logger.warning(
+                            f"[CTX-GUARD] TRUNCATED: {len(api_messages)} messages kept, "
+                            f"failures={_consecutive_guard_failures}/3"
+                        )
+                else:
+                    _consecutive_guard_failures = 0
+            response = await asyncio.wait_for(
+                client.stream(
+                    messages=api_messages,
+                    tools=_round_tools if _round_tools else None,
+                    temperature=model.temperature,
+                    max_tokens=max_tokens,
+                    on_chunk=on_chunk,
+                    on_tool_delta=on_tool_delta,
+                    on_thinking=on_thinking,
+                ),
+                timeout=float(os.getenv("ACP_LLM_STREAM_TIMEOUT", "120")),  # 默认 120s, env 可覆盖
             )
             # [LSP4J-PERF] LLM stream 完成
             llm_time = time.monotonic() - round_start
             logger.info(
                 "[LSP4J-PERF] Round {}: LLM stream done "
                 "llm_time={:.2f}s tool_calls={} "
-                "input_tokens={} output_tokens={}",
+                "input_tokens={} output_tokens={}{}",
                 round_i + 1, llm_time, len(response.tool_calls or []),
                 getattr(response.usage, "input_tokens", 0) if response.usage else 0,
                 getattr(response.usage, "output_tokens", 0) if response.usage else 0,
+                _perf_channel_suffix(),
             )
+        except asyncio.TimeoutError:
+            _elapsed = time.monotonic() - round_start
+            logger.warning(
+                f"[LLM-TIMEOUT] stream timed out after {_elapsed:.1f}s "
+                f"round={round_i + 1} session={session_id}"
+            )
+            api_messages.append(LLMMessage(
+                role="user",
+                content="LLM 推理超时（超过 60 秒）。请立即调用 finish 结束当前轮次。",
+            ))
+            continue
         except LLMError as e:
             logger.error(f"[LLM] LLMError: provider={getattr(model, 'provider', '?')} model={getattr(model, 'model', '?')} {e}")
             if agent_id and _accumulated_usage.total_tokens > 0:
@@ -629,6 +711,12 @@ async def call_llm(
                 if agent_id and _accumulated_usage.total_tokens > 0:
                     await record_token_usage(agent_id, _accumulated_usage)
                 await client.close()
+                # finish(content=...) 才是用户可见正文；LLM stream 的 on_chunk 被 _buffer_chunk 吞掉
+                # 若调用方已通过 on_tool_delta 流式推送 finish 内容（如 WebSocket chat），
+                # 此处不再重复调用 on_chunk，避免前端收到重复 chunk 导致内容闪烁
+                _already_streamed_via_delta = on_tool_delta is not None
+                if on_chunk and finish_call.content and not _already_streamed_via_delta:
+                    await on_chunk(finish_call.content)
                 return finish_call.content
 
             api_messages.append(LLMMessage(
@@ -677,13 +765,20 @@ async def call_llm(
             tool_time = time.monotonic() - round_start - llm_time
             logger.info(
                 "[LSP4J-PERF] Round {}: tools done "
-                "tool_time={:.2f}s total={:.2f}s",
+                "tool_time={:.2f}s total={:.2f}s{}",
                 round_i + 1, tool_time, time.monotonic() - round_start,
+                _perf_channel_suffix(),
             )
 
     # Record tokens even on "too many rounds" exit
     if agent_id and _accumulated_usage.total_tokens > 0:
         await record_token_usage(agent_id, _accumulated_usage)
+    _final_ratio = _accumulated_usage.input_tokens / _ctx_window if _ctx_window else 0
+    if _final_ratio >= 0.5:
+        logger.info(
+            f"[CTX-GUARD] post-stream session={session_id} "
+            f"utilization={_final_ratio:.1%} context_window={_ctx_window}"
+        )
     await client.close()
     return "[Error] Too many tool call rounds"
 
@@ -709,6 +804,7 @@ async def call_llm_with_failover(
     tool_warning_mode: str = "default",
     on_code_output=None,
     current_user_name_override: str | None = None,
+    max_tool_rounds_override: int | None = None,  # 可选覆盖, 不传则走 WebUI agent.max_tool_rounds
 ) -> str:
     """Call LLM with automatic failover support.
 
@@ -758,6 +854,7 @@ async def call_llm_with_failover(
         tool_warning_mode=tool_warning_mode,
         on_code_output=on_code_output,
         current_user_name_override=current_user_name_override,
+        max_tool_rounds_override=max_tool_rounds_override,
     )
 
     # Check if we need to failover
@@ -827,6 +924,7 @@ async def call_llm_with_failover(
         tool_warning_mode=tool_warning_mode,
         on_code_output=on_code_output,
         current_user_name_override=current_user_name_override,
+        max_tool_rounds_override=max_tool_rounds_override,
     )
 
     # Combine error messages if fallback also failed

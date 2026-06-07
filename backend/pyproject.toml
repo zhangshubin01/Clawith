@@ -62,6 +62,29 @@ dev = [
 target-version = "py311"
 line-length = 120
 
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes (unused imports, undefined names, etc.)
+    "I",    # isort (import ordering)
+    "N",    # pep8-naming
+    "B",    # flake8-bugbear (common bugs)
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify (code simplification)
+    "UP",   # pyupgrade (modern Python syntax)
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]

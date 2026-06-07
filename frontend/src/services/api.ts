@@ -601,3 +601,23 @@ export const controlApi = {
     unlock: (agentId: string, data: { session_id: string; export_cookies?: boolean; platform_hint?: string }) =>
         request<any>(`/agents/${agentId}/control/unlock`, { method: 'POST', body: JSON.stringify(data) }),
 };
+
+// ─── Sessions ─────────────────────────────────────────
+export const sessionApi = {
+    list: (agentId: string, params?: { scope?: string; skip?: number; limit?: number }) => {
+        const sp = new URLSearchParams();
+        if (params?.scope) sp.set('scope', params.scope);
+        if (params?.skip !== undefined) sp.set('skip', String(params.skip));
+        if (params?.limit !== undefined) sp.set('limit', String(params.limit));
+        const qs = sp.toString();
+        return request<any>(`/agents/${agentId}/sessions${qs ? '?' + qs : ''}`);
+    },
+
+    messages: (agentId: string, sessionId: string, params?: { limit?: number; before?: string }, signal?: AbortSignal) => {
+        const sp = new URLSearchParams();
+        if (params?.limit) sp.set('limit', String(params.limit));
+        if (params?.before) sp.set('before', params.before);
+        const qs = sp.toString();
+        return request<any>(`/agents/${agentId}/sessions/${sessionId}/messages${qs ? '?' + qs : ''}`, { signal });
+    },
+};

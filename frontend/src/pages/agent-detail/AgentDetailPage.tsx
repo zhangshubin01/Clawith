@@ -13,8 +13,11 @@ import PromptModal from '../../components/PromptModal';
 import { appendLiveCodeOutput, type LivePreviewState } from '../../components/AgentBayLivePanel';
 import AgentSidePanel, { SidePanelTab } from '../../components/AgentSidePanel';
 import type { WorkspaceActivity, WorkspaceLiveDraft } from '../../components/WorkspaceOperationPanel';
-import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, focusApi, scheduleApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress } from '../../services/api';
+import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, focusApi, scheduleApi, sessionApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress } from '../../services/api';
 import type { FocusApiItem } from '../../services/api';
+import { ChatMessageItem } from './components/ChatMessageItem';
+import { useHistoryPagination } from './hooks/useHistoryPagination';
+import type { ChatMessage as ChatMessageType } from '../../types/chat';
 import ModelSwitcher from '../../components/ModelSwitcher';
 import { useAppStore } from '../../stores';
 import { useAuthStore } from '../../stores';
@@ -2188,6 +2191,8 @@ export default function AgentDetailPage() {
     const sessionsCurrentPageRef = useRef(0);
     const allSessionsCurrentPageRef = useRef(0);
     const [agentExpired, setAgentExpired] = useState(false);
+    const historyPagination = useHistoryPagination<any>(HISTORY_PAGE_SIZE);
+    const chatPagination = useHistoryPagination<any>(HISTORY_PAGE_SIZE);
     // Websocket chat state (for 'me' conversation)
     const token = useAuthStore((s) => s.token);
     const currentUser = useAuthStore((s) => s.user);
@@ -2324,9 +2329,9 @@ export default function AgentDetailPage() {
         setActiveSession(null);
         setChatMessages([]);
         setChatOldestTimestamp(null);
-        setChatHistoryHasMore(true);
-        setChatHistoryLoadingMore(false);
+        chatPagination.reset();
         setHistoryMsgs([]);
+        historyPagination.reset();
         setWsConnected(false);
         setIsStreaming(false);
         setIsWaiting(false);
@@ -2453,13 +2458,11 @@ export default function AgentDetailPage() {
         pendingLiveInitialScrollRef.current = writable;
         pendingHistoryInitialScrollRef.current = !writable;
         setChatMessages([]);
-        setChatOldestTimestamp(null);
-        setChatHistoryHasMore(true);
-        setChatHistoryLoadingMore(false);
+        chatPagination.oldestTimestampRef.current = null;
+        chatPagination.setHasMore(true);
         setHistoryMsgs([]);
-        setHistoryOldestTimestamp(null);
-        setHistoryHasMore(true);
-        setHistoryLoadingMore(false);
+        historyPagination.oldestTimestampRef.current = null;
+        historyPagination.setHasMore(true);
         setIsStreaming(runtimeState.isStreaming);
         setIsWaiting(runtimeState.isWaiting);
         setActiveSession(sess);
@@ -2496,12 +2499,12 @@ export default function AgentDetailPage() {
 
             if (writable) {
                 setChatMessages(preParsed);
-                setChatOldestTimestamp(oldestTimestamp);
-                setChatHistoryHasMore(msgs.length >= HISTORY_PAGE_SIZE);
+                chatPagination.oldestTimestampRef.current = oldestTimestamp;
+                chatPagination.setHasMore(msgs.length >= HISTORY_PAGE_SIZE);
             } else {
                 setHistoryMsgs(preParsed);
-                setHistoryOldestTimestamp(oldestTimestamp);
-                setHistoryHasMore(msgs.length >= HISTORY_PAGE_SIZE);
+                historyPagination.oldestTimestampRef.current = oldestTimestamp;
+                historyPagination.setHasMore(msgs.length >= HISTORY_PAGE_SIZE);
             }
             // The backend marks the session as read when the current user opens it. Mirror that
             // immediately in local state so unread badges clear without waiting for the next poll.
@@ -3094,7 +3097,7 @@ export default function AgentDetailPage() {
             if (d.type === 'thinking') {
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
-                    if (last && last.role === 'assistant' && (last as any)._streaming) {
+                    if (last && last.role === 'assistant' && ((last as ChatMessageType)._streaming ?? false)) {
                         return [...prev.slice(0, -1), { ...last, thinking: (last.thinking || '') + d.content } as any];
                     }
                     return [...prev, { role: 'assistant', content: '', thinking: d.content, _streaming: true } as any];
@@ -3247,7 +3250,7 @@ export default function AgentDetailPage() {
             } else if (d.type === 'chunk') {
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
-                    if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { ...last, content: last.content + d.content } as any];
+                    if (last && last.role === 'assistant' && ((last as ChatMessageType)._streaming ?? false)) return [...prev.slice(0, -1), { ...last, content: last.content + d.content } as any];
                     return [...prev, { role: 'assistant', content: d.content, _streaming: true } as any];
                 });
             } else if (d.type === 'done') {
@@ -3261,8 +3264,8 @@ export default function AgentDetailPage() {
                 });
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
-                    const thinking = (last && last.role === 'assistant' && (last as any)._streaming) ? last.thinking : undefined;
-                    if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), parseChatMsg({ role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() })];
+                    const thinking = (last && last.role === 'assistant' && ((last as ChatMessageType)._streaming ?? false)) ? last.thinking : undefined;
+                    if (last && last.role === 'assistant' && ((last as ChatMessageType)._streaming ?? false)) return [...prev.slice(0, -1), parseChatMsg({ role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() })];
                     return [...prev, parseChatMsg({ role: d.role, content: d.content, timestamp: new Date().toISOString() })];
                 });
                 const currentSessionId = activeSessionIdRef.current ? String(activeSessionIdRef.current) : '';
@@ -3501,96 +3504,58 @@ export default function AgentDetailPage() {
     }, []);
 
     const loadMoreHistoryMessages = useCallback(async () => {
-        if (historyLoadingMore || !historyHasMore || !activeSession || !id || !historyOldestTimestamp) return;
+        if (!activeSession || !id) return;
         const sess = activeSession;
-        const targetAgentId = id;
-        setHistoryLoadingMore(true);
-        try {
-            const tkn = localStorage.getItem('token');
-            const res = await fetch(`/api/agents/${targetAgentId}/sessions/${sess.id}/messages?limit=${HISTORY_PAGE_SIZE}&before=${encodeURIComponent(historyOldestTimestamp)}`, {
-                headers: { Authorization: `Bearer ${tkn}` },
-            });
-            if (!res.ok) return;
-            const msgs = await res.json();
-            // Validate session is still active after async fetch
-            if (activeSession?.id !== sess.id) return;
-            if (msgs.length === 0) {
-                setHistoryHasMore(false);
-                return;
+        const el = historyContainerRef.current;
+        const oldScrollHeight = el?.scrollHeight ?? 0;
+        await historyPagination.loadMore(async ({ limit, before }) => {
+            try {
+                const msgs = await sessionApi.messages(id!, sess.id, { limit, before });
+                return msgs.map((m: any) => parseChatMsg({
+                    role: m.role, content: m.content || '',
+                    ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
+                    ...(m.thinking && { thinking: m.thinking }),
+                    ...(m.created_at && { timestamp: m.created_at }),
+                    ...(m.id && { id: m.id }),
+                }));
+            } catch {
+                return [];
             }
-            const preParsed = msgs.map((m: any) => parseChatMsg({
-                role: m.role, content: m.content || '',
-                ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
-                ...(m.thinking && { thinking: m.thinking }),
-                ...(m.created_at && { timestamp: m.created_at }),
-                ...(m.id && { id: m.id }),
-            }));
-            // Save current scroll position
-            const el = historyContainerRef.current;
-            const oldScrollHeight = el?.scrollHeight ?? 0;
-            setHistoryMsgs(prev => [...preParsed, ...prev]);
-            // Update the oldest timestamp (first message in the new batch, since messages are in chronological order)
-            setHistoryOldestTimestamp(msgs[0].created_at);
-            setHistoryHasMore(msgs.length >= HISTORY_PAGE_SIZE);
-            // Restore scroll position after new messages are prepended
-            requestAnimationFrame(() => {
-                if (el) {
-                    const newScrollHeight = el.scrollHeight;
-                    el.scrollTop = newScrollHeight - oldScrollHeight;
-                }
-            });
-        } catch (err: any) {
-            console.error('Failed to load more history messages:', err);
-        } finally {
-            setHistoryLoadingMore(false);
-        }
-    }, [historyLoadingMore, historyHasMore, activeSession, id, historyOldestTimestamp]);
+        });
+        requestAnimationFrame(() => {
+            if (el) {
+                const newScrollHeight = el.scrollHeight;
+                el.scrollTop = newScrollHeight - oldScrollHeight;
+            }
+        });
+    }, [activeSession, id, historyPagination]);
 
     const loadMoreChatHistoryMessages = useCallback(async () => {
-        if (chatHistoryLoadingMore || !chatHistoryHasMore || !activeSession || !id || !chatOldestTimestamp) return;
+        if (!activeSession || !id) return;
         const sess = activeSession;
-        const targetAgentId = id;
-        setChatHistoryLoadingMore(true);
-        try {
-            const tkn = localStorage.getItem('token');
-            const res = await fetch(`/api/agents/${targetAgentId}/sessions/${sess.id}/messages?limit=${HISTORY_PAGE_SIZE}&before=${encodeURIComponent(chatOldestTimestamp)}`, {
-                headers: { Authorization: `Bearer ${tkn}` },
-            });
-            if (!res.ok) return;
-            const msgs = await res.json();
-            // Validate session is still active after async fetch
-            if (activeSession?.id !== sess.id) return;
-            if (msgs.length === 0) {
-                setChatHistoryHasMore(false);
-                return;
+        const el = chatContainerRef.current;
+        const oldScrollHeight = el?.scrollHeight ?? 0;
+        await chatPagination.loadMore(async ({ limit, before }) => {
+            try {
+                const msgs = await sessionApi.messages(id!, sess.id, { limit, before });
+                return msgs.map((m: any) => parseChatMsg({
+                    role: m.role, content: m.content || '',
+                    ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
+                    ...(m.thinking && { thinking: m.thinking }),
+                    ...(m.created_at && { timestamp: m.created_at }),
+                    ...(m.id && { id: m.id }),
+                }));
+            } catch {
+                return [];
             }
-            const preParsed = msgs.map((m: any) => parseChatMsg({
-                role: m.role, content: m.content || '',
-                ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
-                ...(m.thinking && { thinking: m.thinking }),
-                ...(m.created_at && { timestamp: m.created_at }),
-                ...(m.id && { id: m.id }),
-            }));
-            // Save current scroll position
-            const el = chatContainerRef.current;
-            const oldScrollHeight = el?.scrollHeight ?? 0;
-            setChatMessages(prev => [...preParsed, ...prev]);
-            // Update the oldest timestamp (first message in the new batch, since messages are in chronological order)
-            setChatOldestTimestamp(msgs[0].created_at);
-            setChatHistoryHasMore(msgs.length >= HISTORY_PAGE_SIZE);
-            // Restore scroll position after new messages are prepended
-            requestAnimationFrame(() => {
-                if (el) {
-                    const newScrollHeight = el.scrollHeight;
-                    el.scrollTop = newScrollHeight - oldScrollHeight;
-                }
-            });
-        } catch (err: any) {
-            console.error('Failed to load more chat history messages:', err);
-        } finally {
-            setChatHistoryLoadingMore(false);
-        }
-    }, [chatHistoryLoadingMore, chatHistoryHasMore, activeSession, id, chatOldestTimestamp]);
+        });
+        requestAnimationFrame(() => {
+            if (el) {
+                const newScrollHeight = el.scrollHeight;
+                el.scrollTop = newScrollHeight - oldScrollHeight;
+            }
+        });
+    }, [activeSession, id, chatPagination]);
 
     const handleHistoryScroll = () => {
         const el = historyContainerRef.current;
@@ -3598,7 +3563,7 @@ export default function AgentDetailPage() {
         const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
         setShowHistoryScrollBtn(distFromBottom > 200);
         // Load more when scrolling near the top
-        if (el.scrollTop < 100 && historyHasMore && !historyLoadingMore) {
+        if (el.scrollTop < 100 && historyPagination.hasMore && !historyPagination.loadingMore) {
             loadMoreHistoryMessages();
         }
     };
@@ -3626,110 +3591,6 @@ export default function AgentDetailPage() {
         }, 100);
         return () => clearTimeout(timer);
     }, [historyMsgs, activeSession?.id, scheduleHistoryScrollToBottom]);
-    // Memoized component for each chat message to avoid re-renders while typing
-    const ChatMessageItem = React.useMemo(() => React.memo(({
-        msg, i, isLeft, t, senderLabel, avatarText, forceSenderLabel = false, hideAvatar = false,
-    }: {
-        msg: any;
-        i: number;
-        isLeft: boolean;
-        t: any;
-        senderLabel?: string;
-        avatarText?: string;
-        forceSenderLabel?: boolean;
-        hideAvatar?: boolean;
-    }) => {
-        const fe = msg.fileName?.split('.').pop()?.toLowerCase() ?? '';
-        const isImage = msg.imageUrl && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
-        const resolvedSenderLabel = msg.sender_name || senderLabel;
-        const resolvedAvatarText = avatarText || (resolvedSenderLabel ? resolvedSenderLabel[0] : (isLeft ? 'A' : 'U'));
-        const showSenderLabel = !!resolvedSenderLabel && (forceSenderLabel || !!msg.sender_name);
-
-        // Parse [image_data:data:image/...;base64,...] markers from user message content.
-        // The backend persists these markers in the DB to preserve multimodal context
-        // across turns. They must ALWAYS be stripped from displayContent so users never
-        // see raw base64 strings in the chat bubble.
-        // Guard: only collect extracted images for thumbnail rendering when msg.imageUrl
-        // is NOT already set — otherwise the image is already shown via the isImage path
-        // and rendering again from the marker would display it twice.
-        const IMAGE_DATA_RE = /\[image_data:(data:image\/[^;]+;base64,[^\]]+)\]/g;
-        const inlineImages: string[] = [];
-        let displayContent = msg.content || '';
-        if (displayContent.includes('[image_data:')) {
-            displayContent = displayContent.replace(IMAGE_DATA_RE, (_: string, dataUrl: string) => {
-                // Only collect for thumbnail rendering if not already shown via imageUrl
-                if (!msg.imageUrl) inlineImages.push(dataUrl);
-                return ''; // always strip the marker from displayed text
-            }).trim();
-        }
-
-        const timestampHtml = msg.timestamp ? (() => {
-            const d = new Date(msg.timestamp);
-            const now = new Date();
-            const diffMs = now.getTime() - d.getTime();
-            const isToday = d.toDateString() === now.toDateString();
-            let timeStr = '';
-            if (isToday) timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            else if (diffMs < 7 * 86400000) timeStr = d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            else timeStr = d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            return (
-                <div className="chat-msg-timestamp">
-                    {timeStr}
-                    {msg.content && <CopyMessageButton text={msg.content} />}
-                </div>
-            );
-        })() : null;
-
-        return (
-            <div key={i} className={`chat-msg-row${isLeft ? '' : ' chat-msg-row--user'}`}>
-                <div
-                    className={`chat-msg-avatar${isLeft ? '' : ' chat-msg-avatar--user'}`}
-                    style={hideAvatar ? { visibility: 'hidden' } : undefined}
-                >
-                    {resolvedAvatarText}
-                </div>
-                <div className="chat-msg-col">
-                    <div className={isLeft ? '' : 'chat-msg-user-line'}>
-                        <div className={`chat-msg-bubble${isLeft ? '' : ' chat-msg-bubble--user'}${(msg as any)._streaming && !msg.content && !msg.thinking ? ' chat-msg-bubble--thinking' : ''}`}>
-                            {showSenderLabel && <div className="chat-msg-sender">{resolvedSenderLabel}</div>}
-                            {isImage ? (
-                                <div style={{ marginBottom: '4px' }}>
-                                    <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} loading="lazy" />
-                                </div>
-                            ) : (msg.fileName && (
-                                <div className="chat-msg-file-chip" style={{ marginBottom: msg.content ? '4px' : '0' }}>
-                                    <IconPaperclip size={14} stroke={1.8} />
-                                    <span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span>
-                                </div>
-                            ))}
-                            {inlineImages.length > 0 && (
-                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: displayContent ? '6px' : '0' }}>
-                                    {inlineImages.map((url, idx) => (
-                                        <img
-                                            key={idx}
-                                            src={url}
-                                            alt="attached image"
-                                            style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)', objectFit: 'cover' }}
-                                            loading="lazy"
-                                        />
-                                    ))}
-                                </div>
-                            )}
-                            {msg.role === 'assistant' ? (
-                                (msg as any)._streaming && !msg.content && !msg.thinking ? (
-                                    <div className="thinking-indicator">
-                                        <div className="thinking-dots"><span /><span /><span /></div>
-                                        <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
-                                    </div>
-                                ) : <MarkdownRenderer content={displayContent} />
-                            ) : <MarkdownRenderer content={displayContent} />}
-                        </div>
-                    </div>
-                    {timestampHtml}
-                </div>
-            </div>
-        );
-    }), [t]);
 
     const handleChatScroll = () => {
         const el = chatContainerRef.current;
@@ -3742,7 +3603,7 @@ export default function AgentDetailPage() {
         }
         setShowScrollBtn(distFromBottom > 200);
         // Load more when scrolling near the top
-        if (el.scrollTop < 100 && chatHistoryHasMore && !chatHistoryLoadingMore) {
+        if (el.scrollTop < 100 && chatPagination.hasMore && !chatPagination.loadingMore) {
             loadMoreChatHistoryMessages();
         }
     };
@@ -6201,12 +6062,12 @@ export default function AgentDetailPage() {
                                                 )}
                                             </div>
                                             <div ref={historyContainerRef} onScroll={handleHistoryScroll} style={{ flex: 1, overflowY: 'auto', padding: '48px 16px 12px' }}>
-                                                {historyLoadingMore && (
+                                                {historyPagination.loadingMore && (
                                                     <div style={{ textAlign: 'center', padding: '12px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
                                                         Loading more messages...
                                                     </div>
                                                 )}
-                                                {!historyHasMore && historyMsgs.length > 0 && (
+                                                {!historyPagination.hasMore && historyMsgs.length > 0 && (
                                                     <div style={{ textAlign: 'center', padding: '12px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
                                                         All messages loaded
                                                     </div>
@@ -6455,7 +6316,7 @@ export default function AgentDetailPage() {
                                                                     <ThoughtDisclosure
                                                                         content={msg.thinking}
                                                                         t={t}
-                                                                        streaming={!!((msg as any)._streaming && !contentText)}
+                                                                        streaming={!!((msg as ChatMessageType)._streaming && !contentText)}
                                                                     />
                                                                     {contentText && (
                                                                         <ChatMessageItem

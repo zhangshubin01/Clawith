@@ -3040,6 +3040,7 @@ async def execute_tool(
             _invoke_name = "delete_file_by_path" if tool_name == "delete_file" else tool_name
             return await invoke_lsp4j_tool(_invoke_name, arguments, agent_id, user_id)
 
+
     # ── Autonomy boundary check ──（提取到 check_tool_autonomy，与 LSP4J 路径复用同一闸门）
     _autonomy_blocked = await check_tool_autonomy(tool_name, arguments, agent_id, user_id)
     if _autonomy_blocked is not None:
