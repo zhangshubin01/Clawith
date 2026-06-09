@@ -414,7 +414,7 @@ async def process_dingtalk_message(
                         "title": _agent_name or "AI Reply",
                         "text": reply_text,
                     },
-                )
+                })
         except Exception as e:
             logger.error(f"[DingTalk] Failed to reply via webhook: {e}")
             # Fallback: try plain text

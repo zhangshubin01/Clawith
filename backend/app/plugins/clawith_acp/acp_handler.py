@@ -17,7 +17,7 @@ from sqlalchemy import select
 from app.database import async_session
 from app.models.agent import Agent as AgentModel
 from app.plugins.clawith_acp.acp_session import AcpSessionManager
-from app.plugins.clawith_acp.tool_bridge import current_acp_handler
+from app.plugins.clawith_acp.tool_bridge import current_acp_handler, is_agent_internal_path
 from app.plugins.clawith_acp.tool_hooks import install_acp_tool_hooks
 
 ACP_PROTOCOL_VERSION = 1
@@ -371,7 +371,17 @@ class AcpHandler:
             kind = _kind_map.get(tool_name, "other")
             locations = []
             if path := args.get("path"):
-                locations.append({"path": str(path)})
+                path_str = str(path)
+                # 后端记忆/技能等内部文件不在 IDE 时间线展示（仍本地执行）
+                if tool_name in ("read_file", "write_file", "edit_file", "delete_file") and is_agent_internal_path(
+                    path_str
+                ):
+                    logger.info(
+                        f"[ACP-PERF] tool_notify skipped internal conn={self.conn_id} "
+                        f"session={self.session_id} tool={tool_name} path={path_str}"
+                    )
+                    return
+                locations.append({"path": path_str})
             elif cmd := args.get("command"):
                 locations.append({"path": f"$ {cmd}"})
             try:

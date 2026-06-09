@@ -35,10 +35,18 @@ def _is_project_file(path: str) -> bool:
     agent_prefixes = ("memory/", "skills/", "enterprise_info/", "workspace/")
     if any(path.startswith(p) for p in agent_prefixes):
         return False
-    agent_files = ("soul.md", "focus.md", "memory.md", "tasks.json")
+    agent_files = ("soul.md", "focus.md", "memory.md", "tasks.json", "reflections.md")
     if path.split("/")[-1] in agent_files:
         return False
     return True  # 其余相对路径 → IDE 项目根
+
+
+def is_agent_internal_path(path: str) -> bool:
+    """Agent 后端内部文件（记忆、技能等），不应在 IDE 时间线展示工具卡片。"""
+    normalized = (path or "").strip()
+    if not normalized:
+        return False
+    return not _is_project_file(normalized)
 
 
 async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
