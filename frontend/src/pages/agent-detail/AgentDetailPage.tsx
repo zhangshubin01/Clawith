@@ -1964,6 +1964,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
 
 export default function AgentDetailPage() {
     const { t, i18n } = useTranslation();
+    const messageTimestampLocale = i18n.language?.startsWith('zh') ? 'zh-CN' : 'en-US';
     const dialog = useDialog();
     const toast = useToast();
     const { id } = useParams<{ id: string }>();
@@ -3578,9 +3579,9 @@ export default function AgentDetailPage() {
             const diffMs = now.getTime() - d.getTime();
             const isToday = d.toDateString() === now.toDateString();
             let timeStr = '';
-            if (isToday) timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            else if (diffMs < 7 * 86400000) timeStr = d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            else timeStr = d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            if (isToday) timeStr = d.toLocaleTimeString(messageTimestampLocale, { hour: '2-digit', minute: '2-digit' });
+            else if (diffMs < 7 * 86400000) timeStr = d.toLocaleDateString(messageTimestampLocale, { weekday: 'short' }) + ' ' + d.toLocaleTimeString(messageTimestampLocale, { hour: '2-digit', minute: '2-digit' });
+            else timeStr = d.toLocaleDateString(messageTimestampLocale, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(messageTimestampLocale, { hour: '2-digit', minute: '2-digit' });
             return (
                 <div className="chat-msg-timestamp">
                     {timeStr}
