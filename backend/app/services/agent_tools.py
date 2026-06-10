@@ -8396,6 +8396,12 @@ async def _handle_set_trigger(
                 reason=reason,
                 focus_ref=focus_ref,
             )
+            # Fix 4: Safety cap for on_message triggers —
+            # prevent infinite loops if agent creates broad watchers.
+            if ttype == "on_message":
+                trigger.max_fires = trigger.max_fires or 100
+                if not trigger.expires_at:
+                    trigger.expires_at = datetime.now(timezone.utc) + timedelta(days=7)
             db.add(trigger)
             await db.commit()
 
