@@ -3,6 +3,7 @@
 import asyncio
 import os
 import shutil
+import signal
 import time
 from pathlib import Path
 
@@ -188,6 +189,7 @@ class SubprocessBackend(BaseSandboxBackend):
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
             "env": self._build_safe_env(work_path),
+            "start_new_session": True,
         }
         if use_preexec:
             kwargs["preexec_fn"] = self._build_preexec_fn(work_path, timeout)
@@ -196,7 +198,6 @@ class SubprocessBackend(BaseSandboxBackend):
     def _build_preexec_fn(self, work_path: Path, timeout: int):
         def _preexec():
             os.chdir(work_path)
-            os.setsid()
             os.umask(0o077)
 
             try:
@@ -455,7 +456,10 @@ class SubprocessBackend(BaseSandboxBackend):
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except Exception:
+                    proc.kill()
                 is_timeout = True
 
             await asyncio.gather(task1, task2)

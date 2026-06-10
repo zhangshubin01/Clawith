@@ -93,14 +93,17 @@ def _sanitize_tool_calls_for_context(tool_calls: list[dict]) -> tuple[list[dict]
                 "Retry the tool call with `function.arguments` as one valid JSON object string."
             )
 
-        sanitized.append({
+        new_tc = {
             "id": tc.get("id", ""),
             "type": tc.get("type") or "function",
             "function": {
                 "name": tool_name,
                 "arguments": args_str,
             },
-        })
+        }
+        if "_gemini_extra" in tc:
+            new_tc["_gemini_extra"] = tc["_gemini_extra"]
+        sanitized.append(new_tc)
 
     return sanitized, None
 
