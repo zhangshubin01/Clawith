@@ -1014,18 +1014,25 @@ def install_acp_tool_hooks() -> None:
                 )
                 return result
 
-        # terminal 工具 → ACP
+        # terminal 工具 → ACP (流式优先)
         if tool_name in ("execute_command", "bash"):
-            from .tool_bridge import _try_acp_terminal as _acp_term_exec
-            result = await _acp_term_exec(args, handler)
+            from .tool_bridge import _try_acp_terminal_streaming
+            _cancel = getattr(handler, "_cancel_event", None)
+            result = await _try_acp_terminal_streaming(args, handler, cancel_event=_cancel)
             if result is not None:
                 logger.info(
-                    "[ACP-HOOKS] route=acp tool={} cmd={} elapsed={:.3f}s",
+                    "[ACP-HOOKS] route=acp-streaming tool={} cmd={} elapsed={:.3f}s",
                     tool_name,
                     str(args.get("command", ""))[:80],
                     time.perf_counter() - route_t0,
                 )
                 return result
+            # result is None → 已进入流式模式，返回占位提示
+            logger.info(
+                "[ACP-HOOKS] route=acp-streaming tool={} cmd={} streaming...",
+                tool_name, str(args.get("command", ""))[:80],
+            )
+            return "(terminal 流式输出中，请等待终端面板更新...)"
 
         # 未命中任何 ACP 路由，返回 None 让链继续
         logger.debug(

@@ -317,6 +317,7 @@ def _repair_truncated_messages(messages: list) -> list:
             f"[CTX-GUARD-REPAIR] removed {removed} orphaned msgs "
             f"tools={orphaned_tool_names}"
         )
+    return repaired
 
 
 def _collect_all_tool_call_ids(messages: list) -> set:
@@ -350,6 +351,19 @@ _TOOL_MIN, _JSON_SMALL, _SEARCH_MIN, _LOG_MIN = 512, 20, 30, 40
 _TEXT_MIN, _TEXT_MAX = 4096, 8192
 _CACHE_MAX, _BREAKER_MAX, _BREAKER_COOLDOWN = 200, 3, 60.0
 _CCR_MAX = 500
+# CTX-GUARD 绝对阈值 — 对齐 Headroom (200K) + Anthropic Claude SDK (100K)
+# 无论模型上下文窗口多大，api_messages 超过此值即触发压缩
+
+def _get_ctx_guard_max_window() -> int:
+    """读取 CTX_GUARD_MAX_WINDOW 环境变量，异常时安全回退到 200000。"""
+    try:
+        return max(int(os.getenv("CTX_GUARD_MAX_WINDOW", "200000")), 1)
+    except (ValueError, TypeError):
+        return 200000
+
+_CTX_GUARD_MAX_WINDOW = _get_ctx_guard_max_window()
+_CTX_GUARD_WARN_RATIO = 0.75    # context 达到 75% 上限时向 LLM 注入提示
+_CTX_GUARD_COMPRESS_RATIO = 0.90  # context 达到 90% 上限时触发 _ctx_compress
 
 _compress_cache: OrderedDict[str, str] = OrderedDict()
 _ccr_store: OrderedDict[str, str] = OrderedDict()
@@ -1057,6 +1071,7 @@ async def call_llm(
     _consecutive_guard_failures = 0
     _ctx_pressure_warned = False
     _unsaved_usage = TokenUsage()
+    _ctx_window = 0  # 在 guard 块中首次赋值；round 1 日志需要默认值
 
     # 中间轮次的 on_chunk 路由到 thinking：只有 finish 的内容才是用户可见正文。
     # finish 内容通过 on_tool_delta 流式推送（若 on_tool_delta 非空），
@@ -1100,10 +1115,11 @@ async def call_llm(
         # [LSP4J-PERF] 轮次开始计时
         round_start = time.monotonic()
         logger.info(
-            "[LSP4J-PERF] Round {}/{} start, context_tokens={}{}",
+            "[LSP4J-PERF] Round {}/{} start, ctx_est={} ctx_limit={}{}",
             round_i + 1,
             _max_tool_rounds,
-            _accumulated_usage.input_tokens,
+            _est_tokens(api_messages),
+            _ctx_window,
             _perf_channel_suffix(),
         )
 
@@ -1137,24 +1153,27 @@ async def call_llm(
                     return _token_limit_msg
 
         try:
-            # 上下文利用率检查：使用当前 api_messages 估算而非累计 input_tokens
-            _ctx_window = _resolve_ctx_window(model)
-            _ctx_ratio = _est_tokens(api_messages) / _ctx_window
-            if _ctx_ratio >= 0.90:
+            # 上下文利用率检查 — v12.2: 绝对 200K 上限 (对齐 Headroom/Anthropic)
+            # 无论模型窗口多大 (deepseek-v4=1M)，按 capped 窗口计算利用率
+            _ctx_window_raw = _resolve_ctx_window(model)
+            _ctx_window = max(min(_ctx_window_raw, _CTX_GUARD_MAX_WINDOW), 1)
+            _ctx_est = _est_tokens(api_messages)
+            _ctx_ratio = _ctx_est / _ctx_window
+            if _ctx_ratio >= _CTX_GUARD_WARN_RATIO:
                 logger.warning(
-                    f"[CTX-GUARD] context 90%: tokens={_est_tokens(api_messages)}"
-                    f"/{_ctx_window} ({_ctx_ratio:.1%}) model={getattr(model, 'model', '?')} session={session_id}"
+                    f"[CTX-GUARD] context {_ctx_est}/{_ctx_window} ({_ctx_ratio:.1%}) "
+                    f"raw_window={_ctx_window_raw} model={getattr(model, 'model', '?')} session={session_id}"
                 )
                 if not _ctx_pressure_warned:
                     _ctx_pressure_warned = True
                     api_messages.append(LLMMessage(
                         role="user",
                         content=(
-                            f"⚠️ 上下文利用率已达 {_ctx_ratio:.0%}（~{_est_tokens(api_messages)}/{_ctx_window} tokens）。"
-                            "请精简后续输出，优先使用 finish 总结当前进度，避免在剩余轮次中发起高成本工具调用。"
+                            f"⚠️ 上下文利用率已达 {_ctx_ratio:.0%}（~{_ctx_est}/{_ctx_window} tokens）。"
+                            "请精简后续输出，优先使用 finish 总结当前进度。"
                         ),
                     ))
-                if _ctx_ratio >= 0.95:
+                if _ctx_ratio >= _CTX_GUARD_COMPRESS_RATIO:
                     _consecutive_guard_failures += 1
                     if _consecutive_guard_failures >= 3:
                         logger.error(
@@ -1166,13 +1185,20 @@ async def call_llm(
                         ))
                     else:
                         # v4.1: 类型感知压缩替代暴力截断
+                        _before_compress = _ctx_est
                         api_messages = _ctx_compress(api_messages, ctx_window=_ctx_window)
+                        _after_compress = _est_tokens(api_messages)
                         logger.warning(
-                            f"[CTX-COMPRESS] compressed: est_tokens={_est_tokens(api_messages)} "
+                            f"[CTX-COMPRESS] compressed: est_tokens={_after_compress} "
                             f"failures={_consecutive_guard_failures}/3"
                         )
+                        # v12.2: 压缩效果显著（>30% 缩减）则重置 warn 标记，允许再次提醒
+                        if _after_compress < _before_compress * 0.70:
+                            _ctx_pressure_warned = False
                 else:
                     _consecutive_guard_failures = 0
+            else:
+                _consecutive_guard_failures = 0  # v12.2: 上下文回落至安全区，重置失败计数
             response = await asyncio.wait_for(
                 client.stream(
                     messages=api_messages,
@@ -1495,11 +1521,14 @@ async def call_llm(
         await record_token_usage(agent_id, _accumulated_usage)
     if agent_id and _unsaved_usage.total_tokens > 0:
         await record_token_usage(agent_id, _unsaved_usage)
-    _final_ratio = _accumulated_usage.input_tokens / _ctx_window if _ctx_window else 0
-    if _final_ratio >= 0.5:
+    # v12.2: post-stream 上下文统计 — 使用实际 api_messages 估算值
+    _final_est = _est_tokens(api_messages)
+    _final_ratio = _final_est / _ctx_window if _ctx_window else 0
+    if _final_est >= 50000:  # 超过 50K 上下文时有统计意义
         logger.info(
             f"[CTX-GUARD] post-stream session={session_id} "
-            f"utilization={_final_ratio:.1%} context_window={_ctx_window}"
+            f"ctx_est={_final_est} ctx_limit={_ctx_window} "
+            f"ratio={_final_ratio:.1%} rounds={round_i + 1}"
         )
     await client.close()
     return "[Error] Too many tool call rounds"

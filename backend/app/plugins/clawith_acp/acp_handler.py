@@ -463,9 +463,8 @@ class AcpHandler:
                     path_hint = path_hint[len(cwd_prefix):]
             cn_name = _TOOL_CN_NAME.get(tool_name, tool_name)
             title = cn_name if not path_hint else f"{cn_name}({path_hint})"
-            logger.info(
-                f"[ACP-PERF] tool_notify conn={self.conn_id} session={self.session_id} "
-                f"tool={tool_name} call_id={call_id} status={status} elapsed_ms={elapsed_ms}"
+            _log.info(
+                f"[ACP-PERF] tool_notify tool={tool_name} call_id={call_id} status={status} elapsed_ms={elapsed_ms}"
             )
             acp_status = (
                 "in_progress"
@@ -475,6 +474,11 @@ class AcpHandler:
                 else status
             )
             kind = _kind_map.get(tool_name, "other")
+            # P1-4: 标题映射验证日志
+            _log.debug(
+                f"[ACP] tool_notify title tool={tool_name} "
+                f"kind={kind} cn_title={title}"
+            )
             locations = []
             if path := args.get("path"):
                 path_str = str(path)
@@ -482,9 +486,9 @@ class AcpHandler:
                 if tool_name in ("read_file", "write_file", "edit_file", "delete_file") \
                         and os.path.isabs(path_str) \
                         and is_agent_internal_path(path_str):
-                    logger.info(
-                        f"[ACP-PERF] tool_notify skipped internal conn={self.conn_id} "
-                        f"session={self.session_id} tool={tool_name} path={path_str}"
+                    _log.info(
+                        f"[ACP-PERF] tool_notify skipped internal "
+                        f"tool={tool_name} path={path_str}"
                     )
                     return
                 locations.append({"path": path_str})
@@ -492,8 +496,13 @@ class AcpHandler:
                 locations.append({"path": f"$ {cmd}"})
             try:
                 await self._push_tool_call(call_id, title, acp_status, kind=kind, locations=locations)
+                # P0-2: 通知正常推送确认
+                _log.debug(
+                    f"[ACP-PERF] tool_notify sent "
+                    f"tool={tool_name} path={args.get('path', '') or args.get('command', '')} kind={kind}"
+                )
             except Exception as push_err:
-                logger.warning(f"[ACP-PERF] tool_notify push failed: {push_err}")
+                _log.warning(f"[ACP-PERF] tool_notify push failed: {push_err}")
 
         async def _do_llm():
             full_reply = ""
@@ -506,7 +515,7 @@ class AcpHandler:
                     from app.models.llm import LLMModel as _LLMModel
                     from sqlalchemy.orm import joinedload
                     from app.database import async_session as _async_session
-                    logger.info(f"[ACP-MODEL] 开始加载模型: agent_id={self.agent_id}")
+                    _log.info(f"[ACP-MODEL] 开始加载模型: agent_id={self.agent_id}")
                     async with _async_session() as db:
                         agent_result = await db.execute(
                             select(_AgentModel)
@@ -520,14 +529,14 @@ class AcpHandler:
                         if agent_row:
                             primary_model = agent_row.primary_model if agent_row.primary_model and agent_row.primary_model.enabled else None
                             fallback_model = agent_row.fallback_model if agent_row.fallback_model and agent_row.fallback_model.enabled else None
-                            logger.info(
+                            _log.info(
                                 f"[ACP-MODEL] 模型加载完成: "
                                 f"primary={getattr(primary_model, 'model', None)} "
                                 f"fallback={getattr(fallback_model, 'model', None)} "
                                 f"agent_row_found=True"
                             )
                         else:
-                            logger.warning(f"[ACP-MODEL] agent_id={self.agent_id} DB 查询无结果!")
+                            _log.warning(f"[ACP-MODEL] agent_id={self.agent_id} DB 查询无结果!")
 
                 history: list[dict] = []
                 if self.session_id and self.user_id:
@@ -547,21 +556,21 @@ class AcpHandler:
                         if agent_ctx and agent_ctx[0]:
                             ctx_prompt = agent_ctx[0] + "\n\n" + agent_ctx[1]
                             ctx_llm_messages.insert(0, {"role": "system", "content": ctx_prompt})
-                            logger.info(
+                            _log.info(
                                 f"[ACP-CTX] build_agent_context 注入完成 "
                                 f"static={len(agent_ctx[0])} dynamic={len(agent_ctx[1])} "
                                 f"agent={self.agent_id}"
                             )
                     except Exception as e:
-                        logger.warning(f"[ACP-CTX] build_agent_context 失败 (非阻塞): {e}")
+                        _log.warning(f"[ACP-CTX] build_agent_context 失败 (非阻塞): {e}")
                 llm_messages = ctx_llm_messages + [
                     {"role": "user", "content": user_text_for_llm}
                 ]
-                logger.info(
+                _log.info(
                     f"[ACP-CTX] prompt history={len(history)} "
                     f"total={len(llm_messages)} session={self.session_id}"
                 )
-                logger.info(
+                _log.info(
                     f"[ACP-PERF] round_start conn={self.conn_id} session={self.session_id} "
                     f"primary_model={getattr(primary_model, 'model', None)} "
                     f"fallback_model={getattr(fallback_model, 'model', None)}"
@@ -580,7 +589,7 @@ class AcpHandler:
                 await self._push_thinking("第 1 轮：规划中…")
 
                 _llm_t0 = time.perf_counter()
-                logger.info(
+                _log.info(
                     f"[ACP-LLM] call_llm_with_failover START session={self.session_id} "
                     f"primary={getattr(primary_model, 'model', 'None')} "
                     f"agent={self.agent_name}"
@@ -600,7 +609,7 @@ class AcpHandler:
                     on_tool_call=on_tool_call,
                 )
                 full_reply = result or ""
-                logger.info(
+                _log.info(
                     f"[ACP-LLM] call_llm_with_failover DONE session={self.session_id} "
                     f"elapsed={time.perf_counter() - _llm_t0:.3f}s "
                     f"reply_len={len(full_reply)}"
@@ -608,15 +617,15 @@ class AcpHandler:
                 if perf := self._current_prompt_perf:
                     perf["reply_chars"] = len(full_reply)
                 if full_reply and (self._current_prompt_perf or {}).get("pushed_chunks", 0) == 0:
-                    logger.warning(f"[ACP] prompt 未收到流式 chunk，使用最终结果兜底推送: {len(full_reply)} chars")
+                    _log.warning(f"[ACP] prompt 未收到流式 chunk，使用最终结果兜底推送: {len(full_reply)} chars")
                     await self._push_chunk(full_reply)
             except asyncio.CancelledError:
-                logger.info(f"[ACP] LLM 调用取消: {prompt_id}")
+                _log.info(f"[ACP] LLM 调用取消: {prompt_id}")
                 # 取消前清空缓冲区中的残余文本, 确保已流式输出的内容不丢失
                 await self._flush_chunk_buffer()
                 raise
             except Exception as e:
-                logger.error(f"[ACP] LLM 调用失败: {e}")
+                _log.error(f"[ACP] LLM 调用失败: {e}")
                 # 错误内容先发送缓冲区中已有文本, 再追加错误提示
                 await self._flush_chunk_buffer()
                 await self._push_chunk(f"\n\n*错误: {e}*")
@@ -624,11 +633,11 @@ class AcpHandler:
 
         try:
             result = await asyncio.wait_for(_do_llm(), timeout=LLM_TIMEOUT_SECONDS)
-            logger.info(f"[ACP] prompt 完成: {len(result)} chars")
+            _log.info(f"[ACP] prompt 完成: {len(result)} chars")
             # 诊断日志: 打印最终回复前 120 字符, 用于确认答案内容正确抵达
             if result:
                 preview = result[:120].replace("\n", "\\n")
-                logger.info(f"[ACP-ANSWER] session={self.session_id} len={len(result)} preview={preview!r}")
+                _log.info(f"[ACP-ANSWER] session={self.session_id} len={len(result)} preview={preview!r}")
             if result and self.session_id and self.agent_id:
                 await self.session_mgr.persist_turn(
                     session_id=self.session_id,
@@ -638,7 +647,7 @@ class AcpHandler:
                     assistant_text=result,
                 )
         except asyncio.TimeoutError:
-            logger.error(f"[ACP] LLM 超时 ({LLM_TIMEOUT_SECONDS}s)")
+            _log.error(f"[ACP] LLM 超时 ({LLM_TIMEOUT_SECONDS}s)")
             # 超时前清空缓冲区, 确保已流式输出的部分内容不丢失
             await self._flush_chunk_buffer()
             await self._push_chunk("\n\n*错误: AI 响应超时*")

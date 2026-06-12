@@ -809,6 +809,10 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             _timeout = float(os.getenv("ACP_FS_WRITE_TIMEOUT", "60"))
         elif method == "fs/edit_text_file":
             _timeout = float(os.getenv("ACP_FS_EDIT_TIMEOUT", "30"))
+        logger.debug(
+            f"[ACP-FS] timeout tier tool={tool_name} method={method} "
+            f"timeout={_timeout}s"
+        )
         result = await handler.send_request(method, params, timeout=_timeout)
         logger.info(
             f"[ACP-PERF] fs DONE tool={tool_name} path={path} session={session_id} "
@@ -835,6 +839,10 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             if time.monotonic() - _cached_ts < _LS_CACHE_TTL:
                 logger.info(f"[ACP-bridge] list_files cache hit path={path} depth={_depth}")
                 return _cached_val
+            # P1-5: 缓存 MISS 日志
+            logger.debug(
+                f"[ACP-CACHE] list_files MISS path={path or '.'} depth={_depth}"
+            )
             if isinstance(result, dict):
                 entries = result.get("entries") or result.get("files") or []
                 if not entries:
@@ -1094,6 +1102,184 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
     except Exception as e:
         logger.error(f"[ACP-terminal conn={conn_id}] error: {command[:80]} session={session_id}: {e}")
         return f"⚠️ 终端执行失败: {e}"
+
+
+async def _try_acp_terminal_streaming(
+    args: dict, handler, cancel_event: asyncio.Event | None = None,
+) -> str | None:
+    """流式 Terminal 执行 — 自适应轮询策略。
+
+    策略:
+      Phase 1 (500ms 静默): 等 500ms, 如果命令已完成 → 返回聚合结果 (零轮询开销)
+      Phase 2 (300ms 轮询): 命令超过 500ms → 启动流式轮询, 每 300ms 推送增量
+
+    短命令 (ls/pwd/git status) 走 Phase 1, 零额外开销。
+    长命令 (gradle build) 自动进入 Phase 2, 用户看到增量输出。
+
+    Returns:
+        None — 流式版本通过 notification 推送, 不返回聚合结果。
+        调用者应检查返回值: None 表示已进入流式模式, 调用者不应再等待结果。
+    """
+    command = args.get("command", "")
+    if not command:
+        return None
+
+    session_id = getattr(handler, "session_id", "")
+    conn_id = getattr(handler, "conn_id", "?")
+
+    logger.info(
+        f"[ACP-PERF] terminal-streaming START conn={conn_id} session={session_id} "
+        f"cmd={command[:80]}"
+    )
+
+    # Step 1: 创建 terminal
+    try:
+        create_resp = await handler.send_request(
+            "terminal/create",
+            {"sessionId": session_id, "command": command},
+            timeout=float(os.getenv("ACP_TERMINAL_CREATE_TIMEOUT", "30")),
+        )
+    except Exception as e:
+        logger.error(
+            f"[ACP-PERF] terminal-streaming CREATE-FAIL conn={conn_id} "
+            f"session={session_id}: {e}"
+        )
+        return f"❌ terminal 创建失败: {e}"
+
+    if isinstance(create_resp, dict) and create_resp.get("error"):
+        return f"❌ terminal 创建失败: {create_resp['error']}"
+    terminal_id = create_resp.get("terminalId", "") if isinstance(create_resp, dict) else ""
+    if not terminal_id:
+        return "❌ terminal 创建失败: 未返回 terminalId"
+
+    # Phase 1: 500ms 静默等待
+    await asyncio.sleep(0.5)
+
+    try:
+        check = await handler.send_request(
+            "terminal/output",
+            {"sessionId": session_id, "terminalId": terminal_id},
+            timeout=float(os.getenv("ACP_TERMINAL_OUTPUT_TIMEOUT", "30")),
+        )
+    except Exception as e:
+        logger.error(
+            f"[ACP-PERF] terminal-streaming CHECK-FAIL conn={conn_id} "
+            f"session={session_id}: {e}"
+        )
+        return f"⚠️ terminal 检查失败: {e}"
+
+    if isinstance(check, dict) and check.get("exitCode") is not None:
+        # Phase 1 完成: 短命令直接返回
+        exit_code = int(check.get("exitCode", -1))
+        out_text = check.get("output", "")
+        logger.info(
+            f"[ACP-PERF] terminal-streaming SHORT-CMD conn={conn_id} "
+            f"session={session_id} exitCode={exit_code} outputLen={len(out_text)}"
+        )
+        if exit_code != 0:
+            return f"❌ 命令失败 (exit={exit_code}):\n{out_text}"
+        return out_text
+
+    # Phase 2: 启动 300ms 流式轮询
+    logger.info(
+        f"[ACP-PERF] terminal-streaming PHASE2 conn={conn_id} "
+        f"session={session_id} reason=exceeded 500ms silence"
+    )
+    seq = 0
+
+    async def poll_loop():
+        nonlocal seq
+        try:
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    logger.warning(
+                        f"[ACP-PERF] terminal-streaming CANCELLED conn={conn_id} "
+                        f"session={session_id} terminalId={terminal_id}"
+                    )
+                    try:
+                        await handler.send_request(
+                            "terminal/kill",
+                            {"sessionId": session_id, "terminalId": terminal_id},
+                            timeout=5,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[ACP-PERF] terminal-streaming KILL-FAIL conn={conn_id}: {e}"
+                        )
+                    break
+
+                try:
+                    output = await handler.send_request(
+                        "terminal/output",
+                        {"sessionId": session_id, "terminalId": terminal_id},
+                        timeout=float(os.getenv("ACP_TERMINAL_OUTPUT_TIMEOUT", "30")),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[ACP-PERF] terminal-streaming POLL-FAIL conn={conn_id} "
+                        f"session={session_id}: {e}"
+                    )
+                    await asyncio.sleep(0.3)
+                    continue
+
+                if not isinstance(output, dict):
+                    await asyncio.sleep(0.3)
+                    continue
+
+                new_text = output.get("output", "")
+                if new_text:
+                    seq += 1
+                    try:
+                        await handler._send_notification("session/update", {
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": {"type": "text", "text": f"[TERMINAL] {new_text}"},
+                            },
+                        })
+                    except Exception as e:
+                        logger.warning(
+                            f"[ACP-PERF] terminal-streaming NOTIFY-FAIL conn={conn_id}: {e}"
+                        )
+
+                if output.get("exitCode") is not None:
+                    exit_code = int(output.get("exitCode", -1))
+                    logger.info(
+                        f"[ACP-PERF] terminal-streaming DONE conn={conn_id} "
+                        f"session={session_id} exitCode={exit_code} total_chunks={seq}"
+                    )
+                    try:
+                        await handler._send_notification("session/update", {
+                            "sessionId": session_id,
+                            "update": {
+                                "sessionUpdate": "agent_thought_chunk",
+                                "content": {
+                                    "type": "text",
+                                    "text": f"\n\n[进程退出: exitCode={exit_code}]",
+                                },
+                            },
+                        })
+                    except Exception as e:
+                        logger.warning(
+                            f"[ACP-PERF] terminal-streaming EXIT-NOTIFY-FAIL conn={conn_id}: {e}"
+                        )
+                    break
+
+                await asyncio.sleep(0.3)
+
+        except asyncio.CancelledError:
+            logger.warning(
+                f"[ACP-PERF] terminal-streaming poll_loop cancelled conn={conn_id} "
+                f"session={session_id}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[ACP-PERF] terminal-streaming poll_loop error conn={conn_id} "
+                f"session={session_id}: {e}"
+            )
+
+    _ = asyncio.create_task(poll_loop())
+    return None  # 流式版本: 调用者看到 None 应停止等待
 
 
 async def _list_files_local(path: str, depth: int = 3, limit: int = 200) -> str:
