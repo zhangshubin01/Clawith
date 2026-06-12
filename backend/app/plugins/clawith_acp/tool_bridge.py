@@ -706,6 +706,10 @@ def is_agent_internal_path(path: str) -> bool:
     return not _is_project_file(normalized)
 
 
+
+# P1-5: list_files/list_directory 去重缓存 (3s TTL)
+_ls_cache: dict[str, tuple[float, str]] = {}
+_LS_CACHE_TTL = 3.0
 async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
     """通过 ACP 协议执行文件操作。
 
@@ -714,7 +718,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
     """
     path = args.get("path") or args.get("file") or args.get("file_path") or args.get("filePath", "")
     # 无 path 参数的工具（如 index_status, build_project）不需要项目文件检查
-    if path and not _is_project_file(path):
+    _cwd = getattr(handler, '_cwd', '')
+    if path and not _is_project_file(path, cwd=_cwd):
         return None
 
     method = _ACP_METHOD_MAP.get(tool_name)
@@ -798,19 +803,42 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
     t0 = time.perf_counter()
     logger.info(f"[ACP-PERF] fs START tool={tool_name} path={path} session={session_id}")
     try:
-        result = await handler.send_request(method, params, timeout=float(os.getenv("ACP_FS_TIMEOUT", "15")))
+        # P2-1: 文件大小阶梯超时
+        _timeout = float(os.getenv("ACP_FS_TIMEOUT", "15"))
+        if method == "fs/write_text_file":
+            _timeout = float(os.getenv("ACP_FS_WRITE_TIMEOUT", "60"))
+        elif method == "fs/edit_text_file":
+            _timeout = float(os.getenv("ACP_FS_EDIT_TIMEOUT", "30"))
+        result = await handler.send_request(method, params, timeout=_timeout)
         logger.info(
             f"[ACP-PERF] fs DONE tool={tool_name} path={path} session={session_id} "
             f"elapsed={time.perf_counter() - t0:.3f}s"
         )
+        # P1-6: 检测 IDE 索引未就绪，引导 LLM 等待而非反复重试
+        if isinstance(result, str) and ("索引未就绪" in result or "索引构建中" in result):
+            logger.warning(f"[ACP-DUMB] {tool_name} blocked by IDE indexing: {result[:100]}")
+            return (
+                f"{result}\n\n"
+                "⚠️ IDE 正在构建代码索引，所有代码搜索/导航暂时不可用。"
+                "请等待索引完成后重试（通常需要 10-60 秒），不要反复重试搜索类工具。"
+                "可调用 index_status 检查索引进度。"
+            )
         if method == "fs/read_text_file":
             if isinstance(result, dict):
                 return result.get("content", "")
             return str(result)
         if method == "fs/list_directory":
+            # P1-5: 去重缓存 — 相同路径 3s 内不重复查询 IDE
+            _depth = str(params.get("depth", 1))
+            _cache_key = f"{path}:{_depth}"
+            _cached_ts, _cached_val = _ls_cache.get(_cache_key, (0, ""))
+            if time.monotonic() - _cached_ts < _LS_CACHE_TTL:
+                logger.info(f"[ACP-bridge] list_files cache hit path={path} depth={_depth}")
+                return _cached_val
             if isinstance(result, dict):
                 entries = result.get("entries") or result.get("files") or []
                 if not entries:
+                    _ls_cache[_cache_key] = (time.monotonic(), "(目录为空)")
                     return "(目录为空)"
                 lines = []
                 for e in entries:
@@ -821,8 +849,10 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                         lines.append(str(e))
                 if result.get("truncated"):
                     lines.append(f"... (截断, 共 {result.get('totalCount', '?')} 项)")
-                logger.info(f"[ACP-bridge] list_files 返回 {len(lines)} 条目")
-                return "\n".join(lines)
+                _out = "\n".join(lines)
+                _ls_cache[_cache_key] = (time.monotonic(), _out)
+                logger.info(f"[ACP-bridge] list_files {len(lines)} entries (cached)")
+                return _out
             return str(result)
         if method == "fs/find_file":
             if isinstance(result, dict):

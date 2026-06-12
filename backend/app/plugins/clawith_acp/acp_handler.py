@@ -47,10 +47,10 @@ install_acp_tool_hooks()
 _kind_map = {
     "read_file": "read", "write_file": "edit", "edit_file": "edit",
     "delete_file": "delete", "execute_command": "execute", "bash": "execute",
-    "find_class": "read", "find_symbol": "read", "index_status": "read",
-    "find_references": "read", "find_definition": "read",
-    "find_implementations": "read", "find_super_methods": "read",
-    "call_hierarchy": "read", "type_hierarchy": "read",
+    "find_class": "search", "find_symbol": "search", "index_status": "read",
+    "find_references": "search", "find_definition": "search",
+    "find_implementations": "search", "find_super_methods": "search",
+    "call_hierarchy": "search", "type_hierarchy": "search",
     "diagnostics": "read",
     "refactor_rename": "edit", "move_file": "edit",
     "reformat_code": "edit", "optimize_imports": "edit",
@@ -58,13 +58,32 @@ _kind_map = {
     "sync_files": "edit",
     "active_file": "read", "open_file": "edit",
     "file_structure": "read",
-    "find_file": "read",
-    "search_text": "read",
+    "find_file": "search",
+    "search_text": "search",
     "list_directory": "read",
     "list_files": "read",
     "build_project": "edit",
     "get_documentation": "read", "apply_quickfix": "edit",
     "git_status": "read", "git_diff": "read", "git_stage": "edit", "git_commit": "edit",
+}
+
+# 工具名 → 中文显示名，供 on_tool_call 填充 title 字段
+_TOOL_CN_NAME = {
+    "read_file": "读取文件", "write_file": "写入文件", "edit_file": "编辑文件",
+    "delete_file": "删除文件", "execute_command": "执行命令", "bash": "终端",
+    "find_class": "搜索类", "find_symbol": "搜索符号", "index_status": "索引进度",
+    "find_references": "查找引用", "find_definition": "查找定义",
+    "find_implementations": "查找实现", "find_super_methods": "查找父方法",
+    "call_hierarchy": "调用层次", "type_hierarchy": "类型层次",
+    "diagnostics": "诊断", "refactor_rename": "重命名", "move_file": "移动文件",
+    "reformat_code": "格式化", "optimize_imports": "优化导入",
+    "safe_delete": "安全删除", "convert_java_to_kotlin": "Java→Kotlin",
+    "sync_files": "同步文件", "active_file": "活动文件", "open_file": "打开文件",
+    "file_structure": "文件结构", "find_file": "查找文件", "search_text": "文本搜索",
+    "list_directory": "列出目录", "list_files": "列出文件",
+    "build_project": "构建项目", "get_documentation": "查看文档",
+    "apply_quickfix": "应用修复",
+    "git_status": "Git状态", "git_diff": "Git差异", "git_stage": "Git暂存", "git_commit": "Git提交",
 }
 class AcpHandler:
     """ACP JSON-RPC 2.0 路由 + Agent 管理。"""
@@ -142,6 +161,8 @@ class AcpHandler:
                     elif method == "session/new":
                         result = await self._handle_session_new(params)
                     elif method == "session/load":
+                        result = await self._handle_session_load(params)
+                    elif method == "session/resume":
                         result = await self._handle_session_load(params)
                     elif method == "session/prompt":
                         # R1: 禁止在读循环内 await 长时 prompt，否则 send_request 无法读入 IDE 工具响应（死锁）
@@ -440,7 +461,8 @@ class AcpHandler:
                 cwd_prefix = f"cd {self._cwd} && "
                 if path_hint.startswith(cwd_prefix):
                     path_hint = path_hint[len(cwd_prefix):]
-            title = tool_name if not path_hint else f"{tool_name}({path_hint})"
+            cn_name = _TOOL_CN_NAME.get(tool_name, tool_name)
+            title = cn_name if not path_hint else f"{cn_name}({path_hint})"
             logger.info(
                 f"[ACP-PERF] tool_notify conn={self.conn_id} session={self.session_id} "
                 f"tool={tool_name} call_id={call_id} status={status} elapsed_ms={elapsed_ms}"
@@ -457,9 +479,9 @@ class AcpHandler:
             if path := args.get("path"):
                 path_str = str(path)
                 # 后端记忆/技能等内部文件不在 IDE 时间线展示（仍本地执行）
-                if tool_name in ("read_file", "write_file", "edit_file", "delete_file") and is_agent_internal_path(
-                    path_str
-                ):
+                if tool_name in ("read_file", "write_file", "edit_file", "delete_file") \
+                        and os.path.isabs(path_str) \
+                        and is_agent_internal_path(path_str):
                     logger.info(
                         f"[ACP-PERF] tool_notify skipped internal conn={self.conn_id} "
                         f"session={self.session_id} tool={tool_name} path={path_str}"
