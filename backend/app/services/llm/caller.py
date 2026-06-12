@@ -18,6 +18,8 @@ import os
 import time
 import re
 import uuid
+import hashlib
+from collections import OrderedDict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -304,11 +306,17 @@ def _repair_truncated_messages(messages: list) -> list:
             repaired.append(m)
     removed = len(messages) - len(repaired)
     if removed:
+        orphaned_tool_names = [
+            tc.get("function", {}).get("name", "?")
+            for m in messages
+            if m.role == "assistant" and m.tool_calls
+            for tc in m.tool_calls
+            if tc.get("id", "") not in tool_result_ids
+        ][:10]
         logger.warning(
-            f"[CTX-GUARD-REPAIR] removed {removed} orphaned messages "
-            f"(tool_calls without matching tool results)"
+            f"[CTX-GUARD-REPAIR] removed {removed} orphaned msgs "
+            f"tools={orphaned_tool_names}"
         )
-    return repaired
 
 
 def _collect_all_tool_call_ids(messages: list) -> set:
@@ -336,6 +344,362 @@ def _usage_from_response_or_estimate(response, api_messages: list[LLMMessage]) -
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 上下文压缩管道 (v4.1 — 类型感知压缩 + 指标修正)
+# ═══════════════════════════════════════════════════════════════════════════════
+_TOOL_MIN, _JSON_SMALL, _SEARCH_MIN, _LOG_MIN = 512, 20, 30, 40
+_TEXT_MIN, _TEXT_MAX = 4096, 8192
+_CACHE_MAX, _BREAKER_MAX, _BREAKER_COOLDOWN = 200, 3, 60.0
+_CCR_MAX = 500
+
+_compress_cache: OrderedDict[str, str] = OrderedDict()
+_ccr_store: OrderedDict[str, str] = OrderedDict()
+_breaker_failures, _breaker_open_until = 0, 0.0
+
+_ERROR_KW = frozenset({"error","failed","failure","fatal","critical","panic","exception",
+    "traceback","stack trace","segfault","abort","timeout","timed out","crashed","killed",
+    "terminated","denied","refused","invalid","unavailable","unreachable","corrupt",
+    "corrupted","overflow","deadlock","unauthorized","forbidden","access denied","deprecated"})
+CCR_SENTINEL_KEY = "_ccr_dropped"
+
+_GREP_RE = re.compile(r'^(?:\.{0,2}/)?[^\s:]+:\d+:|^\x1b\[[0-9;]*m', re.MULTILINE)
+_LOG_RE = re.compile(r'\d{4}[-/]\d{2}[-/]\d{2}[T\s]\d{2}:\d{2}|\[\d{4}-\d{2}-\d{2}|\b(ERROR|CRITICAL|FATAL|WARN|WARNING|INFO|DEBUG|TRACE)\b')
+_SIG_RE = re.compile(r'^\s*(def |class |fn |function |public |private |protected |export |async def |async fn )')
+_STOP_RE = re.compile(r'\b(the|a|an|is|are|was|were|be|been|being|have|has|had|do|does|did|will|would|shall|should|may|might|can|could|to|of|in|for|on|with|at|by|from|as|into|through|during|and|but|or|nor|not|so|yet|both|either|neither|this|that|these|those|it|its|they|them|their)\b', re.IGNORECASE)
+_CODE_KW = ("import ","from ","def ","class ","fn ","function ","// ","/*","export ","package ","public ","private ","use ","mod ","struct ","enum ","interface ","impl ")
+_IMPORTANCE_RE = re.compile(r'(error|fail|exception|panic|traceback|segfault|abort|timeout|crash|denied|refused|forbidden|deadlock|corrupt|overflow|TODO|FIXME|HACK|BUG|WARNING|DEPRECATED)', re.IGNORECASE)
+
+
+def _breaker_is_open() -> bool:
+    global _breaker_failures, _breaker_open_until
+    now = time.monotonic()
+    if _breaker_open_until > 0 and now >= _breaker_open_until:
+        _breaker_failures = 0; _breaker_open_until = 0.0
+    return _breaker_open_until > 0
+
+
+def _breaker_record_failure() -> None:
+    global _breaker_failures, _breaker_open_until
+    _breaker_failures += 1
+    if _breaker_failures >= _BREAKER_MAX:
+        _breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN
+        logger.warning(f"[CTX-COMPRESS] breaker OPEN — bypass {_BREAKER_COOLDOWN}s")
+
+
+def _breaker_record_success() -> None:
+    global _breaker_failures, _breaker_open_until
+    _breaker_failures = 0; _breaker_open_until = 0.0
+
+
+def _est_tokens(msgs: list) -> int:
+    t = 0
+    for m in msgs:
+        c = getattr(m, 'content', None)
+        if isinstance(c, str):
+            t += len(c)
+        elif isinstance(c, list):
+            for p in c:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    t += len(p.get("text", ""))
+        if tc := getattr(m, 'tool_calls', None):
+            t += len(json.dumps(tc, default=str))
+        if dc := getattr(m, 'dynamic_content', None):
+            t += len(dc)
+    return max(t // 3, 1)
+
+
+def _trunc(s: str, n: int) -> str:
+    if len(s) <= n:
+        return s
+    return s[:n] + f"\n... ({len(s) - n} more chars)"
+
+
+def _work_paths(msgs: list) -> set[str]:
+    ps: set[str] = set()
+    n = 0
+    for m in reversed(msgs):
+        if getattr(m, 'role', None) != "assistant":
+            continue
+        for tc in (getattr(m, 'tool_calls', None) or []):
+            a = tc.get("function", {}).get("arguments", "{}")
+            if isinstance(a, str):
+                try:
+                    a = json.loads(a)
+                except json.JSONDecodeError:
+                    continue
+            for k in ("path", "file_path", "filePath", "file"):
+                if v := a.get(k):
+                    ps.add(str(v))
+            n += 1
+            if n >= 20:
+                return ps
+    return ps
+
+
+def _isolate(msg, wp: set[str]) -> bool:
+    if getattr(msg, 'role', None) == "system":
+        return True
+    c = getattr(msg, 'content', None)
+    if isinstance(c, str):
+        lo = c.lower()
+        if any(kw in lo for kw in _ERROR_KW):
+            return True
+        if wp and any(p in lo for p in wp):
+            return True
+    return False
+
+
+def _detect(content: str) -> str:
+    s = content.strip()
+    if not s:
+        return "empty"
+    if s[0] in ("{", "["):
+        try:
+            json.loads(s)
+            return "json"
+        except (json.JSONDecodeError, ValueError):
+            pass
+    h = s.split("\n")[:10]
+    if sum(1 for L in h if _GREP_RE.search(L)) >= max(len(h) * 0.5, 2):
+        return "search"
+    ls = s.split("\n")[:30]
+    if sum(1 for L in ls if _LOG_RE.search(L)) >= max(len(ls) * 0.3, 3):
+        return "log"
+    cs = s.split("\n")[:20]
+    if sum(1 for L in cs if L.lstrip().startswith(_CODE_KW)) >= 3:
+        return "code"
+    return "text"
+
+
+def _compress_cached(content: str) -> str:
+    h = hashlib.sha256(content.encode()).hexdigest()
+    if h in _compress_cache:
+        return _compress_cache[h]
+    ct = _detect(content)
+    result = _dispatch(content, ct)
+    if result is not content:
+        if len(_compress_cache) >= _CACHE_MAX:
+            _compress_cache.popitem(last=False)
+        _compress_cache[h] = result
+    return result
+
+
+def _dispatch(c: str, t: str) -> str:
+    if t == "json":
+        return _json(c)
+    if t == "search":
+        return _search(c)
+    if t == "log":
+        return _log(c)
+    if t == "code":
+        return _code(c)
+    if t == "text":
+        return _text(c)
+    return c
+
+
+def _json(content: str) -> str:
+    try:
+        d = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return _trunc(content, 4096)
+    if isinstance(d, list):
+        n = len(d)
+        if n <= _JSON_SMALL:
+            return content
+        errors = [i for i in d[:min(n, 500)] if isinstance(i, dict)
+                  and any(kw in str(i).lower() for kw in ("error", "fail", "exception"))]
+        keys = {k for i in d[:min(n, 100)] if isinstance(i, dict) for k in i}
+        kept = list(d[:5])
+        if errors:
+            kept.append({"_pinned_errors": len(errors)})
+        kept += list(d[-5:])
+        dropped = n - len(kept)
+        if dropped > 0:
+            h = hashlib.sha256(content.encode()).hexdigest()[:12]
+            if len(_ccr_store) >= _CCR_MAX:
+                _ccr_store.popitem(last=False)
+            _ccr_store[h] = content
+            kept.append({CCR_SENTINEL_KEY: f"ccr:{h} {dropped}_rows {len(content)}B"})
+        return json.dumps({"_total": n, "_fields": sorted(keys)[:20], "_sample": kept},
+                          ensure_ascii=False)
+    if isinstance(d, dict):
+        c = {}
+        for k, v in d.items():
+            if isinstance(v, str) and len(v) > 200:
+                c[k] = v[:200] + "..."
+            elif isinstance(v, (list, tuple)) and len(v) > 20:
+                c[k] = f"[{len(v)} items]"
+            elif isinstance(v, dict):
+                c[k] = f"{{...{len(v)} keys...}}"
+            else:
+                c[k] = v
+        return json.dumps(c, ensure_ascii=False)
+    return _trunc(content, 4096)
+
+
+def _search(content: str) -> str:
+    lines = content.strip().split("\n")
+    if len(lines) <= _SEARCH_MIN:
+        return content
+    fc, important = {}, []
+    for line in lines:
+        m = re.match(r'^(?:\.{0,2}/)?([^\s:]+(?:\.[a-zA-Z]+)?):\d+:', line)
+        if m:
+            fc[m.group(1)] = fc.get(m.group(1), 0) + 1
+        if _IMPORTANCE_RE.search(line):
+            important.append(line)
+    p = [f"[grep: {len(lines)} matches / {len(fc)} files]",
+         "Top: " + ", ".join(f"{f}({c})" for f, c in sorted(fc.items(), key=lambda x: -x[1])[:10])]
+    if important:
+        p.append(f"\n--- Highlights ({len(important)}) ---")
+        p.extend(important[:20])
+    p.append("\n--- Head ---")
+    p.extend(lines[:5])
+    p.append("\n--- Tail ---")
+    p.extend(lines[-5:])
+    return "\n".join(p)
+
+
+def _log(content: str) -> str:
+    lines = content.strip().split("\n")
+    if len(lines) <= _LOG_MIN:
+        return content
+    im, it = [], False
+    for line in lines:
+        st = line.lstrip()
+        is_t = (len(st) < len(line) or "Traceback" in line
+                or st.startswith('File "') or re.match(r'^\s+at\s', line))
+        if is_t:
+            if not it:
+                it = True
+            im.append(line)
+            continue
+        it = False
+        if re.search(r'\b(ERROR|CRITICAL|FATAL|WARN|WARNING)\b', line):
+            im.append(line)
+    r = list(lines[:20])
+    r.append(f"\n... ({max(0, len(lines) - 40)} lines omitted) ...\n")
+    if im:
+        r.append(f"--- Alerts ({len(im)}) ---")
+        r.extend(im[:30])
+    r.append("--- Last 20 ---")
+    r.extend(lines[-20:])
+    return "\n".join(r)
+
+
+def _code(content: str) -> str:
+    lines = content.split("\n")
+    r, ib, bi = [], False, 0
+    for line in lines:
+        s = line.strip()
+        if not s:
+            r.append("")
+            continue
+        if s.startswith(("import ", "from ", "use ", "require ", "#include", "using ")):
+            r.append(line)
+            continue
+        if _SIG_RE.match(s):
+            r.append(line)
+            ib = True
+            bi = len(line) - len(line.lstrip())
+            continue
+        if ib:
+            cur = len(line) - len(line.lstrip()) if s else 0
+            if cur <= bi and s:
+                ib = False
+                r.append(line)
+            elif s.startswith(("return ", "raise ", "yield ", "throw ")):
+                r.append(line)
+        else:
+            r.append(line)
+    c = "\n".join(r)
+    if len(c) > 4096:
+        cl = c.split("\n")
+        c = "\n".join(
+            cl[:50] + [f"\n... ({max(0, len(cl) - 100)} lines omitted) ...\n"] + cl[-50:]
+        )
+    return c
+
+
+def _text(content: str) -> str:
+    if len(content) <= _TEXT_MIN:
+        return content
+    lines = content.strip().split("\n")
+    if len(lines) <= 20:
+        return _trunc(content, _TEXT_MAX)
+    sc = []
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s:
+            continue
+        v = len(s) + sum(1 for c in s if c.isupper()) * 2
+        v += sum(1 for c in s if c in "{}[]()<>|&^%$#@!:=;")
+        v -= len(_STOP_RE.findall(s)) * 5
+        sc.append((i, max(v, 1), line))
+    if not sc:
+        return content
+    sc.sort(key=lambda x: x[1], reverse=True)
+    k = max(int(len(sc) * 0.5), 30)
+    kp = sorted(sc[:k], key=lambda x: x[0])
+    return _trunc("\n".join(ln for _, _, ln in kp), _TEXT_MAX)
+
+
+def _ctx_compress(api_messages: list, ctx_window: int) -> list:
+    from app.services.llm.client import LLMMessage
+
+    if _breaker_is_open() or _est_tokens(api_messages) <= ctx_window * 0.80:
+        return api_messages
+
+    wp = _work_paths(api_messages)
+    before = _est_tokens(api_messages)
+    compressed = 0
+    fallback = 0
+    result = []
+
+    try:
+        for msg in api_messages:
+            if _isolate(msg, wp):
+                result.append(msg)
+                continue
+            role = getattr(msg, 'role', None)
+            content = getattr(msg, 'content', None)
+            if role == "tool" and isinstance(content, str) and len(content) > _TOOL_MIN:
+                try:
+                    nc = _compress_cached(content)
+                    if content.strip() and isinstance(nc, str) and not nc.strip():
+                        nc = content
+                        logger.warning("[CTX-COMPRESS] empty output prevented")
+                    if nc is not content:
+                        compressed += 1
+                    result.append(LLMMessage(
+                        role="tool", content=nc,
+                        tool_call_id=getattr(msg, 'tool_call_id', None),
+                    ))
+                except Exception:
+                    fallback += 1
+                    result.append(msg)
+            else:
+                result.append(msg)
+
+        after = _est_tokens(result)
+        if compressed or fallback:
+            logger.info(
+                f"[CTX-COMPRESS] {compressed} ok {fallback} fb "
+                f"tokens: {before}→{after} "
+                f"cache={len(_compress_cache)} ccr={len(_ccr_store)}"
+            )
+        if fallback == 0:
+            _breaker_record_success()
+        else:
+            _breaker_record_failure()
+
+        return _repair_truncated_messages(result)
+    except Exception:
+        _breaker_record_failure()
+        logger.exception("[CTX-COMPRESS] pipeline failed, returning original")
+        return api_messages
+
+
 # Helper Functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -773,20 +1137,20 @@ async def call_llm(
                     return _token_limit_msg
 
         try:
-            # 上下文利用率检查：来自 openhuman COMPACTION_TRIGGER_THRESHOLD=0.90
+            # 上下文利用率检查：使用当前 api_messages 估算而非累计 input_tokens
             _ctx_window = _resolve_ctx_window(model)
-            _ctx_ratio = _accumulated_usage.input_tokens / _ctx_window
+            _ctx_ratio = _est_tokens(api_messages) / _ctx_window
             if _ctx_ratio >= 0.90:
                 logger.warning(
-                    f"[CTX-GUARD] context 90%: input_tokens={_accumulated_usage.input_tokens} "
-                    f"/ {_ctx_window} ({_ctx_ratio:.1%}) model={getattr(model, 'model', '?')} session={session_id}"
+                    f"[CTX-GUARD] context 90%: tokens={_est_tokens(api_messages)}"
+                    f"/{_ctx_window} ({_ctx_ratio:.1%}) model={getattr(model, 'model', '?')} session={session_id}"
                 )
                 if not _ctx_pressure_warned:
                     _ctx_pressure_warned = True
                     api_messages.append(LLMMessage(
                         role="user",
                         content=(
-                            f"⚠️ 上下文利用率已达 {_ctx_ratio:.0%}（{_accumulated_usage.input_tokens}/{_ctx_window} tokens）。"
+                            f"⚠️ 上下文利用率已达 {_ctx_ratio:.0%}（~{_est_tokens(api_messages)}/{_ctx_window} tokens）。"
                             "请精简后续输出，优先使用 finish 总结当前进度，避免在剩余轮次中发起高成本工具调用。"
                         ),
                     ))
@@ -801,14 +1165,10 @@ async def call_llm(
                             content="上下文已严重超限，请立即调用 finish 结束。",
                         ))
                     else:
-                        _half = max(2, len(api_messages) // 2)
-                        api_messages = api_messages[:_half] + api_messages[-_half:]
-                        # 截断后修复: 删除中间切断产生的孤儿 tool_calls。
-                        # 前半部分末尾的 assistant(tool_calls) 缺少对应的 tool(result),
-                        # 会导致 LLM API 400。扫描并移除这些孤立消息。
-                        api_messages = _repair_truncated_messages(api_messages)
+                        # v4.1: 类型感知压缩替代暴力截断
+                        api_messages = _ctx_compress(api_messages, ctx_window=_ctx_window)
                         logger.warning(
-                            f"[CTX-GUARD] TRUNCATED: {len(api_messages)} messages kept, "
+                            f"[CTX-COMPRESS] compressed: est_tokens={_est_tokens(api_messages)} "
                             f"failures={_consecutive_guard_failures}/3"
                         )
                 else:
@@ -825,17 +1185,7 @@ async def call_llm(
                 ),
                 timeout=float(os.getenv("ACP_LLM_STREAM_TIMEOUT", "30")),  # 默认 30s (hermes-agent 对齐), env 可覆盖
             )
-            # [LSP4J-PERF] LLM stream 完成
             llm_time = time.monotonic() - round_start
-            logger.info(
-                "[LSP4J-PERF] Round {}: LLM stream done "
-                "llm_time={:.2f}s tool_calls={} "
-                "input_tokens={} output_tokens={}{}",
-                round_i + 1, llm_time, len(response.tool_calls or []),
-                getattr(response.usage, "input_tokens", 0) if response.usage else 0,
-                getattr(response.usage, "output_tokens", 0) if response.usage else 0,
-                _perf_channel_suffix(),
-            )
         except asyncio.TimeoutError:
             _elapsed = time.monotonic() - round_start
             logger.warning(
@@ -865,6 +1215,16 @@ async def call_llm(
         _accumulated_usage.add(_usage_this_round)
         _unsaved_usage.add(_usage_this_round)
 
+        # Log round completion with estimated (not raw) token usage
+        logger.info(
+            "[LSP4J-PERF] Round {}: LLM stream done "
+            "llm_time={:.2f}s tool_calls={} "
+            "input_tokens={} output_tokens={}{}",
+            round_i + 1, llm_time, len(response.tool_calls or []),
+            getattr(_usage_this_round, "input_tokens", 0),
+            getattr(_usage_this_round, "output_tokens", 0),
+            _perf_channel_suffix(),
+        )
         # Plain assistant text is not a stop condition. The model must finish
         # explicitly via finish(content=...).
         if not response.tool_calls:
