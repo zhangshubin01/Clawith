@@ -25,7 +25,8 @@ class AcpSessionManager:
 
     def __init__(self):
         self._history_cache: dict[str, tuple[float, list[dict]]] = {}
-        self._CACHE_TTL = 5.0
+        # TTL 30s: ACP 多轮对话场景, persist_turn 后主动更新缓存, 延长 TTL 覆盖连续对话间隔
+        self._CACHE_TTL = 30.0
 
     async def create(self, user_id: str, agent_id: str, cwd: str = "") -> str:
         """创建新会话 — source_channel="acp", project_path=cwd。"""
@@ -64,10 +65,12 @@ class AcpSessionManager:
                 logger.warning(f"[ACP-Session] 会话归属不匹配: {session_id}")
                 return None
 
-            # 取最近 N 条再按时间正序，供 session/load 展示
+            # 取最近 N 条再按时间正序，供 session/load 展示。
+            # 增加 user_id 过滤: 与 load_history_for_llm 保持一致, 纵深防御 + 索引覆盖。
             history_result = await db.execute(
                 select(ChatMessage)
                 .where(ChatMessage.conversation_id == session_id)
+                .where(ChatMessage.user_id == uuid.UUID(user_id))
                 .where(ChatMessage.role.in_(("user", "assistant")))
                 .order_by(ChatMessage.created_at.desc())
                 .limit(ACP_HISTORY_LIMIT)
@@ -200,6 +203,7 @@ class AcpSessionManager:
                 f"[ACP-Session] persist: session={session_id} "
                 f"user_len={len(user_text)} reply_len={len(assistant_text)}"
             )
+            # 淘汰缓存: 会话已更新, 下次 prompt 从 DB 加载最新历史。TTL 30s 覆盖连续对话间隔。
             self._history_cache.pop(session_id, None)
         except Exception as e:
             logger.error(f"[ACP-Session] persist 失败: {e}", exc_info=True)

@@ -54,6 +54,8 @@ from app.services.llm.caller import call_llm_with_failover, _format_friendly_err
 from app.services.task_executor import execute_task as _execute_task
 from app.services.connection_manager import manager
 
+from app.plugins.clawith_acp.tool_bridge import is_agent_internal_path
+
 from .context import (
     current_lsp4j_message_history,
     current_lsp4j_session_id,
@@ -421,9 +423,8 @@ _SESSION_MESSAGE_CACHE_MAX = 500  # #102 修复：LRU 淘汰上限，基于 Orde
 
 # Agent 内部目录前缀 — 解析到后端工作空间，不解析到 IDE 项目路径
 # ⚠️ "workspace/" 不在此列表：LLM 常用 workspace/xxx 路径操作项目文件，
-# Agent 内部文件（soul.md 等）由 _AGENT_WS_BASE_NAMES 单独保护。
-_AGENT_WS_PREFIXES = ("memory/", "skills/", "enterprise_info/")
-_AGENT_WS_BASE_NAMES = frozenset({"soul.md", "focus.md", "tasks.json", "memory.md"})
+# Agent 内部文件（soul.md 等）由 is_agent_internal_path 统一判断。
+# 使用共享函数 is_agent_internal_path (from tool_bridge) 确保 ACP/LSP4J 一致。
 
 
 def _resolve_search_path(rel_path: str, project_path: str | None = None) -> Path:
@@ -439,18 +440,21 @@ def _resolve_search_path(rel_path: str, project_path: str | None = None) -> Path
     if p.is_absolute():
         return p
 
-    # Agent 内部文件 → 后端工作空间（由文件名保护，不依赖路径前缀）
-    basename = rel_path.split("/")[-1]
-    if basename in _AGENT_WS_BASE_NAMES:
-        return Path.cwd() / rel_path
-    for prefix in _AGENT_WS_PREFIXES:
-        if rel_path.startswith(prefix):
-            return Path.cwd() / rel_path
-
-    # ★ 剥离 LLM 常用的 workspace/ 前缀
+    # ★ 先剥离 LLM 常用的 workspace/ 前缀，再判断是否为 Agent 内部文件
+    # workspace/ 前缀在 LSP4J 语境下表示"用户项目文件"，剥离后被 IDE 插件识别；
+    # 剥离后 is_agent_internal_path 可正确判断 soul.md / memory/ 等内部路径。
     _clean_path = rel_path
     if _clean_path.startswith("workspace/"):
         _clean_path = _clean_path[len("workspace/") :]
+
+    # Agent 内部文件 → 后端工作空间（使用共享函数，确保与 ACP 判断一致）
+    if is_agent_internal_path(_clean_path):
+        return Path.cwd() / _clean_path
+
+    # 其余相对路径 → IDE 项目路径
+    if project_path:
+        return Path(project_path) / _clean_path
+    return Path.cwd() / _clean_path
 
     # 其余相对路径 → IDE 项目路径
     if project_path:

@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import contextvars
 import json
 import os
 import re
@@ -16,6 +17,7 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.models.agent import Agent as AgentModel
+from app.models.org import OrgMember
 from app.plugins.clawith_acp.acp_session import AcpSessionManager
 from app.plugins.clawith_acp.tool_bridge import current_acp_handler, is_agent_internal_path
 from app.plugins.clawith_acp.tool_hooks import install_acp_tool_hooks
@@ -23,11 +25,17 @@ from app.plugins.clawith_acp.tool_hooks import install_acp_tool_hooks
 ACP_PROTOCOL_VERSION = 1
 LLM_TIMEOUT_SECONDS = int(os.getenv("ACP_LLM_TIMEOUT_SECONDS", "600"))
 
-_CHUNK_HARD_FLUSH = 480
-_CHUNK_SOFT_FLUSH = 220
-_CHUNK_IDLE_MIN = 80
-_CHUNK_IDLE_SEC = 0.75
-_SENTENCE_END_RE = re.compile(r'[.!?][)"\'`]*\s$')
+_CHUNK_HARD_FLUSH = 240   # 降低硬上限, 配合时间驱动 flush 避免长时间无输出
+_CHUNK_SOFT_FLUSH = 120   # 降低软上限, 短文本也能在合理边界发送
+_CHUNK_IDLE_MIN = 10      # 降低 idle 最小阈值, 覆盖"完成。"等极短中文回复
+# 渐进式 idle flush: 短回复 (&lt;40字) 用 150ms 避免卡顿, 长回复用 500ms 等待更多内容
+_CHUNK_IDLE_SEC_SHORT = 0.15
+_CHUNK_IDLE_SEC_LONG = 0.50
+# 参考 gptme PR #1586: 100ms 时间驱动 flush 确保流式输出及时到达客户端,
+# 不依赖内容边界(句号/换段)即可触发。150ms 平衡延迟与网络开销。
+_PERIODIC_FLUSH_SEC = 0.15
+# 中英文句末标点均触发句子边界 flush
+_SENTENCE_END_RE = re.compile(r'[.!?。！？…~]["\'」』）\)]*\s*$')
 _SPLIT_NL_RE = re.compile(r"(?<=\n)")
 
 # Install ACP tool hooks (idempotent)
@@ -36,6 +44,20 @@ install_acp_tool_hooks()
 _kind_map = {
     "read_file": "read", "write_file": "edit", "edit_file": "edit",
     "delete_file": "delete", "execute_command": "execute", "bash": "execute",
+    "find_class": "read", "find_symbol": "read", "index_status": "read",
+    "find_references": "read", "find_definition": "read",
+    "find_implementations": "read", "find_super_methods": "read",
+    "call_hierarchy": "read", "type_hierarchy": "read",
+    "diagnostics": "read",
+    "refactor_rename": "edit", "move_file": "edit",
+    "reformat_code": "edit", "optimize_imports": "edit",
+    "safe_delete": "delete", "convert_java_to_kotlin": "edit",
+    "sync_files": "edit",
+    "active_file": "read", "open_file": "edit",
+    "file_structure": "read",
+    "find_file": "read",
+    "search_text": "read",
+    "list_directory": "read",
 }
 class AcpHandler:
     """ACP JSON-RPC 2.0 路由 + Agent 管理。"""
@@ -45,6 +67,7 @@ class AcpHandler:
         self.user_id = user_id
         # 短连接 ID，便于 docker logs 对齐 IDE gen 与后端 handler
         self.conn_id = uuid.uuid4().hex[:8]
+        self._tenant_id: uuid.UUID | None = None  # 惰性加载, 通过 _resolve_tenant_id() 获取
         self.session_id: str | None = None
         self.agent_id: str | None = None
         self.agent_name: str = "ACP Agent"
@@ -57,9 +80,11 @@ class AcpHandler:
         self._cwd: str = ""  # IDE project root
         # 当前 prompt 的性能计数，供 [ACP-PERF] prompt_done / first_chunk 使用
         self._current_prompt_perf: dict | None = None
-        self._tool_call_starts: dict[str, float] = {}
         self._chunk_buffer = ""
         self._chunk_idle_task: asyncio.Task | None = None
+        # 参考 gptme PR #1586: 时间驱动周期性 flush, 确保 LLM 流式输出期间
+        # 不依赖内容边界即可每 150ms 发送一次文本到插件端
+        self._periodic_flush_task: asyncio.Task | None = None
         self._chunk_template = json.dumps({
             "jsonrpc": "2.0", "method": "session/update",
             "params": {
@@ -75,7 +100,8 @@ class AcpHandler:
         token = current_acp_handler.set(self)
         try:
             async for raw in self.ws.iter_text():
-                logger.debug(f"[ACP-RAW-IN] {raw}")
+                if "session/new" in raw:
+                    logger.info(f"[ACP-RAW-IN] session/new request: {raw[:800]}")
                 try:
                     request = json.loads(raw)
                 except json.JSONDecodeError:
@@ -156,8 +182,8 @@ class AcpHandler:
                     if msg_id is not None:
                         await self._send_result(msg_id, result)
                 except Exception as e:
-                    logger.error(f"[ACP] {method} 失败: {e}")
-                    await self._send_error(msg_id, -32603, str(e))
+                    logger.error(f"[ACP] {method} 失败", exc_info=True)
+                    await self._send_error(msg_id, -32603, "Internal error")
         finally:
             current_acp_handler.reset(token)
 
@@ -175,10 +201,25 @@ class AcpHandler:
             result = await self._handle_prompt(params, msg_id)
             if msg_id is not None and result is not None:
                 await self._send_result(msg_id, result)
-        except Exception as e:
-            logger.error(f"[ACP] dispatch_prompt 失败: session={self.session_id} id={msg_id} err={e}")
+        except asyncio.CancelledError:
+            logger.warning(
+                f"[ACP] dispatch_prompt 取消: session={self.session_id} id={msg_id}"
+            )
             if msg_id is not None:
-                await self._send_error(msg_id, -32603, str(e))
+                await self._send_error(msg_id, -32800, "Prompt cancelled")
+        except TimeoutError:
+            logger.error(
+                f"[ACP] dispatch_prompt 超时: session={self.session_id} id={msg_id}"
+            )
+            if msg_id is not None:
+                await self._send_error(msg_id, -32000, "LLM timeout")
+        except Exception as e:
+            logger.error(
+                f"[ACP] dispatch_prompt 失败: session={self.session_id} id={msg_id} "
+                f"exception={type(e).__name__}: {e}"
+            )
+            if msg_id is not None:
+                await self._send_error(msg_id, -32603, f"Internal error: {type(e).__name__}")
         finally:
             if dispatch_key:
                 self._active_tasks.pop(dispatch_key, None)
@@ -209,10 +250,28 @@ class AcpHandler:
             "protocolVersion": ACP_PROTOCOL_VERSION,
             "capabilities": {
                 "prompt": {"text": True},
-                "fs": {"readTextFile": True, "writeTextFile": True},
+                "fs": {
+                    "readTextFile": True, "writeTextFile": True,
+                    "findFile": True, "searchText": True,
+                    "findClass": True, "findSymbol": True,
+                    "findReferences": True, "findDefinition": True,
+                    "findImplementations": True, "findSuperMethods": True,
+                    "callHierarchy": True, "typeHierarchy": True,
+                    "diagnostics": True, "fileStructure": True,
+                    "safeDelete": True, "refactorRename": True,
+                    "moveFile": True, "reformatCode": True,
+                    "optimizeImports": True, "convertJavaToKotlin": True,
+                    "listDirectory": True,
+                },
+                "ide": {
+                    "indexStatus": True, "syncFiles": True,
+                    "activeFile": True, "openFile": True,
+                },
                 "terminal": True,
             },
-            "agentInfo": {"name": "clawith-acp-agent", "version": "0.1.0"},
+            # ACP 协议规范字段名为 implementation, 非 agentInfo。
+            # 插件端 Client.initialize() 通过 ServerInfo.implementation 读取此字段。
+            "implementation": {"name": "clawith-acp-agent", "version": "0.1.0"},
         }
 
     async def _handle_session_new(self, params: dict) -> dict:
@@ -221,6 +280,8 @@ class AcpHandler:
         # Accept agentId from client _meta
         agent = None
         client_agent_id = (params.get("_meta") or {}).get("agentId")
+        # 诊断日志: 查看 session/new 的实际参数, 确认 _meta 是否正确到达
+        logger.info(f"[ACP] session/new params keys={list(params.keys())} _meta={params.get('_meta')!r}")
         if client_agent_id:
             agent = await self._find_agent_by_id(client_agent_id)
             if agent:
@@ -302,8 +363,12 @@ class AcpHandler:
         prompt_id = str(uuid.uuid4())
         self._cancel_event = asyncio.Event()
 
+        # P1-11: 拷贝当前 contextvars 上下文，确保 create_task 创建的协程能继承
+        # ContextVar（如 current_acp_handler），避免 asyncio.wait_for 超时取消路径破坏继承链
+        ctx = contextvars.copy_context()
         task = asyncio.create_task(
-            self._run_prompt_with_timeout(prompt_id, user_text_raw, user_text_for_llm)
+            self._run_prompt_with_timeout(prompt_id, user_text_raw, user_text_for_llm),
+            context=ctx,
         )
         self._active_tasks[prompt_id] = task
 
@@ -318,6 +383,10 @@ class AcpHandler:
         self, prompt_id: str, user_text_raw: str, user_text_for_llm: str
     ):
         """LLM 调用 with 600s 超时 + cancel_event；加载/持久化多轮对话历史。"""
+        # P1-12: 生成 trace_id 用于全链路日志追踪，便于跨模块定位单次 prompt 请求
+        trace_id = str(uuid.uuid4())[:8]
+        # 将模块级 logger 替换为绑定 trace_id 的本地副本，本作用域内所有日志自动带 trace_id
+        _log = logger.bind(trace_id=trace_id)  # type: ignore[assignment]
         from app.services.llm.caller import call_llm_with_failover
 
         self._current_prompt_perf = {
@@ -326,7 +395,8 @@ class AcpHandler:
             "first_chunk_ms": None,
             "reply_chars": 0,
         }
-        self._tool_call_starts.clear()
+        # 每轮独立的 tool_call 计时: 并行执行时 call_id 隔离, 防跨 round 竞态
+        _tool_call_starts: dict[str, float] = {}
         logger.info(
             f"[ACP-PERF] prompt_start conn={self.conn_id} session={self.session_id} "
             f"prompt_id={prompt_id} user_chars={len(user_text_raw)} llm_chars={len(user_text_for_llm)}"
@@ -350,13 +420,19 @@ class AcpHandler:
             status = data.get("status", "")
             args = data.get("args") or {}
             if status == "running":
-                self._tool_call_starts[call_id] = time.perf_counter()
+                _tool_call_starts[call_id] = time.perf_counter()
                 elapsed_ms = 0
             else:
-                t0 = self._tool_call_starts.pop(call_id, time.perf_counter())
+                t0 = _tool_call_starts.pop(call_id, time.perf_counter())
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
             path_hint = args.get("path") or args.get("command") or ""
-            title = tool_name if not path_hint else f"{tool_name}({str(path_hint)[:80]})"
+            # 去掉公共前缀 cd <cwd> && , 保留命令的区分部分。
+            # 不再硬截断 — 插件端 ToolTimelineRow 无长度限制, 截断导致不同命令在 UI 上无法区分。
+            if path_hint and self._cwd and isinstance(path_hint, str):
+                cwd_prefix = f"cd {self._cwd} && "
+                if path_hint.startswith(cwd_prefix):
+                    path_hint = path_hint[len(cwd_prefix):]
+            title = tool_name if not path_hint else f"{tool_name}({path_hint})"
             logger.info(
                 f"[ACP-PERF] tool_notify conn={self.conn_id} session={self.session_id} "
                 f"tool={tool_name} call_id={call_id} status={status} elapsed_ms={elapsed_ms}"
@@ -400,6 +476,7 @@ class AcpHandler:
                     from app.models.llm import LLMModel as _LLMModel
                     from sqlalchemy.orm import joinedload
                     from app.database import async_session as _async_session
+                    logger.info(f"[ACP-MODEL] 开始加载模型: agent_id={self.agent_id}")
                     async with _async_session() as db:
                         agent_result = await db.execute(
                             select(_AgentModel)
@@ -413,6 +490,14 @@ class AcpHandler:
                         if agent_row:
                             primary_model = agent_row.primary_model if agent_row.primary_model and agent_row.primary_model.enabled else None
                             fallback_model = agent_row.fallback_model if agent_row.fallback_model and agent_row.fallback_model.enabled else None
+                            logger.info(
+                                f"[ACP-MODEL] 模型加载完成: "
+                                f"primary={getattr(primary_model, 'model', None)} "
+                                f"fallback={getattr(fallback_model, 'model', None)} "
+                                f"agent_row_found=True"
+                            )
+                        else:
+                            logger.warning(f"[ACP-MODEL] agent_id={self.agent_id} DB 查询无结果!")
 
                 history: list[dict] = []
                 if self.session_id and self.user_id:
@@ -427,11 +512,29 @@ class AcpHandler:
                     f"total={len(llm_messages)} session={self.session_id}"
                 )
                 logger.info(
-                    f"[ACP-PERF] round_start conn={self.conn_id} session={self.session_id}"
+                    f"[ACP-PERF] round_start conn={self.conn_id} session={self.session_id} "
+                    f"primary_model={getattr(primary_model, 'model', None)} "
+                    f"fallback_model={getattr(fallback_model, 'model', None)}"
                 )
+
+                # 模型未配置时提前返回友好错误, 避免 call_llm_with_failover 瞬间返回
+                # "⚠️ 未配置 LLM 模型" 被当作正常回复 → 客户端不理解 → 断开重连循环
+                if primary_model is None and fallback_model is None:
+                    err_msg = (
+                        f"⚠️ Agent「{self.agent_name}」未配置 LLM 模型。"
+                        "请在管理后台 agent 设置中指定 primary_model。"
+                    )
+                    await self._push_chunk(err_msg)
+                    return err_msg
 
                 await self._push_thinking("第 1 轮：规划中…")
 
+                _llm_t0 = time.perf_counter()
+                logger.info(
+                    f"[ACP-LLM] call_llm_with_failover START session={self.session_id} "
+                    f"primary={getattr(primary_model, 'model', 'None')} "
+                    f"agent={self.agent_name}"
+                )
                 result = await call_llm_with_failover(
                     primary_model=primary_model,
                     fallback_model=fallback_model,
@@ -447,6 +550,11 @@ class AcpHandler:
                     on_tool_call=on_tool_call,
                 )
                 full_reply = result or ""
+                logger.info(
+                    f"[ACP-LLM] call_llm_with_failover DONE session={self.session_id} "
+                    f"elapsed={time.perf_counter() - _llm_t0:.3f}s "
+                    f"reply_len={len(full_reply)}"
+                )
                 if perf := self._current_prompt_perf:
                     perf["reply_chars"] = len(full_reply)
                 if full_reply and (self._current_prompt_perf or {}).get("pushed_chunks", 0) == 0:
@@ -454,15 +562,23 @@ class AcpHandler:
                     await self._push_chunk(full_reply)
             except asyncio.CancelledError:
                 logger.info(f"[ACP] LLM 调用取消: {prompt_id}")
+                # 取消前清空缓冲区中的残余文本, 确保已流式输出的内容不丢失
+                await self._flush_chunk_buffer()
                 raise
             except Exception as e:
                 logger.error(f"[ACP] LLM 调用失败: {e}")
+                # 错误内容先发送缓冲区中已有文本, 再追加错误提示
+                await self._flush_chunk_buffer()
                 await self._push_chunk(f"\n\n*错误: {e}*")
             return full_reply
 
         try:
             result = await asyncio.wait_for(_do_llm(), timeout=LLM_TIMEOUT_SECONDS)
             logger.info(f"[ACP] prompt 完成: {len(result)} chars")
+            # 诊断日志: 打印最终回复前 120 字符, 用于确认答案内容正确抵达
+            if result:
+                preview = result[:120].replace("\n", "\\n")
+                logger.info(f"[ACP-ANSWER] session={self.session_id} len={len(result)} preview={preview!r}")
             if result and self.session_id and self.agent_id:
                 await self.session_mgr.persist_turn(
                     session_id=self.session_id,
@@ -473,8 +589,12 @@ class AcpHandler:
                 )
         except asyncio.TimeoutError:
             logger.error(f"[ACP] LLM 超时 ({LLM_TIMEOUT_SECONDS}s)")
+            # 超时前清空缓冲区, 确保已流式输出的部分内容不丢失
+            await self._flush_chunk_buffer()
             await self._push_chunk("\n\n*错误: AI 响应超时*")
         except asyncio.CancelledError:
+            # 取消前清空缓冲区
+            await self._flush_chunk_buffer()
             await self._push_chunk("\n\n*[已取消]*")
             raise
         finally:
@@ -502,6 +622,8 @@ class AcpHandler:
                     f"ms_since_prompt={elapsed_ms:.0f} len={len(text)}"
                 )
         self._chunk_buffer += text
+        # 确保时间驱动 flush 在运行中 — 无论内容边界如何, 每 150ms 至少发送一次
+        self._ensure_periodic_flush()
         if self._should_flush():
             await self._do_flush()
         else:
@@ -524,36 +646,80 @@ class AcpHandler:
             return
         if len(self._chunk_buffer) < _CHUNK_IDLE_MIN:
             return
-        self._chunk_idle_task = asyncio.ensure_future(self._idle_flush())
+        # 渐进式延迟: 缓冲区越小, flush 越快 (短回复不卡)
+        delay = _CHUNK_IDLE_SEC_SHORT if len(self._chunk_buffer) < 40 else _CHUNK_IDLE_SEC_LONG
+        self._chunk_idle_task = asyncio.create_task(self._idle_flush(delay))
 
-    async def _idle_flush(self):
-        await asyncio.sleep(_CHUNK_IDLE_SEC)
+    async def _idle_flush(self, delay: float = 0.50):
+        await asyncio.sleep(delay)
         if self._chunk_buffer:
             await self._do_flush()
 
     async def _do_flush(self):
         self._cancel_idle_task()
+        self._cancel_periodic_task()
         text = self._chunk_buffer
-        self._chunk_buffer = ""
+        self._chunk_buffer = ""  # 必须在 await 前清空, 确保新 chunk 不被重复发送
+        if not text:
+            return
         raw = self._chunk_template.replace("__SID__", self.session_id or "").replace(
             "__TEXT__", json.dumps(text, ensure_ascii=False)[1:-1]
         )
-        await self.ws.send_text(raw)
+        try:
+            # asyncio.shield 防止取消中断发送导致 chunk 永久丢失 (buffer 已清空)
+            # WebSocket 断开时 send_text 会抛 ConnectionClosedError, 捕获防止重入竞态
+            await asyncio.shield(self.ws.send_text(raw))
+        except Exception:
+            pass
+        preview = text[:60].replace("\n", "\\n")
+        logger.info(
+            f"[ACP-FLUSH] conn={self.conn_id} session={self.session_id} "
+            f"len={len(text)} preview={preview!r}"
+        )
 
     def _cancel_idle_task(self):
         if self._chunk_idle_task and not self._chunk_idle_task.done():
             self._chunk_idle_task.cancel()
             self._chunk_idle_task = None
 
+    # ── 时间驱动周期性 flush (参考 gptme PR #1586: 每 100ms 定时 flush) ──
+
+    def _ensure_periodic_flush(self):
+        """确保周期性 flush 在运行中 — 时间驱动保底, 不依赖内容边界。
+
+        参考 gptme PR #1586: on_token 回调中每 100ms 定时 flush。
+        本实现取 150ms, 平衡延迟与 WebSocket 消息频率。
+        """
+        if self._periodic_flush_task and not self._periodic_flush_task.done():
+            return
+        self._periodic_flush_task = asyncio.ensure_future(self._periodic_flush())
+
+    async def _periodic_flush(self):
+        """每隔 _PERIODIC_FLUSH_SEC 秒检查并发送缓冲区内容。"""
+        await asyncio.sleep(_PERIODIC_FLUSH_SEC)
+        if self._chunk_buffer:
+            await self._do_flush()
+
+    def _cancel_periodic_task(self):
+        if self._periodic_flush_task and not self._periodic_flush_task.done():
+            self._periodic_flush_task.cancel()
+            self._periodic_flush_task = None
+
     async def _flush_chunk_buffer(self):
         self._cancel_idle_task()
+        self._cancel_periodic_task()
         if self._chunk_buffer:
             text = self._chunk_buffer
-            self._chunk_buffer = ""
+            self._chunk_buffer = ""  # 必须在 await 前清空
             raw = self._chunk_template.replace("__SID__", self.session_id or "").replace(
                 "__TEXT__", json.dumps(text, ensure_ascii=False)[1:-1]
             )
-            await self.ws.send_text(raw)
+            try:
+                # asyncio.shield: _flush_chunk_buffer 在取消/超时路径被调用 (CancelledError catch),
+                # 此处无 shield 会导致 chunk 已清空但 send 被取消 → 永久丢失
+                await asyncio.shield(self.ws.send_text(raw))
+            except Exception:
+                pass  # WS 已断开, 静默丢弃
 
     async def _push_thinking(self, text: str):
         # 轮次状态（A2）推送时打一条 hint，便于与 [LSP4J-PERF] Round 交叉验证
@@ -659,35 +825,50 @@ class AcpHandler:
 
     # ── 辅助方法 ──────────────────────────────────────────────
 
-    async def _find_agent(self):
-        """查找最近更新的 Agent (无 user_id 过滤, 取租户内活跃 Agent)。"""
+    async def _resolve_tenant_id(self) -> uuid.UUID | None:
+        """通过 self.user_id 查询 OrgMember 获取 tenant_id (惰性加载)。"""
+        if self._tenant_id is not None:
+            return self._tenant_id
         async with async_session() as db:
-            result = await db.execute(
-                select(AgentModel)
-                .where(AgentModel.status == "idle")
-                .order_by(AgentModel.updated_at.desc())
-                .limit(1)
-            )
-            agent = result.scalar_one_or_none()
-            if not agent:
-                # 备选: 任意活跃 Agent
+            try:
+                uid = uuid.UUID(self.user_id)
                 result = await db.execute(
-                    select(AgentModel)
-                    .order_by(AgentModel.updated_at.desc())
+                    select(OrgMember.tenant_id)
+                    .where(OrgMember.user_id == uid, OrgMember.status == "active")
                     .limit(1)
                 )
+                self._tenant_id = result.scalar_one_or_none()
+            except ValueError:
+                logger.warning(f"[ACP] 无效的 user_id, 无法解析 tenant_id: {self.user_id}")
+                self._tenant_id = None
+        return self._tenant_id
+
+    async def _find_agent(self):
+        """查找当前租户内最近更新的 Agent。"""
+        tenant_id = await self._resolve_tenant_id()
+        async with async_session() as db:
+            # 优先找当前租户下 idle 状态的 Agent
+            base = select(AgentModel).order_by(AgentModel.updated_at.desc()).limit(1)
+            if tenant_id:
+                base = base.where(AgentModel.tenant_id == tenant_id)
+            result = await db.execute(base.where(AgentModel.status == "idle"))
+            agent = result.scalar_one_or_none()
+            if not agent:
+                # 备选: 当前租户下任意状态的 Agent
+                result = await db.execute(base)
                 agent = result.scalar_one_or_none()
             return agent
 
     async def _find_agent_by_id(self, agent_id: str):
-        """Find agent by UUID."""
+        """Find agent by UUID (带 tenant_id 过滤)。"""
+        tenant_id = await self._resolve_tenant_id()
         async with async_session() as db:
             try:
-                from uuid import UUID
-                aid = UUID(agent_id)
-                result = await db.execute(
-                    select(AgentModel).where(AgentModel.id == aid)
-                )
+                aid = uuid.UUID(agent_id)
+                query = select(AgentModel).where(AgentModel.id == aid)
+                if tenant_id:
+                    query = query.where(AgentModel.tenant_id == tenant_id)
+                result = await db.execute(query)
                 return result.scalar_one_or_none()
             except ValueError:
                 logger.warning(f"[ACP] invalid agentId: {agent_id}")
@@ -725,27 +906,32 @@ class AcpHandler:
             "jsonrpc": "2.0", "id": msg_id, "result": result
         }, ensure_ascii=False, default=str)
         logger.debug(f"[ACP-RAW-OUT] {raw}")
-        await self.ws.send_text(raw)
+        await asyncio.shield(self.ws.send_text(raw))
 
     async def _send_error(self, msg_id, code: int, message: str):
+        # P1-2: error_ref 随机码，用户报 ref=abc12345 → grep 秒级定位
+        error_ref = str(uuid.uuid4())[:8]
         raw = json.dumps({
             "jsonrpc": "2.0", "id": msg_id,
-            "error": {"code": code, "message": message}
+            "error": {"code": code, "message": f"{message} (ref: {error_ref})"}
         }, ensure_ascii=False)
-        logger.debug(f"[ACP-RAW-OUT] {raw}")
-        await self.ws.send_text(raw)
+        logger.error(f"[ACP] _send_error code={code} ref={error_ref} msg={message}")
+        try:
+            await asyncio.shield(self.ws.send_text(raw))
+        except Exception:
+            pass  # WS 已关闭 (cleanup() → ws.close()), 静默丢弃
 
     async def _send_notification(self, method: str, params: dict):
         raw = json.dumps({
             "jsonrpc": "2.0", "method": method, "params": params
         }, ensure_ascii=False, default=str)
         logger.debug(f"[ACP-RAW-OUT] {raw}")
-        await self.ws.send_text(raw)
+        await asyncio.shield(self.ws.send_text(raw))
 
     async def _send_json(self, data: dict):
         raw = json.dumps(data, ensure_ascii=False, default=str)
         logger.debug(f"[ACP-RAW-OUT] {raw}")
-        await self.ws.send_text(raw)
+        await asyncio.shield(self.ws.send_text(raw))
 
     async def send_request(self, method: str, params: dict, timeout: float = 30.0):
         """Send ACP JSON-RPC request and wait for response.
@@ -753,9 +939,16 @@ class AcpHandler:
         Used for agent->client tool call proxy (e.g. fs/read_text_file).
         
         Note: the future is NOT removed from _pending_requests on timeout,
-        so a late-arriving response can still be consumed by a subsequent 
-        retry or cleanup. asyncio.wait_for does NOT cancel a Future, so 
+        so a late-arriving response can still be consumed by a subsequent
+        retry or cleanup. asyncio.wait_for does NOT cancel a Future, so
         the future stays valid for later resolution."""
+        # 惰性清理: 条目数 > 50 或最早条目 > 120s 时触发清理, 防止 _pending_requests 泄漏
+        if len(self._pending_requests) > 50:
+            await self.cleanup_stale_requests()
+        elif self._pending_requests:
+            oldest = min(ts for _, (_, ts) in self._pending_requests.items())
+            if time.monotonic() - oldest > 120:
+                await self.cleanup_stale_requests()
         req_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_requests[req_id] = (future, time.monotonic())
@@ -773,7 +966,7 @@ class AcpHandler:
             f"timeout={timeout}s req_id={req_id}"
         )
         try:
-            await self.ws.send_text(raw)
+            await asyncio.shield(self.ws.send_text(raw))
             result = await asyncio.wait_for(future, timeout=timeout)
             elapsed = time.perf_counter() - t0
             logger.info(
@@ -797,19 +990,18 @@ class AcpHandler:
             return ""
 
         return (
-            f"## IDE Project Environment (Important)\n"
-            f"You are working inside the user's IDE. Active project: {cwd}\n"
+            f"## IDE Project Environment\n"
+            f"Working directory: {cwd}\n"
             f"\n"
-            f"## File Access\n"
-            f"- Use read_file to read project files (absolute or relative paths).\n"
-            f"- Example: read_file(path=\"{cwd}/build.gradle.kts\")\n"
-            f"- Project files DO exist. Read them directly without confirming.\n"
-            f"- Use execute_command for builds, tests, and git operations.\n"
-            f"- Use execute_command with grep -r to search code.\n"
-            f"\n"
-            f"## Notes\n"
-            f"- Agent config files (memory/, skills/ prefix) are local, not IDE.\n"
-            f"- On first interaction, read build.gradle.kts to understand the project.\n"
+            f"## Rules\n"
+            f"- 回答简洁直接。如果用户的问题不需要读取项目文件(如问候/身份确认), 只回复不扫描项目。\n"
+            f"- 需要读文件时用 read_file, 不要用 cat/head/tail。\n"
+            f"- build/test/git 用 execute_command。\n"
+            f"- 代码搜索优先使用 IDE 索引工具 (find_class/find_symbol/search_text/"
+            f"find_references/find_definition/find_file/find_implementations/list_files 等)，"
+            f"比 grep -r 快 100-1000 倍且支持语义匹配 (多态继承、接口实现等)。"
+            f"grep -r 仅作为 IDE 索引不可用时的降级方案。\n"
+            f"- Agent 内部文件(memory/, skills/ 前缀)不在 IDE, 由后端本地读取。\n"
         )
 
 

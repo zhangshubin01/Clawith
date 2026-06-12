@@ -2940,6 +2940,19 @@ export default function AgentDetailPage() {
     }, [id]);
 
     // Switching login account or token must not leave another user's sessions/messages in memory.
+    // Also listen for the custom 'tenant-switch' event from Layout.tsx to proactively disconnect
+    // before the token actually changes.
+    useEffect(() => {
+        const onTenantSwitch = () => {
+            Object.keys(wsMapRef.current).forEach((k) => {
+                const ws = wsMapRef.current[k];
+                if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
+            });
+        };
+        window.addEventListener('tenant-switch', onTenantSwitch);
+        return () => window.removeEventListener('tenant-switch', onTenantSwitch);
+    }, []);
+
     useEffect(() => {
         setSessions([]);
         setAllSessions([]);

@@ -502,6 +502,10 @@ export default function Layout() {
         enabled: !!user,
     });
 
+    /**
+     * 切换租户时断开所有旧 WebSocket、清除 TanStack Query 缓存、重建连接。
+     * 同域名场景下避免全页刷新，提升切换流畅度。
+     */
     const handleSwitchTenant = async (tenantId: string) => {
         const token = localStorage.getItem('token');
         const res = await fetch('/api/auth/switch-tenant', {
@@ -515,10 +519,8 @@ export default function Layout() {
             return;
         }
         const data = await res.json();
-        console.log('[switch-tenant] redirect_url:', data.redirect_url);
-        console.log('[switch-tenant] access_token preview:', data.access_token?.substring(0, 20) + '...');
-        console.log('[switch-tenant] current hostname:', window.location.hostname);
         if (data.redirect_url) {
+            // 跨域名重定向 — 必须全页跳转，token 由服务端 URL 参数携带
             localStorage.setItem('token', data.access_token);
             const targetUrl = new URL(data.redirect_url, window.location.origin);
             if (targetUrl.hostname === window.location.hostname) {
@@ -529,8 +531,26 @@ export default function Layout() {
             targetUrl.hash = '';
             window.location.href = targetUrl.toString();
         } else if (data.access_token) {
+            // 同域名：断开旧 WebSocket → 清除缓存 → 更新 store → 导航重建
+            // 1. 发全局事件通知所有活跃 WebSocket 关闭旧连接（AgentDetailPage 中监听）
+            window.dispatchEvent(new CustomEvent('tenant-switch', { detail: { oldToken: localStorage.getItem('token') } }));
+
+            // 2. 保存新 token 到 localStorage
             localStorage.setItem('token', data.access_token);
-            window.location.href = '/';
+
+            // 3. 清除 TanStack Query 全量缓存，所有 useQuery 在组件重新挂载时自动用新 token 重拉
+            queryClient.clear();
+
+            // 4. 更新 auth store 中的 user 信息（后台已切换租户上下文）
+            try {
+                const freshUser = await authApi.me();
+                setAuth(freshUser, data.access_token);
+            } catch {
+                // me() 失败时至少保留 token，navigate 到首页后会重新尝试
+            }
+
+            // 5. 用 navigate 代替 window.location.href，避免全页刷新的闪烁
+            navigate('/', { replace: true });
         }
     };
 

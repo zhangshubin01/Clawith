@@ -183,6 +183,9 @@ def _format_friendly_error(error_text: str) -> str:
         (r'time[-\s]?out|timed\s*out', '⏱️ 模型响应超时，请稍后重试。'),
         (r'context[\s_-]*length[\s_-]*exceed', '📏 上下文超过模型限制，请缩短对话或减少附加内容。'),
         (r'internal[\s_-]*server[\s_-]*error|internal\s+error', '🖥️ 模型服务暂时异常，请稍后重试或联系管理员。'),
+        # HTTP 400 通常由消息格式错误引起（如截断破坏 tool_calls 配对）
+        (r'invalid_request_error|tool_calls.*must\s+be\s+followed|tool.*must\s+be\s+a\s+response',
+         '🔄 上下文消息格式异常（历史过长被截断导致工具调用配对丢失），请开启新会话重试。'),
     ]
 
     for pattern, friendly in patterns:
@@ -194,9 +197,63 @@ def _format_friendly_error(error_text: str) -> str:
     if status_match and status_match.group(1).startswith('5'):
         return f'🖥️ 模型服务暂时异常（HTTP {status_match.group(1)}），请稍后重试或联系管理员。'
 
-    # 无法识别时返回简短摘要
-    short = error_text[:200].replace('\n', ' ')
+    # 无法识别时返回摘要（500 字符足以包含完整 JSON 错误体）
+    short = error_text[:500].replace('\n', ' ')
     return f'⚠️ 调用模型出错，请联系管理员。错误摘要: {short}'
+
+
+def _repair_truncated_messages(messages: list) -> list:
+    """修复截断产生的孤儿 tool_calls: 删除缺少 tool_result 的 assistant(tool_calls)。
+
+    CTX-GUARD 截断 `api_messages[:_half] + api_messages[-_half:]` 可能从中间
+    切断 assistant(tool_calls) → tool(result) 链。此函数扫描并移除孤立的
+    assistant 消息(其 tool_calls 无对应 tool 响应), 防止 LLM API 400 错误。
+    """
+    # 收集所有 tool 消息的 tool_call_id
+    tool_result_ids = {
+        m.tool_call_id for m in messages
+        if m.role == "tool" and getattr(m, "tool_call_id", None)
+    }
+    repaired = []
+    for m in messages:
+        if m.role == "assistant" and m.tool_calls:
+            # 过滤掉无对应 tool_result 的 tool_call
+            valid_calls = [
+                tc for tc in m.tool_calls
+                if tc.get("id", "") in tool_result_ids
+            ]
+            if not valid_calls:
+                # 全部孤立 — 丢弃此 assistant 消息
+                continue
+            if len(valid_calls) != len(m.tool_calls):
+                # 部分孤立 — 仅保留有效调用
+                m.tool_calls = valid_calls
+            repaired.append(m)
+        elif m.role == "tool":
+            tid = getattr(m, "tool_call_id", None)
+            if tid and tid not in _collect_all_tool_call_ids(messages):
+                # 孤立的 tool 响应(对应 assistant 已移除) — 丢弃
+                continue
+            repaired.append(m)
+        else:
+            repaired.append(m)
+    removed = len(messages) - len(repaired)
+    if removed:
+        logger.warning(
+            f"[CTX-GUARD-REPAIR] removed {removed} orphaned messages "
+            f"(tool_calls without matching tool results)"
+        )
+    return repaired
+
+
+def _collect_all_tool_call_ids(messages: list) -> set:
+    """收集所有 assistant 消息中的 tool_call id。"""
+    ids = set()
+    for m in messages:
+        if m.role == "assistant" and m.tool_calls:
+            for tc in m.tool_calls:
+                ids.add(tc.get("id", ""))
+    return ids
 
 
 def _get_model_timeout(model: "LLMModel") -> float:
@@ -413,7 +470,7 @@ async def _process_tool_call(
     )
     tool_elapsed = time.monotonic() - tool_start
     logger.info("[LSP4J-PERF] tool: {} elapsed={:.3f}s{}", tool_name, tool_elapsed, _perf_channel_suffix())
-    logger.debug(f"[LLM] Tool result: {result[:100]}")
+    logger.info("[LLM-TOOL-RESULT] tool={} len={} result=\n{}", tool_name, len(str(result)), str(result))
 
     # ── Vision injection for screenshot tools ──
     tool_content: str | list = str(result)
@@ -525,6 +582,11 @@ async def call_llm(
     from app.services.agent_context import build_agent_context
     # Look up current user's display name so the agent knows who it's talking to
     static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_user_name)
+    # 诊断日志: 确认智能体记忆/soul/skill 已注入 system prompt
+    logger.info(
+        "[CTX-LOAD] agent={} static_prompt_chars={} dynamic_prompt_chars={}{}",
+        agent_id, len(static_prompt), len(dynamic_prompt), _perf_channel_suffix(),
+    )
 
     # Load tools dynamically from DB. `skip_tools=True` is set by the WS
     # handler on the onboarding greeting turn; keep the runtime-level `finish`
@@ -564,6 +626,26 @@ async def call_llm(
     max_tokens = get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None))
     _accumulated_usage = TokenUsage()
     _consecutive_guard_failures = 0
+
+    # 中间轮次的 on_chunk 路由到 thinking：只有 finish 的内容才是用户可见正文。
+    # finish 内容通过 on_tool_delta 流式推送（若 on_tool_delta 非空），
+    # 或通过 finish_call.valid 分支直接调用原始 on_chunk（若无 on_tool_delta）。
+    # 中间轮次模型输出的纯文本（未调 finish）路由到 on_thinking，
+    # 前端将其显示为可折叠的思考内容，不会被后续 done 消息覆盖。
+    _original_on_chunk = on_chunk
+    _original_on_thinking = on_thinking
+
+    async def _suppressed_on_chunk(text: str) -> None:
+        """中间轮次的文本路由到 thinking 回调，避免 done 覆盖正文。"""
+        if _original_on_thinking:
+            await _original_on_thinking(text)
+        # 若无 on_thinking 回调，文本被丢弃（至少不泄漏为正文）
+
+    if on_chunk is not None:
+        on_chunk = _suppressed_on_chunk
+
+    # FINISH_PROTOCOL_REMINDER 注入标记：同一轮 call_llm 调用中仅注入一次到 system prompt
+    _reminder_injected = False
 
     # Tool-calling loop
     for round_i in range(_max_tool_rounds):
@@ -634,6 +716,10 @@ async def call_llm(
                     else:
                         _half = max(2, len(api_messages) // 2)
                         api_messages = api_messages[:_half] + api_messages[-_half:]
+                        # 截断后修复: 删除中间切断产生的孤儿 tool_calls。
+                        # 前半部分末尾的 assistant(tool_calls) 缺少对应的 tool(result),
+                        # 会导致 LLM API 400。扫描并移除这些孤立消息。
+                        api_messages = _repair_truncated_messages(api_messages)
                         logger.warning(
                             f"[CTX-GUARD] TRUNCATED: {len(api_messages)} messages kept, "
                             f"failures={_consecutive_guard_failures}/3"
@@ -695,11 +781,25 @@ async def call_llm(
         if not response.tool_calls:
             if response.content:
                 api_messages.append(LLMMessage(role="assistant", content=response.content))
-            api_messages.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
+            # 将 finish 协议提醒注入 system prompt 的 dynamic_content 而非作为 user 消息。
+            # 作为 user 消息会导致模型"回复"这条提醒（例如 "Acknowledged..."），
+            # 而不是继续回答用户的原始问题。注入 system prompt 让模型将其理解为元指令。
+            if not _reminder_injected:
+                api_messages[0].dynamic_content = (
+                    (api_messages[0].dynamic_content or "") + "\n\n" + FINISH_PROTOCOL_REMINDER
+                )
+                _reminder_injected = True
             continue
 
         # Execute tool calls
         logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
+        # 当 LLM 返回 0 个 tool_calls 时 (纯思考轮次), 向客户端推送状态提示,
+        # 消除"黑屏等待"体验。回调失败不应中断 LLM 流程。
+        if len(response.tool_calls or []) == 0 and on_thinking:
+            try:
+                await on_thinking(f"第 {round_i+1} 轮思考中… | Thinking round {round_i+1}…")
+            except Exception:
+                pass
         sanitized_tool_calls, retry_instruction = _sanitize_tool_calls_for_context(response.tool_calls)
         if retry_instruction:
             api_messages.append(LLMMessage(role="user", content=retry_instruction))
@@ -711,12 +811,12 @@ async def call_llm(
                 if agent_id and _accumulated_usage.total_tokens > 0:
                     await record_token_usage(agent_id, _accumulated_usage)
                 await client.close()
-                # finish(content=...) 才是用户可见正文；LLM stream 的 on_chunk 被 _buffer_chunk 吞掉
+                # finish(content=...) 才是用户可见正文；中间轮次的 on_chunk 已被 _suppressed_on_chunk 吞掉
                 # 若调用方已通过 on_tool_delta 流式推送 finish 内容（如 WebSocket chat），
-                # 此处不再重复调用 on_chunk，避免前端收到重复 chunk 导致内容闪烁
+                # 此处不再重复调用 _original_on_chunk，避免前端收到重复 chunk 导致内容闪烁
                 _already_streamed_via_delta = on_tool_delta is not None
-                if on_chunk and finish_call.content and not _already_streamed_via_delta:
-                    await on_chunk(finish_call.content)
+                if _original_on_chunk and finish_call.content and not _already_streamed_via_delta:
+                    await _original_on_chunk(finish_call.content)
                 return finish_call.content
 
             api_messages.append(LLMMessage(
@@ -742,29 +842,200 @@ async def call_llm(
 
         full_reasoning_content = response.reasoning_content or ""
 
-        for tc in sanitized_tool_calls or []:
-            tool_error = await _process_tool_call(
-                tc=tc,
-                api_messages=api_messages,
-                agent_id=agent_id,
-                user_id=user_id,
-                session_id=session_id,
-                supports_vision=supports_vision,
-                on_tool_call=on_tool_call,
-                on_code_output=on_code_output,
-                full_reasoning_content=full_reasoning_content,
-                allowed_tool_names=allowed_tool_names,
-            )
-            if tool_error:
-                api_messages.append(LLMMessage(
-                    role="tool",
-                    content=tool_error,
-                    tool_call_id=tc.get("id", ""),
-                ))
-            # [LSP4J-PERF] 所有工具执行完成
+        # ── 只读工具集合: 无副作用, 可安全并行执行 ──
+        # 约束: 此集合中的工具不会触发 on_code_output (无 execute_code 等代码执行)
+        _READONLY_TOOLS: frozenset[str] = frozenset({
+            "read_file", "search_files", "search_file",
+            "list_files", "list_dir", "find_files",
+            "web_search", "duckduckgo_search", "google_search",
+            "read_webpage", "jina_read", "jina_search",
+            "read_document", "exa_search", "tavily_search",
+        })
+        # 并行读取并发上限: 防止极端场景 (LLM 产生 20+ 个 read_file) 导致文件描述符耗尽。
+        # 参考 LangChain gather_with_concurrency + Semaphore 模式。
+        _MAX_READ_CONCURRENCY = 10
+
+        # ── LSP4J 路径守卫: 插件端 WebSocket 单通道, ToolInvokeProcessor 同步调用无锁保护 ──
+        # 并发发送多个工具请求可能导致 CountDownLatch 状态混乱。
+        # 检测到活跃 LSP4J 连接时回退串行执行。
+        _lsp4j_active = False
+        try:
+            from app.plugins.clawith_lsp4j.jsonrpc_router import get_active_router
+            _lsp4j_active = await get_active_router((str(user_id), str(agent_id))) is not None
+        except ImportError:
+            pass  # LSP4J 插件未安装, 正常跳过
+        except Exception as exc:
+            # DB 异常/路由表损坏不应导致守卫误判 (false negative → 并行发给不兼容插件)
+            logger.warning("[PERF] LSP4J 守卫检测异常, 保守假定活跃回退串行: {}", exc)
+            _lsp4j_active = True
+
+        if _lsp4j_active:
+            # LSP4J 路径: 保持原有串行逻辑, 不做并行化
+            for tc in sanitized_tool_calls or []:
+                tool_error = await _process_tool_call(
+                    tc=tc, api_messages=api_messages,
+                    agent_id=agent_id, user_id=user_id,
+                    session_id=session_id, supports_vision=supports_vision,
+                    on_tool_call=on_tool_call, on_code_output=on_code_output,
+                    full_reasoning_content=full_reasoning_content,
+                    allowed_tool_names=allowed_tool_names,
+                )
+                if tool_error:
+                    api_messages.append(LLMMessage(
+                        role="tool", content=tool_error,
+                        tool_call_id=tc.get("id", ""),
+                    ))
+                tool_time = time.monotonic() - round_start - llm_time
+                logger.info(
+                    "[LSP4J-PERF] Round {}: tools done "
+                    "tool_time={:.2f}s total={:.2f}s{}",
+                    round_i + 1, tool_time, time.monotonic() - round_start,
+                    _perf_channel_suffix(),
+                )
+        else:
+            # ACP / WebUI / IM 路径: 只读工具并行执行
+            # 将工具调用分为只读组(可并行)和写入组(需串行, 因为有副作用)
+            read_items: list[tuple[dict, str]] = []
+            write_items: list[tuple[dict, str]] = []
+
+            # ── 读写冲突检测: 收集写入路径, 检查只读工具是否涉及相同文件 ──
+            # 极端情况: LLM 在同轮发出 read_file("a.txt") + write_file("a.txt"),
+            # 若 LLM 意图"先写再读验证", 并行会破坏顺序。检测到冲突时全部回退串行。
+            _write_paths: set[str] = set()
+            _has_conflict = False
+            for tc in sanitized_tool_calls or []:
+                fn = tc.get("function", {}) or {}
+                tname = fn.get("name", "")
+                if tname not in _READONLY_TOOLS:
+                    try:
+                        args = json.loads(fn.get("arguments", "{}"))
+                        _p = args.get("path") or args.get("file_path") or args.get("source")
+                        if _p:
+                            _write_paths.add(str(_p))
+                    except json.JSONDecodeError:
+                        # 写入工具 arguments 解析失败, 保守假定有冲突 (回退串行防 data race)
+                        logger.warning("[PERF] 工具 {} arguments JSON 解析失败, 保守回退串行: {}",
+                                       tname, fn.get("arguments", "")[:100])
+                        _has_conflict = True
+                        break
+
+            if not _has_conflict:
+                for tc in sanitized_tool_calls or []:
+                    fn = tc.get("function", {}) or {}
+                    tname = fn.get("name", "")
+                    if tname in _READONLY_TOOLS:
+                        try:
+                            args = json.loads(fn.get("arguments", "{}"))
+                            _rp = args.get("path") or args.get("file_path")
+                            if _rp and str(_rp) in _write_paths:
+                                _has_conflict = True
+                                break
+                        except json.JSONDecodeError:
+                            # 只读工具参数解析失败, 保守回退 (无法确定是否冲突)
+                            logger.warning("[PERF] 只读工具 {} arguments JSON 解析失败, 保守回退串行",
+                                           tname)
+                            _has_conflict = True
+                            break
+
+            if _has_conflict:
+                # 读写冲突: 全部回退串行
+                logger.warning(
+                    "[PERF] Round {}: 检测到读写工具操作相同文件 paths={}, 回退串行执行",
+                    round_i + 1, list(_write_paths)[:5],
+                )
+                for tc in sanitized_tool_calls or []:
+                    tool_error = await _process_tool_call(
+                        tc=tc, api_messages=api_messages,
+                        agent_id=agent_id, user_id=user_id,
+                        session_id=session_id, supports_vision=supports_vision,
+                        on_tool_call=on_tool_call, on_code_output=on_code_output,
+                        full_reasoning_content=full_reasoning_content,
+                        allowed_tool_names=allowed_tool_names,
+                    )
+                    if tool_error:
+                        api_messages.append(LLMMessage(
+                            role="tool", content=tool_error,
+                            tool_call_id=tc.get("id", ""),
+                        ))
+            else:
+                # 正常路径: 分类执行
+                for tc in sanitized_tool_calls or []:
+                    fn = tc.get("function", {}) or {}
+                    tool_name = fn.get("name", "")
+                    if tool_name in _READONLY_TOOLS:
+                        read_items.append((tc, tool_name))
+                    else:
+                        write_items.append((tc, tool_name))
+
+                # Step 1: 并行执行只读工具
+                if read_items:
+                    _t_read_start = time.monotonic()
+                    # Semaphore 在调用内创建 (非模块级), 防止跨会话竞争配额
+                    _read_semaphore = asyncio.Semaphore(
+                        min(_MAX_READ_CONCURRENCY, max(len(read_items), 1))
+                    )
+
+                    async def _gated_read(tc, _tname):
+                        async with _read_semaphore:
+                            return await _process_tool_call(
+                                tc=tc, api_messages=api_messages,
+                                agent_id=agent_id, user_id=user_id,
+                                session_id=session_id, supports_vision=supports_vision,
+                                on_tool_call=on_tool_call,
+                                full_reasoning_content=full_reasoning_content,
+                                allowed_tool_names=allowed_tool_names,
+                            )
+
+                    read_tasks = [_gated_read(tc, tname) for tc, tname in read_items]
+                    results = await asyncio.gather(*read_tasks, return_exceptions=True)
+                    for (tc, tname), result in zip(read_items, results):
+                        if isinstance(result, BaseException):
+                            # 不将完整异常信息暴露给 LLM (可能含文件路径/堆栈), 仅记录日志
+                            logger.error("[TOOL-ERROR] {} 执行异常: {}", tname, result)
+                            api_messages.append(LLMMessage(
+                                role="tool",
+                                content=f"[Error] {tname} 执行失败",
+                                tool_call_id=tc.get("id", ""),
+                            ))
+                        elif result:
+                            api_messages.append(LLMMessage(
+                                role="tool", content=result,
+                                tool_call_id=tc.get("id", ""),
+                            ))
+                    logger.info(
+                        "[LSP4J-PERF] Round {}: parallel read tools done "
+                        "count={} elapsed={:.3f}s{}",
+                        round_i + 1, len(read_items),
+                        time.monotonic() - _t_read_start, _perf_channel_suffix(),
+                    )
+
+                # Step 2: 串行执行写入工具 (保持顺序, 因为有副作用)
+                # on_code_output 只在 write_items 循环中使用, 避免并行读取时输出混乱
+                for tc, tname in write_items:
+                    _t_write_start = time.monotonic()
+                    tool_error = await _process_tool_call(
+                        tc=tc, api_messages=api_messages,
+                        agent_id=agent_id, user_id=user_id,
+                        session_id=session_id, supports_vision=supports_vision,
+                        on_tool_call=on_tool_call, on_code_output=on_code_output,
+                        full_reasoning_content=full_reasoning_content,
+                        allowed_tool_names=allowed_tool_names,
+                    )
+                    logger.info(
+                        "[LSP4J-PERF] Round {}: write tool {} done elapsed={:.3f}s{}",
+                        round_i + 1, tname, time.monotonic() - _t_write_start,
+                        _perf_channel_suffix(),
+                    )
+                    if tool_error:
+                        api_messages.append(LLMMessage(
+                            role="tool", content=tool_error,
+                            tool_call_id=tc.get("id", ""),
+                        ))
+
+            # 所有工具执行完成
             tool_time = time.monotonic() - round_start - llm_time
             logger.info(
-                "[LSP4J-PERF] Round {}: tools done "
+                "[LSP4J-PERF] Round {}: all tools done "
                 "tool_time={:.2f}s total={:.2f}s{}",
                 round_i + 1, tool_time, time.monotonic() - round_start,
                 _perf_channel_suffix(),
@@ -859,9 +1130,11 @@ async def call_llm_with_failover(
 
     # Check if we need to failover
     if not is_retryable_error(primary_result):
-        logger.warning(f"[Failover] Canceled: Primary model returned a non-retryable error: {primary_result[:150]}")
+        # 区分两种情况：正常响应（finish 返回的用户可见文本）vs 不可重试的 LLM 错误
         if primary_result.startswith(("[LLM Error]", "[LLM call error]", "[Error]")):
+            logger.warning(f"[Failover] Canceled: Primary model returned a non-retryable error: {primary_result[:150]}")
             return _format_friendly_error(primary_result)
+        # 正常响应：无错误，无需 failover
         return primary_result
 
     # Check guard conditions
