@@ -4440,7 +4440,16 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
 
             if not tool:
                 logger.warning(f"[MCP] Unknown tool: {tool_name}")
-                return f"Unknown tool: {tool_name}"
+                # 返回可用工具列表引导 LLM 使用正确工具名, 避免反复生成幻觉调用
+                known_names = sorted(set(
+                    t.mcp_tool_name for t in (await db.execute(
+                        select(Tool).where(Tool.type == "mcp")
+                    )).scalars().all()
+                ))[:30]
+                return (
+                    f"工具 '{tool_name}' 不存在。可用工具: {', '.join(known_names)}。"
+                    f"请使用可用工具完成操作。"
+                )
 
             # Load per-agent config override
             agent_config = {}

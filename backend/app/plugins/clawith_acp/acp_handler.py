@@ -26,6 +26,20 @@ from app.services.agent_context import build_agent_context
 ACP_PROTOCOL_VERSION = 1
 LLM_TIMEOUT_SECONDS = int(os.getenv("ACP_LLM_TIMEOUT_SECONDS", "600"))
 
+# ── 背压控制：读写分离阈值 ──────────────────────────────────────
+# 读操作(VFS/索引/搜索)响应快(&lt;100ms), 允许更高并发
+# 写操作(write/build/reformat)需 EDT+WriteAction, 保持保守阈值
+_READ_BACKPRESSURE_THRESHOLD = 15
+_WRITE_BACKPRESSURE_THRESHOLD = 5
+_READ_METHODS = frozenset({
+    "fs/read_text_file", "fs/list_directory", "fs/find_file",
+    "fs/search_text", "fs/find_class", "fs/find_symbol",
+    "fs/find_references", "fs/find_definition", "fs/find_implementations",
+    "fs/find_super_methods", "fs/file_structure", "fs/get_documentation",
+    "fs/call_hierarchy", "fs/type_hierarchy", "fs/diagnostics",
+    "ide/active_file", "ide/index_status",
+})
+
 _CHUNK_HARD_FLUSH = 240   # 降低硬上限, 配合时间驱动 flush 避免长时间无输出
 _CHUNK_SOFT_FLUSH = 120   # 降低软上限, 短文本也能在合理边界发送
 _CHUNK_IDLE_MIN = 10      # 降低 idle 最小阈值, 覆盖"完成。"等极短中文回复
@@ -103,6 +117,8 @@ class AcpHandler:
         self._pending_tools: dict[str, asyncio.Future] = {}
         self._pending_requests: dict[str, tuple[asyncio.Future, float]] = {}
         self._cancel_event: asyncio.Event | None = None
+        self._closing = False  # 关闭保护: 标记 WebSocket 正在关闭, 拒绝新 dispatch
+        self._close_lock = asyncio.Lock()  # 防止并发 close()/cleanup()
         self._cwd: str = ""  # IDE project root
         # 当前 prompt 的性能计数，供 [ACP-PERF] prompt_done / first_chunk 使用
         self._current_prompt_perf: dict | None = None
@@ -224,6 +240,15 @@ class AcpHandler:
 
         必须从 run() 读循环外调用，否则 LLM 工具 send_request 无法读入 IDE 响应（R1 死锁）。
         """
+        # WebSocket 关闭保护: 拒绝新 dispatch, 避免 "Unexpected ASGI message" 错误
+        if self._closing:
+            logger.warning(
+                f"[ACP] dispatch_prompt 跳过 (正在关闭): "
+                f"session={self.session_id} id={msg_id}"
+            )
+            if msg_id is not None:
+                await self._send_error(msg_id, -32000, "WebSocket is closing")
+            return
         logger.info(f"[ACP] prompt 派发开始: session={self.session_id} id={msg_id}")
         try:
             result = await self._handle_prompt(params, msg_id)
@@ -946,9 +971,21 @@ class AcpHandler:
             logger.warning(f"[ACP] stale requests cleaned: {len(stale)}")
 
     async def cleanup(self):
+        """安全清理 — 标记关闭状态, 取消并等待活跃任务完成。"""
+        async with self._close_lock:
+            if self._closing:
+                return
+            self._closing = True
         self._cancel_idle_task()
+        # 取消所有活跃任务 (dispatch + terminal streaming)
         for task in self._active_tasks.values():
-            task.cancel()
+            if not task.done():
+                task.cancel()
+        # 等待任务完成 (最多 5s), 避免 WebSocket 关闭时仍有进行中的 dispatch
+        if self._active_tasks:
+            await asyncio.gather(
+                *self._active_tasks.values(), return_exceptions=True
+            )
         for future in self._pending_tools.values():
             if not future.done():
                 future.cancel()
@@ -976,7 +1013,11 @@ class AcpHandler:
             "jsonrpc": "2.0", "id": msg_id,
             "error": {"code": code, "message": f"{message} (ref: {error_ref})"}
         }, ensure_ascii=False)
-        logger.error(f"[ACP] _send_error code={code} ref={error_ref} msg={message}")
+        # 关闭中不报 ERROR — "after websocket.close" 是预期的清理行为
+        if self._closing:
+            logger.warning(f"[ACP] _send_error (closing) code={code} ref={error_ref} msg={message}")
+        else:
+            logger.error(f"[ACP] _send_error code={code} ref={error_ref} msg={message}")
         try:
             await asyncio.shield(self.ws.send_text(raw))
         except Exception:
@@ -1003,13 +1044,34 @@ class AcpHandler:
         so a late-arriving response can still be consumed by a subsequent
         retry or cleanup. asyncio.wait_for does NOT cancel a Future, so
         the future stays valid for later resolution."""
-        # 惰性清理: 条目数 > 50 或最早条目 > 120s 时触发清理, 防止 _pending_requests 泄漏
+        # 惰性清理: 条目数 > 50 或最早条目 > 120s 时触发清理
         if len(self._pending_requests) > 50:
             await self.cleanup_stale_requests()
         elif self._pending_requests:
             oldest = min(ts for _, (_, ts) in self._pending_requests.items())
             if time.monotonic() - oldest > 120:
                 await self.cleanup_stale_requests()
+        # 背压控制: pending 积压时拒绝新请求, 防止 IDE 端无响应时队列无限增长
+        # 读写分离: 读操作 (VFS/索引) 允许更高并发, 写操作保持保守
+        pending_count = len(self._pending_requests)
+        is_read = method in _READ_METHODS
+        threshold = _READ_BACKPRESSURE_THRESHOLD if is_read else _WRITE_BACKPRESSURE_THRESHOLD
+        if pending_count >= threshold:
+            logger.error(
+                f"[ACP-BACKPRESSURE] 拒绝 {method}: pending={pending_count} >= {threshold} "
+                f"(type={'read' if is_read else 'write'}). "
+                f"IDE 端可能 EDT 阻塞或无响应, 请检查 IDE 状态。"
+            )
+            raise RuntimeError(
+                f"ACP backpressure: {pending_count} pending requests. "
+                f"IDE 端可能忙或无响应。请稍后重试。"
+            )
+        elif pending_count >= 3:
+            oldest_age = min(time.monotonic() - ts for _, (_, ts) in self._pending_requests.items())
+            logger.warning(
+                f"[ACP-QUEUE] pending 积压: count={pending_count} "
+                f"method={method} oldest_age={oldest_age:.0f}s"
+            )
         req_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_requests[req_id] = (future, time.monotonic())

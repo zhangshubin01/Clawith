@@ -317,7 +317,19 @@ class OpenAICompatibleClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=False, proxy=None, verify=_create_ssl_context())
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                follow_redirects=False,
+                proxy=None,
+                verify=_create_ssl_context(),
+                limits=httpx.Limits(
+                    max_connections=200,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=30.0,
+                ),
+                transport=httpx.AsyncHTTPTransport(retries=3),
+                http2=False,
+            )
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
@@ -709,9 +721,9 @@ class OpenAICompatibleClient(LLMClient):
 
                 break  # Success
 
-            except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
+            except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout, httpx.RemoteProtocolError, httpx.PoolTimeout) as e:
                 if attempt < max_retries - 1:
-                    wait = (attempt + 1) * 1
+                    wait = min((2 ** attempt), 30)  # 指数退避: 1s -> 2s -> 4s -> 8s (max 30s)
                     logger.warning(f"Stream attempt {attempt + 1} failed ({type(e).__name__}), retrying in {wait}s...")
                     await asyncio.sleep(wait)
                     full_content = ""
@@ -765,7 +777,19 @@ class OpenAIResponsesClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=False, proxy=None, verify=_create_ssl_context())
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                follow_redirects=False,
+                proxy=None,
+                verify=_create_ssl_context(),
+                limits=httpx.Limits(
+                    max_connections=200,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=30.0,
+                ),
+                transport=httpx.AsyncHTTPTransport(retries=3),
+                http2=False,
+            )
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
@@ -1141,7 +1165,19 @@ class GeminiClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=False, proxy=None, verify=_create_ssl_context())
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                follow_redirects=False,
+                proxy=None,
+                verify=_create_ssl_context(),
+                limits=httpx.Limits(
+                    max_connections=200,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=30.0,
+                ),
+                transport=httpx.AsyncHTTPTransport(retries=3),
+                http2=False,
+            )
         return self._client
 
     async def _get_openai_fallback_client(self) -> OpenAICompatibleClient:
@@ -1650,7 +1686,19 @@ class AnthropicClient(LLMClient):
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self.timeout, follow_redirects=False, proxy=None, verify=_create_ssl_context())
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                follow_redirects=False,
+                proxy=None,
+                verify=_create_ssl_context(),
+                limits=httpx.Limits(
+                    max_connections=200,
+                    max_keepalive_connections=50,
+                    keepalive_expiry=30.0,
+                ),
+                transport=httpx.AsyncHTTPTransport(retries=3),
+                http2=False,
+            )
         return self._client
 
     def _get_headers(self) -> dict[str, str]:

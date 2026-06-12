@@ -708,6 +708,24 @@ def is_agent_internal_path(path: str) -> bool:
 
 
 
+# 方案4: Autonomy blocked 阈值 — 同工具被拦截 3 次后引导 LLM 停止重试
+_AUTONOMY_STOP_THRESHOLD = 3
+_autonomy_counts: dict[str, int] = {}
+
+def _handle_autonomy_blocked(tool_name: str, reason: str) -> str:
+    """同工具被 autonomy 反复拦截时, 反馈 LLM 停止重试而非死循环。"""
+    c = _autonomy_counts.get(tool_name, 0) + 1
+    _autonomy_counts[tool_name] = c
+    if c >= _AUTONOMY_STOP_THRESHOLD:
+        return (
+            f"操作 '{tool_name}' 已被拦截 {c} 次, 请立即停止重试。"
+            f"改用其他方式完成目标。拦截原因: {reason[:100]}"
+        )
+    return (
+        f"'{tool_name}' 需要审批 (第 {c}/{_AUTONOMY_STOP_THRESHOLD} 次)。"
+        f"已提交审批请求。请勿重复尝试, 先执行其他任务。"
+    )
+
 # P1-5: list_files/list_directory 去重缓存 (3s TTL)
 _ls_cache: dict[str, tuple[float, str]] = {}
 _LS_CACHE_TTL = 3.0
@@ -762,7 +780,7 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                 _block = await _check_fn(tool_name, args, _agent_id, _user_id, notify=False)
                 if _block is not None:
                     logger.warning(f"[ACP-bridge] autonomy blocked: {tool_name} reason={_block[:60]}")
-                    return _block
+                    return _handle_autonomy_blocked(tool_name, _block)
 
     if not method:
         return None
@@ -1041,7 +1059,7 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
             block = await _check_fn("execute_command", args, agent_id, user_id, notify=False)
             if block is not None:
                 logger.warning(f"[ACP-bridge] autonomy blocked: cmd={command[:80]} reason={block[:60]}")
-                return block
+                return _handle_autonomy_blocked("execute_command", block)
 
     session_id = getattr(handler, "session_id", "")
     conn_id = getattr(handler, "conn_id", "?")
