@@ -25,10 +25,14 @@ class AutonomyService:
     """Enforce autonomy boundaries for agent operations."""
 
     async def check_and_enforce(
-        self, db: AsyncSession, agent: Agent, action_type: str, details: dict
+        self, db: AsyncSession, agent: Agent, action_type: str, details: dict,
+        notify: bool = True,
     ) -> dict:
         """Check if an action is allowed under the agent's autonomy policy.
 
+        Args:
+            notify: If False, skip all external notifications (WebUI/Feishu/etc).
+                    Used by ACP plugin sessions where the user is actively watching.
         Returns:
             {
                 "allowed": True/False,
@@ -58,9 +62,10 @@ class AutonomyService:
             }
 
         elif level == "L2":
-            # Auto-execute but notify creator
-            logger.info(f"L2: Executing {action_type} for agent {agent.name} with notification")
-            await self._notify_creator(db, agent, action_type, details)
+            # Auto-execute but notify creator (unless suppressed — e.g. ACP plugin sessions)
+            logger.info(f"L2: Executing {action_type} for agent {agent.name} notify={notify}")
+            if notify:
+                await self._notify_creator(db, agent, action_type, details)
             return {
                 "allowed": True,
                 "level": "L2",

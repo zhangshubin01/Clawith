@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import pathlib
+import shlex
 import time
 from contextvars import ContextVar
 from typing import Any
@@ -758,7 +759,7 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             _agent_id = getattr(handler, "agent_id", None)
             _user_id = getattr(handler, "user_id", None)
             if _agent_id is not None and _user_id is not None:
-                _block = await _check_fn(tool_name, args, _agent_id, _user_id)
+                _block = await _check_fn(tool_name, args, _agent_id, _user_id, notify=False)
                 if _block is not None:
                     logger.warning(f"[ACP-bridge] autonomy blocked: {tool_name} reason={_block[:60]}")
                     return _block
@@ -834,7 +835,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         if method == "fs/list_directory":
             # P1-5: 去重缓存 — 相同路径 3s 内不重复查询 IDE
             _depth = str(params.get("depth", 1))
-            _cache_key = f"{path}:{_depth}"
+            # P1-5+H8: 缓存键含 session_id + cwd 防止跨项目缓存污染
+            _cache_key = f"{session_id}:{_cwd}:{path}:{_depth}"
             _cached_ts, _cached_val = _ls_cache.get(_cache_key, (0, ""))
             if time.monotonic() - _cached_ts < _LS_CACHE_TTL:
                 logger.info(f"[ACP-bridge] list_files cache hit path={path} depth={_depth}")
@@ -977,7 +979,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                 logger.warning(
                     "[ACP-bridge] fs/list_directory 不支持, 回落 terminal find: %s", path
                 )
-                find_cmd = f"find '{path}' -maxdepth {params.get('depth', 3)} -type f -o -type d | head -{params.get('limit', 200)}"
+                # H9: shlex.quote 转义路径特殊字符，防止 shell 命令注入
+                find_cmd = f"find {shlex.quote(path)} -maxdepth {params.get('depth', 3)} -type f -o -type d | head -{params.get('limit', 200)}"
                 return await _try_acp_terminal({"command": find_cmd}, handler)
             logger.warning(
                 "[ACP-bridge] %s 不支持: %s (IDE 插件需实现对应 handler)",
@@ -1035,7 +1038,7 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
     if agent_id is not None and user_id is not None:
         _check_fn = _INLINE_IMPORTED.get("check_tool_autonomy")
         if _check_fn is not None:
-            block = await _check_fn("execute_command", args, agent_id, user_id)
+            block = await _check_fn("execute_command", args, agent_id, user_id, notify=False)
             if block is not None:
                 logger.warning(f"[ACP-bridge] autonomy blocked: cmd={command[:80]} reason={block[:60]}")
                 return block
@@ -1107,18 +1110,11 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
 async def _try_acp_terminal_streaming(
     args: dict, handler, cancel_event: asyncio.Event | None = None,
 ) -> str | None:
-    """流式 Terminal 执行 — 自适应轮询策略。
+    """流式 Terminal 执行 — 自适应轮询策略 (v15.5: 15 项缺陷修复)。
 
-    策略:
-      Phase 1 (500ms 静默): 等 500ms, 如果命令已完成 → 返回聚合结果 (零轮询开销)
-      Phase 2 (300ms 轮询): 命令超过 500ms → 启动流式轮询, 每 300ms 推送增量
-
-    短命令 (ls/pwd/git status) 走 Phase 1, 零额外开销。
-    长命令 (gradle build) 自动进入 Phase 2, 用户看到增量输出。
-
-    Returns:
-        None — 流式版本通过 notification 推送, 不返回聚合结果。
-        调用者应检查返回值: None 表示已进入流式模式, 调用者不应再等待结果。
+    Phase 1 (500ms 静默): 短命令直接返回聚合结果, 零轮询开销。
+    Phase 2 (300ms 轮询): 长命令进入流式推送, 每 300ms 发送增量输出。
+    600s 超时保护 + WS 断开检测 + 空输出/进程消失检测 + cancel 支持。
     """
     command = args.get("command", "")
     if not command:
@@ -1127,12 +1123,35 @@ async def _try_acp_terminal_streaming(
     session_id = getattr(handler, "session_id", "")
     conn_id = getattr(handler, "conn_id", "?")
 
+    # CR1: 从 ACP SDK 解嵌套 exitStatus.exitCode (兼容旧版直接 exitCode)
+    def _get_exit_code(resp: dict) -> int | None:
+        es = resp.get("exitStatus") if isinstance(resp, dict) else None
+        if isinstance(es, dict) and es.get("exitCode") is not None:
+            return int(es["exitCode"])
+        code = resp.get("exitCode") if isinstance(resp, dict) else None
+        return int(code) if code is not None else None
+
+    # P2-2: autonomy 检查 (ACP 会话 notify=False 跳过外部通知)
+    _lazy_import_agent_tools()
+    agent_id = getattr(handler, "agent_id", None)
+    user_id = getattr(handler, "user_id", None)
+    if agent_id is not None and user_id is not None:
+        _check_fn = _INLINE_IMPORTED.get("check_tool_autonomy")
+        if _check_fn is not None:
+            block = await _check_fn("execute_command", args, agent_id, user_id, notify=False)
+            if block is not None:
+                logger.warning(
+                    f"[ACP-PERF] terminal-streaming autonomy blocked conn={conn_id} "
+                    f"cmd={command[:80]} reason={block[:60]}"
+                )
+                return block
+
     logger.info(
-        f"[ACP-PERF] terminal-streaming START conn={conn_id} session={session_id} "
-        f"cmd={command[:80]}"
+        f"[ACP-PERF] terminal-streaming START conn={conn_id} "
+        f"session={session_id} cmd={command[:80]}"
     )
 
-    # Step 1: 创建 terminal
+    # Step 1: 创建 terminal 进程
     try:
         create_resp = await handler.send_request(
             "terminal/create",
@@ -1144,15 +1163,24 @@ async def _try_acp_terminal_streaming(
             f"[ACP-PERF] terminal-streaming CREATE-FAIL conn={conn_id} "
             f"session={session_id}: {e}"
         )
-        return f"❌ terminal 创建失败: {e}"
+        return f"terminal 创建失败: {e}"
 
     if isinstance(create_resp, dict) and create_resp.get("error"):
-        return f"❌ terminal 创建失败: {create_resp['error']}"
+        logger.error(
+            f"[ACP-PERF] terminal-streaming CREATE-FAIL conn={conn_id}: {create_resp['error']}"
+        )
+        return f"terminal 创建失败: {create_resp['error']}"
     terminal_id = create_resp.get("terminalId", "") if isinstance(create_resp, dict) else ""
     if not terminal_id:
-        return "❌ terminal 创建失败: 未返回 terminalId"
+        logger.error(
+            f"[ACP-PERF] terminal-streaming CREATE-FAIL conn={conn_id}: no terminalId"
+        )
+        return "terminal 创建失败: 未返回 terminalId"
+    logger.info(
+        f"[ACP-PERF] terminal-streaming CREATE-OK conn={conn_id} terminalId={terminal_id}"
+    )
 
-    # Phase 1: 500ms 静默等待
+    # Phase 1: 500ms 静默等待 — 短命令直接返回
     await asyncio.sleep(0.5)
 
     try:
@@ -1166,35 +1194,63 @@ async def _try_acp_terminal_streaming(
             f"[ACP-PERF] terminal-streaming CHECK-FAIL conn={conn_id} "
             f"session={session_id}: {e}"
         )
-        return f"⚠️ terminal 检查失败: {e}"
+        return f"terminal 检查失败: {e}"
 
-    if isinstance(check, dict) and check.get("exitCode") is not None:
-        # Phase 1 完成: 短命令直接返回
-        exit_code = int(check.get("exitCode", -1))
-        out_text = check.get("output", "")
+    exit_code = _get_exit_code(check) if isinstance(check, dict) else None
+    if exit_code is not None:
+        out_text = check.get("output", "") if isinstance(check, dict) else ""
         logger.info(
             f"[ACP-PERF] terminal-streaming SHORT-CMD conn={conn_id} "
             f"session={session_id} exitCode={exit_code} outputLen={len(out_text)}"
         )
         if exit_code != 0:
-            return f"❌ 命令失败 (exit={exit_code}):\n{out_text}"
+            return f"命令失败 (exit={exit_code}):\n{out_text}"
         return out_text
 
-    # Phase 2: 启动 300ms 流式轮询
+    # Phase 2: 300ms 流式轮询
     logger.info(
         f"[ACP-PERF] terminal-streaming PHASE2 conn={conn_id} "
         f"session={session_id} reason=exceeded 500ms silence"
     )
+    # H2: 独立 Event, 与 prompt cancel_event 解耦
+    terminal_cancel = asyncio.Event()
     seq = 0
+    # H1+R7: 增量跟踪, 从 Phase1 输出长度开始避免重复
+    _last_output_len = len(check.get("output", "")) if isinstance(check, dict) else 0
+    _empty_streak = 0  # R2: 空输出计数, 检测进程消失
+    deadline = time.monotonic() + float(os.getenv("ACP_TERMINAL_STREAM_TIMEOUT", "600"))
 
     async def poll_loop():
-        nonlocal seq
+        nonlocal seq, _last_output_len, _empty_streak
+        _key = f"terminal-stream-{terminal_id}"
         try:
             while True:
-                if cancel_event and cancel_event.is_set():
+                # 取消检查 (terminal_cancel 或 handler cleanup)
+                if terminal_cancel.is_set():
                     logger.warning(
                         f"[ACP-PERF] terminal-streaming CANCELLED conn={conn_id} "
                         f"session={session_id} terminalId={terminal_id}"
+                    )
+                    try:
+                        await handler.send_request(
+                            "terminal/kill",
+                            {"sessionId": session_id, "terminalId": terminal_id},
+                            timeout=5,
+                        )
+                        logger.warning(
+                            f"[ACP-PERF] terminal-streaming KILLED conn={conn_id}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[ACP-PERF] terminal-streaming KILL-FAIL conn={conn_id}: {e}"
+                        )
+                    break
+
+                # 超时保护 (600s, 对齐 hermes-agent)
+                if time.monotonic() > deadline:
+                    logger.error(
+                        f"[ACP-PERF] terminal-streaming TIMEOUT conn={conn_id} "
+                        f"session={session_id}"
                     )
                     try:
                         await handler.send_request(
@@ -1206,8 +1262,16 @@ async def _try_acp_terminal_streaming(
                         logger.warning(
                             f"[ACP-PERF] terminal-streaming KILL-FAIL conn={conn_id}: {e}"
                         )
+                    await handler._send_notification("session/update", {
+                        "sessionId": session_id,
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "\n\n[timeout: 600s]"},
+                        },
+                    })
                     break
 
+                # 获取 terminal 输出
                 try:
                     output = await handler.send_request(
                         "terminal/output",
@@ -1215,6 +1279,13 @@ async def _try_acp_terminal_streaming(
                         timeout=float(os.getenv("ACP_TERMINAL_OUTPUT_TIMEOUT", "30")),
                     )
                 except Exception as e:
+                    err_msg = str(e)
+                    # R1: WS 断开时直接终止, 避免 2000 次空循环
+                    if "WebSocket" in err_msg or "Connection" in err_msg:
+                        logger.error(
+                            f"[ACP-PERF] terminal-streaming WS-DISCONNECT conn={conn_id}: {e}"
+                        )
+                        break
                     logger.warning(
                         f"[ACP-PERF] terminal-streaming POLL-FAIL conn={conn_id} "
                         f"session={session_id}: {e}"
@@ -1226,61 +1297,92 @@ async def _try_acp_terminal_streaming(
                     await asyncio.sleep(0.3)
                     continue
 
+                # H1: 只发送增量 (避免全量重复)
                 new_text = output.get("output", "")
-                if new_text:
+                if len(new_text) > _last_output_len:
                     seq += 1
                     try:
                         await handler._send_notification("session/update", {
                             "sessionId": session_id,
                             "update": {
                                 "sessionUpdate": "agent_message_chunk",
-                                "content": {"type": "text", "text": f"[TERMINAL] {new_text}"},
+                                "content": {
+                                    "type": "text",
+                                    "text": f"[TERM] {new_text[_last_output_len:]}",
+                                },
                             },
                         })
-                    except Exception as e:
+                    except Exception:
+                        # R4: WS 断开时 notification 失败, 终止轮询
+                        break
+                    _last_output_len = len(new_text)
+                    _empty_streak = 0
+                else:
+                    # R2: 连续空输出检测 — terminal 可能已被 release
+                    _empty_streak += 1
+                    if _empty_streak >= 5:
                         logger.warning(
-                            f"[ACP-PERF] terminal-streaming NOTIFY-FAIL conn={conn_id}: {e}"
+                            f"[ACP-PERF] terminal-streaming DISAPPEARED conn={conn_id} "
+                            f"session={session_id} (no output for {_empty_streak} polls)"
                         )
+                        break
 
-                if output.get("exitCode") is not None:
-                    exit_code = int(output.get("exitCode", -1))
+                # CR1: 解嵌套检查 exitCode
+                exit_code = _get_exit_code(output)
+                if exit_code is not None:
                     logger.info(
                         f"[ACP-PERF] terminal-streaming DONE conn={conn_id} "
                         f"session={session_id} exitCode={exit_code} total_chunks={seq}"
                     )
+                    # M1: exit 用 agent_message_chunk (确保文本可见)
                     try:
                         await handler._send_notification("session/update", {
                             "sessionId": session_id,
                             "update": {
-                                "sessionUpdate": "agent_thought_chunk",
+                                "sessionUpdate": "agent_message_chunk",
                                 "content": {
                                     "type": "text",
-                                    "text": f"\n\n[进程退出: exitCode={exit_code}]",
+                                    "text": f"\n\n[exit: {exit_code}]",
                                 },
                             },
                         })
-                    except Exception as e:
-                        logger.warning(
-                            f"[ACP-PERF] terminal-streaming EXIT-NOTIFY-FAIL conn={conn_id}: {e}"
-                        )
+                    except Exception:
+                        pass
                     break
 
                 await asyncio.sleep(0.3)
 
         except asyncio.CancelledError:
+            # R3: CancelledError 路径也发送 kill (task.cancel() 不触发 event 检查)
             logger.warning(
-                f"[ACP-PERF] terminal-streaming poll_loop cancelled conn={conn_id} "
+                f"[ACP-PERF] terminal-streaming CANCELLED (task) conn={conn_id} "
                 f"session={session_id}"
             )
+            try:
+                await handler.send_request(
+                    "terminal/kill",
+                    {"sessionId": session_id, "terminalId": terminal_id},
+                    timeout=5,
+                )
+            except Exception:
+                pass
         except Exception as e:
             logger.error(
                 f"[ACP-PERF] terminal-streaming poll_loop error conn={conn_id} "
                 f"session={session_id}: {e}"
             )
+        finally:
+            # CR2: 自清理 — 从 _active_tasks 移除
+            handler._active_tasks.pop(_key, None)
 
-    _ = asyncio.create_task(poll_loop())
-    return None  # 流式版本: 调用者看到 None 应停止等待
-
+    # CR2: 注册到 handler._active_tasks, 确保 cleanup() 和 _handle_cancel 可取消
+    _key = f"terminal-stream-{terminal_id}"
+    handler._active_tasks[_key] = asyncio.create_task(poll_loop())
+    # H2+R5: 注册 terminal_cancel 到 handler, 供 _handle_cancel 和 timeout 联动
+    if not hasattr(handler, '_terminal_events'):
+        handler._terminal_events = {}
+    handler._terminal_events[terminal_id] = terminal_cancel
+    return None  # 流式模式: 调用者看到 None 应停止等待, poll_loop 后台运行
 
 async def _list_files_local(path: str, depth: int = 3, limit: int = 200) -> str:
     """本地 list_files 回落 — Docker 容器内 / IDE 不可用时使用。

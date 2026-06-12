@@ -2665,10 +2665,14 @@ async def check_tool_autonomy(
     arguments: dict,
     agent_id: uuid.UUID,
     user_id: uuid.UUID,
+    notify: bool = True,
 ) -> str | None:
     """前置 autonomy 检查 —— 高敏工具在任何执行路径之前调用。
 
     Phase P2-1 修复：抽离原 execute_tool 内部的 autonomy 块，使 LSP4J 路由也能复用。
+
+    Args:
+        notify: False 时跳过所有外部通知 (WebUI/飞书等)。ACP 插件会话设 False。
 
     Returns:
         - None: 检查通过，可继续执行
@@ -2691,6 +2695,7 @@ async def check_tool_autonomy(
                 _agent,
                 action_type,
                 {"tool": tool_name, "args": str(arguments)[:200], "requested_by": str(user_id)},
+                notify=notify,
             )
             await _adb.commit()
             if result_check.get("allowed"):
