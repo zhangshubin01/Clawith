@@ -21,6 +21,7 @@ from app.models.org import OrgMember
 from app.plugins.clawith_acp.acp_session import AcpSessionManager
 from app.plugins.clawith_acp.tool_bridge import current_acp_handler, is_agent_internal_path
 from app.plugins.clawith_acp.tool_hooks import install_acp_tool_hooks
+from app.services.agent_context import build_agent_context
 
 ACP_PROTOCOL_VERSION = 1
 LLM_TIMEOUT_SECONDS = int(os.getenv("ACP_LLM_TIMEOUT_SECONDS", "600"))
@@ -37,6 +38,8 @@ _PERIODIC_FLUSH_SEC = 0.15
 # 中英文句末标点均触发句子边界 flush
 _SENTENCE_END_RE = re.compile(r'[.!?。！？…~]["\'」』）\)]*\s*$')
 _SPLIT_NL_RE = re.compile(r"(?<=\n)")
+
+# ── LLM 输出脱敏 ──────────────────────────────────────────────
 
 # Install ACP tool hooks (idempotent)
 install_acp_tool_hooks()
@@ -58,6 +61,10 @@ _kind_map = {
     "find_file": "read",
     "search_text": "read",
     "list_directory": "read",
+    "list_files": "read",
+    "build_project": "edit",
+    "get_documentation": "read", "apply_quickfix": "edit",
+    "git_status": "read", "git_diff": "read", "git_stage": "edit", "git_commit": "edit",
 }
 class AcpHandler:
     """ACP JSON-RPC 2.0 路由 + Agent 管理。"""
@@ -267,6 +274,7 @@ class AcpHandler:
                     "indexStatus": True, "syncFiles": True,
                     "activeFile": True, "openFile": True,
                 },
+                "git": {"status": True, "diff": True, "stage": True, "commit": True},
                 "terminal": True,
             },
             # ACP 协议规范字段名为 implementation, 非 agentInfo。
@@ -504,7 +512,27 @@ class AcpHandler:
                     history = await self.session_mgr.load_history_for_llm(
                         self.session_id, self.user_id
                     )
-                llm_messages = list(history) + [
+
+                # 注入 agent context（soul.md + memory.md + skills + MCP 配置）
+                ctx_llm_messages = list(history)
+                if self.agent_id:
+                    try:
+                        agent_ctx = await build_agent_context(
+                            agent_id=uuid.UUID(self.agent_id),
+                            agent_name=self.agent_name,
+                            role_description=self.role_description,
+                        )
+                        if agent_ctx and agent_ctx[0]:
+                            ctx_prompt = agent_ctx[0] + "\n\n" + agent_ctx[1]
+                            ctx_llm_messages.insert(0, {"role": "system", "content": ctx_prompt})
+                            logger.info(
+                                f"[ACP-CTX] build_agent_context 注入完成 "
+                                f"static={len(agent_ctx[0])} dynamic={len(agent_ctx[1])} "
+                                f"agent={self.agent_id}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"[ACP-CTX] build_agent_context 失败 (非阻塞): {e}")
+                llm_messages = ctx_llm_messages + [
                     {"role": "user", "content": user_text_for_llm}
                 ]
                 logger.info(
@@ -611,6 +639,8 @@ class AcpHandler:
           4. 软边界 ≥220 字 + 空白结尾 — 词边界，发送
           5. 空闲 750ms + ≥80 字 — 最后一段不卡死
         """
+        # P1: LLM 输出脱敏 — 推送前 sanitize 敏感信息
+        
         perf = self._current_prompt_perf
         if perf is not None:
             perf["pushed_chunks"] = perf.get("pushed_chunks", 0) + 1

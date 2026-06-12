@@ -7,13 +7,12 @@ ContextVar:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import pathlib
-import re
 import time
 from contextvars import ContextVar
 from typing import Any
-from collections import defaultdict as _defaultdict
 
 from loguru import logger
 
@@ -23,9 +22,14 @@ current_acp_handler: ContextVar[Any | None] = ContextVar("current_acp_handler", 
 _ACP_METHOD_MAP = {
     "read_file": "fs/read_text_file",
     "write_file": "fs/write_text_file",
-    "edit_file": "fs/write_text_file",
+    "edit_file": "fs/edit_text_file",
     "delete_file": "fs/write_text_file",
     "list_files": "fs/list_directory",
+    # P0-2: find_file/search_text builder handler 已实现 (line 76, 95) 且在
+    # _ACP_PARAM_BUILDERS 已注册 (line 468-469), 补充 _ACP_METHOD_MAP 入口。
+    # _try_acp_execute (line 593) 用此映射查 method, 此前缺失导致退回基路径。
+    "find_file": "fs/find_file",
+    "search_text": "fs/search_text",
     "find_class": "fs/find_class",
     "find_symbol": "fs/find_symbol",
     "index_status": "ide/index_status",
@@ -46,6 +50,13 @@ _ACP_METHOD_MAP = {
     "active_file": "ide/active_file",
     "open_file": "ide/open_file",
     "file_structure": "fs/file_structure",
+    "build_project": "ide/build_project",
+    "get_documentation": "fs/get_documentation",
+    "apply_quickfix": "ide/apply_quickfix",
+    "git_status": "git/status",
+    "git_diff": "git/diff",
+    "git_stage": "git/stage",
+    "git_commit": "git/commit",
 }
 
 
@@ -182,35 +193,38 @@ async def _build_read_text_file_params(
     return params
 
 
+async def _build_edit_file_params(
+    tool_name: str, args: dict, handler, session_id: str, path: str,
+) -> dict | str:
+    """构建 edit_text_file 参数 — 将补丁参数发送到 IDE 端原位替换。
+
+    不再走「读文件 → 本地替换 → 全量写回」路径（存在并发覆盖风险），
+    而是传递 oldString/newString/replaceAll 到 IDE 插件，由 IDE 用
+    Document.replaceString() 执行原子原位替换，消除窗口期竞争。
+    """
+    old_str = args.get("old_string") or args.get("old_str", "")
+    new_str = args.get("new_string") or args.get("new_str", "")
+    if not old_str:
+        return "❌ edit_file 缺少 old_string 参数"
+    replace_all = args.get("replace_all", False)
+    logger.debug(
+        "[ACP-bridge] edit_file path={} old_len={} new_len={} replace_all={}",
+        path, len(old_str), len(new_str), replace_all,
+    )
+    return {
+        "sessionId": session_id,
+        "path": path,
+        "oldString": old_str,
+        "newString": new_str,
+        "replaceAll": replace_all,
+    }
+
+
 async def _build_write_text_file_params(
     tool_name: str, args: dict, handler, session_id: str, path: str,
 ) -> dict | str:
-    """构建 write_text_file 参数（含 edit_file 特殊处理和 delete_file 清空）。"""
-    if tool_name == "edit_file":
-        # edit_file 使用 old_string/new_string 参数（非 content）。
-        # 需要先读文件 → 本地替换 → 写回，避免 args.get("content", "") 返回空字符串导致 IDE 清空文件。
-        old_str = args.get("old_string", "")
-        new_str = args.get("new_string", "")
-        if not old_str and not new_str:
-            return "❌ edit_file 缺少 old_string/new_string 参数"
-        # 1. 通过 ACP 读取当前文件内容
-        read_result = await handler.send_request("fs/read_text_file", {
-            "sessionId": session_id, "path": path,
-        }, timeout=float(os.getenv("ACP_FS_TIMEOUT", "15")))
-        if isinstance(read_result, dict):
-            current_content = read_result.get("content", "")
-        else:
-            current_content = str(read_result)
-        if old_str not in current_content:
-            return f"❌ 'old_string' not found in {path}. 请检查 exact text 包括空白和换行。"
-        # 2. 本地执行替换（与 agent_tools.py 逻辑一致）
-        replace_all = args.get("replace_all", False)
-        count = current_content.count(old_str)
-        if count > 1 and not replace_all:
-            return f"❌ 'old_string' appears {count} times in {path}. Use replace_all=true or provide more context."
-        new_content = current_content.replace(old_str, new_str) if replace_all else current_content.replace(old_str, new_str, 1)
-        content = new_content
-    elif tool_name == "delete_file":
+    """构建 write_text_file 参数（含 delete_file 清空）。"""
+    if tool_name == "delete_file":
         content = ""
     else:
         content = args.get("content", "")
@@ -461,6 +475,106 @@ async def _build_file_structure_params(
     return {"sessionId": session_id, "file": f_path}
 
 
+async def _build_project_params(
+    tool_name: str, args: dict, handler, session_id: str, path: str,
+) -> dict | str:
+    """构建 build_project 参数 — 编译项目。"""
+    logger.info(f"[ACP-bridge] build_project rebuild={args.get('rebuild')}")
+    return {
+        "sessionId": session_id,
+        "rebuild": args.get("rebuild", False),
+        "includeRawOutput": args.get("includeRawOutput", False),
+        "timeoutSeconds": int(args.get("timeoutSeconds", 120)),
+    }
+
+
+async def _build_get_documentation_params(
+    tool_name: str, args: dict, handler, session_id: str, path: str,
+) -> dict | str:
+    """构建 get_documentation 参数 — 获取符号文档。"""
+    class_name = args.get("className", "")
+    if not class_name:
+        return "❌ get_documentation: className 不能为空"
+    params: dict[str, Any] = {"sessionId": session_id, "className": class_name}
+    if args.get("memberName"):
+        params["memberName"] = args["memberName"]
+    logger.info(f"[ACP-bridge] get_documentation className={class_name}")
+    return params
+
+
+async def _build_apply_quickfix_params(
+    tool_name: str, args: dict, handler, session_id: str, path: str,
+) -> dict | str:
+    """构建 apply_quickfix 参数 — 应用快速修复。"""
+    f_path = args.get("file", "")
+    if not f_path:
+        return "❌ apply_quickfix: file 不能为空"
+    fix_name = args.get("fixName", "")
+    if not fix_name:
+        return "❌ apply_quickfix: fixName 不能为空"
+    params: dict[str, Any] = {
+        "sessionId": session_id, "file": f_path,
+        "line": int(args.get("line", 1)), "column": int(args.get("column", 1)),
+        "fixName": fix_name,
+    }
+    logger.info(f"[ACP-bridge] apply_quickfix file={f_path} fixName={fix_name}")
+    return params
+
+
+async def _build_git_status_params(
+    tool_name: str, args: dict, handler, session_id: str, path: str,
+) -> dict | str:
+    """构建 git/status 参数 — 查看 Git 状态。"""
+    logger.info("[ACP-bridge] git_status")
+    return {"sessionId": session_id, "verbose": args.get("verbose", False)}
+
+
+async def _build_git_diff_params(
+    tool_name: str, args: dict, handler, session_id: str, path: str,
+) -> dict | str:
+    """构建 git/diff 参数 — 查看 Git 差异。"""
+    params: dict[str, Any] = {
+        "sessionId": session_id,
+        "staged": args.get("staged", False),
+        "statOnly": args.get("stat_only", False),
+    }
+    if args.get("commit"):
+        params["commit"] = args["commit"]
+    if args.get("path"):
+        params["path"] = args["path"]
+    logger.info(f"[ACP-bridge] git_diff staged={params['staged']}")
+    return params
+
+
+async def _build_git_stage_params(
+    tool_name: str, args: dict, handler, session_id: str, path: str,
+) -> dict | str:
+    """构建 git/stage 参数 — 暂存文件。"""
+    params: dict[str, Any] = {
+        "sessionId": session_id,
+        "all": args.get("all", False),
+    }
+    if args.get("paths"):
+        params["paths"] = args["paths"]
+    logger.info(f"[ACP-bridge] git_stage all={params['all']}")
+    return params
+
+
+async def _build_git_commit_params(
+    tool_name: str, args: dict, handler, session_id: str, path: str,
+) -> dict | str:
+    """构建 git/commit 参数 — 创建提交。"""
+    msg = args.get("message", "")
+    if not msg:
+        return "❌ git_commit: message 不能为空"
+    params: dict[str, Any] = {
+        "sessionId": session_id, "message": msg,
+        "all": args.get("all", True), "amend": args.get("amend", False),
+    }
+    logger.info(f"[ACP-bridge] git_commit all={params['all']} amend={params['amend']}")
+    return params
+
+
 # ── ACP 参数构建器注册表 ──
 
 _ACP_PARAM_BUILDERS: dict[str, Any] = {
@@ -471,6 +585,7 @@ _ACP_PARAM_BUILDERS: dict[str, Any] = {
     "fs/find_symbol": _build_find_symbol_params,
     "ide/index_status": _build_index_status_params,
     "fs/read_text_file": _build_read_text_file_params,
+    "fs/edit_text_file": _build_edit_file_params,
     "fs/write_text_file": _build_write_text_file_params,
     "fs/find_references": _build_find_references_params,
     "fs/find_definition": _build_find_definition_params,
@@ -489,6 +604,13 @@ _ACP_PARAM_BUILDERS: dict[str, Any] = {
     "ide/active_file": _build_active_file_params,
     "ide/open_file": _build_open_file_params,
     "fs/file_structure": _build_file_structure_params,
+    "ide/build_project": _build_project_params,
+    "fs/get_documentation": _build_get_documentation_params,
+    "ide/apply_quickfix": _build_apply_quickfix_params,
+    "git/status": _build_git_status_params,
+    "git/diff": _build_git_diff_params,
+    "git/stage": _build_git_stage_params,
+    "git/commit": _build_git_commit_params,
 }
 
 
@@ -500,11 +622,12 @@ class AcpRateLimiter:
     使用 sliding window 算法，以 method 为 key 独立计数。
     """
 
-    __slots__ = ("_default_limit", "_window_sec", "_buckets")
+    __slots__ = ("_default_limit", "_window_sec", "_buckets", "_lock")
 
     def __init__(self, default_limit: int = 60, window_sec: float = 60.0) -> None:
         self._default_limit = default_limit
         self._window_sec = window_sec
+        self._lock = asyncio.Lock()
         # method -> list[float]（时间戳列表）
         self._buckets: dict[str, list[float]] = {}
 
@@ -516,16 +639,17 @@ class AcpRateLimiter:
         cutoff = now - self._window_sec
         self._buckets[method] = [t for t in timestamps if t > cutoff]
 
-    def allow(self, method: str, limit: int | None = None) -> bool:
+    async def allow(self, method: str, limit: int | None = None) -> bool:
         """检查是否允许请求。允许则记录时间戳并返回 True。"""
-        now = time.time()
-        self._prune(method, now)
-        limit = limit or self._default_limit
-        timestamps = self._buckets.setdefault(method, [])
-        if len(timestamps) >= limit:
-            return False
-        timestamps.append(now)
-        return True
+        async with self._lock:
+            now = time.time()
+            self._prune(method, now)
+            limit = limit or self._default_limit
+            timestamps = self._buckets.setdefault(method, [])
+            if len(timestamps) >= limit:
+                return False
+            timestamps.append(now)
+            return True
 
     def remaining(self, method: str) -> int:
         """返回当前窗口剩余配额。"""
@@ -535,9 +659,7 @@ class AcpRateLimiter:
         return max(0, limit - len(self._buckets.get(method, [])))
 
 
-_RATE_LIMITER = AcpRateLimiter()
-
-import os as _os
+_RATE_LIMITER = AcpRateLimiter(default_limit=120)  # 读工具限速 120次/min
 
 # 内联导入：_DANGEROUS_BASH_ALWAYS 和 check_tool_autonomy 引用 agent_tools，
 # 延迟导入避免循环依赖（agent_tools 也可能回引用本模块）
@@ -552,14 +674,18 @@ def _lazy_import_agent_tools():
         )
         _INLINE_IMPORTED["_DANGEROUS_BASH_ALWAYS"] = _bash_always
         _INLINE_IMPORTED["check_tool_autonomy"] = _check_autonomy
+        from app.services.agent_tools import _TOOL_AUTONOMY_MAP as _autonomy_map
+        _INLINE_IMPORTED["_TOOL_AUTONOMY_MAP"] = _autonomy_map
 
 def _is_project_file(path: str, cwd: str = "") -> bool:
     """判断路径是否是 IDE 项目文件（应走 ACP）还是 agent 自身文件（走本地）。"""
     if not path:
         return False
+    if not cwd:
+        return False  # 拒绝空 cwd，防止所有绝对路径被放行（安全审计 V1/V4）
     if path.startswith("/"):
         # 绝对路径: 规范化后检查是否在项目根下，防路径穿越 (如 /etc/passwd)
-        if cwd and not _os.path.normpath(path).startswith(_os.path.normpath(cwd)):
+        if cwd and not os.path.normpath(path).startswith(os.path.normpath(cwd)):
             return False
         return True
     # agent 自身文件前缀
@@ -586,20 +712,42 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
     返回 None 表示不应由 ACP 处理（如 path 为空或 agent 自身文件）。
     返回字符串表示 ACP 执行结果。
     """
-    path = args.get("path") or args.get("file_path") or args.get("filePath", "")
-    if not _is_project_file(path):
+    path = args.get("path") or args.get("file") or args.get("file_path") or args.get("filePath", "")
+    # 无 path 参数的工具（如 index_status, build_project）不需要项目文件检查
+    if path and not _is_project_file(path):
         return None
 
     method = _ACP_METHOD_MAP.get(tool_name)
+
+    # 统一路径穿越防护 — 对所有含 path 参数的工具检查（安全审计 V1）
+    path = args.get("path") or args.get("file") or args.get("file_path") or args.get("filePath", "")
+    if path and ".." in path:
+        logger.warning(f"[ACP-SEC] 拒绝路径穿越: {tool_name} path={path}")
+        return f'{{"error": "路径不合法: 禁止路径穿越"}}'
 
     # Autonomy 闸门: 写操作需要经过 check_tool_autonomy 检查
     _WRITE_TOOLS = frozenset({
         "write_file", "edit_file", "delete_file",
         "refactor_rename", "move_file", "safe_delete",
         "reformat_code", "optimize_imports", "convert_java_to_kotlin",
+        "apply_quickfix", "git_stage", "git_commit",
     })
     if tool_name in _WRITE_TOOLS:
         _lazy_import_agent_tools()
+        # 确保 agent_tools.py 的 _TOOL_AUTONOMY_MAP 包含 ACP 写工具映射 (安全审计 V2)
+        _autonomy_map = _INLINE_IMPORTED.get("_TOOL_AUTONOMY_MAP", {})
+        _acp_autonomy_entries = {
+            "edit_file": "write_workspace_files",
+            "refactor_rename": "write_workspace_files",
+            "safe_delete": "delete_files",
+            "reformat_code": "write_workspace_files",
+            "optimize_imports": "write_workspace_files",
+            "convert_java_to_kotlin": "write_workspace_files",
+            "execute_command": "execute_code",
+        }
+        for k, v in _acp_autonomy_entries.items():
+            if k not in _autonomy_map:
+                _autonomy_map[k] = v
         _check_fn = _INLINE_IMPORTED.get("check_tool_autonomy")
         if _check_fn is not None:
             _agent_id = getattr(handler, "agent_id", None)
@@ -621,10 +769,18 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         "fs/find_super_methods", "fs/call_hierarchy", "fs/type_hierarchy",
         "fs/diagnostics", "ide/sync_files", "ide/active_file", "fs/file_structure",
     })
-    if method in _READ_METHODS and not _RATE_LIMITER.allow(method):
+    if method in _READ_METHODS and not await _RATE_LIMITER.allow(method):
         left = _RATE_LIMITER.remaining(method)
         logger.warning(f"[ACP-bridge] rate limited: {method} remaining={left}")
         return f"⚠️ 请求过频繁（{method}），请稍后重试"
+
+    # 写操作独立限速: 10次/60s (安全审计 V7)
+    _WRITE_METHODS = frozenset({
+        "fs/write_text_file", "fs/edit_text_file",
+    })
+    if method in _WRITE_METHODS and not await _RATE_LIMITER.allow(method, limit=30):
+        logger.warning(f"[ACP-LIMIT] 写操作 {method} 超限")
+        return '{"error": "写操作频率超限，请稍后重试"}'
 
     session_id = _get_session_id(handler)
     conn_id = getattr(handler, "conn_id", "?")
@@ -721,6 +877,27 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                 indexing = result.get("isIndexing", False)
                 return f"索引状态: isDumbMode={dumb} isIndexing={indexing}"
             return str(result)
+        if method == "ide/build_project":
+            if isinstance(result, dict):
+                success = result.get("success", False)
+                errors = result.get("errors", 0)
+                warnings = result.get("warnings", 0)
+                msgs = result.get("buildMessages", [])
+                aborted = result.get("aborted", False)
+                elapsed = result.get("durationMs", 0)
+                lines = [f"构建结果: success={success} errors={errors} warnings={warnings} aborted={aborted} 耗时={elapsed}ms"]
+                if msgs:
+                    for m in msgs[:30]:
+                        loc = f"{m.get('file', '?')}:{m.get('line', '?')}:{m.get('column', '?')}"
+                        lines.append(f"  [{m.get('category','')}] {loc} {m.get('message','')}")
+                    if len(msgs) > 30:
+                        lines.append(f"  ... (共 {len(msgs)} 条消息)")
+                if result.get("truncated"):
+                    lines.append("  (结果已截断，仅显示前 100 条)")
+                if result.get("rawOutput"):
+                    lines.append(f"\n原始编译输出:\n{result['rawOutput']}")
+                return "\n".join(lines)
+            return str(result)
         if method == "fs/search_text":
             if isinstance(result, dict):
                 matches = result.get("matches") or []
@@ -785,12 +962,33 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
     # 与 agent_tools.py 中 execute_command 的处理逻辑一致，防止 LLM 通过 ACP 通道绕过安全检查
     _lazy_import_agent_tools()
     _dangerous = _INLINE_IMPORTED.get("_DANGEROUS_BASH_ALWAYS", [])
+    _EXTRA_DANGEROUS = [
+        "> /dev/sda", "parted", "fdisk", "dd if=/dev/zero of=/",
+        "eval ", "$(", "`", "mkfs.", ":(){ :|:& };:",
+    ]
     lower_cmd = command.strip().lower()
-    for pattern in _dangerous:
-        if re.search(pattern, lower_cmd):
+    for pattern in _EXTRA_DANGEROUS:
+        if pattern in lower_cmd:
             msg = f"❌ 危险命令已被拦截: pattern={pattern}"
             logger.warning(f"[ACP-bridge] {msg} cmd={command[:80]}")
             return msg
+    for pattern in _dangerous:
+        if pattern in lower_cmd:
+            msg = f"❌ 危险命令已被拦截: pattern={pattern}"
+            logger.warning(f"[ACP-bridge] {msg} cmd={command[:80]}")
+            return msg
+
+    # 网络危险命令检查（curl/wget/nc/ssh/scp 等数据外泄通道）
+    _lazy_import_agent_tools()
+    _network = _INLINE_IMPORTED.get("_DANGEROUS_BASH_NETWORK", [])
+    for pattern in _network:
+        if pattern in lower_cmd:
+            msg = f"❌ 网络命令已被拦截: pattern={pattern}"
+            logger.warning(f"[ACP-bridge] {msg} cmd={command[:80]}")
+            return msg
+    # 路径穿越检查
+    if "../../" in command:
+        return "❌ 路径穿越已被拦截"
 
     # P0-3: autonomy 审批闸门 —— 高敏工具（写文件/执行命令）需要 agent autonomy 策略检查
     # 从 handler 获取 agent/user 身份，传给 check_tool_autonomy 判定 L1/L2/L3 策略

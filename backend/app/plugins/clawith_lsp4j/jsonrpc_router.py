@@ -7524,7 +7524,7 @@ async def invoke_lsp4j_tool(tool_name: str, arguments: dict, agent_id: uuid.UUID
             "pwd",
         )
         if any(kw in command for kw in _BUILD_KEYWORDS):
-            timeout = 600.0  # 编译/构建: 10 分钟
+            timeout = 120.0  # 编译/构建: 2 分钟 (CodeWhale TERMINAL_TIMEOUT_MS=120000 对齐)
         elif any(kw in command for kw in _READONLY_KEYWORDS):
             timeout = 15.0  # 读操作: 15 秒（实际耗时 <20ms，30s 过度冗余）
         else:

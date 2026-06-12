@@ -71,6 +71,68 @@ TOOLS_REQUIRING_ARGS = frozenset({
     "send_message_to_agent", "send_feishu_message", "send_email"
 })
 
+# ── 模型上下文窗口映射: 用于上下文利用率告警 ──
+# key: model 标识符 (LLMModel.model), value: context window (tokens)
+# 未匹配到的模型回退到 ACP_CTX_WINDOW_TOKENS 环境变量 (默认 131072)
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # DeepSeek
+    "deepseek-v3": 128_000,
+    "deepseek-r1": 128_000,
+    "deepseek-chat": 128_000,
+    "deepseek-reasoner": 128_000,
+    # OpenAI
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4": 8_192,
+    "o1": 200_000,
+    "o1-mini": 200_000,
+    "o3-mini": 200_000,
+    # Anthropic
+    "claude-3-opus-20240229": 200_000,
+    "claude-3.5-sonnet-20241022": 200_000,
+    "claude-3.5-haiku-20241022": 200_000,
+    "claude-opus-4-6": 200_000,
+    "claude-sonnet-4-20250514": 200_000,
+    "claude-haiku-3.5": 200_000,
+    # Google
+    "gemini-1.5-pro": 1_048_576,
+    "gemini-1.5-flash": 1_048_576,
+    "gemini-2.0-flash": 1_048_576,
+    "gemini-2.5-pro": 1_048_576,
+    # Qwen (通义千问)
+    "qwen-max": 32_000,
+    "qwen-plus": 131_072,
+    "qwen-turbo": 1_000_000,
+    "qwen2.5": 131_072,
+    # 豆包 (字节)
+    "doubao-pro-32k": 32_000,
+    "doubao-pro-128k": 128_000,
+    # GLM (智谱)
+    "glm-4": 128_000,
+    "glm-4-flash": 128_000,
+    # Moonshot (月之暗面)
+    "moonshot-v1-8k": 8_192,
+    "moonshot-v1-32k": 32_000,
+    "moonshot-v1-128k": 128_000,
+    # DeepSeek V4: 1M tokens
+    "deepseek-v4": 1_000_000,
+}
+
+
+def _resolve_ctx_window(model: "LLMModel") -> int:
+    """Resolve context window for a model by exact match, then prefix match."""
+    model_name = getattr(model, "model", "") or ""
+    # Exact match
+    if model_name in MODEL_CONTEXT_WINDOWS:
+        return MODEL_CONTEXT_WINDOWS[model_name]
+    # Prefix match (e.g. "deepseek-v3-0324" matches "deepseek-v3")
+    for key, window in MODEL_CONTEXT_WINDOWS.items():
+        if model_name.startswith(key):
+            return window
+    # Fallback to env var
+    return int(os.getenv("ACP_CTX_WINDOW_TOKENS", "131072"))
+
 
 def _sanitize_tool_calls_for_context(tool_calls: list[dict]) -> tuple[list[dict] | None, str | None]:
     """Return OpenAI-compatible tool calls, or a retry instruction if args are invalid."""
@@ -629,6 +691,7 @@ async def call_llm(
     max_tokens = get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None))
     _accumulated_usage = TokenUsage()
     _consecutive_guard_failures = 0
+    _ctx_pressure_warned = False
     _unsaved_usage = TokenUsage()
 
     # 中间轮次的 on_chunk 路由到 thinking：只有 finish 的内容才是用户可见正文。
@@ -711,13 +774,22 @@ async def call_llm(
 
         try:
             # 上下文利用率检查：来自 openhuman COMPACTION_TRIGGER_THRESHOLD=0.90
-            _ctx_window = int(os.getenv("ACP_CTX_WINDOW_TOKENS", "1000000"))
+            _ctx_window = _resolve_ctx_window(model)
             _ctx_ratio = _accumulated_usage.input_tokens / _ctx_window
             if _ctx_ratio >= 0.90:
                 logger.warning(
                     f"[CTX-GUARD] context 90%: input_tokens={_accumulated_usage.input_tokens} "
-                    f"/ {_ctx_window} ratio={_ctx_ratio:.1%} session={session_id}"
+                    f"/ {_ctx_window} ({_ctx_ratio:.1%}) model={getattr(model, 'model', '?')} session={session_id}"
                 )
+                if not _ctx_pressure_warned:
+                    _ctx_pressure_warned = True
+                    api_messages.append(LLMMessage(
+                        role="user",
+                        content=(
+                            f"⚠️ 上下文利用率已达 {_ctx_ratio:.0%}（{_accumulated_usage.input_tokens}/{_ctx_window} tokens）。"
+                            "请精简后续输出，优先使用 finish 总结当前进度，避免在剩余轮次中发起高成本工具调用。"
+                        ),
+                    ))
                 if _ctx_ratio >= 0.95:
                     _consecutive_guard_failures += 1
                     if _consecutive_guard_failures >= 3:
@@ -751,7 +823,7 @@ async def call_llm(
                     on_tool_delta=on_tool_delta,
                     on_thinking=on_thinking,
                 ),
-                timeout=float(os.getenv("ACP_LLM_STREAM_TIMEOUT", "120")),  # 默认 120s, env 可覆盖
+                timeout=float(os.getenv("ACP_LLM_STREAM_TIMEOUT", "30")),  # 默认 30s (hermes-agent 对齐), env 可覆盖
             )
             # [LSP4J-PERF] LLM stream 完成
             llm_time = time.monotonic() - round_start

@@ -760,14 +760,135 @@ _ACP_IDE_TOOLS = [
             }
         }
     },
+    # ── build_project: 编译项目返回结构化错误 ──
+    {
+        "type": "function",
+        "function": {
+            "name": "build_project",
+            "description": (
+                "使用 IDE 编译系统编译项目，返回结构化编译错误（含文件路径、行号、列号、错误代码、严重级别）。\n"
+                "比 execute_command + gradle 更适合 LLM 自助修复。\n"
+                "参数: rebuild(是否clean build), includeRawOutput, timeoutSeconds(默认120)"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rebuild": {"type": "boolean", "default": False, "description": "是否完整重建（clean build），默认 false（增量编译）"},
+                    "includeRawOutput": {"type": "boolean", "default": False, "description": "是否包含原始编译器输出，默认 false"},
+                    "timeoutSeconds": {"type": "integer", "default": 120, "description": "编译超时秒数，默认 120"}
+                }
+            }
+        }
+    },
+    # ── get_documentation: 获取文档/API 参考 ──
+    {
+        "type": "function",
+        "function": {
+            "name": "get_documentation",
+            "description": "获取 IDE 中指定符号（类/方法）的文档和 API 参考信息。支持 className 和可选 memberName 参数。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "className": {"type": "string", "description": "类名（必填，支持 FQN）"},
+                    "memberName": {"type": "string", "description": "成员名（可选，如方法名、字段名）"}
+                },
+                "required": ["className"]
+            }
+        }
+    },
+    # ── apply_quickfix: 应用快速修复（需审批）──
+    {
+        "type": "function",
+        "function": {
+            "name": "apply_quickfix",
+            "description": "应用 IDE 快速修复。使用 diagnostics 获取可用修复后调用此工具应用指定修复。需要用户审批。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string", "description": "文件路径（必填）"},
+                    "line": {"type": "integer", "description": "1-based 行号（必填）"},
+                    "column": {"type": "integer", "description": "1-based 列号（必填）"},
+                    "fixName": {"type": "string", "description": "修复名称（必填）"}
+                },
+                "required": ["file", "line", "column", "fixName"]
+            }
+        }
+    },
+    # ── git_status: Git 状态 ──
+    {
+        "type": "function",
+        "function": {
+            "name": "git_status",
+            "description": "查看 Git 仓库状态（modified/staged/untracked 文件列表）。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "verbose": {"type": "boolean", "default": False, "description": "是否显示详细变更内容（默认 false）"}
+                }
+            }
+        }
+    },
+    # ── git_diff: Git 差异 ──
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff",
+            "description": "查看 Git 差异。支持 staged/working tree 差异，可选 stat_only 仅显示统计信息。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "staged": {"type": "boolean", "default": False, "description": "是否显示已暂存文件的差异（默认 false）"},
+                    "stat_only": {"type": "boolean", "default": False, "description": "是否仅显示统计信息（默认 false）"},
+                    "commit": {"type": "string", "description": "比较的 commit hash（可选）"},
+                    "path": {"type": "string", "description": "限定路径（可选）"}
+                }
+            }
+        }
+    },
+    # ── git_stage: 暂存文件（需审批）──
+    {
+        "type": "function",
+        "function": {
+            "name": "git_stage",
+            "description": "暂存文件变更（git add）。默认暂存所有变更，也可指定文件列表。需要用户审批。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要暂存的文件路径列表（可选，不传则暂存所有变更）"
+                    },
+                    "all": {"type": "boolean", "default": False, "description": "是否暂存所有变更（包括新文件）"}
+                }
+            }
+        }
+    },
+    # ── git_commit: 提交变更（需审批）──
+    {
+        "type": "function",
+        "function": {
+            "name": "git_commit",
+            "description": "创建 Git 提交（git commit）。默认暂存所有变更后提交。需要用户审批。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "提交信息（必填）"},
+                    "all": {"type": "boolean", "default": True, "description": "是否暂存所有变更后提交（默认 true）"},
+                    "amend": {"type": "boolean", "default": False, "description": "是否修正上一次提交（默认 false）"}
+                },
+                "required": ["message"]
+            }
+        }
+    },
 ]
 
 # ACP 活跃时过滤基础工具中与 ACP 代理工具重名的
 _ACP_OVERLAP_BASE_TOOL_NAMES = frozenset({
     "read_file", "write_file", "edit_file", "delete_file",
-    "find_files", "search_files", "list_files",  # 系统提示替代
-    "tree",                                      # 系统提示替代
-    "execute_bash",                              # 替换为 execute_command
+    "find_file", "search_text", "list_files", "move_file",  # 系统提示替代
+    "tree",                                                     # 系统提示替代
+    "execute_bash",                                             # 替换为 execute_command
 })
 
 # 无关工具：IDE 编辑场景不需要的工具
@@ -824,7 +945,7 @@ def install_acp_tool_hooks() -> None:
     _ACP_TOOL_MAP = {
         "read_file": "fs/read_text_file",
         "write_file": "fs/write_text_file",
-        "edit_file": "fs/write_text_file",
+        "edit_file": "fs/edit_text_file",
         "delete_file": "fs/write_text_file",  # 暂通过 write 空内容实现
         "list_files": "fs/list_directory",
         "find_file": "fs/find_file",
@@ -849,6 +970,13 @@ def install_acp_tool_hooks() -> None:
         "active_file": "ide/active_file",
         "open_file": "ide/open_file",
         "file_structure": "fs/file_structure",
+        "build_project": "ide/build_project",
+        "get_documentation": "fs/get_documentation",
+        "apply_quickfix": "ide/apply_quickfix",
+        "git_status": "git/status",
+        "git_diff": "git/diff",
+        "git_stage": "git/stage",
+        "git_commit": "git/commit",
     }
 
     async def _acp_aware_execute_tool(
