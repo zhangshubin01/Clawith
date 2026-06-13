@@ -4814,11 +4814,12 @@ export default function AgentDetailPage() {
                             </>
                             {(agent as any)?.agent_type !== 'openclaw' && (
                                 <>
-                                    {agent.status === 'stopped' ? (
+                                    {canManage && agent.status === 'stopped' && (
                                         <button className="btn btn-secondary" onClick={async () => { await agentApi.start(id!); queryClient.invalidateQueries({ queryKey: ['agent', id] }); }}>{t('agent.actions.start')}</button>
-                                    ) : agent.status === 'running' ? (
+                                    )}
+                                    {canManage && agent.status === 'running' && (
                                         <button className="btn btn-secondary" onClick={async () => { await agentApi.stop(id!); queryClient.invalidateQueries({ queryKey: ['agent', id] }); }}>{t('agent.actions.stop')}</button>
-                                    ) : null}
+                                    )}
                                 </>
                             )}
                         </div>
@@ -4829,7 +4830,7 @@ export default function AgentDetailPage() {
                 {activeTab !== 'chat' && <div className="tabs">
                     {AGENT_DETAIL_TABS.filter(tab => {
                         if (['aware', 'workspace', 'chat'].includes(tab)) return false;
-                        // 'use' access: hide settings and approvals tabs
+                        // 'use' access keeps the existing tab bar unchanged; settings remains available via its own entry.
                         if ((agent as any)?.access_level === 'use') {
                             if (tab === 'settings' || tab === 'approvals') return false;
                         }
@@ -5038,7 +5039,7 @@ export default function AgentDetailPage() {
                             {/* Quick Actions */}
                             <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
                                 <button className="btn btn-secondary" onClick={() => setActiveTab('chat')}>{t('agent.actions.chat')}</button>
-                                <button className="btn btn-secondary" onClick={() => setActiveTab('settings')}>{t('agent.tabs.settings')}</button>
+                                {canManage && <button className="btn btn-secondary" onClick={() => setActiveTab('settings')}>{t('agent.tabs.settings')}</button>}
                             </div>
                         </div>
                     );
@@ -5282,9 +5283,10 @@ export default function AgentDetailPage() {
                                                             {trig.is_enabled ? t('agent.aware.inProgress') : t('agent.aware.completed')}
                                                         </span>
                                                         <div style={{ display: 'flex', gap: '4px' }}>
-                                                            {!trig.is_system && <button className="btn btn-ghost" style={{ padding: '2px 6px', fontSize: '11px', color: 'var(--error)' }}
+                                                            {canManage && !trig.is_system && <button className="btn btn-ghost" style={{ padding: '2px 6px', fontSize: '11px', color: 'var(--error)' }}
                                                                 onClick={async (e) => {
                                                                     e.stopPropagation();
+                                                                    if (!canManage) return;
                                                                     const ok = await dialog.confirm(t('agent.aware.deleteTriggerConfirm', { name: trig.name }), { title: '删除触发器', danger: true, confirmLabel: '删除' });
                                                                     if (ok) {
                                                                         await triggerApi.delete(id!, trig.id);
@@ -5711,7 +5713,7 @@ export default function AgentDetailPage() {
                             upload: (file, path, onProgress) => fileApi.upload(id!, file, path + '/', onProgress),
                             downloadUrl: (p) => fileApi.downloadUrl(id!, p),
                         };
-                        return <FileBrowser api={adapter} rootPath="workspace" features={{ upload: true, newFile: true, newFolder: true, edit: true, delete: canManage, directoryNavigation: true }} />;
+                        return <FileBrowser api={adapter} rootPath="workspace" features={{ upload: canManage, newFile: canManage, newFolder: canManage, edit: canManage, delete: canManage, directoryNavigation: true }} />;
                     })()
                 }
 
@@ -6656,7 +6658,7 @@ export default function AgentDetailPage() {
 
                 {/* ── Approvals Tab ── */}
                 {
-                    activeTab === 'approvals' && id && <ApprovalsTab agentId={id} />
+                    activeTab === 'approvals' && id && <ApprovalsTab agentId={id} canManage={canManage} />
                 }
 
                 {/* ── Settings Tab ── */}
