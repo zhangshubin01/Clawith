@@ -15,6 +15,7 @@
 import asyncio
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
+from loguru import logger
 
 # 模块级后台任务集合，保存 create_task 返回值防止 GC 回收
 _bg_tasks: set[asyncio.Task] = set()
@@ -152,6 +153,7 @@ async def create_task(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
+    logger.info("[API] 创建任务 task_id={} agent_id={} type={} title={}", task.id, agent_id, data.type, data.title)
     task_out = task_service.to_task_out(task)
 
     # 提交事务，确保后台执行能看到数据

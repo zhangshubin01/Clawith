@@ -177,7 +177,7 @@ async def _send_supervision_reminder(task: Task, agent_name: str):
 
         days_since = (datetime.now(timezone.utc) - task.created_at).days
         reminder_msg = (
-            f"📋 督办提醒 — 来自 {agent_name}\n\n"
+            f"[Supervision] 督办提醒 — 来自 {agent_name}\n\n"
             f"事项：{task.title}\n"
         )
         if task.description:
@@ -268,7 +268,7 @@ async def _send_supervision_reminder(task: Task, agent_name: str):
                             participant_id=tgt_part.id if tgt_part else None,
                         ))
                         send_method = f"agent消息+回复({reply[:40]})"
-                        logger.info(f"📋 Target agent {target_agent.name} replied: {reply[:80]}")
+                        logger.info(f"[Supervision] Target agent {target_agent.name} replied: {reply[:80]}")
                 except Exception as e:
                     logger.warning(f"Target agent reply failed: {e}")
             else:
@@ -317,7 +317,7 @@ async def _send_supervision_reminder(task: Task, agent_name: str):
             if sent:
                 log = TaskLog(task_id=task.id, content=f"✅ 已向 {target_name} 发送督办提醒（{send_method}）")
             elif target_agent or target_name:
-                log = TaskLog(task_id=task.id, content=f"📋 督办提醒已触发，目标：{target_name}")
+                log = TaskLog(task_id=task.id, content=f"[Supervision] 督办提醒已触发，目标：{target_name}")
             else:
                 log = TaskLog(task_id=task.id, content=f"⚠️ 提醒失败：未找到联系人 '{target_name}'")
             db.add(log)
@@ -326,14 +326,14 @@ async def _send_supervision_reminder(task: Task, agent_name: str):
             activity = AgentActivityLog(
                 agent_id=task.agent_id,
                 action_type="schedule_run",
-                summary=f"📋 督办提醒：{task.title} → {target_name}" + (f"（{send_method}已发送）" if sent else ""),
+                summary=f"[Supervision] 督办提醒：{task.title} → {target_name}" + (f"（{send_method}已发送）" if sent else ""),
                 detail_json={"task_id": str(task.id), "target": target_name, "sent": sent},
                 related_id=task.id,
             )
             db.add(activity)
             await db.commit()
 
-            logger.info(f"📋 Supervision reminder for '{task.title}' -> {target_name}, sent={sent}")
+            logger.info(f"[Supervision] Supervision reminder for '{task.title}' -> {target_name}, sent={sent}")
 
     except Exception as e:
         logger.exception(f"Supervision reminder error for task {task.id}: {e}")
@@ -341,7 +341,7 @@ async def _send_supervision_reminder(task: Task, agent_name: str):
 
 async def _supervision_tick():
     """One tick: check all supervision tasks and send due reminders."""
-    logger.info("[supervision] tick running...")
+    logger.info("[Supervision] tick running...")
     from app.services.audit_logger import write_audit_log
 
     try:
@@ -357,7 +357,7 @@ async def _supervision_tick():
                 )
             )
             rows = result.all()
-            logger.info(f"[supervision] found {len(rows)} supervision tasks")
+            logger.info(f"[Supervision] found {len(rows)} supervision tasks")
 
             await write_audit_log("supervision_tick", {"tasks_found": len(rows)})
 
@@ -374,7 +374,7 @@ async def _supervision_tick():
                     last_reminded = last_log.created_at if last_log else None
 
                     if _is_reminder_due(task.remind_schedule, last_reminded, now):
-                        logger.info(f"[supervision] FIRING reminder for '{task.title}' -> {task.supervision_target_name}")
+                        logger.info(f"[Supervision] FIRING reminder for '{task.title}' -> {task.supervision_target_name}")
                         await write_audit_log(
                             "supervision_fire",
                             {"task_id": str(task.id), "title": task.title, "target": task.supervision_target_name},
@@ -392,8 +392,8 @@ async def _supervision_tick():
 
 async def start_supervision_reminder():
     """Start the background supervision reminder loop. Call from FastAPI startup."""
-    logger.info("📋 [supervision] Reminder service started (60s tick)")
-    logger.info("📋 Supervision reminder service started (60s tick)")
+    logger.info("[Supervision] Reminder service started (60s tick)")
+    logger.info("[Supervision] Supervision reminder service started (60s tick)")
     while True:
         await _supervision_tick()
         await asyncio.sleep(60)

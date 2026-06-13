@@ -231,7 +231,7 @@ async def seed_default_agents():
         )
         admin = admin_result.scalar_one_or_none()
         if not admin:
-            logger.warning("[AgentSeeder] No platform admin found, skipping default agents")
+            logger.warning("[Startup] No platform admin found, skipping default agents")
             return
 
         # DB-backed idempotency is the source of truth. The storage marker can
@@ -252,7 +252,7 @@ async def seed_default_agents():
             existing_by_name.setdefault(agent.name, agent)
 
         if "Morty" in existing_by_name and "Meeseeks" in existing_by_name:
-            logger.info("[AgentSeeder] Default agents already exist in DB, skipping creation")
+            logger.info("[Startup] Default agents already exist in DB, skipping creation")
             await _append_seed_marker(
                 f"morty={existing_by_name['Morty'].id}\nmeeseeks={existing_by_name['Meeseeks'].id}"
             )
@@ -385,7 +385,7 @@ async def seed_default_agents():
 
         await db.commit()
         logger.info(
-            "[AgentSeeder] Default agent seeding complete: "
+            "[Startup] Default agent seeding complete: "
             f"Morty ({morty.id}), Meeseeks ({meeseeks.id}), created={len(created_agents)}"
         )
 
@@ -395,7 +395,7 @@ async def seed_default_agents():
         f"seeded\nmorty={morty.id}\nmeeseeks={meeseeks.id}\n",
         encoding="utf-8",
     )
-    logger.info(f"[AgentSeeder] Wrote seed marker to {SEED_MARKER_KEY}")
+    logger.info(f"[Startup] Wrote seed marker to {SEED_MARKER_KEY}")
 
 
 async def seed_okr_agent():
@@ -415,7 +415,7 @@ async def seed_okr_agent():
     # Check if OKR Agent has already been seeded
     marker_content = await _read_seed_marker()
     if "okr_agent=" in marker_content:
-        logger.info("[AgentSeeder] OKR Agent already seeded, skipping")
+        logger.info("[Startup] OKR Agent already seeded, skipping")
         return
 
     async with async_session() as db:
@@ -432,7 +432,7 @@ async def seed_okr_agent():
             .limit(1)
         )
         if existing.scalar_one_or_none():
-            logger.info("[AgentSeeder] OKR Agent already exists in DB, skipping")
+            logger.info("[Startup] OKR Agent already exists in DB, skipping")
             # Update marker so we don't check again next startup
             await _append_seed_marker("okr_agent=existing")
             return
@@ -443,7 +443,7 @@ async def seed_okr_agent():
         )
         admin = admin_result.scalar_one_or_none()
         if not admin:
-            logger.warning("[AgentSeeder] No platform admin, skipping OKR Agent creation")
+            logger.warning("[Startup] No platform admin, skipping OKR Agent creation")
             return
 
         # Create OKR Agent
@@ -474,7 +474,7 @@ async def seed_okr_agent():
             await db.flush()
         except IntegrityError:
             await db.rollback()
-            logger.info("[AgentSeeder] OKR Agent was created concurrently (or exists with same name), skipping")
+            logger.info("[Startup] OKR Agent was created concurrently (or exists with same name), skipping")
             await _append_seed_marker("okr_agent=existing")
             return
 
@@ -566,12 +566,12 @@ async def seed_okr_agent():
                 )
                 if not existing_at.scalar_one_or_none():
                     db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
-                    logger.info(f"[AgentSeeder] Assigned OKR tool '{tool_name}' to OKR Agent")
+                    logger.info(f"[Startup] Assigned OKR tool '{tool_name}' to OKR Agent")
             else:
-                logger.warning(f"[AgentSeeder] OKR tool '{tool_name}' not found in DB — run tool seeder first")
+                logger.warning(f"[Startup] OKR tool '{tool_name}' not found in DB — run tool seeder first")
 
         await db.commit()
-        logger.info(f"[AgentSeeder] Created OKR Agent ({okr_agent.id})")
+        logger.info(f"[Startup] Created OKR Agent ({okr_agent.id})")
 
         # ── System cron triggers for precise report scheduling ──
         # These triggers fire OKR Agent at exact times (supplement the 4-hour heartbeat).
@@ -581,7 +581,7 @@ async def seed_okr_agent():
 
     # Update seed marker
     await _append_seed_marker(f"okr_agent={okr_agent.id}")
-    logger.info(f"[AgentSeeder] OKR Agent seeded, id={okr_agent.id}")
+    logger.info(f"[Startup] OKR Agent seeded, id={okr_agent.id}")
 
 
 async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
@@ -675,7 +675,7 @@ async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
             )
         )
         if existing.scalar_one_or_none():
-            logger.info(f"[AgentSeeder] Trigger '{t['name']}' already exists, skipping")
+            logger.info(f"[Startup] Trigger '{t['name']}' already exists, skipping")
             continue
 
         trigger = AgentTrigger(
@@ -690,7 +690,7 @@ async def _seed_okr_triggers(db, agent_id: uuid.UUID) -> None:
             is_enabled=True,
         )
         db.add(trigger)
-        logger.info(f"[AgentSeeder] Created system trigger '{t['name']}' for OKR Agent")
+        logger.info(f"[Startup] Created system trigger '{t['name']}' for OKR Agent")
 
 
 async def _ensure_okr_tool_rows_exist(required_tool_names: list[str]) -> dict[str, Tool]:
@@ -713,7 +713,7 @@ async def _ensure_okr_tool_rows_exist(required_tool_names: list[str]) -> dict[st
     missing = [name for name in required_tool_names if name not in tool_rows]
     if missing:
         logger.warning(
-            f"[AgentSeeder] Missing OKR tool rows {missing}; re-running builtin tool seeder"
+            f"[Startup] Missing OKR tool rows {missing}; re-running builtin tool seeder"
         )
         from app.services.tool_seeder import seed_builtin_tools
         await seed_builtin_tools()
@@ -736,7 +736,7 @@ async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OK
         daily_hour = max(0, min(23, int(hour_str)))
         daily_minute = max(0, min(59, int(minute_str)))
     except (AttributeError, ValueError):
-        logger.warning(f"[AgentSeeder] Invalid OKR daily_report_time {settings.daily_report_time}; using 18:00")
+        logger.warning(f"[Startup] Invalid OKR daily_report_time {settings.daily_report_time}; using 18:00")
 
     result = await db.execute(
         select(AgentTrigger).where(
@@ -797,7 +797,7 @@ async def _sync_okr_triggers_with_settings(db, agent_id: uuid.UUID, settings: OK
             changed = True
 
     if changed:
-        logger.info("[AgentSeeder] Synced OKR system triggers with settings")
+        logger.info("[Startup] Synced OKR system triggers with settings")
     return changed
 
 
@@ -850,19 +850,19 @@ async def patch_existing_okr_agent() -> None:
                 if okr_settings.okr_agent_id != agent.id:
                     okr_settings.okr_agent_id = agent.id
                     changed = True
-                    logger.info(f"[AgentSeeder] Patched OKR Agent {agent.id}: set okr_agent_id in settings")
+                    logger.info(f"[Startup] Patched OKR Agent {agent.id}: set okr_agent_id in settings")
 
             if not agent.is_system:
                 agent.is_system = True
                 changed = True
-                logger.info(f"[AgentSeeder] Patched OKR Agent {agent.id}: set is_system=True")
+                logger.info(f"[Startup] Patched OKR Agent {agent.id}: set is_system=True")
 
             await db.flush()
 
             for tool_name in all_okr_tools:
                 tool = tools_by_name.get(tool_name)
                 if not tool:
-                    logger.warning(f"[AgentSeeder] OKR tool '{tool_name}' not found — run tool seeder first")
+                    logger.warning(f"[Startup] OKR tool '{tool_name}' not found — run tool seeder first")
                     continue
                 at_res = await db.execute(
                     select(AgentTool).where(AgentTool.agent_id == agent.id, AgentTool.tool_id == tool.id)
@@ -870,7 +870,7 @@ async def patch_existing_okr_agent() -> None:
                 if not at_res.scalar_one_or_none():
                     db.add(AgentTool(agent_id=agent.id, tool_id=tool.id, enabled=True))
                     changed = True
-                    logger.info(f"[AgentSeeder] Patched OKR Agent {agent.id}: assigned tool '{tool_name}'")
+                    logger.info(f"[Startup] Patched OKR Agent {agent.id}: assigned tool '{tool_name}'")
 
             await _seed_okr_triggers(db, agent.id)
             changed = await _sync_okr_triggers_with_settings(db, agent.id, okr_settings) or changed
@@ -883,7 +883,7 @@ async def patch_existing_okr_agent() -> None:
 
         if changed_any:
             await db.commit()
-            logger.info("[AgentSeeder] OKR Agent patch complete")
+            logger.info("[Startup] OKR Agent patch complete")
 
 
 async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID) -> None:
@@ -917,7 +917,7 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
                     okr_settings.okr_agent_id = existing_agent.id
                     await db.commit()
                 logger.info(
-                    f"[AgentSeeder] OKR Agent already exists for tenant {tenant_id}, skipping"
+                    f"[Startup] OKR Agent already exists for tenant {tenant_id}, skipping"
                 )
                 return
 
@@ -1014,13 +1014,13 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
                     db.add(AgentTool(agent_id=okr_agent.id, tool_id=tool.id, enabled=True))
             else:
                 logger.warning(
-                    f"[AgentSeeder] OKR tool '{tool_name}' not found — run tool seeder first"
+                    f"[Startup] OKR tool '{tool_name}' not found — run tool seeder first"
                 )
 
         # 先提交 Agent 本体，再创建 trigger/focus（ensure_focus_item 使用独立 session）
         await db.commit()
         logger.info(
-            "[AgentSeeder] OKR Agent core records committed for tenant {} ({})",
+            "[Startup] OKR Agent core records committed for tenant {} ({})",
             tenant_id,
             okr_agent.id,
         )
@@ -1030,5 +1030,5 @@ async def seed_okr_agent_for_tenant(tenant_id: uuid.UUID, creator_id: uuid.UUID)
         from app.services.okr_agent_hook import sync_okr_agent_platform_members
         await sync_okr_agent_platform_members(db, tenant_id)
         await db.commit()
-        logger.info(f"[AgentSeeder] Created OKR Agent for tenant {tenant_id} ({okr_agent.id})")
-        logger.info(f"[AgentSeeder] OKR triggers created for tenant {tenant_id}")
+        logger.info(f"[Startup] Created OKR Agent for tenant {tenant_id} ({okr_agent.id})")
+        logger.info(f"[Startup] OKR triggers created for tenant {tenant_id}")

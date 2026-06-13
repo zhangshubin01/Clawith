@@ -59,7 +59,7 @@ async def _chained_execute_tool(
             if result is not None:
                 return result
         except Exception:
-            logger.exception("[CHAIN] handler {} 抛出异常，继续下一个 handler", handler.__name__)
+            logger.exception("[ACP] handler {} 抛出异常，继续下一个 handler", handler.__name__)
 
     # 所有 bridge handler 未处理，回退基础入口
     base = _base_execute_tool_snapshot
@@ -927,7 +927,7 @@ def install_acp_tool_hooks() -> None:
     """
     global _installed, _base_execute_tool_snapshot
     if _installed:
-        logger.debug("[ACP-HOOKS] 工具钩子已安装，跳过")
+        logger.debug("[ACP] 工具钩子已安装，跳过")
         return
 
     # ── 在首次安装时捕获基础 tool 入口并设置链式分发器 ──
@@ -937,7 +937,7 @@ def install_acp_tool_hooks() -> None:
     if not _bridge_handlers:
         _base_execute_tool_snapshot = agent_tools.execute_tool
         agent_tools.execute_tool = _chained_execute_tool
-        logger.info("[ACP-HOOKS] 初始化链式分发器 _chained_execute_tool")
+        logger.info("[ACP] 初始化链式分发器 _chained_execute_tool")
 
     _base_get_tools = agent_tools.get_agent_tools_for_llm
 
@@ -1007,7 +1007,7 @@ def install_acp_tool_hooks() -> None:
             result = await _acp_file_exec(tool_name, args, handler)
             if result is not None:
                 logger.info(
-                    "[ACP-HOOKS] route=acp tool={} path={} elapsed={:.3f}s",
+                    "[ACP] route=acp tool={} path={} elapsed={:.3f}s",
                     tool_name,
                     args.get("path", ""),
                     time.perf_counter() - route_t0,
@@ -1021,7 +1021,7 @@ def install_acp_tool_hooks() -> None:
             result = await _try_acp_terminal_streaming(args, handler, cancel_event=_cancel)
             if result is not None:
                 logger.info(
-                    "[ACP-HOOKS] route=acp-streaming tool={} cmd={} elapsed={:.3f}s",
+                    "[ACP] route=acp-streaming tool={} cmd={} elapsed={:.3f}s",
                     tool_name,
                     str(args.get("command", ""))[:80],
                     time.perf_counter() - route_t0,
@@ -1029,14 +1029,14 @@ def install_acp_tool_hooks() -> None:
                 return result
             # result is None → 已进入流式模式，返回占位提示
             logger.info(
-                "[ACP-HOOKS] route=acp-streaming tool={} cmd={} streaming...",
+                "[ACP] route=acp-streaming tool={} cmd={} streaming...",
                 tool_name, str(args.get("command", ""))[:80],
             )
             return "(terminal 流式输出中，请等待终端面板更新...)"
 
         # 未命中任何 ACP 路由，返回 None 让链继续
         logger.debug(
-            "[ACP-HOOKS] unhandled={} elapsed={:.3f}s", tool_name, time.perf_counter() - route_t0,
+            "[ACP] unhandled={} elapsed={:.3f}s", tool_name, time.perf_counter() - route_t0,
         )
         return None
 
@@ -1052,13 +1052,13 @@ def install_acp_tool_hooks() -> None:
             tools = [t for t in tools
                      if t.get("function", {}).get("name", "") not in _ACP_IRRELEVANT_TOOL_NAMES]
             ide_names = [t["function"]["name"] for t in _ACP_IDE_TOOLS]
-            logger.info("[ACP-HOOKS] 注册工具: base_count={} acp_tools={}", len(tools), ide_names)
+            logger.info("[ACP] 注册工具: base_count={} acp_tools={}", len(tools), ide_names)
             return tools + _ACP_IDE_TOOLS
         return await _base_get_tools(agent_id)
 
     # 注册到链式 handler 列表
     _bridge_handlers.append(_acp_aware_execute_tool)
-    logger.info("[ACP-HOOKS] ACP handler 注册到链, 当前 handler 数: {}", len(_bridge_handlers))
+    logger.info("[ACP] ACP handler 注册到链, 当前 handler 数: {}", len(_bridge_handlers))
 
     # get_agent_tools_for_llm 仍然直接覆盖（注册路径不参与链式调用）
     agent_tools.get_agent_tools_for_llm = _acp_aware_get_tools
@@ -1067,9 +1067,9 @@ def install_acp_tool_hooks() -> None:
     try:
         import app.services.llm.caller as _caller_mod
         _caller_mod.get_agent_tools_for_llm = _acp_aware_get_tools  # type: ignore[attr-defined]
-        logger.info("[ACP-HOOKS] patched caller module local references")
+        logger.info("[ACP] patched caller module local references")
     except Exception as _patch_e:
-        logger.warning("[ACP-HOOKS] failed to patch caller module: {}", _patch_e)
+        logger.warning("[ACP] failed to patch caller module: {}", _patch_e)
 
     _installed = True
-    logger.info("[ACP-HOOKS] tool hooks installed (chain mode, handlers={})", len(_bridge_handlers))
+    logger.info("[ACP] tool hooks installed (chain mode, handlers={})", len(_bridge_handlers))

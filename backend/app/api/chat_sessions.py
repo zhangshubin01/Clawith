@@ -5,6 +5,7 @@ from datetime import datetime, timezone as tz
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from loguru import logger
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,6 +75,7 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
 ):
     """List chat sessions for an agent. scope=all for org/platform admins and agent_admin."""
+    logger.info("[API] 列出会话 agent_id={} scope={}", agent_id, scope)
     # Verify agent exists
     agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
     agent = agent_result.scalar_one_or_none()
@@ -327,6 +329,7 @@ async def create_session(
     db.add(session)
     await db.commit()
     await db.refresh(session)
+    logger.info("[API] 创建会话 session_id={} agent_id={} user_id={}", session.id, agent_id, current_user.id)
     return SessionOut(
         id=str(session.id),
         agent_id=str(session.agent_id),
@@ -485,6 +488,7 @@ async def get_session_messages(
                 entry["toolResult"] = data.get("result", "")
                 entry["toolThinking"] = data.get("reasoning_content", "")
             except Exception:
+                logger.warning("[API] tool_call JSON 解析失败 session_id={}", session_id)
                 pass
             if sender_name:
                 entry["sender_name"] = sender_name

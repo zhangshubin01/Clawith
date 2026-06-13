@@ -145,7 +145,7 @@ async def serve_wecom_verify_file(
         if filename in verify_files:
             content = verify_files[filename]
             logger.info(
-                f"[WeCom Verify] Serving {filename} for tenant {provider.tenant_id}"
+                f"[WeCom-Verify] Serving {filename} for tenant {provider.tenant_id}"
             )
             return Response(content=content, media_type="text/plain")
 

@@ -85,7 +85,7 @@ export default function UserManagement() {
             const data = await fetchJson<UserInfo[]>(`/users/${tenantId ? `?tenant_id=${tenantId}` : ''}`);
             setUsers(data);
         } catch (e) {
-            console.error('Failed to load users', e);
+            console.error('[API] Failed to load users', e);
         }
         setLoading(false);
     };

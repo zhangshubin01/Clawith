@@ -160,7 +160,7 @@ class ConnectionManager:
             try:
                 await ws.send_json(payload)
             except Exception:
-                pass
+                logger.warning("[WS] 发布订阅发送失败 agent_id={} session_id={}", agent_id, sid)
 
     async def send_message(self, agent_id: str, message: dict):
         await realtime_router.route_message(
@@ -1032,7 +1032,7 @@ class WebSocketChatHandler:
             await increment_conversation_usage(self.user.id)
             await increment_agent_llm_usage(self.agent_id)
         except Exception:
-            pass
+            logger.warning("[WS] 更新会话用量失败 agent_id={} user_id={}", self.agent_id, self.user.id)
 
         try:
             user_text = getattr(self, "current_user_text", "")

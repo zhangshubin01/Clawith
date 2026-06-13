@@ -19,6 +19,7 @@ class TokenUsage:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    reasoning_tokens: int = 0
     estimated_tokens: int = 0
 
     def add(self, other: "TokenUsage") -> None:
@@ -49,6 +50,18 @@ def _int_token(value) -> int:
 
 def _token_counter(source: dict, *keys: str) -> int:
     return sum(_int_token(source.get(key)) for key in keys)
+
+
+def _extract_reasoning_tokens(usage: dict) -> int:
+    """提取推理模型 (OpenAI o1/o3, DeepSeek-R1) 的 reasoning tokens。
+
+    OpenAI 返回 completion_tokens_details.reasoning_tokens，
+    DeepSeek 和其他兼容提供商也使用相同字段。
+    """
+    details = usage.get("completion_tokens_details", {})
+    if isinstance(details, dict):
+        return _int_token(details.get("reasoning_tokens", 0))
+    return 0
 
 
 def extract_token_usage(usage: dict | None) -> TokenUsage | None:
@@ -105,6 +118,7 @@ def extract_token_usage(usage: dict | None) -> TokenUsage | None:
             output_tokens=output_tokens,
             cache_read_tokens=cached,
             cache_creation_tokens=cache_creation,
+            reasoning_tokens=_extract_reasoning_tokens(usage),
         )
 
     # Anthropic:

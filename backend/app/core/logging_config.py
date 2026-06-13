@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from app.config import Settings
 
 # Context variable for trace ID
-trace_id_var: ContextVar[str] = ContextVar("trace_id", default=None)
+trace_id_var: ContextVar[str] = ContextVar("trace_id", default="")
 
 # Idempotency guard
 _config_lock = threading.Lock()

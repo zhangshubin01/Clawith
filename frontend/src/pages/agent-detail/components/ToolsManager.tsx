@@ -44,7 +44,7 @@ export default function ToolsManager({ agentId, canManage = false }: { agentId: 
                 const res2 = await fetch(`/api/tools/agents/${agentId}`, { headers: { Authorization: `Bearer ${token}` } });
                 if (res2.ok) setTools(await res2.json());
             }
-        } catch (e) { console.error(e); }
+        } catch (e) { console.error('[ToolsManager] Failed to load tools:', String(e)); }
         setLoading(false);
     };
 
@@ -59,7 +59,7 @@ export default function ToolsManager({ agentId, canManage = false }: { agentId: 
                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                 body: JSON.stringify([{ tool_id: toolId, enabled }]),
             });
-        } catch (e) { console.error(e); }
+        } catch (e) { console.error('[ToolsManager] Failed to toggle tool:', String(e)); }
     };
 
     const openConfig = (tool: any) => {
@@ -112,8 +112,7 @@ export default function ToolsManager({ agentId, canManage = false }: { agentId: 
                 Object.assign(merged, agentCfg);
                 setConfigData(merged);
             }
-        } catch (e) { console.error(e); }
-        setConfigSaving(false);
+        } catch (e) { console.error('[ToolsManager] Failed to load category config:', String(e)); }
     };
 
     const saveConfig = async () => {
@@ -203,7 +202,7 @@ export default function ToolsManager({ agentId, canManage = false }: { agentId: 
                 body: JSON.stringify(payload),
             });
         } catch (err: any) {
-            console.error('Bulk update failed', err);
+            console.error('[Tools] Bulk update failed', err);
             loadTools();
         }
     };

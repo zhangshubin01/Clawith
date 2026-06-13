@@ -84,14 +84,14 @@ def _verify_key(api_key: str, stored_hash: str) -> bool:
         rest = stored_hash[len(_PBKDF2_PREFIX) :]
         parts = rest.split("$", 1)
         if len(parts) != 2:
-            logger.warning("[Gateway] 无效的 PBKDF2 哈希格式")
+            logger.warning("[API] 无效的 PBKDF2 哈希格式")
             return False
         salt_hex, hash_hex = parts
         try:
             salt = bytes.fromhex(salt_hex)
             expected_hash = bytes.fromhex(hash_hex)
         except ValueError:
-            logger.warning("[Gateway] PBKDF2 哈希十六进制解码失败")
+            logger.warning("[API] PBKDF2 哈希十六进制解码失败")
             return False
         dk = hashlib.pbkdf2_hmac("sha256", api_key.encode("utf-8"), salt, _PBKDF2_ITERATIONS, dklen=_PBKDF2_DKLEN)
         return hmac.compare_digest(dk, expected_hash)
@@ -100,7 +100,7 @@ def _verify_key(api_key: str, stored_hash: str) -> bool:
         legacy_hash = hashlib.sha256(api_key.encode()).hexdigest()
         if hmac.compare_digest(stored_hash.encode(), legacy_hash.encode()):
             logger.warning(
-                "[Gateway] 旧式 SHA-256 API Key 验证成功，建议迁移到 PBKDF2。"
+                "[API] 旧式 SHA-256 API Key 验证成功，建议迁移到 PBKDF2。"
                 " 请重新生成 API Key 以使用 PBKDF2 存储。key_prefix={}",
                 api_key[:8],
             )
@@ -133,7 +133,7 @@ async def _get_agent_by_key(api_key: str, db: AsyncSession) -> Agent:
     if agent:
         # 旧格式验证成功 → 自动升级为 PBKDF2
         agent.api_key_hash = _hash_key_pbkdf2(api_key)
-        logger.info("[Gateway] 自动升级旧式 SHA-256 哈希为 PBKDF2，agent_id={}", agent.id)
+        logger.info("[API] 自动升级旧式 SHA-256 哈希为 PBKDF2，agent_id={}", agent.id)
         return agent
 
     # 步骤 2: PBKDF2 验证 — 仅扫描 api_key_hash 含版本头的 agent（跳过已升级和空哈希）
@@ -166,7 +166,7 @@ async def poll_messages(
     Also updates openclaw_last_seen for online status tracking.
     """
     _check_gateway_rate_limit(f"poll:{x_api_key[:16]}")
-    logger.debug(f"[Gateway] poll called, key_prefix={x_api_key[:8]}...")
+    logger.debug(f"[API] poll called, key_prefix={x_api_key[:8]}...")
     agent = await _get_agent_by_key(x_api_key, db)
 
     # Update last seen
@@ -187,7 +187,7 @@ async def poll_messages(
     )
     if cleanup_result.rowcount:
         logger.info(
-            f"[Gateway] Cleaned up {cleanup_result.rowcount} expired pending messages for agent {agent.id}"
+            f"[API] Cleaned up {cleanup_result.rowcount} expired pending messages for agent {agent.id}"
         )
 
     # 查询 pending 消息时跳过已过期的消息
@@ -328,7 +328,7 @@ async def report_result(
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Missing X-Api-Key")
     _check_gateway_rate_limit(f"report:{x_api_key[:16]}")
-    logger.debug(f"[Gateway] report called, key_prefix={x_api_key[:8]}..., msg_id={body.message_id}")
+    logger.debug(f"[API] report called, key_prefix={x_api_key[:8]}..., msg_id={body.message_id}")
     agent = await _get_agent_by_key(x_api_key, db)
 
     result = await db.execute(
@@ -402,7 +402,7 @@ async def report_result(
             )
             reply_db.add(gw_reply)
             await reply_db.commit()
-            logger.info(f"[Gateway] Reply routed back to sender agent {msg.sender_agent_id}")
+            logger.info(f"[API] Reply routed back to sender agent {msg.sender_agent_id}")
 
     return {"status": "ok"}
 
@@ -444,7 +444,7 @@ async def _send_to_agent_background(
     Accepts plain values (not ORM objects) to avoid stale session references
     since this runs after the request's DB session has closed.
     """
-    logger.info(f"[Gateway] _send_to_agent_background started: {source_agent_name} -> {target_agent_name}")
+    logger.info(f"[API] _send_to_agent_background started: {source_agent_name} -> {target_agent_name}")
     try:
         from app.services.llm import call_llm
         from app.models.llm import LLMModel
@@ -611,10 +611,10 @@ async def _send_to_agent_background(
             db.add(gw_reply)
             await db.commit()
 
-        logger.info(f"[Gateway] Agent {target_agent_name} replied to {source_agent_name}")
+        logger.info(f"[API] Agent {target_agent_name} replied to {source_agent_name}")
 
     except Exception as e:
-        logger.exception(f"[Gateway] send_to_agent_background failed: {e}")
+        logger.exception(f"[API] send_to_agent_background failed: {e}")
 
 
 @router.post("/send-message")
@@ -658,7 +658,7 @@ async def send_message(
             break
 
     logger.info(
-        f"[Gateway] send_message: target='{target_name}', found_agent={target_agent.name if target_agent else None}, agent_type={getattr(target_agent, 'agent_type', None) if target_agent else None}, channel_hint='{channel_hint}'"
+        f"[API] send_message: target='{target_name}', found_agent={target_agent.name if target_agent else None}, agent_type={getattr(target_agent, 'agent_type', None) if target_agent else None}, channel_hint='{channel_hint}'"
     )
 
     if target_agent and (not channel_hint or channel_hint == "agent"):

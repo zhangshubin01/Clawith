@@ -411,10 +411,10 @@ class DingTalkStreamManager:
     ):
         """Start a DingTalk Stream client for a specific agent."""
         if not app_key or not app_secret:
-            logger.warning(f"[DingTalk Stream] Missing credentials for {agent_id}, skipping")
+            logger.warning(f"[DingTalk-Stream] Missing credentials for {agent_id}, skipping")
             return
 
-        logger.info(f"[DingTalk Stream] Starting client for agent {agent_id} (AppKey: {app_key[:8]}...)")
+        logger.info(f"[DingTalk-Stream] Starting client for agent {agent_id} (AppKey: {app_key[:8]}...)")
 
         # Capture the main event loop so threads can dispatch coroutines back
         if self._main_loop is None:
@@ -436,7 +436,7 @@ class DingTalkStreamManager:
         )
         self._threads[agent_id] = thread
         thread.start()
-        logger.info(f"[DingTalk Stream] Client thread started for agent {agent_id}")
+        logger.info(f"[DingTalk-Stream] Client thread started for agent {agent_id}")
 
     def _run_client_thread(
         self,
@@ -450,7 +450,7 @@ class DingTalkStreamManager:
             import dingtalk_stream
         except ImportError:
             logger.warning(
-                "[DingTalk Stream] dingtalk-stream package not installed. "
+                "[DingTalk-Stream] dingtalk-stream package not installed. "
                 "Install with: pip install dingtalk-stream"
             )
             self._threads.pop(agent_id, None)
@@ -488,7 +488,7 @@ class DingTalkStreamManager:
                     session_webhook = incoming.session_webhook or ""
 
                     logger.info(
-                        f"[DingTalk Stream] Received {msgtype} message from {sender_staff_id}"
+                        f"[DingTalk-Stream] Received {msgtype} message from {sender_staff_id}"
                     )
 
                     if msgtype == "text":
@@ -499,7 +499,7 @@ class DingTalkStreamManager:
                             return dingtalk_stream.AckMessage.STATUS_OK, "empty message"
 
                         logger.info(
-                            f"[DingTalk Stream] Text from {sender_staff_id}: {user_text[:80]}"
+                            f"[DingTalk-Stream] Text from {sender_staff_id}: {user_text[:80]}"
                         )
 
                         from app.api.dingtalk import process_dingtalk_message
@@ -522,7 +522,7 @@ class DingTalkStreamManager:
                                     message_id=message_id,
                                 ))
                         else:
-                            logger.warning("[DingTalk Stream] Main loop not available")
+                            logger.warning("[DingTalk-Stream] Main loop not available")
 
                     else:
                         # Non-text message: process media in the main loop
@@ -546,11 +546,11 @@ class DingTalkStreamManager:
                                     message_id=message_id,
                                 ))
                         else:
-                            logger.warning("[DingTalk Stream] Main loop not available")
+                            logger.warning("[DingTalk-Stream] Main loop not available")
 
                     return dingtalk_stream.AckMessage.STATUS_OK, "ok"
                 except Exception as e:
-                    logger.error(f"[DingTalk Stream] Error in message handler: {e}")
+                    logger.error(f"[DingTalk-Stream] Error in message handler: {e}")
                     import traceback
                     traceback.print_exc()
                     return dingtalk_stream.AckMessage.STATUS_SYSTEM_EXCEPTION, str(e)
@@ -565,7 +565,7 @@ class DingTalkStreamManager:
                 )
 
                 logger.info(
-                    f"[DingTalk Stream] Connecting for agent {agent_id}... "
+                    f"[DingTalk-Stream] Connecting for agent {agent_id}... "
                     f"(attempt {retries + 1}/{MAX_RETRIES + 1})"
                 )
                 # start_forever() blocks until disconnected
@@ -579,25 +579,25 @@ class DingTalkStreamManager:
                 retries = 0
                 retries += 1
                 logger.warning(
-                    f"[DingTalk Stream] Connection lost for agent {agent_id}, will retry..."
+                    f"[DingTalk-Stream] Connection lost for agent {agent_id}, will retry..."
                 )
 
             except Exception as e:
                 retries += 1
                 logger.error(
-                    f"[DingTalk Stream] Connection error for {agent_id} "
+                    f"[DingTalk-Stream] Connection error for {agent_id} "
                     f"(attempt {retries}/{MAX_RETRIES + 1}): {e}"
                 )
 
             if retries > MAX_RETRIES:
                 logger.error(
-                    f"[DingTalk Stream] Agent {agent_id} exhausted all {MAX_RETRIES} retries, giving up"
+                    f"[DingTalk-Stream] Agent {agent_id} exhausted all {MAX_RETRIES} retries, giving up"
                 )
                 break
 
             delay = RETRY_DELAYS[min(retries - 1, len(RETRY_DELAYS) - 1)]
             logger.info(
-                f"[DingTalk Stream] Retrying in {delay}s for agent {agent_id}..."
+                f"[DingTalk-Stream] Retrying in {delay}s for agent {agent_id}..."
             )
             # Use stop_event.wait so we exit immediately if stopped
             if stop_event.wait(timeout=delay):
@@ -605,7 +605,7 @@ class DingTalkStreamManager:
 
         self._threads.pop(agent_id, None)
         self._stop_events.pop(agent_id, None)
-        logger.info(f"[DingTalk Stream] Client stopped for agent {agent_id}")
+        logger.info(f"[DingTalk-Stream] Client stopped for agent {agent_id}")
 
     @staticmethod
     async def _handle_media_and_dispatch(
@@ -631,7 +631,7 @@ class DingTalkStreamManager:
         )
 
         if not user_text:
-            logger.info("[DingTalk Stream] Empty content after media processing, skipping")
+            logger.info("[DingTalk-Stream] Empty content after media processing, skipping")
             return
 
         await process_dingtalk_message(
@@ -654,14 +654,14 @@ class DingTalkStreamManager:
             stop_event.set()
         thread = self._threads.pop(agent_id, None)
         if thread and thread.is_alive():
-            logger.info(f"[DingTalk Stream] Stopping client for agent {agent_id}, waiting for thread...")
+            logger.info(f"[DingTalk-Stream] Stopping client for agent {agent_id}, waiting for thread...")
             thread.join(timeout=5)
             if thread.is_alive():
-                logger.warning(f"[DingTalk Stream] Thread for {agent_id} did not exit within 5s")
+                logger.warning(f"[DingTalk-Stream] Thread for {agent_id} did not exit within 5s")
 
     async def start_all(self):
         """Start Stream clients for all configured DingTalk agents."""
-        logger.info("[DingTalk Stream] Initializing all active DingTalk channels...")
+        logger.info("[DingTalk-Stream] Initializing all active DingTalk channels...")
         async with async_session() as db:
             result = await db.execute(
                 select(ChannelConfig).where(
@@ -671,7 +671,7 @@ class DingTalkStreamManager:
             )
             configs = result.scalars().all()
 
-        logger.info(f"[DingTalk Stream] Found {len(configs)} configured DingTalk channel(s)")
+        logger.info(f"[DingTalk-Stream] Found {len(configs)} configured DingTalk channel(s)")
 
         for config in configs:
             if config.app_id and config.app_secret:
@@ -681,7 +681,7 @@ class DingTalkStreamManager:
                 )
             else:
                 logger.warning(
-                    f"[DingTalk Stream] Skipping agent {config.agent_id}: missing credentials"
+                    f"[DingTalk-Stream] Skipping agent {config.agent_id}: missing credentials"
                 )
 
     def status(self) -> dict:

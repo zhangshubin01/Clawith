@@ -5,6 +5,11 @@ import httpx
 from loguru import logger
 
 
+def _safe(data: dict) -> dict:
+    skip = {"access_token","refresh_token","id_token","accessToken","client_secret"}
+    return {k:v for k,v in data.items() if k not in skip}
+
+
 async def get_dingtalk_access_token(app_id: str, app_secret: str) -> dict:
     """Get DingTalk access_token using app_id and app_secret.
 
@@ -24,7 +29,7 @@ async def get_dingtalk_access_token(app_id: str, app_secret: str) -> dict:
             if data.get("errcode") == 0:
                 return {"access_token": data.get("access_token"), "expires_in": data.get("expires_in")}
             else:
-                logger.error(f"[DingTalk] Failed to get access_token: {data}")
+                logger.error(f"[DingTalk] Failed to get access_token: {_safe(data)}")
                 return {"errcode": data.get("errcode"), "errmsg": data.get("errmsg")}
         except Exception as e:
             logger.error(f"[DingTalk] Network error getting access_token: {e}")
@@ -78,7 +83,7 @@ async def send_dingtalk_v1_robot_oto_message(
                 logger.info(f"[DingTalk] Robot v1.0 OTO batch message sent to {user_ids}")
                 return {"errcode": 0, "processQueryKey": data.get("processQueryKey")}
             else:
-                logger.error(f"[DingTalk] Failed to send v1.0 OTO message: {data}")
+                logger.error(f"[DingTalk] Failed to send v1.0 OTO message: {_safe(data)}")
                 return {"errcode": resp.status_code, "errmsg": str(data)}
         except Exception as e:
             logger.error(f"[DingTalk] Network error sending v1.0 OTO message: {e}")
@@ -117,7 +122,7 @@ async def send_dingtalk_corp_conversation(
             if data.get("errcode") == 0:
                 return data
             else:
-                logger.error(f"[DingTalk] Failed to send corp conversation: {data}")
+                logger.error(f"[DingTalk] Failed to send corp conversation: {_safe(data)}")
                 return data
         except Exception as e:
             logger.error(f"[DingTalk] Network error sending corp conversation: {e}")

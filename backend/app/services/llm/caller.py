@@ -28,6 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import async_session
+from app.core.logging_config import get_trace_id
 
 
 def _perf_channel_suffix() -> str:
@@ -228,7 +229,7 @@ def is_retryable_error(result: str) -> bool:
     
     Uses unified classification from failover.py.
     """
-    if not (result.startswith("[LLM Error]") or result.startswith("[LLM call error]") or result.startswith("[Error]")):
+    if not (result.startswith("[LLM-Error]") or result.startswith("[LLM-Error]") or result.startswith("[Error]")):
         return False
         
     return classify_error(Exception(result)) != FailoverErrorType.NON_RETRYABLE
@@ -357,13 +358,13 @@ _CCR_MAX = 500
 def _get_ctx_guard_max_window() -> int:
     """读取 CTX_GUARD_MAX_WINDOW 环境变量，异常时安全回退到 200000。"""
     try:
-        return max(int(os.getenv("CTX_GUARD_MAX_WINDOW", "200000")), 1)
+        return max(int(os.getenv("CTX_GUARD_MAX_WINDOW", "100000")), 1)
     except (ValueError, TypeError):
-        return 200000
+        return 100000
 
 _CTX_GUARD_MAX_WINDOW = _get_ctx_guard_max_window()
-_CTX_GUARD_WARN_RATIO = 0.75    # context 达到 75% 上限时向 LLM 注入提示
-_CTX_GUARD_COMPRESS_RATIO = 0.90  # context 达到 90% 上限时触发 _ctx_compress
+_CTX_GUARD_WARN_RATIO = 0.60    # context 达到 60% 上限时向 LLM 注入提示 (100K×0.60=60K)
+_CTX_GUARD_COMPRESS_RATIO = 0.80  # context 达到 80% 上限时触发 _ctx_compress (100K×0.80=80K)
 
 _compress_cache: OrderedDict[str, str] = OrderedDict()
 _ccr_store: OrderedDict[str, str] = OrderedDict()
@@ -728,14 +729,14 @@ async def _get_agent_config(agent_id) -> tuple[int, str | None]:
             _ar = await _db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             _agent = _ar.scalar_one_or_none()
             if _agent:
-                max_rounds = _agent.max_tool_rounds or 50
+                max_rounds = min(_agent.max_tool_rounds or 50, 50)
                 if _agent.max_tokens_per_day and _agent.tokens_used_today >= _agent.max_tokens_per_day:
                     return max_rounds, f"⚠️ Daily token usage has reached the limit ({_agent.tokens_used_today:,}/{_agent.max_tokens_per_day:,}). Please try again tomorrow or ask admin to increase the limit."
                 if _agent.max_tokens_per_month and _agent.tokens_used_month >= _agent.max_tokens_per_month:
                     return max_rounds, f"⚠️ Monthly token usage has reached the limit ({_agent.tokens_used_month:,}/{_agent.max_tokens_per_month:,}). Please ask admin to increase the limit."
                 return max_rounds, None
     except Exception:
-        pass
+        logger.warning("[LLM] 获取 agent 配置失败, 回退默认值 agent_id={}", agent_id)
     return 50, None
 
 
@@ -757,7 +758,7 @@ async def _get_user_name(user_id) -> str | None:
             if _a:
                 return _a.name
     except Exception:
-        pass
+        logger.debug("[LLM] 获取用户名称失败 user_id={}", user_id)
     return None
 
 
@@ -854,7 +855,7 @@ async def _process_tool_call(
     fn = tc["function"]
     tool_name = fn["name"]
     raw_args = fn.get("arguments", "{}")
-    logger.info(f"[LLM] Calling tool: {tool_name}({json.dumps(raw_args, ensure_ascii=False)[:100]})")
+    logger.info(f"[LLM] Calling tool: {tool_name}({json.dumps(dict(list(raw_args.items())[:20]), ensure_ascii=False)[:200]})")
 
     try:
         args = json.loads(raw_args) if raw_args else {}
@@ -913,7 +914,20 @@ async def _process_tool_call(
     )
     tool_elapsed = time.monotonic() - tool_start
     logger.info("[LSP4J-PERF] tool: {} elapsed={:.3f}s{}", tool_name, tool_elapsed, _perf_channel_suffix())
-    logger.info("[LLM-TOOL-RESULT] tool={} len={} result=\n{}", tool_name, len(str(result)), str(result))
+    # P2-1: 工具返回内容日志 — 单行, 前500字 + 空/错误标记
+    res_str = str(result)
+    res_len = len(res_str)
+    is_empty = res_len == 0 or res_str.strip() == ""
+    is_error = not is_empty and any(kw in res_str[:200] for kw in (
+        "文件不存在", "路径不存在", "不存在", "error", "Error", "failed",
+        "不支持", "超时", "timeout", "权限", "拒绝", "-32603", "-32601",
+    ))
+    status = "EMPTY" if is_empty else ("ERROR" if is_error else "OK")
+    preview = res_str[:500].replace('\n', '\\n')
+    logger.info(
+        "[LLM-TOOL-RESULT] tool={} status={} len={} preview={}",
+        tool_name, status, res_len, preview
+    )
 
     # ── Vision injection for screenshot tools ──
     tool_content: str | list = str(result)
@@ -1024,9 +1038,10 @@ async def call_llm(
     # Build rich prompt with soul, memory, skills, relationships
     from app.services.agent_context import build_agent_context
     # Look up current user's display name so the agent knows who it's talking to
+    _log = logger.bind(trace_id=get_trace_id())
     static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_user_name)
     # 诊断日志: 确认智能体记忆/soul/skill 已注入 system prompt
-    logger.info(
+    _log.info(
         "[CTX-LOAD] agent={} static_prompt_chars={} dynamic_prompt_chars={}{}",
         agent_id, len(static_prompt), len(dynamic_prompt), _perf_channel_suffix(),
     )
@@ -1064,11 +1079,13 @@ async def call_llm(
             timeout=_get_model_timeout(model),
         )
     except Exception as e:
+        logger.error("[LLM] 创建 LLM 客户端失败 provider={} model={}: {}", model.provider, model.model, e)
         return f"[Error] Failed to create LLM client: {e}"
 
     max_tokens = get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None))
     _accumulated_usage = TokenUsage()
     _consecutive_guard_failures = 0
+    _consecutive_timeouts = 0
     _ctx_pressure_warned = False
     _unsaved_usage = TokenUsage()
     _ctx_window = 0  # 在 guard 块中首次赋值；round 1 日志需要默认值
@@ -1097,7 +1114,7 @@ async def call_llm(
     for round_i in range(_max_tool_rounds):
         # 取消检查：若 cancel_event 已设置，立即中断工具循环
         if cancel_event and cancel_event.is_set():
-            logger.info("[LLM] cancel_event 已设置，中断工具循环（round={}）", round_i)
+            _log.info("[LLM] cancel_event 已设置，中断工具循环（round={}）", round_i)
             break
 
         # P0: 最后一轮仅允许 finish 工具，防止 Agent 无限制工具循环
@@ -1108,13 +1125,13 @@ async def call_llm(
             if _finish_tool is None:
                 _finish_tool = next((t for t in tools_for_llm if hasattr(t, 'function') and getattr(t.function, 'name', None) == "finish"), None)
             _round_tools = [_finish_tool] if _finish_tool else tools_for_llm
-            logger.warning(
+            _log.warning(
                 f"[LAST-ROUND] round={round_i + 1}/{_max_tool_rounds} "
                 f"tools_before={len(tools_for_llm)} tools_after={len(_round_tools)} session={session_id}"
             )
         # [LSP4J-PERF] 轮次开始计时
         round_start = time.monotonic()
-        logger.info(
+        _log.info(
             "[LSP4J-PERF] Round {}/{} start, ctx_est={} ctx_limit={}{}",
             round_i + 1,
             _max_tool_rounds,
@@ -1148,7 +1165,7 @@ async def call_llm(
                 _unsaved_usage = TokenUsage()
                 _, _token_limit_msg = await _get_agent_config(agent_id)
                 if _token_limit_msg:
-                    logger.warning(f"[LLM] Token limit exceeded mid-loop: {_token_limit_msg}")
+                    _log.warning(f"[LLM] Token limit exceeded mid-loop: {_token_limit_msg}")
                     await client.close()
                     return _token_limit_msg
 
@@ -1160,7 +1177,7 @@ async def call_llm(
             _ctx_est = _est_tokens(api_messages)
             _ctx_ratio = _ctx_est / _ctx_window
             if _ctx_ratio >= _CTX_GUARD_WARN_RATIO:
-                logger.warning(
+                _log.warning(
                     f"[CTX-GUARD] context {_ctx_est}/{_ctx_window} ({_ctx_ratio:.1%}) "
                     f"raw_window={_ctx_window_raw} model={getattr(model, 'model', '?')} session={session_id}"
                 )
@@ -1176,7 +1193,7 @@ async def call_llm(
                 if _ctx_ratio >= _CTX_GUARD_COMPRESS_RATIO:
                     _consecutive_guard_failures += 1
                     if _consecutive_guard_failures >= 3:
-                        logger.error(
+                        _log.error(
                             f"[CTX-GUARD] BREAKER: {_consecutive_guard_failures} consecutive failures, forcing finish"
                         )
                         api_messages.append(LLMMessage(
@@ -1188,7 +1205,7 @@ async def call_llm(
                         _before_compress = _ctx_est
                         api_messages = _ctx_compress(api_messages, ctx_window=_ctx_window)
                         _after_compress = _est_tokens(api_messages)
-                        logger.warning(
+                        _log.warning(
                             f"[CTX-COMPRESS] compressed: est_tokens={_after_compress} "
                             f"failures={_consecutive_guard_failures}/3"
                         )
@@ -1199,6 +1216,25 @@ async def call_llm(
                     _consecutive_guard_failures = 0
             else:
                 _consecutive_guard_failures = 0  # v12.2: 上下文回落至安全区，重置失败计数
+            # ── 发送给 LLM 的消息摘要 ──
+            msg_count = len(api_messages)
+            total_chars = sum(len(m.content or '') if isinstance(m.content, str) else 0 for m in api_messages)
+            tool_msgs = sum(1 for m in api_messages if getattr(m, 'role', '') == 'tool')
+            last_user = ""
+            for m in reversed(api_messages):
+                if getattr(m, 'role', '') == 'user' and isinstance(m.content, str) and m.content:
+                    last_user = m.content[:200].replace('\n', '\\n')
+                    break
+            _log.info(
+                f"[LLM-INPUT] round={round_i+1}/{_max_tool_rounds} "
+                f"msgs={msg_count} tool_msgs={tool_msgs} "
+                f"chars={total_chars} est_tokens={_est_tokens(api_messages)} "
+                f"tools={len(_round_tools) if _round_tools else 0} "
+                f"last_user={last_user}"
+            )
+            # 自适应流式超时: 根据上下文 tokens 动态计算 (prefill 时间与 tokens 呈线性关系)
+            _stream_est = _est_tokens(api_messages)
+            _stream_timeout = max(30.0, min(30.0 + (_stream_est / 1000) * 2.0, 110.0))
             response = await asyncio.wait_for(
                 client.stream(
                     messages=api_messages,
@@ -1209,32 +1245,49 @@ async def call_llm(
                     on_tool_delta=on_tool_delta,
                     on_thinking=on_thinking,
                 ),
-                timeout=float(os.getenv("ACP_LLM_STREAM_TIMEOUT", "30")),  # 默认 30s (hermes-agent 对齐), env 可覆盖
+                timeout=float(os.getenv("ACP_LLM_STREAM_TIMEOUT", str(_stream_timeout))),
             )
             llm_time = time.monotonic() - round_start
+            _consecutive_timeouts = 0  # 成功完成, 重置超时计数器
         except asyncio.TimeoutError:
+            _consecutive_timeouts += 1
             _elapsed = time.monotonic() - round_start
-            logger.warning(
+            _log.warning(
                 f"[LLM-TIMEOUT] stream timed out after {_elapsed:.1f}s "
-                f"round={round_i + 1} session={session_id}"
+                f"round={round_i + 1} est_tokens={_stream_est} "
+                f"timeouts={_consecutive_timeouts}/3 session={session_id}"
             )
+            # 关闭脏连接, 防止 death loop 复用半开 TCP 连接
+            try:
+                await client.close()
+            except Exception:
+                logger.warning("[LLM] 超时后关闭客户端失败 round={} session={}", round_i + 1, session_id)
+            if _consecutive_timeouts >= 3:
+                _log.error(
+                    f"[LLM-FATAL] {_consecutive_timeouts} 次连续超时, 强制终止 "
+                    f"session={session_id}"
+                )
+                return "LLM 连续超时，会话终止。请重新开始对话。"
             api_messages.append(LLMMessage(
                 role="user",
-                content="LLM 推理超时（超过 60 秒）。请立即调用 finish 结束当前轮次。",
+                content=(
+                    f"LLM 推理超时（超过 {_stream_timeout:.0f} 秒）。"
+                    "请立即调用 finish 结束当前轮次。"
+                ),
             ))
             continue
         except LLMError as e:
-            logger.error(f"[LLM] LLMError: provider={getattr(model, 'provider', '?')} model={getattr(model, 'model', '?')} {e}")
+            _log.error(f"[LLM] LLMError: provider={getattr(model, 'provider', '?')} model={getattr(model, 'model', '?')} {e}")
             if agent_id and _unsaved_usage.total_tokens > 0:
                 await record_token_usage(agent_id, _unsaved_usage)
             await client.close()
-            return f"[LLM Error] {e}"
+            return f"[LLM-Error] {e}"
         except Exception as e:
-            logger.exception(f"[LLM] Unexpected error: {type(e).__name__}: {str(e)[:300]}")
+            _log.exception(f"[LLM] Unexpected error: {type(e).__name__}: {str(e)[:300]}")
             if agent_id and _unsaved_usage.total_tokens > 0:
                 await record_token_usage(agent_id, _unsaved_usage)
             await client.close()
-            return f"[LLM call error] {type(e).__name__}: {str(e)[:200]}"
+            return f"[LLM-Error] {type(e).__name__}: {str(e)[:200]}"
 
         # Track tokens for this round
         _usage_this_round = _usage_from_response_or_estimate(response, api_messages)
@@ -1242,7 +1295,7 @@ async def call_llm(
         _unsaved_usage.add(_usage_this_round)
 
         # Log round completion with estimated (not raw) token usage
-        logger.info(
+        _log.info(
             "[LSP4J-PERF] Round {}: LLM stream done "
             "llm_time={:.2f}s tool_calls={} "
             "input_tokens={} output_tokens={}{}",
@@ -1267,7 +1320,7 @@ async def call_llm(
             continue
 
         # Execute tool calls
-        logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
+        _log.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
         # 当 LLM 返回 0 个 tool_calls 时 (纯思考轮次), 向客户端推送状态提示,
         # 消除"黑屏等待"体验。回调失败不应中断 LLM 流程。
         if len(response.tool_calls or []) == 0 and on_thinking:
@@ -1341,7 +1394,7 @@ async def call_llm(
             pass  # LSP4J 插件未安装, 正常跳过
         except Exception as exc:
             # DB 异常/路由表损坏不应导致守卫误判 (false negative → 并行发给不兼容插件)
-            logger.warning("[PERF] LSP4J 守卫检测异常, 保守假定活跃回退串行: {}", exc)
+            _log.warning("[PERF] LSP4J 守卫检测异常, 保守假定活跃回退串行: {}", exc)
             _lsp4j_active = True
 
         if _lsp4j_active:
@@ -1361,7 +1414,7 @@ async def call_llm(
                         tool_call_id=tc.get("id", ""),
                     ))
                 tool_time = time.monotonic() - round_start - llm_time
-                logger.info(
+                _log.info(
                     "[LSP4J-PERF] Round {}: tools done "
                     "tool_time={:.2f}s total={:.2f}s{}",
                     round_i + 1, tool_time, time.monotonic() - round_start,
@@ -1389,7 +1442,7 @@ async def call_llm(
                             _write_paths.add(str(_p))
                     except json.JSONDecodeError:
                         # 写入工具 arguments 解析失败, 保守假定有冲突 (回退串行防 data race)
-                        logger.warning("[PERF] 工具 {} arguments JSON 解析失败, 保守回退串行: {}",
+                        _log.warning("[PERF] 工具 {} arguments JSON 解析失败, 保守回退串行: {}",
                                        tname, fn.get("arguments", "")[:100])
                         _has_conflict = True
                         break
@@ -1407,14 +1460,14 @@ async def call_llm(
                                 break
                         except json.JSONDecodeError:
                             # 只读工具参数解析失败, 保守回退 (无法确定是否冲突)
-                            logger.warning("[PERF] 只读工具 {} arguments JSON 解析失败, 保守回退串行",
+                            _log.warning("[PERF] 只读工具 {} arguments JSON 解析失败, 保守回退串行",
                                            tname)
                             _has_conflict = True
                             break
 
             if _has_conflict:
                 # 读写冲突: 全部回退串行
-                logger.warning(
+                _log.warning(
                     "[PERF] Round {}: 检测到读写工具操作相同文件 paths={}, 回退串行执行",
                     round_i + 1, list(_write_paths)[:5],
                 )
@@ -1466,7 +1519,7 @@ async def call_llm(
                     for (tc, tname), result in zip(read_items, results):
                         if isinstance(result, BaseException):
                             # 不将完整异常信息暴露给 LLM (可能含文件路径/堆栈), 仅记录日志
-                            logger.error("[TOOL-ERROR] {} 执行异常: {}", tname, result)
+                            _log.error("[TOOL-ERROR] {} 执行异常: {}", tname, result)
                             api_messages.append(LLMMessage(
                                 role="tool",
                                 content=f"[Error] {tname} 执行失败",
@@ -1477,7 +1530,7 @@ async def call_llm(
                                 role="tool", content=result,
                                 tool_call_id=tc.get("id", ""),
                             ))
-                    logger.info(
+                    _log.info(
                         "[LSP4J-PERF] Round {}: parallel read tools done "
                         "count={} elapsed={:.3f}s{}",
                         round_i + 1, len(read_items),
@@ -1496,7 +1549,7 @@ async def call_llm(
                         full_reasoning_content=full_reasoning_content,
                         allowed_tool_names=allowed_tool_names,
                     )
-                    logger.info(
+                    _log.info(
                         "[LSP4J-PERF] Round {}: write tool {} done elapsed={:.3f}s{}",
                         round_i + 1, tname, time.monotonic() - _t_write_start,
                         _perf_channel_suffix(),
@@ -1509,7 +1562,7 @@ async def call_llm(
 
             # 所有工具执行完成
             tool_time = time.monotonic() - round_start - llm_time
-            logger.info(
+            _log.info(
                 "[LSP4J-PERF] Round {}: all tools done "
                 "tool_time={:.2f}s total={:.2f}s{}",
                 round_i + 1, tool_time, time.monotonic() - round_start,
@@ -1525,7 +1578,7 @@ async def call_llm(
     _final_est = _est_tokens(api_messages)
     _final_ratio = _final_est / _ctx_window if _ctx_window else 0
     if _final_est >= 50000:  # 超过 50K 上下文时有统计意义
-        logger.info(
+        _log.info(
             f"[CTX-GUARD] post-stream session={session_id} "
             f"ctx_est={_final_est} ctx_limit={_ctx_window} "
             f"ratio={_final_ratio:.1%} rounds={round_i + 1}"
@@ -1566,7 +1619,7 @@ async def call_llm_with_failover(
 
     # Config-level fallback: if no primary, use fallback directly
     if primary_model is None and fallback_model is not None:
-        logger.info("[Failover] Primary model not configured, using fallback directly")
+        logger.info("[LLM] Primary model not configured, using fallback directly")
         primary_model = fallback_model
         fallback_model = None
 
@@ -1611,8 +1664,8 @@ async def call_llm_with_failover(
     # Check if we need to failover
     if not is_retryable_error(primary_result):
         # 区分两种情况：正常响应（finish 返回的用户可见文本）vs 不可重试的 LLM 错误
-        if primary_result.startswith(("[LLM Error]", "[LLM call error]", "[Error]")):
-            logger.warning(f"[Failover] Canceled: Primary model returned a non-retryable error: {primary_result[:150]}")
+        if primary_result.startswith(("[LLM-Error]", "[LLM-Error]", "[Error]")):
+            logger.warning(f"[LLM] Canceled: Primary model returned a non-retryable error: {primary_result[:150]}")
             return _format_friendly_error(primary_result)
         # 正常响应：无错误，无需 failover
         return primary_result
@@ -1620,20 +1673,20 @@ async def call_llm_with_failover(
     # Check guard conditions
     if not guard.can_failover():
         if guard.tool_executed:
-            logger.warning("[Failover] Blocked: side-effecting tool already executed")
+            logger.warning("[LLM] Blocked: side-effecting tool already executed")
         elif guard.streaming_started:
-            logger.warning("[Failover] Blocked: streaming already started")
+            logger.warning("[LLM] Blocked: streaming already started")
         elif guard.failover_done:
-            logger.warning("[Failover] Blocked: failover already done once")
+            logger.warning("[LLM] Blocked: failover already done once")
         return primary_result
 
     # No fallback available
     if fallback_model is None:
-        logger.warning("[Failover] No fallback model available")
+        logger.warning("[LLM] No fallback model available")
         return primary_result
 
     # Runtime failover: retry with fallback model
-    logger.info(f"[Failover] Retrying with fallback model: {fallback_model.provider}/{fallback_model.model}")
+    logger.info(f"[LLM] Retrying with fallback model: {fallback_model.provider}/{fallback_model.model}")
 
     if on_failover:
         try:
@@ -1813,6 +1866,7 @@ async def call_agent_llm_with_tools(
 
     async def _try_model(model: LLMModel) -> tuple[str, bool, bool]:
         """Try to complete with a model. Returns (response, success, tool_executed)."""
+        _log = logger.bind(trace_id=get_trace_id())
         _accumulated_usage = TokenUsage()
         _unsaved_usage = TokenUsage()
         tool_executed = False
@@ -1840,7 +1894,7 @@ async def call_agent_llm_with_tools(
                         _unsaved_usage = TokenUsage()
                         _, _token_limit_msg = await _get_agent_config(agent_id)
                         if _token_limit_msg:
-                            logger.warning(f"[call_agent_llm_with_tools] Token limit exceeded mid-loop: {_token_limit_msg}")
+                            logger.warning(f"[LLM] Token limit exceeded mid-loop: {_token_limit_msg}")
                             await client.close()
                             return _token_limit_msg, False, tool_executed
 
@@ -1852,7 +1906,7 @@ async def call_agent_llm_with_tools(
                         max_tokens=max_tokens,
                     )
                 except Exception as e:
-                    logger.error(f"[call_agent_llm_with_tools] Agent {agent_id}: LLM call error: {e}")
+                    logger.error(f"[LLM] Agent {agent_id}: LLM call error: {e}")
                     await client.close()
                     if agent_id and _unsaved_usage.total_tokens > 0:
                         await record_token_usage(agent_id, _unsaved_usage)
@@ -1862,6 +1916,8 @@ async def call_agent_llm_with_tools(
                 _usage_this_round = _usage_from_response_or_estimate(response, api_messages)
                 _accumulated_usage.add(_usage_this_round)
                 _unsaved_usage.add(_usage_this_round)
+                _log.info("[LLM] Round %d: stream done input_tokens=%d output_tokens=%d",
+                          round_i + 1, _usage_this_round.input_tokens, _usage_this_round.output_tokens)
 
                 if not response.tool_calls:
                     if response.content:
@@ -1913,7 +1969,7 @@ async def call_agent_llm_with_tools(
 
                     tool_executed = True
                     if tool_name not in allowed_tool_names:
-                        logger.warning(f"[call_agent_llm_with_tools] Blocked disabled tool call: {tool_name} agent_id={agent_id}")
+                        logger.warning(f"[LLM] Blocked disabled tool call: {tool_name} agent_id={agent_id}")
                         result = _tool_not_enabled_message(tool_name)
                     else:
                         result = await execute_tool(
@@ -1949,11 +2005,11 @@ async def call_agent_llm_with_tools(
         return reply
 
     if primary_tool_executed:
-        logger.warning("[call_agent_llm_with_tools] Blocked fallback: side-effecting tool already executed")
+        logger.warning("[LLM] Blocked fallback: side-effecting tool already executed")
         return reply
 
     # Try fallback model
-    logger.info(f"[call_agent_llm_with_tools] Retrying with fallback: {fallback_model.model}")
+    logger.info(f"[LLM] Retrying with fallback: {fallback_model.model}")
     reply2, success2, _fallback_tool_executed = await _try_model(fallback_model)
     if success2:
         return reply2

@@ -1873,7 +1873,7 @@ async def trigger_member_outreach(user=Depends(get_current_user)):
         member_block = (
             f"--- Member {index}: {agent_member.name} [Agent] ---\n"
             f"  STEP 1 → send_message_to_agent(agent_name=\"{agent_member.name}\",\n"
-            f"             message=\"[OKR Agent] 请根据公司 OKR，描述您在本周期（{ps.isoformat()} ~ {pe.isoformat()}）"
+            f"             message=\"[OKR-Agent] 请根据公司 OKR，描述您在本周期（{ps.isoformat()} ~ {pe.isoformat()}）"
             f"的主要目标（Objective）和关键结果（Key Results）。\")\n"
             f"  STEP 2 → Read the reply carefully from the tool result.\n"
             f"  STEP 3 → Call this EXACTLY (use the UUID below verbatim, do NOT invent one):\n"

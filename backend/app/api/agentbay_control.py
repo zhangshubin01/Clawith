@@ -70,7 +70,7 @@ def is_session_locked(agent_id: str, session_id: str) -> bool:
         return False
     _user_id, locked_at, _env_type = _take_control_locks[key]
     if time.time() - locked_at > _LOCK_TIMEOUT_SECONDS:
-        logger.info(f"[TakeControl] Auto-expired stale lock for session={session_id[:8]}")
+        logger.info(f"[AgentBay] Auto-expired stale lock for session={session_id[:8]}")
         del _take_control_locks[key]
         return False
     return True
@@ -177,7 +177,7 @@ async def _get_client(agent_id: uuid.UUID, session_id: str, env_type: str = "bro
             if now - last_used < _AGENTBAY_SESSION_TIMEOUT:
                 _agentbay_sessions[cache_key] = (client, now)
                 logger.info(
-                    f"[TakeControl] Found existing {image_type} session (exact match) for "
+                    f"[AgentBay] Found existing {image_type} session (exact match) for "
                     f"agent={agent_id}, session={session_id[:8]} "
                     f"(requested env_type={env_type})"
                 )
@@ -186,7 +186,7 @@ async def _get_client(agent_id: uuid.UUID, session_id: str, env_type: str = "bro
                         await client._ensure_browser_initialized()
                         _browser_initialized.add(cache_key)
                     except Exception as e:
-                        logger.warning(f"[TakeControl] Browser init on cached session failed: {e}")
+                        logger.warning(f"[AgentBay] Browser init on cached session failed: {e}")
                 return client
 
     # ── Phase 2: Fallback — search all sessions for this agent by env_type preference ──
@@ -219,7 +219,7 @@ async def _get_client(agent_id: uuid.UUID, session_id: str, env_type: str = "bro
         # Refresh the timestamp so this session stays warm
         _agentbay_sessions[best_cache_key] = (best_client, now)
         logger.info(
-            f"[TakeControl] Found existing {best_image_type} session (agent-id fallback) for "
+            f"[AgentBay] Found existing {best_image_type} session (agent-id fallback) for "
             f"agent={agent_id} (requested session={session_id[:8]}, "
             f"actual session={best_cache_key[1][:8]}, env_type={env_type})"
         )
@@ -228,7 +228,7 @@ async def _get_client(agent_id: uuid.UUID, session_id: str, env_type: str = "bro
                 await best_client._ensure_browser_initialized()
                 _browser_initialized.add(best_cache_key)
             except Exception as e:
-                logger.warning(f"[TakeControl] Browser init on fallback session failed: {e}")
+                logger.warning(f"[AgentBay] Browser init on fallback session failed: {e}")
         return best_client
 
     # ── Phase 3: No cached session found — create a new session ──
@@ -238,7 +238,7 @@ async def _get_client(agent_id: uuid.UUID, session_id: str, env_type: str = "bro
     from app.services.agentbay_client import get_agentbay_client_for_agent
 
     logger.warning(
-        f"[TakeControl] No cached AgentBay session found for agent={agent_id} "
+        f"[AgentBay] No cached AgentBay session found for agent={agent_id} "
         f"(env_type={env_type}). Creating new session — will show blank screen."
     )
     try:
@@ -249,9 +249,9 @@ async def _get_client(agent_id: uuid.UUID, session_id: str, env_type: str = "bro
             try:
                 await client._ensure_browser_initialized()
                 _browser_initialized.add((agent_id, session_id, "browser"))
-                logger.info(f"[TakeControl] Browser initialized for new session, agent={agent_id}")
+                logger.info(f"[AgentBay] Browser initialized for new session, agent={agent_id}")
             except Exception as e:
-                logger.warning(f"[TakeControl] Browser init on new session failed: {e}")
+                logger.warning(f"[AgentBay] Browser init on new session failed: {e}")
         return client
     except Exception as e:
         raise HTTPException(
@@ -286,7 +286,7 @@ async def _cdp_exec(client, script: str, timeout_ms: int = 15000) -> dict:
         timeout_ms=5000,
     )
     if not write_result.get("success"):
-        logger.error(f"[TakeControl] Failed to write CDP script: {write_result}")
+        logger.error(f"[AgentBay] Failed to write CDP script: {write_result}")
         return {"success": False, "output": "Failed to write script", "stderr": str(write_result)[:200]}
 
     result = await client.command_exec(
@@ -299,7 +299,7 @@ async def _cdp_exec(client, script: str, timeout_ms: int = 15000) -> dict:
     tc_success = "TC_OK" in stdout
 
     logger.info(
-        f"[TakeControl] CDP exec: cmd_success={cmd_success}, tc_ok={tc_success}, "
+        f"[AgentBay] CDP exec: cmd_success={cmd_success}, tc_ok={tc_success}, "
         f"stdout={stdout[:200]}, stderr={stderr[:200]}, exit_code={result.get('exit_code', 'N/A')}"
     )
     return {"success": tc_success, "output": stdout[:500], "stderr": stderr[:200]}
@@ -324,12 +324,12 @@ async def _eval_cdp_script(client, script_body: str) -> dict:
         stderr = getattr(result, 'stderr', '') or ''
         
         if not success:
-            logger.error(f"[TakeControl] CDP execution failed. Output: {output}, Stderr: {stderr}")
+            logger.error(f"[AgentBay] CDP execution failed. Output: {output}, Stderr: {stderr}")
             return {"success": False, "output": f"Node error: {stderr[:200]}"}
             
         return {"success": True, "output": output}
     except Exception as e:
-        logger.error(f"[TakeControl] CDP exception: {e}")
+        logger.error(f"[AgentBay] CDP exception: {e}")
         return {"success": False, "output": str(e)}
 
 
@@ -423,11 +423,11 @@ const { chromium } = require('/usr/local/lib/node_modules/playwright');
 """
         res = await _eval_cdp_script(cleanup_client, cleanup_script)
         logger.info(
-            f"[TakeControl] Cleanup: {res.get('output', 'no output')[:100]} "
+            f"[AgentBay] Cleanup: {res.get('output', 'no output')[:100]} "
             f"for session={session_id[:8]}"
         )
     except Exception as e:
-        logger.warning(f"[TakeControl] Cleanup failed (non-fatal): {e}")
+        logger.warning(f"[AgentBay] Cleanup failed (non-fatal): {e}")
 
 
 async def _perform_click(client, x: int, y: int, button: str = "left"):
@@ -439,7 +439,7 @@ async def _perform_click(client, x: int, y: int, button: str = "left"):
     graceful disconnect so Chrome's DevTools session does not leak.
     """
     image_type = getattr(client, '_image_type', 'unknown')
-    logger.info(f"[TakeControl] Click at ({x}, {y}), button={button}, image_type={image_type}")
+    logger.info(f"[AgentBay] Click at ({x}, {y}), button={button}, image_type={image_type}")
 
     if _is_browser_session(client):
         script = f"""
@@ -496,10 +496,10 @@ const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
             client._session.computer.click_mouse, x, y, button
         )
         success = getattr(result, 'success', False)
-        logger.info(f"[TakeControl] Computer click at ({x}, {y}): success={success}")
+        logger.info(f"[AgentBay] Computer click at ({x}, {y}): success={success}")
         return {"success": success, "method": "computer_click", "output": f"Clicked at ({x}, {y})"}
     except Exception as e:
-        logger.warning(f"[TakeControl] Computer click failed: {e}")
+        logger.warning(f"[AgentBay] Computer click failed: {e}")
         return {"success": False, "output": f"Click failed: {str(e)[:200]}"}
 
 
@@ -511,7 +511,7 @@ async def _perform_type(client, text: str):
     Browser sessions use CDP keyboard API; desktop sessions use computer.input_text.
     """
     image_type = getattr(client, '_image_type', 'unknown')
-    logger.info(f"[TakeControl] Type text: '{text[:30]}', image_type={image_type}")
+    logger.info(f"[AgentBay] Type text: '{text[:30]}', image_type={image_type}")
 
     if _is_browser_session(client):
         import urllib.parse
@@ -544,10 +544,10 @@ const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
             client._session.computer.input_text, text
         )
         success = getattr(result, 'success', False)
-        logger.info(f"[TakeControl] Computer input_text: success={success}")
+        logger.info(f"[AgentBay] Computer input_text: success={success}")
         return {"success": success, "method": "computer_input", "output": "Text typed"}
     except Exception as e:
-        logger.warning(f"[TakeControl] Computer input_text failed: {e}")
+        logger.warning(f"[AgentBay] Computer input_text failed: {e}")
         return {"success": False, "output": f"Type failed: {str(e)[:200]}"}
 
 
@@ -559,7 +559,7 @@ async def _perform_press_keys(client, keys: list[str]):
     Browser sessions use CDP keyboard API; desktop sessions use computer.press_keys.
     """
     key_desc = "+".join(keys)
-    logger.info(f"[TakeControl] Press keys: {key_desc}")
+    logger.info(f"[AgentBay] Press keys: {key_desc}")
 
     if _is_browser_session(client):
         # Convert key names to the Playwright format (e.g. 'ctrl' → 'Control')
@@ -596,10 +596,10 @@ const {{ chromium }} = require('/usr/local/lib/node_modules/playwright');
             client._session.computer.press_keys, keys
         )
         success = getattr(result, 'success', False)
-        logger.info(f"[TakeControl] Computer press_keys: success={success}")
+        logger.info(f"[AgentBay] Computer press_keys: success={success}")
         return {"success": success, "method": "computer_keys", "output": f"Pressed {key_desc}"}
     except Exception as e:
-        logger.warning(f"[TakeControl] Computer press_keys failed: {e}")
+        logger.warning(f"[AgentBay] Computer press_keys failed: {e}")
         return {"success": False, "output": f"Key press failed: {str(e)[:200]}"}
 
 
@@ -616,7 +616,7 @@ async def _perform_drag(
     All CDP scripts use browser.close() for graceful disconnect.
     """
     logger.info(
-        f"[TakeControl] Drag: ({from_x},{from_y}) -> ({to_x},{to_y}), "
+        f"[AgentBay] Drag: ({from_x},{from_y}) -> ({to_x},{to_y}), "
         f"duration={duration_ms}ms"
     )
 
@@ -727,7 +727,7 @@ let browser;
             return {"status": "ok", "url": url}
         return {"status": "ok", "url": ""}
     except Exception as e:
-        logger.warning(f"[TakeControl] current-url failed: {e}")
+        logger.warning(f"[AgentBay] current-url failed: {e}")
         return {"status": "ok", "url": ""}  # Non-fatal — return empty URL
 
 
@@ -761,7 +761,7 @@ async def control_click(
                 detail = result.get("stderr") or result.get("output") or "Click operation failed"
                 return {"status": "error", "detail": detail[:500]}
         except Exception as e:
-            logger.error(f"[TakeControl] Click exception: {e}")
+            logger.error(f"[AgentBay] Click exception: {e}")
             return {"status": "error", "detail": str(e)[:500]}
 
 
@@ -788,7 +788,7 @@ async def control_type(
                 detail = result.get("stderr") or result.get("output") or "Type operation failed"
                 return {"status": "error", "detail": detail[:500]}
         except Exception as e:
-            logger.error(f"[TakeControl] Type exception: {e}")
+            logger.error(f"[AgentBay] Type exception: {e}")
             return {"status": "error", "detail": str(e)[:500]}
 
 
@@ -815,7 +815,7 @@ async def control_press_keys(
                 detail = result.get("stderr") or result.get("output") or "Key press failed"
                 return {"status": "error", "detail": detail[:500]}
         except Exception as e:
-            logger.error(f"[TakeControl] Press keys exception: {e}")
+            logger.error(f"[AgentBay] Press keys exception: {e}")
             return {"status": "error", "detail": str(e)[:500]}
 
 
@@ -851,7 +851,7 @@ async def control_drag(
             else:
                 return {"status": "error", "detail": result.get("output", "Drag failed")[:500]}
         except Exception as e:
-            logger.error(f"[TakeControl] Drag exception: {e}")
+            logger.error(f"[AgentBay] Drag exception: {e}")
             return {"status": "error", "detail": str(e)[:500]}
 
 
@@ -878,7 +878,7 @@ async def control_screenshot(
         if not screenshot_b64:
             screenshot_b64 = await client.get_desktop_snapshot_base64()
         if not screenshot_b64:
-            logger.warning(f"[TakeControl] Screenshot returned None for agent={agent_id}")
+            logger.warning(f"[AgentBay] Screenshot returned None for agent={agent_id}")
 
         # Also fetch screen size for coordinate mapping between
         # screenshot dimensions and computer.click_mouse() coordinates
@@ -898,7 +898,7 @@ async def control_screenshot(
             "screen_size": screen_size,
         }
     except Exception as e:
-        logger.warning(f"[TakeControl] Screenshot failed: {e}")
+        logger.warning(f"[AgentBay] Screenshot failed: {e}")
         return {"status": "error", "detail": str(e)[:500]}
 
 
@@ -925,7 +925,7 @@ async def control_lock(
         if existing_user_id != str(current_user.id):
             # Check if the lock has expired
             if time.time() - locked_at > _LOCK_TIMEOUT_SECONDS:
-                logger.info(f"[TakeControl] Cleared expired lock held by {existing_user_id}")
+                logger.info(f"[AgentBay] Cleared expired lock held by {existing_user_id}")
             else:
                 return {"status": "already_locked", "locked_by": existing_user_id}
 
@@ -938,7 +938,7 @@ async def control_lock(
     _take_control_locks[key] = (str(current_user.id), time.time(), env_type)
     is_reentry = existing is not None
     logger.info(
-        f"[TakeControl] Lock acquired: agent={agent_id}, session={data.session_id}, "
+        f"[AgentBay] Lock acquired: agent={agent_id}, session={data.session_id}, "
         f"user={current_user.id}, env_type={env_type}, re_entry={is_reentry}"
     )
     return {"status": "locked", "locked_by": str(current_user.id)}
@@ -961,7 +961,7 @@ async def control_unlock(
 
     key = (str(agent_id), data.session_id)
     if key not in _take_control_locks:
-        logger.info(f"[TakeControl] Unlock called but no lock found: agent={agent_id}, session={data.session_id}")
+        logger.info(f"[AgentBay] Unlock called but no lock found: agent={agent_id}, session={data.session_id}")
         return {"status": "not_locked"}
 
     exported = False
@@ -978,16 +978,16 @@ async def control_unlock(
                 )
                 exported = True
                 logger.info(
-                    f"[TakeControl] Cookies exported: agent={agent_id}, "
+                    f"[AgentBay] Cookies exported: agent={agent_id}, "
                     f"platform={data.platform_hint}, count={export_count}"
                 )
             except Exception as e:
-                logger.warning(f"[TakeControl] Cookie export failed (non-fatal): {e}")
+                logger.warning(f"[AgentBay] Cookie export failed (non-fatal): {e}")
     finally:
         # ALWAYS release the lock, even if cookie export fails
         _take_control_locks.pop(key, None)
         logger.info(
-            f"[TakeControl] Lock released: agent={agent_id}, session={data.session_id}"
+            f"[AgentBay] Lock released: agent={agent_id}, session={data.session_id}"
         )
         # Reset browser initialization flag so the next agentbay browser tool
         # call re-initializes the SDK's browser.operator. This clears any stale
@@ -1000,7 +1000,7 @@ async def control_unlock(
                 _tc_client, _ts = _agentbay_sessions[_ck]
                 _tc_client._browser_initialized = False
                 logger.info(
-                    f"[TakeControl] Reset _browser_initialized after TC unlock "
+                    f"[AgentBay] Reset _browser_initialized after TC unlock "
                     f"for session={data.session_id[:8]}"
                 )
         # Clear from the control-layer initialization tracking set as well
@@ -1089,15 +1089,15 @@ let browser;
     write_result = await client.command_exec(
         f"echo '{script_b64}' | /usr/bin/base64 -d > tc_export_cookies.js"
     )
-    logger.info(f"[TakeControl] Cookie export script write: success={write_result.get('success')}, stderr={write_result.get('stderr', '')[:100]}")
+    logger.info(f"[AgentBay] Cookie export script write: success={write_result.get('success')}, stderr={write_result.get('stderr', '')[:100]}")
     
     result = await client.command_exec("node tc_export_cookies.js", timeout_ms=15000)
     stdout = result.get("stdout", "")
     stderr = result.get("stderr", "")
-    logger.info(f"[TakeControl] Cookie export script exec: success={result.get('success')}, stdout_len={len(stdout)}, stderr={stderr[:200]}")
+    logger.info(f"[AgentBay] Cookie export script exec: success={result.get('success')}, stdout_len={len(stdout)}, stderr={stderr[:200]}")
 
     if "COOKIES_EXPORT:" not in stdout:
-        logger.warning(f"[TakeControl] Cookie export script failed: {stdout}")
+        logger.warning(f"[AgentBay] Cookie export script failed: {stdout}")
         return 0
 
     # Parse the exported cookies JSON
@@ -1109,7 +1109,7 @@ let browser;
     try:
         cookies = json.loads(cookies_json_str)
     except json.JSONDecodeError:
-        logger.warning("[TakeControl] Failed to parse exported cookies JSON")
+        logger.warning("[AgentBay] Failed to parse exported cookies JSON")
         return 0
 
     if not cookies:

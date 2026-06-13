@@ -28,14 +28,14 @@ async def execute_task(task_id: uuid.UUID, agent_id: uuid.UUID) -> None:
       - todo tasks: pending → doing → done
       - supervision tasks: pending → doing → pending (stays active, just logs result)
     """
-    logger.info(f"[TaskExec] Starting task {task_id} for agent {agent_id}")
+    logger.info(f"[LLM] Starting task {task_id} for agent {agent_id}")
 
     # Step 1: Mark as doing
     async with async_session() as db:
         result = await db.execute(select(Task).where(Task.id == task_id))
         task = result.scalar_one_or_none()
         if not task:
-            logger.warning(f"[TaskExec] Task {task_id} not found")
+            logger.warning(f"[LLM] Task {task_id} not found")
             return
 
         task.status = "doing"
@@ -96,7 +96,7 @@ You are now in TASK EXECUTION MODE (not a conversation). A task has been assigne
     from app.services.llm import call_agent_llm_with_tools
     
     try:
-        logger.info(f"[TaskExec] Calling LLM with tools for task: {task_title}")
+        logger.info(f"[LLM] Calling LLM with tools for task: {task_title}")
         
         async with async_session() as db:
             reply = await call_agent_llm_with_tools(
@@ -108,10 +108,10 @@ You are now in TASK EXECUTION MODE (not a conversation). A task has been assigne
                 session_id=str(task_id),
             )
             
-        logger.info(f"[TaskExec] LLM reply: {reply[:80]}")
+        logger.info(f"[LLM] LLM reply: {reply[:80]}")
     except Exception as e:
         error_msg = str(e) or repr(e)
-        logger.error(f"[TaskExec] Error: {error_msg}")
+        logger.error(f"[LLM] Error: {error_msg}")
         await _log_error(task_id, f"执行出错: {error_msg[:150]}")
         if task_type == 'supervision':
             await _restore_supervision_status(task_id)
@@ -131,7 +131,7 @@ You are now in TASK EXECUTION MODE (not a conversation). A task has been assigne
                 task.completed_at = datetime.now(timezone.utc)
                 db.add(TaskLog(task_id=task_id, content=f"✅ 任务完成\n\n{reply}"))
             await db.commit()
-            logger.info(f"[TaskExec] Task {task_id} {'logged' if task_type == 'supervision' else 'completed'}!")
+            logger.info(f"[LLM] Task {task_id} {'logged' if task_type == 'supervision' else 'completed'}!")
 
     # Log activity
     from app.services.activity_logger import log_activity
@@ -145,7 +145,7 @@ You are now in TASK EXECUTION MODE (not a conversation). A task has been assigne
 
 async def _log_error(task_id: uuid.UUID, message: str) -> None:
     """Add an error log to the task."""
-    logger.error(f"[TaskExec] Error for {task_id}: {message}")
+    logger.error(f"[LLM] Error for {task_id}: {message}")
     async with async_session() as db:
         db.add(TaskLog(task_id=task_id, content=f"❌ {message}"))
         await db.commit()

@@ -152,7 +152,7 @@ export default function PlatformDashboard() {
                 { headers: authHeaders() }
             );
             if (res.ok) setTimeSeriesData(await res.json());
-        } catch (e) { console.error('Failed to load metrics:', e); }
+        } catch (e) { console.error('[API] Failed to load metrics:', e); }
         setLoadingStats(false);
     };
 
@@ -165,7 +165,7 @@ export default function PlatformDashboard() {
                 setTopCompanies(data.top_companies || []);
                 setTopAgents(data.top_agents || []);
             }
-        } catch (e) { console.error('Failed to load leaderboards:', e); }
+        } catch (e) { console.error('[API] Failed to load leaderboards:', e); }
         setLoadingLeaders(false);
     };
 
@@ -174,7 +174,7 @@ export default function PlatformDashboard() {
         try {
             const res = await fetch('/api/admin/metrics/enhanced', { headers: authHeaders() });
             if (res.ok) setEnhanced(await res.json());
-        } catch (e) { console.error('Failed to load enhanced metrics:', e); }
+        } catch (e) { console.error('[API] Failed to load enhanced metrics:', e); }
         setLoadingEnhanced(false);
     };
 

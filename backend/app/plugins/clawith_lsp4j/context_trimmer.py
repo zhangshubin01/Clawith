@@ -8,7 +8,10 @@
 - 更早的轮次：按工具类型分组摘要，去重合并
 """
 
+import time
 from collections import defaultdict
+
+from loguru import logger
 
 # 单次工具结果最大字符数（超过则截断）
 MAX_TOOL_RESULT_CHARS = 4000
@@ -24,22 +27,30 @@ TRUNCATION_MARKER = "\n\n[结果已截断，完整内容可通过 read_file 获�
 
 def trim_tool_result(result_content: str, tool_name: str = "", max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
     """截断过长的工具结果到 max_chars，差异化策略保留最有价值的部分。"""
+    t0 = time.monotonic()
     if len(result_content) <= max_chars:
+        logger.debug("[CTX] skip tool=%s len=%d <= max=%d elapsed=%.1fms",
+                     tool_name, len(result_content), max_chars, (time.monotonic() - t0) * 1000)
         return result_content
+
+    logger.debug("[CTX] tool=%s original=%d → max=%d",
+                 tool_name, len(result_content), max_chars)
 
     if tool_name in ("read_file",):
         half = max_chars // 2
         head = result_content[:half]
         tail = result_content[-half:]
-        return head + f"\n... [中间 {len(result_content) - max_chars} 字符已省略] ...\n" + tail
+        result = head + f"\n... [中间 {len(result_content) - max_chars} 字符已省略] ...\n" + tail
+    elif tool_name in ("search_file", "search_codebase", "search_symbol", "list_dir"):
+        result = result_content[:max_chars] + TRUNCATION_MARKER
+    elif tool_name in ("run_in_terminal",):
+        result = _trim_terminal_output_intelligent(result_content, max_chars)
+    else:
+        result = result_content[:max_chars] + TRUNCATION_MARKER
 
-    if tool_name in ("search_file", "search_codebase", "search_symbol", "list_dir"):
-        return result_content[:max_chars] + TRUNCATION_MARKER
-
-    if tool_name in ("run_in_terminal",):
-        return _trim_terminal_output_intelligent(result_content, max_chars)
-
-    return result_content[:max_chars] + TRUNCATION_MARKER
+    logger.info("[CTX] tool=%s original=%d → actual=%d max=%d elapsed=%.1fms",
+                tool_name, len(result_content), len(result), max_chars, (time.monotonic() - t0) * 1000)
+    return result
 
 
 def _trim_terminal_output_intelligent(result: str, max_chars: int = 2000) -> str:
@@ -76,9 +87,15 @@ def _trim_terminal_output_intelligent(result: str, max_chars: int = 2000) -> str
 
 def trim_tool_context_history(tool_records: list[dict], max_rounds: int = MAX_TOOL_HISTORY_ROUNDS) -> list[dict]:
     """只保留最近 max_rounds 轮的工具调用记录。"""
+    t0 = time.monotonic()
     if len(tool_records) <= max_rounds:
+        logger.debug("[CTX] history skip rounds=%d <= max=%d elapsed=%.1fms",
+                     len(tool_records), max_rounds, (time.monotonic() - t0) * 1000)
         return tool_records
-    return tool_records[-max_rounds:]
+    result = tool_records[-max_rounds:]
+    logger.info("[CTX] history rounds=%d → max=%d elapsed=%.1fms",
+                len(tool_records), max_rounds, (time.monotonic() - t0) * 1000)
+    return result
 
 
 def _extract_file_paths(results) -> list[str]:
@@ -105,8 +122,11 @@ def compress_tool_context_summary(
     Returns:
         格式化后的行列表，可直接拼接为 system message
     """
+    t0 = time.monotonic()
     total = len(tool_records)
     if total <= recent_detail:
+        logger.debug("[CTX] summary skip total=%d <= recent=%d elapsed=%.1fms",
+                     total, recent_detail, (time.monotonic() - t0) * 1000)
         return []  # 不需要压缩，走正常详情流程
 
     recent = tool_records[-recent_detail:]
@@ -226,5 +246,13 @@ def compress_tool_context_summary(
         lines.append(f"- 其他: {other_count} 次")
     lines.append("")
     lines.append("如需要上述早期操作的详细结果，可调用 read_file 或搜索工具重新获取。")
+
+    total_after = sum(len(l) for l in lines)
+    total_before = sum(len(str(r.get("result", r.get("results", "")))) for r in tool_records)
+    if total_before > total_after:
+        logger.info("[CTX] tool_summary: %d results, %d→%d chars (%.1f%% reduction) elapsed=%.1fms",
+                    total, total_before, total_after,
+                    (1 - total_after / total_before) * 100,
+                    (time.monotonic() - t0) * 1000)
 
     return lines

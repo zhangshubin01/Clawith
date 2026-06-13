@@ -183,6 +183,8 @@ IntelliJ Plugin (Java/Kotlin)  ←→  WebSocket JSON-RPC  ←→  clawith_lsp4j
 ## Code Guidelines
 
 - **Python Imports**: Python imports should be placed at the top of the file (file header) as much as possible. Avoid inline imports within functions or methods unless strictly necessary (e.g., to prevent circular import dependencies).
+- **Log Prefix**: All log messages MUST use `[Module]` prefix format. See workspace `CLAUDE.md` §2.1 for the complete prefix table and formatting rules. Key prefixes: `[LLM]`, `[CTX]`, `[TOOL]`, `[WS]`, `[ACP]`, `[LSP4J]`, `[SEC]`, `[HB]`, `[Startup]`, `[API]`. Never `except Exception: pass` without a `logger.warning`.
+- **Logging Library**: Backend uses `loguru` (`from loguru import logger`). All API endpoint files under `app/api/` must import logger and log at minimum request start and completion.
 
 ## graphify
 

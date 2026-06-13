@@ -6,7 +6,7 @@ const API_BASE = '/api';
 
 let _traceCounter = 0;
 
-/** 为每个 API 请求生成唯一 trace ID，注入 X-Trace-ID header 用于三端日志关联 */
+/** 为每个 API 请求生成唯一 trace ID，注入 X-Trace-Id header 用于三端日志关联 */
 function generateTraceId(): string {
     _traceCounter += 1;
     return `fe-${Date.now().toString(36)}-${_traceCounter.toString(36)}`;
@@ -16,7 +16,7 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
     const token = localStorage.getItem('token');
     const headers: Record<string, string> = {
         'Content-Type': 'application/json',
-        'X-Trace-ID': generateTraceId(),
+        'X-Trace-Id': generateTraceId(),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
     };
 

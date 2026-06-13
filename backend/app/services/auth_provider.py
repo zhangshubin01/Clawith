@@ -20,6 +20,13 @@ from app.services.identity_provider_lookup import get_preferred_identity_provide
 from loguru import logger
 
 
+def _sanitize_token_response(data: dict) -> dict:
+    """移除 OAuth token 响应中的敏感字段, 防止 access_token 泄漏到日志"""
+    skip = {"access_token", "refresh_token", "id_token", "accessToken",
+            "app_access_token", "tenant_access_token", "client_secret"}
+    return {k: v for k, v in data.items() if k not in skip}
+
+
 @dataclass
 class ExternalUserInfo:
     """Standardized user info from external identity providers."""
@@ -390,7 +397,7 @@ class DingTalkAuthProvider(BaseAuthProvider):
             )
             resp_data = resp.json()
             if resp.status_code != 200:
-                logger.error(f"DingTalk token exchange failed (HTTP {resp.status_code}): {resp_data}")
+                logger.error(f"DingTalk token exchange failed (HTTP {resp.status_code}): {_sanitize_token_response(resp_data)}")
                 return {}
 
             # New DingTalk OAuth2 returns flat JSON with camelCase fields
@@ -504,7 +511,7 @@ class WeComAuthProvider(BaseAuthProvider):
             token_data = token_resp.json()
             access_token = token_data.get("access_token")
             if not access_token:
-                logger.error(f"[WeCom SSO] gettoken failed: {token_data}")
+                logger.error(f"[WeCom SSO] gettoken failed: {_sanitize_token_response(token_data)}")
                 return {}
 
             # Step 2: Exchange OAuth code for userid + user_ticket
@@ -811,7 +818,7 @@ class GoogleAuthProvider(BaseAuthProvider):
             )
             data = resp.json()
             if resp.status_code != 200:
-                logger.error(f"Google token exchange failed (HTTP {resp.status_code}): {data}")
+                logger.error(f"Google token exchange failed (HTTP {resp.status_code}): {_sanitize_token_response(data)}")
                 return {}
             return data
 
@@ -874,7 +881,7 @@ class GitHubAuthProvider(BaseAuthProvider):
             )
             data = resp.json()
             if resp.status_code != 200:
-                logger.error(f"GitHub token exchange failed (HTTP {resp.status_code}): {data}")
+                logger.error(f"GitHub token exchange failed (HTTP {resp.status_code}): {_sanitize_token_response(data)}")
                 return {}
             return data
 

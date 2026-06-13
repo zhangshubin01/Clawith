@@ -46,7 +46,7 @@ class AcpSessionManager:
             db.add(session)
             await db.commit()
 
-        logger.info(f"[ACP-Session] 创建: id={session_id} agent={agent_id}")
+        logger.info(f"[ACP] 创建: id={session_id} agent={agent_id}")
         return session_id
 
     async def load(self, session_id: str, user_id: str) -> dict | None:
@@ -59,10 +59,10 @@ class AcpSessionManager:
             )
             session: ChatSession | None = result.scalar_one_or_none()
             if not session:
-                logger.warning(f"[ACP-Session] 会话不存在: {session_id}")
+                logger.warning(f"[ACP] 会话不存在: {session_id}")
                 return None
             if str(session.user_id) != str(user_id):
-                logger.warning(f"[ACP-Session] 会话归属不匹配: {session_id}")
+                logger.warning(f"[ACP] 会话归属不匹配: {session_id}")
                 return None
 
             # 取最近 N 条再按时间正序，供 session/load 展示。
@@ -81,7 +81,7 @@ class AcpSessionManager:
                 for msg in messages
             ]
 
-            logger.info(f"[ACP-Session] 加载: id={session_id} history={len(history)}条")
+            logger.info(f"[ACP] 加载: id={session_id} history={len(history)}条")
             return {
                 "agent_id": str(session.agent_id),
                 "cwd": session.project_path or "",  # ChatSession.project_path
@@ -98,7 +98,7 @@ class AcpSessionManager:
             if session:
                 session.agent_id = agent_id
                 await db.commit()
-                logger.info(f"[ACP-Session] 更新会话智能体: id={session_id} → agent={agent_id}")
+                logger.info(f"[ACP] 更新会话智能体: id={session_id} → agent={agent_id}")
 
     async def load_history_for_llm(
         self,
@@ -155,7 +155,7 @@ class AcpSessionManager:
             uid_uuid = uuid.UUID(user_id)
             aid_uuid = uuid.UUID(agent_id)
         except ValueError:
-            logger.warning(f"[ACP-Session] persist 跳过非法 UUID: session={session_id}")
+            logger.warning(f"[ACP] persist 跳过非法 UUID: session={session_id}")
             return
 
         now = datetime.now(timezone.utc)
@@ -167,7 +167,7 @@ class AcpSessionManager:
                     )
                     sess = sr.scalar_one_or_none()
                     if not sess or str(sess.user_id) != str(user_id):
-                        logger.warning(f"[ACP-Session] persist 会话不存在或无权限: {session_id}")
+                        logger.warning(f"[ACP] persist 会话不存在或无权限: {session_id}")
                         return
 
                     sess.last_message_at = now
@@ -200,10 +200,10 @@ class AcpSessionManager:
                         (1 if user_text else 0) + (1 if assistant_text else 0)
                     )
             logger.info(
-                f"[ACP-Session] persist: session={session_id} "
+                f"[ACP] persist: session={session_id} "
                 f"user_len={len(user_text)} reply_len={len(assistant_text)}"
             )
             # 淘汰缓存: 会话已更新, 下次 prompt 从 DB 加载最新历史。TTL 30s 覆盖连续对话间隔。
             self._history_cache.pop(session_id, None)
         except Exception as e:
-            logger.error(f"[ACP-Session] persist 失败: {e}", exc_info=True)
+            logger.error(f"[ACP] persist 失败: {e}", exc_info=True)

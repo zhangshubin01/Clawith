@@ -10,6 +10,7 @@ from pathlib import Path
 
 import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, status
+from loguru import logger
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -212,6 +213,7 @@ async def list_files(
 ):
     """List files and directories in an agent's file system."""
     await check_agent_access(db, current_user, agent_id)
+    logger.info("[API] 列出文件 agent_id={} path={}", agent_id, path)
     storage = get_storage_backend()
     storage_key, is_enterprise = _visible_storage_key(agent_id, path, current_user.tenant_id)
     normalized_path = (path or "").strip().strip("/")
@@ -271,6 +273,7 @@ async def read_file(
 ):
     """Read the content of a file."""
     await check_agent_access(db, current_user, agent_id)
+    logger.info("[API] 读取文件 agent_id={} path={}", agent_id, path)
     if is_focus_file_path(path):
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
@@ -602,6 +605,7 @@ async def write_file(
 ):
     """Write content to a file (create or overwrite)."""
     await check_agent_access(db, current_user, agent_id)
+    logger.info("[API] 写入文件 agent_id={} path={} size={}", agent_id, path, len(data.content))
     if is_focus_file_path(path):
         raise HTTPException(
             status_code=status.HTTP_410_GONE,
@@ -860,6 +864,7 @@ async def upload_file_to_workspace(
     filename = file.filename or "unnamed"
     # Sanitize filename
     filename = filename.replace("/", "_").replace("\\", "_")
+    logger.info("[API] 上传文件 agent_id={} filename={} size={}", agent_id, filename, file.size if hasattr(file, 'size') else 0)
     storage = get_storage_backend()
     file_key = _agent_storage_key(agent_id, f"{normalized_path}/{filename}")
 

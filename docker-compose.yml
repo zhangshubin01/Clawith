@@ -75,6 +75,12 @@ services:
       - ./ss-nodes.json:/data/ss-nodes.json:ro
     ports:
       - "${BACKEND_PORT:-8008}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-s", "--max-time", "3", "http://localhost:8000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     privileged: true
     cap_add:
       - SYS_ADMIN
@@ -107,7 +113,13 @@ services:
     networks:
       - default
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   pgdata:

@@ -232,8 +232,6 @@ export default function App() {
         let effectiveToken = token;
 
         if (urlToken && !pathsWithOwnToken.includes(currentPath)) {
-        console.log('[App] urlToken present:', urlToken ? urlToken.substring(0, 20) + '...' : null);
-        console.log('[App] currentPath:', currentPath);
             // Persist the new token and update the zustand store's in-memory value
             localStorage.setItem('token', urlToken);
             useAuthStore.setState({ token: urlToken, user: null });
@@ -250,7 +248,6 @@ export default function App() {
         }
 
 
-        console.log('[App] calling auth/me with effectiveToken:', effectiveToken?.substring(0, 20) + '...');
         if (effectiveToken && !user) {
             authApi.me()
                 .then((u) => setAuth(u, effectiveToken!))

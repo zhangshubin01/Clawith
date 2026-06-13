@@ -9,6 +9,7 @@ Runs as a background task inside the FastAPI process.
 
 import asyncio
 import json
+import random
 import uuid
 from datetime import datetime, timezone, timedelta
 
@@ -326,7 +327,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                     from app.services.llm.caller import _get_agent_config
                     _, _token_limit_msg = await _get_agent_config(agent_id)
                     if _token_limit_msg:
-                        logger.warning(f"[Heartbeat] Token limit exceeded mid-loop: {_token_limit_msg}")
+                        logger.warning(f"[HB] Token limit exceeded mid-loop: {_token_limit_msg}")
                         await client.close()
                         reply = _token_limit_msg
                         break
@@ -340,11 +341,11 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                 )
             except LLMError as e:
                 # LLM 服务暂时不可用属于外部故障，非代码缺陷，使用 WARNING 级别避免刷屏 ERROR
-                logger.warning(f"[Heartbeat] LLM API 不可用: {e}")
+                logger.warning(f"[HB] LLM API 不可用: {e}")
                 reply = ""
                 break
             except Exception as e:
-                logger.exception(f"[Heartbeat] LLM call error for agent {agent_id}: {type(e).__name__}: {e}")
+                logger.exception(f"[HB] LLM call error for agent {agent_id}: {type(e).__name__}: {e}")
                 reply = ""
                 break
 
@@ -393,17 +394,17 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                     fn = tc["function"]
                     tool_name = fn["name"]
                     raw_args = fn.get("arguments", "{}")
-                    logger.debug(f"[Heartbeat] Raw arguments for {tool_name} (len={len(raw_args) if raw_args else 0}): {repr(raw_args[:300]) if raw_args else 'None'}")
+                    logger.debug(f"[HB] Raw arguments for {tool_name} (len={len(raw_args) if raw_args else 0}): {repr(raw_args[:300]) if raw_args else 'None'}")
                     try:
                         args = parse_tool_arguments(raw_args)
                     except json.JSONDecodeError as je:
-                        logger.warning(f"[Heartbeat] JSON parse failed for {tool_name}: {je}. Raw: {repr(raw_args[:200])}")
+                        logger.warning(f"[HB] JSON parse failed for {tool_name}: {je}. Raw: {repr(raw_args[:200])}")
                         args = {}
 
                     # Guard: if a tool that requires arguments received empty args,
                     # return an error to LLM instead of executing
                     if not args and tool_name in _TOOLS_REQUIRING_ARGS:
-                        logger.warning(f"[Heartbeat] Empty arguments for {tool_name}, asking LLM to retry")
+                        logger.warning(f"[HB] Empty arguments for {tool_name}, asking LLM to retry")
                         llm_messages.append(LLMMessage(
                             role="tool",
                             tool_call_id=tc["id"],
@@ -472,7 +473,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                 detail={"status": "error"},
             )
 
-        logger.info(f"💓 Heartbeat for {agent_name}: {'OK' if is_ok else reply[:60]}")
+        logger.info(f"[HB] Heartbeat for {agent_name}: {'OK' if is_ok else reply[:60]}")
 
     except Exception as e:
         logger.exception(f"Heartbeat error for agent {agent_id}: {e}")
@@ -531,6 +532,8 @@ async def _heartbeat_tick():
                 interval = timedelta(minutes=agent.heartbeat_interval_minutes or 240)
                 if agent.last_heartbeat_at and (now - agent.last_heartbeat_at) < interval:
                     continue
+                # 首次心跳添加随机抖动，防止所有 Agent 同秒触发
+                await asyncio.sleep(random.uniform(0, min(30, interval.total_seconds() / 2)))
 
                 # Atomically claim this heartbeat slot before scheduling work.
                 claim_result = await db.execute(
@@ -552,7 +555,7 @@ async def _heartbeat_tick():
                 await db.commit()
 
                 # Fire heartbeat only after the DB claim has been committed.
-                logger.info(f"💓 Triggering heartbeat for {agent.name}")
+                logger.info(f"[HB] Triggering heartbeat for {agent.name}")
                 try:
                     await write_audit_log("heartbeat_fire", {"agent_name": agent.name}, agent_id=agent.id)
                 except Exception as e:
@@ -577,7 +580,7 @@ _shutdown_event = asyncio.Event()
 
 async def start_heartbeat():
     """Start the background heartbeat loop. Call from FastAPI startup."""
-    logger.info("💓 Agent heartbeat service started (60s tick)")
+    logger.info("[HB] Agent heartbeat service started (60s tick)")
     try:
         while not _shutdown_event.is_set():
             await _heartbeat_tick()
@@ -586,9 +589,9 @@ async def start_heartbeat():
             except asyncio.TimeoutError:
                 pass
     except asyncio.CancelledError:
-        logger.info("💓 Heartbeat service cancelled, shutting down")
+        logger.info("[HB] Heartbeat service cancelled, shutting down")
     finally:
-        logger.info("💓 Heartbeat service stopped")
+        logger.info("[HB] Heartbeat service stopped")
 
 async def shutdown_heartbeat():
     """Signal heartbeat loop to stop gracefully."""
@@ -618,9 +621,9 @@ async def _notify_oneshot_error(
                 sender_name=agent_name,
             ))
             await db.commit()
-        logger.info(f"[Oneshot] Notified user {triggered_by_user_id} about {agent_name} failure")
+        logger.info(f"[HB] Notified user {triggered_by_user_id} about {agent_name} failure")
     except Exception as e:
-        logger.warning(f"[Oneshot] Failed to create error notification: {e}")
+        logger.warning(f"[HB] Failed to create error notification: {e}")
 
 
 async def run_agent_oneshot(
@@ -663,13 +666,13 @@ async def run_agent_oneshot(
             result = await db.execute(select(Agent).where(Agent.id == agent_id))
             agent = result.scalar_one_or_none()
             if not agent:
-                logger.warning(f"[Oneshot] Agent {agent_id} not found — aborting")
+                logger.warning(f"[HB] Agent {agent_id} not found — aborting")
                 return ""
 
             model_id = agent.primary_model_id or agent.fallback_model_id
             if not model_id:
                 msg = "Agent has no LLM model configured. Please assign a model in Agent Settings."
-                logger.warning(f"[Oneshot] Agent {agent_id} has no model configured — aborting")
+                logger.warning(f"[HB] Agent {agent_id} has no model configured — aborting")
                 await _notify_oneshot_error(triggered_by_user_id, agent_id, agent_name or str(agent_id), msg)
                 return ""
 
@@ -677,7 +680,7 @@ async def run_agent_oneshot(
             model = model_result.scalar_one_or_none()
             if not model:
                 msg = f"The configured LLM model ({model_id}) was not found. Please check Agent Settings."
-                logger.warning(f"[Oneshot] Model {model_id} not found — aborting")
+                logger.warning(f"[HB] Model {model_id} not found — aborting")
                 await _notify_oneshot_error(triggered_by_user_id, agent_id, agent_name or str(agent_id), msg)
                 return ""
 
@@ -724,7 +727,7 @@ async def run_agent_oneshot(
             )
         except Exception as e:
             msg = f"Failed to initialise the LLM client: {e}"
-            logger.error(f"[Oneshot] Failed to create LLM client for {agent_name}: {e}")
+            logger.error(f"[HB] Failed to create LLM client for {agent_name}: {e}")
             await _notify_oneshot_error(triggered_by_user_id, agent_id, agent_name, msg)
             return ""
 
@@ -745,12 +748,12 @@ async def run_agent_oneshot(
                     try:
                         await record_token_usage(agent_id, unsaved_usage)
                     except Exception as e:
-                        logger.warning(f"[Oneshot] Failed to record token usage mid-loop: {e}")
+                        logger.warning(f"[HB] Failed to record token usage mid-loop: {e}")
                     unsaved_usage = TokenUsage()
                     from app.services.llm.caller import _get_agent_config
                     _, _token_limit_msg = await _get_agent_config(agent_id)
                     if _token_limit_msg:
-                        logger.warning(f"[Oneshot] Token limit exceeded mid-loop: {_token_limit_msg}")
+                        logger.warning(f"[HB] Token limit exceeded mid-loop: {_token_limit_msg}")
                         await client.close()
                         reply = _token_limit_msg
                         break
@@ -763,14 +766,14 @@ async def run_agent_oneshot(
                     max_tokens=get_max_tokens(model_provider, model_model, model_max_output_tokens),
                 )
             except LLMError as e:
-                logger.error(f"[Oneshot] LLM error (round {round_i}): {e}")
+                logger.error(f"[HB] LLM error (round {round_i}): {e}")
                 await _notify_oneshot_error(
                     triggered_by_user_id, agent_id, agent_name,
                     f"LLM call failed (round {round_i}): {e}",
                 )
                 break
             except Exception as e:
-                logger.error(f"[Oneshot] Unexpected LLM error (round {round_i}): {e}")
+                logger.error(f"[HB] Unexpected LLM error (round {round_i}): {e}")
                 await _notify_oneshot_error(
                     triggered_by_user_id, agent_id, agent_name,
                     f"Unexpected error during LLM call (round {round_i}): {e}",
@@ -839,7 +842,7 @@ async def run_agent_oneshot(
             try:
                 await record_token_usage(agent_id, unsaved_usage)
             except Exception as e:
-                logger.warning(f"[Oneshot] Failed to record token usage: {e}")
+                logger.warning(f"[HB] Failed to record token usage: {e}")
 
         # Log activity
         if reply:
@@ -874,11 +877,11 @@ async def run_agent_oneshot(
                     )
                     await db.commit()
             except Exception as e:
-                logger.warning(f"[Oneshot] Failed to clear error notifications: {e}")
+                logger.warning(f"[HB] Failed to clear error notifications: {e}")
 
-        logger.info(f"[Oneshot] {agent_name} completed ({round_i + 1} rounds, {accumulated_usage.total_tokens} tokens)")
+        logger.info(f"[HB] {agent_name} completed ({round_i + 1} rounds, {accumulated_usage.total_tokens} tokens)")
         return reply
 
     except Exception as e:
-        logger.exception(f"[Oneshot] Unexpected error for agent {agent_id}: {e}")
+        logger.exception(f"[HB] Unexpected error for agent {agent_id}: {e}")
         return ""

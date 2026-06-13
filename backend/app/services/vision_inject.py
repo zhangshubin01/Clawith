@@ -49,7 +49,7 @@ def store_temp_screenshot(raw_bytes: bytes, *, grid_options: Optional[dict] = No
     img_id = str(_uuid_mod.uuid4())
     _memory_image_cache[img_id] = (raw_bytes, time.monotonic(), grid_options or {})
     cache_size = len(_memory_image_cache)
-    logger.debug(f"[VisionInject] Stored temp screenshot id={img_id}, cache_size={cache_size}")
+    logger.debug(f"[TOOL] Stored temp screenshot id={img_id}, cache_size={cache_size}")
     return img_id
 
 
@@ -68,7 +68,7 @@ def _prune_expired_cache() -> None:
     for k in expired_keys:
         del _memory_image_cache[k]
     if expired_keys:
-        logger.debug(f"[VisionInject] Pruned {len(expired_keys)} expired cache entries")
+        logger.debug(f"[TOOL] Pruned {len(expired_keys)} expired cache entries")
 
 
 def pop_temp_screenshot(img_id: str) -> Optional[tuple[bytes, dict]]:
@@ -231,15 +231,15 @@ def compress_bytes_to_base64(
         size_kb = len(buf.getvalue()) / 1024
         suffix = ", grid" if coordinate_grid else ""
         logger.info(
-            f"[VisionInject] Compressed (Memory): {img.width}x{img.height}, {size_kb:.0f}KB{suffix}"
+            f"[TOOL] Compressed (Memory): {img.width}x{img.height}, {size_kb:.0f}KB{suffix}"
         )
         return f"data:image/jpeg;base64,{b64_data}"
 
     except ImportError:
-        logger.warning("[VisionInject] Pillow not installed, cannot compress screenshots")
+        logger.warning("[TOOL] Pillow not installed, cannot compress screenshots")
         return None
     except Exception as e:
-        logger.warning(f"[VisionInject] Failed to compress screenshot bytes: {e}")
+        logger.warning(f"[TOOL] Failed to compress screenshot bytes: {e}")
         return None
 
 
@@ -255,13 +255,13 @@ def compress_screenshot_to_base64(
     Returns None if the file doesn't exist or processing fails.
     """
     if not file_path.exists():
-        logger.warning(f"[VisionInject] Screenshot file not found: {file_path}")
+        logger.warning(f"[TOOL] Screenshot file not found: {file_path}")
         return None
     try:
         raw_bytes = file_path.read_bytes()
         return compress_bytes_to_base64(raw_bytes, coordinate_grid=coordinate_grid, grid_options=grid_options)
     except Exception as e:
-        logger.warning(f"[VisionInject] Failed to read screenshot file: {e}")
+        logger.warning(f"[TOOL] Failed to read screenshot file: {e}")
         return None
 
 
@@ -304,7 +304,7 @@ def try_inject_screenshot_vision(
         entry = pop_temp_screenshot(img_id)
         if entry is None:
             # Cache miss (expired or already consumed) — degrade gracefully
-            logger.warning(f"[VisionInject] ImageID {img_id} not found in cache (expired?)")
+            logger.warning(f"[TOOL] ImageID {img_id} not found in cache (expired?)")
             return None
         raw_bytes, grid_options = entry
         data_url = compress_bytes_to_base64(
@@ -316,7 +316,7 @@ def try_inject_screenshot_vision(
             return None
         # Strip the [ImageID: ...] marker from the text that goes to the LLM
         clean_text = _IMAGE_ID_RE.sub("", result_text).strip()
-        logger.info(f"[VisionInject] Injected in-memory screenshot for {tool_name}")
+        logger.info(f"[TOOL] Injected in-memory screenshot for {tool_name}")
         return [
             {"type": "text", "text": clean_text},
             {"type": "image_url", "image_url": {"url": data_url}},
@@ -330,7 +330,7 @@ def try_inject_screenshot_vision(
         data_url = compress_screenshot_to_base64(abs_path, coordinate_grid=add_coordinate_grid)
         if not data_url:
             return None
-        logger.info(f"[VisionInject] Injected file-based screenshot for {tool_name}")
+        logger.info(f"[TOOL] Injected file-based screenshot for {tool_name}")
         return [
             {"type": "text", "text": result_text},
             {"type": "image_url", "image_url": {"url": data_url}},

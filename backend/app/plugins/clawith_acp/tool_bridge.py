@@ -17,6 +17,10 @@ from typing import Any
 
 from loguru import logger
 
+# ── 失败路径去重: 同路径 read_file 失败 ≥3 次时拦截 ──
+_failed_paths: dict[str, int] = {}
+_FAILED_PATH_BLOCK = 3
+
 current_acp_handler: ContextVar[Any | None] = ContextVar("current_acp_handler", default=None)
 
 # ACP 协议方法映射
@@ -147,7 +151,7 @@ async def _build_find_class_params(
         params["matchMode"] = args["matchMode"]
     if args.get("cursor"):
         params["cursor"] = args["cursor"]
-    logger.info(f"[ACP-bridge] find_class query={query} scope={params['scope']}")
+    logger.info(f"[ACP] find_class query={query} scope={params['scope']}")
     return params
 
 
@@ -168,7 +172,7 @@ async def _build_find_symbol_params(
         params["language"] = args["language"]
     if args.get("cursor"):
         params["cursor"] = args["cursor"]
-    logger.info(f"[ACP-bridge] find_symbol query={query} scope={params['scope']}")
+    logger.info(f"[ACP] find_symbol query={query} scope={params['scope']}")
     return params
 
 
@@ -176,7 +180,7 @@ async def _build_index_status_params(
     tool_name: str, args: dict, handler, session_id: str, path: str,
 ) -> dict | str:
     """构建 index_status 参数。"""
-    logger.info("[ACP-bridge] index_status")
+    logger.info("[ACP] index_status")
     return {"sessionId": session_id}
 
 
@@ -209,7 +213,7 @@ async def _build_edit_file_params(
         return "❌ edit_file 缺少 old_string 参数"
     replace_all = args.get("replace_all", False)
     logger.debug(
-        "[ACP-bridge] edit_file path={} old_len={} new_len={} replace_all={}",
+        "[ACP] edit_file path={} old_len={} new_len={} replace_all={}",
         path, len(old_str), len(new_str), replace_all,
     )
     return {
@@ -247,7 +251,7 @@ async def _build_find_references_params(
     if args.get("language"): params["language"] = args["language"]
     if args.get("symbol"): params["symbol"] = args["symbol"]
     if args.get("cursor"): params["cursor"] = args["cursor"]
-    logger.info(f"[ACP-bridge] find_references file={args.get('file')}")
+    logger.info(f"[ACP] find_references file={args.get('file')}")
     return params
 
 
@@ -261,7 +265,7 @@ async def _build_find_definition_params(
     if args.get("column"): params["column"] = int(args["column"])
     if args.get("language"): params["language"] = args["language"]
     if args.get("symbol"): params["symbol"] = args["symbol"]
-    logger.info(f"[ACP-bridge] find_definition file={args.get('file')}")
+    logger.info(f"[ACP] find_definition file={args.get('file')}")
     return params
 
 
@@ -278,7 +282,7 @@ async def _build_find_implementations_params(
     if args.get("scope"): params["scope"] = args["scope"]
     if args.get("cursor"): params["cursor"] = args["cursor"]
     params["pageSize"] = int(args.get("pageSize", 100))
-    logger.info(f"[ACP-bridge] find_implementations file={args.get('file')}")
+    logger.info(f"[ACP] find_implementations file={args.get('file')}")
     return params
 
 
@@ -292,7 +296,7 @@ async def _build_find_super_methods_params(
     if args.get("column"): params["column"] = int(args["column"])
     if args.get("language"): params["language"] = args["language"]
     if args.get("symbol"): params["symbol"] = args["symbol"]
-    logger.info(f"[ACP-bridge] find_super_methods file={args.get('file')}")
+    logger.info(f"[ACP] find_super_methods file={args.get('file')}")
     return params
 
 
@@ -309,7 +313,7 @@ async def _build_call_hierarchy_params(
     if args.get("direction"): params["direction"] = args["direction"]
     params["depth"] = int(args.get("depth", 3))
     if args.get("scope"): params["scope"] = args["scope"]
-    logger.info(f"[ACP-bridge] call_hierarchy file={args.get('file')} direction={args.get('direction')}")
+    logger.info(f"[ACP] call_hierarchy file={args.get('file')} direction={args.get('direction')}")
     return params
 
 
@@ -323,7 +327,7 @@ async def _build_type_hierarchy_params(
     if args.get("line"): params["line"] = int(args["line"])
     if args.get("column"): params["column"] = int(args["column"])
     if args.get("scope"): params["scope"] = args["scope"]
-    logger.info(f"[ACP-bridge] type_hierarchy className={args.get('className')}")
+    logger.info(f"[ACP] type_hierarchy className={args.get('className')}")
     return params
 
 
@@ -342,7 +346,7 @@ async def _build_diagnostics_params(
     if args.get("file"): params["file"] = args["file"]
     if args.get("startLine"): params["startLine"] = int(args["startLine"])
     if args.get("endLine"): params["endLine"] = int(args["endLine"])
-    logger.info(f"[ACP-bridge] diagnostics file={args.get('file')} severity={params['severity']}")
+    logger.info(f"[ACP] diagnostics file={args.get('file')} severity={params['severity']}")
     return params
 
 
@@ -359,7 +363,7 @@ async def _build_refactor_rename_params(
     if args.get("column"): params["column"] = int(args["column"])
     if args.get("overrideStrategy"): params["overrideStrategy"] = args["overrideStrategy"]
     if args.get("relatedRenamingStrategy"): params["relatedRenamingStrategy"] = args["relatedRenamingStrategy"]
-    logger.info(f"[ACP-bridge] refactor_rename file={args.get('file')} newName={new_name}")
+    logger.info(f"[ACP] refactor_rename file={args.get('file')} newName={new_name}")
     return params
 
 
@@ -390,7 +394,7 @@ async def _build_reformat_code_params(
     if args.get("endLine"): params["endLine"] = int(args["endLine"])
     params["optimizeImports"] = args.get("optimizeImports", True)
     params["rearrangeCode"] = args.get("rearrangeCode", True)
-    logger.info(f"[ACP-bridge] reformat_code file={f_path}")
+    logger.info(f"[ACP] reformat_code file={f_path}")
     return params
 
 
@@ -401,7 +405,7 @@ async def _build_optimize_imports_params(
     f_path = args.get("file", "")
     if not f_path:
         return "❌ optimize_imports: file 不能为空"
-    logger.info(f"[ACP-bridge] optimize_imports file={f_path}")
+    logger.info(f"[ACP] optimize_imports file={f_path}")
     return {"sessionId": session_id, "file": f_path}
 
 
@@ -417,7 +421,7 @@ async def _build_safe_delete_params(
     if args.get("column"): params["column"] = int(args["column"])
     params["target_type"] = args.get("target_type", "symbol")
     params["force"] = args.get("force", False)
-    logger.info(f"[ACP-bridge] safe_delete file={f_path} target_type={params['target_type']}")
+    logger.info(f"[ACP] safe_delete file={f_path} target_type={params['target_type']}")
     return params
 
 
@@ -428,7 +432,7 @@ async def _build_convert_java_to_kotlin_params(
     files = args.get("files", [])
     if not files or not isinstance(files, list):
         return "❌ convert_java_to_kotlin: files 数组不能为空"
-    logger.info(f"[ACP-bridge] convert_java_to_kotlin files={files}")
+    logger.info(f"[ACP] convert_java_to_kotlin files={files}")
     return {"sessionId": session_id, "files": files}
 
 
@@ -439,7 +443,7 @@ async def _build_sync_files_params(
     params: dict[str, Any] = {"sessionId": session_id}
     if args.get("paths"):
         params["paths"] = args["paths"]
-    logger.info("[ACP-bridge] sync_files")
+    logger.info("[ACP] sync_files")
     return params
 
 
@@ -447,7 +451,7 @@ async def _build_active_file_params(
     tool_name: str, args: dict, handler, session_id: str, path: str,
 ) -> dict | str:
     """构建 active_file 参数 — 获取当前活动文件。"""
-    logger.info("[ACP-bridge] active_file")
+    logger.info("[ACP] active_file")
     return {"sessionId": session_id}
 
 
@@ -461,7 +465,7 @@ async def _build_open_file_params(
     params: dict[str, Any] = {"sessionId": session_id, "file": f_path}
     if args.get("line"): params["line"] = int(args["line"])
     if args.get("column"): params["column"] = int(args["column"])
-    logger.info(f"[ACP-bridge] open_file file={f_path}")
+    logger.info(f"[ACP] open_file file={f_path}")
     return params
 
 
@@ -472,7 +476,7 @@ async def _build_file_structure_params(
     f_path = args.get("file", "")
     if not f_path:
         return "❌ file_structure: file 不能为空"
-    logger.info(f"[ACP-bridge] file_structure file={f_path}")
+    logger.info(f"[ACP] file_structure file={f_path}")
     return {"sessionId": session_id, "file": f_path}
 
 
@@ -480,7 +484,7 @@ async def _build_project_params(
     tool_name: str, args: dict, handler, session_id: str, path: str,
 ) -> dict | str:
     """构建 build_project 参数 — 编译项目。"""
-    logger.info(f"[ACP-bridge] build_project rebuild={args.get('rebuild')}")
+    logger.info(f"[ACP] build_project rebuild={args.get('rebuild')}")
     return {
         "sessionId": session_id,
         "rebuild": args.get("rebuild", False),
@@ -499,7 +503,7 @@ async def _build_get_documentation_params(
     params: dict[str, Any] = {"sessionId": session_id, "className": class_name}
     if args.get("memberName"):
         params["memberName"] = args["memberName"]
-    logger.info(f"[ACP-bridge] get_documentation className={class_name}")
+    logger.info(f"[ACP] get_documentation className={class_name}")
     return params
 
 
@@ -518,7 +522,7 @@ async def _build_apply_quickfix_params(
         "line": int(args.get("line", 1)), "column": int(args.get("column", 1)),
         "fixName": fix_name,
     }
-    logger.info(f"[ACP-bridge] apply_quickfix file={f_path} fixName={fix_name}")
+    logger.info(f"[ACP] apply_quickfix file={f_path} fixName={fix_name}")
     return params
 
 
@@ -526,7 +530,7 @@ async def _build_git_status_params(
     tool_name: str, args: dict, handler, session_id: str, path: str,
 ) -> dict | str:
     """构建 git/status 参数 — 查看 Git 状态。"""
-    logger.info("[ACP-bridge] git_status")
+    logger.info("[ACP] git_status")
     return {"sessionId": session_id, "verbose": args.get("verbose", False)}
 
 
@@ -543,7 +547,7 @@ async def _build_git_diff_params(
         params["commit"] = args["commit"]
     if args.get("path"):
         params["path"] = args["path"]
-    logger.info(f"[ACP-bridge] git_diff staged={params['staged']}")
+    logger.info(f"[ACP] git_diff staged={params['staged']}")
     return params
 
 
@@ -557,7 +561,7 @@ async def _build_git_stage_params(
     }
     if args.get("paths"):
         params["paths"] = args["paths"]
-    logger.info(f"[ACP-bridge] git_stage all={params['all']}")
+    logger.info(f"[ACP] git_stage all={params['all']}")
     return params
 
 
@@ -572,7 +576,7 @@ async def _build_git_commit_params(
         "sessionId": session_id, "message": msg,
         "all": args.get("all", True), "amend": args.get("amend", False),
     }
-    logger.info(f"[ACP-bridge] git_commit all={params['all']} amend={params['amend']}")
+    logger.info(f"[ACP] git_commit all={params['all']} amend={params['amend']}")
     return params
 
 
@@ -746,7 +750,7 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
     # 统一路径穿越防护 — 对所有含 path 参数的工具检查（安全审计 V1）
     path = args.get("path") or args.get("file") or args.get("file_path") or args.get("filePath", "")
     if path and ".." in path:
-        logger.warning(f"[ACP-SEC] 拒绝路径穿越: {tool_name} path={path}")
+        logger.warning(f"[ACP] 拒绝路径穿越: {tool_name} path={path}")
         return f'{{"error": "路径不合法: 禁止路径穿越"}}'
 
     # Autonomy 闸门: 写操作需要经过 check_tool_autonomy 检查
@@ -779,7 +783,7 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             if _agent_id is not None and _user_id is not None:
                 _block = await _check_fn(tool_name, args, _agent_id, _user_id, notify=False)
                 if _block is not None:
-                    logger.warning(f"[ACP-bridge] autonomy blocked: {tool_name} reason={_block[:60]}")
+                    logger.warning(f"[ACP] autonomy blocked: {tool_name} reason={_block[:60]}")
                     return _handle_autonomy_blocked(tool_name, _block)
 
     if not method:
@@ -795,7 +799,7 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
     })
     if method in _READ_METHODS and not await _RATE_LIMITER.allow(method):
         left = _RATE_LIMITER.remaining(method)
-        logger.warning(f"[ACP-bridge] rate limited: {method} remaining={left}")
+        logger.warning(f"[ACP] rate limited: {method} remaining={left}")
         return f"⚠️ 请求过频繁（{method}），请稍后重试"
 
     # 写操作独立限速: 10次/60s (安全审计 V7)
@@ -803,7 +807,7 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         "fs/write_text_file", "fs/edit_text_file",
     })
     if method in _WRITE_METHODS and not await _RATE_LIMITER.allow(method, limit=30):
-        logger.warning(f"[ACP-LIMIT] 写操作 {method} 超限")
+        logger.warning(f"[ACP] 写操作 {method} 超限")
         return '{"error": "写操作频率超限，请稍后重试"}'
 
     session_id = _get_session_id(handler)
@@ -833,13 +837,14 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             f"timeout={_timeout}s"
         )
         result = await handler.send_request(method, params, timeout=_timeout)
+        _elapsed = time.perf_counter() - t0
         logger.info(
-            f"[ACP-PERF] fs DONE tool={tool_name} path={path} session={session_id} "
-            f"elapsed={time.perf_counter() - t0:.3f}s"
+            f"[ACP-RTT] tool={tool_name} method={method} rtt_ms={_elapsed*1000:.0f} "
+            f"result_len={len(str(result))} path={path} session={session_id}"
         )
         # P1-6: 检测 IDE 索引未就绪，引导 LLM 等待而非反复重试
         if isinstance(result, str) and ("索引未就绪" in result or "索引构建中" in result):
-            logger.warning(f"[ACP-DUMB] {tool_name} blocked by IDE indexing: {result[:100]}")
+            logger.warning(f"[ACP] {tool_name} blocked by IDE indexing: {result[:100]}")
             return (
                 f"{result}\n\n"
                 "⚠️ IDE 正在构建代码索引，所有代码搜索/导航暂时不可用。"
@@ -857,11 +862,11 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             _cache_key = f"{session_id}:{_cwd}:{path}:{_depth}"
             _cached_ts, _cached_val = _ls_cache.get(_cache_key, (0, ""))
             if time.monotonic() - _cached_ts < _LS_CACHE_TTL:
-                logger.info(f"[ACP-bridge] list_files cache hit path={path} depth={_depth}")
+                logger.info(f"[ACP] list_files cache hit path={path} depth={_depth}")
                 return _cached_val
             # P1-5: 缓存 MISS 日志
             logger.debug(
-                f"[ACP-CACHE] list_files MISS path={path or '.'} depth={_depth}"
+                f"[ACP] list_files MISS path={path or '.'} depth={_depth}"
             )
             if isinstance(result, dict):
                 entries = result.get("entries") or result.get("files") or []
@@ -879,7 +884,7 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                     lines.append(f"... (截断, 共 {result.get('totalCount', '?')} 项)")
                 _out = "\n".join(lines)
                 _ls_cache[_cache_key] = (time.monotonic(), _out)
-                logger.info(f"[ACP-bridge] list_files {len(lines)} entries (cached)")
+                logger.info(f"[ACP] list_files {len(lines)} entries (cached)")
                 return _out
             return str(result)
         if method == "fs/find_file":
@@ -977,15 +982,15 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             return str(result)
         return "文件操作成功"
     except TimeoutError:
-        logger.warning(f"[ACP-bridge] timeout: {tool_name} {path}, 尝试本地读取")
+        logger.warning(f"[ACP] timeout: {tool_name} {path}, 尝试本地读取")
         if method == "fs/read_text_file" and os.path.isfile(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
-                logger.info(f"[ACP-bridge] 本地读取成功: {path} ({len(content)} bytes)")
+                logger.info(f"[ACP] 本地读取成功: {path} ({len(content)} bytes)")
                 return content
             except Exception as e:
-                logger.error(f"[ACP-bridge] 本地读取失败: {path}: {e}")
+                logger.error(f"[ACP] 本地读取失败: {path}: {e}")
                 return f"⚠️ 文件读取失败: {e}"
         return f"⚠️ IDE 文件操作超时: {path}"
     except Exception as e:
@@ -995,16 +1000,36 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             # 避免 list_files 在旧版本 IDE 插件上完全不可用，保持功能降级可用
             if method == "fs/list_directory":
                 logger.warning(
-                    "[ACP-bridge] fs/list_directory 不支持, 回落 terminal find: %s", path
+                    "[ACP] fs/list_directory 不支持, 回落 terminal find: %s", path
                 )
                 # H9: shlex.quote 转义路径特殊字符，防止 shell 命令注入
                 find_cmd = f"find {shlex.quote(path)} -maxdepth {params.get('depth', 3)} -type f -o -type d | head -{params.get('limit', 200)}"
                 return await _try_acp_terminal({"command": find_cmd}, handler)
             logger.warning(
-                "[ACP-bridge] %s 不支持: %s (IDE 插件需实现对应 handler)",
+                "[ACP] %s 不支持: %s (IDE 插件需实现对应 handler)",
                 tool_name, path
             )
             return f"❌ IDE 插件不支持此操作: {tool_name}（需升级插件版本）"
+        # ── 文件不存在去重: 同路径失败 ≥3 次时拦截 ──
+        if tool_name in ("read_file", "find_file", "list_files") and path:
+            key = f"{tool_name}:{path.lower().rstrip('/')}"
+            fails = _failed_paths.get(key, 0) + 1
+            _failed_paths[key] = fails
+            if fails >= _FAILED_PATH_BLOCK:
+                logger.warning(
+                    "[ACP] {} BLOCKED: path={} fails={}/{}",
+                    tool_name, path, fails, _FAILED_PATH_BLOCK
+                )
+                del _failed_paths[key]
+                return (
+                    f"⛔ 文件/目录 '{path}' 已被确认不存在 (已尝试 {fails} 次)。\n"
+                    f"请用 list_directory 确认正确的目录结构，不要再猜测此路径。"
+                )
+            elif fails >= 2:
+                logger.warning(
+                    "[ACP] {} 重复失败: path={} fails={}/{}",
+                    tool_name, path, fails, _FAILED_PATH_BLOCK
+                )
         logger.error(
             "[ACP-bridge conn={} error: {} path={} session={}: {}",
             conn_id, tool_name, path, session_id, e
@@ -1029,12 +1054,12 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
     for pattern in _EXTRA_DANGEROUS:
         if pattern in lower_cmd:
             msg = f"❌ 危险命令已被拦截: pattern={pattern}"
-            logger.warning(f"[ACP-bridge] {msg} cmd={command[:80]}")
+            logger.warning(f"[ACP] {msg} cmd={command[:80]}")
             return msg
     for pattern in _dangerous:
         if pattern in lower_cmd:
             msg = f"❌ 危险命令已被拦截: pattern={pattern}"
-            logger.warning(f"[ACP-bridge] {msg} cmd={command[:80]}")
+            logger.warning(f"[ACP] {msg} cmd={command[:80]}")
             return msg
 
     # 网络危险命令检查（curl/wget/nc/ssh/scp 等数据外泄通道）
@@ -1043,7 +1068,7 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
     for pattern in _network:
         if pattern in lower_cmd:
             msg = f"❌ 网络命令已被拦截: pattern={pattern}"
-            logger.warning(f"[ACP-bridge] {msg} cmd={command[:80]}")
+            logger.warning(f"[ACP] {msg} cmd={command[:80]}")
             return msg
     # 路径穿越检查
     if "../../" in command:
@@ -1058,7 +1083,7 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
         if _check_fn is not None:
             block = await _check_fn("execute_command", args, agent_id, user_id, notify=False)
             if block is not None:
-                logger.warning(f"[ACP-bridge] autonomy blocked: cmd={command[:80]} reason={block[:60]}")
+                logger.warning(f"[ACP] autonomy blocked: cmd={command[:80]} reason={block[:60]}")
                 return _handle_autonomy_blocked("execute_command", block)
 
     session_id = getattr(handler, "session_id", "")

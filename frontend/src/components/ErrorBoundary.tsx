@@ -23,7 +23,12 @@ class ErrorBoundary extends Component<Props, State> {
     }
 
     public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-        console.error('Uncaught error:', error, errorInfo);
+        console.error('[ErrorBoundary] Crash', {
+            route: window.location.pathname,
+            search: window.location.search,
+            error: error?.message || String(error),
+            componentStack: errorInfo?.componentStack?.split('\n')?.slice(0, 5)?.join('\n'),
+        });
     }
 
     public render() {

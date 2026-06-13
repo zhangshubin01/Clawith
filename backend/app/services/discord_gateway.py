@@ -28,7 +28,7 @@ except ImportError:
 
 if not _HAS_DISCORD:
     logger.warning(
-        "[Discord GW] discord.py package not installed. "
+        "[Discord-GW] discord.py package not installed. "
         "Discord Gateway features will be disabled. "
         "Install with: pip install discord.py"
     )
@@ -52,13 +52,13 @@ class DiscordGatewayManager:
     ):
         """Start a Discord Gateway client for the given agent."""
         if not _HAS_DISCORD:
-            logger.warning("[Discord GW] discord.py not installed, cannot start client")
+            logger.warning("[Discord-GW] discord.py not installed, cannot start client")
             return
         if not bot_token:
-            logger.warning(f"[Discord GW] Missing bot_token for {agent_id}, skipping")
+            logger.warning(f"[Discord-GW] Missing bot_token for {agent_id}, skipping")
             return
 
-        logger.info(f"[Discord GW] Starting Gateway client for agent {agent_id}")
+        logger.info(f"[Discord-GW] Starting Gateway client for agent {agent_id}")
 
         # Stop existing client if any
         if stop_existing and agent_id in self._tasks:
@@ -73,7 +73,7 @@ class DiscordGatewayManager:
         @client.event
         async def on_ready():
             logger.info(
-                f"[Discord GW] Bot connected for agent {agent_id}: "
+                f"[Discord-GW] Bot connected for agent {agent_id}: "
                 f"{client.user.name}#{client.user.discriminator} ({client.user.id})"
             )
 
@@ -100,7 +100,7 @@ class DiscordGatewayManager:
                 return
 
             logger.info(
-                f"[Discord GW] Message for agent {agent_id} from "
+                f"[Discord-GW] Message for agent {agent_id} from "
                 f"{message.author.name}: {user_text[:80]}"
             )
 
@@ -122,11 +122,11 @@ class DiscordGatewayManager:
                 # discord.py supports proxy via the `proxy` kwarg on Client.start
                 await client.start(bot_token, reconnect=True)
             except asyncio.CancelledError:
-                logger.info(f"[Discord GW] Bot task cancelled for agent {agent_id}")
+                logger.info(f"[Discord-GW] Bot task cancelled for agent {agent_id}")
             except discord.LoginFailure:
-                logger.error(f"[Discord GW] Invalid bot token for agent {agent_id}")
+                logger.error(f"[Discord-GW] Invalid bot token for agent {agent_id}")
             except Exception as e:
-                logger.exception(f"[Discord GW] Bot error for agent {agent_id}: {e}")
+                logger.exception(f"[Discord-GW] Bot error for agent {agent_id}: {e}")
             finally:
                 if not client.is_closed():
                     await client.close()
@@ -134,7 +134,7 @@ class DiscordGatewayManager:
 
         task = asyncio.create_task(_run_bot(), name=f"discord-gw-{str(agent_id)[:8]}")
         self._tasks[agent_id] = task
-        logger.info(f"[Discord GW] Gateway task scheduled for agent {agent_id}")
+        logger.info(f"[Discord-GW] Gateway task scheduled for agent {agent_id}")
 
     async def _handle_message(
         self,
@@ -235,7 +235,7 @@ class DiscordGatewayManager:
                     user_id=platform_user_id,
                     session_id=session_conv_id,
                 )
-                logger.info(f"[Discord GW] LLM reply for {agent_id}: {reply_text[:80]}")
+                logger.info(f"[Discord-GW] LLM reply for {agent_id}: {reply_text[:80]}")
 
                 # Save reply
                 db.add(ChatMessage(
@@ -252,7 +252,7 @@ class DiscordGatewayManager:
 
         except Exception as e:
             logger.exception(
-                f"[Discord GW] Error handling message for {agent_id}: {e}"
+                f"[Discord-GW] Error handling message for {agent_id}: {e}"
             )
             return f"An error occurred while processing your message: {str(e)[:100]}"
 
@@ -262,21 +262,21 @@ class DiscordGatewayManager:
             task = self._tasks.pop(agent_id)
             if not task.done():
                 task.cancel()
-                logger.info(f"[Discord GW] Cancelled task for agent {agent_id}")
+                logger.info(f"[Discord-GW] Cancelled task for agent {agent_id}")
         if agent_id in self._clients:
             client = self._clients.pop(agent_id)
             try:
                 if not client.is_closed():
                     await client.close()
             except Exception as e:
-                logger.error(f"[Discord GW] Error closing client for {agent_id}: {e}")
+                logger.error(f"[Discord-GW] Error closing client for {agent_id}: {e}")
 
     async def start_all(self):
         """Start Gateway clients for all configured Discord agents."""
         if not _HAS_DISCORD:
-            logger.info("[Discord GW] discord.py not installed, skipping Discord Gateway init")
+            logger.info("[Discord-GW] discord.py not installed, skipping Discord Gateway init")
             return
-        logger.info("[Discord GW] Initializing all active Discord Gateway channels...")
+        logger.info("[Discord-GW] Initializing all active Discord Gateway channels...")
         async with async_session() as db:
             result = await db.execute(
                 select(ChannelConfig).where(
@@ -297,7 +297,7 @@ class DiscordGatewayManager:
                     )
                 else:
                     logger.warning(
-                        f"[Discord GW] Skipping agent {config.agent_id}: missing bot_token"
+                        f"[Discord-GW] Skipping agent {config.agent_id}: missing bot_token"
                     )
 
     def status(self) -> dict:

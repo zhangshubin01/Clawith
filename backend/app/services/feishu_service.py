@@ -830,7 +830,7 @@ class FeishuService:
         try:
             resp = await client.cardkit.v1.card.acreate(request)
             logger.info(
-                f"[Feishu CardKit] create_card_entity response: "
+                f"[Feishu-CardKit] create_card_entity response: "
                 f"code={resp.code}, msg={resp.msg}"
             )
             if not resp.success():
@@ -841,7 +841,7 @@ class FeishuService:
         except Exception as e:
             if isinstance(e, RuntimeError):
                 raise
-            logger.error(f"[Feishu CardKit] create_card_entity error: {e}")
+            logger.error(f"[Feishu-CardKit] create_card_entity error: {e}")
             raise RuntimeError(f"Feishu CardKit create_card_entity error: {e}") from e
 
     async def send_card_by_card_id(
@@ -895,7 +895,7 @@ class FeishuService:
         try:
             resp = await client.cardkit.v1.card_element.acontent(request)
             logger.info(
-                f"[Feishu CardKit] stream_card_content response: "
+                f"[Feishu-CardKit] stream_card_content response: "
                 f"code={resp.code}, msg={resp.msg}, card_id={card_id}, "
                 f"element_id={element_id}, sequence={sequence}"
             )
@@ -907,7 +907,7 @@ class FeishuService:
         except Exception as e:
             if isinstance(e, RuntimeError):
                 raise
-            logger.error(f"[Feishu CardKit] stream_card_content error: {e}")
+            logger.error(f"[Feishu-CardKit] stream_card_content error: {e}")
             raise RuntimeError(f"Feishu CardKit stream_card_content error: {e}") from e
 
     async def set_card_streaming_mode(
@@ -936,7 +936,7 @@ class FeishuService:
         try:
             resp = await client.cardkit.v1.card.asettings(request)
             logger.info(
-                f"[Feishu CardKit] set_card_streaming_mode response: "
+                f"[Feishu-CardKit] set_card_streaming_mode response: "
                 f"code={resp.code}, msg={resp.msg}, card_id={card_id}, "
                 f"streaming_mode={streaming_mode}, sequence={sequence}"
             )
@@ -948,7 +948,7 @@ class FeishuService:
         except Exception as e:
             if isinstance(e, RuntimeError):
                 raise
-            logger.error(f"[Feishu CardKit] set_card_streaming_mode error: {e}")
+            logger.error(f"[Feishu-CardKit] set_card_streaming_mode error: {e}")
             raise RuntimeError(f"Feishu CardKit set_card_streaming_mode error: {e}") from e
 
     async def update_cardkit_card(
@@ -981,7 +981,7 @@ class FeishuService:
         try:
             resp = await client.cardkit.v1.card.aupdate(request)
             logger.info(
-                f"[Feishu CardKit] update_cardkit_card response: "
+                f"[Feishu-CardKit] update_cardkit_card response: "
                 f"code={resp.code}, msg={resp.msg}, card_id={card_id}, "
                 f"sequence={sequence}"
             )
@@ -993,7 +993,7 @@ class FeishuService:
         except Exception as e:
             if isinstance(e, RuntimeError):
                 raise
-            logger.error(f"[Feishu CardKit] update_cardkit_card error: {e}")
+            logger.error(f"[Feishu-CardKit] update_cardkit_card error: {e}")
             raise RuntimeError(f"Feishu CardKit update_cardkit_card error: {e}") from e
 
 

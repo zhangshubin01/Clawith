@@ -22,10 +22,10 @@ def load_plugins(app: FastAPI) -> None:
         if not (item / "plugin.json").exists():
             continue
         if item.name in _loaded_plugins:
-            logger.debug(f"[plugin] {item.name}: 已加载，跳过重复注册")
+            logger.debug(f"[Plugin] {item.name}: 已加载，跳过重复注册")
             continue
         if not (item / "__init__.py").exists():
-            logger.warning(f"[plugin] {item.name}: 缺少 __init__.py，跳过")
+            logger.warning(f"[Plugin] {item.name}: 缺少 __init__.py，跳过")
             continue
         try:
             # Use the real package path when available, otherwise load from file.
@@ -36,27 +36,27 @@ def load_plugins(app: FastAPI) -> None:
             else:
                 spec = importlib.util.spec_from_file_location(real_pkg, init_file)
                 if spec is None or spec.loader is None:
-                    logger.warning(f"[plugin] {item.name}: 无法创建模块 spec，跳过")
+                    logger.warning(f"[Plugin] {item.name}: 无法创建模块 spec，跳过")
                     continue
                 module = importlib.util.module_from_spec(spec)
                 sys.modules[real_pkg] = module
                 spec.loader.exec_module(module)
             plugin_instance = getattr(module, "plugin", None)
             if plugin_instance is None:
-                logger.warning(f"[plugin] {item.name}: 未导出 'plugin' 实例，跳过")
+                logger.warning(f"[Plugin] {item.name}: 未导出 'plugin' 实例，跳过")
                 continue
             if not isinstance(plugin_instance, ClawithPlugin):
                 logger.warning(
-                    f"[plugin] {item.name}: 'plugin' 不是 ClawithPlugin 实例 "
+                    f"[Plugin] {item.name}: 'plugin' 不是 ClawithPlugin 实例 "
                     f"(got {type(plugin_instance).__name__})，跳过"
                 )
                 continue
             plugin_instance.register(app)
             _loaded_plugins.add(item.name)
-            logger.info(f"[plugin] 已加载: {plugin_instance.name} v{plugin_instance.version}")
+            logger.info(f"[Plugin] 已加载: {plugin_instance.name} v{plugin_instance.version}")
         except Exception as exc:
             _failed_count += 1
-            logger.exception(f"[plugin] 加载 {item.name} 失败: {exc}")
+            logger.exception(f"[Plugin] 加载 {item.name} 失败: {exc}")
 
     if _failed_count:
-        logger.error("[plugin] {} 个插件加载失败，请检查上方异常日志", _failed_count)
+        logger.error("[Plugin] {} 个插件加载失败，请检查上方异常日志", _failed_count)

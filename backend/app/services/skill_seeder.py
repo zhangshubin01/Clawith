@@ -970,7 +970,7 @@ async def seed_skills():
             if mcp_file.exists():
                 s["files"] = [{"path": "SKILL.md", "content": mcp_file.read_text(encoding="utf-8")}]
             else:
-                logger.warning("[SkillSeeder] mcp-installer/SKILL.md not found in agent_template/skills/")
+                logger.warning("[Startup] mcp-installer/SKILL.md not found in agent_template/skills/")
 
     async with async_session() as db:
         for skill_data in BUILTIN_SKILLS:
@@ -999,10 +999,10 @@ async def seed_skills():
                         existing_file = existing_paths[f["path"]]
                         if existing_file.content != f["content"]:
                             existing_file.content = f["content"]
-                            logger.info(f"[SkillSeeder] Updated {f['path']} in {skill_data['name']}")
+                            logger.info(f"[Startup] Updated {f['path']} in {skill_data['name']}")
                     else:
                         db.add(SkillFile(skill_id=existing.id, path=f["path"], content=f["content"]))
-                        logger.info(f"[SkillSeeder] Added file {f['path']} to {skill_data['name']}")
+                        logger.info(f"[Startup] Added file {f['path']} to {skill_data['name']}")
             else:
                 skill = Skill(
                     name=skill_data["name"],
@@ -1017,9 +1017,9 @@ async def seed_skills():
                 await db.flush()
                 for f in skill_data["files"]:
                     db.add(SkillFile(skill_id=skill.id, path=f["path"], content=f["content"]))
-                logger.info(f"[SkillSeeder] Created skill: {skill_data['name']}")
+                logger.info(f"[Startup] Created skill: {skill_data['name']}")
         await db.commit()
-        logger.info("[SkillSeeder] Skills seeded")
+        logger.info("[Startup] Skills seeded")
 
 
 async def push_default_skills_to_existing_agents():
@@ -1057,7 +1057,7 @@ async def push_default_skills_to_existing_agents():
         )
         setting = setting_r.scalar_one_or_none()
         if setting and setting.value.get("hash") == current_hash:
-            logger.info(f"[SkillSeeder] Default skills sync hash '{current_hash}' matches, skipping sync for existing agents")
+            logger.info(f"[Startup] Default skills sync hash '{current_hash}' matches, skipping sync for existing agents")
             return
 
         # Load all agents
@@ -1075,7 +1075,7 @@ async def push_default_skills_to_existing_agents():
                     await storage.delete(legacy_key)
                     removed_legacy += 1
                 except Exception as exc:
-                    logger.warning(f"[SkillSeeder] Failed to remove legacy MCP_INSTALLER.md for agent {agent.id}: {exc}")
+                    logger.warning(f"[Startup] Failed to remove legacy MCP_INSTALLER.md for agent {agent.id}: {exc}")
             for skill in default_skills:
                 if not skill.files:
                     continue
@@ -1089,7 +1089,7 @@ async def push_default_skills_to_existing_agents():
                     key = f"{agent_prefix}/skills/{skill.folder_name}/{sf.path}"
                     await storage.write_text(key, sf.content, encoding="utf-8")
                     pushed += 1
-                logger.info(f"[SkillSeeder] Pushed new default skill '{skill.name}' to agent {agent.id}")
+                logger.info(f"[Startup] Pushed new default skill '{skill.name}' to agent {agent.id}")
 
         # Save/update the sync hash in settings
         if setting:
@@ -1100,8 +1100,8 @@ async def push_default_skills_to_existing_agents():
 
         if pushed or removed_legacy:
             logger.info(
-                f"[SkillSeeder] Pushed {pushed} new skill files "
+                f"[Startup] Pushed {pushed} new skill files "
                 f"to existing agents; removed {removed_legacy} legacy MCP installer files"
             )
         else:
-            logger.info("[SkillSeeder] All existing agents already have all default skills")
+            logger.info("[Startup] All existing agents already have all default skills")

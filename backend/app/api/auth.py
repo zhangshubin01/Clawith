@@ -171,7 +171,7 @@ async def register_init(
     from app.services.registration_service import registration_service
     from app.models.user import Identity, User
 
-    logger.info(f"[REGISTER_INIT] Starting registration for email={data.email}")
+    logger.info(f"[API] Starting registration for email={data.email}")
 
     # Resolve email config once
     from app.services.system_email_service import resolve_email_config_async
@@ -195,7 +195,7 @@ async def register_init(
     # this guard protects against future regressions.
     if identity.email and identity.email != data.email:
         logger.warning(
-            "[REGISTER_INIT] Identity email mismatch: submitted=%s returned=%s — rejecting",
+            "[API] Identity email mismatch: submitted=%s returned=%s — rejecting",
             data.email,
             identity.email,
         )
@@ -280,7 +280,7 @@ async def register_sso(
     from app.services.auth_registry import auth_provider_registry
     from app.services.registration_service import registration_service
 
-    logger.info(f"[REGISTER_SSO] Starting SSO registration: provider={data.provider}")
+    logger.info(f"[API] Starting SSO registration: provider={data.provider}")
 
     # Get provider
     auth_provider = await auth_provider_registry.get_provider(db, data.provider)
@@ -307,7 +307,7 @@ async def register_sso(
     # Generate token
     token = create_access_token(str(user.id), user.role)
 
-    logger.info(f"[REGISTER_SSO] SSO successful: user_id={user.id}, is_new={is_new}")
+    logger.info(f"[API] SSO successful: user_id={user.id}, is_new={is_new}")
 
     return TokenResponse(
         access_token=token,
@@ -318,7 +318,7 @@ async def register_sso(
 
 async def _handle_normal_register(data: UserRegister, background_tasks: BackgroundTasks, db: AsyncSession, settings):
     """Legacy normal registration handler."""
-    logger.info(f"[REGISTER_LEGACY] email={data.email}")
+    logger.info(f"[API] email={data.email}")
 
     from app.services.registration_service import registration_service
     from sqlalchemy import func
@@ -384,7 +384,7 @@ async def _handle_normal_register(data: UserRegister, background_tasks: Backgrou
     # acts as a safety net against future regressions.
     if identity.email and identity.email != data.email:
         logger.warning(
-            "[REGISTER_LEGACY] Identity email mismatch: submitted=%s returned=%s — rejecting",
+            "[API] Identity email mismatch: submitted=%s returned=%s — rejecting",
             data.email,
             identity.email,
         )
@@ -462,7 +462,7 @@ async def login(data: UserLogin, background_tasks: BackgroundTasks, db: AsyncSes
     identity = result.scalar_one_or_none()
 
     if not identity or not identity.password_hash or not await verify_password_async(data.password, identity.password_hash):
-        logger.warning(f"[LOGIN] Invalid credentials for {data.login_identifier} identity_id={identity.id if identity else 'None'}")
+        logger.warning(f"[API] Invalid credentials for {data.login_identifier} identity_id={identity.id if identity else 'None'}")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     # 2. Check Global Activity & Verification

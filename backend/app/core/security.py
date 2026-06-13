@@ -87,7 +87,7 @@ def encrypt_data(plaintext: str, key: str) -> str:
 
     aes_key = _derive_key_v1(key)
 
-    logger.debug("[security] encrypt_data: plaintext_len={}", len(plaintext))
+    logger.debug("[SEC] encrypt_data: plaintext_len={}", len(plaintext))
     iv = os.urandom(16)
 
     cipher = AES.new(aes_key, AES.MODE_CBC, iv)
@@ -125,13 +125,13 @@ def decrypt_data(ciphertext: str, key: str) -> str:
         padded_data = cipher.decrypt(encrypted)
         plaintext = unpad(padded_data, AES.block_size).decode("utf-8")
 
-        logger.debug("[security] decrypt_data: success, plaintext_len={}", len(plaintext))
+        logger.debug("[SEC] decrypt_data: success, plaintext_len={}", len(plaintext))
         return plaintext
     except (ValueError, KeyError) as e:
-        logger.debug("[security] decrypt_data failed (caller should handle): error={}", e)
+        logger.debug("[SEC] decrypt_data failed (caller should handle): error={}", e)
         raise ValueError(f"Decryption failed: {e}") from e
     except Exception as e:
-        logger.error("[security] decrypt_data unexpected error", exc_info=True)
+        logger.error("[SEC] decrypt_data unexpected error", exc_info=True)
         raise ValueError(f"Decryption failed: {e}") from e
 
 
@@ -154,13 +154,13 @@ def decode_access_token(token: str) -> dict:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         return payload
     except ExpiredSignatureError:
-        logger.warning("[security] JWT token has expired")
+        logger.warning("[SEC] JWT token has expired")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token expired",
         )
     except PyJWTError:
-        logger.warning("[security] JWT decode failed: invalid token")
+        logger.warning("[SEC] JWT decode failed: invalid token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
@@ -181,7 +181,7 @@ def decode_access_token_soft(token: str) -> dict:
         )
         return payload
     except PyJWTError:
-        logger.warning("[security] JWT soft-decode failed: invalid token")
+        logger.warning("[SEC] JWT soft-decode failed: invalid token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
@@ -284,7 +284,7 @@ async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
             )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     except PyJWTError:
-        logger.warning("[security] JWT decode failed: invalid token")
+        logger.warning("[SEC] JWT decode failed: invalid token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",

@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from loguru import logger
+
+
+def _safe(data: dict) -> dict:
+    skip = {"access_token","refresh_token","id_token","accessToken","client_secret"}
+    return {k:v for k,v in data.items() if k not in skip}
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -98,7 +103,7 @@ async def _handle_google_sso_callback(
         token_data = await auth_provider.exchange_code_for_token(code)
         access_token = token_data.get("access_token")
         if not access_token:
-            logger.error(f"Google Workspace token exchange failed: {token_data}")
+            logger.error(f"Google Workspace token exchange failed: {_safe(token_data)}")
             return HTMLResponse("Auth failed: Token exchange error")
 
         user_info = await auth_provider.get_user_info(access_token)

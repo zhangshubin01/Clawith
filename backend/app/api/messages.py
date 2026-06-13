@@ -7,6 +7,7 @@ This API now queries chat_sessions + chat_messages for the inbox.
 
 
 from fastapi import APIRouter, Depends, Query
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,9 +38,11 @@ async def get_inbox(
     my_agent_ids = [r[0] for r in agent_ids_q.fetchall()]
 
     if not my_agent_ids:
+        logger.info("[API] 获取收件箱 user_id={} agent_count=0", current_user.id)
         return []
 
     # Find agent-to-agent chat sessions involving the user's agents
+    logger.info("[API] 获取收件箱 user_id={} agent_count={}", current_user.id, len(my_agent_ids))
     sessions_q = await db.execute(
         select(ChatSession)
         .where(

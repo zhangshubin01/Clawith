@@ -8,7 +8,7 @@ export async function copyToClipboard(text: string): Promise<boolean> {
             await navigator.clipboard.writeText(text);
             return true;
         } catch (e) {
-            console.error('Clipboard API failed', e);
+            console.error('[Util] Clipboard API failed', e);
         }
     }
     // Fallback for non-HTTPS dev environments where clipboard API is unavailable
@@ -25,7 +25,7 @@ export async function copyToClipboard(text: string): Promise<boolean> {
         document.body.removeChild(textArea);
         return successful;
     } catch (err) {
-        console.error('Fallback copy failed', err);
+        console.error('[Util] Fallback copy failed', err);
         return false;
     }
 }

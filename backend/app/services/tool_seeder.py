@@ -3460,7 +3460,7 @@ async def seed_builtin_tools():
         new_tool = new_result.scalar_one_or_none()
         if old_tool and not new_tool:
             old_tool.name = new_name
-            logger.info(f"[ToolSeeder] Renamed builtin tool: {old_name} -> {new_name}")
+            logger.info(f"[Startup] Renamed builtin tool: {old_name} -> {new_name}")
         elif old_tool and new_tool:
             old_assignments = await db.execute(select(AgentTool).where(AgentTool.tool_id == old_tool.id))
             for assignment in old_assignments.scalars().all():
@@ -3473,7 +3473,7 @@ async def seed_builtin_tools():
                 if not existing_assignment.scalar_one_or_none():
                     assignment.tool_id = new_tool.id
             await db.delete(old_tool)
-            logger.info(f"[ToolSeeder] Merged legacy builtin tool into {new_name}")
+            logger.info(f"[Startup] Merged legacy builtin tool into {new_name}")
 
         new_tool_ids = []
         for t in BUILTIN_TOOLS:
@@ -3498,7 +3498,7 @@ async def seed_builtin_tools():
                 await db.flush()  # get tool.id
                 if t["is_default"]:
                     new_tool_ids.append(tool.id)
-                logger.info(f"[ToolSeeder] Created builtin tool: {t['name']}")
+                logger.info(f"[Startup] Created builtin tool: {t['name']}")
             else:
                 # Sync fields that may evolve
                 updated_fields = []
@@ -3551,7 +3551,7 @@ async def seed_builtin_tools():
                     existing.parameters_schema = t["parameters_schema"]
                     updated_fields.append("parameters_schema")
                 if updated_fields:
-                    logger.info(f"[ToolSeeder] Updated {', '.join(updated_fields)}: {t['name']}")
+                    logger.info(f"[Startup] Updated {', '.join(updated_fields)}: {t['name']}")
 
         # Auto-assign new default tools to all existing agents
         if new_tool_ids:
@@ -3568,7 +3568,7 @@ async def seed_builtin_tools():
                     )
                     if not check.scalar_one_or_none():
                         db.add(AgentTool(agent_id=agent_id, tool_id=tool_id, enabled=True))
-            logger.info(f"[ToolSeeder] Auto-assigned {len(new_tool_ids)} new tools to {len(agent_ids)} agents")
+            logger.info(f"[Startup] Auto-assigned {len(new_tool_ids)} new tools to {len(agent_ids)} agents")
 
         # AgentBay desktop window helpers are non-default tools, but should be
         # available wherever the user has already enabled Cloud Desktop tools.
@@ -3611,7 +3611,7 @@ async def seed_builtin_tools():
                         assigned_count += 1
             if assigned_count:
                 logger.info(
-                    f"[ToolSeeder] Auto-assigned {assigned_count} AgentBay computer helper tool(s) "
+                    f"[Startup] Auto-assigned {assigned_count} AgentBay computer helper tool(s) "
                     f"to {len(enabled_agent_ids)} agent(s)"
                 )
 
@@ -3647,7 +3647,7 @@ async def seed_builtin_tools():
                         browser_assigned_count += 1
             if browser_assigned_count:
                 logger.info(
-                    f"[ToolSeeder] Auto-assigned {browser_assigned_count} AgentBay browser helper tool(s) "
+                    f"[Startup] Auto-assigned {browser_assigned_count} AgentBay browser helper tool(s) "
                     f"to {len(browser_enabled_agent_ids)} agent(s)"
                 )
 
@@ -3688,7 +3688,7 @@ async def seed_builtin_tools():
                         code_assigned_count += 1
             if code_assigned_count:
                 logger.info(
-                    f"[ToolSeeder] Auto-assigned {code_assigned_count} AgentBay code file helper tool(s) "
+                    f"[Startup] Auto-assigned {code_assigned_count} AgentBay code file helper tool(s) "
                     f"to {len(code_enabled_agent_ids)} agent(s)"
                 )
 
@@ -3698,7 +3698,7 @@ async def seed_builtin_tools():
             obsolete = result.scalar_one_or_none()
             if obsolete:
                 await db.delete(obsolete)
-                logger.info(f"[ToolSeeder] Removed obsolete tool: {obsolete_name}")
+                logger.info(f"[Startup] Removed obsolete tool: {obsolete_name}")
 
         # Legacy deployments stored company credentials for builtin tools in
         # the global tools.config row. Move those values into the first tenant's
@@ -3740,12 +3740,12 @@ async def seed_builtin_tools():
                 tool.config = clean_config
             if migrated:
                 logger.info(
-                    f"[ToolSeeder] Migrated {migrated} legacy builtin tool config(s) "
+                    f"[Startup] Migrated {migrated} legacy builtin tool config(s) "
                     f"to tenant_settings for tenant {first_tenant.id}"
                 )
 
         await db.commit()
-        logger.info("[ToolSeeder] Builtin tools seeded")
+        logger.info("[Startup] Builtin tools seeded")
 
 
 async def clean_orphaned_mcp_tools():
@@ -3777,7 +3777,7 @@ async def clean_orphaned_mcp_tools():
         await db.commit()
         
         if deleted_count > 0:
-            logger.info(f"[ToolSeeder] Cleaned up {deleted_count} orphaned MCP tools")
+            logger.info(f"[Startup] Cleaned up {deleted_count} orphaned MCP tools")
 
 # ── Atlassian Rovo MCP Server Integration ──────────────────────────────────
 
@@ -3848,7 +3848,7 @@ async def seed_atlassian_rovo_config():
             )
             db.add(tool)
             await db.commit()
-            logger.info("[ToolSeeder] Created Atlassian Rovo config tool")
+            logger.info("[Startup] Created Atlassian Rovo config tool")
         else:
             updated = False
             if existing.config_schema != t["config_schema"]:
@@ -3863,7 +3863,7 @@ async def seed_atlassian_rovo_config():
                 updated = True
             if updated:
                 await db.commit()
-                logger.info("[ToolSeeder] Updated Atlassian Rovo config tool")
+                logger.info("[Startup] Updated Atlassian Rovo config tool")
 
 
 async def get_atlassian_api_key() -> str:

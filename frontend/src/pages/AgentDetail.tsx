@@ -33,7 +33,7 @@ class AgentDetailErrorBoundary extends Component<{ children: React.ReactNode }, 
     }
 
     componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-        console.error('AgentDetail crash caught by error boundary:', error, errorInfo);
+        console.error('[ACP] AgentDetail crash caught by error boundary:', error, errorInfo);
     }
 
     handleReload = () => {

@@ -4,6 +4,11 @@ import httpx
 from loguru import logger
 
 
+def _safe(data: dict) -> dict:
+    skip = {"access_token","refresh_token","id_token","accessToken","client_secret"}
+    return {k:v for k,v in data.items() if k not in skip}
+
+
 async def get_wecom_access_token(corp_id: str, secret: str) -> dict:
     """Get WeCom access_token using corp_id and secret.
 
@@ -25,7 +30,7 @@ async def get_wecom_access_token(corp_id: str, secret: str) -> dict:
                 "expires_in": data.get("expires_in"),
             }
         else:
-            logger.error(f"[WeCom] Failed to get access_token: {data}")
+            logger.error(f"[WeCom] Failed to get access_token: {_safe(data)}")
             return {"errcode": data.get("errcode"), "errmsg": data.get("errmsg")}
 
 
@@ -83,5 +88,5 @@ async def send_wecom_message(
             logger.info(f"[WeCom] Message sent to {user_id}")
             return data
         else:
-            logger.error(f"[WeCom] Failed to send message: {data}")
+            logger.error(f"[WeCom] Failed to send message: {_safe(data)}")
             return data

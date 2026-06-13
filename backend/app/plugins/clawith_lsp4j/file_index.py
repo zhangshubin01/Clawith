@@ -162,12 +162,12 @@ def _build_from_git(project_path: str) -> FileIndex | None:
         idx.built_at = time.monotonic()
         idx.build_method = "git_ls_files"
         logger.info(
-            "[FILE-INDEX] built via git ls-files: project={} files={} elapsed={:.2f}s",
+            "[CTX] built via git ls-files: project={} files={} elapsed={:.2f}s",
             project_path, idx.file_count, idx.age,
         )
         return idx
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        logger.info("[FILE-INDEX] git ls-files unavailable: {}", e)
+        logger.info("[CTX] git ls-files unavailable: {}", e)
         return None
 
 
@@ -206,7 +206,7 @@ def _build_from_scandir(project_path: str) -> FileIndex:
     idx.build_method = "scandir"
     elapsed = time.monotonic() - start
     logger.info(
-        "[FILE-INDEX] built via scandir: project={} files={} elapsed={:.2f}s",
+        "[CTX] built via scandir: project={} files={} elapsed={:.2f}s",
         project_path, idx.file_count, elapsed,
     )
     return idx
@@ -231,7 +231,7 @@ def get_or_build_index(project_path: str, force_rebuild: bool = False) -> FileIn
 
     if not force_rebuild and cache_key in _index_cache and not _index_cache[cache_key].is_stale():
         idx = _index_cache[cache_key]
-        logger.debug("[FILE-INDEX] cache hit: project={} age={:.0f}s", project_path, idx.age)
+        logger.debug("[CTX] cache hit: project={} age={:.0f}s", project_path, idx.age)
         return idx
 
     # 构建新索引: git ls-files 优先
@@ -252,7 +252,7 @@ def build_code_map(project_path: str) -> str:
     # 服务器 PATH 可能不包含 /opt/homebrew/bin，用常见路径查找 rg
     _rg_path = shutil.which("rg") or shutil.which("rg", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
     if not _rg_path:
-        logger.warning("[CODE-MAP] rg not found")
+        logger.warning("[CTX] rg not found")
         return ""
 
     _DECL_PATTERN = (
@@ -350,7 +350,7 @@ def get_or_build_code_map(project_path: str) -> str:
     cmap = build_code_map(project_path)
     if cmap:
         _code_map_cache[cache_key] = (time.monotonic(), cmap)
-        logger.info("[CODE-MAP] built: project={} size={}", project_path, len(cmap))
+        logger.info("[CTX] built: project={} size={}", project_path, len(cmap))
     else:
-        logger.warning("[CODE-MAP] build returned empty: project={} isdir={}", project_path, os.path.isdir(project_path))
+        logger.warning("[CTX] build returned empty: project={} isdir={}", project_path, os.path.isdir(project_path))
     return cmap

@@ -65,12 +65,12 @@ def _make_no_proxy_connect(orig_connect):
             return
         old = _websockets.connect
         _websockets.connect = _NoProxyConnect
-        logger.debug("[Feishu WS] Scoped websockets proxy bypass: active")
+        logger.debug("[Feishu-WS] Scoped websockets proxy bypass: active")
         try:
             yield
         finally:
             _websockets.connect = old
-            logger.debug("[Feishu WS] Scoped websockets proxy bypass: restored")
+            logger.debug("[Feishu-WS] Scoped websockets proxy bypass: restored")
 
     return _scoped_no_proxy
 
@@ -82,7 +82,7 @@ _feishu_ws_bg: set[asyncio.Task] = set()
 
 if not _HAS_LARK:
     logger.warning(
-        "[Feishu WS] lark-oapi package not installed. "
+        "[Feishu-WS] lark-oapi package not installed. "
         "Feishu WebSocket features will be disabled. "
         "Install with: pip install lark-oapi"
     )
@@ -144,20 +144,20 @@ class FeishuWSManager:
                 body_dict = _parse_feishu_event_body(data)
                 if not body_dict:
                     logger.warning(
-                        f"[Feishu WS] Unexpected event data type with no recognizable fields: {type(data)}"
+                        f"[Feishu-WS] Unexpected event data type with no recognizable fields: {type(data)}"
                     )
                     return
                 event_type = body_dict.get("header", {}).get("event_type", "unknown")
-                logger.info(f"[Feishu WS] Received event for agent {agent_id}: {event_type}")
+                logger.info(f"[Feishu-WS] Received event for agent {agent_id}: {event_type}")
                 main_loop = self._main_loop
                 if main_loop is None or not main_loop.is_running():
-                    logger.error(f"[Feishu WS] Main event loop unavailable for agent {agent_id}")
+                    logger.error(f"[Feishu-WS] Main event loop unavailable for agent {agent_id}")
                     return
                 asyncio.run_coroutine_threadsafe(
                     self._async_handle_message(agent_id, body_dict), main_loop
                 )
             except Exception as e:
-                logger.exception(f"[Feishu WS] Could not dispatch event to main loop: {e}")
+                logger.exception(f"[Feishu-WS] Could not dispatch event to main loop: {e}")
 
         dispatcher = (
             lark.EventDispatcherHandler.builder("", "")
@@ -170,7 +170,7 @@ class FeishuWSManager:
         """Handle im.message.receive_v1 events from Feishu WebSocket asynchronously."""
         try:
             event_type = body_dict.get("header", {}).get("event_type", "unknown")
-            logger.info(f"[Feishu WS] Event received for agent {agent_id}: {event_type}")
+            logger.info(f"[Feishu-WS] Event received for agent {agent_id}: {event_type}")
 
             # Import here to avoid circular dependencies
             from app.api.feishu import process_feishu_event
@@ -178,7 +178,7 @@ class FeishuWSManager:
             await process_feishu_event(agent_id, body_dict)
 
         except Exception as e:
-            logger.exception(f"[Feishu WS] Error processing event for {agent_id}: {e}")
+            logger.exception(f"[Feishu-WS] Error processing event for {agent_id}: {e}")
 
     async def start_client(
         self,
@@ -189,7 +189,7 @@ class FeishuWSManager:
     ):
         """Spawns a WebSocket client fully asynchronously inside FastAPI's loop."""
         if not _HAS_LARK:
-            logger.warning("[Feishu WS] lark-oapi not installed, cannot start client")
+            logger.warning("[Feishu-WS] lark-oapi not installed, cannot start client")
             return
 
         # Monkeypatch lark-oapi global event loop to use the current running event loop.
@@ -198,14 +198,14 @@ class FeishuWSManager:
         try:
             import lark_oapi.ws.client as lark_ws_client
             lark_ws_client.loop = asyncio.get_running_loop()
-            logger.debug("[Feishu WS] Patched lark_oapi.ws.client.loop with running loop")
+            logger.debug("[Feishu-WS] Patched lark_oapi.ws.client.loop with running loop")
         except Exception as e:
-            logger.warning(f"[Feishu WS] Failed to patch lark-oapi event loop: {e}")
+            logger.warning(f"[Feishu-WS] Failed to patch lark-oapi event loop: {e}")
         if not app_id or not app_secret:
-            logger.warning(f"[Feishu WS] Missing app_id or app_secret for {agent_id}, skipping")
+            logger.warning(f"[Feishu-WS] Missing app_id or app_secret for {agent_id}, skipping")
             return
 
-        logger.info(f"[Feishu WS] Starting async WS client for agent {agent_id} (App ID: {app_id})")
+        logger.info(f"[Feishu-WS] Starting async WS client for agent {agent_id} (App ID: {app_id})")
         try:
             self._main_loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -216,12 +216,12 @@ class FeishuWSManager:
             old_task = self._tasks.pop(agent_id, None)
             if old_task and not old_task.done():
                 old_task.cancel()
-                logger.info(f"[Feishu WS] Cancelled old WS task for {agent_id}")
+                logger.info(f"[Feishu-WS] Cancelled old WS task for {agent_id}")
 
         try:
             event_handler = self._create_event_handler(agent_id)
         except Exception as e:
-            logger.exception(f"[Feishu WS] Failed to create event handler for {agent_id}: {e}")
+            logger.exception(f"[Feishu-WS] Failed to create event handler for {agent_id}: {e}")
             return
 
         # Instantiate Client — SDK manages connect + receive + ping internally.
@@ -261,16 +261,16 @@ class FeishuWSManager:
             _bind_lark_ws_loop()
             _ping_task: Optional[asyncio.Task] = None
             try:
-                logger.info(f"[Feishu WS] Connecting for agent {agent_id}")
+                logger.info(f"[Feishu-WS] Connecting for agent {agent_id}")
                 _ping_task = await _do_full_connect()
                 logger.info(
-                    f"[Feishu WS] Connected for agent {agent_id}, "
+                    f"[Feishu-WS] Connected for agent {agent_id}, "
                     f"conn_id={getattr(client, '_conn_id', None)}, receive loop started"
                 )
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                logger.exception(f"[Feishu WS] Initial connect failed for agent {agent_id}: {e}")
+                logger.exception(f"[Feishu-WS] Initial connect failed for agent {agent_id}: {e}")
 
             # 健康检查：SDK auto_reconnect 在 ping 超时后未必恢复，需主动重连避免飞书报 app not online
             _last_conn_id = getattr(client, "_conn_id", None)
@@ -289,7 +289,7 @@ class FeishuWSManager:
                         _unhealthy_streak += 1
                         if not _was_disconnected:
                             logger.warning(
-                                f"[Feishu WS] Connection unhealthy for agent {agent_id} "
+                                f"[Feishu-WS] Connection unhealthy for agent {agent_id} "
                                 f"(conn_dead={conn_dead}, ping_dead={ping_dead}, "
                                 f"last conn_id={_last_conn_id})"
                             )
@@ -297,10 +297,10 @@ class FeishuWSManager:
                         if _unhealthy_streak >= 2:
                             creds = self._credentials.get(agent_id)
                             if not creds:
-                                logger.error(f"[Feishu WS] No credentials for forced reconnect: {agent_id}")
+                                logger.error(f"[Feishu-WS] No credentials for forced reconnect: {agent_id}")
                                 _unhealthy_streak = 0
                                 continue
-                            logger.warning(f"[Feishu WS] Forcing reconnect for agent {agent_id}")
+                            logger.warning(f"[Feishu-WS] Forcing reconnect for agent {agent_id}")
                             try:
                                 await client._disconnect()
                             except Exception:
@@ -310,36 +310,36 @@ class FeishuWSManager:
                             _was_disconnected = False
                             _last_conn_id = getattr(client, "_conn_id", None)
                             logger.info(
-                                f"[Feishu WS] Reconnected for agent {agent_id} "
+                                f"[Feishu-WS] Reconnected for agent {agent_id} "
                                 f"(conn_id={_last_conn_id})"
                             )
                     else:
                         _unhealthy_streak = 0
                         if _was_disconnected:
                             logger.info(
-                                f"[Feishu WS] Connection restored for agent {agent_id} "
+                                f"[Feishu-WS] Connection restored for agent {agent_id} "
                                 f"(new conn_id={curr_conn_id})"
                             )
                             _was_disconnected = False
                         if curr_conn_id != _last_conn_id and curr_conn_id:
                             logger.info(
-                                f"[Feishu WS] Connection ID changed for agent {agent_id}: "
+                                f"[Feishu-WS] Connection ID changed for agent {agent_id}: "
                                 f"{_last_conn_id} → {curr_conn_id}"
                             )
                             _last_conn_id = curr_conn_id
                 except asyncio.CancelledError:
-                    logger.info(f"[Feishu WS] Task cancelled for agent {agent_id}")
+                    logger.info(f"[Feishu-WS] Task cancelled for agent {agent_id}")
                     try:
                         await client._disconnect()
                     except Exception:
                         pass
                     return
                 except Exception as e:
-                    logger.exception(f"[Feishu WS] Health-watch error for agent {agent_id}: {e}")
+                    logger.exception(f"[Feishu-WS] Health-watch error for agent {agent_id}: {e}")
 
         task = asyncio.create_task(_run_async_client(), name=f"feishu-ws-async-{str(agent_id)[:8]}")
         self._tasks[agent_id] = task
-        logger.info(f"[Feishu WS] Async WS task scheduled for agent {agent_id}")
+        logger.info(f"[Feishu-WS] Async WS task scheduled for agent {agent_id}")
 
     async def stop_client(self, agent_id: uuid.UUID):
         """Stops an actively running WebSocket client for an agent."""
@@ -347,20 +347,20 @@ class FeishuWSManager:
             task = self._tasks.pop(agent_id)
             if not task.done():
                 task.cancel()
-                logger.info(f"[Feishu WS] Stopped client task for agent {agent_id}")
+                logger.info(f"[Feishu-WS] Stopped client task for agent {agent_id}")
         if agent_id in self._clients:
             client = self._clients.pop(agent_id)
             try:
                 await client._disconnect()
             except Exception as e:
-                logger.error(f"[Feishu WS] Error disconnecting client for {agent_id}: {e}")
+                logger.error(f"[Feishu-WS] Error disconnecting client for {agent_id}: {e}")
 
     async def start_all(self):
         """Start WS clients for all configured Feishu agents."""
         if not _HAS_LARK:
-            logger.info("[Feishu WS] lark-oapi not installed, skipping Feishu WS initialization")
+            logger.info("[Feishu-WS] lark-oapi not installed, skipping Feishu WS initialization")
             return
-        logger.info("[Feishu WS] Initializing all active Feishu channels...")
+        logger.info("[Feishu-WS] Initializing all active Feishu channels...")
         self._main_loop = asyncio.get_running_loop()
         async with async_session() as db:
             result = await db.execute(
@@ -380,7 +380,7 @@ class FeishuWSManager:
                         config.agent_id, config.app_id, config.app_secret, stop_existing=False
                     )
                 else:
-                    logger.warning(f"[Feishu WS] Skipping agent {config.agent_id}: missing credentials")
+                    logger.warning(f"[Feishu-WS] Skipping agent {config.agent_id}: missing credentials")
 
     def status(self) -> dict:
         """Return status of all active WS tasks."""

@@ -32,6 +32,7 @@ from loguru import logger
 from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 
+from app.core.logging_config import get_trace_id
 from app.database import async_session
 from app.models.task import Task
 from app.models.agent import Agent as AgentModel
@@ -2996,6 +2997,7 @@ async def execute_tool(
         session_id: The ChatSession ID, used to isolate AgentBay instances
                     per conversation. Passed through to agentbay_* tools.
     """
+    _log = logger.bind(trace_id=get_trace_id())
     if not isinstance(tool_name, str):
         tool_name = str(tool_name or "")
     tool_name = (
@@ -6044,7 +6046,7 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                         return f"✅ 消息已发送（user_id: {direct_user_id}）"
                     return f"❌ 发送失败：{resp.get('msg')} (code {resp.get('code')})"
                 except FeishuAPIError as user_id_err:
-                    logger.info(f"❌ 发送失败(user_id): {user_id_err.msg}")
+                    logger.info(f"[AgentBay] 发送失败(user_id): {user_id_err.msg}")
                     return f"❌ 飞书发送失败：{user_id_err.user_message}"
 
             # Find the relationship member by name
@@ -6063,12 +6065,12 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                     break
 
             if not target_member:
-                logger.info(f"❌ {member_name} has no Feishu user_id in relationship")   
+                logger.info(f"[AgentBay] {member_name} has no Feishu user_id in relationship")   
                 return f"❌ {member_name} 不是我的关系"
                 
             logger.info(f"target_member={target_member.external_id}, {target_member.open_id}, {target_member.email}, {target_member.phone}")
             if not target_member.external_id:
-                logger.error(f"❌ {member_name} has no linked Feishu user_id")
+                logger.error(f"[AgentBay] {member_name} has no linked Feishu user_id")
                 return f"❌ {member_name} 没有关联可用的飞书 user_id"
 
             content = json.dumps({"text": message_text}, ensure_ascii=False)
@@ -6125,10 +6127,10 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                 if resp.get("code") == 0:
                     await _save_outgoing_to_feishu_session(target_member.external_id)
                     return f"✅ Successfully sent message to {member_name}"
-                logger.info(f"❌ Failed to send message to {target_member.external_id} via Feishu (user_id): {resp}")
+                logger.info(f"[AgentBay] Failed to send message to {target_member.external_id} via Feishu (user_id): {resp}")
                 return f"发送失败: {resp.get('msg')} (code {resp.get('code')})"
             except FeishuAPIError as user_id_err:
-                logger.info(f"❌ Failed to send message to {target_member.external_id} via Feishu (user_id): {user_id_err}")
+                logger.info(f"[AgentBay] Failed to send message to {target_member.external_id} via Feishu (user_id): {user_id_err}")
                 return f"❌ 飞书发送失败：{user_id_err.user_message}"
     except Exception as e:
         return f"❌ Message send error: {str(e)[:200]}"
@@ -7236,7 +7238,7 @@ async def _append_focus_item(agent_id: uuid.UUID, identifier: str, description: 
     try:
         await ensure_focus_item(agent_id, focus_ref=identifier, description=description)
     except Exception as e:
-        logger.warning(f"[A2A] Failed to update Focus for agent {agent_id}: {e}")
+        logger.warning(f"[TOOL] Failed to update Focus for agent {agent_id}: {e}")
 
 
 async def _wake_agent_async(agent_id: uuid.UUID, reason_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False, a2a_session_id: str | None = None) -> None:
@@ -7480,7 +7482,7 @@ async def _send_message_to_agent(
                     fb_r = await db.execute(select(LLMModel).where(LLMModel.id == target.fallback_model_id))
                     target_model = fb_r.scalar_one_or_none()
                     if target_model:
-                        logger.warning(f"[A2A] Primary model unavailable for {target_name}, using fallback: {target_model.model}")
+                        logger.warning(f"[TOOL] Primary model unavailable for {target_name}, using fallback: {target_model.model}")
 
                 if not target_model:
                     return f"⚠️ {target_name} has no LLM model configured"
@@ -7530,7 +7532,7 @@ async def _send_message_to_agent(
                     a2a_session_id=session_id,
                 )
             except Exception as e:
-                logger.warning(f"[A2A] Failed to wake {target_name} for notify: {e}")
+                logger.warning(f"[TOOL] Failed to wake {target_name} for notify: {e}")
 
             return f"✅ Notification sent to {target_name}. They will process it asynchronously."
 
@@ -7542,7 +7544,7 @@ async def _send_message_to_agent(
             try:
                 await _append_focus_item(from_agent_id, focus_id, focus_desc)
             except Exception as e:
-                logger.warning(f"[A2A] Failed to write focus for delegate: {e}")
+                logger.warning(f"[TOOL] Failed to write focus for delegate: {e}")
 
             trigger_name = f"a2a_wait_{target_name.lower().replace(' ', '_')}"
             trigger_reason = (
@@ -7572,7 +7574,7 @@ async def _send_message_to_agent(
                     origin_source_channel=origin_source_channel,
                 )
             except Exception as e:
-                logger.warning(f"[A2A] Failed to create trigger for delegate: {e}")
+                logger.warning(f"[TOOL] Failed to create trigger for delegate: {e}")
 
             try:
                 from app.services.activity_logger import log_activity
@@ -7593,7 +7595,7 @@ async def _send_message_to_agent(
                     a2a_session_id=session_id,
                 )
             except Exception as e:
-                logger.warning(f"[A2A] Failed to wake {target_name} for delegate: {e}")
+                logger.warning(f"[TOOL] Failed to wake {target_name} for delegate: {e}")
 
             return f"✅ Task delegated to {target_name}. You will be notified when they complete it."
 
@@ -7694,7 +7696,7 @@ async def _send_message_to_agent(
                         err_text = str(llm_exc) or type(llm_exc).__name__
                         backoff = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                         logger.warning(
-                            f"[A2A] LLM call failed for {target_name} (round={_round + 1}, "
+                            f"[TOOL] LLM call failed for {target_name} (round={_round + 1}, "
                             f"attempt={attempt}/{_A2A_MAX_RETRIES}): {err_text[:200]}. "
                             f"Retrying in {backoff:.1f}s"
                         )
@@ -7745,7 +7747,7 @@ async def _send_message_to_agent(
                         try:
                             tool_args = parse_tool_arguments(raw_args)
                         except Exception as parse_exc:
-                            logger.warning(f"[A2A] Invalid tool arguments for {tool_name}: {parse_exc}")
+                            logger.warning(f"[TOOL] Invalid tool arguments for {tool_name}: {parse_exc}")
                             tool_result = (
                                 f"❌ Invalid JSON arguments for `{tool_name}`: {parse_exc}. "
                                 "DO NOT retry with the same content. Please fix the JSON encoding: "
@@ -7788,7 +7790,7 @@ async def _send_message_to_agent(
                                 ))
                                 await _tc_db.commit()
                         except Exception as _tc_err:
-                            logger.error(f"[A2A] Failed to save tool_call: {_tc_err}")
+                            logger.error(f"[TOOL] Failed to save tool_call: {_tc_err}")
 
                         # Add tool result to conversation
                         full_msgs.append(LLMMessage(
@@ -7842,7 +7844,7 @@ async def _send_message_to_agent(
 
     except Exception as e:
         logger.exception(
-            f"[A2A] send_message_to_agent failed: from={from_agent_id}, to={args.get('agent_name', '')}"
+            f"[TOOL] send_message_to_agent failed: from={from_agent_id}, to={args.get('agent_name', '')}"
         )
         error_type = type(e).__name__
         error_detail = (str(e) or "").strip()

@@ -16,6 +16,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.database import async_session
+from app.core.logging_config import get_trace_id
 from app.models.agent import Agent as AgentModel
 from app.models.org import OrgMember
 from app.plugins.clawith_acp.acp_session import AcpSessionManager
@@ -143,7 +144,7 @@ class AcpHandler:
         try:
             async for raw in self.ws.iter_text():
                 if "session/new" in raw:
-                    logger.info(f"[ACP-RAW-IN] session/new request: {raw[:800]}")
+                    logger.info(f"[ACP-RAW-IN] session/new len={len(raw)}")
                 try:
                     request = json.loads(raw)
                 except json.JSONDecodeError:
@@ -294,6 +295,15 @@ class AcpHandler:
                 self._current_prompt_perf = None
             await self._flush_chunk_buffer()
             logger.info(f"[ACP] prompt 派发结束: session={self.session_id} id={msg_id}")
+
+            await self._push_to_ide(json.dumps({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": self.session_id,
+                    "update": {"traceId": get_trace_id(), "type": "prompt_done"}
+                }
+            }))
 
     # ── ACP 方法实现 ──────────────────────────────────────────
 
@@ -756,7 +766,7 @@ class AcpHandler:
             # WebSocket 断开时 send_text 会抛 ConnectionClosedError, 捕获防止重入竞态
             await asyncio.shield(self.ws.send_text(raw))
         except Exception:
-            pass
+            logger.warning("[ACP-FLUSH] 发送失败 conn={} session={} len={}", self.conn_id, self.session_id, len(text))
         preview = text[:60].replace("\n", "\\n")
         logger.info(
             f"[ACP-FLUSH] conn={self.conn_id} session={self.session_id} "

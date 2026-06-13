@@ -534,7 +534,7 @@ export default function Dashboard() {
                 const tasks: Task[] = [];
                 taskResults.forEach(r => { if (r.status === 'fulfilled') tasks.push(...r.value); });
                 setAllTasks(tasks);
-            } catch (e) { console.error('Failed to fetch tasks:', e); }
+            } catch (e) { console.error('[API] Failed to fetch tasks:', e); }
 
             try {
                 const actResults = await Promise.allSettled(agents.map(a => activityApi.list(a.id, 5)));
@@ -549,7 +549,7 @@ export default function Dashboard() {
                 activities.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
                 setAllActivities(activities.slice(0, 20));
                 setAgentActivities(perAgent);
-            } catch (e) { console.error('Failed to fetch activities:', e); }
+            } catch (e) { console.error('[API] Failed to fetch activities:', e); }
         };
         fetchData();
         const interval = setInterval(fetchData, 30000);

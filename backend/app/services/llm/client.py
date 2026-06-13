@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import socket
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Literal
@@ -18,6 +19,7 @@ import ssl
 import certifi
 import httpx
 from loguru import logger
+from app.core.logging_config import get_trace_id
 
 
 def _create_ssl_context() -> ssl.SSLContext:
@@ -327,7 +329,16 @@ class OpenAICompatibleClient(LLMClient):
                     max_keepalive_connections=50,
                     keepalive_expiry=30.0,
                 ),
-                transport=httpx.AsyncHTTPTransport(retries=3),
+                transport=httpx.AsyncHTTPTransport(
+                    retries=3,
+                    socket_options=[
+                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
+                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
+                    ],
+                ),
                 http2=False,
             )
         return self._client
@@ -336,6 +347,7 @@ class OpenAICompatibleClient(LLMClient):
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
+            "X-Trace-Id": get_trace_id(),
         }
 
     def _normalize_base_url(self) -> str:
@@ -356,7 +368,7 @@ class OpenAICompatibleClient(LLMClient):
     ) -> dict[str, Any]:
         """Build request payload."""
         messages_payload = self._messages_to_openai_payload(messages)
-        logger.debug(f"[LLM-Debug] OpenAICompatibleClient payload messages for model {self.model}: {json.dumps(messages_payload, indent=2, ensure_ascii=False)}")
+        logger.opt(lazy=True).debug(lambda: f"[LLM-Debug] OpenAICompatibleClient payload messages for model {self.model}: {json.dumps(messages_payload, indent=2, ensure_ascii=False)}")
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages_payload,
@@ -787,7 +799,16 @@ class OpenAIResponsesClient(LLMClient):
                     max_keepalive_connections=50,
                     keepalive_expiry=30.0,
                 ),
-                transport=httpx.AsyncHTTPTransport(retries=3),
+                transport=httpx.AsyncHTTPTransport(
+                    retries=3,
+                    socket_options=[
+                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
+                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
+                    ],
+                ),
                 http2=False,
             )
         return self._client
@@ -796,6 +817,7 @@ class OpenAIResponsesClient(LLMClient):
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
+            "X-Trace-Id": get_trace_id(),
         }
 
     def _normalize_base_url(self) -> str:
@@ -1175,7 +1197,16 @@ class GeminiClient(LLMClient):
                     max_keepalive_connections=50,
                     keepalive_expiry=30.0,
                 ),
-                transport=httpx.AsyncHTTPTransport(retries=3),
+                transport=httpx.AsyncHTTPTransport(
+                    retries=3,
+                    socket_options=[
+                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
+                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
+                    ],
+                ),
                 http2=False,
             )
         return self._client
@@ -1202,6 +1233,7 @@ class GeminiClient(LLMClient):
         return {
             "Content-Type": "application/json",
             "x-goog-api-key": self.api_key,
+            "X-Trace-Id": get_trace_id(),
         }
 
     def _normalize_base_url(self) -> str:
@@ -1696,7 +1728,16 @@ class AnthropicClient(LLMClient):
                     max_keepalive_connections=50,
                     keepalive_expiry=30.0,
                 ),
-                transport=httpx.AsyncHTTPTransport(retries=3),
+                transport=httpx.AsyncHTTPTransport(
+                    retries=3,
+                    socket_options=[
+                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
+                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
+                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
+                    ],
+                ),
                 http2=False,
             )
         return self._client
@@ -1707,6 +1748,7 @@ class AnthropicClient(LLMClient):
             "x-api-key": self.api_key,
             "anthropic-version": self.API_VERSION,
             "anthropic-beta": "prompt-caching-2024-07-31",
+            "X-Trace-Id": get_trace_id(),
         }
 
     def _normalize_base_url(self) -> str:

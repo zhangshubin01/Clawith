@@ -342,7 +342,7 @@ function CopyMessageButton({ text }: { text: string }) {
         };
 
         if (navigator.clipboard && window.isSecureContext) {
-            copyToClipboard(text).then(copySuccess).catch(err => console.error('Clipboard API failed', err));
+            copyToClipboard(text).then(copySuccess).catch(err => console.error('[Util] Clipboard API failed', err));
         } else {
             // Fallback for non-HTTPS dev environments
             const textArea = document.createElement("textarea");
@@ -356,7 +356,7 @@ function CopyMessageButton({ text }: { text: string }) {
                     copySuccess();
                 }
             } catch (err) {
-                console.error('Fallback copy failed', err);
+                console.error('[Util] Fallback copy failed', err);
             }
             document.body.removeChild(textArea);
         }
@@ -497,7 +497,7 @@ function AccessPermissionsPanel({
         } catch (e) {
             setLocalScope(previousScope);
             setPermissionError(e instanceof Error ? e.message : String(e));
-            console.error('Failed to update permissions', e);
+            console.error('[API] Failed to update permissions', e);
         } finally {
             setSavingScope(null);
         }
@@ -516,7 +516,7 @@ function AccessPermissionsPanel({
         } catch (e) {
             setLocalAccessLevel(previousLevel);
             setPermissionError(e instanceof Error ? e.message : String(e));
-            console.error('Failed to update access level', e);
+            console.error('[API] Failed to update access level', e);
         } finally {
             setSavingScope(null);
         }
@@ -529,7 +529,7 @@ function AccessPermissionsPanel({
             scope_type: 'custom',
             access_level: currentAccessLevel,
             user_access: [...userAccess, { ...candidate, access_level: creatorId === userId ? 'manage' : 'use' }],
-        }).catch(e => console.error('Failed to add user access', e));
+        }).catch(e => console.error('[API] Failed to add user access', e));
     };
 
     const isLockedAccessUser = (user: AccessUser) => user.is_required || creatorId === user.id;
@@ -547,7 +547,7 @@ function AccessPermissionsPanel({
             scope_type: 'custom',
             access_level: currentAccessLevel,
             user_access: userAccess.map(u => u.id === userId ? { ...u, access_level: level } : u),
-        }).catch(e => console.error('Failed to update user access', e));
+        }).catch(e => console.error('[API] Failed to update user access', e));
     };
 
     const removeUser = (userId: string) => {
@@ -557,7 +557,7 @@ function AccessPermissionsPanel({
             scope_type: 'custom',
             access_level: currentAccessLevel,
             user_access: userAccess.filter(u => u.id !== userId),
-        }).catch(e => console.error('Failed to remove user access', e));
+        }).catch(e => console.error('[API] Failed to remove user access', e));
     };
 
     const toggleUser = (user: AccessUserCandidate) => {
@@ -2475,7 +2475,7 @@ export default function AgentDetailPage() {
             queryClient.invalidateQueries({ queryKey: ['agents'] });
         } catch (err: any) {
             if (err?.name === 'AbortError') return;
-            console.error('Failed to load session messages:', err);
+            console.error('[Session] Failed to load session messages:', err);
         }
     };
 
@@ -2496,11 +2496,11 @@ export default function AgentDetailPage() {
                 await selectSession(newSess, 'mine');
             } else {
                 const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-                console.error('Failed to create session:', err);
+                console.error('[Session] Failed to create session:', err);
                 toast.error(t('common.error.sessionCreateFailed', '创建会话失败'), { details: String(err.detail || `HTTP ${res.status}`) });
             }
         } catch (err: any) {
-            console.error('Failed to create session:', err);
+            console.error('[Session] Failed to create session:', err);
             toast.error(t('common.error.sessionCreateFailed', '创建会话失败'), { details: String(err.message || err) });
         }
     };
@@ -2970,6 +2970,8 @@ export default function AgentDetailPage() {
     const ensureSessionSocket = (sess: any, agentId: string, authToken: string) => {
         const sessionId = String(sess.id);
         const key = buildSessionRuntimeKey(agentId, sessionId);
+        let _streamStarted = false;
+        let _chunkCount = 0;
         const existing = wsMapRef.current[key];
         if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
         reconnectDisabledRef.current[key] = false;
@@ -2979,6 +2981,7 @@ export default function AgentDetailPage() {
         const scheduleReconnect = () => {
             if (reconnectDisabledRef.current[key]) return;
             clearReconnectTimer(key);
+            console.log('[WS] Scheduling reconnect', { key, delayMs: 2000 });
             reconnectTimerRef.current[key] = setTimeout(() => {
                 reconnectTimerRef.current[key] = null;
                 if (!reconnectDisabledRef.current[key]) ensureSessionSocket(sess, agentId, authToken);
@@ -2989,6 +2992,7 @@ export default function AgentDetailPage() {
         const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${agentId}?token=${authToken}${sessionParam}&lang=${lang}`);
         wsMapRef.current[key] = ws;
         ws.onopen = () => {
+            console.log('[WS] Connected', { sessionId, key });
             if (reconnectDisabledRef.current[key]) {
                 ws.close();
                 return;
@@ -3005,6 +3009,7 @@ export default function AgentDetailPage() {
             }
         };
         ws.onclose = (e) => {
+            console.warn('[WS] Closed', { sessionId, code: e.code, reason: e.reason || 'none', wasClean: e.wasClean });
             if (wsMapRef.current[key] === ws) delete wsMapRef.current[key];
             setSessionUiState(key, { isWaiting: false, isStreaming: false });
             const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
@@ -3015,6 +3020,7 @@ export default function AgentDetailPage() {
                 setIsStreaming(false);
             }
             if (e.code === 4003 || e.code === 4002) {
+                console.warn('[WS] Terminal close', { sessionId, code: e.code });
                 reconnectDisabledRef.current[key] = true;
                 clearReconnectTimer(key);
                 if (isActiveRuntime && e.code === 4003) setAgentExpired(true);
@@ -3025,7 +3031,7 @@ export default function AgentDetailPage() {
         ws.onerror = (error) => {
             const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
             if (isActiveRuntime) setWsConnected(false);
-            console.warn(`WebSocket error for session ${sessionId}:`, error);
+            console.error('[WS] Error', { sessionId, error: String(error) });
             // Error automatically triggers onclose with abnormal code, which handles reconnect
         };
         ws.onmessage = (e) => {
@@ -3071,6 +3077,7 @@ export default function AgentDetailPage() {
             }
 
             if (d.type === 'thinking') {
+                console.debug('[Stream] Thinking', { sessionId, active: true });
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
                     if (last && last.role === 'assistant' && ((last as ChatMessageType)._streaming ?? false)) {
@@ -3223,12 +3230,16 @@ export default function AgentDetailPage() {
                     queryClient.invalidateQueries({ queryKey: ['agents'] });
                 }
             } else if (d.type === 'chunk') {
+                if (!_streamStarted) { _streamStarted = true; console.log('[Stream] Start', { sessionId }); }
+                _chunkCount++;
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
                     if (last && last.role === 'assistant' && ((last as ChatMessageType)._streaming ?? false)) return [...prev.slice(0, -1), { ...last, content: last.content + d.content } as any];
                     return [...prev, { role: 'assistant', content: d.content, _streaming: true } as any];
                 });
             } else if (d.type === 'done') {
+                console.log('[Stream] End', { sessionId, chunks: _chunkCount });
+                _streamStarted = false; _chunkCount = 0;
                 // Add end marker to code output if there was any code activity
                 setLiveState(prev => {
                     if (prev.code?.output) {
@@ -6455,6 +6466,7 @@ export default function AgentDetailPage() {
                                                                     const activeRuntimeKey = buildSessionRuntimeKey(id, String(activeSession.id));
                                                                     const activeSocket = wsMapRef.current[activeRuntimeKey];
                                                                     if (activeSocket?.readyState === WebSocket.OPEN) {
+                                                                        console.log('[Stream] Abort', { sessionId: String(activeSession.id) });
                                                                         activeSocket.send(JSON.stringify({ type: 'abort' }));
                                                                         setIsStreaming(false);
                                                                         setIsWaiting(false);

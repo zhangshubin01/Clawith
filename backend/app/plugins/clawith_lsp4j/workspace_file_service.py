@@ -137,7 +137,7 @@ class WorkspaceFileService:
         async with self._lock:
             if file_path and content is not None:
                 self._file_content_cache[file_path] = content
-                logger.debug("[WS-FILE] 缓存文件内容: path={} len={}", file_path, len(content))
+                logger.debug("[WS] 缓存文件内容: path={} len={}", file_path, len(content))
 
     async def get_cached_content(self, file_path: str) -> str | None:
         """获取缓存的文件内容。"""
@@ -165,7 +165,7 @@ class WorkspaceFileService:
             self._snapshot_to_request[snapshot_id] = request_id
             self._current_snapshot_id = snapshot_id
             self._current_snapshot_by_session[session_id] = snapshot_id
-            logger.info("[WS-FILE] 创建 snapshot: id={} requestId={} idx={}",
+            logger.info("[WS] 创建 snapshot: id={} requestId={} idx={}",
                         snapshot_id[:8], request_id[:8], idx)
             return snap
 
@@ -192,7 +192,7 @@ class WorkspaceFileService:
                     delChars=existing.diff_info.delChars,
                 )
                 existing.tool_call_id = tool_call_id
-                logger.info("[WS-FILE] 更新文件版本: fileId={} version={}", file_id, existing.version)
+                logger.info("[WS] 更新文件版本: fileId={} version={}", file_id, existing.version)
                 return existing
 
             ws_file = WorkspaceFile(
@@ -205,7 +205,7 @@ class WorkspaceFileService:
             )
             self._files[file_id] = ws_file
             self._files_by_id[ws_file.id] = ws_file
-            logger.info("[WS-FILE] 创建工作区文件: id={} fileId={} mode={} snapshot={}",
+            logger.info("[WS] 创建工作区文件: id={} fileId={} mode={} snapshot={}",
                         ws_file.id[:8], file_id, mode, snapshot_id[:8])
             return ws_file
 
@@ -219,14 +219,14 @@ class WorkspaceFileService:
         async with self._lock:
             ws_file = self._files.get(file_id)
             if not ws_file:
-                logger.warning("[WS-FILE] set_content: 文件不存在 fileId={}", file_id)
+                logger.warning("[WS] set_content: 文件不存在 fileId={}", file_id)
                 return DiffInfo()
 
             ws_file.last_stable_content = last_stable_content
             ws_file.content = full_content
             # compute_diff_info 是纯计算，不访问共享状态，可在锁内调用
             ws_file.diff_info = self.compute_diff_info(last_stable_content, full_content)
-            logger.info("[WS-FILE] 设置内容: fileId={} old_len={} new_len={} +{} -{}",
+            logger.info("[WS] 设置内容: fileId={} old_len={} new_len={} +{} -{}",
                         file_id, len(last_stable_content), len(full_content),
                         ws_file.diff_info.add, ws_file.diff_info.delete)
             return ws_file.diff_info
@@ -240,12 +240,12 @@ class WorkspaceFileService:
                 if ws_file_by_uuid:
                     ws_file = ws_file_by_uuid
                 else:
-                    logger.warning("[WS-FILE] update_status: 文件不存在 id={}", file_id)
+                    logger.warning("[WS] update_status: 文件不存在 id={}", file_id)
                     return None
             ws_file.status = status
             if message:
                 ws_file.message = message
-            logger.info("[WS-FILE] 状态更新: fileId={} status={}", ws_file.file_id, status)
+            logger.info("[WS] 状态更新: fileId={} status={}", ws_file.file_id, status)
             return ws_file
 
     async def get_file(self, file_id: str) -> WorkspaceFile | None:
@@ -268,7 +268,7 @@ class WorkspaceFileService:
         async with self._lock:
             ws_file = self._files_by_id.get(ws_id)
             if not ws_file:
-                logger.warning("[WS-FILE] operate: 文件不存在 id={}", ws_id)
+                logger.warning("[WS] operate: 文件不存在 id={}", ws_id)
                 return False
 
             if op_type.upper() in ("ACCEPT", "ACCEPTED"):
@@ -278,10 +278,10 @@ class WorkspaceFileService:
             elif op_type.upper() in ("REJECT", "REJECTED"):
                 ws_file.status = "REJECTED"
             else:
-                logger.warning("[WS-FILE] operate: 未知操作类型 op={}", op_type)
+                logger.warning("[WS] operate: 未知操作类型 op={}", op_type)
                 return False
 
-            logger.info("[WS-FILE] 操作完成: id={} op={} status={}",
+            logger.info("[WS] 操作完成: id={} op={} status={}",
                         ws_id[:8], op_type, ws_file.status)
             return True
 
@@ -290,7 +290,7 @@ class WorkspaceFileService:
         async with self._lock:
             ws_file = self._files_by_id.get(ws_id)
             if not ws_file:
-                logger.warning("[WS-FILE] update_content: 文件不存在 id={}", ws_id)
+                logger.warning("[WS] update_content: 文件不存在 id={}", ws_id)
                 return False
 
             if content is not None:
@@ -300,7 +300,7 @@ class WorkspaceFileService:
             # 重新计算 DiffInfo
             ws_file.diff_info = self.compute_diff_info(
                 ws_file.last_stable_content, ws_file.content)
-            logger.info("[WS-FILE] 更新内容: id={} +{} -{}", ws_id[:8],
+            logger.info("[WS] 更新内容: id={} +{} -{}", ws_id[:8],
                         ws_file.diff_info.add, ws_file.diff_info.delete)
             return True
 
@@ -346,7 +346,7 @@ class WorkspaceFileService:
                 if f.snapshot_id != snapshot_id:
                     continue
                 f.status = "ACCEPTED"
-                logger.info("[WS-FILE] 状态更新: fileId={} status={}", f.file_id, "ACCEPTED")
+                logger.info("[WS] 状态更新: fileId={} status={}", f.file_id, "ACCEPTED")
                 n += 1
             return n
 
@@ -358,7 +358,7 @@ class WorkspaceFileService:
                 if f.snapshot_id != snapshot_id:
                     continue
                 f.status = "REJECTED"
-                logger.info("[WS-FILE] 状态更新: fileId={} status={}", f.file_id, "REJECTED")
+                logger.info("[WS] 状态更新: fileId={} status={}", f.file_id, "REJECTED")
                 n += 1
             return n
 

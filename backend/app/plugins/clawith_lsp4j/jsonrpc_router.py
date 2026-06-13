@@ -1551,7 +1551,7 @@ class JSONRPCRouter:
         if "id" in msg and "method" not in msg and ("result" in msg or "error" in msg):
             error_detail = msg.get("error", {}).get("message", "") if "error" in msg else ""
             logger.info(
-                "[LSP4J ←] response: id={} has_result={} has_error={} error_detail={}",
+                "[LSP4J-RECV] response: id={} has_result={} has_error={} error_detail={}",
                 msg.get("id"),
                 "result" in msg,
                 "error" in msg,
@@ -1583,14 +1583,14 @@ class JSONRPCRouter:
         # 心跳/探活消息降级为 DEBUG，避免污染 INFO 日志（#2 修复）
         if method == "ping":
             logger.debug(
-                "[LSP4J ←] method={} id={} params_keys={}",
+                "[LSP4J-RECV] method={} id={} params_keys={}",
                 method,
                 msg_id,
                 list(params.keys()) if isinstance(params, dict) else type(params).__name__,
             )
         else:
             logger.info(
-                "[LSP4J ←] method={} id={} params_keys={}",
+                "[LSP4J-RECV] method={} id={} params_keys={}",
                 method,
                 msg_id,
                 list(params.keys()) if isinstance(params, dict) else type(params).__name__,
@@ -5175,6 +5175,10 @@ class JSONRPCRouter:
 
                 _tool_invoke_elapsed = time.monotonic() - _tool_invoke_start
                 logger.info(
+                    "[LSP4J-PERF] TOOL_INVOKE tool=%s callId=%s elapsed=%.3fs result_len=%d",
+                    tool_name, tool_call_id, _tool_invoke_elapsed, len(result or ""),
+                )
+                logger.info(
                     "[LSP4J-PERF] TOOL_SUCCESS tool={} callId={} elapsed={:.1f}s result_len={}",
                     tool_name,
                     tool_call_id[:8],
@@ -5680,16 +5684,16 @@ class JSONRPCRouter:
                     _text = _params.get("text", "")
                     # 记录 toolCall markdown 块
                     if "toolCall::" in _text:
-                        logger.info("[LSP4J →] method={} id={} TOOLCALL_BLOCK={!r}", _method, message.get("id"), _text)
+                        logger.info("[LSP4J-SEND] method={} id={} TOOLCALL_BLOCK={!r}", _method, message.get("id"), _text)
                     # 记录包含工具名称的文本（可能是 LLM 回复中的纯文本）
                     elif any(tool in _text for tool in ["replace_text_by_path", "read_file", "list_files"]):
-                        logger.info("[LSP4J →] method={} id={} TOOL_TEXT={!r}", _method, message.get("id"), _text[:200])
+                        logger.info("[LSP4J-SEND] method={} id={} TOOL_TEXT={!r}", _method, message.get("id"), _text[:200])
                     # 记录表格内容
                     elif _text and "|" in _text:
-                        logger.info("[LSP4J →] method={} id={} text={!r}", _method, message.get("id"), _text)
+                        logger.info("[LSP4J-SEND] method={} id={} text={!r}", _method, message.get("id"), _text)
                     else:
                         logger.info(
-                            "[LSP4J →] method={} id={} text_len={} overwrite={} preview={!r}",
+                            "[LSP4J-SEND] method={} id={} text_len={} overwrite={} preview={!r}",
                             _method,
                             message.get("id"),
                             len(_text),
@@ -5700,17 +5704,17 @@ class JSONRPCRouter:
                     # chat/think 消息打印 extra 内容便于排查思考面板显示问题
                     if _method == "chat/think":
                         _extra = _params.get("extra", {})
-                        logger.info("[LSP4J →] method={} id={} step={} text={!r} extra={}",
+                        logger.info("[LSP4J-SEND] method={} id={} step={} text={!r} extra={}",
                             _method, message.get("id"), _params.get("step"), _params.get("text"), _extra)
                     else:
-                        logger.info("[LSP4J →] method={} id={} params_keys={}", _method, message.get("id"), _pkeys)
+                        logger.info("[LSP4J-SEND] method={} id={} params_keys={}", _method, message.get("id"), _pkeys)
             elif "result" in message:
                 logger.debug(
-                    "[LSP4J →] response id={} result_type={}", message.get("id"), type(message["result"]).__name__
+                    "[LSP4J-SEND] response id={} result_type={}", message.get("id"), type(message["result"]).__name__
                 )
             elif "error" in message:
                 logger.warning(
-                    "[LSP4J →] error id={} code={} msg={}",
+                    "[LSP4J-SEND] error id={} code={} msg={}",
                     message.get("id"),
                     message.get("error", {}).get("code"),
                     message.get("error", {}).get("message"),
@@ -5743,7 +5747,7 @@ class JSONRPCRouter:
                 }
             )
             await self._ws.send_text(frame)
-            logger.info("[LSP4J →] best-effort error id={} code={}", msg_id, code)
+            logger.info("[LSP4J-SEND] best-effort error id={} code={}", msg_id, code)
         except websockets.exceptions.ConnectionClosed as e:
             logger.warning("LSP4J: best-effort JSON-RPC error send failed id={} err={}", msg_id, e)
             self._closed = True

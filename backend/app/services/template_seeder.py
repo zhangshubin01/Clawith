@@ -389,22 +389,22 @@ def _load_folder_templates() -> list[dict]:
         bootstrap_path = slug_dir / "bootstrap.md"
 
         if not meta_path.exists():
-            logger.warning(f"[TemplateSeeder] {slug_dir.name}: no meta.yaml, skipping")
+            logger.warning(f"[Startup] {slug_dir.name}: no meta.yaml, skipping")
             continue
         if not soul_path.exists():
-            logger.warning(f"[TemplateSeeder] {slug_dir.name}: no soul.md, skipping")
+            logger.warning(f"[Startup] {slug_dir.name}: no soul.md, skipping")
             continue
 
         try:
             meta = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
         except yaml.YAMLError as exc:
-            logger.error(f"[TemplateSeeder] {slug_dir.name}/meta.yaml parse error: {exc}")
+            logger.error(f"[Startup] {slug_dir.name}/meta.yaml parse error: {exc}")
             continue
 
         missing = _REQUIRED_META_FIELDS - meta.keys()
         if missing:
             logger.error(
-                f"[TemplateSeeder] {slug_dir.name}/meta.yaml missing fields: "
+                f"[Startup] {slug_dir.name}/meta.yaml missing fields: "
                 f"{sorted(missing)}, skipping"
             )
             continue
@@ -429,7 +429,7 @@ def _load_folder_templates() -> list[dict]:
             "default_mcp_servers": meta.get("default_mcp_servers", []),
             "default_autonomy_policy": meta.get("default_autonomy_policy", {}),
         })
-        logger.debug(f"[TemplateSeeder] Loaded folder template: {meta['name']}")
+        logger.debug(f"[Startup] Loaded folder template: {meta['name']}")
 
     return out
 
@@ -466,9 +466,9 @@ async def seed_agent_templates():
                     )
                     if ref_count.scalar() == 0:
                         await db.delete(old)
-                        logger.info(f"[TemplateSeeder] Removed old template: {old.name}")
+                        logger.info(f"[Startup] Removed old template: {old.name}")
                     else:
-                        logger.info(f"[TemplateSeeder] Skipping delete of '{old.name}' (still referenced by agents)")
+                        logger.info(f"[Startup] Skipping delete of '{old.name}' (still referenced by agents)")
 
             # Upsert templates
             for tmpl in templates:
@@ -503,8 +503,8 @@ async def seed_agent_templates():
                         capability_bullets=tmpl["capability_bullets"],
                         bootstrap_content=tmpl["bootstrap_content"],
                     ))
-                    logger.info(f"[TemplateSeeder] Created template: {tmpl['name']}")
+                    logger.info(f"[Startup] Created template: {tmpl['name']}")
             await db.commit()
-            logger.info(f"[TemplateSeeder] Seeded {len(templates)} templates "
+            logger.info(f"[Startup] Seeded {len(templates)} templates "
                         f"({len(DEFAULT_TEMPLATES)} legacy + "
                         f"{len(templates) - len(DEFAULT_TEMPLATES)} folder)")

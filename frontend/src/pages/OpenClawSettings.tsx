@@ -45,11 +45,11 @@ export default function OpenClawSettings({ agent, agentId }: OpenClawSettingsPro
                 try {
                     await navigator.clipboard.writeText(result.api_key);
                 } catch (err) {
-                    console.error('Failed to auto-copy to clipboard:', err);
+                    console.error('[Config] Failed to auto-copy to clipboard:', err);
                 }
             }
         } catch (e) {
-            console.error('Failed to regenerate API key', e);
+            console.error('[Config] Failed to regenerate API key', e);
         } finally {
             setRegenerating(false);
         }
@@ -62,7 +62,7 @@ export default function OpenClawSettings({ agent, agentId }: OpenClawSettingsPro
             queryClient.invalidateQueries({ queryKey: ['agents'] });
             navigate('/');
         } catch (e) {
-            console.error('Failed to delete agent', e);
+            console.error('[Config] Failed to delete agent', e);
             setDeleting(false);
         }
     };
@@ -84,7 +84,7 @@ export default function OpenClawSettings({ agent, agentId }: OpenClawSettingsPro
             queryClient.invalidateQueries({ queryKey: ['agent-permissions', agentId] });
             queryClient.invalidateQueries({ queryKey: ['agent', agentId] });
         } catch (e) {
-            console.error('Failed to update permissions', e);
+            console.error('[Config] Failed to update permissions', e);
         }
     };
 
@@ -98,7 +98,7 @@ export default function OpenClawSettings({ agent, agentId }: OpenClawSettingsPro
             queryClient.invalidateQueries({ queryKey: ['agent-permissions', agentId] });
             queryClient.invalidateQueries({ queryKey: ['agent', agentId] });
         } catch (e) {
-            console.error('Failed to update access level', e);
+            console.error('[Config] Failed to update access level', e);
         }
     };
 

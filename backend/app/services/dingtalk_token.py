@@ -8,6 +8,11 @@ import time
 import asyncio
 from typing import Dict, Optional, Tuple
 from loguru import logger
+
+
+def _safe(data: dict) -> dict:
+    skip = {"access_token","refresh_token","id_token","accessToken","client_secret"}
+    return {k:v for k,v in data.items() if k not in skip}
 import httpx
 
 
@@ -57,7 +62,7 @@ class DingTalkTokenManager:
                         logger.debug(f"[DingTalk Token] Refreshed for {app_key[:8]}..., expires in {expires_in}s")
                         return token
 
-                    logger.error(f"[DingTalk Token] Failed to get token: {data}")
+                    logger.error(f"[DingTalk Token] Failed to get token: {_safe(data)}")
                     return None
             except Exception as e:
                 logger.error(f"[DingTalk Token] Error getting token: {e}")
