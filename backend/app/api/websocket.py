@@ -294,7 +294,9 @@ class WebSocketChatHandler:
 
         # Authenticate
         try:
-            payload = decode_access_token(self.token)
+            # 传递 client_ip 以启用 JWT 过期风暴检测 (security.py _expired_ip_window)
+            client_ip = self.websocket.client.host if self.websocket.client else "unknown"
+            payload = decode_access_token(self.token, client_ip=client_ip)
             user_id = uuid.UUID(payload["sub"])
         except Exception:
             await self.websocket.send_json({"type": "error", "content": "Authentication failed"})

@@ -294,7 +294,9 @@ _ACP_IDE_TOOLS = [
         "function": {
             "name": "find_symbol",
             "description": (
-                "按符号名搜索项目中的符号（类、方法、字段、函数等）。基于 IntelliJ 符号索引 (Ctrl+Alt+Shift+N 同款)。\n"
+                "🚀 IDE 索引符号搜索 — 比 grep -r 快 100-1000 倍，支持语义匹配（多态继承、接口实现）。\n"
+                "用途: 按名称查找类/方法/字段/函数。基于 IntelliJ 符号索引 (Ctrl+Alt+Shift+N 同款)，\n"
+                "能搜到 grep 找不到的 Kotlin data class/Java 接口实现/继承链中的方法。\n"
                 "参数: query(必填), scope, language(按语言过滤), pageSize(默认25, 最大500), cursor"
             ),
             "parameters": {

@@ -85,6 +85,72 @@ async def coalesce_or_execute(
                 logger.debug("[ACP-COALESCE] done cleanup key={}", key)
 
 
+# ── 礼貌延迟: 请求间 16ms 最小间隔, 给 EDT 调度留空隙 ──
+# 原理:
+#   - PSI 缓存预热: 请求 A 加载缓存 → 间隔确保缓存热 → 请求 B 命中热缓存
+#   - VFS 刷新合并: 间隙确保前一个 refresh 已完成
+#   - EDT 调度空隙: 16ms (1 EDT frame @ 60fps) 允许 UI 事件处理
+# 多 Agent 隔离: _last_send_ts + _polite_lock 是 AcpHandler 实例字段,
+# Agent A 和 Agent B 各自维护发送间隔, 互不干扰。
+# env ACP_POLITENESS_ENABLED=true (默认开启), ACP_POLITENESS_DELAY_S=0.016
+
+_POLITENESS_ENABLED: bool = os.getenv("ACP_POLITENESS_ENABLED", "true").lower() == "true"
+_POLITENESS_DELAY_S: float = float(os.getenv("ACP_POLITENESS_DELAY_S", "0.016"))  # 16ms
+
+# fast path: 不消耗 VFS/PSI 的方法跳过礼貌延迟
+_FAST_METHODS: frozenset[str] = frozenset({
+    "ide/index_status", "ide/active_file", "fs/diagnostics",
+})
+
+
+async def polite_send(
+    handler: Any,          # AcpHandler instance
+    method: str,
+    params: dict[str, Any],
+    timeout: float,
+) -> Any:
+    """带礼貌延迟的 send_request 包装。
+
+    使用 handler 实例上的 _last_send_ts 和 _polite_lock，
+    保证多 Agent 之间的礼貌延迟互相隔离。
+
+    跳过策略:
+      - 快路径方法 (index_status/active_file/diagnostics): 不消耗资源, 跳过延迟
+      - 写操作方法: 用户期望低延迟, 跳过延迟
+      - 其他方法: 应用 16ms 最小间隔
+    """
+    if not _POLITENESS_ENABLED:
+        return await handler.send_request(method, params, timeout)
+
+    # 写操作的方法族 (来自 _METHOD_FAMILIES)
+    _write_methods_for_polite: frozenset[str] = frozenset({
+        "fs/write_text_file", "fs/edit_text_file", "fs/write_text_files",
+        "fs/convert_java_to_kotlin", "fs/refactor_rename", "fs/safe_delete",
+        "fs/move_file", "fs/reformat_code", "fs/optimize_imports",
+    })
+
+    if method in _FAST_METHODS or method in _write_methods_for_polite:
+        return await handler.send_request(method, params, timeout)
+
+    # 计算与上次发送的间隔, 必要时等待
+    async with handler._polite_lock:
+        now = time.monotonic()
+        gap = _POLITENESS_DELAY_S - (now - handler._last_send_ts)
+        if gap > 0:
+            handler._last_send_ts = now + gap   # 预先更新, 防止下一个请求过早
+        else:
+            handler._last_send_ts = now
+
+    if gap > 0:
+        logger.debug(
+            "[ACP-POLITE] delay={:.0f}ms method={} — 给 EDT 调度留空隙",
+            gap * 1000, method,
+        )
+        await asyncio.sleep(gap)
+
+    return await handler.send_request(method, params, timeout)
+
+
 # ── 延迟基线追踪 (第二梯队): 每方法族 RTT 采样 + P50/P95/P99 定期输出 ──
 # 用途: Phase 0+1 上线后收集 24h 生产数据, 验证修复效果 + 为 Phase 2a Vegas 调参提供基线
 # env ACP_BASELINE_ENABLED=true (默认开启), ACP_BASELINE_FLUSH_SAMPLES=100, ACP_BASELINE_FLUSH_SEC=300
@@ -993,7 +1059,7 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         )
         result = await coalesce_or_execute(
             method, path, session_id,
-            executor=lambda: handler.send_request(method, params, timeout=_timeout),
+            executor=lambda: polite_send(handler, method, params, timeout=_timeout),
         )
         _elapsed = time.perf_counter() - t0
         logger.info(

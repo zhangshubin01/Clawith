@@ -29,7 +29,9 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
             || url.startsWith('/auth/verify-email')
             || url.startsWith('/auth/resend-verification')
             || url.startsWith('/auth/forgot-password')
-            || url.startsWith('/auth/reset-password');
+            || url.startsWith('/auth/reset-password')
+            || url.startsWith('/auth/refresh')
+            || url.startsWith('/auth/providers');
         if (res.status === 401 && !isAuthEndpoint) {
             console.warn('[api] 401 auto-logout triggered for:', url, 'status:', res.status);
             localStorage.removeItem('token');
@@ -601,6 +603,41 @@ export const controlApi = {
     unlock: (agentId: string, data: { session_id: string; export_cookies?: boolean; platform_hint?: string }) =>
         request<any>(`/agents/${agentId}/control/unlock`, { method: 'POST', body: JSON.stringify(data) }),
 };
+
+// ─── Auth Token Refresh ─────────────────────────────────────────
+
+export function tokenNeedsRefresh(token: string): boolean {
+    try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        const now = Math.floor(Date.now() / 1000);
+        return payload.exp - now < 300;
+    } catch {
+        return true;
+    }
+}
+
+export async function refreshAccessToken(): Promise<string> {
+    const currentToken = localStorage.getItem('token') || sessionStorage.getItem('token');
+    if (!currentToken) throw new Error('No token available for refresh');
+
+    const response = await fetch('/api/auth/refresh', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${currentToken}`, 'Content-Type': 'application/json' },
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        throw new Error(`Token refresh failed: ${response.status} ${errorText.slice(0, 100)}`);
+    }
+
+    const data: TokenResponse = await response.json();
+    const newToken = data.access_token;
+
+    if (localStorage.getItem('token')) localStorage.setItem('token', newToken);
+    if (sessionStorage.getItem('token')) sessionStorage.setItem('token', newToken);
+
+    return newToken;
+}
 
 // ─── Sessions ─────────────────────────────────────────
 export const sessionApi = {

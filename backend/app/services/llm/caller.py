@@ -403,10 +403,7 @@ _CTX_GUARD_MAX_WINDOW_DEFAULT = 100000
 _CTX_GUARD_WARN_RATIO = 0.60
 _CTX_GUARD_COMPRESS_RATIO = 0.80
 
-_compress_cache: OrderedDict[str, str] = OrderedDict()
-_ccr_store: OrderedDict[str, str] = OrderedDict()
-_breaker_failures, _breaker_open_until = 0, 0.0
-
+# ══ 模块级常量 (纯常量，不迁移) ══
 _ERROR_KW = frozenset({"error","failed","failure","fatal","critical","panic","exception",
     "traceback","stack trace","segfault","abort","timeout","timed out","crashed","killed",
     "terminated","denied","refused","invalid","unavailable","unreachable","corrupt",
@@ -421,25 +418,186 @@ _CODE_KW = ("import ","from ","def ","class ","fn ","function ","// ","/*","expo
 _IMPORTANCE_RE = re.compile(r'(error|fail|exception|panic|traceback|segfault|abort|timeout|crash|denied|refused|forbidden|deadlock|corrupt|overflow|TODO|FIXME|HACK|BUG|WARNING|DEPRECATED)', re.IGNORECASE)
 
 
+# ══ F3: ContextCompressor 类 — 会话级上下文压缩器 ══
+
+class ContextCompressor:
+    """会话级上下文压缩器。封装压缩缓存 + CCR 存储 + 管道断路器。
+
+    每个 call_llm 调用创建独立实例 → 会话隔离 + 并发安全 + 可测试。
+    模块级 _default_compressor 单例提供向后兼容。
+    """
+
+    def __init__(self, session_id: str = ""):
+        self.session_id = session_id
+        self._compress_cache: OrderedDict[str, str] = OrderedDict()
+        self._ccr_store: OrderedDict[str, str] = OrderedDict()
+        self._breaker_failures = 0
+        self._breaker_open_until = 0.0
+        # F10: 分类型压缩率统计
+        self._stats: dict[str, list[float]] = {}
+        self._skipped_types: set[str] = set()
+
+    # ── 断路器 ──
+
+    @property
+    def breaker_is_open(self) -> bool:
+        now = time.monotonic()
+        if self._breaker_open_until > 0 and now >= self._breaker_open_until:
+            self._breaker_failures = 0
+            self._breaker_open_until = 0.0
+        return self._breaker_open_until > 0
+
+    def breaker_record_failure(self) -> None:
+        self._breaker_failures += 1
+        if self._breaker_failures >= _BREAKER_MAX:
+            self._breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN
+            logger.warning(f"[CTX-COMPRESS] breaker OPEN — bypass {_BREAKER_COOLDOWN}s")
+
+    def breaker_record_success(self) -> None:
+        self._breaker_failures = 0
+        self._breaker_open_until = 0.0
+
+    # ── F10: 自适应压缩反馈 ──
+
+    _TYPE_MIN_SIZES = {"json": 20, "search": 30, "log": 40, "code": 512, "text": 4096}
+    _TYPE_BASELINES = {"json": 0.50, "search": 0.75, "log": 0.60, "code": 0.40, "text": 0.50}
+
+    def record_compress(self, content_type: str, chars_before: int, chars_after: int) -> None:
+        """记录一次压缩效果。仅记录超过类型最小规模的压缩。"""
+        min_size = self._TYPE_MIN_SIZES.get(content_type, 0)
+        if chars_before < min_size:
+            return
+        ratio = 1 - (chars_after / max(chars_before, 1))
+        window = self._stats.setdefault(content_type, [])
+        window.append(ratio)
+        if len(window) > 20:  # 滑动窗口
+            window.pop(0)
+        # 自动恢复: 近 20 次中 ≥3 次 > 基线 → 解除跳过
+        if content_type in self._skipped_types:
+            baseline = self._TYPE_BASELINES.get(content_type, 0.30)
+            successes = sum(1 for r in window[-20:] if r > baseline * 0.5)
+            if successes >= 3:
+                self._skipped_types.discard(content_type)
+                logger.info("[CTX-ADAPT] resumed type={} after recovery", content_type)
+
+    def should_skip_type(self, content_type: str, ctx_pressure: float = 0.0) -> bool:
+        """判断是否应跳过该类型的压缩。上下文压力高 (>0.75) 时忽略跳过。"""
+        if ctx_pressure > 0.75:
+            return False
+        if content_type in self._skipped_types:
+            return True
+        window = self._stats.get(content_type, [])
+        if len(window) < 10:
+            return False
+        recent = window[-10:]
+        avg = sum(recent) / len(recent)
+        baseline = self._TYPE_BASELINES.get(content_type, 0.30)
+        # 平均低于基线的 50% 且全部低于基线 → 跳过
+        if avg < baseline * 0.5 and all(r < baseline for r in recent):
+            self._skipped_types.add(content_type)
+            logger.info("[CTX-ADAPT] skip type={} avg_ratio={:.1%} baseline={:.0%}", content_type, avg, baseline)
+            return True
+        return False
+
+    # ── 压缩缓存 + 类型路由 + JSON 压缩 ──
+
+    def compress_cached(self, content: str) -> str:
+        h = hashlib.sha256(content.encode()).hexdigest()
+        if h in self._compress_cache:
+            return self._compress_cache[h]
+        ct = _detect(content)
+        # F10: 自适应跳过
+        if self.should_skip_type(ct):
+            return content
+        before = len(content)
+        result = self._dispatch(content, ct)
+        if result is not content:
+            # F10: 记录压缩统计
+            self.record_compress(ct, before, len(result))
+            if len(self._compress_cache) >= _CACHE_MAX:
+                self._compress_cache.popitem(last=False)
+            self._compress_cache[h] = result
+        return result
+
+    def _dispatch(self, c: str, t: str) -> str:
+        if t == "json":
+            return self._json(c)
+        if t == "search":
+            return _search(c)
+        if t == "log":
+            return _log(c)
+        if t == "code":
+            return _code(c)
+        if t == "text":
+            return _text(c)
+        return c
+
+    def _json(self, content: str) -> str:
+        try:
+            d = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            return _trunc(content, 4096)
+        if isinstance(d, list):
+            n = len(d)
+            if n <= _JSON_SMALL:
+                return content
+            errors = [i for i in d[:min(n, 500)] if isinstance(i, dict)
+                      and any(kw in str(i).lower() for kw in ("error", "fail", "exception"))]
+            keys = {k for i in d[:min(n, 100)] if isinstance(i, dict) for k in i}
+            kept = list(d[:5])
+            if errors:
+                kept.append({"_pinned_errors": len(errors)})
+            kept += list(d[-5:])
+            dropped = n - len(kept)
+            if dropped > 0:
+                h = hashlib.sha256(content.encode()).hexdigest()[:12]
+                if len(self._ccr_store) >= _CCR_MAX:
+                    self._ccr_store.popitem(last=False)
+                self._ccr_store[h] = content
+                kept.append({CCR_SENTINEL_KEY: f"ccr:{h} {dropped}_rows {len(content)}B"})
+            return json.dumps({"_total": n, "_fields": sorted(keys)[:20], "_sample": kept},
+                              ensure_ascii=False)
+        if isinstance(d, dict):
+            c = {}
+            for k, v in d.items():
+                if isinstance(v, str) and len(v) > 200:
+                    c[k] = v[:200] + "..."
+                elif isinstance(v, (list, tuple)) and len(v) > 20:
+                    c[k] = f"[{len(v)} items]"
+                elif isinstance(v, dict):
+                    c[k] = f"{{...{len(v)} keys...}}"
+                else:
+                    c[k] = v
+            return json.dumps(c, ensure_ascii=False)
+        return _trunc(content, 4096)
+
+
+# F3: 模块级单例 — 向后兼容包装器
+_default_compressor = ContextCompressor()
+
+
 def _breaker_is_open() -> bool:
-    global _breaker_failures, _breaker_open_until
-    now = time.monotonic()
-    if _breaker_open_until > 0 and now >= _breaker_open_until:
-        _breaker_failures = 0; _breaker_open_until = 0.0
-    return _breaker_open_until > 0
+    return _default_compressor.breaker_is_open
 
 
 def _breaker_record_failure() -> None:
-    global _breaker_failures, _breaker_open_until
-    _breaker_failures += 1
-    if _breaker_failures >= _BREAKER_MAX:
-        _breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN
-        logger.warning(f"[CTX-COMPRESS] breaker OPEN — bypass {_BREAKER_COOLDOWN}s")
+    _default_compressor.breaker_record_failure()
 
 
 def _breaker_record_success() -> None:
-    global _breaker_failures, _breaker_open_until
-    _breaker_failures = 0; _breaker_open_until = 0.0
+    _default_compressor.breaker_record_success()
+
+
+def _compress_cached(content: str) -> str:
+    return _default_compressor.compress_cached(content)
+
+
+def _dispatch(c: str, t: str) -> str:
+    return _default_compressor._dispatch(c, t)
+
+
+def _json(content: str) -> str:
+    return _default_compressor._json(content)
 
 
 # ══ F1: 模型级 Tokenizer ══
@@ -628,73 +786,6 @@ def _detect(content: str) -> str:
     return "text"
 
 
-def _compress_cached(content: str) -> str:
-    h = hashlib.sha256(content.encode()).hexdigest()
-    if h in _compress_cache:
-        return _compress_cache[h]
-    ct = _detect(content)
-    result = _dispatch(content, ct)
-    if result is not content:
-        if len(_compress_cache) >= _CACHE_MAX:
-            _compress_cache.popitem(last=False)
-        _compress_cache[h] = result
-    return result
-
-
-def _dispatch(c: str, t: str) -> str:
-    if t == "json":
-        return _json(c)
-    if t == "search":
-        return _search(c)
-    if t == "log":
-        return _log(c)
-    if t == "code":
-        return _code(c)
-    if t == "text":
-        return _text(c)
-    return c
-
-
-def _json(content: str) -> str:
-    try:
-        d = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
-        return _trunc(content, 4096)
-    if isinstance(d, list):
-        n = len(d)
-        if n <= _JSON_SMALL:
-            return content
-        errors = [i for i in d[:min(n, 500)] if isinstance(i, dict)
-                  and any(kw in str(i).lower() for kw in ("error", "fail", "exception"))]
-        keys = {k for i in d[:min(n, 100)] if isinstance(i, dict) for k in i}
-        kept = list(d[:5])
-        if errors:
-            kept.append({"_pinned_errors": len(errors)})
-        kept += list(d[-5:])
-        dropped = n - len(kept)
-        if dropped > 0:
-            h = hashlib.sha256(content.encode()).hexdigest()[:12]
-            if len(_ccr_store) >= _CCR_MAX:
-                _ccr_store.popitem(last=False)
-            _ccr_store[h] = content
-            kept.append({CCR_SENTINEL_KEY: f"ccr:{h} {dropped}_rows {len(content)}B"})
-        return json.dumps({"_total": n, "_fields": sorted(keys)[:20], "_sample": kept},
-                          ensure_ascii=False)
-    if isinstance(d, dict):
-        c = {}
-        for k, v in d.items():
-            if isinstance(v, str) and len(v) > 200:
-                c[k] = v[:200] + "..."
-            elif isinstance(v, (list, tuple)) and len(v) > 20:
-                c[k] = f"[{len(v)} items]"
-            elif isinstance(v, dict):
-                c[k] = f"{{...{len(v)} keys...}}"
-            else:
-                c[k] = v
-        return json.dumps(c, ensure_ascii=False)
-    return _trunc(content, 4096)
-
-
 def _search(content: str) -> str:
     lines = content.strip().split("\n")
     if len(lines) <= _SEARCH_MIN:
@@ -846,7 +937,7 @@ def _ctx_compress(api_messages: list, ctx_window: int, model_name: str = "") -> 
             logger.info(
                 f"[CTX-COMPRESS] {compressed} ok {fallback} fb "
                 f"tokens: {before}→{after} "
-                f"cache={len(_compress_cache)} ccr={len(_ccr_store)}"
+                f"cache={len(_default_compressor._compress_cache)} ccr={len(_default_compressor._ccr_store)}"
             )
         if fallback == 0:
             _breaker_record_success()
@@ -868,6 +959,7 @@ def _multi_role_compress(
     model_name: str = "",
     round_i: int = 0,
     session_id: str = "",
+    compressor: "ContextCompressor | None" = None,
 ) -> list:
     """多角色分级上下文压缩, 原地替换消息内容以减少内存分配.
 
@@ -876,10 +968,13 @@ def _multi_role_compress(
       P1 (摘要)  assistant → 无 tool_calls 纯文本 → _text() 有损, 含错误关键词则 ISOLATE
       P2 (降级)  user      → >2000 字符 → head/tail 保留, 含错误关键词 ISOLATE, 单行→_trunc
       P3 (压缩)  tool      → 现有类型感知策略不变, 跳过 <!-- ctx:trimmed --> 标记
+
+    compressor: 会话级压缩器实例。None 时回退模块级 _default_compressor 单例。
     """
     from app.services.llm.client import LLMMessage
 
-    if _breaker_is_open() or _est_tokens(api_messages, model_name) <= ctx_window * 0.80:
+    c = compressor or _default_compressor  # F3: 优先会话级，回退模块级单例
+    if c.breaker_is_open or _est_tokens(api_messages, model_name) <= ctx_window * 0.80:
         return api_messages
 
     est_before = _est_tokens(api_messages, model_name)
@@ -994,13 +1089,85 @@ def _multi_role_compress(
     return _repair_truncated_messages(api_messages)
 
 
+# ══ F4: 跨轮次文件读取哈希去重 ══
+
+# 会话级内容去重追踪: content_hash → (first_round, file_path)
+_dedup_seen: dict[str, tuple[int, str]] = {}
+
+
+def _dedup_file_tool_results(api_messages: list, round_i: int = 0) -> list:
+    """每轮工具结果追加后, 替换重复的 read_file 结果为短引用.
+
+    使用 content sha256 作去重键 (非 file_path), 确保 write_file 修改文件后
+    后续 read_file 不被错误去重。O(n) 单遍扫描 + 单遍替换, 不删除消息。
+    """
+    if not api_messages:
+        return api_messages
+
+    # 第一遍: 建立 tool_call_id → file_path 映射 (仅本轮的 assistant 消息)
+    _tc_file_map: dict[str, str] = {}
+    for msg in api_messages:
+        if getattr(msg, 'role', None) != "assistant":
+            continue
+        for tc in getattr(msg, 'tool_calls', None) or []:
+            fn = tc.get("function", {})
+            if fn.get("name") != "read_file":
+                continue
+            try:
+                args = json.loads(fn.get("arguments", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            fp = args.get("file_path") or args.get("filePath", "")
+            if fp:
+                _tc_file_map[tc.get("id", "")] = fp
+
+    if not _tc_file_map:
+        return api_messages
+
+    # 第二遍: 对 read_file 的 tool 结果做 content hash 去重
+    for i, msg in enumerate(api_messages):
+        if getattr(msg, 'role', None) != "tool":
+            continue
+        tc_id = getattr(msg, 'tool_call_id', None)
+        if tc_id not in _tc_file_map:
+            continue
+        content = getattr(msg, 'content', None)
+        if not isinstance(content, str) or len(content) <= 1000:
+            continue
+
+        fp = _tc_file_map[tc_id]
+        ch = hashlib.sha256(content.encode()).hexdigest()[:16]
+
+        if ch in _dedup_seen:
+            first_round, _first_fp = _dedup_seen[ch]
+            api_messages[i] = type(msg)(
+                role="tool", tool_call_id=tc_id,
+                content=(
+                    f"[DUPLICATE-READ] 文件 \"{fp}\" — 内容与 Round {first_round} 完全一致, 此处省略."
+                ),
+            )
+            api_messages[i]._cached_tokens = None
+        else:
+            _dedup_seen[ch] = (round_i, fp)
+
+    # LRU 淘汰: 保留最近 500 个 hash
+    if len(_dedup_seen) > 500:
+        oldest = next(iter(_dedup_seen))
+        del _dedup_seen[oldest]
+
+    return api_messages
+
+
 # Helper Functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def _get_agent_config(agent_id) -> tuple[int, str | None]:
-    """Get agent config: max_tool_rounds and token limit status."""
+    """Get agent config: max_tool_rounds and token limit status.
+
+    max_tool_rounds 读取 agent 配置, 默认 100, 安全帽 500 (防误配无限循环).
+    """
     if not agent_id:
-        return 50, None
+        return 100, None
 
     try:
         from app.models.agent import Agent as AgentModel
@@ -1008,7 +1175,8 @@ async def _get_agent_config(agent_id) -> tuple[int, str | None]:
             _ar = await _db.execute(select(AgentModel).where(AgentModel.id == agent_id))
             _agent = _ar.scalar_one_or_none()
             if _agent:
-                max_rounds = min(_agent.max_tool_rounds or 50, 50)
+                # 直接读取 agent 配置, 安全帽 500 防止配置错误导致无限循环
+                max_rounds = min(_agent.max_tool_rounds or 100, 500)
                 if _agent.max_tokens_per_day and _agent.tokens_used_today >= _agent.max_tokens_per_day:
                     return max_rounds, f"⚠️ Daily token usage has reached the limit ({_agent.tokens_used_today:,}/{_agent.max_tokens_per_day:,}). Please try again tomorrow or ask admin to increase the limit."
                 if _agent.max_tokens_per_month and _agent.tokens_used_month >= _agent.max_tokens_per_month:
@@ -1016,7 +1184,7 @@ async def _get_agent_config(agent_id) -> tuple[int, str | None]:
                 return max_rounds, None
     except Exception:
         logger.warning("[LLM] 获取 agent 配置失败, 回退默认值 agent_id={}", agent_id)
-    return 50, None
+    return 100, None
 
 
 async def _get_user_name(user_id) -> str | None:
@@ -1311,8 +1479,9 @@ async def call_llm(
     _max_tool_rounds, _token_limit_msg = await _get_agent_config(agent_id)
     if _token_limit_msg:
         return _token_limit_msg
-    if max_tool_rounds_override and max_tool_rounds_override < _max_tool_rounds:
-        _max_tool_rounds = max_tool_rounds_override
+    # override 允许双向 (提升或降低), 安全帽 500 防止配置错误
+    if max_tool_rounds_override and max_tool_rounds_override > 0:
+        _max_tool_rounds = min(max_tool_rounds_override, 500)
 
     # Get user's name for personalized context
     if current_user_name_override:
@@ -1422,6 +1591,9 @@ async def call_llm(
     _last_read_files: list[str] = []
     _same_file_streak = 0
     _LOOP_DETECT_THRESHOLD = 3  # 连续 3 轮读同一文件 → 注入提醒
+
+    # F3: 会话级压缩器实例 (隔离缓存+断路器, 消除跨会话全局状态泄露)
+    _session_compressor = ContextCompressor(session_id=session_id)
 
     # Tool-calling loop
     for round_i in range(_max_tool_rounds):
@@ -1589,6 +1761,7 @@ async def call_llm(
                             api_messages, ctx_window=_ctx_window,
                             model_name=getattr(model, 'model', ''),
                             round_i=round_i, session_id=session_id,
+                            compressor=_session_compressor,
                         )
                         _after_compress = _est_tokens(api_messages, getattr(model, 'model', ''))
                         _log.warning(
@@ -1986,6 +2159,10 @@ async def call_llm(
                 round_i + 1, tool_time, time.monotonic() - round_start,
                 _perf_channel_suffix(),
             )
+
+            # F4: 跨轮次文件读取哈希去重 (每轮执行, 独立于压缩管道)
+            if round_i > 0:
+                api_messages = _dedup_file_tool_results(api_messages, round_i=round_i)
 
             # ── 上下文膨胀追踪: 计算本轮增量并更新滑动平均 ──
             _current_ctx = _est_tokens(api_messages, getattr(model, 'model', ''))

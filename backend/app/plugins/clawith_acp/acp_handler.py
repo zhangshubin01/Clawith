@@ -125,6 +125,11 @@ class AcpHandler:
         self._cwd: str = ""  # IDE project root
         # 当前 prompt 的性能计数，供 [ACP-PERF] prompt_done / first_chunk 使用
         self._current_prompt_perf: dict | None = None
+        # 熔断器: per-instance 滑动窗口错误率熔断, IDE 异常时自动切断
+        self._circuit = CircuitBreaker()
+        # 礼貌延迟: 请求间最小间隔 (16ms = 1 EDT frame @ 60fps)
+        self._last_send_ts: float = 0.0
+        self._polite_lock = asyncio.Lock()
         self._chunk_buffer = ""
         self._chunk_idle_task: asyncio.Task | None = None
         # 参考 gptme PR #1586: 时间驱动周期性 flush, 确保 LLM 流式输出期间
@@ -362,6 +367,12 @@ class AcpHandler:
             if agent:
                 logger.info(f"[ACP] session/new: using client agent={client_agent_id}")
 
+        if not agent and self.agent_id:
+            # 用户已通过 _clawith/set_agent 选择了智能体（Phase 2），
+            # 优先使用选定的智能体而非 _find_agent() 的默认排序
+            agent = await self._find_agent_by_id(self.agent_id)
+            if agent:
+                logger.info(f"[ACP] session/new: using previously set agent={self.agent_id} ({agent.name})")
         if not agent:
             agent = await self._find_agent()
         if not agent:
@@ -1062,11 +1073,18 @@ class AcpHandler:
         """Send ACP JSON-RPC request and wait for response.
 
         Used for agent->client tool call proxy (e.g. fs/read_text_file).
-        
+
         Note: the future is NOT removed from _pending_requests on timeout,
         so a late-arriving response can still be consumed by a subsequent
         retry or cleanup. asyncio.wait_for does NOT cancel a Future, so
         the future stays valid for later resolution."""
+        # 熔断器门控: IDE 端持续异常时拒绝发送, 防止错误扩散
+        if os.getenv("ACP_CIRCUIT_ENABLED", "true").lower() != "false":
+            if not self._circuit.allow():
+                raise RuntimeError(
+                    "ACP circuit breaker OPEN — IDE 端持续异常, 请求已被熔断。"
+                    "请等待恢复或检查 IDE 状态。"
+                )
         # 惰性清理: 条目数 > 50 或最早条目 > 120s 时触发清理
         if len(self._pending_requests) > 50:
             await self.cleanup_stale_requests()
@@ -1120,6 +1138,9 @@ class AcpHandler:
                 f"[ACP-PERF] send_request DONE session={self.session_id} method={method} "
                 f"elapsed={elapsed:.3f}s req_id={req_id}"
             )
+            # 熔断器: 记录成功
+            if os.getenv("ACP_CIRCUIT_ENABLED", "true").lower() != "false":
+                self._circuit.success()
             return result
         except asyncio.TimeoutError:
             elapsed = time.perf_counter() - t0
@@ -1128,6 +1149,9 @@ class AcpHandler:
                 f"elapsed={elapsed:.3f}s timeout={timeout}s req_id={req_id} "
                 f"pending={len(self._pending_requests)} (future kept for late response)"
             )
+            # 熔断器: 记录超时失败
+            if os.getenv("ACP_CIRCUIT_ENABLED", "true").lower() != "false":
+                self._circuit.failure()
             raise TimeoutError(f"ACP request {method} timed out after {timeout}s")
 
     def _build_project_context(self) -> str:
@@ -1144,11 +1168,13 @@ class AcpHandler:
             f"- 回答简洁直接。如果用户的问题不需要读取项目文件(如问候/身份确认), 只回复不扫描项目。\n"
             f"- 需要读文件时用 read_file, 不要用 cat/head/tail。\n"
             f"- build/test/git 用 execute_command。\n"
-            f"- 代码搜索优先使用 IDE 索引工具 (find_class/find_symbol/search_text/"
-            f"find_references/find_definition/find_file/find_implementations/list_files 等)，"
-            f"比 grep -r 快 100-1000 倍且支持语义匹配 (多态继承、接口实现等)。"
-            f"grep -r 仅作为 IDE 索引不可用时的降级方案。\n"
+            f"🔍 **代码搜索强制规则**: 搜索代码时必须用 IDE 索引工具 (find_symbol/search_text/find_class/"
+            f"find_references/find_definition/find_file/find_implementations/list_files)，"
+            f"比 grep -r 快 100-1000 倍且支持语义匹配。**严禁用 execute_command + grep 替代 IDE 搜索**。\n"
+            f"⚠️ 注意: index_status 返回错误不代表其他 IDE 工具不可用，各工具独立运作。\n"
             f"- Agent 内部文件(memory/, skills/ 前缀)不在 IDE, 由后端本地读取。\n"
+            f"- 🚀 并行执行: 多个独立的 read_file/search/list/find 操作必须在一次函数调用批次中并行调用, "
+            f"不要逐个串行。例如: 需要读 3 个文件时, 一次 tool_calls 中同时调用 3 个 read_file。\n"
         )
 
 
@@ -1166,3 +1192,141 @@ def _extract_user_text(messages: list) -> str:
             elif isinstance(content, str):
                 return content
     return ""
+
+
+# ── 滑动窗口错误率熔断器 ──────────────────────────────────────
+# 参考 Hystrix CircuitBreaker 模式 + aioresilience。
+# per-AcpHandler 实例级（非模块级单例），保证多智能体独立熔断。
+
+
+# 熔断器可调参数（环境变量注入，支持热调整无需重新部署）
+_CIRCUIT_WINDOW_S: float = float(os.getenv("ACP_CIRCUIT_WINDOW_S", "60"))
+_CIRCUIT_ERROR_RATE: float = float(os.getenv("ACP_CIRCUIT_ERROR_RATE", "0.5"))
+_CIRCUIT_RECOVERY_S: float = float(os.getenv("ACP_CIRCUIT_RECOVERY_S", "30"))
+
+
+class CircuitBreaker:
+    """per-AcpHandler 滑动窗口错误率熔断器。
+
+    状态机:
+      CLOSED → (error_rate > 50%) → OPEN
+      OPEN   → (recovery_time 后)  → HALF_OPEN (放行 1 个探测请求)
+      HALF_OPEN → 探测成功         → CLOSED
+      HALF_OPEN → 探测失败         → OPEN
+
+    关键设计:
+      - 单探针 (half_open 仅放行 1 个请求), 避免多探针预算耗尽死锁
+      - _prune() 自动清理滑动窗口外条目, 防止内存泄漏
+      - per-instance (非模块级), 每个 AcpHandler 独立熔断
+      - 状态变化 WARNING 级别日志, 携带前后状态和错误率
+      - 所有参数通过环境变量可配, ACP_CIRCUIT_ENABLED=false 关闭
+    """
+
+    CLOSED = "CLOSED"
+    OPEN = "OPEN"
+    HALF_OPEN = "HALF_OPEN"
+
+    def __init__(
+        self,
+        window_s: float = _CIRCUIT_WINDOW_S,
+        error_rate_threshold: float = _CIRCUIT_ERROR_RATE,
+        recovery_s: float = _CIRCUIT_RECOVERY_S,
+    ) -> None:
+        self.state: str = self.CLOSED
+        self._window_s = window_s
+        self._error_rate_threshold = error_rate_threshold
+        self._recovery = recovery_s
+        self._half_open_probe_sent = False  # 单探针: 仅放行 1 个探测请求
+        self._results: list[tuple[float, bool]] = []  # [(timestamp, success)]
+        self.last_fail = 0.0
+
+    def _prune(self) -> None:
+        """清理滑动窗口外的旧条目, 防止内存泄漏。每次 success/failure 自动调用。"""
+        now = time.monotonic()
+        cutoff = now - self._window_s
+        self._results = [r for r in self._results if r[0] > cutoff]
+
+    def _error_rate(self) -> float:
+        """计算滑动窗口内的错误率 (0.0 ~ 1.0)。"""
+        now = time.monotonic()
+        cutoff = now - self._window_s
+        recent = [ok for ts, ok in self._results if ts > cutoff]
+        if not recent:
+            return 0.0
+        return 1.0 - sum(recent) / len(recent)
+
+    def allow(self) -> bool:
+        """判断是否允许发送请求。
+
+        CLOSED → 直接放行
+        OPEN   → 检查是否到恢复时间, 到了则转换到 HALF_OPEN 并放行 1 个探测
+        HALF_OPEN → 仅放行 1 个探测请求
+        """
+        if self.state == self.CLOSED:
+            return True
+
+        if self.state == self.OPEN:
+            age = time.monotonic() - self.last_fail
+            if age > self._recovery:
+                err_rate = self._error_rate()
+                old_state = self.state
+                self.state = self.HALF_OPEN
+                self._half_open_probe_sent = True
+                logger.warning(
+                    "[ACP-CIRCUIT] state={}→{} error_rate={:.0%} "
+                    "last_fail={:.0f}s_ago — 发送探测请求",
+                    old_state, self.state, err_rate, age,
+                )
+                return True
+            return False
+
+        if self.state == self.HALF_OPEN:
+            # 单探针: 仅放行 1 个探测请求
+            if self._half_open_probe_sent:
+                return False
+            self._half_open_probe_sent = True
+            return True
+
+        return False
+
+    def success(self) -> None:
+        """记录一次成功请求。HALF_OPEN 状态下成功则恢复 CLOSED。"""
+        self._results.append((time.monotonic(), True))
+        self._prune()
+
+        if self.state == self.HALF_OPEN:
+            old_state = self.state
+            self.state = self.CLOSED
+            self._half_open_probe_sent = False
+            logger.warning(
+                "[ACP-CIRCUIT] state={}→{} — 探测成功, 熔断器关闭",
+                old_state, self.state,
+            )
+
+    def failure(self) -> None:
+        """记录一次失败请求。CLOSED 下超阈值 → OPEN; HALF_OPEN 下失败 → 重新 OPEN。"""
+        self._results.append((time.monotonic(), False))
+        self._prune()
+
+        self.last_fail = time.monotonic()
+
+        if self.state == self.HALF_OPEN:
+            old_state = self.state
+            self.state = self.OPEN
+            self._half_open_probe_sent = False
+            logger.warning(
+                "[ACP-CIRCUIT] state={}→{} — 探测失败, 熔断器重新打开",
+                old_state, self.state,
+            )
+            return
+
+        if self.state == self.CLOSED:
+            err_rate = self._error_rate()
+            if err_rate >= self._error_rate_threshold:
+                old_state = self.state
+                self.state = self.OPEN
+                logger.warning(
+                    "[ACP-CIRCUIT] state={}→{} error_rate={:.0%} "
+                    "last_fail=now — 错误率超阈值, 触发熔断",
+                    old_state, self.state, err_rate,
+                )

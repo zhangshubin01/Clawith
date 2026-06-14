@@ -13,7 +13,7 @@ import PromptModal from '../../components/PromptModal';
 import { appendLiveCodeOutput, type LivePreviewState } from '../../components/AgentBayLivePanel';
 import AgentSidePanel, { SidePanelTab } from '../../components/AgentSidePanel';
 import type { WorkspaceActivity, WorkspaceLiveDraft } from '../../components/WorkspaceOperationPanel';
-import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, focusApi, scheduleApi, sessionApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress } from '../../services/api';
+import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, focusApi, scheduleApi, sessionApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress, refreshAccessToken, tokenNeedsRefresh } from '../../services/api';
 import type { FocusApiItem } from '../../services/api';
 import { ChatMessageItem } from './components/ChatMessageItem';
 import { useHistoryPagination } from './hooks/useHistoryPagination';
@@ -2178,6 +2178,17 @@ export default function AgentDetailPage() {
     const wsMapRef = useRef<Record<SessionRuntimeKey, WebSocket>>({});
     const reconnectTimerRef = useRef<Record<SessionRuntimeKey, ReturnType<typeof setTimeout> | null>>({});
     const reconnectDisabledRef = useRef<Record<SessionRuntimeKey, boolean>>({});
+    const backoffAttemptRef = useRef<Record<SessionRuntimeKey, number>>({});
+    const MAX_RECONNECT_ATTEMPTS = 12;
+    const BACKOFF_BASE_MS = 500;
+    const BACKOFF_MAX_MS = 30000;
+
+    const calculateBackoff = (attempt: number): number => {
+        const exponential = Math.min(BACKOFF_BASE_MS * Math.pow(2, attempt), BACKOFF_MAX_MS);
+        const jitter = exponential * (0.5 + Math.random() * 0.5);
+        return Math.floor(jitter);
+    };
+    const resetBackoff = (key: SessionRuntimeKey) => { delete backoffAttemptRef.current[key]; };
     const sessionUiStateRef = useRef<Record<SessionRuntimeKey, { isWaiting: boolean; isStreaming: boolean }>>({});
     const activeSessionIdRef = useRef<string | null>(null);
     const currentAgentIdRef = useRef<string | undefined>(id);
@@ -2987,17 +2998,33 @@ export default function AgentDetailPage() {
         const scheduleReconnect = () => {
             if (reconnectDisabledRef.current[key]) return;
             clearReconnectTimer(key);
-            frontendLogger.log('warn', 'WS', `reconnect scheduled sessionId=${sessionId} delayMs=2000`);
+            const attempt = (backoffAttemptRef.current[key] || 0) + 1;
+            backoffAttemptRef.current[key] = attempt;
+
+            if (attempt > MAX_RECONNECT_ATTEMPTS) {
+                frontendLogger.log('error', 'WS', `max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached sessionId=${sessionId}`);
+                reconnectDisabledRef.current[key] = true;
+                if (currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId) {
+                    setChatInfoMsg('Connection lost. Please check your network and try again.');
+                }
+                return;
+            }
+
+            const delay = calculateBackoff(attempt - 1);
+            frontendLogger.log('warn', 'WS', `reconnect scheduled sessionId=${sessionId} delayMs=${delay} attempt=${attempt}/${MAX_RECONNECT_ATTEMPTS}`);
             reconnectTimerRef.current[key] = setTimeout(() => {
                 reconnectTimerRef.current[key] = null;
                 if (!reconnectDisabledRef.current[key]) ensureSessionSocket(sess, agentId, authToken);
-            }, 2000);
+            }, delay);
         };
 
         const lang = (i18n.language || 'en').toLowerCase().startsWith('zh') ? 'zh' : 'en';
-        const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${agentId}?token=${authToken}${sessionParam}&lang=${lang}`);
-        wsMapRef.current[key] = ws;
-        ws.onopen = () => {
+
+        const createWs = (token: string) => {
+            const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${agentId}?token=${token}${sessionParam}&lang=${lang}`);
+            wsMapRef.current[key] = ws;
+            ws.onopen = () => {
+            resetBackoff(key);
             frontendLogger.log('info', 'WS', `connected sessionId=${sessionId}`);
             if (reconnectDisabledRef.current[key]) {
                 ws.close();
@@ -3024,6 +3051,20 @@ export default function AgentDetailPage() {
                 setWsConnected(false);
                 setIsWaiting(false);
                 setIsStreaming(false);
+            }
+            if (e.code === 4001) {
+                frontendLogger.log('warn', 'WS', `auth failed sessionId=${sessionId}, attempting token refresh`);
+                refreshAccessToken()
+                    .then((newToken) => {
+                        frontendLogger.log('info', 'WS', `token refreshed, reconnecting sessionId=${sessionId}`);
+                        ensureSessionSocket(sess, agentId, newToken);
+                    })
+                    .catch((err) => {
+                        frontendLogger.log('error', 'WS', `token refresh failed sessionId=${sessionId}`, { error: String(err) });
+                        reconnectDisabledRef.current[key] = true;
+                        if (isActiveRuntime) setChatInfoMsg('Session expired. Please refresh the page.');
+                    });
+                return;
             }
             if (e.code === 4003 || e.code === 4002) {
                 frontendLogger.log('warn', 'WS', `terminal close sessionId=${sessionId} code=${e.code}`);
@@ -3336,6 +3377,21 @@ export default function AgentDetailPage() {
                 setChatMessages(prev => [...prev, parseChatMsg({ role: d.role, content: d.content })]);
             }
         };
+    };
+
+    if (tokenNeedsRefresh(authToken)) {
+        refreshAccessToken()
+            .then((freshToken) => {
+                frontendLogger.log('info', 'WS', `token refreshed before connect sessionId=${sessionId}`);
+                createWs(freshToken);
+            })
+            .catch((err) => {
+                frontendLogger.log('error', 'WS', `token refresh failed sessionId=${sessionId}, using old token`, { error: String(err) });
+                createWs(authToken);
+            });
+    } else {
+        createWs(authToken);
+    }
     };
 
     const dispatchChatMessage = (socket: WebSocket, runtimeKey: SessionRuntimeKey, payload: PendingChatMessage) => {
