@@ -28,6 +28,10 @@ from app.services import agent_tools
 from .context import current_lsp4j_ws
 from .tool_constants import LSP4J_IDE_TOOL_NAMES, TOOL_NAME_MAP
 
+# ── LSP4J 桥接健康追踪 ──
+# 记录上一次 lsp4j_ws 状态，只在新旧状态切换时打日志
+_lsp4j_last_healthy_state = False
+
 # ──────────────────────────────────────────────
 # 插件原生工具名称（基于 ToolInvokeProcessor.java 源码验证）
 # ──────────────────────────────────────────────
@@ -699,8 +703,18 @@ def install_lsp4j_tool_hooks() -> None:
         2. 搜索类工具（grep_code/search_codebase/search_symbol） → 本地 ripgrep
         3. 其余 → 走基础工具入口（agent_tools.execute_tool 原实现）
         """
+        global _lsp4j_last_healthy_state
         lsp4j_ws = current_lsp4j_ws.get()
         is_lsp4j_tool = tool_name in LSP4J_IDE_TOOL_NAMES
+        _lsp4j_is_healthy = lsp4j_ws is not None
+
+        # ── LSP4J 桥接健康状态变化追踪 ──
+        if _lsp4j_is_healthy != _lsp4j_last_healthy_state:
+            if _lsp4j_is_healthy:
+                logger.info("[LSP4J] 桥接恢复: LSP4J WebSocket connected, IDE tools available")
+            else:
+                logger.warning("[LSP4J] 桥接断连: LSP4J WebSocket disconnected, all IDE tools fallback to base")
+            _lsp4j_last_healthy_state = _lsp4j_is_healthy
 
         # ★ 工具名映射：基础工具名 → 插件原生名（如 edit_file → replace_text_by_path）
         # LSP4J 活跃时，LLM 可能调用基础工具名，需映射后才能被插件识别

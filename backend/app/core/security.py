@@ -5,7 +5,9 @@ import base64
 import hashlib
 from loguru import logger
 import os
+import time
 import uuid
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -32,6 +34,13 @@ settings = get_settings()
 _APP_KEY_SALT = b"clawith::aes256::salt-v1"
 _PBKDF2_ITERATIONS = 100_000
 _CIPHERTEXT_MAGIC = b"\x01\xca\xfe"  # 3-byte magic for PBKDF2 ciphertext (1/16M false-positive vs 1-byte's 1/256)
+
+# ── JWT 过期风暴检测 (按 IP 聚合，防止日志噪音淹没真实问题) ──
+# 同一个 IP 在 60s 内连续发送过期 token → 判定为"重连风暴"
+_EXPIRED_WINDOW_SEC = 60
+_EXPIRED_STORM_THRESHOLD = 5  # 60s 内 5 次过期 → 拒绝该 IP 后续连接
+_expired_ip_window: dict[str, list[float]] = defaultdict(list)
+_last_expired_ip_cleanup = 0.0
 
 # Bearer token scheme
 security = HTTPBearer(auto_error=False)
@@ -148,23 +157,67 @@ def create_access_token(user_id: str, role: str, expires_delta: timedelta | None
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def decode_access_token(token: str) -> dict:
-    """Decode and validate a JWT access token."""
+def decode_access_token(token: str, client_ip: str = "") -> dict:
+    """Decode and validate a JWT access token.
+
+    附带客户端 IP 用于风暴检测: 同一 IP 60s 内发送 ≥5 次过期 token → 直接拒绝 (429)
+    """
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         return payload
     except ExpiredSignatureError:
-        logger.warning("[SEC] JWT token has expired")
+        # ── JWT 过期风暴检测 ──
+        if client_ip:
+            _cleanup_expired_window()
+            now = time.time()
+            _expired_ip_window[client_ip] = [
+                t for t in _expired_ip_window[client_ip] if now - t < _EXPIRED_WINDOW_SEC
+            ]
+            _expired_ip_window[client_ip].append(now)
+            count = len(_expired_ip_window[client_ip])
+
+            if count >= _EXPIRED_STORM_THRESHOLD:
+                logger.warning(
+                    f"[SEC] REJECT expired-token-storm: {count} expired in {_EXPIRED_WINDOW_SEC}s "
+                    f"from ip={client_ip} → 429 (possible reconnect loop)"
+                )
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Too many expired token attempts ({count}/{_EXPIRED_WINDOW_SEC}s). "
+                           f"请刷新 token 或重新登录。",
+                )
+            elif count >= 3:
+                logger.warning(
+                    f"[SEC] JWT expired count={count}/{_EXPIRED_WINDOW_SEC}s ip={client_ip} — approaching storm threshold"
+                )
+            else:
+                logger.warning(f"[SEC] JWT token has expired ip={client_ip}")
+        else:
+            logger.warning("[SEC] JWT token has expired")
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token expired",
         )
     except PyJWTError:
-        logger.warning("[SEC] JWT decode failed: invalid token")
+        logger.warning(f"[SEC] JWT decode failed: invalid token ip={client_ip}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
         )
+
+
+def _cleanup_expired_window():
+    """惰性清理过期窗口条目: 每 120s 一次。"""
+    global _last_expired_ip_cleanup
+    now = time.time()
+    if now - _last_expired_ip_cleanup < 120:
+        return
+    _last_expired_ip_cleanup = now
+    for ip in list(_expired_ip_window.keys()):
+        _expired_ip_window[ip] = [t for t in _expired_ip_window[ip] if now - t < _EXPIRED_WINDOW_SEC]
+        if not _expired_ip_window[ip]:
+            del _expired_ip_window[ip]
 
 
 def decode_access_token_soft(token: str) -> dict:

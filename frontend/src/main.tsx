@@ -10,6 +10,23 @@ import ErrorBoundary from './components/ErrorBoundary';
 import { DialogProvider } from './components/Dialog/DialogProvider';
 import { ToastProvider } from './components/Toast/ToastProvider';
 import { loadSavedAccentColor } from './utils/theme';
+import { frontendLogger } from './utils/frontendLogger';
+
+// ── 全局 JS 错误上报 ──
+window.addEventListener('error', (event) => {
+  frontendLogger.log('error', 'App', `[JS] uncaught: ${event.message}`, {
+    src: event.filename,
+    line: event.lineno,
+    col: event.colno,
+    stack: event.error?.stack?.slice(0, 500),
+  });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  frontendLogger.log('error', 'App', `[JS] unhandled rejection: ${String(event.reason)}`, {
+    stack: event.reason?.stack?.slice(0, 500),
+  });
+});
 
 // Apply saved theme color before first paint
 loadSavedAccentColor();

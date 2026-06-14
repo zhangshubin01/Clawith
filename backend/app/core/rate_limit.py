@@ -101,7 +101,7 @@ async def check_ip_rate_limit(
                 pipe.expire(redis_key, window_s + 5)
                 _, current, _, _ = await pipe.execute()
                 if int(current) >= max_attempts:
-                    raise _rate_limit_exceeded(endpoint_key, max_attempts, window_s)
+                    raise _rate_limit_exceeded(endpoint_key, max_attempts, window_s, int(current))
                 return
         except Exception as e:
             if "429" in str(type(e).__name__) or "rate" in str(e).lower():
@@ -117,7 +117,7 @@ async def check_ip_rate_limit(
         ts_list = _ip_store[bucket_key]
         ts_list[:] = [t for t in ts_list if t > cutoff]
         if len(ts_list) >= max_attempts:
-            raise _rate_limit_exceeded(endpoint_key, max_attempts, window_s)
+            raise _rate_limit_exceeded(endpoint_key, max_attempts, window_s, len(ts_list))
         ts_list.append(now)
 
 
@@ -147,6 +147,10 @@ async def check_session_rate_limit(
                 pipe.expire(redis_key, window_s + 5)
                 _, current, _, _ = await pipe.execute()
                 if int(current) >= max_attempts:
+                    logger.warning(
+                        "[RATE] limit exceeded endpoint={} count={}/{}s",
+                        f"session:{endpoint_key}", int(current), window_s,
+                    )
                     raise RuntimeError(
                         f"Session rate limit exceeded: {endpoint_key} "
                         f"({max_attempts} per {window_s}s)"
@@ -166,6 +170,10 @@ async def check_session_rate_limit(
         ts_list = _session_store[bucket_key]
         ts_list[:] = [t for t in ts_list if t > cutoff]
         if len(ts_list) >= max_attempts:
+            logger.warning(
+                "[RATE] limit exceeded endpoint=session:{} count={}/{}s",
+                endpoint_key, len(ts_list), window_s,
+            )
             raise RuntimeError(
                 f"Session rate limit exceeded: {endpoint_key} "
                 f"({max_attempts} per {window_s}s)"
@@ -173,8 +181,12 @@ async def check_session_rate_limit(
         ts_list.append(now)
 
 
-def _rate_limit_exceeded(key: str, max_attempts: int, window_s: int):
+def _rate_limit_exceeded(key: str, max_attempts: int, window_s: int, count: int = 0):
     from fastapi import HTTPException, status
+    logger.warning(
+        "[RATE] limit exceeded endpoint={} count={}/{}s",
+        key, count if count else f">{max_attempts}", window_s,
+    )
     return HTTPException(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         detail=f"Rate limit exceeded: {key} ({max_attempts} per {window_s}s)",

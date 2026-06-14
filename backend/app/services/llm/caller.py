@@ -855,12 +855,17 @@ async def _process_tool_call(
     fn = tc["function"]
     tool_name = fn["name"]
     raw_args = fn.get("arguments", "{}")
-    logger.info(f"[LLM] Calling tool: {tool_name}({json.dumps(dict(list(raw_args.items())[:20]), ensure_ascii=False)[:200]})")
-
-    try:
-        args = json.loads(raw_args) if raw_args else {}
-    except json.JSONDecodeError:
+    # 解析参数 — raw_args 可能是 JSON 字符串(LLM 原始返回)或已解析的 dict(中间处理层转换)
+    if isinstance(raw_args, str):
+        try:
+            args = json.loads(raw_args) if raw_args else {}
+        except json.JSONDecodeError:
+            args = {}
+    elif isinstance(raw_args, dict):
+        args = raw_args
+    else:
         args = {}
+    logger.info(f"[LLM] Calling tool: {tool_name}({json.dumps(dict(list(args.items())[:20]), ensure_ascii=False)[:200]})")
 
     # Guard: check if tool requires arguments
     should_execute, error_msg = _check_tool_requires_args(tool_name, args)
@@ -960,13 +965,30 @@ async def _process_tool_call(
     # 工具结果截断：防止大结果（git 20KB+、构建日志 8KB+）膨胀 LLM 上下文
     # 来自 openhuman DEFAULT_TOOL_RESULT_BUDGET_BYTES = 16384
     _TOOL_RESULT_BUDGET_BYTES = 16384
+    # Head+Tail 模式：保留前 60% + 后 35%，中间 5% 预算用于截断提示
+    # 尾部包含 exit code、错误信息等关键结果，head-only 会丢失
+    _HEAD_RATIO = 0.60
+    _TAIL_RATIO = 0.35
     if isinstance(tool_content, str):
         _original_len = len(tool_content.encode("utf-8"))
         if _original_len > _TOOL_RESULT_BUDGET_BYTES:
-            tool_content = tool_content[:16384] + f"\n…(截断 {_original_len - 16384} 字节)"
+            _head_bytes = int(_TOOL_RESULT_BUDGET_BYTES * _HEAD_RATIO)
+            _tail_bytes = int(_TOOL_RESULT_BUDGET_BYTES * _TAIL_RATIO)
+            _truncated = _original_len - _TOOL_RESULT_BUDGET_BYTES
+
+            tool_content_bytes = tool_content.encode("utf-8")
+            _head = tool_content_bytes[:_head_bytes].decode("utf-8", errors="replace")
+            _tail = tool_content_bytes[-_tail_bytes:].decode("utf-8", errors="replace")
+
+            _notice = (
+                f"\n\n⚠️ [TOOL-OUTPUT-TRUNCATED] 输出已截断: {_original_len}→{_TOOL_RESULT_BUDGET_BYTES} 字节 "
+                f"(保留头部 {_head_bytes}B + 尾部 {_tail_bytes}B, 中间 {_truncated}B 被丢弃)。"
+                f"如需完整输出请用更精确的查询或 read_file 直接读取文件。"
+            )
+            tool_content = _head + _notice + _tail
             logger.info(
                 f"[TOOL-BUDGET] 截断 tool={tool_name} original_bytes={_original_len} "
-                f"→ {_TOOL_RESULT_BUDGET_BYTES} session={session_id}"
+                f"→ head={_head_bytes}B+tail={_tail_bytes}B truncated={_truncated} session={session_id}"
             )
 
     api_messages.append(LLMMessage(
@@ -1090,6 +1112,11 @@ async def call_llm(
     _unsaved_usage = TokenUsage()
     _ctx_window = 0  # 在 guard 块中首次赋值；round 1 日志需要默认值
 
+    # ── 上下文膨胀追踪 ──
+    _prev_ctx_est = 0
+    _ctx_growth_history: list[float] = []  # 近 5 轮增量
+    _avg_growth_per_round = 0.0
+
     # 中间轮次的 on_chunk 路由到 thinking：只有 finish 的内容才是用户可见正文。
     # finish 内容通过 on_tool_delta 流式推送（若 on_tool_delta 非空），
     # 或通过 finish_call.valid 分支直接调用原始 on_chunk（若无 on_tool_delta）。
@@ -1131,14 +1158,30 @@ async def call_llm(
             )
         # [LSP4J-PERF] 轮次开始计时
         round_start = time.monotonic()
-        _log.info(
-            "[LSP4J-PERF] Round {}/{} start, ctx_est={} ctx_limit={}{}",
-            round_i + 1,
-            _max_tool_rounds,
-            _est_tokens(api_messages),
-            _ctx_window,
-            _perf_channel_suffix(),
-        )
+        _ctx_est = _est_tokens(api_messages)
+        _ctx_ratio = _ctx_est / _ctx_window if _ctx_window else 0
+
+        # ── 上下文膨胀监控 ──
+        if _ctx_ratio >= 0.8:
+            _remaining_rounds = int((_ctx_window - _ctx_est) / max(_avg_growth_per_round, 1))
+            _log.warning(
+                "[CTX-TRIM] 上下文接近上限 ctx_est={}/{} ({:.0f}%) remaining_rounds_est={}",
+                _ctx_est, _ctx_window, _ctx_ratio * 100, _remaining_rounds,
+            )
+        elif _ctx_ratio >= 0.6:
+            _log.info(
+                "[CTX-WARN] ctx_est={}/{} ({:.0f}%) avg_growth={:.0f}/round",
+                _ctx_est, _ctx_window, _ctx_ratio * 100, _avg_growth_per_round,
+            )
+        else:
+            _log.info(
+                "[LSP4J-PERF] Round {}/{} start, ctx_est={} ctx_limit={}{}",
+                round_i + 1,
+                _max_tool_rounds,
+                _ctx_est,
+                _ctx_window,
+                _perf_channel_suffix(),
+            )
 
         # Dynamic tool-call limit warning
         _warn_threshold_80 = int(_max_tool_rounds * 0.8)
@@ -1381,7 +1424,9 @@ async def call_llm(
         })
         # 并行读取并发上限: 防止极端场景 (LLM 产生 20+ 个 read_file) 导致文件描述符耗尽。
         # 参考 LangChain gather_with_concurrency + Semaphore 模式。
-        _MAX_READ_CONCURRENCY = 10
+        # Phase 1: 从 10 降到 4, 匹配 Phase 0 的 4 worker 线程池。
+        # 支持环境变量覆盖: ACP_MAX_READ_CONCURRENCY=10 恢复到修复前水平
+        _MAX_READ_CONCURRENCY = int(os.getenv("ACP_MAX_READ_CONCURRENCY", "4"))
 
         # ── LSP4J 路径守卫: 插件端 WebSocket 单通道, ToolInvokeProcessor 同步调用无锁保护 ──
         # 并发发送多个工具请求可能导致 CountDownLatch 状态混乱。
@@ -1568,6 +1613,16 @@ async def call_llm(
                 round_i + 1, tool_time, time.monotonic() - round_start,
                 _perf_channel_suffix(),
             )
+
+            # ── 上下文膨胀追踪: 计算本轮增量并更新滑动平均 ──
+            _current_ctx = _est_tokens(api_messages)
+            if _prev_ctx_est > 0:
+                _delta = _current_ctx - _prev_ctx_est
+                _ctx_growth_history.append(_delta)
+                if len(_ctx_growth_history) > 5:
+                    _ctx_growth_history.pop(0)
+                _avg_growth_per_round = sum(_ctx_growth_history) / len(_ctx_growth_history)
+            _prev_ctx_est = _current_ctx
 
     # Record tokens even on "too many rounds" exit
     if agent_id and _accumulated_usage.total_tokens > 0:

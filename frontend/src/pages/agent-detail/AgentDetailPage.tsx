@@ -22,6 +22,7 @@ import ModelSwitcher from '../../components/ModelSwitcher';
 import { useAppStore } from '../../stores';
 import { useAuthStore } from '../../stores';
 import { copyToClipboard } from '../../utils/clipboard';
+import { frontendLogger } from '../../utils/frontendLogger';
 import { formatFileSize } from '../../utils/formatFileSize';
 import {
     IconBrain,
@@ -2395,7 +2396,7 @@ export default function AgentDetailPage() {
             } else {
                 if (page === 0) setAllSessions([]);
                 if (res.status === 403) {
-                    console.warn('[chat] scope=all sessions forbidden (need org/platform/agent admin)');
+                    frontendLogger.log('warn', 'App', 'scope=all sessions forbidden (need org/platform/agent admin)');
                 }
             }
         } catch {
@@ -2479,7 +2480,7 @@ export default function AgentDetailPage() {
             queryClient.invalidateQueries({ queryKey: ['agents'] });
         } catch (err: any) {
             if (err?.name === 'AbortError') return;
-            console.error('[Session] Failed to load session messages:', err);
+                frontendLogger.log('error', 'App', `Failed to load session messages: ${err}`);
         }
     };
 
@@ -2500,11 +2501,11 @@ export default function AgentDetailPage() {
                 await selectSession(newSess, 'mine');
             } else {
                 const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-                console.error('[Session] Failed to create session:', err);
+                frontendLogger.log('error', 'App', `Failed to create session`, { detail: String(err.detail || err.message || err) });
                 toast.error(t('common.error.sessionCreateFailed', '创建会话失败'), { details: String(err.detail || `HTTP ${res.status}`) });
             }
         } catch (err: any) {
-            console.error('[Session] Failed to create session:', err);
+            frontendLogger.log('error', 'App', `Failed to create session`, { detail: String(err.detail || err.message || err) });
             toast.error(t('common.error.sessionCreateFailed', '创建会话失败'), { details: String(err.message || err) });
         }
     };
@@ -2975,6 +2976,7 @@ export default function AgentDetailPage() {
         const sessionId = String(sess.id);
         const key = buildSessionRuntimeKey(agentId, sessionId);
         let _streamStarted = false;
+        let _streamStartTs = 0;
         let _chunkCount = 0;
         const existing = wsMapRef.current[key];
         if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
@@ -2985,7 +2987,7 @@ export default function AgentDetailPage() {
         const scheduleReconnect = () => {
             if (reconnectDisabledRef.current[key]) return;
             clearReconnectTimer(key);
-            console.log('[WS] Scheduling reconnect', { key, delayMs: 2000 });
+            frontendLogger.log('warn', 'WS', `reconnect scheduled sessionId=${sessionId} delayMs=2000`);
             reconnectTimerRef.current[key] = setTimeout(() => {
                 reconnectTimerRef.current[key] = null;
                 if (!reconnectDisabledRef.current[key]) ensureSessionSocket(sess, agentId, authToken);
@@ -2996,7 +2998,7 @@ export default function AgentDetailPage() {
         const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${agentId}?token=${authToken}${sessionParam}&lang=${lang}`);
         wsMapRef.current[key] = ws;
         ws.onopen = () => {
-            console.log('[WS] Connected', { sessionId, key });
+            frontendLogger.log('info', 'WS', `connected sessionId=${sessionId}`);
             if (reconnectDisabledRef.current[key]) {
                 ws.close();
                 return;
@@ -3013,7 +3015,7 @@ export default function AgentDetailPage() {
             }
         };
         ws.onclose = (e) => {
-            console.warn('[WS] Closed', { sessionId, code: e.code, reason: e.reason || 'none', wasClean: e.wasClean });
+            frontendLogger.log('warn', 'WS', `closed sessionId=${sessionId} code=${e.code} wasClean=${e.wasClean}`, { reason: e.reason || 'none' });
             if (wsMapRef.current[key] === ws) delete wsMapRef.current[key];
             setSessionUiState(key, { isWaiting: false, isStreaming: false });
             const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
@@ -3024,7 +3026,7 @@ export default function AgentDetailPage() {
                 setIsStreaming(false);
             }
             if (e.code === 4003 || e.code === 4002) {
-                console.warn('[WS] Terminal close', { sessionId, code: e.code });
+                frontendLogger.log('warn', 'WS', `terminal close sessionId=${sessionId} code=${e.code}`);
                 reconnectDisabledRef.current[key] = true;
                 clearReconnectTimer(key);
                 if (isActiveRuntime && e.code === 4003) setAgentExpired(true);
@@ -3035,7 +3037,7 @@ export default function AgentDetailPage() {
         ws.onerror = (error) => {
             const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
             if (isActiveRuntime) setWsConnected(false);
-            console.error('[WS] Error', { sessionId, error: String(error) });
+            frontendLogger.log('error', 'WS', `error sessionId=${sessionId}`, { error: String(error) });
             // Error automatically triggers onclose with abnormal code, which handles reconnect
         };
         ws.onmessage = (e) => {
@@ -3234,7 +3236,7 @@ export default function AgentDetailPage() {
                     queryClient.invalidateQueries({ queryKey: ['agents'] });
                 }
             } else if (d.type === 'chunk') {
-                if (!_streamStarted) { _streamStarted = true; console.log('[Stream] Start', { sessionId }); }
+                if (!_streamStarted) { _streamStarted = true; _streamStartTs = performance.now(); }
                 _chunkCount++;
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
@@ -3242,8 +3244,9 @@ export default function AgentDetailPage() {
                     return [...prev, { role: 'assistant', content: d.content, _streaming: true } as any];
                 });
             } else if (d.type === 'done') {
-                console.log('[Stream] End', { sessionId, chunks: _chunkCount });
-                _streamStarted = false; _chunkCount = 0;
+                const streamElapsedMs = _streamStarted ? Math.round(performance.now() - _streamStartTs) : 0;
+                frontendLogger.log('info', 'Stream', `done sessionId=${sessionId} chunks=${_chunkCount} elapsed=${streamElapsedMs}ms`);
+                _streamStarted = false; _streamStartTs = 0; _chunkCount = 0;
                 // Add end marker to code output if there was any code activity
                 setLiveState(prev => {
                     if (prev.code?.output) {
@@ -3266,6 +3269,11 @@ export default function AgentDetailPage() {
                 }
                 queryClient.invalidateQueries({ queryKey: ['agents'] });
             } else if (d.type === 'error' || d.type === 'quota_exceeded') {
+                const streamElapsedMs = _streamStarted ? Math.round(performance.now() - _streamStartTs) : 0;
+                if (_streamStarted) {
+                    frontendLogger.log('error', 'Stream', `${d.type} sessionId=${sessionId} chunks=${_chunkCount} elapsed=${streamElapsedMs}ms`, { msg: d.content || d.detail });
+                }
+                _streamStarted = false; _streamStartTs = 0; _chunkCount = 0;
                 const msg = d.content || d.detail || d.message || 'Request denied';
                 const isNoModelError = msg.includes('no LLM model') || msg.includes('No model');
                 if (isNoModelError) {
@@ -3331,6 +3339,8 @@ export default function AgentDetailPage() {
     };
 
     const dispatchChatMessage = (socket: WebSocket, runtimeKey: SessionRuntimeKey, payload: PendingChatMessage) => {
+        const msgLen = payload.contentForLLM?.length ?? 0;
+        frontendLogger.log('info', 'App', `user message sent sessionKey=${runtimeKey} len=${msgLen} hasFile=${!!payload.fileName}`);
         setIsWaiting(true);
         setIsStreaming(false);
         setSessionUiState(runtimeKey, { isWaiting: true, isStreaming: false });
@@ -6521,7 +6531,7 @@ export default function AgentDetailPage() {
                                                                     const activeRuntimeKey = buildSessionRuntimeKey(id, String(activeSession.id));
                                                                     const activeSocket = wsMapRef.current[activeRuntimeKey];
                                                                     if (activeSocket?.readyState === WebSocket.OPEN) {
-                                                                        console.log('[Stream] Abort', { sessionId: String(activeSession.id) });
+                                                                        frontendLogger.log('info', 'Stream', `abort sessionId=${String(activeSession.id)}`);
                                                                         activeSocket.send(JSON.stringify({ type: 'abort' }));
                                                                         setIsStreaming(false);
                                                                         setIsWaiting(false);

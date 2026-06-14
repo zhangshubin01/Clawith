@@ -414,6 +414,7 @@ from app.api.okr import router as okr_router
 from app.api.ide_plugin import router as ide_plugin_router
 from app.plugins.clawith_lsp4j.router import router as lsp4j_router
 from app.plugins.clawith_acp.router import router as acp_router
+from app.api.frontend_log import router as frontend_log_router
 from app.api.onboarding import router as onboarding_router
 
 app.include_router(auth_router, prefix=settings.API_PREFIX)
@@ -463,6 +464,7 @@ app.include_router(okr_router)  # OKR — self-prefixed at /api/okr
 app.include_router(ide_plugin_router)  # IDE Plugin — self-prefixed at /api/ide-plugin
 app.include_router(lsp4j_router, prefix="/api/plugins/clawith-lsp4j")  # LSP4J WebSocket endpoint
 app.include_router(acp_router)  # ACP WebSocket endpoint — self-prefixed at /ws/acp
+app.include_router(frontend_log_router)  # Frontend log — self-prefixed at /api/log
 app.include_router(onboarding_router, prefix=settings.API_PREFIX)
 
 

@@ -17,12 +17,13 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.core.logging_config import get_trace_id
+from app.core.permissions import build_visible_agents_query
 from app.models.agent import Agent as AgentModel
 from app.models.org import OrgMember
+from app.models.user import User as UserModel
 from app.plugins.clawith_acp.acp_session import AcpSessionManager
 from app.plugins.clawith_acp.tool_bridge import current_acp_handler, is_agent_internal_path
 from app.plugins.clawith_acp.tool_hooks import install_acp_tool_hooks
-from app.services.agent_context import build_agent_context
 
 ACP_PROTOCOL_VERSION = 1
 LLM_TIMEOUT_SECONDS = int(os.getenv("ACP_LLM_TIMEOUT_SECONDS", "600"))
@@ -108,6 +109,7 @@ class AcpHandler:
         self.user_id = user_id
         # 短连接 ID，便于 docker logs 对齐 IDE gen 与后端 handler
         self.conn_id = uuid.uuid4().hex[:8]
+        self._start_time = time.monotonic()  # 连接建立时间, 用于 disconnect 日志计算持续时间
         self._tenant_id: uuid.UUID | None = None  # 惰性加载, 通过 _resolve_tenant_id() 获取
         self.session_id: str | None = None
         self.agent_id: str | None = None
@@ -141,6 +143,16 @@ class AcpHandler:
     async def run(self):
         """消息循环: 接收 JSON-RPC → 分发 → 返回响应。"""
         token = current_acp_handler.set(self)
+        # 提取客户端 IP (uvicorn 通过 ws.client 暴露, 或通过 scope 获取)
+        client_ip = "?"
+        try:
+            if hasattr(self.ws, "client") and self.ws.client:
+                client_ip = self.ws.client.host
+            elif hasattr(self.ws, "scope"):
+                client_ip = self.ws.scope.get("client", ("?", 0))[0]
+        except Exception:
+            pass
+        logger.info("[ACP-CONN] connect conn_id={} user={} ip={}", self.conn_id, self.user_id[:8] if self.user_id else "?", client_ip)
         try:
             async for raw in self.ws.iter_text():
                 if "session/new" in raw:
@@ -296,14 +308,13 @@ class AcpHandler:
             await self._flush_chunk_buffer()
             logger.info(f"[ACP] prompt 派发结束: session={self.session_id} id={msg_id}")
 
-            await self._push_to_ide(json.dumps({
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
+            try:
+                await self._send_notification("session/update", {
                     "sessionId": self.session_id,
                     "update": {"traceId": get_trace_id(), "type": "prompt_done"}
-                }
-            }))
+                })
+            except Exception as _pd_e:
+                logger.warning("[ACP] prompt_done 通知失败 session={}: {}", self.session_id, _pd_e)
 
     # ── ACP 方法实现 ──────────────────────────────────────────
 
@@ -579,26 +590,11 @@ class AcpHandler:
                         self.session_id, self.user_id
                     )
 
-                # 注入 agent context（soul.md + memory.md + skills + MCP 配置）
-                ctx_llm_messages = list(history)
-                if self.agent_id:
-                    try:
-                        agent_ctx = await build_agent_context(
-                            agent_id=uuid.UUID(self.agent_id),
-                            agent_name=self.agent_name,
-                            role_description=self.role_description,
-                        )
-                        if agent_ctx and agent_ctx[0]:
-                            ctx_prompt = agent_ctx[0] + "\n\n" + agent_ctx[1]
-                            ctx_llm_messages.insert(0, {"role": "system", "content": ctx_prompt})
-                            _log.info(
-                                f"[ACP-CTX] build_agent_context 注入完成 "
-                                f"static={len(agent_ctx[0])} dynamic={len(agent_ctx[1])} "
-                                f"agent={self.agent_id}"
-                            )
-                    except Exception as e:
-                        _log.warning(f"[ACP-CTX] build_agent_context 失败 (非阻塞): {e}")
-                llm_messages = ctx_llm_messages + [
+                # 历史消息直接传递给 call_llm_with_failover。
+                # build_agent_context (soul.md + memory.md + skills + MCP 配置)
+                # 由 caller.call_llm 统一注入到 system prompt, 避免 ACP 路径双重注入
+                # (acp_handler 注入一次 + caller 再注入一次 → 浪费 ~2-4K tokens/次)。
+                llm_messages = list(history) + [
                     {"role": "user", "content": user_text_for_llm}
                 ]
                 _log.info(
@@ -903,10 +899,23 @@ class AcpHandler:
         return {"model": params.get("model", "")}
 
     async def _handle_list_agents(self, params: dict) -> dict:
-        """ACP 扩展: 列出可用 Agent 列表 (智能体选择)。"""
+        """ACP 扩展: 列出可用 Agent 列表 (智能体选择)。
+
+        与 REST API ide_plugin.py 的 list_agents_for_ide 对齐权限模型:
+        通过 build_visible_agents_query 按 tenant_id + user 权限过滤,
+        确保 ACP 通道不会跨租户泄露 agent 列表。
+        """
         async with async_session() as db:
+            # 加载 User 对象以进行权限过滤 (build_visible_agents_query 需要 User 实例)
+            user_r = await db.execute(select(UserModel).where(UserModel.id == self.user_id))
+            user = user_r.scalar_one_or_none()
+            if not user:
+                logger.warning("[ACP] list_agents: user not found for user_id=%s", self.user_id)
+                return {"agents": []}
+            # 复用 REST API 的可见性过滤规则,
+            # 仅追加 status 过滤(排除已删除/禁用的 agent)
             result = await db.execute(
-                select(AgentModel)
+                build_visible_agents_query(user)
                 .where(AgentModel.status.in_(["idle", "running"]))
                 .order_by(AgentModel.updated_at.desc())
                 .limit(20)
@@ -1005,7 +1014,11 @@ class AcpHandler:
         self._active_tasks.clear()
         self._pending_tools.clear()
         self._pending_requests.clear()
-        logger.info("[ACP] resources cleaned")
+        duration = time.monotonic() - self._start_time
+        logger.info(
+            "[ACP-CONN] disconnect conn_id={} session={} user={} duration={:.0f}s",
+            self.conn_id, self.session_id or "?", self.user_id[:8] if self.user_id else "?", duration,
+        )
 
     # ── JSON-RPC 序列化 ───────────────────────────────────────
 
@@ -1076,11 +1089,12 @@ class AcpHandler:
                 f"ACP backpressure: {pending_count} pending requests. "
                 f"IDE 端可能忙或无响应。请稍后重试。"
             )
-        elif pending_count >= 3:
+        elif pending_count >= 5:
             oldest_age = min(time.monotonic() - ts for _, (_, ts) in self._pending_requests.items())
             logger.warning(
                 f"[ACP-QUEUE] pending 积压: count={pending_count} "
-                f"method={method} oldest_age={oldest_age:.0f}s"
+                f"method={method} oldest_age={oldest_age:.1f}s "
+                f"total_pending={len(self._pending_requests)}"
             )
         req_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_running_loop().create_future()

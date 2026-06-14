@@ -12,10 +12,77 @@ import os
 import pathlib
 import shlex
 import time
+from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
 
 from loguru import logger
+
+# ── 进行中读请求合并: 对同一 (session, method, path) 的并行读请求只发一次 IDE 调用 ──
+# 消除 LLM 并行发起多个 search_text / read_text_file 到同一路径时的重复 IDE 调用
+_METHODS_FOR_COALESCE: frozenset[str] = frozenset({
+    "fs/read_text_file",
+    "fs/list_directory",
+    "fs/search_text",
+})
+_inflight: dict[str, asyncio.Task[Any]] = {}
+_inflight_lock = asyncio.Lock()
+
+
+async def coalesce_or_execute(
+    method: str,
+    path: str,
+    session_id: str,
+    executor: Callable[[], Any],
+) -> Any:
+    """对同一 (session, method, path) 合并并行请求，复用已有 Task 结果。
+
+    Args:
+        method: ACP 方法名 (如 "fs/read_text_file")
+        path: 请求的路径参数
+        session_id: ACP 会话 ID
+        executor: 实际执行请求的协程工厂
+
+    Returns:
+        executor() 的返回值, 或复用已有 Task 的返回值
+
+    实现要点:
+      - asyncio.Lock 保护 check-set 原子性, 消除 TOCTOU 窗口
+      - CancelledError 传播时不清理 key, 让原始 Task 继续服务其他等待者
+      - 异常或正常完成时通过 identity check 安全清理 key
+    """
+    if method not in _METHODS_FOR_COALESCE:
+        return await executor()
+
+    key = f"{session_id}:{method}:{path}"
+
+    async with _inflight_lock:
+        existing = _inflight.get(key)
+        if existing is not None and not existing.done():
+            logger.debug("[ACP-COALESCE] hit key={} method={} — 复用已有请求", key, method)
+            return await existing               # 复用已有 Task, 不创建新请求
+
+        task = asyncio.create_task(executor())
+        _inflight[key] = task
+        logger.debug("[ACP-COALESCE] new key={} method={} — 创建新请求", key, method)
+
+    try:
+        return await task
+    except asyncio.CancelledError:
+        # 取消不清理 key — 让原始 Task 继续运行, 其他等待者仍可复用其返回值
+        logger.debug("[ACP-COALESCE] cancelled key={} — 保留原始 Task", key)
+        raise
+    except BaseException:
+        async with _inflight_lock:
+            if _inflight.get(key) is task:       # identity check 防止误删重连后同一 key 的新 Task
+                del _inflight[key]
+                logger.debug("[ACP-COALESCE] error cleanup key={}", key)
+        raise
+    else:
+        async with _inflight_lock:
+            if _inflight.get(key) is task:
+                del _inflight[key]
+                logger.debug("[ACP-COALESCE] done cleanup key={}", key)
 
 # ── 失败路径去重: 同路径 read_file 失败 ≥3 次时拦截 ──
 _failed_paths: dict[str, int] = {}
@@ -836,7 +903,10 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             f"[ACP-FS] timeout tier tool={tool_name} method={method} "
             f"timeout={_timeout}s"
         )
-        result = await handler.send_request(method, params, timeout=_timeout)
+        result = await coalesce_or_execute(
+            method, path, session_id,
+            executor=lambda: handler.send_request(method, params, timeout=_timeout),
+        )
         _elapsed = time.perf_counter() - t0
         logger.info(
             f"[ACP-RTT] tool={tool_name} method={method} rtt_ms={_elapsed*1000:.0f} "
