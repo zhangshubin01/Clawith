@@ -49,6 +49,7 @@ class LLMMessage:
     reasoning_content: str | None = None
     reasoning_signature: str | None = None
     dynamic_content: str | None = None
+    _cached_tokens: int | None = None  # F1: per-message token 缓存，内容变更时置 None
 
     def to_openai_format(self) -> dict:
         """Convert to OpenAI format."""

@@ -84,6 +84,94 @@ async def coalesce_or_execute(
                 del _inflight[key]
                 logger.debug("[ACP-COALESCE] done cleanup key={}", key)
 
+
+# ── 延迟基线追踪 (第二梯队): 每方法族 RTT 采样 + P50/P95/P99 定期输出 ──
+# 用途: Phase 0+1 上线后收集 24h 生产数据, 验证修复效果 + 为 Phase 2a Vegas 调参提供基线
+# env ACP_BASELINE_ENABLED=true (默认开启), ACP_BASELINE_FLUSH_SAMPLES=100, ACP_BASELINE_FLUSH_SEC=300
+
+_BASELINE_ENABLED: bool = os.getenv("ACP_BASELINE_ENABLED", "true").lower() == "true"
+_BASELINE_MAX_SAMPLES: int = int(os.getenv("ACP_BASELINE_MAX_SAMPLES", "10000"))
+_BASELINE_FLUSH_SAMPLES: int = int(os.getenv("ACP_BASELINE_FLUSH_SAMPLES", "100"))
+_BASELINE_FLUSH_SEC: float = float(os.getenv("ACP_BASELINE_FLUSH_SEC", "300"))
+
+# per-family ring buffer: {family: [rtt_ms, ...]}
+_baseline_samples: dict[str, list[float]] = {}
+_baseline_count: int = 0
+_baseline_last_flush: float = time.monotonic()
+
+
+def _baseline_family(method: str) -> str:
+    """将 ACP method 映射到方法族 (与 Phase 2a _METHOD_FAMILIES 对齐)。"""
+    if method in ("fs/read_text_file", "ide/index_status", "ide/active_file",
+                   "fs/file_structure", "fs/diagnostics", "fs/get_documentation"):
+        return "fast_read"
+    if method in ("fs/find_file", "fs/find_class", "fs/find_symbol", "fs/search_text"):
+        return "fast_search"
+    if method in ("fs/find_references", "fs/find_definition", "fs/find_implementations",
+                   "fs/find_super_methods", "fs/call_hierarchy", "fs/type_hierarchy"):
+        return "heavy_search"
+    if method in ("fs/list_directory",):
+        return "listing"
+    if method in ("fs/write_text_file", "fs/edit_text_file", "fs/write_text_files",
+                   "fs/convert_java_to_kotlin", "fs/refactor_rename", "fs/safe_delete",
+                   "fs/move_file", "fs/reformat_code", "fs/optimize_imports"):
+        return "write"
+    if method in ("ide/build_project",):
+        return "build"
+    return "other"
+
+
+def record_baseline_rtt(method: str, rtt_s: float) -> None:
+    """记录一次 ACP 方法调用的 RTT 到基线追踪器。
+
+    在 _try_acp_execute 的 send_request 返回处调用。
+    仅当 ACP_BASELINE_ENABLED=true 时记录。
+    """
+    if not _BASELINE_ENABLED:
+        return
+    family = _baseline_family(method)
+    rtt_ms = rtt_s * 1000
+    if family not in _baseline_samples:
+        _baseline_samples[family] = []
+    samples = _baseline_samples[family]
+    samples.append(rtt_ms)
+    # 环形缓冲: 超过上限时淘汰最早一半
+    if len(samples) > _BASELINE_MAX_SAMPLES:
+        _baseline_samples[family] = samples[len(samples) // 2:]
+    global _baseline_count
+    _baseline_count += 1
+    # 每 N 个样本或每 M 秒输出一次统计
+    if _baseline_count >= _BASELINE_FLUSH_SAMPLES or (
+        time.monotonic() - _baseline_last_flush > _BASELINE_FLUSH_SEC
+    ):
+        flush_baseline_stats()
+
+
+def flush_baseline_stats() -> None:
+    """输出各方法族的 P50/P95/P99 延迟统计到日志。"""
+    global _baseline_count, _baseline_last_flush
+    if not _BASELINE_ENABLED or not _baseline_samples:
+        return
+    _baseline_count = 0
+    _baseline_last_flush = time.monotonic()
+    parts: list[str] = []
+    for family in sorted(_baseline_samples.keys()):
+        samples = _baseline_samples[family]
+        if not samples:
+            continue
+        s = sorted(samples)
+        n = len(s)
+        p50 = s[int(n * 0.50)] if n > 0 else 0
+        p95 = s[int(n * 0.95)] if n > 1 else s[0]
+        p99 = s[int(n * 0.99)] if n > 1 else s[0]
+        parts.append(
+            f"{family}: n={n} p50={p50:.0f}ms p95={p95:.0f}ms p99={p99:.0f}ms"
+        )
+    if parts:
+        logger.info("[ACP-BASELINE] {} | total_samples={}", " | ".join(parts),
+                     sum(len(v) for v in _baseline_samples.values()))
+
+
 # ── 失败路径去重: 同路径 read_file 失败 ≥3 次时拦截 ──
 _failed_paths: dict[str, int] = {}
 _FAILED_PATH_BLOCK = 3
@@ -912,6 +1000,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             f"[ACP-RTT] tool={tool_name} method={method} rtt_ms={_elapsed*1000:.0f} "
             f"result_len={len(str(result))} path={path} session={session_id}"
         )
+        # 第二梯队: 基线延迟追踪 (每方法族 P50/P95/P99 统计)
+        record_baseline_rtt(method, _elapsed)
         # P1-6: 检测 IDE 索引未就绪，引导 LLM 等待而非反复重试
         if isinstance(result, str) and ("索引未就绪" in result or "索引构建中" in result):
             logger.warning(f"[ACP] {tool_name} blocked by IDE indexing: {result[:100]}")

@@ -21,7 +21,9 @@ MAX_TERMINAL_RESULT_CHARS = 2000
 MAX_TOOL_HISTORY_ROUNDS = 10
 # 最近 N 轮保留详情，更早的按分组摘要
 RECENT_DETAIL_ROUNDS = 5
-# 截断标记
+# 程序可读的压缩标记，用于 caller.py _multi_role_compress 跳过已截断的内容，避免二次压缩
+COMPRESSION_MARKER = "<!-- ctx:trimmed -->"
+# 截断标记（面向用户）
 TRUNCATION_MARKER = "\n\n[结果已截断，完整内容可通过 read_file 获取]"
 
 
@@ -40,13 +42,14 @@ def trim_tool_result(result_content: str, tool_name: str = "", max_chars: int = 
         half = max_chars // 2
         head = result_content[:half]
         tail = result_content[-half:]
-        result = head + f"\n... [中间 {len(result_content) - max_chars} 字符已省略] ...\n" + tail
+        body = head + f"\n... [中间 {len(result_content) - max_chars} 字符已省略] ...\n" + tail
+        result = COMPRESSION_MARKER + "\n" + body
     elif tool_name in ("search_file", "search_codebase", "search_symbol", "list_dir"):
-        result = result_content[:max_chars] + TRUNCATION_MARKER
+        result = COMPRESSION_MARKER + "\n" + result_content[:max_chars] + TRUNCATION_MARKER
     elif tool_name in ("run_in_terminal",):
-        result = _trim_terminal_output_intelligent(result_content, max_chars)
+        result = COMPRESSION_MARKER + "\n" + _trim_terminal_output_intelligent(result_content, max_chars)
     else:
-        result = result_content[:max_chars] + TRUNCATION_MARKER
+        result = COMPRESSION_MARKER + "\n" + result_content[:max_chars] + TRUNCATION_MARKER
 
     logger.info("[CTX] tool=%s original=%d → actual=%d max=%d elapsed=%.1fms",
                 tool_name, len(result_content), len(result), max_chars, (time.monotonic() - t0) * 1000)

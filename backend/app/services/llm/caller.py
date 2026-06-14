@@ -19,7 +19,16 @@ import time
 import re
 import uuid
 import hashlib
+import threading
 from collections import OrderedDict
+
+# F1: 条件导入 tiktoken — 未安装时自动降级到 chars//3
+try:
+    import tiktoken
+    HAS_TIKTOKEN = True
+except ImportError:
+    HAS_TIKTOKEN = False
+    tiktoken = None  # type: ignore[assignment]
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -355,16 +364,44 @@ _CCR_MAX = 500
 # CTX-GUARD 绝对阈值 — 对齐 Headroom (200K) + Anthropic Claude SDK (100K)
 # 无论模型上下文窗口多大，api_messages 超过此值即触发压缩
 
-def _get_ctx_guard_max_window() -> int:
-    """读取 CTX_GUARD_MAX_WINDOW 环境变量，异常时安全回退到 200000。"""
+def _get_ctx_guard_max_window(model_name: str = "") -> int:
+    """按模型自适应上下文保护上限。Claude 模型 100K，其他模型取窗口 60%。
+
+    优先级: 环境变量 CTX_GUARD_MAX_WINDOW > 模型自适应 > 默认 100K
+    """
+    # 1. 环境变量显式覆盖
     try:
-        return max(int(os.getenv("CTX_GUARD_MAX_WINDOW", "100000")), 1)
+        env_val = os.getenv("CTX_GUARD_MAX_WINDOW")
+        if env_val:
+            return max(int(env_val), 1)
     except (ValueError, TypeError):
+        pass
+
+    # 2. Claude 模型使用 Anthropic 推荐 100K
+    if any(kw in model_name.lower() for kw in ("claude", "anthropic")):
         return 100000
 
-_CTX_GUARD_MAX_WINDOW = _get_ctx_guard_max_window()
-_CTX_GUARD_WARN_RATIO = 0.60    # context 达到 60% 上限时向 LLM 注入提示 (100K×0.60=60K)
-_CTX_GUARD_COMPRESS_RATIO = 0.80  # context 达到 80% 上限时触发 _ctx_compress (100K×0.80=80K)
+    # 3. 其他模型默认 200K (60% of ~333K avg, safe for most models)
+    return 200000
+
+
+def _get_ctx_guard_ratios(model_name: str = "") -> tuple[float, float]:
+    """按模型自适应 WARN/COMPRESS 比率。大窗口模型使用更高阈值。"""
+    lo = model_name.lower()
+    # 1M 窗口模型 (deepseek-v4): 更宽松的阈值
+    if "deepseek-v4" in lo or "1m" in lo:
+        return 0.75, 0.90
+    # Claude 模型 (200K): 适中阈值
+    if any(kw in lo for kw in ("claude", "anthropic")):
+        return 0.60, 0.80
+    # 默认
+    return 0.60, 0.80
+
+
+# 模块常量: 默认值 (运行时被 call_llm 内动态计算覆盖)
+_CTX_GUARD_MAX_WINDOW_DEFAULT = 100000
+_CTX_GUARD_WARN_RATIO = 0.60
+_CTX_GUARD_COMPRESS_RATIO = 0.80
 
 _compress_cache: OrderedDict[str, str] = OrderedDict()
 _ccr_store: OrderedDict[str, str] = OrderedDict()
@@ -405,21 +442,127 @@ def _breaker_record_success() -> None:
     _breaker_failures = 0; _breaker_open_until = 0.0
 
 
-def _est_tokens(msgs: list) -> int:
+# ══ F1: 模型级 Tokenizer ══
+
+# 按模型系列编码器缓存 (双重检查锁定, 线程安全)
+_EST_ENCODERS_CACHE: dict[str, object] = {}
+_EST_ENCODERS_LOCK = threading.Lock()
+
+
+def _tokenizer_key(model_name: str) -> str:
+    """将模型名称映射到 tokenizer 系列键, 用于缓存查找."""
+    lo = model_name.lower()
+    if any(kw in lo for kw in ("claude", "anthropic")):
+        return "claude"  # Anthropic 专有 tokenizer, tiktoken 不兼容 → None
+    if "deepseek" in lo:
+        return "deepseek"  # cl100k_base 近似, 已知偏差 ~10-30% (DeepSeek 未开源 tokenizer)
+    if any(kw in lo for kw in ("gpt-4o", "gpt-4", "o1", "o3")):
+        return "o200k_base"
+    if any(kw in lo for kw in ("gpt", "qwen")):
+        return "cl100k_base"
+    return "cl100k_base"  # 默认 fallback
+
+
+def _get_tokenizer(model_name: str):
+    """按模型系列选择 tokenizer, 双重检查锁定 + lazy 加载.
+
+    失败返回 None → 自动回退 chars//3. Claude 系列始终返回 None.
+    """
+    key = _tokenizer_key(model_name)
+
+    # 第一次检查 (无锁, 快速路径)
+    if key in _EST_ENCODERS_CACHE:
+        return _EST_ENCODERS_CACHE[key]
+
+    if key == "claude" or not HAS_TIKTOKEN:
+        enc = None
+    else:
+        try:
+            enc = tiktoken.get_encoding(key)
+        except Exception:
+            # 未知编码名 (如 "deepseek" 不在 tiktoken 注册表中) → fallback cl100k_base
+            try:
+                enc = tiktoken.get_encoding("cl100k_base")
+            except Exception:
+                enc = None
+
+    # 第二次检查 (加锁, 防止其他线程已写入)
+    with _EST_ENCODERS_LOCK:
+        if key in _EST_ENCODERS_CACHE:
+            return _EST_ENCODERS_CACHE[key]  # 其他线程抢先初始化
+        _EST_ENCODERS_CACHE[key] = enc
+
+    return enc
+
+
+def _img_token_estimate(img_block: dict) -> int:
+    """估算 image block token 占用.
+
+    Anthropic 公式: W*H/750. 对于 1024×1024 图像 ≈ 1398 tokens.
+    当前使用 800 默认值, 后续可从 source 提取尺寸动态计算.
+    """
+    source = img_block.get("source", {})
+    if not source:
+        return 0
+    return 800  # TODO: 从 source 提取宽高用 W*H/750 公式
+
+
+def _est_tokens(msgs: list, model_name: str = "") -> int:
+    """估算上下文 token 数。优先真实 tokenizer，失败回退 chars//3。
+
+    性能优化: 使用 LLMMessage._cached_tokens 避免重复 encode 同一消息。
+    首轮计算后，后续轮次仅新增/修改消息需重新编码（通常 1-3 条/轮）。
+    """
+    encoder = _get_tokenizer(model_name) if model_name else None
     t = 0
+
     for m in msgs:
+        # ── 缓存命中: 直接复用 ──
+        cached = getattr(m, '_cached_tokens', None)
+        if cached is not None:
+            t += cached
+            continue
+
+        msg_t = 0
         c = getattr(m, 'content', None)
+
         if isinstance(c, str):
-            t += len(c)
+            msg_t += len(encoder.encode(c)) if encoder else len(c)
         elif isinstance(c, list):
-            for p in c:
-                if isinstance(p, dict) and p.get("type") == "text":
-                    t += len(p.get("text", ""))
+            for block in c:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        text = block.get("text", "")
+                        msg_t += len(encoder.encode(text)) if encoder else len(text)
+                    elif block.get("type") == "image":
+                        msg_t += _img_token_estimate(block)
+
         if tc := getattr(m, 'tool_calls', None):
-            t += len(json.dumps(tc, default=str))
+            s = json.dumps(tc, default=str)
+            msg_t += len(encoder.encode(s)) if encoder else (len(s) // 3)
+
         if dc := getattr(m, 'dynamic_content', None):
-            t += len(dc)
-    return max(t // 3, 1)
+            s = str(dc)
+            msg_t += len(encoder.encode(s)) if encoder else (len(s) // 3)
+
+        if rc := getattr(m, 'reasoning_content', None):
+            s = str(rc)
+            msg_t += len(encoder.encode(s)) if encoder else (len(s) // 3)
+
+        # 回退模式: chars//3
+        if not encoder:
+            msg_t = max(msg_t // 3, 1)
+
+        t += msg_t
+
+        # 写入 per-message 缓存 (仅在 encoder 可用时, 避免 chars//3 污染)
+        if encoder:
+            try:
+                m._cached_tokens = msg_t
+            except Exception:
+                pass  # dataclass frozen 或 slots 限制时静默跳过
+
+    return max(t, 1)
 
 
 def _trunc(s: str, n: int) -> str:
@@ -659,14 +802,15 @@ def _text(content: str) -> str:
     return _trunc("\n".join(ln for _, _, ln in kp), _TEXT_MAX)
 
 
-def _ctx_compress(api_messages: list, ctx_window: int) -> list:
+def _ctx_compress(api_messages: list, ctx_window: int, model_name: str = "") -> list:
+    """类型感知上下文压缩。model_name 用于精确 token 估算，空字符串回退 chars//3。"""
     from app.services.llm.client import LLMMessage
 
-    if _breaker_is_open() or _est_tokens(api_messages) <= ctx_window * 0.80:
+    if _breaker_is_open() or _est_tokens(api_messages, model_name) <= ctx_window * 0.80:
         return api_messages
 
     wp = _work_paths(api_messages)
-    before = _est_tokens(api_messages)
+    before = _est_tokens(api_messages, model_name)
     compressed = 0
     fallback = 0
     result = []
@@ -686,6 +830,7 @@ def _ctx_compress(api_messages: list, ctx_window: int) -> list:
                         logger.warning("[CTX-COMPRESS] empty output prevented")
                     if nc is not content:
                         compressed += 1
+                        msg._cached_tokens = None  # F1: 内容变更 → 失效缓存
                     result.append(LLMMessage(
                         role="tool", content=nc,
                         tool_call_id=getattr(msg, 'tool_call_id', None),
@@ -696,7 +841,7 @@ def _ctx_compress(api_messages: list, ctx_window: int) -> list:
             else:
                 result.append(msg)
 
-        after = _est_tokens(result)
+        after = _est_tokens(result, model_name)
         if compressed or fallback:
             logger.info(
                 f"[CTX-COMPRESS] {compressed} ok {fallback} fb "
@@ -713,6 +858,140 @@ def _ctx_compress(api_messages: list, ctx_window: int) -> list:
         _breaker_record_failure()
         logger.exception("[CTX-COMPRESS] pipeline failed, returning original")
         return api_messages
+
+
+# ══ F2: 多角色分级压缩 ══
+
+def _multi_role_compress(
+    api_messages: list,
+    ctx_window: int,
+    model_name: str = "",
+    round_i: int = 0,
+    session_id: str = "",
+) -> list:
+    """多角色分级上下文压缩, 原地替换消息内容以减少内存分配.
+
+    策略:
+      P0 (保护)  system     → 仅合并 dynamic_content 重复 reminder
+      P1 (摘要)  assistant → 无 tool_calls 纯文本 → _text() 有损, 含错误关键词则 ISOLATE
+      P2 (降级)  user      → >2000 字符 → head/tail 保留, 含错误关键词 ISOLATE, 单行→_trunc
+      P3 (压缩)  tool      → 现有类型感知策略不变, 跳过 <!-- ctx:trimmed --> 标记
+    """
+    from app.services.llm.client import LLMMessage
+
+    if _breaker_is_open() or _est_tokens(api_messages, model_name) <= ctx_window * 0.80:
+        return api_messages
+
+    est_before = _est_tokens(api_messages, model_name)
+    wp = _work_paths(api_messages)
+    merged_reminders: dict[str, str] = {}
+    compressed = 0
+    fallback = 0
+
+    for i, msg in enumerate(api_messages):
+        role = getattr(msg, 'role', None)
+        content = getattr(msg, 'content', None)
+        dc = getattr(msg, 'dynamic_content', None)
+
+        # ── P0: system — 收集去重 dynamic_content ──
+        if role == "system":
+            if dc and isinstance(dc, str):
+                merged_reminders[hashlib.md5(dc.encode()).hexdigest()] = dc
+            continue
+
+        # ── ISOLATE 守卫: error / 工作路径 ──
+        if _isolate(msg, wp):
+            continue
+
+        # ── 非字符串内容跳过 ──
+        if not isinstance(content, str) or not content:
+            continue
+
+        # ── P1: assistant 纯文本回复 → 有损压缩 ──
+        if role == "assistant" and not getattr(msg, 'tool_calls', None):
+            if len(content) > 800:
+                # 含错误关键词 → ISOLATE 保护
+                if any(kw in content.lower() for kw in _ERROR_KW):
+                    continue
+                try:
+                    compressed_content = _text(content)
+                    api_messages[i] = LLMMessage(
+                        role="assistant", content=compressed_content,
+                        tool_calls=getattr(msg, 'tool_calls', None),
+                        tool_call_id=getattr(msg, 'tool_call_id', None),
+                    )
+                    api_messages[i]._cached_tokens = None
+                    compressed += 1
+                except Exception:
+                    fallback += 1
+            continue
+
+        # ── P2: user 长消息 → 降级压缩 ──
+        if role == "user":
+            if len(content) > 2000:
+                # 含错误关键词 → ISOLATE 保护
+                if any(kw in content.lower() for kw in _ERROR_KW):
+                    continue
+                try:
+                    if "\n" not in content:
+                        compressed_content = _trunc(content, 2000)
+                    else:
+                        lines = content.split("\n")
+                        if len(lines) <= 20:
+                            compressed_content = _trunc(content, 2000)
+                        else:
+                            head = "\n".join(lines[:10])
+                            tail = "\n".join(lines[-10:])
+                            omitted = len(content) - len(head) - len(tail)
+                            compressed_content = (
+                                head + f"\n... [中间 {omitted} 字符已省略] ...\n" + tail
+                            )
+                    api_messages[i] = LLMMessage(role="user", content=compressed_content)
+                    api_messages[i]._cached_tokens = None
+                    compressed += 1
+                except Exception:
+                    fallback += 1
+            continue
+
+        # ── P3: tool → 类型感知压缩 (现有策略) ──
+        if role == "tool" and len(content) > _TOOL_MIN:
+            # 跳过已被 LSP4J trimmer 处理的内容 (F5)
+            if "<!-- ctx:trimmed -->" in content:
+                continue
+            try:
+                nc = _compress_cached(content)
+                if content.strip() and isinstance(nc, str) and not nc.strip():
+                    nc = content
+                    logger.warning("[CTX-COMPRESS] empty output prevented")
+                if nc is not content:
+                    api_messages[i] = LLMMessage(
+                        role="tool", content=nc,
+                        tool_call_id=getattr(msg, 'tool_call_id', None),
+                    )
+                    api_messages[i]._cached_tokens = None
+                    compressed += 1
+            except Exception:
+                fallback += 1
+
+    # ── 将去重后的 dynamic_content 写入首条 system ──
+    if merged_reminders:
+        for m in api_messages:
+            if getattr(m, 'role', None) == "system":
+                merged = "\n".join(merged_reminders.values())
+                m.dynamic_content = merged
+                m._cached_tokens = None
+                break
+
+    est_after = _est_tokens(api_messages, model_name)
+    if compressed or fallback:
+        logger.info(
+            f"[CTX-MULTI] {compressed} ok {fallback} fb "
+            f"tokens: {est_before}→{est_after} "
+            f"({(1 - est_after / max(est_before, 1)) * 100:.0f}%) "
+            f"round={round_i} session={session_id[:8]}"
+        )
+
+    return _repair_truncated_messages(api_messages)
 
 
 # Helper Functions
@@ -986,6 +1265,8 @@ async def _process_tool_call(
                 f"如需完整输出请用更精确的查询或 read_file 直接读取文件。"
             )
             tool_content = _head + _notice + _tail
+            # F5: 添加压缩标记, 使 _multi_role_compress 跳过已截断内容
+            tool_content = "<!-- ctx:trimmed -->\n" + tool_content
             logger.info(
                 f"[TOOL-BUDGET] 截断 tool={tool_name} original_bytes={_original_len} "
                 f"→ head={_head_bytes}B+tail={_tail_bytes}B truncated={_truncated} session={session_id}"
@@ -1137,6 +1418,11 @@ async def call_llm(
     # FINISH_PROTOCOL_REMINDER 注入标记：同一轮 call_llm 调用中仅注入一次到 system prompt
     _reminder_injected = False
 
+    # F6: 循环检测状态
+    _last_read_files: list[str] = []
+    _same_file_streak = 0
+    _LOOP_DETECT_THRESHOLD = 3  # 连续 3 轮读同一文件 → 注入提醒
+
     # Tool-calling loop
     for round_i in range(_max_tool_rounds):
         # 取消检查：若 cancel_event 已设置，立即中断工具循环
@@ -1158,7 +1444,7 @@ async def call_llm(
             )
         # [LSP4J-PERF] 轮次开始计时
         round_start = time.monotonic()
-        _ctx_est = _est_tokens(api_messages)
+        _ctx_est = _est_tokens(api_messages, getattr(model, 'model', ''))
         _ctx_ratio = _ctx_est / _ctx_window if _ctx_window else 0
 
         # ── 上下文膨胀监控 ──
@@ -1184,9 +1470,19 @@ async def call_llm(
             )
 
         # Dynamic tool-call limit warning
+        # F6: 50% 轮次进度警告
+        _warn_threshold_50 = int(_max_tool_rounds * 0.5)
         _warn_threshold_80 = int(_max_tool_rounds * 0.8)
         _warn_threshold_96 = _max_tool_rounds - 2
-        if round_i == _warn_threshold_80:
+        if round_i == _warn_threshold_50:
+            api_messages.append(LLMMessage(
+                role="user",
+                content=(
+                    f"[System] 已消耗 {round_i}/{_max_tool_rounds} 轮工具调用（50%）。"
+                    "请评估当前进度，如任务已完成或接近完成，请尽快总结并调用 finish。"
+                ),
+            ))
+        elif round_i == _warn_threshold_80:
             api_messages.append(LLMMessage(
                 role="user",
                 content=(
@@ -1212,14 +1508,57 @@ async def call_llm(
                     await client.close()
                     return _token_limit_msg
 
-        try:
-            # 上下文利用率检查 — v12.2: 绝对 200K 上限 (对齐 Headroom/Anthropic)
-            # 无论模型窗口多大 (deepseek-v4=1M)，按 capped 窗口计算利用率
+        # F7: 主动轮次压缩 — 每 10 轮压缩早期 tool 消息 (跳过 assistant 保 tool 链)
+        _ACTIVE_TRIM_INTERVAL = 10
+        _ACTIVE_TRIM_KEEP_RECENT = 15
+        if round_i > 0 and round_i % _ACTIVE_TRIM_INTERVAL == 0:
             _ctx_window_raw = _resolve_ctx_window(model)
-            _ctx_window = max(min(_ctx_window_raw, _CTX_GUARD_MAX_WINDOW), 1)
-            _ctx_est = _est_tokens(api_messages)
+            _ctx_window_capped = max(min(_ctx_window_raw, _get_ctx_guard_max_window(getattr(model, 'model', ''))), 1)
+            _active_est = _est_tokens(api_messages, getattr(model, 'model', ''))
+            _active_ratio = _active_est / _ctx_window_capped
+
+            if _active_ratio >= 0.50 and len(api_messages) > _ACTIVE_TRIM_KEEP_RECENT:
+                _log.info(
+                    "[CTX-BUDGET] active trim round={} ctx={}/{} ({:.0f}%)",
+                    round_i, _active_est, _ctx_window_capped, _active_ratio * 100
+                )
+                _recent = api_messages[-_ACTIVE_TRIM_KEEP_RECENT:]
+                _early = list(api_messages[:-_ACTIVE_TRIM_KEEP_RECENT])
+                # F7-review #1: 只压缩早期 tool 消息，跳过 assistant (保 tool 链)
+                for j, em in enumerate(_early):
+                    role = getattr(em, 'role', None)
+                    content = getattr(em, 'content', None)
+                    if role == "tool" and isinstance(content, str) and len(content) > _TOOL_MIN:
+                        try:
+                            nc = _compress_cached(content)
+                            if nc is not content:
+                                from app.services.llm.client import LLMMessage as _LLM
+                                _early[j] = _LLM(
+                                    role="tool", content=nc,
+                                    tool_call_id=getattr(em, 'tool_call_id', None),
+                                )
+                                _early[j]._cached_tokens = None
+                        except Exception:
+                            pass
+                api_messages = _early + _recent
+                _after_active = _est_tokens(api_messages, getattr(model, 'model', ''))
+                _log.info(
+                    "[CTX-BUDGET] active trim done: {}→{} ({:.0f}%)",
+                    _active_est, _after_active,
+                    (1 - _after_active / max(_active_est, 1)) * 100
+                )
+
+        try:
+            # F8: 上下文利用率检查 — 模型自适应窗口上限
+            _ctx_window_raw = _resolve_ctx_window(model)
+            _model_name = getattr(model, 'model', '')
+            _ctx_guard_max = _get_ctx_guard_max_window(_model_name)
+            _ctx_window = max(min(_ctx_window_raw, _ctx_guard_max), 1)
+            _ctx_est = _est_tokens(api_messages, _model_name)
             _ctx_ratio = _ctx_est / _ctx_window
-            if _ctx_ratio >= _CTX_GUARD_WARN_RATIO:
+            # F8: 模型自适应 WARN/COMPRESS 比率
+            _warn_ratio, _compress_ratio = _get_ctx_guard_ratios(_model_name)
+            if _ctx_ratio >= _warn_ratio:
                 _log.warning(
                     f"[CTX-GUARD] context {_ctx_est}/{_ctx_window} ({_ctx_ratio:.1%}) "
                     f"raw_window={_ctx_window_raw} model={getattr(model, 'model', '?')} session={session_id}"
@@ -1233,7 +1572,7 @@ async def call_llm(
                             "请精简后续输出，优先使用 finish 总结当前进度。"
                         ),
                     ))
-                if _ctx_ratio >= _CTX_GUARD_COMPRESS_RATIO:
+                if _ctx_ratio >= _compress_ratio:
                     _consecutive_guard_failures += 1
                     if _consecutive_guard_failures >= 3:
                         _log.error(
@@ -1244,10 +1583,14 @@ async def call_llm(
                             content="上下文已严重超限，请立即调用 finish 结束。",
                         ))
                     else:
-                        # v4.1: 类型感知压缩替代暴力截断
+                        # F2: 多角色分级压缩替代 _ctx_compress
                         _before_compress = _ctx_est
-                        api_messages = _ctx_compress(api_messages, ctx_window=_ctx_window)
-                        _after_compress = _est_tokens(api_messages)
+                        api_messages = _multi_role_compress(
+                            api_messages, ctx_window=_ctx_window,
+                            model_name=getattr(model, 'model', ''),
+                            round_i=round_i, session_id=session_id,
+                        )
+                        _after_compress = _est_tokens(api_messages, getattr(model, 'model', ''))
                         _log.warning(
                             f"[CTX-COMPRESS] compressed: est_tokens={_after_compress} "
                             f"failures={_consecutive_guard_failures}/3"
@@ -1271,12 +1614,12 @@ async def call_llm(
             _log.info(
                 f"[LLM-INPUT] round={round_i+1}/{_max_tool_rounds} "
                 f"msgs={msg_count} tool_msgs={tool_msgs} "
-                f"chars={total_chars} est_tokens={_est_tokens(api_messages)} "
+                f"chars={total_chars} est_tokens={_est_tokens(api_messages, getattr(model, 'model', ''))} "
                 f"tools={len(_round_tools) if _round_tools else 0} "
                 f"last_user={last_user}"
             )
             # 自适应流式超时: 根据上下文 tokens 动态计算 (prefill 时间与 tokens 呈线性关系)
-            _stream_est = _est_tokens(api_messages)
+            _stream_est = _est_tokens(api_messages, getattr(model, 'model', ''))
             _stream_timeout = max(30.0, min(30.0 + (_stream_est / 1000) * 2.0, 110.0))
             response = await asyncio.wait_for(
                 client.stream(
@@ -1375,6 +1718,36 @@ async def call_llm(
         if retry_instruction:
             api_messages.append(LLMMessage(role="user", content=retry_instruction))
             continue
+
+        # F6: 循环检测 — 连续多轮读取同一文件则注入提醒
+        _current_read_files = []
+        for tc in sanitized_tool_calls:
+            name = tc.get("function", {}).get("name", "")
+            if name == "read_file":
+                try:
+                    args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    args = {}
+                fp = args.get("file_path") or args.get("filePath", "")
+                if fp:
+                    _current_read_files.append(fp)
+
+        if _current_read_files and sorted(_current_read_files) == sorted(_last_read_files):
+            _same_file_streak += 1
+        else:
+            _same_file_streak = 0
+        _last_read_files = _current_read_files
+
+        if _same_file_streak >= _LOOP_DETECT_THRESHOLD:
+            api_messages.append(LLMMessage(
+                role="user",
+                content=(
+                    f"[System] 你似乎陷入了重复探索模式——连续 {_same_file_streak} 轮读取同样的文件。"
+                    "请基于已有的项目结构理解，总结你的发现并调用 finish。"
+                    "如果确实需要更深入的分析，请说明具体需要什么信息。"
+                ),
+            ))
+            _same_file_streak = 0  # 重置，避免重复注入
 
         finish_call = find_finish_call(sanitized_tool_calls)
         if finish_call:
@@ -1615,7 +1988,7 @@ async def call_llm(
             )
 
             # ── 上下文膨胀追踪: 计算本轮增量并更新滑动平均 ──
-            _current_ctx = _est_tokens(api_messages)
+            _current_ctx = _est_tokens(api_messages, getattr(model, 'model', ''))
             if _prev_ctx_est > 0:
                 _delta = _current_ctx - _prev_ctx_est
                 _ctx_growth_history.append(_delta)
@@ -1630,7 +2003,7 @@ async def call_llm(
     if agent_id and _unsaved_usage.total_tokens > 0:
         await record_token_usage(agent_id, _unsaved_usage)
     # v12.2: post-stream 上下文统计 — 使用实际 api_messages 估算值
-    _final_est = _est_tokens(api_messages)
+    _final_est = _est_tokens(api_messages, getattr(model, 'model', ''))
     _final_ratio = _final_est / _ctx_window if _ctx_window else 0
     if _final_est >= 50000:  # 超过 50K 上下文时有统计意义
         _log.info(
@@ -1639,7 +2012,12 @@ async def call_llm(
             f"ratio={_final_ratio:.1%} rounds={round_i + 1}"
         )
     await client.close()
-    return "[Error] Too many tool call rounds"
+    # F6: 改进错误消息 — 含原因+建议
+    return (
+        f"[Error] 会话达到最大轮次限制（{_max_tool_rounds} 轮）。\n"
+        "可能原因: 任务复杂/prompt不明确/重复探索循环。\n"
+        "建议: 拆分任务/明确输出格式/开启新会话重试。"
+    )
 
 
 async def call_llm_with_failover(
