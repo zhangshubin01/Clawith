@@ -31,7 +31,7 @@ services:
 
   backend:
     build:
-      context: ../backend
+      context: ./backend
       args:
         CLAWITH_PIP_INDEX_URL: ${CLAWITH_PIP_INDEX_URL:-}
         CLAWITH_PIP_TRUSTED_HOST: ${CLAWITH_PIP_TRUSTED_HOST:-}
@@ -80,7 +80,7 @@ services:
         max-size: "10m"
         max-file: "3"
   frontend:
-    build: ../frontend
+    build: ./frontend
     restart: unless-stopped
     ports:
       - "${FRONTEND_PORT:-3008}:3000"
@@ -89,7 +89,7 @@ services:
       API_UPSTREAM: ${API_UPSTREAM:-backend:8000}
       MINIO_UPSTREAM: ${MINIO_UPSTREAM:-minio:9000}
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - ./frontend/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
     networks:
       - default
     depends_on:
