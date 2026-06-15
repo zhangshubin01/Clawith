@@ -21,22 +21,27 @@ def upgrade() -> None:
     """创建复合索引 — CONCURRENTLY 避免锁表。
 
     CREATE INDEX CONCURRENTLY 不能在事务内执行。
-    通过 op.get_bind() 获取原始连接，使用 autocommit 绕过 Alembic 的事务管理。
+    SQLAlchemy 2.0: op.get_bind() 返回的连接已有活跃事务,
+    必须通过 engine 获取原始连接并设置 autocommit 隔离级别。
     """
-    connection = op.get_bind()
-    connection.execution_options(isolation_level="AUTOCOMMIT").execute(
-        sa.text(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
-            "ix_chat_messages_conv_user_role "
-            "ON chat_messages "
-            "(conversation_id, user_id, role, created_at DESC)"
+    engine = op.get_bind().engine
+    with engine.connect() as conn:
+        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+        conn.execute(
+            sa.text(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+                "ix_chat_messages_conv_user_role "
+                "ON chat_messages "
+                "(conversation_id, user_id, role, created_at DESC)"
+            )
         )
-    )
 
 
 def downgrade() -> None:
     """回退 — CONCURRENTLY 同样避免锁表。"""
-    connection = op.get_bind()
-    connection.execution_options(isolation_level="AUTOCOMMIT").execute(
-        sa.text("DROP INDEX CONCURRENTLY IF EXISTS ix_chat_messages_conv_user_role")
-    )
+    engine = op.get_bind().engine
+    with engine.connect() as conn:
+        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+        conn.execute(
+            sa.text("DROP INDEX CONCURRENTLY IF EXISTS ix_chat_messages_conv_user_role")
+        )

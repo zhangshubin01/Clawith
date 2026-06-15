@@ -1171,6 +1171,8 @@ class AcpHandler:
             f"🔍 **代码搜索强制规则**: 搜索代码时必须用 IDE 索引工具 (find_symbol/search_text/find_class/"
             f"find_references/find_definition/find_file/find_implementations/list_files)，"
             f"比 grep -r 快 100-1000 倍且支持语义匹配。**严禁用 execute_command + grep 替代 IDE 搜索**。\n"
+            f"📍 **查找引用/实现优先**: 找到符号后，必须用 find_references（查所有引用）或 find_implementations（查所有实现），"
+            f"一次性获取所有相关位置，不要逐文件搜索。\n"
             f"⚠️ 注意: index_status 返回错误不代表其他 IDE 工具不可用，各工具独立运作。\n"
             f"- Agent 内部文件(memory/, skills/ 前缀)不在 IDE, 由后端本地读取。\n"
             f"- 🚀 并行执行: 多个独立的 read_file/search/list/find 操作必须在一次函数调用批次中并行调用, "

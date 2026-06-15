@@ -79,6 +79,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    ports:
+      - "${BACKEND_PORT:-8008}:8000"
   frontend:
     build: ./frontend
     restart: unless-stopped

@@ -13,6 +13,7 @@ All paths now support:
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -152,6 +153,38 @@ def is_retryable_error(result: str) -> bool:
         return False
         
     return classify_error(Exception(result)) != FailoverErrorType.NON_RETRYABLE
+
+
+def _format_friendly_error(error_text: str) -> str:
+    """将 LLM 原始错误转换为用户可理解的中文提示。
+
+    按优先级匹配错误模式，返回带 emoji 的中文提示。
+    无法识别时返回简短摘要。
+    """
+    text_lower = error_text.lower()
+
+    patterns: list[tuple[str, str]] = [
+        (r'insufficient\s*balance', '💰 API 余额不足，请前往控制台充值后重试。'),
+        (r'invalid.*api[\s_-]*key|unauthorized', '🔑 API 密钥无效或已过期，请检查 API 设置。'),
+        (r'rate[\s_-]*limit|too\s*many\s*request', '⏳ 请求过于频繁，请稍后重试。'),
+        (r'connection[\s_-]*refused', '🔌 无法连接到模型服务，请检查网络或服务状态。'),
+        (r'time[-\s]?out|timed\s*out', '⏱️ 模型响应超时，请稍后重试。'),
+        (r'context[\s_-]*length[\s_-]*exceed', '📏 上下文超过模型限制，请缩短对话或减少附加内容。'),
+        (r'internal[\s_-]*server[\s_-]*error|internal\s+error', '🖥️ 模型服务暂时异常，请稍后重试或联系管理员。'),
+        (r'invalid_request_error|tool_calls.*must\s+be\s+followed|tool.*must\s+be\s+a\s+response',
+         '🔄 上下文消息格式异常（历史过长被截断导致工具调用配对丢失），请开启新会话重试。'),
+    ]
+
+    for pattern, friendly in patterns:
+        if re.search(pattern, text_lower):
+            return friendly
+
+    status_match = re.search(r'HTTP\s+(\d{3})', error_text)
+    if status_match and status_match.group(1).startswith('5'):
+        return f'🖥️ 模型服务暂时异常（HTTP {status_match.group(1)}），请稍后重试或联系管理员。'
+
+    short = error_text[:500].replace('\n', ' ')
+    return f'⚠️ 调用模型出错，请联系管理员。错误摘要: {short}'
 
 
 def _get_model_timeout(model: "LLMModel") -> float:
