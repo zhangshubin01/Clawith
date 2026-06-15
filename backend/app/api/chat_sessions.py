@@ -131,7 +131,7 @@ async def list_sessions(
                 .where(
                     ChatSession.id.in_(session_uuid_ids),
                     ChatSession.user_id == current_user.id,
-                    ChatSession.source_channel.notin_(["agent", "trigger", "acp"]),
+                    ChatSession.source_channel.notin_(["agent", "trigger"]),
                     ChatSession.is_group == False,
                     ChatMessage.role.in_(["assistant", "system", "tool_call"]),
                     ChatMessage.created_at > func.coalesce(
@@ -225,7 +225,7 @@ async def list_sessions(
                 ChatSession.agent_id == agent_id,
                 ChatSession.user_id == current_user.id,
                 ChatSession.is_group == False,
-                ChatSession.source_channel.notin_(["agent", "trigger", "acp"]),
+                ChatSession.source_channel.notin_(["agent", "trigger"]),
             )
         )
         total = count_result.scalar() or 0
@@ -236,7 +236,7 @@ async def list_sessions(
                 ChatSession.agent_id == agent_id,
                 ChatSession.user_id == current_user.id,
                 ChatSession.is_group == False,
-                ChatSession.source_channel.notin_(["agent", "trigger", "acp"]),
+                ChatSession.source_channel.notin_(["agent", "trigger"]),
             )
             .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
             .offset(skip).limit(limit)  # #70 修复：分页支持
