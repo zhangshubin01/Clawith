@@ -21,25 +21,26 @@ import queue
 import tempfile
 import uuid
 import unicodedata
+import weakref
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, Optional
 import re
 
 from loguru import logger
 from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 
+from app.core.logging_config import get_trace_id
 from app.database import async_session
 from app.models.task import Task
 from app.models.agent import Agent as AgentModel
 from app.models.org import AgentRelationship, OrgMember, AgentAgentRelationship
-from app.models.audit import ChatMessage, AuditLog
+from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.channel_config import ChannelConfig
 from app.models.user import User as UserModel
-from app.services.auth_registry import auth_provider_registry
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import get_platform_user_by_org_member
 from app.services.document_conversion import (
@@ -75,6 +76,12 @@ from app.services.llm.finish import (
 )
 
 
+from collections import OrderedDict
+
+# 后台任务强引用集合
+_agent_tools_bg: set[asyncio.Task] = set()
+
+
 _settings = get_settings()
 WORKSPACE_ROOT = Path(_settings.STORAGE_LOCAL_ROOT or _settings.AGENT_DATA_DIR)
 TOOL_MATERIALIZE_MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -88,6 +95,13 @@ MAX_EXEC_STDERR_CAPTURE_BYTES = 500_000
 # Key: (agent_id, tool_name), Value: (config, expiry_time)
 _tool_config_cache: dict[tuple, tuple[dict, datetime]] = {}
 _TOOL_CONFIG_CACHE_TTL_SECONDS = 60
+
+# ─── Tool Definition Cache (LRU) ────────────────────────────────────────
+# Cache tools definition list to avoid DB queries per request
+# Key: (agent_id, has_feishu, has_any_channel, a2a_async, os_type), Value: (tools_list, expiry_time)
+_MAX_TOOLS_CACHE_SIZE = 100
+_tools_def_cache: OrderedDict[tuple, tuple[list, datetime]] = OrderedDict()
+_tools_def_lock = asyncio.Lock()  # Protect concurrent cache access
 
 # Sensitive field keys that should be encrypted/decrypted
 SENSITIVE_FIELD_KEYS = {"api_key", "private_key", "auth_code", "password", "secret", "atlassian_api_key"}
@@ -216,7 +230,10 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
             _set_cached_tool_config(agent_id, tool_name, decrypted)
             return decrypted
 
-    logger.error(f"[ToolConfig] No DB config found for {tool_name}, agent_id={agent_id}")
+    if tool_name.startswith("agentbay_"):
+        logger.debug(f"[ToolConfig] No DB config found for {tool_name}, agent_id={agent_id} (AgentBay not configured, this is expected if not using AgentBay)")
+    else:
+        logger.error(f"[ToolConfig] No DB config found for {tool_name}, agent_id={agent_id}")
     return None
 
 # ContextVar set by each channel handler so send_channel_file knows where to send
@@ -1666,6 +1683,40 @@ AGENT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "unpublish_page",
+            "description": "Unpublish and delete a previously published public page. Use this to remove a page that is no longer needed or contains incorrect content. Requires the short_id from list_published_pages.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "short_id": {
+                        "type": "string",
+                        "description": "The short ID of the page to unpublish (e.g. 'aB3xY7kM'). Get this from list_published_pages.",
+                    },
+                },
+                "required": ["short_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_published_page",
+            "description": "Delete a previously published public page. Alias for unpublish_page — same behavior. Requires the short_id from list_published_pages.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "short_id": {
+                        "type": "string",
+                        "description": "The short ID of the page to delete (e.g. 'aB3xY7kM'). Get this from list_published_pages.",
+                    },
+                },
+                "required": ["short_id"],
+            },
+        },
+    },
     # --- Skill Management ---
     {
         "type": "function",
@@ -2157,12 +2208,12 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     When the tenant's a2a_async_enabled flag is False, the msg_type parameter is
     removed from the send_message_to_agent tool so the LLM only sees the
     synchronous consult behaviour.
+
+    Uses LRU cache with TTL (60s) to avoid DB queries per request.
     """
+    # Get dynamic parameters (these cannot be cached reliably)
     has_feishu = await _agent_has_feishu(agent_id)
     has_any_channel = await _agent_has_any_channel(agent_id)
-    _always_tools = _always_core_tools + (_feishu_tools if has_feishu else []) + (_channel_tools if has_any_channel else [])
-
-    # Check tenant-level a2a_async_enabled flag
     _a2a_async = False
     is_system_agent = False
     agent_tenant_id = None
@@ -2182,9 +2233,18 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     _a2a_async = getattr(_tenant, "a2a_async_enabled", False)
     except Exception:
         pass
-
-    # Read os_type once; used to patch agentbay_file_transfer paths below
     computer_os_type = await _get_computer_os_type(agent_id)
+
+    # Check cache hit with full key
+    _cache_key = (str(agent_id), has_feishu, has_any_channel, _a2a_async, computer_os_type)
+    if _cache_key in _tools_def_cache:
+        tools_list, expiry = _tools_def_cache[_cache_key]
+        if datetime.now() < expiry:
+            _tools_def_cache.move_to_end(_cache_key)
+            return tools_list
+
+    # Build _always_tools first (needed for cache key validation)
+    _always_tools = _always_core_tools + (_feishu_tools if has_feishu else []) + (_channel_tools if has_any_channel else [])
 
     try:
         from app.models.tool import Tool, AgentTool
@@ -2231,6 +2291,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     default_included_names.append(t.name)
 
                 if not enabled:
+                    # 用户显式 enabled=False 时记录，避免 _always_tools 循环再次注入
                     if at and not at.enabled:
                         explicitly_disabled_names.add(t.name)
                     continue
@@ -2293,6 +2354,13 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 # Strip msg_type from send_message_to_agent when async A2A is disabled
                 if not _a2a_async:
                     result = _strip_a2a_msg_type(result)
+
+                # Store in cache (LRU)
+                expiry = datetime.now() + timedelta(seconds=60)
+                while len(_tools_def_cache) >= _MAX_TOOLS_CACHE_SIZE:
+                    _tools_def_cache.popitem(last=False)
+                _tools_def_cache[_cache_key] = (result, expiry)
+
                 # Final diagnostic: log the complete tool list and assignment stats
                 final_names = sorted(t["function"]["name"] for t in result)
                 logger.info(
@@ -2584,7 +2652,71 @@ _TOOL_AUTONOMY_MAP = {
     "web_search": "web_search",
     "execute_code": "execute_code",
     "execute_code_e2b": "execute_code",
+    # ★ P2-1 修复：IDE 高敏工具（LSP4J 路径下也必须走 autonomy 检查）
+    # 历史问题：LSP4J 工具调用绕过 execute_tool 内部检查直达 IDE，相当于无门槛运行。
+    # 这些工具会修改用户磁盘或执行任意命令，必须与本地等效工具共享同一道审批闸门。
+    "delete_file_by_path": "delete_files",          # 删除 IDE 项目文件
+    "run_in_terminal": "execute_code",               # 终端命令执行
+    "create_file_with_text": "write_workspace_files",
+    "replace_text_by_path": "write_workspace_files",
+    "search_replace": "write_workspace_files",
+    "apply_patch": "write_workspace_files",
+    "save_file": "write_workspace_files",
 }
+
+
+async def check_tool_autonomy(
+    tool_name: str,
+    arguments: dict,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    notify: bool = True,
+) -> str | None:
+    """前置 autonomy 检查 —— 高敏工具在任何执行路径之前调用。
+
+    Phase P2-1 修复：抽离原 execute_tool 内部的 autonomy 块，使 LSP4J 路由也能复用。
+
+    Args:
+        notify: False 时跳过所有外部通知 (WebUI/飞书等)。ACP 插件会话设 False。
+
+    Returns:
+        - None: 检查通过，可继续执行
+        - str: 已拒绝/待审批，调用方应直接返回该字符串作为工具结果
+    """
+    action_type = _TOOL_AUTONOMY_MAP.get(tool_name)
+    if not action_type:
+        return None
+
+    try:
+        from app.services.autonomy_service import autonomy_service
+        from app.models.agent import Agent as AgentModel
+        async with async_session() as _adb:
+            _ar = await _adb.execute(select(AgentModel).where(AgentModel.id == agent_id))
+            _agent = _ar.scalar_one_or_none()
+            if not _agent:
+                return None
+            result_check = await autonomy_service.check_and_enforce(
+                _adb,
+                _agent,
+                action_type,
+                {"tool": tool_name, "args": str(arguments)[:200], "requested_by": str(user_id)},
+                notify=notify,
+            )
+            await _adb.commit()
+            if result_check.get("allowed"):
+                return None
+            level = result_check.get("level", "L3")
+            logger.info("[Autonomy] Tool {} denied, level: {}", tool_name, level)
+            if level == "L3":
+                return (
+                    "⏳ This action requires approval. An approval request has been sent. "
+                    "Please wait for approval before retrying. "
+                    f"(Approval ID: {result_check.get('approval_id', 'N/A')})"
+                )
+            return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
+    except Exception as e:
+        logger.exception("[Autonomy] Check failed: {}", e)
+        return f"⚠️ Autonomy check failed ({e}). Operation blocked for safety. Please retry or contact admin."
 
 
 def _is_enterprise_info_path(path: str | None) -> bool:
@@ -2844,6 +2976,17 @@ async def _execute_tool_direct(
         return f"Error executing {tool_name}: {e}"
 
 
+# 广场与只读工具在专用路径写 activity，避免 execute_tool 尾部重复记 tool_call
+_SKIP_TOOL_ACTIVITY = frozenset({
+    "list_files",
+    "read_file",
+    "read_document",
+    "plaza_create_post",
+    "plaza_add_comment",
+    "plaza_get_new_posts",
+})
+
+
 async def execute_tool(
     tool_name: str,
     arguments: dict,
@@ -2858,6 +3001,7 @@ async def execute_tool(
         session_id: The ChatSession ID, used to isolate AgentBay instances
                     per conversation. Passed through to agentbay_* tools.
     """
+    _log = logger.bind(trace_id=get_trace_id())
     if not isinstance(tool_name, str):
         tool_name = str(tool_name or "")
     tool_name = (
@@ -2873,33 +3017,44 @@ async def execute_tool(
         content = arguments.get("content", "")
         return content if isinstance(content, str) else str(content)
 
+    # 0. 工具执行速率限制（per-session）：防止 Agent 失控时无限循环调用工具
+    # 写操作工具（write_file/delete_file 等）使用更严格的频率限制
+    # 参考 jsonrpc_router.py L2628-2645 的 LSP4J 端限流实现
+    from app.core.rate_limit import check_session_rate_limit, is_write_tool
+    try:
+        limit_key = "tool_write" if is_write_tool(tool_name) else "tool_execute"
+        await check_session_rate_limit(session_id or "unknown", limit_key)
+    except RuntimeError as rate_err:
+        logger.warning(
+            "[ToolRateLimit] session={} tool={} exceeded: {}",
+            session_id, tool_name, rate_err,
+        )
+        return (
+            "⚠️ Tool execution rate limit reached. "
+            f"Your session has exceeded the allowed rate for '{tool_name}' operations. "
+            f"Please wait a moment before making additional tool calls, "
+            f"or consolidate multiple operations into fewer calls. "
+            f"({rate_err})"
+        )
+
     _agent_tenant_id = await _get_agent_tenant_id(agent_id)
 
     ws = _agent_workspace_root(agent_id)
 
-    # ── Autonomy boundary check ──
-    action_type = _TOOL_AUTONOMY_MAP.get(tool_name)
-    if action_type:
-        try:
-            from app.services.autonomy_service import autonomy_service
-            from app.models.agent import Agent as AgentModel
-            async with async_session() as _adb:
-                _ar = await _adb.execute(select(AgentModel).where(AgentModel.id == agent_id))
-                _agent = _ar.scalar_one_or_none()
-                if _agent:
-                    result_check = await autonomy_service.check_and_enforce(
-                        _adb, _agent, action_type, {"tool": tool_name, "args": str(arguments)[:200], "requested_by": str(user_id)}
-                    )
-                    await _adb.commit()
-                    if not result_check.get("allowed"):
-                        level = result_check.get("level", "L3")
-                        logger.info(f"[Autonomy] Tool {tool_name} denied, level: {level}")
-                        if level == "L3":
-                            return f"⏳ This action requires approval. An approval request has been sent. Please wait for approval before retrying. (Approval ID: {result_check.get('approval_id', 'N/A')})"
-                        return f"❌ Action denied: {result_check.get('message', 'unknown reason')}"
-        except Exception as e:
-            logger.exception(f"[Autonomy] Check failed: {e}")
-            return f"⚠️ Autonomy check failed ({e}). Operation blocked for safety. Please retry or contact admin."
+    # IDE 删除：已连接 LSP4J 时改走插件内 PENDING 审批，避免 L3 只回文本、IDE 无授权按钮
+    if tool_name in ("delete_file_by_path", "delete_file"):
+        from app.plugins.clawith_lsp4j.jsonrpc_router import get_active_router, invoke_lsp4j_tool
+
+        agent_key = (str(user_id), str(agent_id))
+        if await get_active_router(agent_key) is not None:
+            _invoke_name = "delete_file_by_path" if tool_name == "delete_file" else tool_name
+            return await invoke_lsp4j_tool(_invoke_name, arguments, agent_id, user_id)
+
+
+    # ── Autonomy boundary check ──（提取到 check_tool_autonomy，与 LSP4J 路径复用同一闸门）
+    _autonomy_blocked = await check_tool_autonomy(tool_name, arguments, agent_id, user_id)
+    if _autonomy_blocked is not None:
+        return _autonomy_blocked
 
     # Pre-inject session_id into arguments for AgentBay tools so each
     # _agentbay_* handler can pass it to get_agentbay_client_for_agent()
@@ -2971,6 +3126,12 @@ async def execute_tool(
                 return "❌ Missing required argument 'path' for read_document"
             max_chars = min(int(arguments.get("max_chars", 8000)), 20000)
             result = await _read_document_from_storage(agent_id, path, max_chars=max_chars, tenant_id=_agent_tenant_id)
+        elif tool_name == "add_tasks":
+            # Phase 5.3：任务规划落盘到 Agent 工作空间 tasks.json（追加语义）
+            result = await _handle_add_tasks(agent_id, arguments)
+        elif tool_name == "todo_write":
+            # Phase 5.3：任务列表覆写到 Agent 工作空间 tasks.json（替换语义）
+            result = await _handle_todo_write(agent_id, arguments)
         elif tool_name in {"write_file", "move_file", "delete_file", "edit_file"}:
             result = await _execute_workspace_mutation(
                 tool_name,
@@ -3210,6 +3371,8 @@ async def execute_tool(
             result = await _publish_page(agent_id, user_id, ws, arguments)
         elif tool_name == "list_published_pages":
             result = await _list_published_pages(agent_id)
+        elif tool_name in ("unpublish_page", "delete_published_page"):
+            result = await _unpublish_page(agent_id, arguments)
         # ── AgentBay Tools ──
         elif tool_name == "agentbay_browser_navigate":
             result = await _agentbay_browser_navigate(agent_id, ws, arguments)
@@ -3332,8 +3495,8 @@ async def execute_tool(
             # Try MCP tool execution
             result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id)
 
-        # Log tool call activity (skip noisy read operations)
-        if tool_name not in ("list_files", "read_file", "read_document"):
+        # Log tool call activity (skip noisy reads and plaza tools — plaza 在专用函数写 plaza_post)
+        if tool_name not in _SKIP_TOOL_ACTIVITY:
             from app.services.activity_logger import log_activity
             await log_activity(
                 agent_id, "tool_call",
@@ -3358,8 +3521,14 @@ async def execute_tool(
 
         return result
     except Exception as e:
-        logger.exception(f"[Tool] Execution failed: {tool_name}")
-        return f"Tool execution error ({tool_name}): {type(e).__name__}: {str(e)[:200]}"
+        # #169 修复：区分网络超时（WARNING）与真正异常（ERROR）
+        _exc_name = type(e).__name__
+        _is_network = _exc_name in ("ReadTimeout", "ConnectTimeout", "ConnectError", "RemoteProtocolError")
+        if _is_network:
+            logger.warning("[Tool] 网络超时 ({}): {} - {}", tool_name, _exc_name, str(e)[:120])
+        else:
+            logger.exception("[Tool] Execution failed: {}", tool_name)
+        return f"Tool execution error ({tool_name}): {_exc_name}: {str(e)[:200]}"
 
 
 async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str:
@@ -3367,8 +3536,6 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
 
     Config resolution priority: Agent config > Company config > Defaults.
     """
-    import httpx
-    import re
 
     query = arguments.get("query", "")
     if not query:
@@ -3398,16 +3565,38 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
 
 
 async def _search_duckduckgo(query: str, max_results: int) -> str:
-    """Search via DuckDuckGo HTML (free, no API key)."""
-    import httpx, re
+    """Search via DuckDuckGo HTML (free, no API key).
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        resp = await client.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
-            timeout=10,
-        )
+    #166 修复：添加指数退避重试（最多 2 次→1s, 3s），应对国内网络不稳定。
+    """
+    import asyncio
+    import httpx
+    import re
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(follow_redirects=False) as client:
+                resp = await client.get(
+                    "https://html.duckduckgo.com/html/",
+                    params={"q": query},
+                    headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+                    timeout=10,
+                )
+            break  # 成功，跳出重试循环
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as e:
+            last_error = e
+            if attempt < 2:
+                _delay = 1.0 * (2 ** attempt)  # 1s → 3s
+                logger.info("[DDG] 尝试 {}/3 失败: {}，{}s后重试...", attempt + 1, type(e).__name__, _delay)
+                await asyncio.sleep(_delay)
+            else:
+                logger.warning("[DDG] 3次重试均失败: {} - {}", type(e).__name__, str(e)[:120])
+                return f'🔍 DuckDuckGo 搜索不可用（网络超时）: "{query}"。请稍后重试或使用其他搜索引擎。'
+        except Exception as e:
+            # 非网络错误（解析失败等）不重试
+            logger.warning("[DDG] 搜索失败（非网络错误）: {} - {}", type(e).__name__, str(e)[:100])
+            return f'🔍 DuckDuckGo 搜索出错: "{query}" - {type(e).__name__}'
 
     results = []
     blocks = re.findall(
@@ -3465,7 +3654,7 @@ async def _jina_search(arguments: dict) -> str:
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=30) as client:
             resp = await client.get(
                 f"https://s.jina.ai/{__import__('urllib.parse', fromlist=['quote']).quote(query)}",
                 headers=headers,
@@ -3496,7 +3685,6 @@ async def _jina_search(arguments: dict) -> str:
 async def _jina_read(arguments: dict) -> str:
     """Read web page via Jina AI Reader API (r.jina.ai). Returns clean structured markdown."""
     import httpx
-    from app.config import get_settings
 
     url = arguments.get("url", "").strip()
     if not url:
@@ -3516,7 +3704,7 @@ async def _jina_read(arguments: dict) -> str:
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=30) as client:
             resp = await client.get(
                 f"https://r.jina.ai/{url}",
                 headers=headers,
@@ -3647,7 +3835,7 @@ async def _read_webpage(arguments: dict) -> str:
     }
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
             async with client.stream("GET", url, headers=headers) as resp:
                 content_length = resp.headers.get("content-length")
                 if content_length and content_length.isdigit() and int(content_length) > max_bytes:
@@ -4258,7 +4446,16 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
 
             if not tool:
                 logger.warning(f"[MCP] Unknown tool: {tool_name}")
-                return f"Unknown tool: {tool_name}"
+                # 返回可用工具列表引导 LLM 使用正确工具名, 避免反复生成幻觉调用
+                known_names = sorted(set(
+                    t.mcp_tool_name for t in (await db.execute(
+                        select(Tool).where(Tool.type == "mcp")
+                    )).scalars().all()
+                ))[:30]
+                return (
+                    f"工具 '{tool_name}' 不存在。可用工具: {', '.join(known_names)}。"
+                    f"请使用可用工具完成操作。"
+                )
 
             # Load per-agent config override
             agent_config = {}
@@ -4362,7 +4559,7 @@ async def _execute_via_smithery_connect(mcp_url: str, tool_name: str, arguments:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
             # Call the tool via the existing connection
             tool_resp = await client.post(
                 f"https://api.smithery.ai/connect/{namespace}/{connection_id}/mcp",
@@ -5755,7 +5952,9 @@ async def _manage_tasks(
                 # Trigger auto-execution for todo tasks
                 import asyncio
                 from app.services.task_executor import execute_task
-                asyncio.create_task(execute_task(task.id, agent_id))
+                _t = asyncio.create_task(execute_task(task.id, agent_id))
+                _agent_tools_bg.add(_t)
+                _t.add_done_callback(_agent_tools_bg.discard)
                 await _sync_tasks_to_file(agent_id, ws)
                 return f"✅ Task created: {title} — auto-execution started"
             else:
@@ -5851,7 +6050,7 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                         return f"✅ 消息已发送（user_id: {direct_user_id}）"
                     return f"❌ 发送失败：{resp.get('msg')} (code {resp.get('code')})"
                 except FeishuAPIError as user_id_err:
-                    logger.info(f"❌ 发送失败(user_id): {user_id_err.msg}")
+                    logger.info(f"[AgentBay] 发送失败(user_id): {user_id_err.msg}")
                     return f"❌ 飞书发送失败：{user_id_err.user_message}"
 
             # Find the relationship member by name
@@ -5870,12 +6069,12 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                     break
 
             if not target_member:
-                logger.info(f"❌ {member_name} has no Feishu user_id in relationship")   
+                logger.info(f"[AgentBay] {member_name} has no Feishu user_id in relationship")   
                 return f"❌ {member_name} 不是我的关系"
                 
             logger.info(f"target_member={target_member.external_id}, {target_member.open_id}, {target_member.email}, {target_member.phone}")
             if not target_member.external_id:
-                logger.error(f"❌ {member_name} has no linked Feishu user_id")
+                logger.error(f"[AgentBay] {member_name} has no linked Feishu user_id")
                 return f"❌ {member_name} 没有关联可用的飞书 user_id"
 
             content = json.dumps({"text": message_text}, ensure_ascii=False)
@@ -5932,10 +6131,10 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
                 if resp.get("code") == 0:
                     await _save_outgoing_to_feishu_session(target_member.external_id)
                     return f"✅ Successfully sent message to {member_name}"
-                logger.info(f"❌ Failed to send message to {target_member.external_id} via Feishu (user_id): {resp}")
+                logger.info(f"[AgentBay] Failed to send message to {target_member.external_id} via Feishu (user_id): {resp}")
                 return f"发送失败: {resp.get('msg')} (code {resp.get('code')})"
             except FeishuAPIError as user_id_err:
-                logger.info(f"❌ Failed to send message to {target_member.external_id} via Feishu (user_id): {user_id_err}")
+                logger.info(f"[AgentBay] Failed to send message to {target_member.external_id} via Feishu (user_id): {user_id_err}")
                 return f"❌ 飞书发送失败：{user_id_err.user_message}"
     except Exception as e:
         return f"❌ Message send error: {str(e)[:200]}"
@@ -6536,12 +6735,12 @@ async def _send_platform_message(agent_id: uuid.UUID, args: dict) -> str:
             target_user = u_result.scalar_one_or_none()
             if not target_user:
                 # List available users for the agent to pick from (within the same tenant)
-                list_query = select(UserModel.username, UserModel.display_name).limit(20)
+                list_query = select(UserModel.display_name).limit(20)
                 if agent.tenant_id:
                     list_query = list_query.where(UserModel.tenant_id == agent.tenant_id)
                 
                 all_r = await db.execute(list_query)
-                names = [f"{r.display_name or r.username}" for r in all_r.all()]
+                names = [r.display_name for r in all_r.all()]
                 return f"❌ No user named '{username}' found in your organization. Available users: {', '.join(names) if names else 'none'}"
 
             rel_result = await db.execute(
@@ -6592,7 +6791,7 @@ async def _send_platform_message(agent_id: uuid.UUID, args: dict) -> str:
 
             # Push via WebSocket if user has an active connection
             try:
-                from app.api.websocket import manager as ws_manager
+                from app.services.connection_manager import manager as ws_manager
                 await ws_manager.send_to_user(
                     str(agent_id),
                     str(target_user.id),
@@ -6673,7 +6872,12 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                 rel_r = await db.execute(
                     select(AgentModel.name).join(
                         AgentAgentRelationship,
-                        (AgentAgentRelationship.target_agent_id == AgentModel.id) & (AgentAgentRelationship.agent_id == from_agent_id)
+                        or_(
+                            (AgentAgentRelationship.target_agent_id == AgentModel.id)
+                            & (AgentAgentRelationship.agent_id == from_agent_id),
+                            (AgentAgentRelationship.agent_id == AgentModel.id)
+                            & (AgentAgentRelationship.target_agent_id == from_agent_id),
+                        ),
                     )
                 )
                 rel_names = [n for (n,) in rel_r.all()]
@@ -6682,11 +6886,11 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
             if target_agent.is_expired or (target_agent.expires_at and datetime.now(timezone.utc) >= target_agent.expires_at):
                 return f"⚠️ {target_agent.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
 
-            # Enforce relationship: only allow file transfer with agents in relationships
+            # 关系校验：任一方向存在即可（与 main 对齐，支持专家→WL4 回传）
             rel_check = await db.execute(
                 select(AgentAgentRelationship).where(
-                    AgentAgentRelationship.agent_id == from_agent_id,
-                    AgentAgentRelationship.target_agent_id == target_agent.id,
+                    ((AgentAgentRelationship.agent_id == from_agent_id) & (AgentAgentRelationship.target_agent_id == target_agent.id))
+                    | ((AgentAgentRelationship.agent_id == target_agent.id) & (AgentAgentRelationship.target_agent_id == from_agent_id))
                 ).limit(1)
             )
             rel = rel_check.scalar_one_or_none()
@@ -6840,6 +7044,18 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
                     chat_session.id,
                     target_name,
                 )
+                # 文件投递后唤醒目标 Agent，否则仅写入会话不会触发专家执行
+                try:
+                    await _wake_agent_async(
+                        target_id,
+                        file_msg_content,
+                        from_agent_id=from_agent_id,
+                        skip_dedup=True,
+                        a2a_session_id=str(chat_session.id),
+                    )
+                    logger.info("[A2A-File] Woke target agent %s after file delivery", target_name)
+                except Exception as wake_err:
+                    logger.warning(f"[A2A-File] Failed to wake {target_name}: {wake_err}")
         except Exception as e:
             logger.error(f"[A2A-File] FAILED to inject file delivery message: {e}")
 
@@ -6882,7 +7098,12 @@ async def _resolve_a2a_target(
         rel_r = await db.execute(
             select(AgentModel.name).join(
                 AgentAgentRelationship,
-                (AgentAgentRelationship.target_agent_id == AgentModel.id) & (AgentAgentRelationship.agent_id == from_agent_id)
+                or_(
+                    (AgentAgentRelationship.target_agent_id == AgentModel.id)
+                    & (AgentAgentRelationship.agent_id == from_agent_id),
+                    (AgentAgentRelationship.agent_id == AgentModel.id)
+                    & (AgentAgentRelationship.target_agent_id == from_agent_id),
+                ),
             )
         )
         rel_names = [n for (n,) in rel_r.all()]
@@ -7021,7 +7242,7 @@ async def _append_focus_item(agent_id: uuid.UUID, identifier: str, description: 
     try:
         await ensure_focus_item(agent_id, focus_ref=identifier, description=description)
     except Exception as e:
-        logger.warning(f"[A2A] Failed to update Focus for agent {agent_id}: {e}")
+        logger.warning(f"[TOOL] Failed to update Focus for agent {agent_id}: {e}")
 
 
 async def _wake_agent_async(agent_id: uuid.UUID, reason_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False, a2a_session_id: str | None = None) -> None:
@@ -7119,7 +7340,12 @@ async def _build_a2a_context(
                 rel_r = await db.execute(
                     select(AgentModel.name).join(
                         AgentAgentRelationship,
-                        (AgentAgentRelationship.target_agent_id == AgentModel.id) & (AgentAgentRelationship.agent_id == from_agent_id)
+                        or_(
+                            (AgentAgentRelationship.target_agent_id == AgentModel.id)
+                            & (AgentAgentRelationship.agent_id == from_agent_id),
+                            (AgentAgentRelationship.agent_id == AgentModel.id)
+                            & (AgentAgentRelationship.target_agent_id == from_agent_id),
+                        ),
                     )
                 )
                 rel_names = [n for (n,) in rel_r.all()]
@@ -7129,11 +7355,11 @@ async def _build_a2a_context(
             if target.is_expired or (target.expires_at and datetime.now(timezone.utc) >= target.expires_at):
                 return f"⚠️ {target.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
 
-            # Enforce relationship
+            # 关系校验：任一方向存在即可（与 main 对齐，支持专家→WL4 回传）
             rel_check = await db.execute(
                 select(AgentAgentRelationship).where(
-                    AgentAgentRelationship.agent_id == from_agent_id,
-                    AgentAgentRelationship.target_agent_id == target.id,
+                    ((AgentAgentRelationship.agent_id == from_agent_id) & (AgentAgentRelationship.target_agent_id == target.id))
+                    | ((AgentAgentRelationship.agent_id == target.id) & (AgentAgentRelationship.target_agent_id == from_agent_id))
                 ).limit(1)
             )
             rel = rel_check.scalar_one_or_none()
@@ -7163,6 +7389,7 @@ async def _build_a2a_context(
                 )
             )
             chat_session = sess_r.scalar_one_or_none()
+            owner_id = source_agent.creator_id if source_agent else from_agent_id
             if not chat_session:
                 chat_session = ChatSession(
                     agent_id=session_agent_id,
@@ -7578,8 +7805,6 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
     content = arguments.get("content", "").strip()
     if not content:
         return "Error: Post content cannot be empty."
-    if len(content) > 500:
-        content = content[:500]
 
     try:
         async with async_session() as db:
@@ -7637,6 +7862,19 @@ async def _plaza_create_post(agent_id: uuid.UUID, arguments: dict) -> str:
 
             await db.commit()
             await db.refresh(post)
+            from app.services.activity_logger import log_activity
+            await log_activity(
+                agent_id,
+                "plaza_post",
+                f"发布广场帖子: {content[:80]}",
+                detail={
+                    "post_id": str(post.id),
+                    "action": "create",
+                    "content_preview": content[:300],
+                    "source": "tool",
+                },
+                related_id=post.id,
+            )
             return f"Post published! (ID: {post.id})"
 
     except Exception as e:
@@ -7652,8 +7890,6 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
     content = arguments.get("content", "").strip()
     if not content:
         return "Error: Comment content cannot be empty."
-    if len(content) > 300:
-        content = content[:300]
 
     try:
         pid = uuid.UUID(str(post_id))
@@ -7761,7 +7997,6 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
                 mentions = re.findall(r'@(\S+)', content)
                 if mentions:
                     from app.services.notification_service import send_notification
-                    from app.models.user import User
                     # Load agents in tenant
                     a_q = select(AgentModel).where(AgentModel.id != agent_id)
                     if agent.tenant_id:
@@ -7785,6 +8020,19 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
                 pass
 
             await db.commit()
+            from app.services.activity_logger import log_activity
+            await log_activity(
+                agent_id,
+                "plaza_post",
+                f"评论广场帖子: {content[:80]}",
+                detail={
+                    "post_id": str(pid),
+                    "action": "comment",
+                    "content_preview": content[:300],
+                    "source": "tool",
+                },
+                related_id=pid,
+            )
             return f"Comment added to post by {post.author_name}."
 
     except Exception as e:
@@ -8124,7 +8372,15 @@ async def _handle_set_trigger(
 
     name = arguments.get("name", "").strip()
     ttype = arguments.get("type", "").strip()
-    config = dict(arguments.get("config", {}) or {})
+    raw_config = arguments.get("config", {})
+    if isinstance(raw_config, str):
+        try:
+            raw_config = json.loads(raw_config)
+        except (json.JSONDecodeError, Exception):
+            return "❌ 'config' must be a valid JSON object"
+    if not isinstance(raw_config, dict):
+        raw_config = {}
+    config = raw_config
     reason = arguments.get("reason", "").strip()
     focus_ref = arguments.get("focus_ref", "") or arguments.get("agenda_ref", "")  # backward compat
 
@@ -8217,6 +8473,19 @@ async def _handle_set_trigger(
 
     try:
         async with async_session() as db:
+            if ttype == "on_message":
+                from app.services.trigger_daemon import normalize_on_message_trigger_config, _debug_log_5f0250
+
+                before = dict(config)
+                config = await normalize_on_message_trigger_config(db, config)
+                if config != before:
+                    _debug_log_5f0250(
+                        "agent_tools.py:_handle_set_trigger",
+                        "on_message_config_normalized_at_create",
+                        {"trigger_name": name, "before": before, "after": config},
+                        "C",
+                    )
+
             # Load agent to get per-agent trigger limit
             from app.models.agent import Agent as _AgentModel
             _a_result = await db.execute(select(_AgentModel).where(_AgentModel.id == agent_id))
@@ -8333,12 +8602,18 @@ async def _handle_update_trigger(agent_id: uuid.UUID, arguments: dict) -> str:
 
             changes = []
             if new_config is not None:
+                if not isinstance(new_config, dict):
+                    return "❌ 'config' must be a JSON object (dict), not a string or other type"
+                if trigger.type == "on_message":
+                    from app.services.trigger_daemon import normalize_on_message_trigger_config
+
+                    new_config = await normalize_on_message_trigger_config(db, new_config)
                 old_config = trigger.config
                 trigger.config = new_config
                 changes.append(f"config: {old_config} → {new_config}")
             if new_reason is not None:
                 trigger.reason = new_reason
-                changes.append(f"reason updated")
+                changes.append("reason updated")
 
             await db.commit()
 
@@ -9296,7 +9571,7 @@ def _parse_feishu_url(url: str) -> dict:
         result['table_id'] = table_match.group(1)
     
     # support URL with /tblxxxxxx
-    if not 'table_id' in result:
+    if 'table_id' not in result:
         tbl_match = re.search(r'/(tbl[a-zA-Z0-9_]+)', url)
         if tbl_match:
             result['table_id'] = tbl_match.group(1)
@@ -9512,9 +9787,9 @@ async def _bitable_query_records(agent_id: uuid.UUID, arguments: dict) -> str:
         elif isinstance(filter_info, str) and filter_info.strip():
             try:
                 filters_dict = json.loads(filter_info)
-            except:
-                pass 
-                
+            except (json.JSONDecodeError, TypeError):
+                logger.debug(f"bitable_query_records: failed to parse filter_info JSON, using raw value: {filter_info!r}")
+
         resp = await feishu_service.bitable_query_records(app_id, app_secret, app_token, table_id, filters_dict)
         err = _check_feishu_err(resp)
         if err: return err
@@ -9866,7 +10141,7 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
 
     space_id = node_info["space_id"]
     if not space_id:
-        return f"❌ 无法获取知识库 space_id，请检查 token 是否正确。"
+        return "❌ 无法获取知识库 space_id，请检查 token 是否正确。"
 
     async def _list_children(parent_token: str, depth: int) -> list[dict]:
         """Return flat list of {title, node_token, obj_token, has_child, depth}."""
@@ -10462,8 +10737,8 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
                         # Feishu platform policy: you cannot add yourself as a collaborator via API.
                         # Permissions must be granted by others, or set manually in the UI.
                         results.append(
-                            f"⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
-                            f"请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
+                            "⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
+                            "请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
                         )
                     elif _c in (99991672, 99991668):
                         return (
@@ -10573,7 +10848,7 @@ async def _feishu_drive_delete(agent_id: uuid.UUID, arguments: dict) -> str:
         elif code == 1061007:
             return f"❌ 文件 `{file_token}` 已被删除。"
         elif code == 1061045:
-            return f"⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
+            return "⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
         else:
             return f"❌ 删除{type_label}失败：{msg} (code {code})"
 
@@ -10674,7 +10949,7 @@ async def _feishu_calendar_list(agent_id: uuid.UUID, arguments: dict) -> str:
                             busy_lines.append(f"  🔴 {s}–{e}")
                         except Exception:
                             busy_lines.append(f"  🔴 {slot.get('start_time')}–{slot.get('end_time')}")
-                    freebusy_section = f"\n📌 **用户真实日历（忙碌时段）**：\n" + "\n".join(busy_lines)
+                    freebusy_section = "\n📌 **用户真实日历（忙碌时段）**：\n" + "\n".join(busy_lines)
                 else:
                     freebusy_section = "\n📌 **用户真实日历**：该时段全部空闲。"
         except Exception as _fe:
@@ -11029,6 +11304,7 @@ async def _feishu_user_search(agent_id: uuid.UUID, arguments: dict) -> str:
     if not app_id or not app_secret:
         return "❌ Agent has no Feishu channel configured."
 
+
     # ── Cache miss: try OrgMember table first (has user_id from org sync) ──────
     try:
         from app.database import async_session as _async_session
@@ -11184,22 +11460,29 @@ async def _publish_page(agent_id: uuid.UUID, user_id: uuid.UUID, ws: Path, argum
     except Exception:
         pass
 
-    # Create record
+    # Create record with short_id collision retry
     from app.models.published_page import PublishedPage
-    try:
-        async with async_session() as db:
-            page = PublishedPage(
-                short_id=short_id,
-                agent_id=agent_id,
-                user_id=user_id,
-                tenant_id=tenant_id,
-                source_path=path,
-                title=title,
-            )
-            db.add(page)
-            await db.commit()
-    except Exception as e:
-        return f"Failed to publish: {e}"
+    from sqlalchemy.exc import IntegrityError
+    max_retries = 3
+    for attempt in range(max_retries):
+        short_id = secrets.token_urlsafe(6)[:8]
+        try:
+            async with async_session() as db:
+                page = PublishedPage(
+                    short_id=short_id,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    source_path=path,
+                    title=title,
+                )
+                db.add(page)
+                await db.commit()
+            break  # 成功，退出重试循环
+        except IntegrityError:
+            if attempt == max_retries - 1:
+                raise  # 重试耗尽
+            await asyncio.sleep(0.05)  # 短暂等待后重试
 
     # Build public URL from the same settings loader used by the app. Reading
     # os.environ directly misses values that come from the local .env file.
@@ -11263,6 +11546,38 @@ async def _list_published_pages(agent_id: uuid.UUID) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Failed to list pages: {e}"
+
+
+async def _unpublish_page(agent_id: uuid.UUID, arguments: dict) -> str:
+    """取消发布一个已发布的页面。根据 short_id 查找并删除。
+
+    这是 unpublish_page 和 delete_published_page 工具的后端实现，
+    两个工具名对应同一操作，方便 LLM 理解不同语义的调用。
+    """
+    short_id = arguments.get("short_id", "").strip()
+    if not short_id:
+        return "Missing required argument 'short_id'"
+
+    from app.models.published_page import PublishedPage
+
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(PublishedPage).where(
+                    PublishedPage.short_id == short_id,
+                    PublishedPage.agent_id == agent_id,
+                )
+            )
+            page = result.scalar_one_or_none()
+            if not page:
+                return f"No published page found with short_id '{short_id}' for this agent. Use list_published_pages to see available pages."
+
+            title = page.title or "Untitled"
+            await db.delete(page)
+            await db.commit()
+            return f"Page '{title}' (short_id: {short_id}) has been unpublished and deleted."
+    except Exception as e:
+        return f"Failed to unpublish page: {e}"
 
 
 # ─── AgentBay Tool Handlers ─────────────────────────────────────
@@ -11443,7 +11758,7 @@ async def _agentbay_browser_click(agent_id: Optional[uuid.UUID], ws: Path, argum
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Browser click failed")
+        logger.exception("[AgentBay] Browser click failed")
         return f"❌ 点击失败: {str(e)[:200]}"
 
 
@@ -11465,7 +11780,7 @@ async def _agentbay_browser_type(agent_id: Optional[uuid.UUID], ws: Path, argume
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Browser type failed")
+        logger.exception("[AgentBay] Browser type failed")
         return f"❌ 输入失败: {str(e)[:200]}"
 
 
@@ -12375,7 +12690,7 @@ async def _agentbay_computer_click(agent_id: Optional[uuid.UUID], ws: Path, argu
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer click failed")
+        logger.exception("[AgentBay] Computer click failed")
         return f"Click failed: {str(e)[:200]}"
 
 
@@ -12396,11 +12711,11 @@ async def _agentbay_computer_input_text(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_input_text(text)
         if result.get("success"):
             return f"Typed text: {text[:100]}"
-        return f"Text input failed"
+        return "Text input failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer input_text failed")
+        logger.exception("[AgentBay] Computer input_text failed")
         return f"Text input failed: {str(e)[:200]}"
 
 
@@ -12428,7 +12743,7 @@ async def _agentbay_computer_press_keys(agent_id: Optional[uuid.UUID], ws: Path,
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer press_keys failed")
+        logger.exception("[AgentBay] Computer press_keys failed")
         return f"Key press failed: {str(e)[:200]}"
 
 
@@ -12450,11 +12765,11 @@ async def _agentbay_computer_scroll(agent_id: Optional[uuid.UUID], ws: Path, arg
         result = await client.computer_scroll(x, y, direction=direction, amount=amount)
         if result.get("success"):
             return f"Scrolled {direction} by {amount} step(s) at ({x}, {y})"
-        return f"Scroll failed"
+        return "Scroll failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer scroll failed")
+        logger.exception("[AgentBay] Computer scroll failed")
         return f"Scroll failed: {str(e)[:200]}"
 
 
@@ -12474,11 +12789,11 @@ async def _agentbay_computer_move_mouse(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_move_mouse(x, y)
         if result.get("success"):
             return f"Mouse moved to ({x}, {y})"
-        return f"Mouse move failed"
+        return "Mouse move failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer move_mouse failed")
+        logger.exception("[AgentBay] Computer move_mouse failed")
         return f"Mouse move failed: {str(e)[:200]}"
 
 
@@ -12501,11 +12816,11 @@ async def _agentbay_computer_drag_mouse(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_drag_mouse(from_x, from_y, to_x, to_y, button=button)
         if result.get("success"):
             return f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})"
-        return f"Drag failed"
+        return "Drag failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer drag_mouse failed")
+        logger.exception("[AgentBay] Computer drag_mouse failed")
         return f"Drag failed: {str(e)[:200]}"
 
 
@@ -12529,7 +12844,7 @@ async def _agentbay_computer_get_screen_size(agent_id: Optional[uuid.UUID], ws: 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_screen_size failed")
+        logger.exception("[AgentBay] Computer get_screen_size failed")
         return f"Get screen size failed: {str(e)[:200]}"
 
 
@@ -12626,7 +12941,7 @@ async def _agentbay_computer_start_app(agent_id: Optional[uuid.UUID], ws: Path, 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer start_app failed")
+        logger.exception("[AgentBay] Computer start_app failed")
         return f"Start application failed: {str(e)[:200]}"
 
 
@@ -12686,7 +13001,7 @@ async def _agentbay_computer_get_cursor_position(agent_id: Optional[uuid.UUID], 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_cursor_position failed")
+        logger.exception("[AgentBay] Computer get_cursor_position failed")
         return f"Get cursor position failed: {str(e)[:200]}"
 
 
@@ -12710,7 +13025,7 @@ async def _agentbay_computer_get_active_window(agent_id: Optional[uuid.UUID], ws
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_active_window failed")
+        logger.exception("[AgentBay] Computer get_active_window failed")
         return f"Get active window failed: {str(e)[:200]}"
 
 
@@ -12735,7 +13050,7 @@ async def _agentbay_computer_activate_window(agent_id: Optional[uuid.UUID], ws: 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer activate_window failed")
+        logger.exception("[AgentBay] Computer activate_window failed")
         return f"Activate window failed: {str(e)[:200]}"
 
 
@@ -12922,7 +13237,7 @@ async def _agentbay_computer_list_visible_apps(agent_id: Optional[uuid.UUID], ws
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer list_visible_apps failed")
+        logger.exception("[AgentBay] Computer list_visible_apps failed")
         return f"List applications failed: {str(e)[:200]}"
 
 
@@ -13120,8 +13435,6 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
     Includes company-level O+KR and every member's individual O+KR.
     This is a read-only tool available to all agents.
     """
-    import json
-    import httpx
 
     # Resolve tenant_id from the calling agent
     if not agent_id:
@@ -13134,7 +13447,7 @@ async def _get_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
         from app.models.org import OrgMember
         from app.models.user import User
         from sqlalchemy import select as _select
-        from datetime import date, timedelta
+        from datetime import date
 
         async with async_session() as db:
             # Look up the agent's tenant
@@ -13300,7 +13613,6 @@ async def _get_my_okr(agent_id: uuid.UUID | None, arguments: dict) -> str:
         from app.models.agent import Agent
         from app.models.okr import OKRObjective, OKRKeyResult, OKRSettings
         from sqlalchemy import select as _select
-        from datetime import date, timedelta
 
         async with async_session() as db:
             agent_result = await db.execute(_select(Agent).where(Agent.id == agent_id))
@@ -13492,7 +13804,7 @@ async def _update_kr_progress(agent_id: uuid.UUID | None, user_id: uuid.UUID | N
 
             prev_value = kr.current_value
             kr.current_value = float(value)
-            kr.last_updated_at = datetime.utcnow()
+            kr.last_updated_at = datetime.now(timezone.utc)
 
             # Auto-determine status based on progress ratio
             ratio = kr.current_value / kr.target_value if kr.target_value else 0
@@ -13849,7 +14161,7 @@ async def _create_objective(agent_id: uuid.UUID | None, user_id: uuid.UUID | Non
             owner_info = f"owner={owner_name_hint or owner_id_str or 'unattributed'}"
             return f"Successfully created Objective '{obj.title}' (ID: {obj.id}, {owner_info})"
     except Exception as e:
-        logger.exception(f"[OKR] create_objective failed")
+        logger.exception("[OKR] create_objective failed")
         return f"Failed to create objective: {str(e)[:200]}"
 
 
@@ -13898,7 +14210,7 @@ async def _create_key_result(agent_id: uuid.UUID | None, user_id: uuid.UUID | No
             await db.commit()
             return f"Successfully created Key Result '{kr.title}' (ID: {kr.id})"
     except Exception as e:
-        logger.exception(f"[OKR] create_key_result failed")
+        logger.exception("[OKR] create_key_result failed")
         return f"Failed to create key result: {str(e)[:200]}"
 
 
@@ -13966,7 +14278,7 @@ async def _update_objective(agent_id: uuid.UUID | None, user_id: uuid.UUID | Non
             await db.commit()
             return f"Successfully updated Objective {obj.id}. Changed fields: {', '.join(updates)}"
     except Exception as e:
-        logger.exception(f"[OKR] update_objective failed")
+        logger.exception("[OKR] update_objective failed")
         return f"Failed to update objective: {str(e)[:200]}"
 
 
@@ -14026,7 +14338,7 @@ async def _update_any_kr_progress(agent_id: uuid.UUID | None, user_id: uuid.UUID
                     kr.status = "behind"
 
             from datetime import datetime
-            kr.last_updated_at = datetime.utcnow()
+            kr.last_updated_at = datetime.now(timezone.utc)
 
             note = arguments.get("note", "Updated by OKR Agent after check-in")
             log_entry = OKRProgressLog(
@@ -14041,7 +14353,7 @@ async def _update_any_kr_progress(agent_id: uuid.UUID | None, user_id: uuid.UUID
 
             return f"Successfully updated KR '{kr.title}'. Progress: {old_val} -> {kr.current_value} {kr.unit or ''}. Status: {kr.status}"
     except Exception as e:
-        logger.exception(f"[OKR] update_any_kr_progress failed")
+        logger.exception("[OKR] update_any_kr_progress failed")
         return f"Failed to update kr progress: {str(e)[:200]}"
 
 
@@ -14153,6 +14465,208 @@ async def _upsert_member_daily_report(agent_id: uuid.UUID | None, arguments: dic
         return f"Failed to upsert member daily report: {str(e)[:200]}"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 搜索能力统一门面（Phase 3 — 搜索工具归位）
+#
+# 设计目标：agent_tools.py 作为搜索能力的对外统一入口，外部代码（如 tool_hooks）
+#          通过此处的门面访问，而非直接耦合到 clawith_lsp4j.jsonrpc_router。
+#
+# 实现策略：懒导入（运行期再 import）— 避免与 jsonrpc_router 形成模块级
+#          循环依赖（jsonrpc_router 间接被 tool_hooks 加载，tool_hooks 已 import
+#          agent_tools）。
+#
+# 后续工作：物理迁移 _rg_search / _execute_local_tool 等 ~700 行到本模块，
+#          目前先建立门面契约，避免一次性大规模搬迁带来的回归风险。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def search_local_tool(tool_name: str, arguments: dict, project_path: str = "") -> tuple[str, list[dict]]:
+    """本地搜索工具门面 — 转发到 LSP4J 模块内的实现。
+
+    Args:
+        tool_name: 工具名（list_dir / search_file / search_codebase / grep_code / search_symbol）
+        arguments: 工具参数
+        project_path: IDE 项目根路径；为空时退回当前 CWD
+
+    Returns:
+        (result_json_str, results_list) — 与底层实现签名一致
+    """
+    from app.plugins.clawith_lsp4j.jsonrpc_router import _execute_local_tool
+    return _execute_local_tool(tool_name, arguments, project_path)
+
+
+def rg_search(project_root: str, pattern: str, max_results: int = 50) -> list[dict] | None:
+    """ripgrep 搜索门面 — 转发到 LSP4J 模块内的实现。
+
+    Returns:
+        [{"fileName", "path", "startLine", "endLine", "matchLine"}] 或 None（rg 不可用）
+    """
+    from app.plugins.clawith_lsp4j.jsonrpc_router import _rg_search
+    return _rg_search(project_root, pattern, max_results)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 任务工具后端实现（Phase 5.3 — add_tasks / todo_write）
+#
+# 目标：将任务规划落盘到 Agent 工作空间的 tasks.json，使 LLM 制定的任务计划
+#       在跨会话/重启场景下持久化，且与 IDE 端 TaskItem schema 兼容。
+#
+# 数据格式：[{"id": str, "content": str, "status": str, "summary": str}, ...]
+#         字段名与 IDE 端 TodoTaskPayloadNormalizer / TaskItem 保持一致：
+#         - id: 任务唯一标识（LLM 提供或自动生成）
+#         - content: 任务正文（兼容 LLM 常用的 summary/description）
+#         - status: pending / in_progress / completed / cancelled
+#
+# 注意：本实现不删除已有任务（与 add_tasks 语义一致），todo_write 视为整列表覆写。
+#
+# 并发安全（P1 修复）：
+#   读-合并-写 序列在多协程并发下存在 lost-update 风险（典型场景：LLM 同一会话
+#   并行调用多次 add_tasks）。用 per-agent asyncio.Lock 串行化同一 Agent 的
+#   tasks.json 读写。锁按 agent_id 分片，跨 agent 不互相阻塞。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Per-agent 任务文件锁（避免读-合并-写 lost-update）
+# WeakValueDictionary 在 agent 长时间无活动后允许 GC 回收锁对象，避免内存泄漏
+_TASKS_FILE_LOCKS: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
+_TASKS_LOCKS_REGISTRY_LOCK = asyncio.Lock()
+
+
+async def _get_tasks_file_lock(agent_id: uuid.UUID) -> asyncio.Lock:
+    """获取指定 Agent 的 tasks.json 文件锁（per-agent 串行）。"""
+    key = str(agent_id)
+    # 注册阶段加锁，避免并发首访问时创建多把锁
+    async with _TASKS_LOCKS_REGISTRY_LOCK:
+        lock = _TASKS_FILE_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _TASKS_FILE_LOCKS[key] = lock
+        return lock
+
+
+def _normalize_task_entry(entry: dict, fallback_idx: int) -> dict:
+    """规范化单条任务条目，兼容多种 LLM 输出格式。"""
+    if not isinstance(entry, dict):
+        return {
+            "id": str(fallback_idx + 1),
+            "content": str(entry),
+            "status": "pending",
+        }
+    # ID 兜底：LLM 可能给出 id / taskId / 数字，缺失时用索引
+    raw_id = entry.get("id") or entry.get("taskId") or entry.get("task_id")
+    task_id = str(raw_id) if raw_id is not None else str(fallback_idx + 1)
+    # 内容兜底：content > summary > description > title
+    content = (
+        entry.get("content")
+        or entry.get("summary")
+        or entry.get("description")
+        or entry.get("title")
+        or ""
+    )
+    # 状态兜底：默认 pending；允许字段缺失或大小写不规范
+    status = str(entry.get("status") or "pending").lower()
+    if status not in ("pending", "in_progress", "completed", "cancelled"):
+        status = "pending"
+    normalized = {
+        "id": task_id,
+        "content": str(content),
+        "status": status,
+    }
+    # 保留可选字段（priority / summary）便于 UI 富展示
+    if entry.get("priority"):
+        normalized["priority"] = str(entry["priority"])
+    if entry.get("summary") and entry.get("summary") != content:
+        normalized["summary"] = str(entry["summary"])
+    return normalized
+
+
+def _atomic_write_tasks(tasks_path: Path, data: list[dict]) -> None:
+    """原子写入 tasks.json — 先写临时文件再 os.replace，避免中断导致文件损坏。"""
+    tmp_path = tasks_path.with_suffix(tasks_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, tasks_path)
+
+
+async def _handle_add_tasks(agent_id: uuid.UUID, arguments: dict) -> str:
+    """add_tasks 后端实现：追加任务到 Agent 工作空间 tasks.json。
+
+    Args:
+        agent_id: Agent UUID
+        arguments: {"tasks": [...]} — 任务列表（dict 或 JSON 字符串）
+
+    并发安全：通过 per-agent asyncio.Lock 串行化同一 Agent 的读-合并-写序列，
+    避免多协程并行调用时的 lost-update 数据丢失。
+    """
+    raw_tasks = arguments.get("tasks", [])
+    if isinstance(raw_tasks, str):
+        try:
+            raw_tasks = json.loads(raw_tasks)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("[add_tasks] tasks 参数解析失败，回退空列表: type={}", type(raw_tasks).__name__)
+            raw_tasks = []
+    if not isinstance(raw_tasks, list):
+        return "❌ add_tasks: tasks 参数必须为 JSON 数组"
+
+    _tenant_id = await _get_agent_tenant_id(agent_id)
+    ws = _agent_workspace_root(agent_id)
+    ws.mkdir(parents=True, exist_ok=True)
+    tasks_path = ws / "tasks.json"
+
+    # ★ 并发锁：保护"读已有 + 合并 + 写回"原子性
+    lock = await _get_tasks_file_lock(agent_id)
+    async with lock:
+        # 读已有任务，做并集追加（按 id 去重，新条目覆盖旧条目）
+        existing: list[dict] = []
+        if tasks_path.exists():
+            try:
+                existing = json.loads(tasks_path.read_text(encoding="utf-8"))
+                if not isinstance(existing, list):
+                    existing = []
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("[add_tasks] tasks.json 读取失败，重置为空: {}", e)
+                existing = []
+
+        new_items = [_normalize_task_entry(t, i) for i, t in enumerate(raw_tasks)]
+        new_ids = {item["id"] for item in new_items}
+        merged = [item for item in existing if item.get("id") not in new_ids] + new_items
+
+        _atomic_write_tasks(tasks_path, merged)
+        logger.info("[add_tasks] agent={} 写入 {} 项任务（追加 {} / 总计 {}）",
+                    str(agent_id)[:8], len(new_items), len(new_items), len(merged))
+        return f"✅ Added {len(new_items)} task(s); total {len(merged)}."
+
+
+async def _handle_todo_write(agent_id: uuid.UUID, arguments: dict) -> str:
+    """todo_write 后端实现：整列表覆写 Agent 工作空间 tasks.json。
+
+    Args:
+        agent_id: Agent UUID
+        arguments: {"tasks": [...]} — 完整任务列表（替换式语义）
+
+    并发安全：与 add_tasks 共享同一 per-agent 文件锁，防止 todo_write 与 add_tasks
+    并发时互相覆盖。
+    """
+    raw_tasks = arguments.get("tasks", [])
+    if isinstance(raw_tasks, str):
+        try:
+            raw_tasks = json.loads(raw_tasks)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("[todo_write] tasks 参数解析失败，回退空列表: type={}", type(raw_tasks).__name__)
+            raw_tasks = []
+    if not isinstance(raw_tasks, list):
+        return "❌ todo_write: tasks 参数必须为 JSON 数组"
+
+    _tenant_id = await _get_agent_tenant_id(agent_id)
+    ws = _agent_workspace_root(agent_id)
+    ws.mkdir(parents=True, exist_ok=True)
+    tasks_path = ws / "tasks.json"
+
+    # ★ 并发锁：与 add_tasks 共享同把锁，覆写也要串行化
+    lock = await _get_tasks_file_lock(agent_id)
+    async with lock:
+        normalized = [_normalize_task_entry(t, i) for i, t in enumerate(raw_tasks)]
+        _atomic_write_tasks(tasks_path, normalized)
+        logger.info("[todo_write] agent={} 覆写 {} 项任务", str(agent_id)[:8], len(normalized))
+        return f"✅ Wrote {len(normalized)} task(s) to tasks.json."
 # ── Vercel & Neon Deploy Helper Functions ──
 
 async def _get_vercel_token(agent_id: uuid.UUID, tool_name: str) -> str | None:
