@@ -73,10 +73,10 @@ class WeComStreamManager:
     ):
         """Start a WeCom AI Bot WebSocket client for a specific agent."""
         if not bot_id or not bot_secret:
-            logger.warning(f"[WeCom-Stream] Missing bot_id or bot_secret for {agent_id}, skipping")
+            logger.warning(f"[WeCom Stream] Missing bot_id or bot_secret for {agent_id}, skipping")
             return
 
-        logger.info(f"[WeCom-Stream] Starting client for agent {agent_id} (BotID: {bot_id[:12]}...)")
+        logger.info(f"[WeCom Stream] Starting client for agent {agent_id} (BotID: {bot_id[:12]}...)")
 
         # Stop existing client if any
         if stop_existing:
@@ -101,7 +101,7 @@ class WeComStreamManager:
         except ImportError:
             self._connected[agent_id] = False
             logger.warning(
-                "[WeCom-Stream] wecom-aibot-sdk-python not installed. "
+                "[WeCom Stream] wecom-aibot-sdk-python not installed. "
                 "Install with: pip install wecom-aibot-sdk-python"
             )
             return
@@ -128,7 +128,7 @@ class WeComStreamManager:
                     sender_id = _extract_wecom_sender_id(body)
                     if not sender_id:
                         logger.warning(
-                            f"[WeCom-Stream] Missing sender id in text payload for agent {agent_id}: "
+                            f"[WeCom Stream] Missing sender id in text payload for agent {agent_id}: "
                             f"body_keys={list(body.keys())}"
                         )
                         stream_id = generate_req_id("stream")
@@ -146,7 +146,7 @@ class WeComStreamManager:
 
                     # Debug: log full body to understand the data structure
                     logger.info(
-                        f"[WeCom-Stream] Text from {sender_id}, "
+                        f"[WeCom Stream] Text from {sender_id}, "
                         f"chat_type={chat_type}, is_group={is_group_msg}, chat_id={chat_id or 'N/A'}, "
                         f"body_keys={list(body.keys())}: {user_text[:80]}"
                     )
@@ -163,10 +163,12 @@ class WeComStreamManager:
                     # Reply via streaming
                     stream_id = generate_req_id("stream")
                     await client.reply_stream(frame, stream_id, reply_text, finish=True)
-                    logger.info(f"[WeCom-Stream] Replied to {sender_id}: {reply_text[:80]}")
+                    logger.info(f"[WeCom Stream] Replied to {sender_id}: {reply_text[:80]}")
 
                 except Exception as e:
-                    logger.exception(f"[WeCom-Stream] Error handling text message: {e}")
+                    logger.error(f"[WeCom Stream] Error handling text message: {e}")
+                    import traceback
+                    traceback.print_exc()
                     try:
                         stream_id = generate_req_id("stream")
                         await client.reply_stream(
@@ -182,7 +184,7 @@ class WeComStreamManager:
                 try:
                     body = frame.body or {}
                     sender_id = _extract_wecom_sender_id(body)
-                    logger.info(f"[WeCom-Stream] Image message from {sender_id} (not yet handled)")
+                    logger.info(f"[WeCom Stream] Image message from {sender_id} (not yet handled)")
                     stream_id = generate_req_id("stream")
                     await client.reply_stream(
                         frame, stream_id,
@@ -190,14 +192,14 @@ class WeComStreamManager:
                         finish=True,
                     )
                 except Exception as e:
-                    logger.error(f"[WeCom-Stream] Error handling image: {e}")
+                    logger.error(f"[WeCom Stream] Error handling image: {e}")
 
             # ── Message handler: file ──
             async def on_file(frame):
                 try:
                     body = frame.body or {}
                     sender_id = _extract_wecom_sender_id(body)
-                    logger.info(f"[WeCom-Stream] File message from {sender_id} (not yet handled)")
+                    logger.info(f"[WeCom Stream] File message from {sender_id} (not yet handled)")
                     stream_id = generate_req_id("stream")
                     await client.reply_stream(
                         frame, stream_id,
@@ -205,7 +207,7 @@ class WeComStreamManager:
                         finish=True,
                     )
                 except Exception as e:
-                    logger.error(f"[WeCom-Stream] Error handling file: {e}")
+                    logger.error(f"[WeCom Stream] Error handling file: {e}")
 
             # ── Enter chat event: send welcome ──
             async def on_enter_chat(frame):
@@ -220,9 +222,9 @@ class WeComStreamManager:
                         "msgtype": "text",
                         "text": {"content": welcome},
                     })
-                    logger.info(f"[WeCom-Stream] Sent welcome message for agent {agent_id}")
+                    logger.info(f"[WeCom Stream] Sent welcome message for agent {agent_id}")
                 except Exception as e:
-                    logger.error(f"[WeCom-Stream] Error sending welcome: {e}")
+                    logger.error(f"[WeCom Stream] Error sending welcome: {e}")
 
             # Register event handlers
             client.on("message.text", on_text)
@@ -235,7 +237,7 @@ class WeComStreamManager:
             max_retry_delay = 120  # Cap at 2 minutes
             while True:
                 try:
-                    logger.info(f"[WeCom-Stream] Connecting for agent {agent_id}...")
+                    logger.info(f"[WeCom Stream] Connecting for agent {agent_id}...")
                     await client.connect_async()
                     self._connected[agent_id] = True
 
@@ -245,26 +247,28 @@ class WeComStreamManager:
                         await asyncio.sleep(1)
 
                     self._connected[agent_id] = False
-                    logger.info(f"[WeCom-Stream] Client disconnected for agent {agent_id}, reconnecting in {retry_delay}s...")
+                    logger.info(f"[WeCom Stream] Client disconnected for agent {agent_id}, reconnecting in {retry_delay}s...")
                 except asyncio.CancelledError:
                     raise  # Propagate cancellation
                 except Exception as e:
                     self._connected[agent_id] = False
-                    logger.error(f"[WeCom-Stream] Connection error for {agent_id}: {e}, retrying in {retry_delay}s...")
+                    logger.error(f"[WeCom Stream] Connection error for {agent_id}: {e}, retrying in {retry_delay}s...")
 
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, max_retry_delay)
 
         except asyncio.CancelledError:
             self._connected[agent_id] = False
-            logger.info(f"[WeCom-Stream] Client task cancelled for agent {agent_id}")
+            logger.info(f"[WeCom Stream] Client task cancelled for agent {agent_id}")
             if agent_id in self._clients:
                 try:
                     await self._clients[agent_id].disconnect()
                 except Exception:
                     pass
         except Exception as e:
-            logger.exception(f"[WeCom-Stream] Fatal client error for {agent_id}: {e}")
+            logger.error(f"[WeCom Stream] Fatal client error for {agent_id}: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             self._connected.pop(agent_id, None)
             self._clients.pop(agent_id, None)
@@ -275,7 +279,7 @@ class WeComStreamManager:
         task = self._tasks.pop(agent_id, None)
         if task and not task.done():
             task.cancel()
-            logger.info(f"[WeCom-Stream] Stopped client for agent {agent_id}")
+            logger.info(f"[WeCom Stream] Stopped client for agent {agent_id}")
         client = self._clients.pop(agent_id, None)
         if client:
             try:
@@ -286,7 +290,7 @@ class WeComStreamManager:
 
     async def start_all(self):
         """Start WebSocket clients for all configured WeCom agents with bot credentials."""
-        logger.info("[WeCom-Stream] Initializing all active WeCom AI Bot channels...")
+        logger.info("[WeCom Stream] Initializing all active WeCom AI Bot channels...")
         async with async_session() as db:
             result = await db.execute(
                 select(ChannelConfig).where(
@@ -308,7 +312,7 @@ class WeComStreamManager:
                 )
                 started += 1
 
-        logger.info(f"[WeCom-Stream] Started {started} WeCom AI Bot client(s)")
+        logger.info(f"[WeCom Stream] Started {started} WeCom AI Bot client(s)")
 
     def status(self) -> dict:
         """Return status of all active WebSocket clients."""
@@ -335,14 +339,14 @@ async def _process_wecom_stream_message(
     from app.models.audit import ChatMessage
     from app.services.channel_session import find_or_create_channel_session
     from app.services.channel_user_service import channel_user_service
-    from app.api.feishu import _call_agent_llm
+    from app.api.feishu import _call_llm_with_config, _load_agent_and_model
 
     async with async_session() as db:
         # Load agent
         agent_r = await db.execute(_select(AgentModel).where(AgentModel.id == agent_id))
         agent_obj = agent_r.scalar_one_or_none()
         if not agent_obj:
-            logger.warning(f"[WeCom-Stream] Agent {agent_id} not found")
+            logger.warning(f"[WeCom Stream] Agent {agent_id} not found")
             return "Agent not found"
         from app.models.agent import DEFAULT_CONTEXT_WINDOW_SIZE
         ctx_size = agent_obj.context_window_size or DEFAULT_CONTEXT_WINDOW_SIZE
@@ -351,9 +355,6 @@ async def _process_wecom_stream_message(
         conv_id = _build_wecom_conv_id(sender_id, chat_id, normalized_chat_type)
 
         # Resolve or create platform user via unified channel user service.
-        # This correctly handles the User/Identity model relationship
-        # (email/username/password_hash are AssociationProxy fields — cannot be
-        # set directly in UserModel constructor).
         platform_user = await channel_user_service.resolve_channel_user(
             db=db,
             agent=agent_obj,
@@ -394,32 +395,46 @@ async def _process_wecom_stream_message(
             conversation_id=session_conv_id,
         ))
         sess.last_message_at = datetime.now(timezone.utc)
+
+        # Pre-load agent/model before releasing connection
+        _agent_model, _llm_model, _fallback_model = await _load_agent_and_model(db, agent_id)
+
         await db.commit()
+        # ── Phase 1 complete: release connection before slow LLM call ──
 
-        # Call LLM
-        reply_text = await _call_agent_llm(
-            db, agent_id, user_text,
-            history=history, user_id=platform_user_id,
-            session_id=session_conv_id,
-        )
-        logger.info(f"[WeCom-Stream] LLM reply: {reply_text[:100]}")
+    # ── Phase 2: LLM call (no DB session) ──
+    reply_text = await _call_llm_with_config(
+        _agent_model, _llm_model, _fallback_model,
+        agent_id, user_text,
+        history=history, user_id=platform_user_id,
+        session_id=session_conv_id,
+    )
+    logger.info(f"[WeCom Stream] LLM reply: {reply_text[:100]}")
 
-        # Save assistant reply
-        db.add(ChatMessage(
+    # ── Phase 3: Save assistant reply (new short transaction) ──
+    async with async_session() as _save_db:
+        _save_db.add(ChatMessage(
             agent_id=agent_id, user_id=platform_user_id,
             role="assistant", content=reply_text,
             conversation_id=session_conv_id,
         ))
-        sess.last_message_at = datetime.now(timezone.utc)
-        await db.commit()
-
-        # Log activity
-        from app.services.activity_logger import log_activity
-        await log_activity(
-            agent_id, "chat_reply",
-            f"Replied to WeCom message: {reply_text[:80]}",
-            detail={"channel": "wecom", "user_text": user_text[:200], "reply": reply_text[:500]},
+        from app.models.chat_session import ChatSession
+        import uuid as _uuid_ws
+        _sess_r = await _save_db.execute(
+            _select(ChatSession).where(ChatSession.id == _uuid_ws.UUID(session_conv_id))
         )
+        _sess_fresh = _sess_r.scalar_one_or_none()
+        if _sess_fresh:
+            _sess_fresh.last_message_at = datetime.now(timezone.utc)
+        await _save_db.commit()
+
+    # Log activity
+    from app.services.activity_logger import log_activity
+    await log_activity(
+        agent_id, "chat_reply",
+        f"Replied to WeCom message: {reply_text[:80]}",
+        detail={"channel": "wecom", "user_text": user_text[:200], "reply": reply_text[:500]},
+    )
 
     return reply_text
 
