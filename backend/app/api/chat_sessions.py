@@ -455,7 +455,7 @@ async def get_session_messages(
     messages = list(reversed(msgs_result.scalars().all()))
 
     # Reading your own first-party/channel session should clear its unread state.
-    if str(session.user_id) == str(current_user.id) and not session.is_group and session.source_channel not in ("agent", "trigger", "acp"):
+    if str(session.user_id) == str(current_user.id) and not session.is_group and session.source_channel not in ("agent", "trigger"):
         session.last_read_at_by_user = datetime.now(tz.utc)
         await db.commit()
 
