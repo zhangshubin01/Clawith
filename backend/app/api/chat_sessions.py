@@ -192,7 +192,7 @@ async def list_sessions(
                 is_group=session.is_group,
                 group_name=session.group_name,
             ))
-        return out
+        return {"items": out}
 
     else:  # scope == "mine"
         result = await db.execute(
@@ -262,7 +262,7 @@ async def list_sessions(
                 unread_count=unread_counts.get(str(session.id), 0),
                 is_primary=bool(session.is_primary),
             ))
-        return out
+        return {"items": out}
 
 
 @router.post("/{agent_id}/sessions", status_code=201)
