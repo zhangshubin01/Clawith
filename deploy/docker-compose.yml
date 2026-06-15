@@ -50,7 +50,6 @@ services:
       CORS_ORIGINS: '["*"]'
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
-      DOCKER_NETWORK: clawith_yaojin_network
       SS_CONFIG_FILE: /data/ss-nodes.json
       # Public base URL for constructing OAuth callback URLs and email links.
       # Required when deployed behind a reverse proxy (e.g. Nginx, Cloudflare).
@@ -90,7 +89,7 @@ services:
       API_UPSTREAM: ${API_UPSTREAM:-backend:8000}
       MINIO_UPSTREAM: ${MINIO_UPSTREAM:-minio:9000}
     volumes:
-      - ./deploy/nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
     networks:
       - default
     depends_on:

@@ -13,16 +13,12 @@ import PromptModal from '../../components/PromptModal';
 import { appendLiveCodeOutput, type LivePreviewState } from '../../components/AgentBayLivePanel';
 import AgentSidePanel, { SidePanelTab } from '../../components/AgentSidePanel';
 import type { WorkspaceActivity, WorkspaceLiveDraft } from '../../components/WorkspaceOperationPanel';
-import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, focusApi, scheduleApi, sessionApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress, refreshAccessToken, tokenNeedsRefresh } from '../../services/api';
+import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, focusApi, scheduleApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress } from '../../services/api';
 import type { FocusApiItem } from '../../services/api';
-import { ChatMessageItem } from './components/ChatMessageItem';
-import { useHistoryPagination } from './hooks/useHistoryPagination';
-import type { ChatMessage as ChatMessageType } from '../../types/chat';
 import ModelSwitcher from '../../components/ModelSwitcher';
 import { useAppStore } from '../../stores';
 import { useAuthStore } from '../../stores';
 import { copyToClipboard } from '../../utils/clipboard';
-import { frontendLogger } from '../../utils/frontendLogger';
 import { formatFileSize } from '../../utils/formatFileSize';
 import {
     IconBrain,
@@ -76,25 +72,6 @@ const WORKSPACE_TOOLS = new Set([
 ]);
 
 const AWARE_TOOLS = new Set(['set_trigger', 'update_trigger', 'cancel_trigger', 'list_triggers', 'list_focus_items', 'upsert_focus_item', 'complete_focus_item']);
-
-const PLAZA_TOOL_NAMES = new Set(['plaza_create_post', 'plaza_add_comment']);
-
-/** 广场发帖/评论：新数据为 plaza_post，历史数据可能仍是 tool_call */
-function isPlazaActivity(log: { action_type?: string; summary?: string; detail?: { tool?: string } }): boolean {
-    if (log.action_type === 'plaza_post') return true;
-    if (log.action_type !== 'tool_call') return false;
-    const tool = log.detail?.tool;
-    if (tool && PLAZA_TOOL_NAMES.has(tool)) return true;
-    return /plaza_(create_post|add_comment)/.test(log.summary || '');
-}
-
-function isHeartbeatActivity(log: { action_type?: string; summary?: string; detail?: { tool?: string } }): boolean {
-    return log.action_type === 'heartbeat' || isPlazaActivity(log);
-}
-
-function isPlazaToolCallOnly(log: { action_type?: string; summary?: string; detail?: { tool?: string } }): boolean {
-    return log.action_type === 'tool_call' && isPlazaActivity(log);
-}
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
 const trimLeadingPictograph = (value: string) => value.replace(/^\p{Extended_Pictographic}\s*/u, '');
 const formatReflectionTitle = (value: string | undefined, isZh: boolean) => {
@@ -343,7 +320,7 @@ function CopyMessageButton({ text }: { text: string }) {
         };
 
         if (navigator.clipboard && window.isSecureContext) {
-            copyToClipboard(text).then(copySuccess).catch(err => console.error('[Util] Clipboard API failed', err));
+            copyToClipboard(text).then(copySuccess).catch(err => console.error('Clipboard API failed', err));
         } else {
             // Fallback for non-HTTPS dev environments
             const textArea = document.createElement("textarea");
@@ -357,7 +334,7 @@ function CopyMessageButton({ text }: { text: string }) {
                     copySuccess();
                 }
             } catch (err) {
-                console.error('[Util] Fallback copy failed', err);
+                console.error('Fallback copy failed', err);
             }
             document.body.removeChild(textArea);
         }
@@ -498,7 +475,7 @@ function AccessPermissionsPanel({
         } catch (e) {
             setLocalScope(previousScope);
             setPermissionError(e instanceof Error ? e.message : String(e));
-            console.error('[API] Failed to update permissions', e);
+            console.error('Failed to update permissions', e);
         } finally {
             setSavingScope(null);
         }
@@ -517,7 +494,7 @@ function AccessPermissionsPanel({
         } catch (e) {
             setLocalAccessLevel(previousLevel);
             setPermissionError(e instanceof Error ? e.message : String(e));
-            console.error('[API] Failed to update access level', e);
+            console.error('Failed to update access level', e);
         } finally {
             setSavingScope(null);
         }
@@ -530,7 +507,7 @@ function AccessPermissionsPanel({
             scope_type: 'custom',
             access_level: currentAccessLevel,
             user_access: [...userAccess, { ...candidate, access_level: creatorId === userId ? 'manage' : 'use' }],
-        }).catch(e => console.error('[API] Failed to add user access', e));
+        }).catch(e => console.error('Failed to add user access', e));
     };
 
     const isLockedAccessUser = (user: AccessUser) => user.is_required || creatorId === user.id;
@@ -548,7 +525,7 @@ function AccessPermissionsPanel({
             scope_type: 'custom',
             access_level: currentAccessLevel,
             user_access: userAccess.map(u => u.id === userId ? { ...u, access_level: level } : u),
-        }).catch(e => console.error('[API] Failed to update user access', e));
+        }).catch(e => console.error('Failed to update user access', e));
     };
 
     const removeUser = (userId: string) => {
@@ -558,7 +535,7 @@ function AccessPermissionsPanel({
             scope_type: 'custom',
             access_level: currentAccessLevel,
             user_access: userAccess.filter(u => u.id !== userId),
-        }).catch(e => console.error('[API] Failed to remove user access', e));
+        }).catch(e => console.error('Failed to remove user access', e));
     };
 
     const toggleUser = (user: AccessUserCandidate) => {
@@ -1987,6 +1964,7 @@ function RelationshipEditor({ agentId, readOnly = false }: { agentId: string; re
 
 export default function AgentDetailPage() {
     const { t, i18n } = useTranslation();
+    const tsLocale = i18n.language?.startsWith('zh') ? 'zh-CN' : 'en-US';
     const dialog = useDialog();
     const toast = useToast();
     const { id } = useParams<{ id: string }>();
@@ -2072,7 +2050,7 @@ export default function AgentDetailPage() {
             const res = await fetch(`/api/agents/${id}/sessions?scope=all`, { headers: { Authorization: `Bearer ${tkn}` } });
             if (!res.ok) return [];
             const all = await res.json();
-            return all.items.filter((s: any) => s.source_channel === 'trigger');
+            return all.filter((s: any) => s.source_channel === 'trigger');
         },
         enabled: !!id && awareDataActive,
         refetchInterval: awareDataActive ? 10000 : false,
@@ -2149,18 +2127,7 @@ export default function AgentDetailPage() {
     const [chatHistoryLoadingMore, setChatHistoryLoadingMore] = useState(false);
     const [sessionsLoading, setSessionsLoading] = useState(false);
     const [allSessionsLoading, setAllSessionsLoading] = useState(false);
-    const PAGE_SIZE = 50;
-    const [sessionsTotal, setSessionsTotal] = useState(0);
-    const [sessionsHasMore, setSessionsHasMore] = useState(false);
-    const [allSessionsTotal, setAllSessionsTotal] = useState(0);
-    const [allSessionsHasMore, setAllSessionsHasMore] = useState(false);
-    const [sessionsLoadingMore, setSessionsLoadingMore] = useState(false);
-    const [allSessionsLoadingMore, setAllSessionsLoadingMore] = useState(false);
-    const sessionsCurrentPageRef = useRef(0);
-    const allSessionsCurrentPageRef = useRef(0);
     const [agentExpired, setAgentExpired] = useState(false);
-    const historyPagination = useHistoryPagination<any>(HISTORY_PAGE_SIZE);
-    const chatPagination = useHistoryPagination<any>(HISTORY_PAGE_SIZE);
     // Websocket chat state (for 'me' conversation)
     const token = useAuthStore((s) => s.token);
     const currentUser = useAuthStore((s) => s.user);
@@ -2178,17 +2145,6 @@ export default function AgentDetailPage() {
     const wsMapRef = useRef<Record<SessionRuntimeKey, WebSocket>>({});
     const reconnectTimerRef = useRef<Record<SessionRuntimeKey, ReturnType<typeof setTimeout> | null>>({});
     const reconnectDisabledRef = useRef<Record<SessionRuntimeKey, boolean>>({});
-    const backoffAttemptRef = useRef<Record<SessionRuntimeKey, number>>({});
-    const MAX_RECONNECT_ATTEMPTS = 12;
-    const BACKOFF_BASE_MS = 500;
-    const BACKOFF_MAX_MS = 30000;
-
-    const calculateBackoff = (attempt: number): number => {
-        const exponential = Math.min(BACKOFF_BASE_MS * Math.pow(2, attempt), BACKOFF_MAX_MS);
-        const jitter = exponential * (0.5 + Math.random() * 0.5);
-        return Math.floor(jitter);
-    };
-    const resetBackoff = (key: SessionRuntimeKey) => { delete backoffAttemptRef.current[key]; };
     const sessionUiStateRef = useRef<Record<SessionRuntimeKey, { isWaiting: boolean; isStreaming: boolean }>>({});
     const activeSessionIdRef = useRef<string | null>(null);
     const currentAgentIdRef = useRef<string | undefined>(id);
@@ -2308,9 +2264,9 @@ export default function AgentDetailPage() {
         setActiveSession(null);
         setChatMessages([]);
         setChatOldestTimestamp(null);
-        chatPagination.reset();
+        setChatHistoryHasMore(true);
+        setChatHistoryLoadingMore(false);
         setHistoryMsgs([]);
-        historyPagination.reset();
         setWsConnected(false);
         setIsStreaming(false);
         setIsWaiting(false);
@@ -2338,89 +2294,46 @@ export default function AgentDetailPage() {
         setWsConnected(!!ws && ws.readyState === WebSocket.OPEN);
     };
 
-    const fetchMySessions = async (silent = false, agentId: string | undefined = id, page = 0) => {
+    const fetchMySessions = async (silent = false, agentId: string | undefined = id) => {
         if (!agentId) return [];
-        if (!silent && currentAgentIdRef.current === agentId) {
-            if (page === 0) setSessionsLoading(true);
-            else setSessionsLoadingMore(true);
-        }
+        if (!silent && currentAgentIdRef.current === agentId) setSessionsLoading(true);
         try {
             const tkn = localStorage.getItem('token');
-            const res = await fetch(`/api/agents/${agentId}/sessions?scope=mine&skip=${page * PAGE_SIZE}&limit=${PAGE_SIZE}`, { headers: { Authorization: `Bearer ${tkn}` } });
+            const res = await fetch(`/api/agents/${agentId}/sessions?scope=mine`, { headers: { Authorization: `Bearer ${tkn}` } });
             if (res.ok) {
-                const json = await res.json();
-                const data = json.items.map((row: any) => normalizeChatSession(row));
-                if (currentAgentIdRef.current === agentId) {
-                    if (page === 0) {
-                        setSessions(data);
-                        sessionsCurrentPageRef.current = 0;
-                    } else {
-                        setSessions(prev => [...prev, ...data]);
-                        sessionsCurrentPageRef.current = page;
-                    }
-                    setSessionsTotal(json.total);
-                    const hasMore = (page + 1) * PAGE_SIZE < json.total;
-                    setSessionsHasMore(hasMore);
-                }
-                if (!silent && currentAgentIdRef.current === agentId) {
-                    setSessionsLoading(false);
-                    setSessionsLoadingMore(false);
-                }
+                const data = (await res.json()).map((row: any) => normalizeChatSession(row));
+                if (currentAgentIdRef.current === agentId) setSessions(data);
+                if (!silent && currentAgentIdRef.current === agentId) setSessionsLoading(false);
                 return data;
             }
         } catch { }
-        if (!silent && currentAgentIdRef.current === agentId) {
-            setSessionsLoading(false);
-            setSessionsLoadingMore(false);
-        }
+        if (!silent && currentAgentIdRef.current === agentId) setSessionsLoading(false);
         return [];
     };
 
-    const loadMoreSessions = () => {
-        const nextPage = sessionsCurrentPageRef.current + 1;
-        fetchMySessions(false, id, nextPage);
-    };
-
-    const fetchAllSessions = async (page = 0) => {
+    const fetchAllSessions = async () => {
         if (!id || !canViewAllAgentChatSessions) return;
-        if (page === 0) setAllSessionsLoading(true);
-        else setAllSessionsLoadingMore(true);
+        setAllSessionsLoading(true);
         try {
             const tkn = localStorage.getItem('token');
-            const res = await fetch(`/api/agents/${id}/sessions?scope=all&skip=${page * PAGE_SIZE}&limit=${PAGE_SIZE}`, { headers: { Authorization: `Bearer ${tkn}` } });
+            const res = await fetch(`/api/agents/${id}/sessions?scope=all`, { headers: { Authorization: `Bearer ${tkn}` } });
             if (!currentAgentIdRef.current || currentAgentIdRef.current !== id) return;
             if (res.ok) {
-                const json = await res.json();
-                const all = json.items
+                const all = (await res.json())
                     .filter((s: any) => String(s.source_channel || 'direct').toLowerCase() !== 'trigger')
                     .map((row: any) => normalizeChatSession(row));
-                if (page === 0) {
-                    setAllSessions(all);
-                    allSessionsCurrentPageRef.current = 0;
-                } else {
-                    setAllSessions(prev => [...prev, ...all]);
-                    allSessionsCurrentPageRef.current = page;
-                }
-                setAllSessionsTotal(json.total);
-                const hasMore = (page + 1) * PAGE_SIZE < json.total;
-                setAllSessionsHasMore(hasMore);
+                setAllSessions(all);
             } else {
-                if (page === 0) setAllSessions([]);
+                setAllSessions([]);
                 if (res.status === 403) {
-                    frontendLogger.log('warn', 'App', 'scope=all sessions forbidden (need org/platform/agent admin)');
+                    console.warn('[chat] scope=all sessions forbidden (need org/platform/agent admin)');
                 }
             }
         } catch {
-            if (currentAgentIdRef.current === id && page === 0) setAllSessions([]);
+            if (currentAgentIdRef.current === id) setAllSessions([]);
         } finally {
-            if (page === 0) setAllSessionsLoading(false);
-            else setAllSessionsLoadingMore(false);
+            setAllSessionsLoading(false);
         }
-    };
-
-    const loadMoreAllSessions = () => {
-        const nextPage = allSessionsCurrentPageRef.current + 1;
-        fetchAllSessions(nextPage);
     };
 
     const selectSession = async (rawSess: any, scopeOverride: 'mine' | 'all' = chatScope) => {
@@ -2437,11 +2350,13 @@ export default function AgentDetailPage() {
         pendingLiveInitialScrollRef.current = writable;
         pendingHistoryInitialScrollRef.current = !writable;
         setChatMessages([]);
-        chatPagination.oldestTimestampRef.current = null;
-        chatPagination.setHasMore(true);
+        setChatOldestTimestamp(null);
+        setChatHistoryHasMore(true);
+        setChatHistoryLoadingMore(false);
         setHistoryMsgs([]);
-        historyPagination.oldestTimestampRef.current = null;
-        historyPagination.setHasMore(true);
+        setHistoryOldestTimestamp(null);
+        setHistoryHasMore(true);
+        setHistoryLoadingMore(false);
         setIsStreaming(runtimeState.isStreaming);
         setIsWaiting(runtimeState.isWaiting);
         setActiveSession(sess);
@@ -2478,12 +2393,12 @@ export default function AgentDetailPage() {
 
             if (writable) {
                 setChatMessages(preParsed);
-                chatPagination.oldestTimestampRef.current = oldestTimestamp;
-                chatPagination.setHasMore(msgs.length >= HISTORY_PAGE_SIZE);
+                setChatOldestTimestamp(oldestTimestamp);
+                setChatHistoryHasMore(msgs.length >= HISTORY_PAGE_SIZE);
             } else {
                 setHistoryMsgs(preParsed);
-                historyPagination.oldestTimestampRef.current = oldestTimestamp;
-                historyPagination.setHasMore(msgs.length >= HISTORY_PAGE_SIZE);
+                setHistoryOldestTimestamp(oldestTimestamp);
+                setHistoryHasMore(msgs.length >= HISTORY_PAGE_SIZE);
             }
             // The backend marks the session as read when the current user opens it. Mirror that
             // immediately in local state so unread badges clear without waiting for the next poll.
@@ -2491,7 +2406,7 @@ export default function AgentDetailPage() {
             queryClient.invalidateQueries({ queryKey: ['agents'] });
         } catch (err: any) {
             if (err?.name === 'AbortError') return;
-                frontendLogger.log('error', 'App', `Failed to load session messages: ${err}`);
+            console.error('Failed to load session messages:', err);
         }
     };
 
@@ -2512,11 +2427,11 @@ export default function AgentDetailPage() {
                 await selectSession(newSess, 'mine');
             } else {
                 const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-                frontendLogger.log('error', 'App', `Failed to create session`, { detail: String(err.detail || err.message || err) });
+                console.error('Failed to create session:', err);
                 toast.error(t('common.error.sessionCreateFailed', '创建会话失败'), { details: String(err.detail || `HTTP ${res.status}`) });
             }
         } catch (err: any) {
-            frontendLogger.log('error', 'App', `Failed to create session`, { detail: String(err.detail || err.message || err) });
+            console.error('Failed to create session:', err);
             toast.error(t('common.error.sessionCreateFailed', '创建会话失败'), { details: String(err.message || err) });
         }
     };
@@ -2916,39 +2831,14 @@ export default function AgentDetailPage() {
         setChatScope('mine');
         setSessions([]);
         setAllSessions([]);
-        setSessionsTotal(0);
-        setSessionsHasMore(false);
-        setAllSessionsTotal(0);
-        setAllSessionsHasMore(false);
-        sessionsCurrentPageRef.current = 0;
-        allSessionsCurrentPageRef.current = 0;
         setAgentExpired(false);
         settingsInitRef.current = false;
     }, [id]);
 
     // Switching login account or token must not leave another user's sessions/messages in memory.
-    // Also listen for the custom 'tenant-switch' event from Layout.tsx to proactively disconnect
-    // before the token actually changes.
-    useEffect(() => {
-        const onTenantSwitch = () => {
-            Object.keys(wsMapRef.current).forEach((k) => {
-                const ws = wsMapRef.current[k];
-                if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
-            });
-        };
-        window.addEventListener('tenant-switch', onTenantSwitch);
-        return () => window.removeEventListener('tenant-switch', onTenantSwitch);
-    }, []);
-
     useEffect(() => {
         setSessions([]);
         setAllSessions([]);
-        setSessionsTotal(0);
-        setSessionsHasMore(false);
-        setAllSessionsTotal(0);
-        setAllSessionsHasMore(false);
-        sessionsCurrentPageRef.current = 0;
-        allSessionsCurrentPageRef.current = 0;
         setChatScope('mine');
         sessionMsgAbortRef.current?.abort();
         activeSessionIdRef.current = null;
@@ -2986,9 +2876,6 @@ export default function AgentDetailPage() {
     const ensureSessionSocket = (sess: any, agentId: string, authToken: string) => {
         const sessionId = String(sess.id);
         const key = buildSessionRuntimeKey(agentId, sessionId);
-        let _streamStarted = false;
-        let _streamStartTs = 0;
-        let _chunkCount = 0;
         const existing = wsMapRef.current[key];
         if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
         reconnectDisabledRef.current[key] = false;
@@ -2998,34 +2885,16 @@ export default function AgentDetailPage() {
         const scheduleReconnect = () => {
             if (reconnectDisabledRef.current[key]) return;
             clearReconnectTimer(key);
-            const attempt = (backoffAttemptRef.current[key] || 0) + 1;
-            backoffAttemptRef.current[key] = attempt;
-
-            if (attempt > MAX_RECONNECT_ATTEMPTS) {
-                frontendLogger.log('error', 'WS', `max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) reached sessionId=${sessionId}`);
-                reconnectDisabledRef.current[key] = true;
-                if (currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId) {
-                    setChatInfoMsg('Connection lost. Please check your network and try again.');
-                }
-                return;
-            }
-
-            const delay = calculateBackoff(attempt - 1);
-            frontendLogger.log('warn', 'WS', `reconnect scheduled sessionId=${sessionId} delayMs=${delay} attempt=${attempt}/${MAX_RECONNECT_ATTEMPTS}`);
             reconnectTimerRef.current[key] = setTimeout(() => {
                 reconnectTimerRef.current[key] = null;
                 if (!reconnectDisabledRef.current[key]) ensureSessionSocket(sess, agentId, authToken);
-            }, delay);
+            }, 2000);
         };
 
         const lang = (i18n.language || 'en').toLowerCase().startsWith('zh') ? 'zh' : 'en';
-
-        const createWs = (token: string) => {
-            const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${agentId}?token=${token}${sessionParam}&lang=${lang}`);
-            wsMapRef.current[key] = ws;
-            ws.onopen = () => {
-            resetBackoff(key);
-            frontendLogger.log('info', 'WS', `connected sessionId=${sessionId}`);
+        const ws = new WebSocket(`${protocol}//${window.location.host}/ws/chat/${agentId}?token=${authToken}${sessionParam}&lang=${lang}`);
+        wsMapRef.current[key] = ws;
+        ws.onopen = () => {
             if (reconnectDisabledRef.current[key]) {
                 ws.close();
                 return;
@@ -3042,7 +2911,6 @@ export default function AgentDetailPage() {
             }
         };
         ws.onclose = (e) => {
-            frontendLogger.log('warn', 'WS', `closed sessionId=${sessionId} code=${e.code} wasClean=${e.wasClean}`, { reason: e.reason || 'none' });
             if (wsMapRef.current[key] === ws) delete wsMapRef.current[key];
             setSessionUiState(key, { isWaiting: false, isStreaming: false });
             const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
@@ -3052,22 +2920,7 @@ export default function AgentDetailPage() {
                 setIsWaiting(false);
                 setIsStreaming(false);
             }
-            if (e.code === 4001) {
-                frontendLogger.log('warn', 'WS', `auth failed sessionId=${sessionId}, attempting token refresh`);
-                refreshAccessToken()
-                    .then((newToken) => {
-                        frontendLogger.log('info', 'WS', `token refreshed, reconnecting sessionId=${sessionId}`);
-                        ensureSessionSocket(sess, agentId, newToken);
-                    })
-                    .catch((err) => {
-                        frontendLogger.log('error', 'WS', `token refresh failed sessionId=${sessionId}`, { error: String(err) });
-                        reconnectDisabledRef.current[key] = true;
-                        if (isActiveRuntime) setChatInfoMsg('Session expired. Please refresh the page.');
-                    });
-                return;
-            }
             if (e.code === 4003 || e.code === 4002) {
-                frontendLogger.log('warn', 'WS', `terminal close sessionId=${sessionId} code=${e.code}`);
                 reconnectDisabledRef.current[key] = true;
                 clearReconnectTimer(key);
                 if (isActiveRuntime && e.code === 4003) setAgentExpired(true);
@@ -3078,7 +2931,7 @@ export default function AgentDetailPage() {
         ws.onerror = (error) => {
             const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
             if (isActiveRuntime) setWsConnected(false);
-            frontendLogger.log('error', 'WS', `error sessionId=${sessionId}`, { error: String(error) });
+            console.warn(`WebSocket error for session ${sessionId}:`, error);
             // Error automatically triggers onclose with abnormal code, which handles reconnect
         };
         ws.onmessage = (e) => {
@@ -3124,10 +2977,9 @@ export default function AgentDetailPage() {
             }
 
             if (d.type === 'thinking') {
-                console.debug('[Stream] Thinking', { sessionId, active: true });
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
-                    if (last && last.role === 'assistant' && ((last as ChatMessageType)._streaming ?? false)) {
+                    if (last && last.role === 'assistant' && (last as any)._streaming) {
                         return [...prev.slice(0, -1), { ...last, thinking: (last.thinking || '') + d.content } as any];
                     }
                     return [...prev, { role: 'assistant', content: '', thinking: d.content, _streaming: true } as any];
@@ -3277,17 +3129,12 @@ export default function AgentDetailPage() {
                     queryClient.invalidateQueries({ queryKey: ['agents'] });
                 }
             } else if (d.type === 'chunk') {
-                if (!_streamStarted) { _streamStarted = true; _streamStartTs = performance.now(); }
-                _chunkCount++;
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
-                    if (last && last.role === 'assistant' && ((last as ChatMessageType)._streaming ?? false)) return [...prev.slice(0, -1), { ...last, content: last.content + d.content } as any];
+                    if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), { ...last, content: last.content + d.content } as any];
                     return [...prev, { role: 'assistant', content: d.content, _streaming: true } as any];
                 });
             } else if (d.type === 'done') {
-                const streamElapsedMs = _streamStarted ? Math.round(performance.now() - _streamStartTs) : 0;
-                frontendLogger.log('info', 'Stream', `done sessionId=${sessionId} chunks=${_chunkCount} elapsed=${streamElapsedMs}ms`);
-                _streamStarted = false; _streamStartTs = 0; _chunkCount = 0;
                 // Add end marker to code output if there was any code activity
                 setLiveState(prev => {
                     if (prev.code?.output) {
@@ -3298,8 +3145,8 @@ export default function AgentDetailPage() {
                 });
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
-                    const thinking = (last && last.role === 'assistant' && ((last as ChatMessageType)._streaming ?? false)) ? last.thinking : undefined;
-                    if (last && last.role === 'assistant' && ((last as ChatMessageType)._streaming ?? false)) return [...prev.slice(0, -1), parseChatMsg({ role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() })];
+                    const thinking = (last && last.role === 'assistant' && (last as any)._streaming) ? last.thinking : undefined;
+                    if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), parseChatMsg({ role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() })];
                     return [...prev, parseChatMsg({ role: d.role, content: d.content, timestamp: new Date().toISOString() })];
                 });
                 const currentSessionId = activeSessionIdRef.current ? String(activeSessionIdRef.current) : '';
@@ -3310,11 +3157,6 @@ export default function AgentDetailPage() {
                 }
                 queryClient.invalidateQueries({ queryKey: ['agents'] });
             } else if (d.type === 'error' || d.type === 'quota_exceeded') {
-                const streamElapsedMs = _streamStarted ? Math.round(performance.now() - _streamStartTs) : 0;
-                if (_streamStarted) {
-                    frontendLogger.log('error', 'Stream', `${d.type} sessionId=${sessionId} chunks=${_chunkCount} elapsed=${streamElapsedMs}ms`, { msg: d.content || d.detail });
-                }
-                _streamStarted = false; _streamStartTs = 0; _chunkCount = 0;
                 const msg = d.content || d.detail || d.message || 'Request denied';
                 const isNoModelError = msg.includes('no LLM model') || msg.includes('No model');
                 if (isNoModelError) {
@@ -3379,24 +3221,7 @@ export default function AgentDetailPage() {
         };
     };
 
-    if (tokenNeedsRefresh(authToken)) {
-        refreshAccessToken()
-            .then((freshToken) => {
-                frontendLogger.log('info', 'WS', `token refreshed before connect sessionId=${sessionId}`);
-                createWs(freshToken);
-            })
-            .catch((err) => {
-                frontendLogger.log('error', 'WS', `token refresh failed sessionId=${sessionId}, using old token`, { error: String(err) });
-                createWs(authToken);
-            });
-    } else {
-        createWs(authToken);
-    }
-    };
-
     const dispatchChatMessage = (socket: WebSocket, runtimeKey: SessionRuntimeKey, payload: PendingChatMessage) => {
-        const msgLen = payload.contentForLLM?.length ?? 0;
-        frontendLogger.log('info', 'App', `user message sent sessionKey=${runtimeKey} len=${msgLen} hasFile=${!!payload.fileName}`);
         setIsWaiting(true);
         setIsStreaming(false);
         setSessionUiState(runtimeKey, { isWaiting: true, isStreaming: false });
@@ -3560,58 +3385,96 @@ export default function AgentDetailPage() {
     }, []);
 
     const loadMoreHistoryMessages = useCallback(async () => {
-        if (!activeSession || !id) return;
+        if (historyLoadingMore || !historyHasMore || !activeSession || !id || !historyOldestTimestamp) return;
         const sess = activeSession;
-        const el = historyContainerRef.current;
-        const oldScrollHeight = el?.scrollHeight ?? 0;
-        await historyPagination.loadMore(async ({ limit, before }) => {
-            try {
-                const msgs = await sessionApi.messages(id!, sess.id, { limit, before });
-                return msgs.map((m: any) => parseChatMsg({
-                    role: m.role, content: m.content || '',
-                    ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
-                    ...(m.thinking && { thinking: m.thinking }),
-                    ...(m.created_at && { timestamp: m.created_at }),
-                    ...(m.id && { id: m.id }),
-                }));
-            } catch {
-                return [];
+        const targetAgentId = id;
+        setHistoryLoadingMore(true);
+        try {
+            const tkn = localStorage.getItem('token');
+            const res = await fetch(`/api/agents/${targetAgentId}/sessions/${sess.id}/messages?limit=${HISTORY_PAGE_SIZE}&before=${encodeURIComponent(historyOldestTimestamp)}`, {
+                headers: { Authorization: `Bearer ${tkn}` },
+            });
+            if (!res.ok) return;
+            const msgs = await res.json();
+            // Validate session is still active after async fetch
+            if (activeSession?.id !== sess.id) return;
+            if (msgs.length === 0) {
+                setHistoryHasMore(false);
+                return;
             }
-        });
-        requestAnimationFrame(() => {
-            if (el) {
-                const newScrollHeight = el.scrollHeight;
-                el.scrollTop = newScrollHeight - oldScrollHeight;
-            }
-        });
-    }, [activeSession, id, historyPagination]);
+            const preParsed = msgs.map((m: any) => parseChatMsg({
+                role: m.role, content: m.content || '',
+                ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
+                ...(m.thinking && { thinking: m.thinking }),
+                ...(m.created_at && { timestamp: m.created_at }),
+                ...(m.id && { id: m.id }),
+            }));
+            // Save current scroll position
+            const el = historyContainerRef.current;
+            const oldScrollHeight = el?.scrollHeight ?? 0;
+            setHistoryMsgs(prev => [...preParsed, ...prev]);
+            // Update the oldest timestamp (first message in the new batch, since messages are in chronological order)
+            setHistoryOldestTimestamp(msgs[0].created_at);
+            setHistoryHasMore(msgs.length >= HISTORY_PAGE_SIZE);
+            // Restore scroll position after new messages are prepended
+            requestAnimationFrame(() => {
+                if (el) {
+                    const newScrollHeight = el.scrollHeight;
+                    el.scrollTop = newScrollHeight - oldScrollHeight;
+                }
+            });
+        } catch (err: any) {
+            console.error('Failed to load more history messages:', err);
+        } finally {
+            setHistoryLoadingMore(false);
+        }
+    }, [historyLoadingMore, historyHasMore, activeSession, id, historyOldestTimestamp]);
 
     const loadMoreChatHistoryMessages = useCallback(async () => {
-        if (!activeSession || !id) return;
+        if (chatHistoryLoadingMore || !chatHistoryHasMore || !activeSession || !id || !chatOldestTimestamp) return;
         const sess = activeSession;
-        const el = chatContainerRef.current;
-        const oldScrollHeight = el?.scrollHeight ?? 0;
-        await chatPagination.loadMore(async ({ limit, before }) => {
-            try {
-                const msgs = await sessionApi.messages(id!, sess.id, { limit, before });
-                return msgs.map((m: any) => parseChatMsg({
-                    role: m.role, content: m.content || '',
-                    ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
-                    ...(m.thinking && { thinking: m.thinking }),
-                    ...(m.created_at && { timestamp: m.created_at }),
-                    ...(m.id && { id: m.id }),
-                }));
-            } catch {
-                return [];
+        const targetAgentId = id;
+        setChatHistoryLoadingMore(true);
+        try {
+            const tkn = localStorage.getItem('token');
+            const res = await fetch(`/api/agents/${targetAgentId}/sessions/${sess.id}/messages?limit=${HISTORY_PAGE_SIZE}&before=${encodeURIComponent(chatOldestTimestamp)}`, {
+                headers: { Authorization: `Bearer ${tkn}` },
+            });
+            if (!res.ok) return;
+            const msgs = await res.json();
+            // Validate session is still active after async fetch
+            if (activeSession?.id !== sess.id) return;
+            if (msgs.length === 0) {
+                setChatHistoryHasMore(false);
+                return;
             }
-        });
-        requestAnimationFrame(() => {
-            if (el) {
-                const newScrollHeight = el.scrollHeight;
-                el.scrollTop = newScrollHeight - oldScrollHeight;
-            }
-        });
-    }, [activeSession, id, chatPagination]);
+            const preParsed = msgs.map((m: any) => parseChatMsg({
+                role: m.role, content: m.content || '',
+                ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
+                ...(m.thinking && { thinking: m.thinking }),
+                ...(m.created_at && { timestamp: m.created_at }),
+                ...(m.id && { id: m.id }),
+            }));
+            // Save current scroll position
+            const el = chatContainerRef.current;
+            const oldScrollHeight = el?.scrollHeight ?? 0;
+            setChatMessages(prev => [...preParsed, ...prev]);
+            // Update the oldest timestamp (first message in the new batch, since messages are in chronological order)
+            setChatOldestTimestamp(msgs[0].created_at);
+            setChatHistoryHasMore(msgs.length >= HISTORY_PAGE_SIZE);
+            // Restore scroll position after new messages are prepended
+            requestAnimationFrame(() => {
+                if (el) {
+                    const newScrollHeight = el.scrollHeight;
+                    el.scrollTop = newScrollHeight - oldScrollHeight;
+                }
+            });
+        } catch (err: any) {
+            console.error('Failed to load more chat history messages:', err);
+        } finally {
+            setChatHistoryLoadingMore(false);
+        }
+    }, [chatHistoryLoadingMore, chatHistoryHasMore, activeSession, id, chatOldestTimestamp]);
 
     const handleHistoryScroll = () => {
         const el = historyContainerRef.current;
@@ -3619,7 +3482,7 @@ export default function AgentDetailPage() {
         const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
         setShowHistoryScrollBtn(distFromBottom > 200);
         // Load more when scrolling near the top
-        if (el.scrollTop < 100 && historyPagination.hasMore && !historyPagination.loadingMore) {
+        if (el.scrollTop < 100 && historyHasMore && !historyLoadingMore) {
             loadMoreHistoryMessages();
         }
     };
@@ -3647,6 +3510,110 @@ export default function AgentDetailPage() {
         }, 100);
         return () => clearTimeout(timer);
     }, [historyMsgs, activeSession?.id, scheduleHistoryScrollToBottom]);
+    // Memoized component for each chat message to avoid re-renders while typing
+    const ChatMessageItem = React.useMemo(() => React.memo(({
+        msg, i, isLeft, t, senderLabel, avatarText, forceSenderLabel = false, hideAvatar = false,
+    }: {
+        msg: any;
+        i: number;
+        isLeft: boolean;
+        t: any;
+        senderLabel?: string;
+        avatarText?: string;
+        forceSenderLabel?: boolean;
+        hideAvatar?: boolean;
+    }) => {
+        const fe = msg.fileName?.split('.').pop()?.toLowerCase() ?? '';
+        const isImage = msg.imageUrl && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
+        const resolvedSenderLabel = msg.sender_name || senderLabel;
+        const resolvedAvatarText = avatarText || (resolvedSenderLabel ? resolvedSenderLabel[0] : (isLeft ? 'A' : 'U'));
+        const showSenderLabel = !!resolvedSenderLabel && (forceSenderLabel || !!msg.sender_name);
+
+        // Parse [image_data:data:image/...;base64,...] markers from user message content.
+        // The backend persists these markers in the DB to preserve multimodal context
+        // across turns. They must ALWAYS be stripped from displayContent so users never
+        // see raw base64 strings in the chat bubble.
+        // Guard: only collect extracted images for thumbnail rendering when msg.imageUrl
+        // is NOT already set — otherwise the image is already shown via the isImage path
+        // and rendering again from the marker would display it twice.
+        const IMAGE_DATA_RE = /\[image_data:(data:image\/[^;]+;base64,[^\]]+)\]/g;
+        const inlineImages: string[] = [];
+        let displayContent = msg.content || '';
+        if (displayContent.includes('[image_data:')) {
+            displayContent = displayContent.replace(IMAGE_DATA_RE, (_: string, dataUrl: string) => {
+                // Only collect for thumbnail rendering if not already shown via imageUrl
+                if (!msg.imageUrl) inlineImages.push(dataUrl);
+                return ''; // always strip the marker from displayed text
+            }).trim();
+        }
+
+        const timestampHtml = msg.timestamp ? (() => {
+            const d = new Date(msg.timestamp);
+            const now = new Date();
+            const diffMs = now.getTime() - d.getTime();
+            const isToday = d.toDateString() === now.toDateString();
+            let timeStr = '';
+            if (isToday) timeStr = d.toLocaleTimeString(tsLocale, { hour: '2-digit', minute: '2-digit' });
+            else if (diffMs < 7 * 86400000) timeStr = d.toLocaleDateString(tsLocale, { weekday: 'short' }) + ' ' + d.toLocaleTimeString(tsLocale, { hour: '2-digit', minute: '2-digit' });
+            else timeStr = d.toLocaleDateString(tsLocale, { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(tsLocale, { hour: '2-digit', minute: '2-digit' });
+            return (
+                <div className="chat-msg-timestamp">
+                    {timeStr}
+                    {msg.content && <CopyMessageButton text={msg.content} />}
+                </div>
+            );
+        })() : null;
+
+        return (
+            <div key={i} className={`chat-msg-row${isLeft ? '' : ' chat-msg-row--user'}`}>
+                <div
+                    className={`chat-msg-avatar${isLeft ? '' : ' chat-msg-avatar--user'}`}
+                    style={hideAvatar ? { visibility: 'hidden' } : undefined}
+                >
+                    {resolvedAvatarText}
+                </div>
+                <div className="chat-msg-col">
+                    <div className={isLeft ? '' : 'chat-msg-user-line'}>
+                        <div className={`chat-msg-bubble${isLeft ? '' : ' chat-msg-bubble--user'}${(msg as any)._streaming && !msg.content && !msg.thinking ? ' chat-msg-bubble--thinking' : ''}`}>
+                            {showSenderLabel && <div className="chat-msg-sender">{resolvedSenderLabel}</div>}
+                            {isImage ? (
+                                <div style={{ marginBottom: '4px' }}>
+                                    <img src={msg.imageUrl} alt={msg.fileName} style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }} loading="lazy" />
+                                </div>
+                            ) : (msg.fileName && (
+                                <div className="chat-msg-file-chip" style={{ marginBottom: msg.content ? '4px' : '0' }}>
+                                    <IconPaperclip size={14} stroke={1.8} />
+                                    <span style={{ fontWeight: 500, color: 'var(--text-primary)', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{msg.fileName}</span>
+                                </div>
+                            ))}
+                            {inlineImages.length > 0 && (
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: displayContent ? '6px' : '0' }}>
+                                    {inlineImages.map((url, idx) => (
+                                        <img
+                                            key={idx}
+                                            src={url}
+                                            alt="attached image"
+                                            style={{ maxWidth: '200px', maxHeight: '150px', borderRadius: '8px', border: '1px solid var(--border-subtle)', objectFit: 'cover' }}
+                                            loading="lazy"
+                                        />
+                                    ))}
+                                </div>
+                            )}
+                            {msg.role === 'assistant' ? (
+                                (msg as any)._streaming && !msg.content && !msg.thinking ? (
+                                    <div className="thinking-indicator">
+                                        <div className="thinking-dots"><span /><span /><span /></div>
+                                        <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
+                                    </div>
+                                ) : <MarkdownRenderer content={displayContent} />
+                            ) : <MarkdownRenderer content={displayContent} />}
+                        </div>
+                    </div>
+                    {timestampHtml}
+                </div>
+            </div>
+        );
+    }), [t]);
 
     const handleChatScroll = () => {
         const el = chatContainerRef.current;
@@ -3659,7 +3626,7 @@ export default function AgentDetailPage() {
         }
         setShowScrollBtn(distFromBottom > 200);
         // Load more when scrolling near the top
-        if (el.scrollTop < 100 && chatPagination.hasMore && !chatPagination.loadingMore) {
+        if (el.scrollTop < 100 && chatHistoryHasMore && !chatHistoryLoadingMore) {
             loadMoreChatHistoryMessages();
         }
     };
@@ -3767,14 +3734,23 @@ export default function AgentDetailPage() {
 
             attachedFiles.forEach(file => {
                 filesDisplay += `[Attachment: ${file.name}] `;
+                const wsPath = file.path || '';
+                const codePath = wsPath.replace(/^workspace\//, '');
+                const fileLoc = wsPath ? `\nFile location: ${wsPath} (for read_file/read_document/send_email tools)\nIn execute_code, use relative path: "${codePath}" (working directory is workspace/)\n` : '';
+
                 if (file.imageUrl && supportsVision) {
                     filesPrompt += `[image_data:${file.imageUrl}]\n`;
+                    if (fileLoc) {
+                        filesPrompt += `[Image File Path Reference]${fileLoc}\n`;
+                    }
                 } else if (file.imageUrl) {
-                    filesPrompt += t('common.file.imageUploaded', '[图片文件已上传: {{name}}...]', { name: file.name }) + '\n';
+                    filesPrompt += t('common.file.imageUploaded', '[图片文件已上传: {{name}}...]', { name: file.name });
+                    if (fileLoc) {
+                        filesPrompt += `${fileLoc}\n`;
+                    } else {
+                        filesPrompt += '\n';
+                    }
                 } else {
-                    const wsPath = file.path || '';
-                    const codePath = wsPath.replace(/^workspace\//, '');
-                    const fileLoc = wsPath ? `\nFile location: ${wsPath} (for read_file/read_document tools)\nIn execute_code, use relative path: "${codePath}" (working directory is workspace/)\n` : '';
                     if (file.source === 'workspace_auto') {
                         filesPrompt += `[Workspace reference: ${file.name}]${fileLoc}\nUse read_file or read_document if you need the file contents.\n\n`;
                     } else {
@@ -4086,7 +4062,7 @@ export default function AgentDetailPage() {
         if (activeTab !== 'chat') return;
         queryClient.refetchQueries({ queryKey: ['llm-models'] });
         queryClient.refetchQueries({ queryKey: ['tenant', 'me'] });
-    }, [activeTab, (location as any).key, queryClient]);
+    }, [activeTab, location.key, queryClient]);
 
     const enabledLlmModels = useMemo(
         () => (llmModels as any[]).filter((m: any) => m.enabled),
@@ -4199,7 +4175,7 @@ export default function AgentDetailPage() {
     const canManage = (agent as any).access_level === 'manage';
     const formatAgentDate = (d?: string | null) => {
         if (!d) return '—';
-        try { return new Date(d).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return d; }
+        try { return new Date(d).toLocaleDateString(tsLocale, { year: 'numeric', month: 'short', day: 'numeric' }); } catch { return d; }
     };
     const primaryModel = llmModels.find((m: any) => m.id === agent.primary_model_id);
     const showNoModelState = !llmModelsLoading && (agent as any).agent_type !== 'openclaw' && (enabledModelCount === 0 || !effectiveModelReady);
@@ -4235,7 +4211,7 @@ export default function AgentDetailPage() {
     const expiryLabel = (agent as any).is_expired
         ? t('agent.settings.expiry.expired')
         : (agent as any).expires_at
-            ? new Date((agent as any).expires_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+            ? new Date((agent as any).expires_at).toLocaleDateString(tsLocale, { year: 'numeric', month: 'short', day: 'numeric' })
             : t('agent.settings.expiry.neverExpires');
     const renderAgentInfoCard = () => (
         <div className={`agent-info-card${infoCardOpen ? ' agent-info-card--open' : ''}`}>
@@ -4365,8 +4341,8 @@ export default function AgentDetailPage() {
         const isZh = i18n.language?.startsWith('zh');
         const formatTrigger = (trig: any) => {
             if (trig.type === 'cron' && trig.config?.expr) return `Cron ${trig.config.expr}`;
-            if (trig.type === 'interval' && trig.config?.minutes) return isZh ? `每 ${trig.config.minutes} 分钟` : `Every ${trig.config.minutes} min`;
-            if (trig.type === 'once' && trig.config?.at) return new Date(trig.config.at).toLocaleString();
+            if (trig.type === 'interval' && trig.config?.minutes) return t('agent.aware.triggerEveryMin', { min: trig.config.minutes });
+            if (trig.type === 'once' && trig.config?.at) return new Date(trig.config.at).toLocaleString(tsLocale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
             return trig.name || trig.type;
         };
         const triggerTitle = (trig: any) => String(trig.reason || trig.name || trig.type || '').trim();
@@ -4547,14 +4523,14 @@ export default function AgentDetailPage() {
         })();
         const calendarRangeLabel = (() => {
             if (awareCalendarMode === 'day') {
-                return calendarAnchor.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', weekday: 'short' });
+                return calendarAnchor.toLocaleDateString(tsLocale, { year: 'numeric', month: 'short', day: 'numeric', weekday: 'short' });
             }
             if (awareCalendarMode === 'month') {
-                return calendarAnchor.toLocaleDateString(undefined, { year: 'numeric', month: 'long' });
+                return calendarAnchor.toLocaleDateString(tsLocale, { year: 'numeric', month: 'long' });
             }
             const first = calendarDays[0];
             const last = calendarDays[calendarDays.length - 1];
-            return `${first.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} - ${last.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
+            return `${first.toLocaleDateString(tsLocale, { month: 'short', day: 'numeric' })} - ${last.toLocaleDateString(tsLocale, { month: 'short', day: 'numeric', year: 'numeric' })}`;
         })();
         const shiftCalendar = (direction: -1 | 1) => {
             setAwareCalendarDate(prev => {
@@ -4605,8 +4581,8 @@ export default function AgentDetailPage() {
                         return (
                             <div key={day.toISOString()} className={`aware-calendar-day ${isToday ? 'is-today' : ''}`}>
                                 <div className="aware-calendar-day-label" style={isToday ? { color: 'var(--accent-primary)', fontWeight: 600 } : {}}>
-                                    {day.toLocaleDateString(undefined, awareCalendarMode === 'month' ? { day: 'numeric' } : (awareCalendarMode === 'week' ? { weekday: 'short', day: 'numeric' } : { weekday: 'short', month: 'numeric', day: 'numeric' }))}
-                                    {isToday && awareCalendarMode === 'day' && <span className="aware-calendar-today-pill">{isZh ? '今天' : 'Today'}</span>}
+                                    {day.toLocaleDateString(tsLocale, awareCalendarMode === 'month' ? { day: 'numeric' } : (awareCalendarMode === 'week' ? { weekday: 'short', day: 'numeric' } : { weekday: 'short', month: 'numeric', day: 'numeric' }))}
+                                    {isToday && awareCalendarMode === 'day' && <span className="aware-calendar-today-pill">{t('agent.aware.today')}</span>}
                                 </div>
                                 {items.length === 0 ? (
                                     <div className="aware-calendar-empty">-</div>
@@ -4742,7 +4718,7 @@ export default function AgentDetailPage() {
                                     <div className="aware-side-trigger-main">
                                         <div className="aware-side-item-title">{formatReflectionTitle(session.title, !!isZh)}</div>
                                         <div className="aware-side-item-meta">
-                                            {new Date(session.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                            {new Date(session.created_at).toLocaleString(tsLocale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                                             {session.message_count > 0 ? ` · ${session.message_count}` : ''}
                                         </div>
                                     </div>
@@ -5107,13 +5083,13 @@ export default function AgentDetailPage() {
                                 <div className="card">
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                                         <h3 style={{ fontSize: '14px', fontWeight: 600 }}>{t('agent.activity.recent', 'Recent Activity')}</h3>
-                                        <button className="btn btn-ghost" style={{ fontSize: '12px' }} onClick={() => setActiveTab('activityLog')}>View All →</button>
+                                        <button className="btn btn-ghost" style={{ fontSize: '12px' }} onClick={() => setActiveTab('activityLog')}>{t('agent.aware.viewAll')} →</button>
                                     </div>
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                         {activityLogs.slice(0, 5).map((log: any, i: number) => (
                                             <div key={i} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', padding: '6px 0', borderBottom: i < 4 ? '1px solid var(--border-subtle)' : 'none' }}>
                                                 <span style={{ fontSize: '11px', color: 'var(--text-tertiary)', minWidth: '60px', flexShrink: 0 }}>
-                                                    {new Date(log.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                    {new Date(log.created_at).toLocaleTimeString(tsLocale, { hour: '2-digit', minute: '2-digit' })}
                                                 </span>
                                                 <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>{log.summary || log.action_type}</span>
                                             </div>
@@ -5167,19 +5143,18 @@ export default function AgentDetailPage() {
                         }
                         if (trig.type === 'once' && trig.config?.at) {
                             try {
-                                return isZh
-                                    ? `一次性：${new Date(trig.config.at).toLocaleString()}`
-                                    : `Once at ${new Date(trig.config.at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
-                            } catch { return isZh ? `一次性：${trig.config.at}` : `Once at ${trig.config.at}`; }
+                                const timeStr = new Date(trig.config.at).toLocaleString(tsLocale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                return t('agent.aware.triggerOnce', { time: timeStr });
+                            } catch { return t('agent.aware.triggerOnce', { time: trig.config.at }); }
                         }
                         if (trig.type === 'interval' && trig.config?.minutes) {
                             const m = trig.config.minutes;
-                            return isZh ? `每 ${m >= 60 ? `${m / 60} 小时` : `${m} 分钟`}` : (m >= 60 ? `Every ${m / 60}h` : `Every ${m} min`);
+                            return m >= 60 ? t('agent.aware.triggerEveryHour', { hour: m / 60 }) : t('agent.aware.triggerEveryMin', { min: m });
                         }
-                        if (trig.type === 'poll') return `${isZh ? '轮询' : 'Poll'}: ${trig.config?.url?.substring(0, 40) || 'URL'}`;
+                        if (trig.type === 'poll') return t('agent.aware.triggerPoll', { url: trig.config?.url?.substring(0, 40) || 'URL' });
                         if (trig.type === 'on_message') {
-                            const sender = trig.config?.from_agent_name || trig.config?.from_user_name || (isZh ? '未知对象' : 'unknown');
-                            return isZh ? `收到 ${sender} 的消息时` : `On message from ${sender}`;
+                            const sender = trig.config?.from_agent_name || trig.config?.from_user_name || t('agent.aware.triggerUnknown');
+                            return t('agent.aware.triggerOnMessage', { sender });
                         }
                         if (trig.type === 'webhook') {
                             return `Webhook${trig.config?.token ? ` (${trig.config.token.substring(0, 6)}...)` : ''}`;
@@ -5226,9 +5201,9 @@ export default function AgentDetailPage() {
                         triggerNameToFocus[trig.name] = trig.focus_ref || focusKeyFromTrigger(trig);
                     }
                     const triggerRelatedLogs = activityLogs.filter((log: any) =>
-                        log.action_type === 'schedule_run'
-                        || (log.detail?.triggers && Array.isArray(log.detail.triggers))
-                        || (log.summary && String(log.summary).includes('触发器执行'))
+                        log.action_type === 'trigger_fired' || log.action_type === 'trigger_created' ||
+                        log.action_type === 'trigger_updated' || log.action_type === 'trigger_cancelled' ||
+                        log.summary?.includes('trigger')
                     );
                     for (const log of triggerRelatedLogs) {
                         // Try to match log to a focus item via trigger name in the summary
@@ -5408,7 +5383,7 @@ export default function AgentDetailPage() {
                                                                     fontWeight: 500,
                                                                 }}>{log.action_type?.replace('trigger_', '')}</span>
                                                                 <span style={{ fontSize: '10px', color: 'var(--text-tertiary)' }}>
-                                                                    {new Date(log.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                                                    {new Date(log.created_at).toLocaleString(tsLocale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                                                                 </span>
                                                             </div>
                                                             <div style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>{log.summary}</div>
@@ -5565,8 +5540,8 @@ export default function AgentDetailPage() {
                                                                     {formatReflectionTitle(session.title, !!isZh)}
                                                                 </div>
                                                                 <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '1px' }}>
-                                                                    {new Date(session.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
-                                                                    {session.message_count > 0 && ` · ${session.message_count} msg`}
+                                                                    {new Date(session.created_at).toLocaleString(tsLocale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                                                    {session.message_count > 0 && ` · ${session.message_count}`}
                                                                 </div>
                                                             </div>
                                                             <span style={{
@@ -5952,8 +5927,8 @@ export default function AgentDetailPage() {
                                                                 </div>
                                                                 <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                                                                     {s.last_message_at
-                                                                        ? new Date(s.last_message_at).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-                                                                        : new Date(s.created_at).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { month: 'short', day: 'numeric' })}
+                                                                        ? new Date(s.last_message_at).toLocaleString(tsLocale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+                                                                        : new Date(s.created_at).toLocaleString(tsLocale, { month: 'short', day: 'numeric' })}
                                                                     {s.message_count > 0 && <span className="session-msg-count" style={{ marginLeft: 'auto' }}>{s.message_count}</span>}
                                                                 </div>
                                                             </div>
@@ -5964,27 +5939,6 @@ export default function AgentDetailPage() {
                                                         </div>
                                                     );
                                                 })}
-                                                {sessionsHasMore && (
-                                                    <div style={{ padding: '8px 12px', textAlign: 'center' }}>
-                                                        <button
-                                                            onClick={loadMoreSessions}
-                                                            disabled={sessionsLoadingMore}
-                                                            style={{
-                                                                width: '100%',
-                                                                padding: '6px 0',
-                                                                fontSize: '12px',
-                                                                color: 'var(--text-secondary)',
-                                                                background: 'transparent',
-                                                                border: '1px solid var(--border-subtle)',
-                                                                borderRadius: '6px',
-                                                                cursor: sessionsLoadingMore ? 'default' : 'pointer',
-                                                                opacity: sessionsLoadingMore ? 0.6 : 1,
-                                                            }}
-                                                        >
-                                                            {sessionsLoadingMore ? t('common.loading') : `${t('common.loadMore', '加载更多')} (${sessions.length}/${sessionsTotal})`}
-                                                        </button>
-                                                    </div>
-                                                )}
                                             </div>
                                         </>
                                     ) : (
@@ -6056,32 +6010,11 @@ export default function AgentDetailPage() {
                                                                 </div>
                                                                 <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', gap: '4px' }}>
                                                                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.username || ''}</span>
-                                                                    <span style={{ flexShrink: 0 }}>{s.last_message_at ? new Date(s.last_message_at).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}{s.message_count > 0 ? ` · ${s.message_count}` : ''}</span>
+                                                                    <span style={{ flexShrink: 0 }}>{s.last_message_at ? new Date(s.last_message_at).toLocaleString(tsLocale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}{s.message_count > 0 ? ` · ${s.message_count}` : ''}</span>
                                                                 </div>
                                                             </div>
                                                         );
                                                     })
-                                                )}
-                                                {allSessionsHasMore && (
-                                                    <div style={{ padding: '8px 12px', textAlign: 'center' }}>
-                                                        <button
-                                                            onClick={loadMoreAllSessions}
-                                                            disabled={allSessionsLoadingMore}
-                                                            style={{
-                                                                width: '100%',
-                                                                padding: '6px 0',
-                                                                fontSize: '12px',
-                                                                color: 'var(--text-secondary)',
-                                                                background: 'transparent',
-                                                                border: '1px solid var(--border-subtle)',
-                                                                borderRadius: '6px',
-                                                                cursor: allSessionsLoadingMore ? 'default' : 'pointer',
-                                                                opacity: allSessionsLoadingMore ? 0.6 : 1,
-                                                            }}
-                                                        >
-                                                            {allSessionsLoadingMore ? t('common.loading') : `${t('common.loadMore', '加载更多')} (${allSessions.length}/${allSessionsTotal})`}
-                                                        </button>
-                                                    </div>
                                                 )}
                                             </div>
                                         </>
@@ -6128,12 +6061,12 @@ export default function AgentDetailPage() {
                                                 )}
                                             </div>
                                             <div ref={historyContainerRef} onScroll={handleHistoryScroll} style={{ flex: 1, overflowY: 'auto', padding: '48px 16px 12px' }}>
-                                                {historyPagination.loadingMore && (
+                                                {historyLoadingMore && (
                                                     <div style={{ textAlign: 'center', padding: '12px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
                                                         Loading more messages...
                                                     </div>
                                                 )}
-                                                {!historyPagination.hasMore && historyMsgs.length > 0 && (
+                                                {!historyHasMore && historyMsgs.length > 0 && (
                                                     <div style={{ textAlign: 'center', padding: '12px', color: 'var(--text-tertiary)', fontSize: '13px' }}>
                                                         All messages loaded
                                                     </div>
@@ -6393,7 +6326,7 @@ export default function AgentDetailPage() {
                                                                     <ThoughtDisclosure
                                                                         content={msg.thinking}
                                                                         t={t}
-                                                                        streaming={!!((msg as ChatMessageType)._streaming && !contentText)}
+                                                                        streaming={!!((msg as any)._streaming && !contentText)}
                                                                     />
                                                                     {contentText && (
                                                                         <ChatMessageItem
@@ -6587,7 +6520,6 @@ export default function AgentDetailPage() {
                                                                     const activeRuntimeKey = buildSessionRuntimeKey(id, String(activeSession.id));
                                                                     const activeSocket = wsMapRef.current[activeRuntimeKey];
                                                                     if (activeSocket?.readyState === WebSocket.OPEN) {
-                                                                        frontendLogger.log('info', 'Stream', `abort sessionId=${String(activeSession.id)}`);
                                                                         activeSocket.send(JSON.stringify({ type: 'abort' }));
                                                                         setIsStreaming(false);
                                                                         setIsWaiting(false);
@@ -6655,20 +6587,17 @@ export default function AgentDetailPage() {
                     activeTab === 'activityLog' && (() => {
                         // Category definitions
                         const userActionTypes = ['chat_reply', 'tool_call', 'task_created', 'task_updated', 'file_written', 'error'];
+                        const heartbeatTypes = ['heartbeat', 'plaza_post'];
                         const scheduleTypes = ['schedule_run'];
                         const messageTypes = ['feishu_msg_sent', 'agent_msg_sent', 'web_msg_sent'];
 
                         let filteredLogs = activityLogs;
                         if (logFilter === 'user') {
-                            filteredLogs = activityLogs.filter((l: any) =>
-                                userActionTypes.includes(l.action_type) && !isPlazaToolCallOnly(l),
-                            );
+                            filteredLogs = activityLogs.filter((l: any) => userActionTypes.includes(l.action_type));
                         } else if (logFilter === 'backend') {
-                            filteredLogs = activityLogs.filter((l: any) =>
-                                !userActionTypes.includes(l.action_type) || isPlazaToolCallOnly(l),
-                            );
+                            filteredLogs = activityLogs.filter((l: any) => !userActionTypes.includes(l.action_type));
                         } else if (logFilter === 'heartbeat') {
-                            filteredLogs = activityLogs.filter((l: any) => isHeartbeatActivity(l));
+                            filteredLogs = activityLogs.filter((l: any) => heartbeatTypes.includes(l.action_type));
                         } else if (logFilter === 'schedule') {
                             filteredLogs = activityLogs.filter((l: any) => scheduleTypes.includes(l.action_type));
                         } else if (logFilter === 'messages') {
@@ -6736,7 +6665,7 @@ export default function AgentDetailPage() {
                                                 heartbeat: <IconHeartbeat size={16} stroke={1.8} />,
                                                 plaza_post: <IconBuilding size={16} stroke={1.8} />,
                                             };
-                                            const time = log.created_at ? new Date(log.created_at).toLocaleString('zh-CN', {
+                                            const time = log.created_at ? new Date(log.created_at).toLocaleString(tsLocale, {
                                                 month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
                                             }) : '';
                                             const isExpanded = expandedLogId === log.id;
@@ -6906,7 +6835,7 @@ export default function AgentDetailPage() {
                                         {(agent as any).is_expired
                                             ? <span className="agent-expiry-status agent-expiry-status--expired">{t('agent.settings.expiry.expired')}</span>
                                             : (agent as any).expires_at
-                                                ? <>{t('agent.settings.expiry.currentExpiry')} <strong>{new Date((agent as any).expires_at).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US')}</strong></>
+                                                ? <>{t('agent.settings.expiry.currentExpiry')} <strong>{new Date((agent as any).expires_at).toLocaleString(tsLocale)}</strong></>
                                                 : <span className="agent-expiry-status">{t('agent.settings.expiry.neverExpires')}</span>
                                         }
                                     </div>

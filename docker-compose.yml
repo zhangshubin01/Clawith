@@ -8,7 +8,6 @@ services:
       POSTGRES_USER: clawith
       POSTGRES_PASSWORD: clawith
       POSTGRES_DB: clawith
-      TZ: Asia/Shanghai
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -20,8 +19,6 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    environment:
-      TZ: Asia/Shanghai
     networks:
       - default
     volumes:
@@ -38,13 +35,9 @@ services:
       args:
         CLAWITH_PIP_INDEX_URL: ${CLAWITH_PIP_INDEX_URL:-}
         CLAWITH_PIP_TRUSTED_HOST: ${CLAWITH_PIP_TRUSTED_HOST:-}
-    dns:
-      - 8.8.8.8
-      - 114.114.114.114
     restart: unless-stopped
     command: ["/bin/bash", "/app/entrypoint.sh"]
     environment:
-      TZ: Asia/Shanghai
       DATABASE_URL: postgresql+asyncpg://clawith:clawith@postgres:5432/clawith
       REDIS_URL: redis://redis:6379/0
       AGENT_DATA_DIR: /data/agents
@@ -55,37 +48,25 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-jwt-secret}
       PROCESS_ROLE: all
       CORS_ORIGINS: '["*"]'
-      ALLOW_MIGRATION_FAILURE: "true"
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
-      DOCKER_NETWORK: clawith_yaojin_network
       SS_CONFIG_FILE: /data/ss-nodes.json
-# 环境选择: cp env.local.example .env | cp env.staging.example .env | cp env.production.example .env
-# 手动指定: docker compose --env-file .env.production up -d
+      # Public base URL for constructing OAuth callback URLs and email links.
       # Required when deployed behind a reverse proxy (e.g. Nginx, Cloudflare).
       # If not set, the server infers the URL from the incoming request host.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       # Password reset token lifetime in minutes (default: 30)
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
     volumes:
-      - ./backend:/app
-      - ${IDE_WORKSPACE_DIR:-/tmp/ide-workspace}:${IDE_WORKSPACE_DIR:-/tmp/ide-workspace}
       - ./backend/agent_data:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
-    ports:
-      - "${BACKEND_PORT:-8008}:8000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "-s", "--max-time", "3", "http://localhost:8000/api/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 10s
     privileged: true
     cap_add:
       - SYS_ADMIN
     security_opt:
       - seccomp=unconfined
+      - apparmor=unconfined
     networks:
       - default
     depends_on:
@@ -104,7 +85,6 @@ services:
     ports:
       - "${FRONTEND_PORT:-3008}:3000"
     environment:
-      TZ: Asia/Shanghai
       VITE_API_URL: http://localhost:8000
       API_UPSTREAM: ${API_UPSTREAM:-backend:8000}
       MINIO_UPSTREAM: ${MINIO_UPSTREAM:-minio:9000}
@@ -113,17 +93,12 @@ services:
     networks:
       - default
     depends_on:
-      backend:
-        condition: service_healthy
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - backend
 
 volumes:
   pgdata:
   redisdata:
+
 
 networks:
   default:
