@@ -4,10 +4,9 @@ import uuid
 from datetime import datetime, timezone as tz
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from loguru import logger
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select, func
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
+from sqlalchemy import cast, select, func, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access
@@ -18,7 +17,7 @@ from app.models.chat_session import ChatSession
 from app.models.agent import Agent
 from app.models.user import User
 
-router = APIRouter(prefix="/agents", tags=["chat-sessions"])
+router = APIRouter(prefix="/api/agents", tags=["chat-sessions"])
 
 
 def _can_view_all_agent_chat_sessions(user: User, agent: Agent) -> bool:
@@ -34,7 +33,7 @@ class SessionOut(BaseModel):
     agent_id: str
     user_id: str
     username: Optional[str] = None      # display_name ?? username
-    source_channel: str = "web"         # web / ide_lsp4j / feishu / discord / slack / agent
+    source_channel: str = "web"         # web / feishu / discord / slack / agent
     title: str
     created_at: str
     last_message_at: Optional[str] = None
@@ -48,13 +47,9 @@ class SessionOut(BaseModel):
     # Group chat session fields
     is_group: bool = False
     group_name: Optional[str] = None
-    # IDE 插件会话上下文字段（#55 模型映射后可用）
-    client_type: Optional[str] = "web"      # 'web' | 'ide_lsp4j'（ide_plugin 为历史值，兼容旧 session）
-    project_path: Optional[str] = None      # IDE 项目根路径
-    current_file: Optional[str] = None      # 当前活动编辑文件
-    open_files: Optional[list] = None       # 打开文件列表
 
-    model_config = ConfigDict(from_attributes=True)
+    class Config:
+        from_attributes = True
 
 
 class CreateSessionIn(BaseModel):
@@ -69,13 +64,10 @@ class PatchSessionIn(BaseModel):
 async def list_sessions(
     agent_id: uuid.UUID,
     scope: str = Query("mine", description="'mine' or 'all'"),
-    skip: int = Query(0, ge=0, description="分页跳过条数 (#70 修复)"),
-    limit: int = Query(50, ge=1, le=200, description="分页返回条数 (#70 修复)"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """List chat sessions for an agent. scope=all for org/platform admins and agent_admin."""
-    logger.info("[API] 列出会话 agent_id={} scope={}", agent_id, scope)
     # Verify agent exists
     agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
     agent = agent_result.scalar_one_or_none()
@@ -87,16 +79,6 @@ async def list_sessions(
         if not _can_view_all_agent_chat_sessions(current_user, agent):
             raise HTTPException(status_code=403, detail="Not authorized to view all sessions")
 
-        # 分页总计查询（与主查询共享相同的 WHERE 条件，#70 修复）
-        count_result = await db.execute(
-            select(func.count(ChatSession.id))
-            .where(
-                (ChatSession.agent_id == agent_id)
-                | ((ChatSession.peer_agent_id == agent_id) & (ChatSession.source_channel == "agent"))
-            )
-        )
-        total = count_result.scalar() or 0
-
         # Fetch all sessions (including agent-to-agent where this agent is peer)
         result = await db.execute(
             select(ChatSession)
@@ -105,7 +87,6 @@ async def list_sessions(
                 | ((ChatSession.peer_agent_id == agent_id) & (ChatSession.source_channel == "agent"))
             )
             .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
-            .offset(skip).limit(limit)  # #70 修复：分页支持
         )
         sessions = result.scalars().all()
         out = []
@@ -127,7 +108,7 @@ async def list_sessions(
 
             unread_res = await db.execute(
                 select(ChatSession.id, func.count(ChatMessage.id))
-                .join(ChatSession.messages)
+                .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
                 .where(
                     ChatSession.id.in_(session_uuid_ids),
                     ChatSession.user_id == current_user.id,
@@ -210,36 +191,19 @@ async def list_sessions(
                 participant_type="group" if session.is_group else participant_type,
                 is_group=session.is_group,
                 group_name=session.group_name,
-                client_type=session.client_type,
-                project_path=session.project_path,
-                current_file=session.current_file,
-                open_files=session.open_files,
             ))
-        return {"items": out, "total": total, "skip": skip, "limit": limit}
+        return out
 
     else:  # scope == "mine"
-        # 分页总计查询（与主查询共享相同的 WHERE 条件，#70 修复）
-        count_result = await db.execute(
-            select(func.count(ChatSession.id))
-            .where(
-                ChatSession.agent_id == agent_id,
-                ChatSession.user_id == current_user.id,
-                ChatSession.is_group == False,
-                ChatSession.source_channel.notin_(["agent", "trigger"]),
-            )
-        )
-        total = count_result.scalar() or 0
-
         result = await db.execute(
             select(ChatSession)
             .where(
                 ChatSession.agent_id == agent_id,
                 ChatSession.user_id == current_user.id,
-                ChatSession.is_group == False,
-                ChatSession.source_channel.notin_(["agent", "trigger"]),
+                ChatSession.is_group == False,  # Group sessions are not "mine"
+                ChatSession.source_channel.notin_(["agent", "trigger"]),  # Exclude agent-to-agent and reflection sessions
             )
             .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
-            .offset(skip).limit(limit)  # #70 修复：分页支持
         )
         sessions = result.scalars().all()
         out = []
@@ -265,7 +229,7 @@ async def list_sessions(
 
             unread_res = await db.execute(
                 select(ChatSession.id, func.count(ChatMessage.id))
-                .join(ChatSession.messages)
+                .join(ChatMessage, ChatMessage.conversation_id == cast(ChatSession.id, String))
                 .where(
                     ChatSession.id.in_(session_uuid_ids),
                     ChatMessage.role.in_(["assistant", "system", "tool_call"]),
@@ -297,12 +261,8 @@ async def list_sessions(
                 message_count=count,
                 unread_count=unread_counts.get(str(session.id), 0),
                 is_primary=bool(session.is_primary),
-                client_type=session.client_type,
-                project_path=session.project_path,
-                current_file=session.current_file,
-                open_files=session.open_files,
             ))
-        return {"items": out, "total": total, "skip": skip, "limit": limit}
+        return out
 
 
 @router.post("/{agent_id}/sessions", status_code=201)
@@ -329,7 +289,6 @@ async def create_session(
     db.add(session)
     await db.commit()
     await db.refresh(session)
-    logger.info("[API] 创建会话 session_id={} agent_id={} user_id={}", session.id, agent_id, current_user.id)
     return SessionOut(
         id=str(session.id),
         agent_id=str(session.agent_id),
@@ -343,10 +302,6 @@ async def create_session(
         is_primary=False,
         participant_type="user",
         is_group=False,
-        client_type="web",
-        project_path=None,
-        current_file=None,
-        open_files=None,
     )
 
 
@@ -396,13 +351,7 @@ async def delete_session(
 
     # Delete associated messages first
     from sqlalchemy import delete as sql_delete
-    # 添加 agent_id 过滤——防御性编程 + 可利用联合索引加速（#59 修复）
-    await db.execute(
-        sql_delete(ChatMessage).where(
-            ChatMessage.conversation_id == str(session_id),
-            ChatMessage.agent_id == agent_id,
-        )
-    )
+    await db.execute(sql_delete(ChatMessage).where(ChatMessage.conversation_id == str(session_id)))
     await db.delete(session)
     await db.commit()
     return None
@@ -488,7 +437,6 @@ async def get_session_messages(
                 entry["toolResult"] = data.get("result", "")
                 entry["toolThinking"] = data.get("reasoning_content", "")
             except Exception:
-                logger.warning("[API] tool_call JSON 解析失败 session_id={}", session_id)
                 pass
             if sender_name:
                 entry["sender_name"] = sender_name

@@ -2050,7 +2050,7 @@ export default function AgentDetailPage() {
             const res = await fetch(`/api/agents/${id}/sessions?scope=all`, { headers: { Authorization: `Bearer ${tkn}` } });
             if (!res.ok) return [];
             const all = await res.json();
-            return (all.items || all).filter((s: any) => s.source_channel === 'trigger');
+            return all.filter((s: any) => s.source_channel === 'trigger');
         },
         enabled: !!id && awareDataActive,
         refetchInterval: awareDataActive ? 10000 : false,
@@ -2301,7 +2301,7 @@ export default function AgentDetailPage() {
             const tkn = localStorage.getItem('token');
             const res = await fetch(`/api/agents/${agentId}/sessions?scope=mine`, { headers: { Authorization: `Bearer ${tkn}` } });
             if (res.ok) {
-                const data = (await res.json()).items.map((row: any) => normalizeChatSession(row));
+                const data = (await res.json()).map((row: any) => normalizeChatSession(row));
                 if (currentAgentIdRef.current === agentId) setSessions(data);
                 if (!silent && currentAgentIdRef.current === agentId) setSessionsLoading(false);
                 return data;
@@ -2319,7 +2319,7 @@ export default function AgentDetailPage() {
             const res = await fetch(`/api/agents/${id}/sessions?scope=all`, { headers: { Authorization: `Bearer ${tkn}` } });
             if (!currentAgentIdRef.current || currentAgentIdRef.current !== id) return;
             if (res.ok) {
-                const all = (await res.json()).items
+                const all = (await res.json())
                     .filter((s: any) => String(s.source_channel || 'direct').toLowerCase() !== 'trigger')
                     .map((row: any) => normalizeChatSession(row));
                 setAllSessions(all);
