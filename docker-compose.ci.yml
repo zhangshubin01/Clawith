@@ -1,64 +1,46 @@
-# CI/CD 专用 docker-compose 配置
-# 使用预构建镜像，不挂载源代码目录
+# ============================================================
+# CI 专用 Docker Compose
+# 用于 Drone CI 的本地部署测试和升级测试
+# 使用预构建镜像，不构建、不挂载持久化卷
+# ============================================================
 
 services:
   postgres:
     image: postgres:15-alpine
-    restart: unless-stopped
     networks:
       - default
     environment:
       POSTGRES_USER: clawith
       POSTGRES_PASSWORD: clawith
       POSTGRES_DB: clawith
-    volumes:
-      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U clawith" ]
+      test: ["CMD-SHELL", "pg_isready -U clawith"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    restart: unless-stopped
     networks:
       - default
-    volumes:
-      - redisdata:/data
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   backend:
     image: clawith-backend:${IMAGE_TAG:-new}
-    restart: unless-stopped
     command: ["/bin/bash", "/app/entrypoint.sh"]
     environment:
       DATABASE_URL: postgresql+asyncpg://clawith:clawith@postgres:5432/clawith
       REDIS_URL: redis://redis:6379/0
       AGENT_DATA_DIR: /data/agents
       AGENT_TEMPLATE_DIR: /app/agent_template
-      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-jwt-secret}
+      SECRET_KEY: ci-test-secret
+      JWT_SECRET_KEY: ci-test-jwt-secret
+      PROCESS_ROLE: all
       CORS_ORIGINS: '["*"]'
-      DOCKER_NETWORK: clawith_network
-    volumes:
-      - agent_data:/data/agents
-      # docker.sock 挂载：backend 需要创建/管理 Agent 子容器（代码执行沙箱）。
-      # 安全影响：容器可获得宿主机 Docker 控制权。
-      - /var/run/docker.sock:/var/run/docker.sock
-    # privileged + SYS_ADMIN + seccomp=unconfined：
-    # Agent 子容器运行代码（bubblewrap/bwrap 沙箱）需要这些权限创建嵌套命名空间。
-    cap_add:
-      - SYS_ADMIN
-    security_opt:
-      - seccomp=unconfined
-    dns:
-      - 114.114.114.114
-      - 8.8.8.8
     networks:
       - default
     depends_on:
@@ -66,38 +48,18 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 
   frontend:
     image: clawith-frontend:${IMAGE_TAG:-new}
-    restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-3008}:3000"
+      - "3008:3000"
     environment:
       VITE_API_URL: http://localhost:8000
+      API_UPSTREAM: backend:8000
     networks:
       - default
     depends_on:
       - backend
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-volumes:
-  pgdata:
-  redisdata:
-  agent_data:
 
 networks:
   default:
