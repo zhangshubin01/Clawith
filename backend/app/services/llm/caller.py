@@ -12,6 +12,7 @@ All paths now support:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -459,8 +460,13 @@ async def call_llm(
     on_code_output=None,
     current_user_name_override: str | None = None,
     system_prompt_suffix: str | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> str:
-    """Call LLM via unified client with function-calling tool loop."""
+    """Call LLM via unified client with function-calling tool loop.
+
+    参数 cancel_event: 当外部设置此事件时，工具循环将在下一轮开始前抛出 CancelledError，
+    实现 ACP 协议的 prompt 取消机制。"""
+
     # Get agent config for tool rounds
     _max_tool_rounds, _token_limit_msg = await _get_agent_config(agent_id)
     if _token_limit_msg:
@@ -540,6 +546,14 @@ async def call_llm(
 
     # Tool-calling loop
     for round_i in range(_max_tool_rounds):
+        # 检查取消信号 — ACP 协议的 prompt 取消机制
+        if cancel_event and cancel_event.is_set():
+            logger.info(f"[LLM] 收到取消信号，终止工具循环 round={round_i}")
+            if agent_id and _unsaved_usage.total_tokens > 0:
+                await record_token_usage(agent_id, _unsaved_usage)
+            await client.close()
+            raise asyncio.CancelledError("LLM call cancelled by cancel_event")
+
         # Dynamic tool-call limit warning
         _warn_threshold_80 = int(_max_tool_rounds * 0.8)
         _warn_threshold_96 = _max_tool_rounds - 2
@@ -571,16 +585,18 @@ async def call_llm(
 
         try:
             # Use streaming API for real-time responses
-            async def _buffer_chunk(_text: str) -> None:
-                # Final user-facing text must come through finish(content=...).
+            # on_chunk 由调用方传入（WebSocket/ACP 路径需要流式输出），
+            # 若未传入则使用空回调，文本仅通过 finish(content=...) 返回
+            async def _noop_chunk(_text: str) -> None:
                 return None
+            _stream_chunk = on_chunk if on_chunk is not None else _noop_chunk
 
             response = await client.stream(
                 messages=api_messages,
                 tools=tools_for_llm if tools_for_llm else None,
                 temperature=model.temperature,
                 max_tokens=max_tokens,
-                on_chunk=_buffer_chunk,
+                on_chunk=_stream_chunk,
                 on_tool_delta=on_tool_delta,
                 on_thinking=on_thinking,
             )
@@ -694,6 +710,7 @@ async def call_llm_with_failover(
     on_code_output=None,
     current_user_name_override: str | None = None,
     system_prompt_suffix: str | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> str:
     """Call LLM with automatic failover support."""
     guard = FailoverGuard()
@@ -737,6 +754,7 @@ async def call_llm_with_failover(
         on_code_output=on_code_output,
         current_user_name_override=current_user_name_override,
         system_prompt_suffix=system_prompt_suffix,
+        cancel_event=cancel_event,
     )
 
     # Check if we need to failover
@@ -802,6 +820,7 @@ async def call_llm_with_failover(
         on_code_output=on_code_output,
         current_user_name_override=current_user_name_override,
         system_prompt_suffix=system_prompt_suffix,
+        cancel_event=cancel_event,
     )
 
     # Combine error messages if fallback also failed

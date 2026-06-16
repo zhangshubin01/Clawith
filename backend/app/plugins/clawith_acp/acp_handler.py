@@ -42,15 +42,14 @@ _READ_METHODS = frozenset({
     "ide/active_file", "ide/index_status",
 })
 
-_CHUNK_HARD_FLUSH = 240   # 降低硬上限, 配合时间驱动 flush 避免长时间无输出
-_CHUNK_SOFT_FLUSH = 120   # 降低软上限, 短文本也能在合理边界发送
-_CHUNK_IDLE_MIN = 10      # 降低 idle 最小阈值, 覆盖"完成。"等极短中文回复
-# 渐进式 idle flush: 短回复 (&lt;40字) 用 150ms 避免卡顿, 长回复用 500ms 等待更多内容
-_CHUNK_IDLE_SEC_SHORT = 0.15
-_CHUNK_IDLE_SEC_LONG = 0.50
-# 参考 gptme PR #1586: 100ms 时间驱动 flush 确保流式输出及时到达客户端,
-# 不依赖内容边界(句号/换段)即可触发。150ms 平衡延迟与网络开销。
-_PERIODIC_FLUSH_SEC = 0.15
+_CHUNK_HARD_FLUSH = 240   # 硬上限: 缓冲区达 240 字立即发送
+_CHUNK_SOFT_FLUSH = 120   # 软上限: 120 字 + 空白边界发送
+_CHUNK_IDLE_MIN = 4       # idle 最小阈值: 极短回复也及时 flush
+# 渐进式 idle flush: 短回复 50ms, 长回复 100ms — 流式流畅度核心参数
+_CHUNK_IDLE_SEC_SHORT = 0.05
+_CHUNK_IDLE_SEC_LONG = 0.10
+# 时间驱动 periodic flush: 每 60ms 兜底发送 (~16fps), 不依赖内容边界
+_PERIODIC_FLUSH_SEC = 0.06
 # 中英文句末标点均触发句子边界 flush
 _SENTENCE_END_RE = re.compile(r'[.!?。！？…~]["\'」』）\)]*\s*$')
 _SPLIT_NL_RE = re.compile(r"(?<=\n)")
@@ -1205,6 +1204,8 @@ def _extract_user_text(messages: list) -> str:
 _CIRCUIT_WINDOW_S: float = float(os.getenv("ACP_CIRCUIT_WINDOW_S", "60"))
 _CIRCUIT_ERROR_RATE: float = float(os.getenv("ACP_CIRCUIT_ERROR_RATE", "0.5"))
 _CIRCUIT_RECOVERY_S: float = float(os.getenv("ACP_CIRCUIT_RECOVERY_S", "30"))
+# 最小样本数门槛: 窗口内样本不足时不计算错误率, 防止单次超时就熔断
+_CIRCUIT_MIN_SAMPLES: int = int(os.getenv("ACP_CIRCUIT_MIN_SAMPLES", "3"))
 
 
 class CircuitBreaker:
@@ -1249,11 +1250,15 @@ class CircuitBreaker:
         self._results = [r for r in self._results if r[0] > cutoff]
 
     def _error_rate(self) -> float:
-        """计算滑动窗口内的错误率 (0.0 ~ 1.0)。"""
+        """计算滑动窗口内的错误率 (0.0 ~ 1.0)。
+
+        最小样本数门槛: 窗口内样本不足 _CIRCUIT_MIN_SAMPLES 时不计算错误率,
+        防止单次超时就触发熔断 (单次超时 = 1/1 = 100% > 50% 阈值 → 误熔断)。
+        """
         now = time.monotonic()
         cutoff = now - self._window_s
         recent = [ok for ts, ok in self._results if ts > cutoff]
-        if not recent:
+        if len(recent) < _CIRCUIT_MIN_SAMPLES:
             return 0.0
         return 1.0 - sum(recent) / len(recent)
 

@@ -454,6 +454,11 @@ async def _build_write_text_file_params(
         content = ""
     else:
         content = args.get("content", "")
+    content_len = len(content) if content else 0
+    logger.info(
+        "[ACP-WRITE] build_params tool={} path={} content_len={} session={}",
+        tool_name, path, content_len, session_id,
+    )
     return {"sessionId": session_id, "path": path, "content": content}
 
 
