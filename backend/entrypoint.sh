@@ -28,6 +28,23 @@ if [ "$(id -u)" = '0' ]; then
         fi
     fi
 
+    # 允许 clawith 用户访问宿主 Docker socket（/var/run/docker.sock）
+    # socket 由宿主挂载，GID 可能不是 docker 组→动态获取
+    if [ -S /var/run/docker.sock ]; then
+        DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo "")
+        if [ -n "${DOCKER_GID}" ] && [ "${DOCKER_GID}" != "0" ]; then
+            # 非 root 组: 创建 docker-sock 组并加入 clawith
+            groupadd --gid "${DOCKER_GID}" docker-sock 2>/dev/null || true
+            usermod -a -G "${DOCKER_GID}" clawith
+            echo "[entrypoint] Docker socket GID=${DOCKER_GID}, added clawith to group"
+        elif [ "${DOCKER_GID}" = "0" ]; then
+            # macOS Docker Desktop: socket 属于 root:root
+            # gosu 保留附加组, 这里把 clawith 加入 gid 0(root) 组
+            usermod -a -G 0 clawith
+            echo "[entrypoint] Docker socket owned by root, added clawith to root group"
+        fi
+    fi
+
     echo "[entrypoint] Dropping privileges to 'clawith' and re-executing..."
     exec gosu clawith /bin/bash "$0" "$@"
 fi

@@ -283,6 +283,7 @@ _ACP_METHOD_MAP = {
     "git_diff": "git/diff",
     "git_stage": "git/stage",
     "git_commit": "git/commit",
+    "ide/screenshot": "ide/screenshot",
 }
 
 
@@ -1135,7 +1136,7 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             return str(result)
         if method == "fs/find_class":
             if isinstance(result, dict):
-                classes = result.get("files") or result.get("results") or []
+                classes = result.get("classes") or result.get("files") or result.get("results") or []
                 if not classes:
                     return "(未找到匹配的类)"
                 lines = []
@@ -1209,6 +1210,130 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                 total = result.get("totalCount", len(matches))
                 if total > len(matches):
                     lines.append(f"... (共 {total} 个匹配)")
+                return "\n".join(lines)
+            return str(result)
+        # ── 新增: find_references / find_definition / find_implementations 等结果处理器 ──
+        if method == "fs/find_references":
+            if isinstance(result, dict):
+                usages = result.get("usages", [])
+                if not usages:
+                    return "(未找到引用)"
+                lines = [f"**引用结果** ({result.get('totalCount', 0)} 条):"]
+                for u in usages[:50]:
+                    f = u.get("file", "?"); l = u.get("line", "?")
+                    t = u.get("type", "?"); ctx = (u.get("context") or "")[:80]
+                    lines.append(f"- `{f}:{l}` [{t}] {ctx}")
+                return "\n".join(lines)
+        if method == "fs/find_definition":
+            if isinstance(result, dict):
+                err = result.get("error")
+                if err: return f"⚠️ {err}"
+                return (
+                    f"**定义**: `{result.get('symbolName', '?')}` → "
+                    f"`{result.get('file', '?')}:{result.get('line', '?')}:{result.get('column', '?')}`\n"
+                    f"```\n{result.get('preview', '')}\n```"
+                )
+        if method == "fs/find_implementations":
+            if isinstance(result, dict):
+                impls = result.get("implementations", [])
+                if not impls: return "(未找到实现)"
+                lines = [f"**实现列表** ({result.get('totalCount', 0)} 条):"]
+                for i in impls[:30]:
+                    lines.append(
+                        f"- `{i.get('name', '?')}` ({i.get('kind', '?')}, "
+                        f"{i.get('language', '')}) → `{i.get('file', '?')}`"
+                    )
+                return "\n".join(lines)
+        if method == "fs/find_super_methods":
+            if isinstance(result, dict):
+                err = result.get("error")
+                if err: return f"⚠️ {err}"
+                hierarchy = result.get("hierarchy", [])
+                if not hierarchy:
+                    return f"**父方法**: `{result.get('method', {}).get('name', '?')}` (无继承链)"
+                lines = [f"**方法继承链** ({len(hierarchy)} 层):"]
+                for h in hierarchy:
+                    prefix = "  " * h.get("depth", 0) + ("└─" if h.get("depth", 0) > 0 else "")
+                    lines.append(f"{prefix}`{h.get('containingClass', '?')}#{h.get('name', '?')}`")
+                return "\n".join(lines)
+        if method == "fs/call_hierarchy":
+            if isinstance(result, dict):
+                err = result.get("error")
+                if err: return f"⚠️ {err}"
+                el = result.get("element", {})
+                calls = result.get("calls", [])
+                lines = [f"**调用层次**: `{el.get('name', '?')}`"]
+                for c in calls[:50]:
+                    lines.append(f"- `{c.get('name', '?')[:80]}` → `{c.get('file', '?')}:{c.get('line', '?')}`")
+                return "\n".join(lines)
+        if method == "fs/type_hierarchy":
+            if isinstance(result, dict):
+                err = result.get("error")
+                if err: return f"⚠️ {err}"
+                el = result.get("element", {})
+                supers = result.get("supertypes", [])
+                subs = result.get("subtypes", [])
+                lines = [f"**类型层次**: `{el.get('name', '?')}`"]
+                if supers:
+                    lines.append(f"  超类型 ({len(supers)}): " + ", ".join(
+                        s.get("name", "?") for s in supers[:10]))
+                if subs:
+                    lines.append(f"  子类型 ({len(subs)}): " + ", ".join(
+                        s.get("name", "?") for s in subs[:20]))
+                return "\n".join(lines)
+        if method == "fs/diagnostics":
+            if isinstance(result, dict):
+                problems = result.get("problems", [])
+                intentions = result.get("intentions", [])
+                build_errors = result.get("buildErrors") or result.get("buildMessages") or []
+                if not problems and not intentions and not build_errors:
+                    return "(无诊断问题)"
+                lines = [f"**诊断结果** ({len(problems)} 问题, {len(intentions)} 快速修复):"]
+                for p in problems[:30]:
+                    sev = p.get("severity", "?"); msg = p.get("message", "?")
+                    f = p.get("file", "?"); l = p.get("line", "?")
+                    lines.append(f"- [{sev}] `{f}:{l}` {msg}")
+                if intentions:
+                    lines.append(f"\n**快速修复建议**:")
+                    for i in intentions[:20]:
+                        lines.append(f"- {i.get('description', '?')}")
+                if build_errors:
+                    lines.append(f"\n**编译错误**:")
+                    for be in build_errors[:10]:
+                        lines.append(f"- {be.get('message', '?')}")
+                return "\n".join(lines)
+        if method == "fs/file_structure":
+            if isinstance(result, dict):
+                err = result.get("error")
+                if err: return f"⚠️ {err}"
+                return (
+                    f"**文件结构** ({result.get('language', '')}):\n"
+                    f"```\n{result.get('structure', '')}\n```"
+                )
+        if method == "fs/get_documentation":
+            if isinstance(result, dict):
+                err = result.get("error")
+                if err: return f"⚠️ {err}"
+                doc = result.get("documentation", "")
+                return f"**API 文档**:\n```\n{doc}\n```" if doc else "(无文档)"
+        if method == "git/status":
+            if isinstance(result, dict):
+                output = result.get("output", "")
+                return output if output else "(无 Git 变更)"
+            return str(result)
+        if method == "git/diff":
+            if isinstance(result, dict):
+                output = result.get("output", "")
+                return output if output else "(无 diff 输出)"
+            return str(result)
+        if method == "ide/active_file":
+            if isinstance(result, dict):
+                files = result.get("files", [])
+                if not files:
+                    return "(无活动文件)"
+                lines = [f"**活动文件** ({result.get('count', len(files))} 个):"]
+                for f in files[:10]:
+                    lines.append(f"- `{f.get('path', '?')}` ({f.get('language', '?')})")
                 return "\n".join(lines)
             return str(result)
         return "文件操作成功"
