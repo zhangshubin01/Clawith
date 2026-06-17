@@ -39,6 +39,7 @@ from app.models.audit import ChatMessage, AuditLog
 from app.models.chat_session import ChatSession
 from app.models.channel_config import ChannelConfig
 from app.models.user import User as UserModel
+from app.core.permissions import can_auto_contact_company_agent
 from app.services.auth_registry import auth_provider_registry
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import get_platform_user_by_org_member
@@ -7104,10 +7105,12 @@ async def _build_a2a_context(
 
             # Find target agent by name — exact match first, then fuzzy
             target = None
+            exact_match = False
             exact_result = await db.execute(
                 select(AgentModel).where(AgentModel.name == agent_name, *base_filter)
             )
             target = exact_result.scalars().first()
+            exact_match = target is not None
             if not target:
                 safe_name = agent_name.replace("%", "").replace("_", r"\_")
                 fuzzy_result = await db.execute(
@@ -7129,20 +7132,21 @@ async def _build_a2a_context(
             if target.is_expired or (target.expires_at and datetime.now(timezone.utc) >= target.expires_at):
                 return f"⚠️ {target.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
 
-            # Enforce relationship
-            rel_check = await db.execute(
-                select(AgentAgentRelationship).where(
-                    AgentAgentRelationship.agent_id == from_agent_id,
-                    AgentAgentRelationship.target_agent_id == target.id,
-                ).limit(1)
-            )
-            rel = rel_check.scalar_one_or_none()
-            if not rel:
-                return f"❌ You do not have a relationship with {target.name}. Only agents in your relationship list can be contacted. Ask your administrator to add a relationship if needed."
-            if hasattr(rel, "agent_id"):
-                status_info = await evaluate_agent_relationship_status(db, rel)
-                if status_info["access_status"] != "active":
-                    return f"❌ Relationship to {target.name} is not active ({status_info['access_status_reason'] or 'restricted'}). Ask a manager of both agents to review Relationships."
+            # Enforce relationship unless phase-1 company-agent auto-contact applies.
+            if not (exact_match and can_auto_contact_company_agent(source_agent, target)):
+                rel_check = await db.execute(
+                    select(AgentAgentRelationship).where(
+                        AgentAgentRelationship.agent_id == from_agent_id,
+                        AgentAgentRelationship.target_agent_id == target.id,
+                    ).limit(1)
+                )
+                rel = rel_check.scalar_one_or_none()
+                if not rel:
+                    return f"❌ You do not have a relationship with {target.name}. Only agents in your relationship list can be contacted. Ask your administrator to add a relationship if needed."
+                if hasattr(rel, "agent_id"):
+                    status_info = await evaluate_agent_relationship_status(db, rel)
+                    if status_info["access_status"] != "active":
+                        return f"❌ Relationship to {target.name} is not active ({status_info['access_status_reason'] or 'restricted'}). Ask a manager of both agents to review Relationships."
 
             src_part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == from_agent_id))
             src_participant = src_part_r.scalar_one_or_none()

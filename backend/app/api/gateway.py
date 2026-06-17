@@ -15,7 +15,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, async_session
-from app.core.permissions import evaluate_agent_relationship_status, evaluate_human_relationship_status
+from app.core.permissions import (
+    evaluate_agent_relationship_status,
+    evaluate_human_relationship_status,
+    can_auto_contact_company_agent,
+)
 from app.models.agent import Agent
 from app.models.gateway_message import GatewayMessage
 from app.models.user import User
@@ -174,14 +178,38 @@ async def poll_messages(
         .where(AgentAgentRelationship.agent_id == agent.id)
         .options(selectinload(AgentAgentRelationship.target_agent))
     )
+    related_agent_ids = set()
     for r in a_result.scalars().all():
         status_info = await evaluate_agent_relationship_status(db, r)
         if r.target_agent and status_info["access_status"] == "active":
+            related_agent_ids.add(r.target_agent.id)
             rel_items.append(GatewayRelationshipItem(
                 name=r.target_agent.name,
                 type="agent",
                 role=r.relation,
                 description=r.description or None,
+                channels=["agent"],
+            ))
+
+    c_result = await db.execute(
+        select(Agent)
+        .where(
+            Agent.tenant_id == agent.tenant_id,
+            Agent.id != agent.id,
+            Agent.access_mode == "company",
+            Agent.status.in_(["running", "idle"]),
+        )
+        .order_by(Agent.name.asc(), Agent.created_at.asc())
+    )
+    for candidate in c_result.scalars().all():
+        if candidate.id in related_agent_ids:
+            continue
+        if can_auto_contact_company_agent(agent, candidate):
+            rel_items.append(GatewayRelationshipItem(
+                name=candidate.name,
+                type="agent",
+                role="company",
+                description=candidate.role_description or None,
                 channels=["agent"],
             ))
 
@@ -488,26 +516,40 @@ async def send_message(
     content = body.content.strip()
     channel_hint = (body.channel or "").strip().lower()
 
-    # 1. Try to find target as another Agent, limited to active relationships.
+    # 1. Try to find target as another Agent.
     from app.models.org import AgentAgentRelationship
     from sqlalchemy.orm import selectinload
+
+    target_agent = None
+    if not channel_hint or channel_hint == "agent":
+        company_result = await db.execute(
+            select(Agent).where(
+                Agent.name == target_name,
+                Agent.tenant_id == agent.tenant_id,
+                Agent.id != agent.id,
+                Agent.access_mode == "company",
+            )
+        )
+        company_candidate = company_result.scalars().first()
+        if company_candidate and can_auto_contact_company_agent(agent, company_candidate):
+            target_agent = company_candidate
 
     rel_result = await db.execute(
         select(AgentAgentRelationship)
         .where(AgentAgentRelationship.agent_id == agent.id)
         .options(selectinload(AgentAgentRelationship.target_agent))
     )
-    target_agent = None
-    for rel in rel_result.scalars().all():
-        candidate = rel.target_agent
-        if not candidate:
-            continue
-        status_info = await evaluate_agent_relationship_status(db, rel)
-        if status_info["access_status"] != "active":
-            continue
-        if candidate.name.lower() == target_name.lower() or target_name.lower() in candidate.name.lower():
-            target_agent = candidate
-            break
+    if not target_agent:
+        for rel in rel_result.scalars().all():
+            candidate = rel.target_agent
+            if not candidate:
+                continue
+            status_info = await evaluate_agent_relationship_status(db, rel)
+            if status_info["access_status"] != "active":
+                continue
+            if candidate.name.lower() == target_name.lower() or target_name.lower() in candidate.name.lower():
+                target_agent = candidate
+                break
 
     logger.info(f"[Gateway] send_message: target='{target_name}', found_agent={target_agent.name if target_agent else None}, agent_type={getattr(target_agent, 'agent_type', None) if target_agent else None}, channel_hint='{channel_hint}'")
 

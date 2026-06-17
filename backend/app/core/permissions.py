@@ -359,3 +359,23 @@ def is_agent_expired(agent: Agent) -> bool:
     if expires_at and datetime.now(timezone.utc) > expires_at:
         return True
     return False
+
+
+def can_auto_contact_company_agent(source_agent: Agent, target_agent: Agent) -> bool:
+    """Return whether source can contact target via the phase-1 company-agent rule."""
+    if not source_agent or not target_agent:
+        return False
+    if getattr(source_agent, "id", None) == getattr(target_agent, "id", None):
+        return False
+    source_tenant_id = getattr(source_agent, "tenant_id", None)
+    target_tenant_id = getattr(target_agent, "tenant_id", None)
+    if not source_tenant_id or source_tenant_id != target_tenant_id:
+        return False
+    if getattr(target_agent, "access_mode", None) != "company":
+        return False
+    target_status = getattr(target_agent, "status", None)
+    if target_status and target_status not in ("running", "idle"):
+        return False
+    if is_agent_expired(target_agent):
+        return False
+    return True

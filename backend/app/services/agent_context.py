@@ -146,8 +146,13 @@ async def _load_skills_index(agent_id: uuid.UUID) -> str:
 async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
     """Query relationships directly from the database and format as a markdown list."""
     from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
+    from app.models.agent import Agent
     from app.models.identity import IdentityProvider
-    from app.core.permissions import evaluate_human_relationship_status, evaluate_agent_relationship_status
+    from app.core.permissions import (
+        evaluate_human_relationship_status,
+        evaluate_agent_relationship_status,
+        can_auto_contact_company_agent,
+    )
     from sqlalchemy.orm import selectinload
     from sqlalchemy import select
 
@@ -168,6 +173,10 @@ async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
         "collaborator": "协作伙伴",
         "other": "其他",
     }
+
+    source_agent = (
+        await db.execute(select(Agent).where(Agent.id == agent_id))
+    ).scalar_one_or_none()
 
     # Load human relationships
     h_result = await db.execute(
@@ -200,12 +209,33 @@ async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
         .options(selectinload(AgentAgentRelationship.target_agent))
     )
     agent_rels = []
+    related_agent_ids = set()
     for rel in a_result.scalars().all():
         status_info = await evaluate_agent_relationship_status(db, rel)
         if status_info["access_status"] == "active":
             agent_rels.append(rel)
+            if getattr(rel, "target_agent_id", None):
+                related_agent_ids.add(rel.target_agent_id)
 
-    if not human_rows and not agent_rels:
+    company_agents = []
+    if source_agent and getattr(source_agent, "tenant_id", None):
+        c_result = await db.execute(
+            select(Agent)
+            .where(
+                Agent.tenant_id == source_agent.tenant_id,
+                Agent.id != agent_id,
+                Agent.access_mode == "company",
+                Agent.status.in_(["running", "idle"]),
+            )
+            .order_by(Agent.name.asc(), Agent.created_at.asc())
+        )
+        for candidate in c_result.scalars().all():
+            if getattr(candidate, "id", None) in related_agent_ids:
+                continue
+            if can_auto_contact_company_agent(source_agent, candidate):
+                company_agents.append(candidate)
+
+    if not human_rows and not agent_rels and not company_agents:
         return ""
 
     lines = []
@@ -225,7 +255,7 @@ async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
             lines.append("")
 
     # Agent relationships
-    if agent_rels:
+    if agent_rels or company_agents:
         lines.append("## 🤖 数字员工同事\n")
         for r in agent_rels:
             a = r.target_agent
@@ -235,6 +265,9 @@ async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
             lines.append(f"### {a.name} — {a.role_description or '数字员工'}")
             if r.description:
                 lines.append(f"- {r.description}")
+            lines.append("")
+        for a in company_agents:
+            lines.append(f"### {a.name} — {a.role_description or '数字员工'}")
             lines.append("")
 
     return "\n".join(lines).strip()

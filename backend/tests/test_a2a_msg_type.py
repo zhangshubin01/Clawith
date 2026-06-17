@@ -67,13 +67,21 @@ class RecordingDB:
 
 
 def _make_agent(
-    agent_id=None, name="TestAgent", tenant_id=None, agent_type="native", expired=False, primary_model_id=None
+    agent_id=None,
+    name="TestAgent",
+    tenant_id=None,
+    agent_type="native",
+    expired=False,
+    primary_model_id=None,
+    access_mode=None,
+    status="running",
 ):
     agent = MagicMock()
     agent.id = agent_id or uuid.uuid4()
     agent.name = name
     agent.tenant_id = tenant_id or uuid.uuid4()
     agent.agent_type = agent_type
+    agent.status = status
     agent.is_expired = expired
     agent.expires_at = None
     agent.creator_id = uuid.uuid4()
@@ -81,6 +89,8 @@ def _make_agent(
     agent.fallback_model_id = None
     agent.role_description = ""
     agent.max_tool_rounds = 50
+    if access_mode is not None:
+        agent.access_mode = access_mode
     return agent
 
 
@@ -386,6 +396,144 @@ async def test_missing_agent_name_returns_error():
     )
 
     assert "❌" in result
+
+
+def test_company_auto_contact_helper_rejects_non_company_boundaries():
+    """Phase-1 company auto-contact only applies inside tenant, not self, and not expired."""
+    from app.core.permissions import can_auto_contact_company_agent
+
+    tenant_id = uuid.uuid4()
+    source = _make_agent(tenant_id=tenant_id, access_mode="company")
+    company_target = _make_agent(tenant_id=tenant_id, access_mode="company")
+    custom_target = _make_agent(tenant_id=tenant_id, access_mode="custom")
+    foreign_target = _make_agent(tenant_id=uuid.uuid4(), access_mode="company")
+    expired_target = _make_agent(tenant_id=tenant_id, access_mode="company", expired=True)
+    stopped_target = _make_agent(tenant_id=tenant_id, access_mode="company", status="stopped")
+
+    assert can_auto_contact_company_agent(source, company_target) is True
+    assert can_auto_contact_company_agent(source, source) is False
+    assert can_auto_contact_company_agent(source, custom_target) is False
+    assert can_auto_contact_company_agent(source, foreign_target) is False
+    assert can_auto_contact_company_agent(source, expired_target) is False
+    assert can_auto_contact_company_agent(source, stopped_target) is False
+
+
+@pytest.mark.asyncio
+async def test_relationship_prompt_includes_company_agent_without_relationship():
+    """Company agents should be visible in prompt relationships without explicit A2A rows."""
+    from app.services.agent_context import _load_relationships_from_db
+
+    tenant_id = uuid.uuid4()
+    source_agent = _make_agent(tenant_id=tenant_id, name="Alice", access_mode="company")
+    company_agent = _make_agent(tenant_id=tenant_id, name="Bob", access_mode="company")
+    company_agent.role_description = "Backend helper"
+
+    db = RecordingDB(
+        responses=[
+            DummyResult(scalar_value=source_agent),
+            DummyResult(values=[]),
+            DummyResult(scalars_list=[]),
+            DummyResult(scalars_list=[company_agent]),
+        ]
+    )
+
+    relationships = await _load_relationships_from_db(db, source_agent.id)
+
+    assert "数字员工同事" in relationships
+    assert "Bob" in relationships
+    assert "Backend helper" in relationships
+
+
+@pytest.mark.asyncio
+async def test_company_agent_without_relationship_can_notify():
+    """Company agents can be contacted without AgentAgentRelationship in phase 1."""
+    from app.services.agent_tools import _send_message_to_agent
+
+    tenant_id = uuid.uuid4()
+    from_agent_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    src_participant = _make_participant(ref_id=from_agent_id)
+    tgt_participant = _make_participant(ref_id=target_id)
+    source_agent = _make_agent(from_agent_id, name="Alice", tenant_id=tenant_id)
+    target_agent = _make_agent(target_id, name="Bob", tenant_id=tenant_id, access_mode="company")
+
+    session = MagicMock()
+    session.id = session_id
+    session.last_message_at = None
+
+    db = RecordingDB(
+        responses=[
+            DummyResult(scalar_value=source_agent),
+            DummyResult(scalars_list=[target_agent]),
+            DummyResult(scalar_value=src_participant),
+            DummyResult(scalar_value=tgt_participant),
+            DummyResult(scalar_value=session),
+            DummyResult(scalar_value=_make_tenant()),
+        ]
+    )
+
+    with (
+        patch("app.services.agent_tools.async_session") as mock_session_ctx,
+        patch("app.services.agent_tools._wake_agent_async", new_callable=AsyncMock) as mock_wake,
+    ):
+        mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=db)
+        mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _send_message_to_agent(
+            from_agent_id,
+            {
+                "agent_name": "Bob",
+                "message": "Hello",
+                "msg_type": "notify",
+            },
+        )
+
+    assert "Notification sent to Bob" in result
+    mock_wake.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_gateway_company_agent_without_relationship_queues_message():
+    """Gateway send-message can target company agents without explicit A2A rows."""
+    from app.api.gateway import send_message
+    from app.schemas.schemas import GatewaySendMessageRequest
+
+    tenant_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    source_agent = _make_agent(source_id, name="Alice", tenant_id=tenant_id, agent_type="openclaw")
+    target_agent = _make_agent(
+        target_id,
+        name="Bob",
+        tenant_id=tenant_id,
+        agent_type="openclaw",
+        access_mode="company",
+    )
+    db = RecordingDB(
+        responses=[
+            DummyResult(scalars_list=[target_agent]),
+            DummyResult(scalars_list=[]),
+        ]
+    )
+
+    with patch("app.api.gateway._get_agent_by_key", new_callable=AsyncMock, return_value=source_agent):
+        result = await send_message(
+            GatewaySendMessageRequest(target="Bob", content="Hello"),
+            x_api_key="test-key",
+            db=db,
+        )
+
+    assert result["status"] == "accepted"
+    assert result["target"] == "Bob"
+    assert result["type"] == "openclaw_agent"
+    assert db.committed is True
+    assert len(db.added) == 1
+    queued = db.added[0]
+    assert queued.agent_id == target_id
+    assert queued.sender_agent_id == source_id
+    assert queued.content == "Hello"
+    assert queued.status == "pending"
 
 
 @pytest.mark.asyncio
