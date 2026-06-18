@@ -1116,12 +1116,18 @@ class AcpHandler:
         req_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_requests[req_id] = (future, time.monotonic())
+        # 端到端追踪: 将 trace_id 和 req_id 注入 ACP params, IDE 插件侧可解析关联
+        # trace_id 由 _do_llm 中 get_trace_id() 生成, 用于跨请求聚合
+        _trace_id = get_trace_id()
+        _params = dict(params)
+        _params["_trace_id"] = _trace_id
+        _params["_req_id"] = req_id
         raw = json.dumps({
             "type": "com.agentclientprotocol.rpc.JsonRpcRequest",
             "jsonrpc": "2.0",
             "id": req_id,
             "method": method,
-            "params": params,
+            "params": _params,
         }, ensure_ascii=False, default=str)
         logger.debug(f"[ACP-RAW-OUT] {raw}")
         t0 = time.perf_counter()

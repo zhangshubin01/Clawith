@@ -249,7 +249,7 @@ _ACP_METHOD_MAP = {
     "read_file": "fs/read_text_file",
     "write_file": "fs/write_text_file",
     "edit_file": "fs/edit_text_file",
-    "delete_file": "fs/write_text_file",
+    "delete_file": "fs/safe_delete",
     "list_files": "fs/list_directory",
     # P0-2: find_file/search_text builder handler 已实现 (line 76, 95) 且在
     # _ACP_PARAM_BUILDERS 已注册 (line 468-469), 补充 _ACP_METHOD_MAP 入口。
@@ -450,11 +450,8 @@ async def _build_edit_file_params(
 async def _build_write_text_file_params(
     tool_name: str, args: dict, handler, session_id: str, path: str,
 ) -> dict | str:
-    """构建 write_text_file 参数（含 delete_file 清空）。"""
-    if tool_name == "delete_file":
-        content = ""
-    else:
-        content = args.get("content", "")
+    """构建 write_text_file 参数。"""
+    content = args.get("content", "")
     content_len = len(content) if content else 0
     logger.info(
         "[ACP-WRITE] build_params tool={} path={} content_len={} session={}",
@@ -639,16 +636,26 @@ async def _build_optimize_imports_params(
 async def _build_safe_delete_params(
     tool_name: str, args: dict, handler, session_id: str, path: str,
 ) -> dict | str:
-    """构建 safe_delete 参数 — 安全删除符号或文件。"""
-    f_path = args.get("file", "")
+    """构建 safe_delete 参数 — 安全删除符号或文件（插件侧 camelCase targetType）。"""
+    f_path = path or args.get("path") or args.get("file") or args.get("file_path") or ""
     if not f_path:
-        return "❌ safe_delete: file 不能为空"
-    params: dict[str, Any] = {"sessionId": session_id, "file": f_path}
-    if args.get("line"): params["line"] = int(args["line"])
-    if args.get("column"): params["column"] = int(args["column"])
-    params["target_type"] = args.get("target_type", "symbol")
-    params["force"] = args.get("force", False)
-    logger.info(f"[ACP] safe_delete file={f_path} target_type={params['target_type']}")
+        return "❌ safe_delete: file/path 不能为空"
+    if tool_name == "delete_file":
+        target_type = "file"
+    else:
+        target_type = args.get("targetType") or args.get("target_type", "symbol")
+    params: dict[str, Any] = {
+        "sessionId": session_id,
+        "path": f_path,
+        "file": f_path,
+        "targetType": target_type,
+        "force": args.get("force", False),
+    }
+    if args.get("line"):
+        params["line"] = int(args["line"])
+    if args.get("column"):
+        params["column"] = int(args["column"])
+    logger.info(f"[ACP] safe_delete file={f_path} targetType={target_type}")
     return params
 
 
@@ -981,13 +988,15 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         return f'{{"error": "路径不合法: 禁止路径穿越"}}'
 
     # Autonomy 闸门: 写操作需要经过 check_tool_autonomy 检查
+    # 删除类工具由 ACP 插件 DeletePermissionRow 把关，跳过后端 L3 web 审批阻断
+    _DELETE_TOOLS_PLUGIN_GATED = frozenset({"delete_file", "safe_delete"})
     _WRITE_TOOLS = frozenset({
         "write_file", "edit_file", "delete_file",
         "refactor_rename", "move_file", "safe_delete",
         "reformat_code", "optimize_imports", "convert_java_to_kotlin",
         "apply_quickfix", "git_stage", "git_commit",
     })
-    if tool_name in _WRITE_TOOLS:
+    if tool_name in _WRITE_TOOLS and tool_name not in _DELETE_TOOLS_PLUGIN_GATED:
         _lazy_import_agent_tools()
         # 确保 agent_tools.py 的 _TOOL_AUTONOMY_MAP 包含 ACP 写工具映射 (安全审计 V2)
         _autonomy_map = _INLINE_IMPORTED.get("_TOOL_AUTONOMY_MAP", {})

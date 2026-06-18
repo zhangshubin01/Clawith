@@ -13,6 +13,7 @@ All paths now support:
 from __future__ import annotations
 
 import asyncio
+import time
 import json
 import re
 import uuid
@@ -545,7 +546,9 @@ async def call_llm(
     _unsaved_usage = TokenUsage()
 
     # Tool-calling loop
+    _session_t0 = time.perf_counter()
     for round_i in range(_max_tool_rounds):
+        _round_t0 = time.perf_counter()
         # 检查取消信号 — ACP 协议的 prompt 取消机制
         if cancel_event and cancel_event.is_set():
             logger.info(f"[LLM] 收到取消信号，终止工具循环 round={round_i}")
@@ -627,7 +630,11 @@ async def call_llm(
             continue
 
         # Execute tool calls
-        logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
+        _session_elapsed = time.perf_counter() - _session_t0
+        logger.info(
+            f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s) "
+            f"session_elapsed={_session_elapsed:.1f}s"
+        )
         sanitized_tool_calls, retry_instruction = _sanitize_tool_calls_for_context(response.tool_calls)
         if retry_instruction:
             api_messages.append(LLMMessage(role="user", content=retry_instruction))
@@ -664,7 +671,9 @@ async def call_llm(
 
         full_reasoning_content = response.reasoning_content or ""
 
+        _round_total_tool_ms = 0.0
         for tc in sanitized_tool_calls or []:
+            _tool_t0 = time.perf_counter()
             tool_error = await _process_tool_call(
                 tc=tc,
                 api_messages=api_messages,
@@ -677,12 +686,26 @@ async def call_llm(
                 full_reasoning_content=full_reasoning_content,
                 allowed_tool_names=allowed_tool_names,
             )
+            _tool_ms = (time.perf_counter() - _tool_t0) * 1000
+            _round_total_tool_ms += _tool_ms
+            _tool_name = tc.get("function", {}).get("name", "?")
+            if _tool_ms > 500:
+                logger.warning(
+                    f"[LLM] 慢工具: {_tool_name} elapsed={_tool_ms:.0f}ms "
+                    f"round={round_i+1} session={session_id}"
+                )
             if tool_error:
                 api_messages.append(LLMMessage(
                     role="tool",
                     content=tool_error,
                     tool_call_id=tc.get("id", ""),
                 ))
+        _round_ms = (time.perf_counter() - _round_t0) * 1000
+        logger.info(
+            f"[LLM-PERF] Round {round_i+1} done: total={_round_ms:.0f}ms "
+            f"tools={_round_total_tool_ms:.0f}ms llm_overhead={_round_ms - _round_total_tool_ms:.0f}ms "
+            f"session_elapsed={time.perf_counter() - _session_t0:.1f}s"
+        )
 
     # Record tokens even on "too many rounds" exit
     if agent_id and _unsaved_usage.total_tokens > 0:

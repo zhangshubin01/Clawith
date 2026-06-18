@@ -948,7 +948,7 @@ def install_acp_tool_hooks() -> None:
         "read_file": "fs/read_text_file",
         "write_file": "fs/write_text_file",
         "edit_file": "fs/edit_text_file",
-        "delete_file": "fs/write_text_file",  # 暂通过 write 空内容实现
+        "delete_file": "fs/safe_delete",
         "list_files": "fs/list_directory",
         "find_file": "fs/find_file",
         "search_text": "fs/search_text",

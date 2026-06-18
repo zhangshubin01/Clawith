@@ -37,6 +37,24 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
             # Add trace ID to response headers
             response.headers["X-Trace-Id"] = trace_id
 
+            # 大响应负载告警: 超过 50KB 的响应可能影响性能和带宽
+            content_length = response.headers.get("content-length")
+            if content_length:
+                try:
+                    _size = int(content_length)
+                    if _size > 100_000:
+                        logger.warning(
+                            f"[API] 超大响应: {request.method} {request.url.path} "
+                            f"size={_size // 1024}KB status={response.status_code}"
+                        )
+                    elif _size > 50_000:
+                        logger.info(
+                            f"[API] 大响应: {request.method} {request.url.path} "
+                            f"size={_size // 1024}KB status={response.status_code}"
+                        )
+                except ValueError:
+                    pass
+
             # Log response (bind request_info so the noise filter can evaluate it)
             logger.bind(
                 request_info={

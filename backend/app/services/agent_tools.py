@@ -17,6 +17,7 @@ import fnmatch
 import json
 import multiprocessing as mp
 import os
+import time
 import queue
 import tempfile
 import uuid
@@ -3002,6 +3003,7 @@ async def execute_tool(
                     per conversation. Passed through to agentbay_* tools.
     """
     _log = logger.bind(trace_id=get_trace_id())
+    _tool_t0 = time.perf_counter()
     if not isinstance(tool_name, str):
         tool_name = str(tool_name or "")
     tool_name = (
@@ -3519,6 +3521,11 @@ async def execute_tool(
             except Exception as _e:
                 logger.warning(f"Failed to save tool error message to session: {_e}")
 
+        _tool_elapsed = (time.perf_counter() - _tool_t0) * 1000
+        if _tool_elapsed > 200:
+            logger.info(f"[Tool] {tool_name} elapsed={_tool_elapsed:.0f}ms")
+        elif _tool_elapsed > 1000:
+            logger.warning(f"[Tool] 慢工具: {tool_name} elapsed={_tool_elapsed:.0f}ms")
         return result
     except Exception as e:
         # #169 修复：区分网络超时（WARNING）与真正异常（ERROR）

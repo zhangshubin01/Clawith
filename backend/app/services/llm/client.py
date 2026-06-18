@@ -10,6 +10,7 @@ import asyncio
 import json
 import re
 import socket
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Literal
@@ -1833,6 +1834,7 @@ class AnthropicClient(LLMClient):
 
         if tools:
             anthropic_tools = []
+            _tools_total_chars = 0
             for tool in tools:
                 if tool.get("type") == "function":
                     func = tool["function"]
@@ -1841,8 +1843,15 @@ class AnthropicClient(LLMClient):
                         "description": func.get("description", ""),
                         "input_schema": func.get("parameters", {"type": "object"}),
                     })
+                    _tools_total_chars += len(func.get("description", "")) + len(
+                        json.dumps(func.get("parameters", {}))
+                    )
             if anthropic_tools:
                 anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
+            logger.debug(
+                f"[LLM] tools={len(anthropic_tools)} est_tokens~{_tools_total_chars // 4} "
+                f"cache_hit={'ephemeral' if anthropic_tools else 'none'}"
+            )
             payload["tools"] = anthropic_tools
 
         payload.update(kwargs)
@@ -1936,6 +1945,9 @@ class AnthropicClient(LLMClient):
         last_finish_reason: str | None = None
         final_usage = None
         final_model = self.model
+        # TTFT 测量: 首 token 到达时间, 用于 [LLM-PERF] 性能追踪
+        _stream_t0 = time.perf_counter()
+        _ttft_recorded = False
 
         client = await self._get_client()
 
@@ -1991,6 +2003,14 @@ class AnthropicClient(LLMClient):
                     elif current_event == "content_block_start":
                         block = data.get("content_block", {})
                         idx = data.get("index", 0)
+                        # TTFT: 首 token (text/thinking/tool_use) 到达时记录一次
+                        if not _ttft_recorded:
+                            _ttft_recorded = True
+                            _ttft_ms = (time.perf_counter() - _stream_t0) * 1000
+                            logger.info(
+                                f"[LLM-PERF] TTFT={_ttft_ms:.0f}ms model={final_model} "
+                                f"block_type={block.get('type','?')}"
+                            )
                         if block.get("type") == "tool_use":
                             tool_call_index_map[idx] = len(tool_calls_data)
                             tool_calls_data.append({

@@ -2903,6 +2903,8 @@ export default function AgentDetailPage() {
                 wsRef.current = ws;
                 setWsConnected(true);
             }
+            // WS 连接生命周期日志: 追踪连接建立
+            console.debug(`[WS] open session=${sessionId} agent=${agentId}`);
             if (pendingChatSendRef.current?.runtimeKey === key) {
                 const pending = pendingChatSendRef.current;
                 pendingChatSendRef.current = null;
@@ -2914,6 +2916,8 @@ export default function AgentDetailPage() {
             if (wsMapRef.current[key] === ws) delete wsMapRef.current[key];
             setSessionUiState(key, { isWaiting: false, isStreaming: false });
             const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
+            // WS 连接生命周期日志: 追踪断连原因
+            console.debug(`[WS] close session=${sessionId} code=${e.code} reason=${e.reason || 'none'} active=${isActiveRuntime}`);
             if (isActiveRuntime) {
                 wsRef.current = null;
                 setWsConnected(false);
@@ -2931,11 +2935,22 @@ export default function AgentDetailPage() {
         ws.onerror = (error) => {
             const isActiveRuntime = currentAgentIdRef.current === agentId && activeSessionIdRef.current === sessionId;
             if (isActiveRuntime) setWsConnected(false);
-            console.warn(`WebSocket error for session ${sessionId}:`, error);
+            console.warn(`[WS] error session=${sessionId} agent=${agentId}:`, error);
             // Error automatically triggers onclose with abnormal code, which handles reconnect
         };
+        const msgCount: Record<string, number> = {};
+        let msgTotal = 0;
         ws.onmessage = (e) => {
             const d = JSON.parse(e.data);
+            // 消息类型频率统计: 每 100 条消息输出一次分布, 用于评估渲染压力
+            msgCount[d.type] = (msgCount[d.type] || 0) + 1;
+            msgTotal++;
+            if (msgTotal % 100 === 0) {
+                const top = Object.entries(msgCount)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([k, v]) => `${k}=${v}`).join(' ');
+                console.debug(`[WS] msg stats total=${msgTotal} session=${sessionId} ${top}`);
+            }
             // Onboarding lock fired (or trigger was rejected because the pair
             // was already onboarded). Either way, invalidate the cached agent
             // record so the kickoff effect stops thinking a new session needs
