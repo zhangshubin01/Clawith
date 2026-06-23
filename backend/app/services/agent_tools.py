@@ -34,12 +34,17 @@ from sqlalchemy.orm import selectinload
 from app.database import async_session
 from app.models.task import Task
 from app.models.agent import Agent as AgentModel
-from app.models.org import AgentRelationship, OrgMember, AgentAgentRelationship
+from app.models.identity import IdentityProvider
+from app.models.org import AgentRelationship, OrgDepartment, OrgMember, AgentAgentRelationship
 from app.models.audit import ChatMessage, AuditLog
 from app.models.chat_session import ChatSession
 from app.models.channel_config import ChannelConfig
 from app.models.user import User as UserModel
-from app.core.permissions import can_auto_contact_company_agent
+from app.core.permissions import (
+    can_auto_contact_company_agent,
+    evaluate_roster_agent_visibility,
+    evaluate_roster_human_visibility,
+)
 from app.services.auth_registry import auth_provider_registry
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import get_platform_user_by_org_member
@@ -594,6 +599,43 @@ AGENT_TOOLS = [
                     },
                 },
                 "required": ["file_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_roster",
+            "description": "Query the people and digital employees this agent can see in its roster. Use this before recommending or contacting a colleague.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional search keyword for name, role, title, department, or skill.",
+                    },
+                    "member_type": {
+                        "type": "string",
+                        "enum": ["all", "agent", "human"],
+                        "description": "Filter by member type. Defaults to all.",
+                    },
+                    "include_uncontactable": {
+                        "type": "boolean",
+                        "description": "Whether to include members that are visible but currently unavailable. Defaults to false. This never returns invisible members.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "description": "Maximum number of members to return. Defaults to 20.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Number of matching members to skip. Defaults to 0.",
+                    },
+                },
+                "required": [],
             },
         },
     },
@@ -1927,6 +1969,7 @@ _ALWAYS_INCLUDE_CORE = {
     "complete_focus_item",
     FINISH_TOOL_NAME,
     "list_focus_items",
+    "query_roster",
     "send_channel_file",
     "send_file_to_agent",
     "upsert_focus_item",
@@ -2829,6 +2872,8 @@ async def _execute_tool_direct(
             return await _bing_search_tool(arguments, agent_id)
         elif tool_name == "send_feishu_message":
             return await _send_feishu_message(agent_id, arguments)
+        elif tool_name == "query_roster":
+            return await _query_roster(agent_id, arguments)
         elif tool_name == "send_message_to_agent":
             return await _send_message_to_agent(
                 agent_id,
@@ -3058,6 +3103,8 @@ async def execute_tool(
             result = await _handle_cancel_trigger(agent_id, arguments)
         elif tool_name == "list_triggers":
             result = await _handle_list_triggers(agent_id)
+        elif tool_name == "query_roster":
+            result = await _query_roster(agent_id, arguments)
         elif tool_name == "send_feishu_message":
             result = await _send_feishu_message(agent_id, arguments)
         elif tool_name == "send_platform_message":
@@ -5797,6 +5844,249 @@ async def _manage_tasks(
             return f"✅ Task deleted: {task_title}"
 
         return f"Unknown action: {action}"
+
+
+def _json_tool_result(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _provider_type_value(provider_type: Any) -> str | None:
+    if provider_type is None:
+        return None
+    return getattr(provider_type, "value", provider_type)
+
+
+def _query_text_match_rank(member: dict, query: str) -> int:
+    if not query:
+        return 4
+    q = query.casefold()
+    display_name = (member.get("display_name") or "").casefold()
+    if display_name == q:
+        return 0
+    if display_name.startswith(q):
+        return 1
+    if q in display_name:
+        return 2
+    return 3
+
+
+def _roster_sort_key(member: dict, query: str) -> tuple:
+    return (
+        0 if member.get("can_contact") else 1,
+        _query_text_match_rank(member, query),
+        0 if member.get("member_type") == "agent" else 1,
+        (member.get("display_name") or "").casefold(),
+        member.get("target_agent_id") or member.get("target_member_id") or "",
+    )
+
+
+def _department_name(member: OrgMember, department: OrgDepartment | None) -> str | None:
+    if department and department.name:
+        return department.name
+    department_path = (getattr(member, "department_path", None) or "").strip()
+    if not department_path:
+        return None
+    for sep in ("/", ">"):
+        if sep in department_path:
+            return department_path.split(sep)[-1].strip() or None
+    return department_path
+
+
+def _format_roster_agent(source_agent: AgentModel, target_agent: AgentModel) -> dict | None:
+    visibility = evaluate_roster_agent_visibility(source_agent, target_agent)
+    if not visibility.visible:
+        return None
+    return {
+        "member_type": "agent",
+        "target_agent_id": str(target_agent.id),
+        "display_name": target_agent.name,
+        "role_description": target_agent.role_description or "",
+        "capabilities": [],
+        "department": None,
+        "skills": [],
+        "access_mode": getattr(target_agent, "access_mode", None) or "company",
+        "can_contact": visibility.can_contact,
+        "contact_tools": ["send_message_to_agent"] if visibility.can_contact else [],
+        "unavailable_reason": visibility.unavailable_reason,
+    }
+
+
+def _format_roster_human(
+    source_agent: AgentModel,
+    member: OrgMember,
+    provider: IdentityProvider | None,
+    department: OrgDepartment | None,
+) -> dict | None:
+    visibility = evaluate_roster_human_visibility(source_agent, member)
+    if not visibility.visible:
+        return None
+
+    provider_type = _provider_type_value(getattr(provider, "provider_type", None))
+    contact_tools: list[str] = []
+    if visibility.can_contact and member.user_id:
+        contact_tools.append("send_platform_message")
+    if visibility.can_contact and provider_type == "feishu" and (member.external_id or member.open_id):
+        contact_tools.append("send_feishu_message")
+
+    can_contact = visibility.can_contact and bool(contact_tools)
+    unavailable_reason = visibility.unavailable_reason
+    if visibility.can_contact and not contact_tools:
+        unavailable_reason = "missing_contact_target"
+
+    dept_name = _department_name(member, department)
+    department_payload = None
+    if member.department_id or dept_name:
+        department_payload = {
+            "id": str(member.department_id) if member.department_id else None,
+            "name": dept_name,
+        }
+
+    provider_payload = None
+    if provider or member.provider_id or member.open_id or member.external_id:
+        provider_payload = {
+            "provider_id": str(member.provider_id) if member.provider_id else None,
+            "provider_type": provider_type,
+            "open_id": member.open_id,
+            "external_id": member.external_id,
+        }
+
+    return {
+        "member_type": "human",
+        "target_member_id": str(member.id),
+        "platform_user_id": str(member.user_id) if member.user_id else None,
+        "display_name": member.name,
+        "title": member.title or "",
+        "department": department_payload,
+        "can_contact": can_contact,
+        "contact_tools": contact_tools if can_contact else [],
+        "provider": provider_payload,
+        "unavailable_reason": None if can_contact else unavailable_reason,
+    }
+
+
+async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
+    query = (args.get("query") or "").strip()
+    member_type = (args.get("member_type") or "all").strip().lower()
+    include_uncontactable = bool(args.get("include_uncontactable", False))
+
+    try:
+        limit = int(args.get("limit", 20))
+    except (TypeError, ValueError):
+        return _json_tool_result({
+            "ok": False,
+            "error": {"code": "invalid_limit", "message": "limit must be between 1 and 50"},
+        })
+    try:
+        offset = int(args.get("offset", 0))
+    except (TypeError, ValueError):
+        return _json_tool_result({
+            "ok": False,
+            "error": {"code": "invalid_offset", "message": "offset must be greater than or equal to 0"},
+        })
+
+    if member_type not in {"all", "agent", "human"}:
+        return _json_tool_result({
+            "ok": False,
+            "error": {"code": "invalid_member_type", "message": "member_type must be all, agent, or human"},
+        })
+    if limit < 1 or limit > 50:
+        return _json_tool_result({
+            "ok": False,
+            "error": {"code": "invalid_limit", "message": "limit must be between 1 and 50"},
+        })
+    if offset < 0:
+        return _json_tool_result({
+            "ok": False,
+            "error": {"code": "invalid_offset", "message": "offset must be greater than or equal to 0"},
+        })
+
+    fetch_size = offset + limit + 1
+    members: list[dict] = []
+
+    try:
+        async with async_session() as db:
+            source = (await db.execute(select(AgentModel).where(AgentModel.id == agent_id))).scalar_one_or_none()
+            if not source:
+                return _json_tool_result({
+                    "ok": False,
+                    "error": {"code": "source_agent_not_found", "message": "Source agent was not found."},
+                })
+
+            source_mode = getattr(source, "access_mode", None) or "company"
+
+            if member_type in {"all", "agent"}:
+                agent_conditions = [
+                    AgentModel.tenant_id == source.tenant_id,
+                    AgentModel.id != source.id,
+                ]
+                if source_mode == "private":
+                    agent_conditions.extend([
+                        AgentModel.access_mode == "private",
+                        AgentModel.creator_id == source.creator_id,
+                    ])
+                else:
+                    agent_conditions.append(AgentModel.access_mode.in_(["company", "custom"]))
+                if query:
+                    agent_conditions.append(or_(
+                        AgentModel.name.ilike(f"%{query}%"),
+                        AgentModel.role_description.ilike(f"%{query}%"),
+                    ))
+
+                agent_result = await db.execute(
+                    select(AgentModel)
+                    .where(*agent_conditions)
+                    .order_by(AgentModel.name.asc(), AgentModel.created_at.asc())
+                    .limit(fetch_size)
+                )
+                for target_agent in agent_result.scalars().all():
+                    payload = _format_roster_agent(source, target_agent)
+                    if payload and (include_uncontactable or payload["can_contact"]):
+                        members.append(payload)
+
+            if member_type in {"all", "human"}:
+                human_conditions = [OrgMember.tenant_id == source.tenant_id]
+                if source_mode == "private":
+                    human_conditions.append(OrgMember.user_id == source.creator_id)
+                if query:
+                    human_conditions.append(or_(
+                        OrgMember.name.ilike(f"%{query}%"),
+                        OrgMember.title.ilike(f"%{query}%"),
+                        OrgMember.department_path.ilike(f"%{query}%"),
+                    ))
+
+                human_result = await db.execute(
+                    select(OrgMember, IdentityProvider, OrgDepartment)
+                    .outerjoin(IdentityProvider, OrgMember.provider_id == IdentityProvider.id)
+                    .outerjoin(OrgDepartment, OrgMember.department_id == OrgDepartment.id)
+                    .where(*human_conditions)
+                    .order_by(OrgMember.name.asc(), OrgMember.synced_at.asc())
+                    .limit(fetch_size)
+                )
+                for member, provider, department in human_result.all():
+                    payload = _format_roster_human(source, member, provider, department)
+                    if payload and (include_uncontactable or payload["can_contact"]):
+                        members.append(payload)
+
+        members.sort(key=lambda member: _roster_sort_key(member, query))
+        page = members[offset:offset + limit]
+        return _json_tool_result({
+            "ok": True,
+            "source_agent_id": str(agent_id),
+            "query": query,
+            "member_type": member_type,
+            "include_uncontactable": include_uncontactable,
+            "returned_count": len(page),
+            "limit": limit,
+            "offset": offset,
+            "has_more": len(members) > offset + limit,
+            "members": page,
+        })
+    except Exception as e:
+        logger.exception(f"[Roster] query_roster failed: agent={agent_id}")
+        return _json_tool_result({
+            "ok": False,
+            "error": {"code": "query_roster_failed", "message": f"query_roster failed: {type(e).__name__}"},
+        })
 
 
 async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
