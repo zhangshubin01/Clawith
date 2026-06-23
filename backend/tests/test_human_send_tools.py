@@ -81,6 +81,9 @@ class DummyResult:
     def all(self):
         return list(self._values)
 
+    def scalars(self):
+        return self
+
 
 class RecordingDB:
     def __init__(self, responses):
@@ -186,18 +189,20 @@ async def test_send_platform_message_uses_target_member_id():
 def test_human_send_tool_schemas_are_id_first():
     platform_schema = _tool_schema("send_platform_message")
     channel_schema = _tool_schema("send_channel_message")
-    feishu_schema = _tool_schema("send_feishu_message")
+    tool_names = {tool["function"]["name"] for tool in agent_tools.AGENT_TOOLS}
 
     assert "target_member_id" in platform_schema["properties"]
     assert "platform_user_id" in platform_schema["properties"]
+    assert "username" not in platform_schema["properties"]
     assert platform_schema["required"] == ["message"]
 
     assert "target_member_id" in channel_schema["properties"]
-    assert "provider_user_id" in channel_schema["properties"]
+    assert "provider_user_id" not in channel_schema["properties"]
+    assert "member_name" not in channel_schema["properties"]
     assert channel_schema["required"] == ["message"]
     assert "teams" in channel_schema["properties"]["channel"]["enum"]
 
-    assert "target_member_id" not in feishu_schema["properties"]
+    assert "send_feishu_message" not in tool_names
 
 
 def _seed_tool(tool_name):
@@ -215,18 +220,65 @@ def test_seeded_human_send_tool_schemas_are_id_first():
 
     assert "target_member_id" in platform_schema["properties"]
     assert "platform_user_id" in platform_schema["properties"]
+    assert "username" not in platform_schema["properties"]
     assert platform_schema["required"] == ["message"]
-    assert "legacy fallback" in platform_schema["properties"]["username"]["description"].lower()
 
     assert "target_member_id" in channel_schema["properties"]
-    assert "provider_user_id" in channel_schema["properties"]
+    assert "provider_user_id" not in channel_schema["properties"]
+    assert "member_name" not in channel_schema["properties"]
     assert channel_schema["required"] == ["message"]
-    assert "legacy fallbacks" in channel_tool["description"].lower()
     assert "teams" in channel_schema["properties"]["channel"]["enum"]
 
-    assert "legacy shortcut" in feishu_tool["description"].lower()
+    assert "hidden legacy compatibility" in feishu_tool["description"].lower()
+    assert feishu_tool["is_default"] is False
     assert "target_member_id" not in feishu_schema["properties"]
     assert feishu_schema["required"] == ["message"]
+
+
+@pytest.mark.asyncio
+async def test_get_agent_tools_for_llm_filters_legacy_feishu_tool_from_db():
+    agent_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
+    source = _make_agent(id=agent_id, tenant_id=tenant_id, is_system=False)
+    platform_tool = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="send_platform_message",
+        description="Send platform message",
+        category="communication",
+        is_default=True,
+        parameters_schema={"type": "object", "properties": {"message": {"type": "string"}}},
+        config={},
+    )
+    legacy_feishu_tool = SimpleNamespace(
+        id=uuid.uuid4(),
+        name="send_feishu_message",
+        description="Legacy Feishu message",
+        category="feishu",
+        is_default=True,
+        parameters_schema={"type": "object", "properties": {"message": {"type": "string"}}},
+        config={},
+    )
+    db = RecordingDB([
+        DummyResult(scalar_value=source),
+        DummyResult(scalar_value=None),
+        DummyResult(values=[]),
+        DummyResult(values=[platform_tool, legacy_feishu_tool]),
+    ])
+
+    with (
+        patch("app.services.agent_tools._agent_has_feishu", new_callable=AsyncMock, return_value=True),
+        patch("app.services.agent_tools._agent_has_any_channel", new_callable=AsyncMock, return_value=True),
+        patch("app.services.agent_tools._get_computer_os_type", new_callable=AsyncMock, return_value=None),
+        patch("app.services.agent_tools.async_session") as mock_session_ctx,
+    ):
+        mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=db)
+        mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        tools = await agent_tools.get_agent_tools_for_llm(agent_id)
+
+    tool_names = {tool["function"]["name"] for tool in tools}
+    assert "send_platform_message" in tool_names
+    assert "send_feishu_message" not in tool_names
 
 
 @pytest.mark.asyncio

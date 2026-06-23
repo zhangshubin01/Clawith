@@ -645,35 +645,6 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "send_feishu_message",
-            "description": (
-                "Legacy shortcut for sending a Feishu IM message to a human colleague. "
-                "Prefer query_roster followed by send_channel_message(channel='feishu') for new calls. "
-                "To contact digital employees use send_message_to_agent instead."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "member_name": {
-                        "type": "string",
-                        "description": "Legacy fallback: recipient's exact name. Prefer target_member_id via send_channel_message.",
-                    },
-                    "user_id": {
-                        "type": "string",
-                        "description": "Legacy fallback: recipient's Feishu user_id.",
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Message content to send",
-                    },
-                },
-                "required": ["message"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "send_channel_message",
             "description": (
                 "Send a message to a human colleague via their configured external channel "
@@ -686,14 +657,6 @@ AGENT_TOOLS = [
                     "target_member_id": {
                         "type": "string",
                         "description": "Stable human member ID returned by query_roster. Preferred recipient identifier.",
-                    },
-                    "provider_user_id": {
-                        "type": "string",
-                        "description": "Legacy fallback: external channel user ID such as Feishu user_id/open_id.",
-                    },
-                    "member_name": {
-                        "type": "string",
-                        "description": "Legacy fallback: exact recipient name. Prefer target_member_id to avoid duplicate-name mistakes.",
                     },
                     "message": {
                         "type": "string",
@@ -724,10 +687,6 @@ AGENT_TOOLS = [
                     "platform_user_id": {
                         "type": "string",
                         "description": "Platform user ID returned by query_roster for first-party platform users.",
-                    },
-                    "username": {
-                        "type": "string",
-                        "description": "Legacy fallback: username or display name of the recipient. Prefer target_member_id or platform_user_id.",
                     },
                     "message": {
                         "type": "string",
@@ -1996,10 +1955,12 @@ _ALWAYS_INCLUDE_CORE = {
 _CHANNEL_MESSAGE_TOOL_NAMES = {
     "send_channel_message",
 }
+_HIDDEN_FROM_LLM_TOOL_NAMES = {
+    "send_feishu_message",
+}
 # Feishu tools are ONLY included when the agent has a configured Feishu channel,
 # to avoid exposing unnecessary tools to non-Feishu agents (reduces hallucination risk).
 _FEISHU_TOOL_NAMES = {
-    "send_feishu_message",
     "feishu_user_search",
     "bitable_create_app",
     "bitable_list_tables",
@@ -2282,6 +2243,9 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
             default_included_names = []
 
             for t in all_tools:
+                if t.name in _HIDDEN_FROM_LLM_TOOL_NAMES:
+                    continue
+
                 tid = str(t.id)
                 at = assignments.get(tid)
 

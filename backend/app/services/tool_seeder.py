@@ -484,7 +484,7 @@ BUILTIN_TOOLS = [
     {
         "name": "send_platform_message",
         "display_name": "Platform Message",
-        "description": "Send a proactive message to a human colleague on the Clawith first-party platform (web or app). Use query_roster first, then pass target_member_id or platform_user_id. username is a legacy fallback only.",
+        "description": "Send a proactive message to a human colleague on the Clawith first-party platform (web or app). Use query_roster first, then pass target_member_id or platform_user_id.",
         "category": "communication",
         "icon": "🌐",
         "is_default": True,
@@ -493,7 +493,6 @@ BUILTIN_TOOLS = [
             "properties": {
                 "target_member_id": {"type": "string", "description": "Stable human member ID returned by query_roster. Preferred recipient identifier."},
                 "platform_user_id": {"type": "string", "description": "Platform user ID returned by query_roster for first-party platform users."},
-                "username": {"type": "string", "description": "Legacy fallback: username or display name of the recipient. Prefer target_member_id or platform_user_id."},
                 "message": {"type": "string", "description": "Message content"},
             },
             "required": ["message"],
@@ -504,7 +503,7 @@ BUILTIN_TOOLS = [
     {
         "name": "send_channel_message",
         "display_name": "Channel Message",
-        "description": "Send a message to a human colleague via their configured external channel (Feishu, DingTalk, WeCom, Slack, Teams, WeChat). Use query_roster first, then pass target_member_id. member_name and provider_user_id are legacy fallbacks only.",
+        "description": "Send a message to a human colleague via their configured external channel (Feishu, DingTalk, WeCom, Slack, Teams, WeChat). Use query_roster first, then pass target_member_id.",
         "category": "communication",
         "icon": "💬",
         "is_default": True,
@@ -512,8 +511,6 @@ BUILTIN_TOOLS = [
             "type": "object",
             "properties": {
                 "target_member_id": {"type": "string", "description": "Stable human member ID returned by query_roster. Preferred recipient identifier."},
-                "provider_user_id": {"type": "string", "description": "Legacy fallback: external channel user ID such as Feishu user_id/open_id."},
-                "member_name": {"type": "string", "description": "Legacy fallback: exact recipient name. Prefer target_member_id to avoid duplicate-name mistakes."},
                 "message": {"type": "string", "description": "Message content"},
                 "channel": {
                     "type": "string",
@@ -1995,7 +1992,7 @@ BUILTIN_TOOLS = [
     {
         "name": "send_feishu_message",
         "display_name": "Feishu Message",
-        "description": "Legacy shortcut for sending a Feishu IM message to a human colleague. Prefer query_roster followed by send_channel_message(channel='feishu') for new calls.",
+        "description": "Hidden legacy compatibility shortcut for old Feishu tool calls. New model calls must use query_roster followed by send_channel_message(channel='feishu').",
         "category": "feishu",
         "icon": "💬",
         "is_default": False,
