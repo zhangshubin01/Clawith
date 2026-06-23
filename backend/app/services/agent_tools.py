@@ -614,6 +614,10 @@ AGENT_TOOLS = [
                         "type": "string",
                         "description": "Optional search keyword for name, role, title, department, or skill.",
                     },
+                    "target_member_id": {
+                        "type": "string",
+                        "description": "Optional exact human member ID returned by query_roster. Use this to verify one specific person.",
+                    },
                     "member_type": {
                         "type": "string",
                         "enum": ["all", "agent", "human"],
@@ -5966,6 +5970,7 @@ def _format_roster_human(
 
 async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
     query = (args.get("query") or "").strip()
+    target_member_id_raw = (args.get("target_member_id") or "").strip()
     member_type = (args.get("member_type") or "all").strip().lower()
     include_uncontactable = bool(args.get("include_uncontactable", False))
 
@@ -5999,6 +6004,23 @@ async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
             "ok": False,
             "error": {"code": "invalid_offset", "message": "offset must be greater than or equal to 0"},
         })
+    target_member_id = None
+    if target_member_id_raw:
+        try:
+            target_member_id = uuid.UUID(target_member_id_raw)
+        except ValueError:
+            return _json_tool_result({
+                "ok": False,
+                "error": {"code": "invalid_target_member_id", "message": "target_member_id must be a valid UUID"},
+            })
+        if member_type == "agent":
+            return _json_tool_result({
+                "ok": False,
+                "error": {
+                    "code": "invalid_member_type",
+                    "message": "target_member_id can only be used with member_type human or all",
+                },
+            })
 
     fetch_size = offset + limit + 1
     members: list[dict] = []
@@ -6014,7 +6036,7 @@ async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
 
             source_mode = getattr(source, "access_mode", None) or "company"
 
-            if member_type in {"all", "agent"}:
+            if member_type in {"all", "agent"} and not target_member_id:
                 agent_conditions = [
                     AgentModel.tenant_id == source.tenant_id,
                     AgentModel.id != source.id,
@@ -6045,9 +6067,11 @@ async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
 
             if member_type in {"all", "human"}:
                 human_conditions = [OrgMember.tenant_id == source.tenant_id]
+                if target_member_id:
+                    human_conditions.append(OrgMember.id == target_member_id)
                 if source_mode == "private":
                     human_conditions.append(OrgMember.user_id == source.creator_id)
-                if query:
+                if query and not target_member_id:
                     human_conditions.append(or_(
                         OrgMember.name.ilike(f"%{query}%"),
                         OrgMember.title.ilike(f"%{query}%"),

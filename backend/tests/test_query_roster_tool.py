@@ -1,6 +1,7 @@
 import json
 import uuid
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -41,11 +42,44 @@ def _make_member(**overrides):
     return SimpleNamespace(**values)
 
 
+class DummyResult:
+    def __init__(self, values=None, scalar_value=None):
+        self._values = list(values or [])
+        self._scalar_value = scalar_value
+
+    def scalar_one_or_none(self):
+        if self._scalar_value is not None:
+            return self._scalar_value
+        return self._values[0] if self._values else None
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._values)
+
+
+class RecordingDB:
+    def __init__(self, responses=None):
+        self.responses = list(responses or [])
+        self.execute_count = 0
+        self.statements = []
+
+    async def execute(self, statement, _params=None):
+        self.execute_count += 1
+        self.statements.append(statement)
+        if not self.responses:
+            raise AssertionError("unexpected execute() call")
+        return self.responses.pop(0)
+
+
 def test_query_roster_tool_is_available_to_agents():
     tool_names = {tool["function"]["name"] for tool in agent_tools.AGENT_TOOLS}
 
     assert "query_roster" in tool_names
     assert "query_roster" in agent_tools._ALWAYS_INCLUDE_CORE
+    query_schema = next(tool["function"]["parameters"] for tool in agent_tools.AGENT_TOOLS if tool["function"]["name"] == "query_roster")
+    assert "target_member_id" in query_schema["properties"]
 
 
 def test_a2a_tools_expose_target_agent_id_not_agent_name():
@@ -65,6 +99,58 @@ async def test_query_roster_rejects_invalid_member_type_before_db():
 
     assert result["ok"] is False
     assert result["error"]["code"] == "invalid_member_type"
+
+
+@pytest.mark.asyncio
+async def test_query_roster_rejects_invalid_target_member_id_before_db():
+    result = json.loads(await agent_tools._query_roster(uuid.uuid4(), {"target_member_id": "not-a-uuid"}))
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "invalid_target_member_id"
+
+
+@pytest.mark.asyncio
+async def test_query_roster_rejects_agent_type_with_target_member_id_before_db():
+    result = json.loads(
+        await agent_tools._query_roster(
+            uuid.uuid4(),
+            {"member_type": "agent", "target_member_id": str(uuid.uuid4())},
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "invalid_member_type"
+
+
+@pytest.mark.asyncio
+async def test_query_roster_target_member_id_returns_exact_human_without_agent_lookup():
+    tenant_id = uuid.uuid4()
+    source = _make_agent(tenant_id=tenant_id)
+    member = _make_member(tenant_id=tenant_id, user_id=uuid.uuid4())
+    db = RecordingDB(
+        responses=[
+            DummyResult(scalar_value=source),
+            DummyResult(values=[(member, None, None)]),
+        ]
+    )
+
+    with patch("app.services.agent_tools.async_session") as mock_session_ctx:
+        mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=db)
+        mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = json.loads(
+            await agent_tools._query_roster(
+                source.id,
+                {"target_member_id": str(member.id), "query": "完全不匹配"},
+            )
+        )
+
+    assert result["ok"] is True
+    assert result["returned_count"] == 1
+    assert result["members"][0]["member_type"] == "human"
+    assert result["members"][0]["target_member_id"] == str(member.id)
+    assert db.execute_count == 2
+    assert "lower(org_members.name)" not in str(db.statements[1])
 
 
 def test_format_roster_agent_returns_stable_id_and_contact_tool():
