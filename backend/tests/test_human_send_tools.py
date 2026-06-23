@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services import agent_tools
+from app.services import tool_seeder
 
 
 def _tool_schema(tool_name):
@@ -197,6 +198,35 @@ def test_human_send_tool_schemas_are_id_first():
     assert "teams" in channel_schema["properties"]["channel"]["enum"]
 
     assert "target_member_id" not in feishu_schema["properties"]
+
+
+def _seed_tool(tool_name):
+    return next(tool for tool in tool_seeder.BUILTIN_TOOLS if tool["name"] == tool_name)
+
+
+def test_seeded_human_send_tool_schemas_are_id_first():
+    platform_tool = _seed_tool("send_platform_message")
+    channel_tool = _seed_tool("send_channel_message")
+    feishu_tool = _seed_tool("send_feishu_message")
+
+    platform_schema = platform_tool["parameters_schema"]
+    channel_schema = channel_tool["parameters_schema"]
+    feishu_schema = feishu_tool["parameters_schema"]
+
+    assert "target_member_id" in platform_schema["properties"]
+    assert "platform_user_id" in platform_schema["properties"]
+    assert platform_schema["required"] == ["message"]
+    assert "legacy fallback" in platform_schema["properties"]["username"]["description"].lower()
+
+    assert "target_member_id" in channel_schema["properties"]
+    assert "provider_user_id" in channel_schema["properties"]
+    assert channel_schema["required"] == ["message"]
+    assert "legacy fallbacks" in channel_tool["description"].lower()
+    assert "teams" in channel_schema["properties"]["channel"]["enum"]
+
+    assert "legacy shortcut" in feishu_tool["description"].lower()
+    assert "target_member_id" not in feishu_schema["properties"]
+    assert feishu_schema["required"] == ["message"]
 
 
 @pytest.mark.asyncio
