@@ -70,7 +70,7 @@ query_roster(member_type="human", query="...") -> stable ID -> send_platform_mes
 1. Phase 2.1：先让 `query_roster` 可以按 `target_member_id` 精确查人。
 2. Phase 2.2：新增 resolver，只做解析和校验，不发送消息。
 3. Phase 2.3：把 `send_platform_message` 和 `send_channel_message` 接到 resolver，完成 ID 化发送；`send_feishu_message` 保留为 legacy shortcut。
-4. Phase 2.4：再改 prompt、tool schema 描述和测试覆盖。
+4. Phase 2.4：再改 prompt、运行时 tool schema、持久化 seed schema 描述和测试覆盖；旧入口/旧参数仍只作为 legacy fallback 保留，删除放到 Phase 3。
 
 ## 当前结论
 

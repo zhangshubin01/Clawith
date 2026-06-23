@@ -4,6 +4,17 @@
 
 Phase 3 目标是把 Phase 1/2 的新链路产品化，并让旧 Relationships / 旧权限字段从主链路里退出。
 
+## 旧工具入口和旧 prompt 删除
+
+- 删除或隐藏模型主 schema 中的 `send_feishu_message`，或降级为仅内部兼容入口。
+- 删除 legacy fallback 的名字发送主路径：
+  - `send_platform_message(username=...)`
+  - `send_channel_message(member_name=...)`
+  - `send_channel_message(provider_user_id=...)`
+- 删除 prompt 中所有“按 Relationships / member_name 直接联系人类”的指引。
+- 删除 `task_executor.py` 等非普通 agent prompt 里的旧 `send_feishu_message` 优先规则。
+- 删除 `## 人类同事背景`，或改成完全不含发送入口的纯备注背景。
+
 ## 旧 Relationships 下线
 
 - `AgentAgentRelationship` 不再参与 A2A 授权。
@@ -50,4 +61,3 @@ Phase 3 目标是把 Phase 1/2 的新链路产品化，并让旧 Relationships /
 ## 当前结论
 
 Phase 3 暂不实施。下一步先完成 Phase 2：人类发送链路 ID 化。
-
