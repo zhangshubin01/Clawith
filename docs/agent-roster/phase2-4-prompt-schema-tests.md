@@ -38,21 +38,6 @@
 
 `username` 标成 legacy fallback。
 
-### send_feishu_message
-
-新增：
-
-```json
-{
-  "target_member_id": {
-    "type": "string",
-    "description": "Human member ID returned by query_roster."
-  }
-}
-```
-
-`member_name` / `user_id` 标成 legacy fallback。
-
 ### send_channel_message
 
 新增：
@@ -66,7 +51,15 @@
 }
 ```
 
-`member_name` 标成 legacy fallback。
+`member_name` 标成 legacy fallback。工具描述改为第三方 IM channel 统一入口，由后端按 provider/channel 分发到 Feishu、DingTalk、WeCom、Slack、Teams、WeChat。
+
+### send_feishu_message
+
+保留为 legacy shortcut，不作为 Phase 2 新主路径。
+
+- prompt 不再主推。
+- tool schema 可以暂时不新增 `target_member_id`。
+- 如果后续为了兼容内部复用而新增，也必须标成 legacy / shortcut，不应让模型优先选择它。
 
 ## prompt 调整
 
@@ -77,8 +70,9 @@ When contacting human colleagues:
 1. Use query_roster(member_type="human", query="...") first.
 2. Use the returned stable IDs.
 3. For platform users, call send_platform_message(platform_user_id="..." or target_member_id="...").
-4. For channel users, call send_channel_message(target_member_id="...", channel="...").
+4. For third-party channel users, call send_channel_message(target_member_id="...", channel="...").
 5. Do not guess names or IDs.
+6. Do not use send_feishu_message as the primary path; use send_channel_message for Feishu too.
 ```
 
 Phase 1.4 保留的 `## 人类同事背景` 可以先保留为背景信息，但不能继续作为发送入口。
@@ -95,8 +89,8 @@ Phase 1.4 保留的 `## 人类同事背景` 可以先保留为背景信息，但
 
 - `test_a2a_msg_type.py` 或新增 human messaging 测试文件
   - platform ID 发送
-  - Feishu target member ID 发送
   - channel target member ID 发送
+  - Feishu 通过 `send_channel_message(..., channel="feishu")` 分发
   - 重名旧参数歧义
   - 跨租户
   - private 限制
@@ -113,4 +107,3 @@ Phase 1.4 保留的 `## 人类同事背景` 可以先保留为背景信息，但
 - 不要求删除旧参数。
 - 不要求修改 OKR 专用 prompt。
 - 不要求改 UI。
-

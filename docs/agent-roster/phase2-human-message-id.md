@@ -26,7 +26,7 @@ prompt 中的人类 Relationships 背景 -> member_name -> send_* tool
 Phase 2 要把人类联系也切到：
 
 ```text
-query_roster(member_type="human", query="...") -> stable ID -> send_* tool -> hard check
+query_roster(member_type="human", query="...") -> stable ID -> send_platform_message / send_channel_message -> hard check
 ```
 
 ## 目标
@@ -51,8 +51,8 @@ query_roster(member_type="human", query="...") -> stable ID -> send_* tool -> ha
 - `query_roster` 支持按 `target_member_id` 精确查单个人类成员。
 - 新增统一 human recipient resolver，统一做租户、可见性、状态、provider、channel 校验。
 - `send_platform_message` 支持 `target_member_id` / `platform_user_id`。
-- `send_feishu_message` 支持 `target_member_id`。
-- `send_channel_message` 支持 `target_member_id + channel/provider_type`。
+- `send_channel_message` 作为第三方渠道统一入口，支持 `target_member_id + channel/provider_type` 并按 provider 分发。
+- `send_feishu_message` 保留为 legacy shortcut，但不作为 Phase 2 新主路径。
 - prompt 改成 roster-first，不再指导模型直接按 `member_name` 作为主路径发送。
 
 ## 非目标
@@ -69,10 +69,9 @@ query_roster(member_type="human", query="...") -> stable ID -> send_* tool -> ha
 
 1. Phase 2.1：先让 `query_roster` 可以按 `target_member_id` 精确查人。
 2. Phase 2.2：新增 resolver，只做解析和校验，不发送消息。
-3. Phase 2.3：把三个发送工具接到 resolver，完成 ID 化发送。
+3. Phase 2.3：把 `send_platform_message` 和 `send_channel_message` 接到 resolver，完成 ID 化发送；`send_feishu_message` 保留为 legacy shortcut。
 4. Phase 2.4：再改 prompt、tool schema 描述和测试覆盖。
 
 ## 当前结论
 
 Phase 2 要一起改 human 发送工具，但每一步单独评审、单独提交。代码实现前，先确认 2.1 到 2.4 的文档边界。
-
