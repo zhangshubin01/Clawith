@@ -48,6 +48,17 @@ def test_query_roster_tool_is_available_to_agents():
     assert "query_roster" in agent_tools._ALWAYS_INCLUDE_CORE
 
 
+def test_a2a_tools_expose_target_agent_id_not_agent_name():
+    tools = {tool["function"]["name"]: tool["function"] for tool in agent_tools.AGENT_TOOLS}
+
+    for tool_name in ("send_message_to_agent", "send_file_to_agent"):
+        schema = tools[tool_name]["parameters"]
+        assert "target_agent_id" in schema["properties"]
+        assert "target_agent_id" in schema["required"]
+        assert "agent_name" not in schema["properties"]
+        assert "agent_name" not in schema["required"]
+
+
 @pytest.mark.asyncio
 async def test_query_roster_rejects_invalid_member_type_before_db():
     result = json.loads(await agent_tools._query_roster(uuid.uuid4(), {"member_type": "team"}))

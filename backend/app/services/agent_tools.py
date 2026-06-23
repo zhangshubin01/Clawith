@@ -725,13 +725,13 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_message_to_agent",
-            "description": "Send a message to a digital employee colleague. The recipient is another AI agent, not a human. Refer to the 'Relationships' section in your system prompt for available digital employees.\n\nDECISION GUIDE for msg_type:\nAsk yourself: does the target agent need to DO WORK (analyze, research, summarize, write, compare, plan, etc.) and RETURN RESULTS to you or the user?\n\n- If YES, the target needs to do work → use task_delegate. Examples: 'summarize X', 'analyze Y', 'check Z', 'prepare a report', 'review and give feedback', 'find out X', 'confirm with X and report back'. The target works asynchronously and you will be woken when they finish.\n\n- If the target just needs to KNOW something → use notify. Examples: 'meeting cancelled', 'I updated the doc', 'heads up about X', 'FYI'. No reply expected.\n\n- If you need a quick factual answer right now → use consult. Examples: 'what is X?', 'do you know Y?'. Synchronous, blocks until reply.\n\nWhen in doubt between notify and task_delegate, prefer task_delegate — it is safer because it guarantees the user gets a result.",
+            "description": "Send a message to a digital employee colleague. Use query_roster first to find the target and pass the returned target_agent_id. Do not send by name and do not guess IDs.\n\nDECISION GUIDE for msg_type:\nAsk yourself: does the target agent need to DO WORK (analyze, research, summarize, write, compare, plan, etc.) and RETURN RESULTS to you or the user?\n\n- If YES, the target needs to do work → use task_delegate. Examples: 'summarize X', 'analyze Y', 'check Z', 'prepare a report', 'review and give feedback', 'find out X', 'confirm with X and report back'. The target works asynchronously and you will be woken when they finish.\n\n- If the target just needs to KNOW something → use notify. Examples: 'meeting cancelled', 'I updated the doc', 'heads up about X', 'FYI'. No reply expected.\n\n- If you need a quick factual answer right now → use consult. Examples: 'what is X?', 'do you know Y?'. Synchronous, blocks until reply.\n\nWhen in doubt between notify and task_delegate, prefer task_delegate — it is safer because it guarantees the user gets a result.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {
+                    "target_agent_id": {
                         "type": "string",
-                        "description": "Target digital employee's name",
+                        "description": "Target digital employee ID returned by query_roster",
                     },
                     "message": {
                         "type": "string",
@@ -743,7 +743,7 @@ AGENT_TOOLS = [
                         "description": "Decision guide: (1) Will the target need to DO WORK and return results? → task_delegate. (2) Is this just a one-way FYI? → notify. (3) Quick factual question needing immediate answer? → consult. When unsure, prefer task_delegate.",
                     },
                 },
-                "required": ["agent_name", "message", "msg_type"],
+                "required": ["target_agent_id", "message", "msg_type"],
             },
         },
     },
@@ -751,13 +751,13 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_file_to_agent",
-            "description": "Send a workspace file to another digital employee. The file is copied into the target agent's workspace/inbox/files/ directory and a delivery note is created in their inbox.",
+            "description": "Send a workspace file to another digital employee. Use query_roster first to find the target and pass the returned target_agent_id. The file is copied into the target agent's workspace/inbox/files/ directory and a delivery note is created in their inbox.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "agent_name": {
+                    "target_agent_id": {
                         "type": "string",
-                        "description": "Target digital employee's name",
+                        "description": "Target digital employee ID returned by query_roster",
                     },
                     "file_path": {
                         "type": "string",
@@ -768,7 +768,7 @@ AGENT_TOOLS = [
                         "description": "Optional delivery note for the target digital employee",
                     },
                 },
-                "required": ["agent_name", "file_path"],
+                "required": ["target_agent_id", "file_path"],
             },
         },
     },
@@ -6905,14 +6905,44 @@ async def _send_platform_message(agent_id: uuid.UUID, args: dict) -> str:
         return f"❌ Web message send error: {str(e)[:200]}"
 
 
+async def _resolve_a2a_target_by_id(
+    db,
+    source_agent: AgentModel,
+    target_agent_id: str,
+) -> tuple[AgentModel | None, str | None]:
+    try:
+        target_id = uuid.UUID((target_agent_id or "").strip())
+    except (TypeError, ValueError):
+        return None, "❌ Invalid target_agent_id. Use query_roster to get a valid target_agent_id."
+
+    if target_id == source_agent.id:
+        return None, "❌ You cannot send a message to yourself."
+
+    target_result = await db.execute(select(AgentModel).where(AgentModel.id == target_id))
+    target = target_result.scalar_one_or_none()
+    if not target:
+        return None, "❌ Target agent not found. Use query_roster to find an available digital employee."
+    if target.tenant_id != source_agent.tenant_id:
+        return None, "❌ Target agent is outside your tenant and cannot be contacted."
+
+    visibility = evaluate_roster_agent_visibility(source_agent, target)
+    if not visibility.visible:
+        return None, "❌ Target agent is not visible to you. Use query_roster to choose a visible digital employee."
+    if not visibility.can_contact:
+        reason = visibility.unavailable_reason or "target_not_contactable"
+        return None, f"❌ Target agent is currently unavailable ({reason})."
+
+    return target, None
+
+
 async def _send_file_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
     """Send a workspace file to another digital employee (agent)."""
-    agent_name = (args.get("agent_name") or "").strip()
+    target_agent_id = (args.get("target_agent_id") or "").strip()
     rel_path = (args.get("file_path") or "").strip()
     delivery_note = (args.get("message") or "").strip()
 
-    if not agent_name or not rel_path:
-        return "❌ Please provide both agent_name and file_path"
+    if not target_agent_id or not rel_path:
+        return "❌ Please provide both target_agent_id and file_path"
 
     storage = get_storage_backend()
     source_key = normalize_storage_key(f"{from_agent_id}/{rel_path}")
@@ -6935,58 +6965,14 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
         async with async_session() as db:
             src_result = await db.execute(select(AgentModel).where(AgentModel.id == from_agent_id))
             source_agent = src_result.scalar_one_or_none()
+            if not source_agent:
+                return "❌ Source agent not found"
             source_agent_name = source_agent.name if source_agent else "Unknown agent"
-            source_tenant_id = source_agent.tenant_id if source_agent else None
             source_creator_id = source_agent.creator_id if source_agent else from_agent_id
 
-            # Build base filter: same tenant + not self
-            base_filter = [AgentModel.id != from_agent_id]
-            if source_tenant_id:
-                base_filter.append(AgentModel.tenant_id == source_tenant_id)
-
-            # Try exact name match first, then fuzzy
-            target_agent = None
-            exact_result = await db.execute(
-                select(AgentModel).where(AgentModel.name == agent_name, *base_filter)
-            )
-            target_agent = exact_result.scalars().first()
-            if not target_agent:
-                # Sanitize SQL wildcards in user input
-                safe_name = agent_name.replace("%", "").replace("_", r"\_")
-                fuzzy_result = await db.execute(
-                    select(AgentModel).where(AgentModel.name.ilike(f"%{safe_name}%"), *base_filter)
-                )
-                target_agent = fuzzy_result.scalars().first()
-
-            if not target_agent:
-                # Only show agents from relationships, not all agents
-                # (AgentAgentRelationship is imported at module level — no local import needed)
-                rel_r = await db.execute(
-                    select(AgentModel.name).join(
-                        AgentAgentRelationship,
-                        (AgentAgentRelationship.target_agent_id == AgentModel.id) & (AgentAgentRelationship.agent_id == from_agent_id)
-                    )
-                )
-                rel_names = [n for (n,) in rel_r.all()]
-                return f"❌ No agent found matching '{agent_name}'. Your connected colleagues: {', '.join(rel_names) if rel_names else 'none — ask your administrator to set up relationships'}"
-
-            if target_agent.is_expired or (target_agent.expires_at and datetime.now(timezone.utc) >= target_agent.expires_at):
-                return f"⚠️ {target_agent.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
-
-            # Enforce relationship: only allow file transfer with agents in relationships
-            rel_check = await db.execute(
-                select(AgentAgentRelationship).where(
-                    AgentAgentRelationship.agent_id == from_agent_id,
-                    AgentAgentRelationship.target_agent_id == target_agent.id,
-                ).limit(1)
-            )
-            rel = rel_check.scalar_one_or_none()
-            if not rel:
-                return f"❌ You do not have a relationship with {target_agent.name}. Only agents in your relationship list can receive files. Ask your administrator to add a relationship if needed."
-            if hasattr(rel, "agent_id"):
-                status_info = await evaluate_agent_relationship_status(db, rel)
-                if status_info["access_status"] != "active":
-                    return f"❌ Relationship to {target_agent.name} is not active ({status_info['access_status_reason'] or 'restricted'}). Ask a manager of both agents to review Relationships."
+            target_agent, target_error = await _resolve_a2a_target_by_id(db, source_agent, target_agent_id)
+            if target_error:
+                return target_error
 
             target_name = target_agent.name
             target_id = target_agent.id
@@ -7354,13 +7340,13 @@ async def _build_a2a_context(
     user_id: uuid.UUID | None = None,
     origin_session_id: str | None = None,
 ) -> A2AContext | str:
-    agent_name = args.get("agent_name", "").strip()
+    target_agent_id = args.get("target_agent_id", "").strip()
     message_text = args.get("message", "").strip()
     msg_type = args.get("msg_type", "notify").strip().lower()
     force_async = bool(args.get("force_async"))
 
-    if not agent_name or not message_text:
-        return "❌ Please provide target agent name and message content"
+    if not target_agent_id or not message_text:
+        return "❌ Please provide target_agent_id and message content"
 
     try:
         from app.models.participant import Participant
@@ -7388,55 +7374,9 @@ async def _build_a2a_context(
             source_tenant_id = source_agent.tenant_id
             owner_id = user_id or source_agent.creator_id
 
-            # Build base filter: same tenant + not self
-            base_filter = [AgentModel.id != from_agent_id]
-            if source_tenant_id:
-                base_filter.append(AgentModel.tenant_id == source_tenant_id)
-
-            # Find target agent by name — exact match first, then fuzzy
-            target = None
-            exact_match = False
-            exact_result = await db.execute(
-                select(AgentModel).where(AgentModel.name == agent_name, *base_filter)
-            )
-            target = exact_result.scalars().first()
-            exact_match = target is not None
-            if not target:
-                safe_name = agent_name.replace("%", "").replace("_", r"\_")
-                fuzzy_result = await db.execute(
-                    select(AgentModel).where(AgentModel.name.ilike(f"%{safe_name}%"), *base_filter)
-                )
-                target = fuzzy_result.scalars().first()
-            if not target:
-                # Only show agents from relationships, not all agents
-                rel_r = await db.execute(
-                    select(AgentModel.name).join(
-                        AgentAgentRelationship,
-                        (AgentAgentRelationship.target_agent_id == AgentModel.id) & (AgentAgentRelationship.agent_id == from_agent_id)
-                    )
-                )
-                rel_names = [n for (n,) in rel_r.all()]
-                return f"❌ No agent found matching '{agent_name}'. Your connected colleagues: {', '.join(rel_names) if rel_names else 'none — ask your administrator to set up relationships'}"
-
-            # Check if target agent has expired
-            if target.is_expired or (target.expires_at and datetime.now(timezone.utc) >= target.expires_at):
-                return f"⚠️ {target.name} is currently unavailable — their service period has ended. Please contact the platform administrator."
-
-            # Enforce relationship unless phase-1 company-agent auto-contact applies.
-            if not (exact_match and can_auto_contact_company_agent(source_agent, target)):
-                rel_check = await db.execute(
-                    select(AgentAgentRelationship).where(
-                        AgentAgentRelationship.agent_id == from_agent_id,
-                        AgentAgentRelationship.target_agent_id == target.id,
-                    ).limit(1)
-                )
-                rel = rel_check.scalar_one_or_none()
-                if not rel:
-                    return f"❌ You do not have a relationship with {target.name}. Only agents in your relationship list can be contacted. Ask your administrator to add a relationship if needed."
-                if hasattr(rel, "agent_id"):
-                    status_info = await evaluate_agent_relationship_status(db, rel)
-                    if status_info["access_status"] != "active":
-                        return f"❌ Relationship to {target.name} is not active ({status_info['access_status_reason'] or 'restricted'}). Ask a manager of both agents to review Relationships."
+            target, target_error = await _resolve_a2a_target_by_id(db, source_agent, target_agent_id)
+            if target_error:
+                return target_error
 
             src_part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == from_agent_id))
             src_participant = src_part_r.scalar_one_or_none()
@@ -7709,7 +7649,7 @@ async def _a2a_handle_consult(ctx: A2AContext) -> str:
             "Plain text responses will be REJECTED and you will be asked to redo.\n"
             "\n** CRITICAL FILE DELIVERY RULE **\n"
             f"After you write any file (report, document, analysis, etc.) that the requesting agent needs, "
-            f"you MUST call `send_file_to_agent(agent_name=\"{ctx.source_agent.name}\", file_path=\"<path>\")` "
+            f"you MUST call `send_file_to_agent(target_agent_id=\"{ctx.source_agent.id}\", file_path=\"<path>\")` "
             f"to deliver it. The other agent CANNOT access your workspace. "
             f"Never just tell them the path — always deliver explicitly.\n"
         )

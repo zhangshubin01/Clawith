@@ -16,6 +16,8 @@ import pytest
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+DEFAULT_TENANT_ID = uuid.uuid4()
+
 class DummyResult:
     def __init__(self, values=None, scalar_value=None, scalars_list=None):
         self._values = list(values or [])
@@ -73,13 +75,13 @@ def _make_agent(
     agent_type="native",
     expired=False,
     primary_model_id=None,
-    access_mode=None,
+    access_mode="company",
     status="running",
 ):
     agent = MagicMock()
     agent.id = agent_id or uuid.uuid4()
     agent.name = name
-    agent.tenant_id = tenant_id or uuid.uuid4()
+    agent.tenant_id = tenant_id or DEFAULT_TENANT_ID
     agent.agent_type = agent_type
     agent.status = status
     agent.is_expired = expired
@@ -89,8 +91,7 @@ def _make_agent(
     agent.fallback_model_id = None
     agent.role_description = ""
     agent.max_tool_rounds = 50
-    if access_mode is not None:
-        agent.access_mode = access_mode
+    agent.access_mode = access_mode
     return agent
 
 
@@ -132,8 +133,7 @@ async def test_notify_returns_immediately():
     db = RecordingDB(
         responses=[
             DummyResult(scalar_value=source_agent),
-            DummyResult(scalars_list=[target_agent]),
-            DummyResult(scalar_value=rel_id),
+            DummyResult(scalar_value=target_agent),
             DummyResult(scalar_value=src_participant),
             DummyResult(scalar_value=tgt_participant),
             DummyResult(scalar_value=session),
@@ -151,7 +151,7 @@ async def test_notify_returns_immediately():
         result = await _send_message_to_agent(
             from_agent_id,
             {
-                "agent_name": "Bob",
+                "target_agent_id": str(target_id),
                 "message": "Please review the document",
                 "msg_type": "notify",
             },
@@ -183,8 +183,7 @@ async def test_task_delegate_creates_focus_and_trigger():
     db = RecordingDB(
         responses=[
             DummyResult(scalar_value=source_agent),
-            DummyResult(scalars_list=[target_agent]),
-            DummyResult(scalar_value=rel_id),
+            DummyResult(scalar_value=target_agent),
             DummyResult(scalar_value=src_participant),
             DummyResult(scalar_value=tgt_participant),
             DummyResult(scalar_value=session),
@@ -204,7 +203,7 @@ async def test_task_delegate_creates_focus_and_trigger():
         result = await _send_message_to_agent(
             from_agent_id,
             {
-                "agent_name": "Bob",
+                "target_agent_id": str(target_id),
                 "message": "Please prepare the Q3 report",
                 "msg_type": "task_delegate",
             },
@@ -274,8 +273,7 @@ async def test_consult_calls_llm_synchronously():
     db = RecordingDB(
         responses=[
             DummyResult(scalar_value=source_agent),
-            DummyResult(scalars_list=[target_agent]),
-            DummyResult(scalar_value=rel_id),
+            DummyResult(scalar_value=target_agent),
             DummyResult(scalar_value=src_participant),
             DummyResult(scalar_value=tgt_participant),
             DummyResult(scalar_value=session),
@@ -322,7 +320,7 @@ async def test_consult_calls_llm_synchronously():
         result = await _send_message_to_agent(
             from_agent_id,
             {
-                "agent_name": "Bob",
+                "target_agent_id": str(target_id),
                 "message": "What is 2+2?",
                 "msg_type": "consult",
             },
@@ -354,8 +352,7 @@ async def test_default_msg_type_is_notify():
     db = RecordingDB(
         responses=[
             DummyResult(scalar_value=source_agent),
-            DummyResult(scalars_list=[target_agent]),
-            DummyResult(scalar_value=rel_id),
+            DummyResult(scalar_value=target_agent),
             DummyResult(scalar_value=src_participant),
             DummyResult(scalar_value=tgt_participant),
             DummyResult(scalar_value=session),
@@ -373,7 +370,7 @@ async def test_default_msg_type_is_notify():
         result = await _send_message_to_agent(
             from_agent_id,
             {
-                "agent_name": "Bob",
+                "target_agent_id": str(target_id),
                 "message": "Heads up about the meeting",
             },
         )
@@ -383,14 +380,14 @@ async def test_default_msg_type_is_notify():
 
 
 @pytest.mark.asyncio
-async def test_missing_agent_name_returns_error():
-    """Missing agent_name should return an error."""
+async def test_missing_target_agent_id_returns_error():
+    """Missing target_agent_id should return an error."""
     from app.services.agent_tools import _send_message_to_agent
 
     result = await _send_message_to_agent(
         uuid.uuid4(),
         {
-            "agent_name": "",
+            "target_agent_id": "",
             "message": "Hello",
         },
     )
@@ -465,7 +462,7 @@ async def test_company_agent_without_relationship_can_notify():
     db = RecordingDB(
         responses=[
             DummyResult(scalar_value=source_agent),
-            DummyResult(scalars_list=[target_agent]),
+            DummyResult(scalar_value=target_agent),
             DummyResult(scalar_value=src_participant),
             DummyResult(scalar_value=tgt_participant),
             DummyResult(scalar_value=session),
@@ -483,7 +480,7 @@ async def test_company_agent_without_relationship_can_notify():
         result = await _send_message_to_agent(
             from_agent_id,
             {
-                "agent_name": "Bob",
+                "target_agent_id": str(target_id),
                 "message": "Hello",
                 "msg_type": "notify",
             },
@@ -537,24 +534,20 @@ async def test_gateway_company_agent_without_relationship_queues_message():
 
 
 @pytest.mark.asyncio
-async def test_no_relationship_returns_error():
-    """No relationship between agents should return an error."""
+async def test_invisible_target_returns_error():
+    """Invisible target agents should return an error."""
     from app.services.agent_tools import _send_message_to_agent
 
     from_agent_id = uuid.uuid4()
     target_id = uuid.uuid4()
-    source_agent = _make_agent(from_agent_id, name="Alice")
-    target_agent = _make_agent(target_id, name="Bob")
-    src_participant = _make_participant(ref_id=from_agent_id)
-    tgt_participant = _make_participant(ref_id=target_id)
+    tenant_id = uuid.uuid4()
+    source_agent = _make_agent(from_agent_id, name="Alice", tenant_id=tenant_id, access_mode="company")
+    target_agent = _make_agent(target_id, name="Bob", tenant_id=tenant_id, access_mode="private")
 
     db = RecordingDB(
         responses=[
             DummyResult(scalar_value=source_agent),
-            DummyResult(scalars_list=[target_agent]),
-            DummyResult(scalar_value=None),
-            DummyResult(scalar_value=src_participant),
-            DummyResult(scalar_value=tgt_participant),
+            DummyResult(scalar_value=target_agent),
         ]
     )
 
@@ -565,13 +558,13 @@ async def test_no_relationship_returns_error():
         result = await _send_message_to_agent(
             from_agent_id,
             {
-                "agent_name": "Bob",
+                "target_agent_id": str(target_id),
                 "message": "Hello",
                 "msg_type": "notify",
             },
         )
 
-    assert "do not have a relationship" in result
+    assert "not visible" in result
 
 
 @pytest.mark.asyncio
@@ -737,8 +730,7 @@ async def test_openclaw_target_still_queues():
     db = RecordingDB(
         responses=[
             DummyResult(scalar_value=source_agent),
-            DummyResult(scalars_list=[target_agent]),
-            DummyResult(scalar_value=rel_id),
+            DummyResult(scalar_value=target_agent),
             DummyResult(scalar_value=src_participant),
             DummyResult(scalar_value=tgt_participant),
             DummyResult(scalar_value=session),
@@ -755,7 +747,7 @@ async def test_openclaw_target_still_queues():
         result = await _send_message_to_agent(
             from_agent_id,
             {
-                "agent_name": "OpenClawBot",
+                "target_agent_id": str(target_id),
                 "message": "Hello",
                 "msg_type": "notify",
             },
@@ -778,8 +770,9 @@ async def test_feature_flag_off_falls_back_to_consult():
     src_participant = _make_participant(ref_id=from_agent_id)
     tgt_participant = _make_participant(ref_id=target_id)
     source_agent = _make_agent(from_agent_id, name="Alice")
-    source_agent.tenant_id = uuid.uuid4()
-    target_agent = _make_agent(target_id, name="Bob", primary_model_id=model_id)
+    tenant_id = uuid.uuid4()
+    source_agent.tenant_id = tenant_id
+    target_agent = _make_agent(target_id, name="Bob", tenant_id=tenant_id, primary_model_id=model_id)
 
     tenant = MagicMock()
     tenant.a2a_async_enabled = False
@@ -818,8 +811,7 @@ async def test_feature_flag_off_falls_back_to_consult():
     db = RecordingDB(
         responses=[
             DummyResult(scalar_value=source_agent),
-            DummyResult(scalars_list=[target_agent]),
-            DummyResult(scalar_value=rel_id),
+            DummyResult(scalar_value=target_agent),
             DummyResult(scalar_value=src_participant),
             DummyResult(scalar_value=tgt_participant),
             DummyResult(scalar_value=session),
@@ -850,7 +842,7 @@ async def test_feature_flag_off_falls_back_to_consult():
         result = await _send_message_to_agent(
             from_agent_id,
             {
-                "agent_name": "Bob",
+                "target_agent_id": str(target_id),
                 "message": "Hello",
                 "msg_type": "notify",
             },
@@ -872,8 +864,9 @@ async def test_feature_flag_on_uses_notify():
     src_participant = _make_participant(ref_id=from_agent_id)
     tgt_participant = _make_participant(ref_id=target_id)
     source_agent = _make_agent(from_agent_id, name="Alice")
-    source_agent.tenant_id = uuid.uuid4()
-    target_agent = _make_agent(target_id, name="Bob")
+    tenant_id = uuid.uuid4()
+    source_agent.tenant_id = tenant_id
+    target_agent = _make_agent(target_id, name="Bob", tenant_id=tenant_id)
 
     tenant = MagicMock()
     tenant.a2a_async_enabled = True
@@ -885,8 +878,7 @@ async def test_feature_flag_on_uses_notify():
     db = RecordingDB(
         responses=[
             DummyResult(scalar_value=source_agent),
-            DummyResult(scalars_list=[target_agent]),
-            DummyResult(scalar_value=rel_id),
+            DummyResult(scalar_value=target_agent),
             DummyResult(scalar_value=src_participant),
             DummyResult(scalar_value=tgt_participant),
             DummyResult(scalar_value=session),
@@ -904,7 +896,7 @@ async def test_feature_flag_on_uses_notify():
         result = await _send_message_to_agent(
             from_agent_id,
             {
-                "agent_name": "Bob",
+                "target_agent_id": str(target_id),
                 "message": "Hello",
                 "msg_type": "notify",
             },
