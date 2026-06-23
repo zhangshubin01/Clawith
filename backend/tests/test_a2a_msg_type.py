@@ -416,8 +416,8 @@ def test_company_auto_contact_helper_rejects_non_company_boundaries():
 
 
 @pytest.mark.asyncio
-async def test_relationship_prompt_includes_company_agent_without_relationship():
-    """Company agents should be visible in prompt relationships without explicit A2A rows."""
+async def test_relationship_prompt_excludes_company_agent_without_relationship():
+    """Digital employees should be discovered through query_roster, not preloaded prompt lists."""
     from app.services.agent_context import _load_relationships_from_db
 
     tenant_id = uuid.uuid4()
@@ -427,18 +427,50 @@ async def test_relationship_prompt_includes_company_agent_without_relationship()
 
     db = RecordingDB(
         responses=[
-            DummyResult(scalar_value=source_agent),
             DummyResult(values=[]),
-            DummyResult(scalars_list=[]),
-            DummyResult(scalars_list=[company_agent]),
         ]
     )
 
     relationships = await _load_relationships_from_db(db, source_agent.id)
 
-    assert "数字员工同事" in relationships
-    assert "Bob" in relationships
-    assert "Backend helper" in relationships
+    assert "数字员工同事" not in relationships
+    assert "Bob" not in relationships
+    assert "Backend helper" not in relationships
+
+
+@pytest.mark.asyncio
+async def test_relationship_prompt_keeps_human_background_heading():
+    """Human relationships remain as background while digital employees move to query_roster."""
+    from app.services.agent_context import _load_relationships_from_db
+
+    tenant_id = uuid.uuid4()
+    source_agent = _make_agent(tenant_id=tenant_id, name="Alice", access_mode="company")
+    member = MagicMock()
+    member.name = "张三"
+    member.title = "产品经理"
+    member.status = "active"
+    member.tenant_id = tenant_id
+    member.user_id = None
+    rel = MagicMock()
+    rel.agent_id = source_agent.id
+    rel.member_id = uuid.uuid4()
+    rel.member = member
+    rel.relation = "collaborator"
+    rel.description = "负责产品需求"
+
+    db = RecordingDB(
+        responses=[
+            DummyResult(values=[(rel, "飞书", "feishu")]),
+            DummyResult(scalar_value=source_agent),
+        ]
+    )
+
+    relationships = await _load_relationships_from_db(db, source_agent.id)
+
+    assert "## 人类同事背景" in relationships
+    assert "张三" in relationships
+    assert "负责产品需求" in relationships
+    assert "数字员工同事" not in relationships
 
 
 @pytest.mark.asyncio

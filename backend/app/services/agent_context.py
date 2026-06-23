@@ -145,38 +145,11 @@ async def _load_skills_index(agent_id: uuid.UUID) -> str:
 
 async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
     """Query relationships directly from the database and format as a markdown list."""
-    from app.models.org import AgentRelationship, AgentAgentRelationship, OrgMember
-    from app.models.agent import Agent
+    from app.models.org import AgentRelationship, OrgMember
     from app.models.identity import IdentityProvider
-    from app.core.permissions import (
-        evaluate_human_relationship_status,
-        evaluate_agent_relationship_status,
-        can_auto_contact_company_agent,
-    )
+    from app.core.permissions import evaluate_human_relationship_status
     from sqlalchemy.orm import selectinload
     from sqlalchemy import select
-
-    RELATION_LABELS = {
-        "direct_leader": "直属上级",
-        "collaborator": "协作伙伴",
-        "stakeholder": "利益相关者",
-        "team_member": "团队成员",
-        "subordinate": "下属",
-        "mentor": "导师",
-        "other": "其他",
-    }
-
-    AGENT_RELATION_LABELS = {
-        "peer": "同级协作",
-        "supervisor": "上级数字员工",
-        "assistant": "助手",
-        "collaborator": "协作伙伴",
-        "other": "其他",
-    }
-
-    source_agent = (
-        await db.execute(select(Agent).where(Agent.id == agent_id))
-    ).scalar_one_or_none()
 
     # Load human relationships
     h_result = await db.execute(
@@ -202,72 +175,22 @@ async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
                 return pn
             human_rows.append((rel, _display_provider_name(provider_name, provider_type)))
 
-    # Load agent relationships
-    a_result = await db.execute(
-        select(AgentAgentRelationship)
-        .where(AgentAgentRelationship.agent_id == agent_id)
-        .options(selectinload(AgentAgentRelationship.target_agent))
-    )
-    agent_rels = []
-    related_agent_ids = set()
-    for rel in a_result.scalars().all():
-        status_info = await evaluate_agent_relationship_status(db, rel)
-        if status_info["access_status"] == "active":
-            agent_rels.append(rel)
-            if getattr(rel, "target_agent_id", None):
-                related_agent_ids.add(rel.target_agent_id)
-
-    company_agents = []
-    if source_agent and getattr(source_agent, "tenant_id", None):
-        c_result = await db.execute(
-            select(Agent)
-            .where(
-                Agent.tenant_id == source_agent.tenant_id,
-                Agent.id != agent_id,
-                Agent.access_mode == "company",
-                Agent.status.in_(["running", "idle"]),
-            )
-            .order_by(Agent.name.asc(), Agent.created_at.asc())
-        )
-        for candidate in c_result.scalars().all():
-            if getattr(candidate, "id", None) in related_agent_ids:
-                continue
-            if can_auto_contact_company_agent(source_agent, candidate):
-                company_agents.append(candidate)
-
-    if not human_rows and not agent_rels and not company_agents:
+    if not human_rows:
         return ""
 
     lines = []
 
     # Human relationships
     if human_rows:
-        lines.append("## 人类同事\n")
+        lines.append("## 人类同事背景\n")
         for r, provider_name in human_rows:
             m = r.member
             if not m:
                 continue
-            label = RELATION_LABELS.get(r.relation, r.relation)
             source = f"（通过 {provider_name} 同步）" if provider_name else ""
             lines.append(f"### {m.name} — {m.title or '未设置职位'}{source}")
             if r.description:
                 lines.append(f"- {r.description}")
-            lines.append("")
-
-    # Agent relationships
-    if agent_rels or company_agents:
-        lines.append("## 🤖 数字员工同事\n")
-        for r in agent_rels:
-            a = r.target_agent
-            if not a:
-                continue
-            label = AGENT_RELATION_LABELS.get(r.relation, r.relation)
-            lines.append(f"### {a.name} — {a.role_description or '数字员工'}")
-            if r.description:
-                lines.append(f"- {r.description}")
-            lines.append("")
-        for a in company_agents:
-            lines.append(f"### {a.name} — {a.role_description or '数字员工'}")
             lines.append("")
 
     return "\n".join(lines).strip()
@@ -353,6 +276,15 @@ When installing or importing an MCP server via `discover_resources` / `import_mc
 - Do **NOT** ask the user for a Smithery API Key unless the tool explicitly returns that no Smithery key is configured.
 - Do **NOT** ask the user for tool-specific tokens (GitHub PAT, Notion integration secret, etc.) when the Smithery flow supports OAuth.
 - Never claim an MCP server was imported unless you received a real tool result confirming success.
+""")
+
+    static_parts.append("""
+## Digital Employee Roster
+
+To find or contact digital employees, use `query_roster`.
+Do not rely on preloaded colleague lists for digital employees.
+If you know a target name, role, or capability, call `query_roster` with `member_type="agent"` and a query.
+Then use the returned `target_agent_id` when calling `send_message_to_agent` or `send_file_to_agent`.
 """)
 
     dynamic_parts = []
