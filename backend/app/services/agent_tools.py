@@ -70,7 +70,6 @@ from app.services.storage import get_storage_backend, normalize_storage_key
 from app.services.storage_runtime.base import WriteCondition, content_hash_bytes
 from app.services.workspace_locking import workspace_locks
 from app.core.permissions import evaluate_agent_relationship_status, evaluate_human_relationship_status
-from app.services.access_relationships import ensure_access_granted_platform_relationships
 from app.config import get_settings
 from app.services.llm.finish import (
     FINISH_PROTOCOL_REMINDER,
@@ -6267,14 +6266,26 @@ async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
 
 async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
     """Send a Feishu message to a person in the agent's relationship list."""
+    target_member_id = (args.get("target_member_id") or "").strip()
     member_name = (args.get("member_name") or "").strip()
     direct_user_id = (args.get("user_id") or "").strip()
     message_text = (args.get("message") or "").strip()
 
     if not message_text:
         return "❌ Please provide message content"
-    if not member_name and not direct_user_id:
-        return "❌ Please provide member_name or user_id"
+    if not target_member_id and not member_name and not direct_user_id:
+        return "❌ Please provide target_member_id, member_name, or user_id"
+
+    return await _send_channel_message(
+        agent_id,
+        {
+            "target_member_id": target_member_id,
+            "provider_user_id": direct_user_id,
+            "member_name": member_name,
+            "message": message_text,
+            "channel": "feishu",
+        },
+    )
 
     try:
         from app.services.feishu_service import FeishuAPIError, feishu_service
@@ -6408,131 +6419,148 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
         return f"❌ Message send error: {str(e)[:200]}"
 
 
+async def _send_feishu_message_to_member(
+    agent_id: uuid.UUID,
+    member_name: str,
+    message_text: str,
+    target_member: OrgMember,
+) -> str:
+    """Send a Feishu message to an already-resolved org member."""
+    try:
+        from app.services.feishu_service import FeishuAPIError, feishu_service
+
+        async with async_session() as db:
+            config_result = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "feishu",
+                )
+            )
+            config = config_result.scalar_one_or_none()
+            if not config:
+                return "❌ This agent has no Feishu channel configured"
+
+            feishu_user_id = (target_member.external_id or "").strip()
+            if not feishu_user_id:
+                return f"❌ {member_name} has no linked Feishu user_id"
+
+            try:
+                resp = await feishu_service.send_message(
+                    config.app_id,
+                    config.app_secret,
+                    receive_id=feishu_user_id,
+                    msg_type="text",
+                    content=json.dumps({"text": message_text}, ensure_ascii=False),
+                    receive_id_type="user_id",
+                )
+            except FeishuAPIError as user_id_err:
+                logger.info(f"❌ Failed to send message to {feishu_user_id} via Feishu: {user_id_err}")
+                return f"❌ 飞书发送失败：{user_id_err.user_message}"
+
+            if resp.get("code") != 0:
+                return f"❌ 发送失败：{resp.get('msg')} (code {resp.get('code')})"
+
+            try:
+                agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+                agent_obj = agent_r.scalar_one_or_none()
+                platform_user = await get_platform_user_by_org_member(
+                    db=db,
+                    org_member=target_member,
+                    agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
+                )
+                ext_conv_id = f"feishu_p2p_{feishu_user_id}"
+                sess = await find_or_create_channel_session(
+                    db=db,
+                    agent_id=agent_id,
+                    user_id=platform_user.id,
+                    external_conv_id=ext_conv_id,
+                    source_channel="feishu",
+                    first_message_title=f"[Agent → {member_name or feishu_user_id}]",
+                )
+                db.add(ChatMessage(
+                    agent_id=agent_id,
+                    user_id=platform_user.id,
+                    role="assistant",
+                    content=message_text,
+                    conversation_id=str(sess.id),
+                ))
+                sess.last_message_at = datetime.now(timezone.utc)
+                await db.commit()
+                logger.info(f"[Feishu] Saved outgoing message to session {sess.id} (user_id: {feishu_user_id})")
+            except Exception as history_err:
+                logger.error(f"[Feishu] Failed to save outgoing message to history: {history_err}")
+
+            return f"✅ Successfully sent message to {member_name}"
+    except Exception as e:
+        logger.exception("[Feishu] Error")
+        return f"❌ Feishu message error: {str(e)[:200]}"
+
+
 async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:
-    """Send message via the recipient's configured external channel.
-
-    1. Find target user from relationships (AgentRelationship -> OrgMember)
-    2. Determine user's provider type (via OrgMember.provider_id -> IdentityProvider)
-    3. Find corresponding channel config (ChannelConfig)
-    4. Send via the appropriate channel
-    """
-    from sqlalchemy import select
-    from sqlalchemy.orm import selectinload
-    from app.models.org import AgentRelationship, OrgMember
-    from app.models.identity import IdentityProvider
-
+    """Send message via a resolved human target's configured external channel."""
+    target_member_id = (args.get("target_member_id") or "").strip()
+    provider_user_id = (args.get("provider_user_id") or "").strip()
     member_name = (args.get("member_name") or "").strip()
     message_text = (args.get("message") or "").strip()
-    raw_target_channel = (args.get("channel") or "").strip().lower()
-    target_channel = "teams" if raw_target_channel == "microsoft_teams" else raw_target_channel
+    target_channel = _normalize_roster_provider_type(args.get("channel"))
 
-    if not member_name:
-        return "❌ Please provide member_name"
     if not message_text:
         return "❌ Please provide message content"
+    if not target_member_id and not provider_user_id and not member_name:
+        return "❌ Please provide target_member_id, provider_user_id, or member_name"
 
     try:
         async with async_session() as db:
-            # 1. Find target member from relationships with provider info (only active members)
-            result = await db.execute(
-                select(AgentRelationship, OrgMember, IdentityProvider)
-                .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
-                .outerjoin(IdentityProvider, OrgMember.provider_id == IdentityProvider.id)
-                .where(AgentRelationship.agent_id == agent_id, OrgMember.name == member_name, OrgMember.status == "active")
-                .options(selectinload(AgentRelationship.member))
+            target, error = await _resolve_roster_human_target(
+                db,
+                agent_id,
+                target_member_id=target_member_id,
+                provider_user_id=provider_user_id,
+                member_name=member_name,
+                provider_type=target_channel,
+                require_provider_identity=bool(provider_user_id),
             )
-            rows = result.all()
-            active_rows = []
-            for rel, member, provider in rows:
-                status_info = await evaluate_human_relationship_status(db, rel)
-                if status_info["access_status"] == "active":
-                    active_rows.append((rel, member, provider))
-            rows = active_rows
+            if error:
+                return error
 
-            if not rows:
-                return f"❌ {member_name} is not in your relationship network"
-
-            target_member = None
-            provider_type = None
-
-            def _normalize_provider_type(value: str | None) -> str | None:
-                if not value:
-                    return None
-                return "teams" if value == "microsoft_teams" else value
-
-            # Handle multiple matches across different providers
-            if target_channel:
-                for rel, member, provider in rows:
-                    if provider and _normalize_provider_type(provider.provider_type) == target_channel:
-                        target_member = member
-                        provider_type = _normalize_provider_type(provider.provider_type)
-                        break
-                if not target_member:
-                    available = sorted({_normalize_provider_type(p.provider_type) for _, _, p in rows if p})
-                    return f"❌ {member_name} not found in {target_channel} channel. Available channels: {', '.join(available)}"
-            else:
-                if len(rows) > 1:
-                    available = [_normalize_provider_type(p.provider_type) for _, _, p in rows if p]
-                    logger.warning(f"[ChannelMessage] Ambiguous member '{member_name}' found in multiple channels: {available}")
-                    # Pick the first one as before, but mention others if possible
-                
-                rel, member, provider = rows[0]
-                target_member = member
-                provider_type = _normalize_provider_type(provider.provider_type) if provider else None
-
-            # 2. Determine channel based on provider type
+            target_member = target.member
+            display_name = target_member.name or member_name or provider_user_id or target_member_id
+            provider_type = target.provider_type
             if not provider_type:
-                # Platform-only relationships are stored as provider-less OrgMembers that
-                # still point at a platform User. In that case, transparently route to the
-                # platform message tool so model tool-choice mistakes do not break delivery.
-                if target_member.user_id:
-                    user_result = await db.execute(
-                        select(UserModel).where(UserModel.id == target_member.user_id)
+                if target.platform_user and not target_channel:
+                    logger.info(
+                        "[ChannelMessage] %s is a platform user; rerouting send_channel_message -> send_platform_message",
+                        display_name,
                     )
-                    platform_user = user_result.scalar_one_or_none()
-                    if platform_user:
-                        platform_identifier = (
-                            platform_user.display_name
-                            or platform_user.username
-                            or member_name
-                        )
-                        logger.info(
-                            "[ChannelMessage] %s is a platform user; rerouting send_channel_message -> send_platform_message",
-                            member_name,
-                        )
-                        return await _send_platform_message(
-                            agent_id,
-                            {
-                                "username": platform_identifier,
-                                "message": message_text,
-                            },
-                        )
-
-                # Fallback: check which channel configs exist and has user info
-                if target_member.external_id or target_member.open_id:
-                    # Try Feishu as default
+                    return await _send_platform_message(
+                        agent_id,
+                        {
+                            "target_member_id": str(target_member.id),
+                            "message": message_text,
+                        },
+                    )
+                if (target_member.external_id or target_member.open_id) and not target_channel:
                     provider_type = "feishu"
                 else:
                     return (
-                        f"❌ {member_name} has no linked channel. "
+                        f"❌ {display_name} has no linked channel. "
                         "If they are a platform user, use send_platform_message instead."
                     )
 
-            logger.info(f"[ChannelMessage] Sending to {member_name} via {provider_type}")
+            logger.info(f"[ChannelMessage] Sending to {display_name} via {provider_type}")
 
-            # 3. Route to appropriate channel
             if provider_type == "feishu":
-                return await _send_feishu_message(agent_id, {"member_name": member_name, "message": message_text})
+                return await _send_feishu_message_to_member(agent_id, display_name, message_text, target_member)
             elif provider_type == "dingtalk":
-                return await _send_dingtalk_message(agent_id, member_name, message_text, target_member)
+                return await _send_dingtalk_message(agent_id, display_name, message_text, target_member)
             elif provider_type == "wecom":
-                return await _send_wecom_message(agent_id, member_name, message_text, target_member)
+                return await _send_wecom_message(agent_id, display_name, message_text, target_member)
             elif provider_type == "slack":
-                return await _send_slack_message(agent_id, member_name, message_text, target_member)
+                return await _send_slack_message(agent_id, display_name, message_text, target_member)
             elif provider_type == "teams":
-                return await _send_teams_channel_message(agent_id, member_name, message_text, target_member)
+                return await _send_teams_channel_message(agent_id, display_name, message_text, target_member)
             elif provider_type == "wechat":
-                return await _send_wechat_channel_message(agent_id, member_name, message_text, target_member)
+                return await _send_wechat_channel_message(agent_id, display_name, message_text, target_member)
             else:
                 return f"❌ Unsupported channel type: {provider_type}"
 
@@ -6967,66 +6995,56 @@ async def _send_wechat_channel_message(
     except Exception as e:
         logger.exception("[WeChat] Error")
         return f"❌ WeChat message error: {str(e)[:200]}"
+
+
 async def _send_platform_message(agent_id: uuid.UUID, args: dict) -> str:
     """Send a proactive message to a first-party platform user."""
-    username = args.get("username", "").strip()
-    message_text = args.get("message", "").strip()
+    target_member_id = (args.get("target_member_id") or "").strip()
+    platform_user_id = (args.get("platform_user_id") or "").strip()
+    username = (args.get("username") or "").strip()
+    message_text = (args.get("message") or "").strip()
 
-    if not username or not message_text:
-        return "❌ Please provide recipient username and message content"
+    if not message_text:
+        return "❌ Please provide message content"
+    if not target_member_id and not platform_user_id and not username:
+        return "❌ Please provide target_member_id, platform_user_id, or username"
 
     try:
         from datetime import datetime as _dt, timezone as _tz
 
-
         async with async_session() as db:
-            # 0. Get agent's tenant_id for scoping
-            agent_res = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-            agent = agent_res.scalar_one_or_none()
-            if not agent:
-                return "❌ Agent not found"
-            if await ensure_access_granted_platform_relationships(db, agent, created_by_user_id=agent.creator_id):
-                await db.flush()
+            resolved_platform_user_id = platform_user_id
+            if username and not target_member_id and not resolved_platform_user_id:
+                source_result = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+                source_agent = source_result.scalar_one_or_none()
+                if not source_agent:
+                    return "❌ Source agent was not found."
 
-            # 1. Look up target user by username or display_name within tenant
-
-            query = select(UserModel).where(
-                or_(
-                    UserModel.username == username,
-                    UserModel.display_name == username,
+                user_query = select(UserModel).where(
+                    or_(
+                        UserModel.username == username,
+                        UserModel.display_name == username,
+                    )
                 )
-            )
-            if agent.tenant_id:
-                query = query.where(UserModel.tenant_id == agent.tenant_id)
+                if source_agent.tenant_id:
+                    user_query = user_query.where(UserModel.tenant_id == source_agent.tenant_id)
+                user_result = await db.execute(user_query)
+                target_user_by_name = user_result.scalar_one_or_none()
+                if not target_user_by_name:
+                    return f"❌ No user named '{username}' found in your organization. Use query_roster to choose a person."
+                resolved_platform_user_id = str(target_user_by_name.id)
 
-            u_result = await db.execute(query)
-            target_user = u_result.scalar_one_or_none()
-            if not target_user:
-                # List available users for the agent to pick from (within the same tenant)
-                list_query = select(UserModel.username, UserModel.display_name).limit(20)
-                if agent.tenant_id:
-                    list_query = list_query.where(UserModel.tenant_id == agent.tenant_id)
-                
-                all_r = await db.execute(list_query)
-                names = [f"{r.display_name or r.username}" for r in all_r.all()]
-                return f"❌ No user named '{username}' found in your organization. Available users: {', '.join(names) if names else 'none'}"
-
-            rel_result = await db.execute(
-                select(AgentRelationship)
-                .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
-                .where(
-                    AgentRelationship.agent_id == agent_id,
-                    OrgMember.user_id == target_user.id,
-                    OrgMember.status == "active",
-                )
-                .options(selectinload(AgentRelationship.member))
+            target, error = await _resolve_roster_human_target(
+                db,
+                agent_id,
+                target_member_id=target_member_id,
+                platform_user_id=resolved_platform_user_id,
+                member_name=None,
+                require_platform_user=True,
             )
-            rel = rel_result.scalars().first()
-            if not rel:
-                return f"❌ {target_user.display_name or target_user.username} is not in your active relationship network"
-            status_info = await evaluate_human_relationship_status(db, rel, source_agent=agent)
-            if status_info["access_status"] != "active":
-                return f"❌ Relationship to {target_user.display_name or target_user.username} is not active ({status_info['access_status_reason'] or 'restricted'})"
+            if error:
+                return error
+            target_user = target.platform_user
 
             # Agent-initiated platform messages should always go to the long-lived primary session
             # for this agent+user pair, so trigger-driven outreach does not fragment into dozens of
