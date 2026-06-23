@@ -5860,6 +5860,158 @@ def _provider_type_value(provider_type: Any) -> str | None:
     return getattr(provider_type, "value", provider_type)
 
 
+def _normalize_roster_provider_type(provider_type: Any) -> str | None:
+    value = _provider_type_value(provider_type)
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return None
+    if normalized == "microsoft_teams":
+        return "teams"
+    return normalized
+
+
+@dataclass(frozen=True)
+class RosterHumanTarget:
+    source_agent: AgentModel
+    member: OrgMember
+    provider: IdentityProvider | None
+    provider_type: str | None
+    platform_user: UserModel | None
+
+
+def _member_has_provider_identity(member: OrgMember) -> bool:
+    return bool(
+        (getattr(member, "external_id", None) or "").strip()
+        or (getattr(member, "open_id", None) or "").strip()
+    )
+
+
+def _provider_identity_condition(provider_user_id: str):
+    return or_(
+        OrgMember.external_id == provider_user_id,
+        OrgMember.open_id == provider_user_id,
+        OrgMember.unionid == provider_user_id,
+    )
+
+
+async def _resolve_roster_human_target(
+    db,
+    agent_id: uuid.UUID,
+    *,
+    target_member_id: str | None = None,
+    platform_user_id: str | None = None,
+    provider_user_id: str | None = None,
+    member_name: str | None = None,
+    provider_type: str | None = None,
+    require_platform_user: bool = False,
+    require_provider_identity: bool = False,
+) -> tuple[RosterHumanTarget | None, str | None]:
+    source_result = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+    source_agent = source_result.scalar_one_or_none()
+    if not source_agent:
+        return None, "❌ Source agent was not found."
+
+    target_member_id_raw = (target_member_id or "").strip()
+    platform_user_id_raw = (platform_user_id or "").strip()
+    provider_user_id_raw = (provider_user_id or "").strip()
+    member_name_raw = (member_name or "").strip()
+    requested_provider_type = _normalize_roster_provider_type(provider_type)
+
+    lookup_kind = ""
+    conditions = [OrgMember.tenant_id == source_agent.tenant_id]
+    if target_member_id_raw:
+        lookup_kind = "target_member_id"
+        try:
+            member_id = uuid.UUID(target_member_id_raw)
+        except ValueError:
+            return None, "❌ Invalid target_member_id. Use query_roster to get a valid target_member_id."
+        conditions.append(OrgMember.id == member_id)
+    elif platform_user_id_raw:
+        lookup_kind = "platform_user_id"
+        try:
+            user_id = uuid.UUID(platform_user_id_raw)
+        except ValueError:
+            return None, "❌ Invalid platform_user_id. Use query_roster to get a valid platform_user_id."
+        conditions.append(OrgMember.user_id == user_id)
+        require_platform_user = True
+    elif provider_user_id_raw:
+        lookup_kind = "provider_user_id"
+        conditions.append(_provider_identity_condition(provider_user_id_raw))
+        require_provider_identity = True
+    elif member_name_raw:
+        lookup_kind = "member_name"
+        conditions.append(OrgMember.name == member_name_raw)
+    else:
+        return None, "❌ Please provide target_member_id, platform_user_id, provider_user_id, or member_name."
+
+    result = await db.execute(
+        select(OrgMember, IdentityProvider)
+        .outerjoin(IdentityProvider, OrgMember.provider_id == IdentityProvider.id)
+        .where(*conditions)
+        .order_by(OrgMember.name.asc(), OrgMember.synced_at.asc())
+        .limit(20)
+    )
+    rows = result.all()
+    if not rows:
+        return None, "❌ Human recipient not found. Use query_roster to find an available human target."
+
+    candidates: list[RosterHumanTarget] = []
+    blocked_reason: str | None = None
+    for member, provider in rows:
+        visibility = evaluate_roster_human_visibility(source_agent, member)
+        if not visibility.visible:
+            blocked_reason = blocked_reason or "not_visible"
+            continue
+        if not visibility.can_contact:
+            blocked_reason = blocked_reason or visibility.unavailable_reason or "not_contactable"
+            continue
+
+        member_provider_type = _normalize_roster_provider_type(getattr(provider, "provider_type", None))
+        if requested_provider_type and member_provider_type != requested_provider_type:
+            blocked_reason = blocked_reason or "provider_type_mismatch"
+            continue
+        if require_provider_identity:
+            if not _member_has_provider_identity(member):
+                blocked_reason = blocked_reason or "missing_provider_identity"
+                continue
+            if not member_provider_type:
+                blocked_reason = blocked_reason or "missing_provider_type"
+                continue
+
+        platform_user = None
+        if getattr(member, "user_id", None):
+            user_result = await db.execute(select(UserModel).where(UserModel.id == member.user_id))
+            platform_user = user_result.scalar_one_or_none()
+            if platform_user and platform_user.tenant_id != source_agent.tenant_id:
+                platform_user = None
+            if platform_user and not getattr(platform_user, "is_active", False):
+                platform_user = None
+        if require_platform_user and not platform_user:
+            blocked_reason = blocked_reason or "missing_platform_user"
+            continue
+
+        candidates.append(RosterHumanTarget(
+            source_agent=source_agent,
+            member=member,
+            provider=provider,
+            provider_type=member_provider_type,
+            platform_user=platform_user,
+        ))
+
+    if not candidates:
+        if requested_provider_type and blocked_reason == "provider_type_mismatch":
+            return None, f"❌ Human recipient was found, but not in {requested_provider_type} channel."
+        return None, f"❌ Human recipient is not contactable ({blocked_reason or 'restricted'}). Use query_roster to choose an available person."
+    if len(candidates) > 1:
+        if lookup_kind == "member_name":
+            return None, "❌ Multiple human recipients match this member_name. Use query_roster and retry with target_member_id."
+        return None, "❌ Multiple human recipients match this identifier. Use query_roster and retry with target_member_id."
+
+    return candidates[0], None
+
+
 def _query_text_match_rank(member: dict, query: str) -> int:
     if not query:
         return 4
