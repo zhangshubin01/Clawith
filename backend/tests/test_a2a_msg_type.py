@@ -439,8 +439,8 @@ async def test_relationship_prompt_excludes_company_agent_without_relationship()
 
 
 @pytest.mark.asyncio
-async def test_relationship_prompt_keeps_human_background_heading():
-    """Human relationships remain as background while digital employees move to query_roster."""
+async def test_relationship_prompt_keeps_human_notes_without_send_entry():
+    """Human relationship notes stay context-only while sending goes through query_roster."""
     from app.services.agent_context import _load_relationships_from_db
 
     tenant_id = uuid.uuid4()
@@ -467,10 +467,14 @@ async def test_relationship_prompt_keeps_human_background_heading():
 
     relationships = await _load_relationships_from_db(db, source_agent.id)
 
-    assert "## 人类同事背景" in relationships
+    assert "## 人类同事背景" not in relationships
+    assert "## 人类协作备注" in relationships
+    assert "不是联系人或发送入口" in relationships
+    assert "query_roster" in relationships
     assert "张三" in relationships
     assert "负责产品需求" in relationships
     assert "数字员工同事" not in relationships
+    assert "send_feishu_message" not in relationships
 
 
 @pytest.mark.asyncio

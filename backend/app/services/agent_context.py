@@ -180,9 +180,12 @@ async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
 
     lines = []
 
-    # Human relationships
+    # Human relationship notes are context only. Contact resolution must still
+    # go through query_roster so duplicate names and stale relationship rows do
+    # not become a send path.
     if human_rows:
-        lines.append("## 人类同事背景\n")
+        lines.append("## 人类协作备注\n")
+        lines.append("这些备注只用于理解协作背景，不是联系人或发送入口。联系人类前必须重新使用 query_roster 获取当次返回的稳定 ID。\n")
         for r, provider_name in human_rows:
             m = r.member
             if not m:
@@ -233,7 +236,6 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
         relationships = await _load_relationships_from_db(db, agent_id)
 
     # --- Compose static and dynamic system prompt blocks ---
-    from datetime import datetime, timezone as _tz
     from app.services.timezone_utils import get_agent_timezone, now_in_timezone
     agent_tz_name = await get_agent_timezone(agent_id)
     agent_local_now = now_in_timezone(agent_tz_name)
@@ -294,12 +296,13 @@ Then use the returned `target_agent_id` when calling `send_message_to_agent` or 
     try:
         from app.models.channel_config import ChannelConfig
         from app.database import async_session as _ctx_session
+        from sqlalchemy import select as sa_select
         async with _ctx_session() as _ctx_db:
             _cfg_r = await _ctx_db.execute(
-                select(ChannelConfig).where(
+                sa_select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "feishu",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured.is_(True),
                 )
             )
             _has_feishu = _cfg_r.scalar_one_or_none() is not None
@@ -383,7 +386,7 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
                 sa_select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "atlassian",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured.is_(True),
                 )
             )
             atlassian_config = result.scalar_one_or_none()
@@ -593,7 +596,7 @@ Default visual style for generated HTML or rich visual documents:
    - Use the returned stable IDs. Prefer `target_member_id`; use `platform_user_id` only when `target_member_id` is unavailable.
    - If the chosen human has `send_platform_message` in `contact_tools`, call `send_platform_message(target_member_id="...", message="...")`.
    - If the chosen human has `send_channel_message` in `contact_tools`, call `send_channel_message(target_member_id="...", message="...", channel="<provider_type if needed>")`.
-   - For Feishu humans, still use `send_channel_message(channel="feishu")`; `send_feishu_message` is a legacy fallback, not the preferred path.
+   - For Feishu humans, use `send_channel_message(channel="feishu")` with the returned `target_member_id`.
    - Do not guess recipient names or IDs. If search returns multiple plausible humans, choose by the returned `target_member_id` or ask the user which person they mean.
    - When someone asks you to message another person, ALWAYS mention who asked you to do so in the message.
    - Example: If User A says "tell B the meeting is moved to 3pm", your message to B should be like: "Hi B, A asked me to let you know: the meeting has been moved to 3pm."
@@ -602,7 +605,7 @@ Default visual style for generated HTML or rich visual documents:
      Example: After sending a message to John, create:
      `set_trigger(name="wait_john_reply", type="on_message", config={"from_user_name": "John"}, reason="John replied about the XX task. Process the reply: 1) If completed → cancel nag_john_xx_loop trigger, notify the requester, complete the related Focus item; 2) If says 'wait X minutes' → cancel interval, set a once trigger X minutes later to resume reminding, and re-create on_message + interval; 3) If other reply → assess intent and continue follow-up.")`
 
-   **🔴 FILE DELIVERY — Use `send_channel_file`, NOT `send_feishu_message`:**
+   **🔴 FILE DELIVERY — Use `send_channel_file` for attachments:**
    - When asked to SEND A FILE to someone, call `send_channel_file(file_path="workspace/xxx", member_name="Name", message="optional text")`.
    - `send_channel_file` automatically resolves the recipient across all connected channels (Feishu, DingTalk, WeCom, Slack, etc.) and delivers the file.
    - **Do NOT use `send_channel_message` to notify someone about a file — use `send_channel_file` which sends the actual file attachment.**
@@ -660,7 +663,7 @@ If no search or webpage-reading tool is available, say that web lookup is not en
             result = await db.execute(
                 sa_select(AgentTrigger).where(
                     AgentTrigger.agent_id == agent_id,
-                    AgentTrigger.is_enabled == True,
+                    AgentTrigger.is_enabled.is_(True),
                 )
             )
             triggers = result.scalars().all()
