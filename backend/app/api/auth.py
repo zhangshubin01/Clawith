@@ -6,6 +6,9 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from loguru import logger
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
 from app.core.security import (
     create_access_token,
     get_authenticated_user,
@@ -781,7 +784,7 @@ async def switch_tenant(
     else:
         async with tenant_dao.session() as session:
             redirect_url = await platform_service.get_tenant_sso_base_url(
-                session, tenant, request, sso_redirect_enabled=sso_redirect_enabled
+                session, tenant, request
             )
 
     # Include token in redirect URL for cross-domain switching if needed
@@ -839,12 +842,13 @@ async def change_password(
 
 @router.get("/providers")
 async def list_providers(
+    db: AsyncSession = Depends(get_db),
     tenant_id: uuid.UUID | None = Query(None, description="Optional tenant ID"),
 ):
     """List all available identity providers."""
     from app.services.auth_registry import auth_provider_registry
 
-    providers = await auth_provider_registry.list_providers(str(tenant_id) if tenant_id else None)
+    providers = await auth_provider_registry.list_providers(db, str(tenant_id) if tenant_id else None)
     return [
         {"id": str(p.id), "provider_type": p.provider_type, "name": p.name, "is_active": p.is_active}
         for p in providers

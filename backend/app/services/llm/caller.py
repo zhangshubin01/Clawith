@@ -388,10 +388,8 @@ async def _process_tool_call(
                 "status": "running",
                 "reasoning_content": full_reasoning_content
             })
-        except Exception:
-            pass
-
-    # Execute tool — pass on_output for execute_code streaming
+        except Exception as _cb_err:
+            logger.warning("[LLM] on_tool_call 回调失败: {}", _cb_err)  # pass on_output for execute_code streaming
     _on_output = on_code_output if tool_name in ("execute_code", "execute_code_e2b") else None
     result = await execute_tool(
         tool_name, args,
@@ -427,8 +425,8 @@ async def _process_tool_call(
                 "result": result,
                 "reasoning_content": full_reasoning_content
             })
-        except Exception:
-            pass
+        except Exception as _cb_err:
+            logger.warning("[LLM] on_tool_call 回调失败: {}", _cb_err)
     
     api_messages.append(LLMMessage(
         role="tool",
