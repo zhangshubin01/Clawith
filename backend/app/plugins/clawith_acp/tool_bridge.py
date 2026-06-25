@@ -284,6 +284,7 @@ _ACP_METHOD_MAP = {
     "git_stage": "git/stage",
     "git_commit": "git/commit",
     "ide/screenshot": "ide/screenshot",
+    "ide_screenshot": "ide/screenshot",
 }
 
 
@@ -373,7 +374,7 @@ async def _build_find_class_params(
         params["matchMode"] = args["matchMode"]
     if args.get("cursor"):
         params["cursor"] = args["cursor"]
-    logger.info(f"[ACP] find_class query={query} scope={params['scope']}")
+    logger.debug(f"[ACP] find_class query={query} scope={params['scope']}")
     return params
 
 
@@ -394,7 +395,7 @@ async def _build_find_symbol_params(
         params["language"] = args["language"]
     if args.get("cursor"):
         params["cursor"] = args["cursor"]
-    logger.info(f"[ACP] find_symbol query={query} scope={params['scope']}")
+    logger.debug(f"[ACP] find_symbol query={query} scope={params['scope']}")
     return params
 
 
@@ -403,6 +404,13 @@ async def _build_index_status_params(
 ) -> dict | str:
     """构建 index_status 参数。"""
     logger.info("[ACP] index_status")
+    return {"sessionId": session_id}
+
+
+async def _build_ide_screenshot_params(
+    tool_name: str, args: dict, handler, session_id: str, path: str,
+) -> dict | str:
+    """构建 ide_screenshot 参数。无需额外参数，仅传 sessionId。"""
     return {"sessionId": session_id}
 
 
@@ -475,7 +483,7 @@ async def _build_find_references_params(
     if args.get("language"): params["language"] = args["language"]
     if args.get("symbol"): params["symbol"] = args["symbol"]
     if args.get("cursor"): params["cursor"] = args["cursor"]
-    logger.info(f"[ACP] find_references file={args.get('file')}")
+    logger.debug(f"[ACP] find_references file={args.get('file')}")
     return params
 
 
@@ -489,7 +497,7 @@ async def _build_find_definition_params(
     if args.get("column"): params["column"] = int(args["column"])
     if args.get("language"): params["language"] = args["language"]
     if args.get("symbol"): params["symbol"] = args["symbol"]
-    logger.info(f"[ACP] find_definition file={args.get('file')}")
+    logger.debug(f"[ACP] find_definition file={args.get('file')}")
     return params
 
 
@@ -506,7 +514,7 @@ async def _build_find_implementations_params(
     if args.get("scope"): params["scope"] = args["scope"]
     if args.get("cursor"): params["cursor"] = args["cursor"]
     params["pageSize"] = int(args.get("pageSize", 100))
-    logger.info(f"[ACP] find_implementations file={args.get('file')}")
+    logger.debug(f"[ACP] find_implementations file={args.get('file')}")
     return params
 
 
@@ -520,7 +528,7 @@ async def _build_find_super_methods_params(
     if args.get("column"): params["column"] = int(args["column"])
     if args.get("language"): params["language"] = args["language"]
     if args.get("symbol"): params["symbol"] = args["symbol"]
-    logger.info(f"[ACP] find_super_methods file={args.get('file')}")
+    logger.debug(f"[ACP] find_super_methods file={args.get('file')}")
     return params
 
 
@@ -537,7 +545,7 @@ async def _build_call_hierarchy_params(
     if args.get("direction"): params["direction"] = args["direction"]
     params["depth"] = int(args.get("depth", 3))
     if args.get("scope"): params["scope"] = args["scope"]
-    logger.info(f"[ACP] call_hierarchy file={args.get('file')} direction={args.get('direction')}")
+    logger.debug(f"[ACP] call_hierarchy file={args.get('file')} direction={args.get('direction')}")
     return params
 
 
@@ -551,7 +559,7 @@ async def _build_type_hierarchy_params(
     if args.get("line"): params["line"] = int(args["line"])
     if args.get("column"): params["column"] = int(args["column"])
     if args.get("scope"): params["scope"] = args["scope"]
-    logger.info(f"[ACP] type_hierarchy className={args.get('className')}")
+    logger.debug(f"[ACP] type_hierarchy className={args.get('className')}")
     return params
 
 
@@ -570,7 +578,7 @@ async def _build_diagnostics_params(
     if args.get("file"): params["file"] = args["file"]
     if args.get("startLine"): params["startLine"] = int(args["startLine"])
     if args.get("endLine"): params["endLine"] = int(args["endLine"])
-    logger.info(f"[ACP] diagnostics file={args.get('file')} severity={params['severity']}")
+    logger.debug(f"[ACP] diagnostics file={args.get('file')} severity={params['severity']}")
     return params
 
 
@@ -587,7 +595,7 @@ async def _build_refactor_rename_params(
     if args.get("column"): params["column"] = int(args["column"])
     if args.get("overrideStrategy"): params["overrideStrategy"] = args["overrideStrategy"]
     if args.get("relatedRenamingStrategy"): params["relatedRenamingStrategy"] = args["relatedRenamingStrategy"]
-    logger.info(f"[ACP] refactor_rename file={args.get('file')} newName={new_name}")
+    logger.debug(f"[ACP] refactor_rename file={args.get('file')} newName={new_name}")
     return params
 
 
@@ -618,7 +626,7 @@ async def _build_reformat_code_params(
     if args.get("endLine"): params["endLine"] = int(args["endLine"])
     params["optimizeImports"] = args.get("optimizeImports", True)
     params["rearrangeCode"] = args.get("rearrangeCode", True)
-    logger.info(f"[ACP] reformat_code file={f_path}")
+    logger.debug(f"[ACP] reformat_code file={f_path}")
     return params
 
 
@@ -629,7 +637,7 @@ async def _build_optimize_imports_params(
     f_path = args.get("file", "")
     if not f_path:
         return "❌ optimize_imports: file 不能为空"
-    logger.info(f"[ACP] optimize_imports file={f_path}")
+    logger.debug(f"[ACP] optimize_imports file={f_path}")
     return {"sessionId": session_id, "file": f_path}
 
 
@@ -655,7 +663,7 @@ async def _build_safe_delete_params(
         params["line"] = int(args["line"])
     if args.get("column"):
         params["column"] = int(args["column"])
-    logger.info(f"[ACP] safe_delete file={f_path} targetType={target_type}")
+    logger.debug(f"[ACP] safe_delete file={f_path} targetType={target_type}")
     return params
 
 
@@ -666,7 +674,7 @@ async def _build_convert_java_to_kotlin_params(
     files = args.get("files", [])
     if not files or not isinstance(files, list):
         return "❌ convert_java_to_kotlin: files 数组不能为空"
-    logger.info(f"[ACP] convert_java_to_kotlin files={files}")
+    logger.debug(f"[ACP] convert_java_to_kotlin files={files}")
     return {"sessionId": session_id, "files": files}
 
 
@@ -699,7 +707,7 @@ async def _build_open_file_params(
     params: dict[str, Any] = {"sessionId": session_id, "file": f_path}
     if args.get("line"): params["line"] = int(args["line"])
     if args.get("column"): params["column"] = int(args["column"])
-    logger.info(f"[ACP] open_file file={f_path}")
+    logger.debug(f"[ACP] open_file file={f_path}")
     return params
 
 
@@ -710,7 +718,7 @@ async def _build_file_structure_params(
     f_path = args.get("file", "")
     if not f_path:
         return "❌ file_structure: file 不能为空"
-    logger.info(f"[ACP] file_structure file={f_path}")
+    logger.debug(f"[ACP] file_structure file={f_path}")
     return {"sessionId": session_id, "file": f_path}
 
 
@@ -718,7 +726,7 @@ async def _build_project_params(
     tool_name: str, args: dict, handler, session_id: str, path: str,
 ) -> dict | str:
     """构建 build_project 参数 — 编译项目。"""
-    logger.info(f"[ACP] build_project rebuild={args.get('rebuild')}")
+    logger.debug(f"[ACP] build_project rebuild={args.get('rebuild')}")
     return {
         "sessionId": session_id,
         "rebuild": args.get("rebuild", False),
@@ -737,7 +745,7 @@ async def _build_get_documentation_params(
     params: dict[str, Any] = {"sessionId": session_id, "className": class_name}
     if args.get("memberName"):
         params["memberName"] = args["memberName"]
-    logger.info(f"[ACP] get_documentation className={class_name}")
+    logger.debug(f"[ACP] get_documentation className={class_name}")
     return params
 
 
@@ -756,7 +764,7 @@ async def _build_apply_quickfix_params(
         "line": int(args.get("line", 1)), "column": int(args.get("column", 1)),
         "fixName": fix_name,
     }
-    logger.info(f"[ACP] apply_quickfix file={f_path} fixName={fix_name}")
+    logger.debug(f"[ACP] apply_quickfix file={f_path} fixName={fix_name}")
     return params
 
 
@@ -781,7 +789,7 @@ async def _build_git_diff_params(
         params["commit"] = args["commit"]
     if args.get("path"):
         params["path"] = args["path"]
-    logger.info(f"[ACP] git_diff staged={params['staged']}")
+    logger.debug(f"[ACP] git_diff staged={params['staged']}")
     return params
 
 
@@ -795,7 +803,7 @@ async def _build_git_stage_params(
     }
     if args.get("paths"):
         params["paths"] = args["paths"]
-    logger.info(f"[ACP] git_stage all={params['all']}")
+    logger.debug(f"[ACP] git_stage all={params['all']}")
     return params
 
 
@@ -810,7 +818,7 @@ async def _build_git_commit_params(
         "sessionId": session_id, "message": msg,
         "all": args.get("all", True), "amend": args.get("amend", False),
     }
-    logger.info(f"[ACP] git_commit all={params['all']} amend={params['amend']}")
+    logger.debug(f"[ACP] git_commit all={params['all']} amend={params['amend']}")
     return params
 
 
@@ -850,6 +858,7 @@ _ACP_PARAM_BUILDERS: dict[str, Any] = {
     "git/diff": _build_git_diff_params,
     "git/stage": _build_git_stage_params,
     "git/commit": _build_git_commit_params,
+    "ide/screenshot": _build_ide_screenshot_params,
 }
 
 

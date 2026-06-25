@@ -469,7 +469,7 @@ class AcpHandler:
     ):
         """LLM 调用 with 600s 超时 + cancel_event；加载/持久化多轮对话历史。"""
         # P1-12: 生成 trace_id 用于全链路日志追踪，便于跨模块定位单次 prompt 请求
-        trace_id = str(uuid.uuid4())[:8]
+        trace_id = str(uuid.uuid4())[:12]
         # 将模块级 logger 替换为绑定 trace_id 的本地副本，本作用域内所有日志自动带 trace_id
         _log = logger.bind(trace_id=trace_id)  # type: ignore[assignment]
         from app.services.llm.caller import call_llm_with_failover
@@ -607,14 +607,9 @@ class AcpHandler:
                 llm_messages = list(history) + [
                     {"role": "user", "content": user_text_for_llm}
                 ]
-                _log.info(
+                _log.debug(
                     f"[ACP-CTX] prompt history={len(history)} "
                     f"total={len(llm_messages)} session={self.session_id}"
-                )
-                _log.info(
-                    f"[ACP-PERF] round_start conn={self.conn_id} session={self.session_id} "
-                    f"primary_model={getattr(primary_model, 'model', None)} "
-                    f"fallback_model={getattr(fallback_model, 'model', None)}"
                 )
 
                 # 模型未配置时提前返回友好错误, 避免 call_llm_with_failover 瞬间返回
@@ -774,9 +769,9 @@ class AcpHandler:
         except Exception:
             logger.warning("[ACP-FLUSH] 发送失败 conn={} session={} len={}", self.conn_id, self.session_id, len(text))
         preview = text[:60].replace("\n", "\\n")
-        logger.info(
-            f"[ACP-FLUSH] conn={self.conn_id} session={self.session_id} "
-            f"len={len(text)} preview={preview!r}"
+        logger.debug(
+            "[ACP-FLUSH] conn={} session={} len={} preview={!r}",
+            self.conn_id, self.session_id, len(text), preview,
         )
 
     def _cancel_idle_task(self):
@@ -1005,6 +1000,9 @@ class AcpHandler:
             if self._closing:
                 return
             self._closing = True
+        # 清理前记录活跃资源数量，便于排查残留泄漏
+        logger.info("[ACP] cleanup: active_tasks={} pending_tools={} pending_requests={}",
+            len(self._active_tasks), len(self._pending_tools), len(self._pending_requests))
         self._cancel_idle_task()
         # 取消所有活跃任务 (dispatch + terminal streaming)
         for task in self._active_tasks.values():
@@ -1048,9 +1046,11 @@ class AcpHandler:
         }, ensure_ascii=False)
         # 关闭中不报 ERROR — "after websocket.close" 是预期的清理行为
         if self._closing:
-            logger.warning(f"[ACP] _send_error (closing) code={code} ref={error_ref} msg={message}")
+            logger.warning("[ACP] _send_error (closing) conn={} session={} code={} ref={} msg={}",
+                self.conn_id, self.session_id, code, error_ref, message)
         else:
-            logger.error(f"[ACP] _send_error code={code} ref={error_ref} msg={message}")
+            logger.error("[ACP] _send_error conn={} session={} code={} ref={} msg={}",
+                self.conn_id, self.session_id, code, error_ref, message)
         try:
             await asyncio.shield(self.ws.send_text(raw))
         except Exception:
@@ -1131,17 +1131,17 @@ class AcpHandler:
         }, ensure_ascii=False, default=str)
         logger.debug(f"[ACP-RAW-OUT] {raw}")
         t0 = time.perf_counter()
-        logger.info(
-            f"[ACP-PERF] send_request START session={self.session_id} method={method} "
-            f"timeout={timeout}s req_id={req_id}"
+        logger.debug(
+            "[ACP-PERF] send_request START session={} method={} timeout={}s req_id={}",
+            self.session_id, method, timeout, req_id,
         )
         try:
             await asyncio.shield(self.ws.send_text(raw))
             result = await asyncio.wait_for(future, timeout=timeout)
             elapsed = time.perf_counter() - t0
-            logger.info(
-                f"[ACP-PERF] send_request DONE session={self.session_id} method={method} "
-                f"elapsed={elapsed:.3f}s req_id={req_id}"
+            logger.debug(
+                "[ACP-PERF] send_request DONE session={} method={} elapsed={:.3f}s req_id={}",
+                self.session_id, method, elapsed, req_id,
             )
             # 熔断器: 记录成功
             if os.getenv("ACP_CIRCUIT_ENABLED", "true").lower() != "false":

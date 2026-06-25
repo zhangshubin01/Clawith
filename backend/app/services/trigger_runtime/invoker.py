@@ -10,6 +10,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.database import async_session
+from app.core.logging_config import new_trace_id
 from app.models.agent import Agent
 from app.models.trigger import AgentTrigger
 from app.services.trigger_runtime import (
@@ -93,6 +94,7 @@ async def invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTri
     from app.services.audit_logger import write_audit_log
     from app.services.llm import call_llm
 
+    new_trace_id()
     try:
         execution_ids = [
             uuid.UUID(str((t.config or {}).get("_execution_id")))

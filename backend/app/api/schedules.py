@@ -1,5 +1,7 @@
 """Schedule API — CRUD for agent cron jobs."""
 
+from loguru import logger
+
 import asyncio
 import uuid
 from datetime import datetime, timezone

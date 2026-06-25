@@ -1,9 +1,8 @@
 """Enterprise management API routes: LLM pool, enterprise info, approvals, audit logs."""
 
 import uuid
-import logging
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request
 from pydantic import BaseModel

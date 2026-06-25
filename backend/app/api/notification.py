@@ -1,5 +1,7 @@
 """Notification API — list, count, mark-read, and broadcast."""
 
+from loguru import logger
+
 import uuid
 from typing import Optional
 

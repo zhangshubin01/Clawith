@@ -1,5 +1,7 @@
 """Activity log API — view agent work history."""
 
+from loguru import logger
+
 import uuid
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func

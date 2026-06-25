@@ -11,6 +11,7 @@ for convenient access.
 from app.core.security import decrypt_data
 from app.config import get_settings
 from app.models.llm import LLMModel
+from loguru import logger
 
 # Re-export all client classes and functions from client.py
 from .client import (
@@ -191,6 +192,7 @@ def truncate_messages_with_pair_integrity(messages: list[dict], ctx_size: int) -
     orphaned_assistant_calls = assistant_call_ids - tool_call_ids
 
     if not orphaned_tools and not orphaned_assistant_calls:
+        logger.debug("[CTX-TRUNC] ctx_size={} messages={} no orphans", ctx_size, len(truncated))
         return truncated
 
     # Remove orphaned tool messages and assistant tool_calls entries
@@ -215,6 +217,8 @@ def truncate_messages_with_pair_integrity(messages: list[dict], ctx_size: int) -
         else:
             sanitized.append(msg)
 
+    logger.debug("[CTX-TRUNC] ctx_size={} messages={}→{} removed_tools={} removed_calls={}",
+        ctx_size, len(truncated), len(sanitized), len(orphaned_tools), len(orphaned_assistant_calls))
     return sanitized
 
 

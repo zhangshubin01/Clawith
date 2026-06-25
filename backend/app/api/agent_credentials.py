@@ -5,6 +5,8 @@ per agent. Sensitive fields (cookies_json) are encrypted at rest
 using AES-256-CBC and are NEVER returned in API responses.
 """
 
+from loguru import logger
+
 import json
 import uuid
 from datetime import datetime, timezone

@@ -3522,10 +3522,12 @@ async def execute_tool(
                 logger.warning(f"Failed to save tool error message to session: {_e}")
 
         _tool_elapsed = (time.perf_counter() - _tool_t0) * 1000
-        if _tool_elapsed > 200:
-            logger.info(f"[Tool] {tool_name} elapsed={_tool_elapsed:.0f}ms")
-        elif _tool_elapsed > 1000:
-            logger.warning(f"[Tool] 慢工具: {tool_name} elapsed={_tool_elapsed:.0f}ms")
+        _rlen = len(str(result)) if result else 0
+        logger.debug("[TOOL-PERF] tool={} elapsed={:.1f}ms result_len={}", tool_name, _tool_elapsed, _rlen)
+        if _tool_elapsed > 1000:
+            logger.warning("[TOOL-PERF] 慢工具: {} elapsed={:.0f}ms result_len={}", tool_name, _tool_elapsed, _rlen)
+        elif _tool_elapsed > 200:
+            logger.info("[TOOL-PERF] {} elapsed={:.0f}ms result_len={}", tool_name, _tool_elapsed, _rlen)
         return result
     except Exception as e:
         # #169 修复：区分网络超时（WARNING）与真正异常（ERROR）

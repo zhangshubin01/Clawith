@@ -1,5 +1,7 @@
 """Agent collaboration and template market API routes."""
 
+from loguru import logger
+
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status

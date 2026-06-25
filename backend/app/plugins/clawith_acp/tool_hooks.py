@@ -979,6 +979,7 @@ def install_acp_tool_hooks() -> None:
         "git_diff": "git/diff",
         "git_stage": "git/stage",
         "git_commit": "git/commit",
+        "ide_screenshot": "ide/screenshot",
     }
 
     async def _acp_aware_execute_tool(

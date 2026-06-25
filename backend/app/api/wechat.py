@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from loguru import logger
+
 import asyncio
 import uuid
 from datetime import datetime, timezone

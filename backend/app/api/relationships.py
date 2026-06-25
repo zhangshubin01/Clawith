@@ -1,5 +1,7 @@
 """Agent relationship management API — human + agent-to-agent."""
 
+from loguru import logger
+
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException

@@ -88,6 +88,7 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $http_host;
+        proxy_set_header X-Trace-Id $http_x_trace_id;
 
         # Keep WebSocket alive for long-running agent sessions (1 hour)
         proxy_read_timeout 3600s;

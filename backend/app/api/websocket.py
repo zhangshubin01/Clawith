@@ -230,9 +230,13 @@ async def websocket_chat(
     token: str = Query(...),
     session_id: str = Query(None),
     lang: str = Query("en"),
+    trace_id: str = Query(None),
 ):
     """WebSocket endpoint for real-time chat with an agent."""
     handler = WebSocketChatHandler(websocket, agent_id, token, session_id, lang)
+    if trace_id:
+        from app.core.logging_config import set_trace_id
+        set_trace_id(trace_id)
     await handler.run()
 
 
@@ -510,7 +514,7 @@ class WebSocketChatHandler:
 
             # Invoke LLM and stream response
             if effective_llm_model:
-                assistant_response, thinking_content, queued_messages = await self._run_llm_and_stream(
+                assistant_response, thinking_content, queued_messages, partial_text = await self._run_llm_and_stream(
                     effective_llm_model, is_onboarding_trigger
                 )
             else:
@@ -531,8 +535,19 @@ class WebSocketChatHandler:
             # Save assistant reply
             await self._save_assistant_reply(assistant_response, thinking_content)
 
-            # Final 'done' packet
-            await self.websocket.send_json({"type": "done", "role": "assistant", "content": assistant_response})
+            # 计算最终 done 消息内容：
+            # - 正常结束（LLM 通过 finish 工具返回）：使用 assistant_response（即 finish_call.content）。
+            #   与 DB 保存内容一致（_save_assistant_reply 使用 assistant_response）。
+            #   不包含 LLM 在 finish 调用前的思考过程文本或 on_chunk 流式草稿。
+            # - 异常终止（超时/中断/LLM 错误）：回退到流式累积的 partial_text。
+            if assistant_response and not any(
+                assistant_response.startswith(p)
+                for p in ("[LLM Error]", "[LLM call error]", "[Error]", "")
+            ):
+                done_content = assistant_response
+            else:
+                done_content = partial_text if partial_text else assistant_response
+            await self.websocket.send_json({"type": "done", "role": "assistant", "content": done_content})
 
             # Re-process any queued messages (if user sent something during generation)
             for qm in queued_messages:
@@ -680,7 +695,7 @@ class WebSocketChatHandler:
 
     async def _run_llm_and_stream(
         self, effective_llm_model: LLMModel, is_onboarding_trigger: bool
-    ) -> tuple[str, list[str], list[dict]]:
+    ) -> tuple[str, list[str], list[dict], str]:
         """Calls the LLM and streams response chunks to WebSocket."""
         start_gen = perf_counter()
         try:
@@ -753,7 +768,7 @@ class WebSocketChatHandler:
                 nonlocal finish_content_sent_len
                 tool_name = data.get("name", "")
 
-                # Stream finish tool content as real-time chunks
+                # 流式传输 finish 工具的 content 参数到前端
                 if tool_name == "finish":
                     raw_args = data.get("arguments", "")
                     if isinstance(raw_args, str) and raw_args:
@@ -761,7 +776,23 @@ class WebSocketChatHandler:
                         if len(current_content) > finish_content_sent_len:
                             delta = current_content[finish_content_sent_len:]
                             finish_content_sent_len = len(current_content)
-                            await stream_to_ws(delta)
+
+                            # 首次收到 finish 增量内容时，清理已累积的文本 chunk。
+                            # finish 工具是模型的权威最终答案，之前 round 通过 on_chunk
+                            # 流式输出的相同文本应被覆盖，防止 done_content 中文本重复。
+                            if finish_content_sent_len == len(delta):
+                                if partial_chunks:
+                                    logger.info(
+                                        "[WS] finish 工具开始流式，清除 {} 个已累积 chunk 以防止文本重复",
+                                        len(partial_chunks),
+                                    )
+                                partial_chunks.clear()
+
+                            # 直接将 finish 增量发送到前端，不经过 stream_to_ws。
+                            # 避免写入 partial_chunks 导致最终 done_content 包含 on_chunk 的冗余文本。
+                            # done_content 由 assistant_response（即 finish_call.content）提供，
+                            # 与 DB 保存内容一致（_save_assistant_reply 使用 assistant_response）。
+                            await self.websocket.send_json({"type": "chunk", "content": delta})
                     return
 
                 _ws_tools = {
@@ -917,6 +948,7 @@ class WebSocketChatHandler:
                 logger.info(f"[WS] LLM aborted, partial: {assistant_response[:80]}")
             else:
                 assistant_response = await llm_task
+                partial_text = "".join(partial_chunks).strip()
                 logger.info(f"[WS] LLM response: {assistant_response[:80]}")
 
             # Raise error on prefix for failover matching
@@ -931,14 +963,14 @@ class WebSocketChatHandler:
             # Post-success actions (last_active_at, quota usage increments, activity logs)
             await self._update_activity_and_quota(assistant_response)
 
-            return assistant_response, thinking_content, queued_messages
+            return assistant_response, thinking_content, queued_messages, partial_text
 
         except WebSocketDisconnect:
             raise
         except Exception as e:
             gen_duration = perf_counter() - start_gen
             logger.exception(f"[WS] LLM error after {gen_duration:.3f}s: {e}")
-            return f"[LLM call error] {str(e)[:200]}", [], []
+            return f"[LLM call error] {str(e)[:200]}", [], [], ""
 
     async def _inject_live_preview_and_workspace_metadata(self, data: dict):
         """Injects live previews and workspace panel activity tracking into tool results."""

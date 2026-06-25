@@ -10,11 +10,12 @@ Cookie export occurs automatically when the Take Control session ends.
 
 import asyncio
 import json
-import logging
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+
+from loguru import logger
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -28,7 +29,6 @@ from app.database import get_db
 from app.models.agent_credential import AgentCredential
 from app.models.user import User
 
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agents/{agent_id}/control", tags=["agentbay-control"])
 

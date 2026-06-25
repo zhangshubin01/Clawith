@@ -1815,7 +1815,7 @@ class JSONRPCRouter:
             return
 
         # ★ NEW-046: 生成 trace_id 贯穿三端日志（backend → IDE → Web）
-        _trace_id = str(uuid.uuid4())[:8]
+        _trace_id = str(uuid.uuid4())[:12]
         self._current_trace_id = _trace_id
 
         logger.info(
@@ -3168,7 +3168,12 @@ class JSONRPCRouter:
                 reply = (reply or "") + "\n\n> ⚠️ 模型配额已耗尽（HTTP 429），请稍后重试或联系管理员。"
             else:
                 finish_reason = "error"
-            await self._send_chat_finish(session_id, finish_reason, reply, request_id, status_code=error_status_code)
+            # 流式已完整推送的文本不在 chat/finish 中重复发给 IDE，避免 MarkdownStreamPanel 重复渲染导致尾部重叠
+            if _sync_plan.branch in ("skip_equal", "tail"):
+                finish_reply = ""
+            else:
+                finish_reply = reply or ""
+            await self._send_chat_finish(session_id, finish_reason, finish_reply, request_id, status_code=error_status_code)
 
             # 合并本轮搜索结果为一张摘要卡（边搜边更新后的最终 FINISHED）
             await self._finalize_search_summary(session_id, request_id)
@@ -3393,7 +3398,7 @@ class JSONRPCRouter:
             )
             logger.info("[LSP4J] tool/invoke: {} 调用成功", tool_name)
         except websockets.exceptions.ConnectionClosed as e:
-            logger.exception("[LSP4J] tool/invoke: {} 调用失败", tool_name)
+            logger.debug("[LSP4J] tool/invoke: {} 调用失败 (连接已关闭): {}", tool_name, e)
             await self._send_response(
                 msg_id,
                 {

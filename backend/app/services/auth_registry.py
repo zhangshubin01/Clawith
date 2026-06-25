@@ -3,9 +3,9 @@
 This module provides a centralized way to manage and instantiate auth providers.
 """
 
-import logging
 from typing import Any
 
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,7 +18,6 @@ from app.services.auth_provider import (
 )
 from app.services.identity_provider_lookup import get_preferred_identity_provider
 
-logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # 需要解密的 config 敏感字段（与 enterprise.py 中 _SENSITIVE_CONFIG_KEYS 保持一致）

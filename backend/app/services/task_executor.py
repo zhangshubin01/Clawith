@@ -11,6 +11,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.config import get_settings
+from app.core.logging_config import new_trace_id
 from app.database import async_session
 from app.models.agent import Agent
 from app.models.task import Task, TaskLog
@@ -29,6 +30,7 @@ async def execute_task(task_id: uuid.UUID, agent_id: uuid.UUID) -> None:
       - supervision tasks: pending → doing → pending (stays active, just logs result)
     """
     logger.info(f"[LLM] Starting task {task_id} for agent {agent_id}")
+    new_trace_id()
 
     # Step 1: Mark as doing
     async with async_session() as db:

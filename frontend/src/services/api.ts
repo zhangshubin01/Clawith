@@ -1,6 +1,7 @@
 /** API service layer */
 
 import type { Agent, TokenResponse, User, Task, ChatMessage } from '../types';
+import { setTraceId } from '../utils/logger';
 
 const API_BASE = '/api';
 
@@ -21,6 +22,9 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
     };
 
     const res = await fetch(`${API_BASE}${url}`, { ...options, headers });
+    // 从响应头提取后端 trace_id，注入前端 logger 实现三端日志关联
+    const backendTraceId = res.headers.get('X-Trace-Id');
+    if (backendTraceId) setTraceId(backendTraceId);
 
     if (!res.ok) {
         // Auto-logout on expired/invalid token (but not on auth endpoints — let them show errors)

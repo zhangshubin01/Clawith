@@ -8,7 +8,6 @@ Supports both:
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,9 +15,9 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, make_msgid
 
-from app.core.email import send_smtp_email
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from app.core.email import send_smtp_email
 
 
 @dataclass(slots=True)

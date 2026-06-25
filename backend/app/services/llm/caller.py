@@ -619,13 +619,18 @@ async def call_llm(
         _accumulated_usage.add(_usage_this_round)
         _unsaved_usage.add(_usage_this_round)
 
-        # Plain assistant text is not a stop condition. The model must finish
-        # explicitly via finish(content=...).
+        # LLM 输出纯文本（无工具调用）即视为最终答案。
+        # 对齐 OpenAI Agents SDK: 文本 + 无工具调用 = final_output，不强制 finish 工具。
+        # 此修改同时修复两个问题：
+        #   1. 流式文本重复 — 不再有 Round 2 通过 finish 重发相同的 chunk 到前端
+        #   2. FAILOVER-CANCEL — 正常文本不再走 is_retryable_error 触发 Canceled 误导日志
         if not response.tool_calls:
             if response.content:
                 api_messages.append(LLMMessage(role="assistant", content=response.content))
-            api_messages.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
-            continue
+            if agent_id and _unsaved_usage.total_tokens > 0:
+                await record_token_usage(agent_id, _unsaved_usage)
+            await client.close()
+            return response.content or ""
 
         # Execute tool calls
         _session_elapsed = time.perf_counter() - _session_t0
@@ -779,6 +784,12 @@ async def call_llm_with_failover(
     )
 
     # Check if we need to failover
+    # 成功返回的文本（非错误前缀）直接返回，不需要 failover。
+    # 避免正常回复（如 "我是 WL4，你的 Android 工程师"）触发 Canceled 误导日志。
+    if not (primary_result.startswith("[LLM Error]") or
+            primary_result.startswith("[LLM call error]") or
+            primary_result.startswith("[Error]")):
+        return primary_result
     if not is_retryable_error(primary_result):
         logger.warning(f"[Failover] Canceled: Primary model returned a non-retryable error: {primary_result[:150]}")
         return primary_result
@@ -1027,11 +1038,14 @@ async def call_agent_llm_with_tools(
                 _accumulated_usage.add(_usage_this_round)
                 _unsaved_usage.add(_usage_this_round)
 
+                # 纯文本即最终答案，对齐 OpenAI Agents SDK
                 if not response.tool_calls:
                     if response.content:
                         api_messages.append(LLMMessage(role="assistant", content=response.content))
-                    api_messages.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
-                    continue
+                    if agent_id and _unsaved_usage.total_tokens > 0:
+                        await record_token_usage(agent_id, _unsaved_usage)
+                    await client.close()
+                    return response.content or "", True, tool_executed
 
                 # Execute tool calls
                 sanitized_tool_calls, retry_instruction = _sanitize_tool_calls_for_context(response.tool_calls)

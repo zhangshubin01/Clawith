@@ -1,5 +1,7 @@
 """Triggers REST API — CRUD endpoints for the Aware page frontend."""
 
+from loguru import logger
+
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException

@@ -1,5 +1,7 @@
 """Public pages API — serves published HTML without authentication."""
 
+from loguru import logger
+
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request

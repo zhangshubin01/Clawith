@@ -326,7 +326,7 @@ class FeishuAuthProvider(BaseAuthProvider):
                 self.FEISHU_USER_INFO_URL, headers={"Authorization": f"Bearer {access_token}"}
             )
             info_data = info_resp.json().get("data", {})
-            logger.info(f"Feishu user info: {info_data}")
+            logger.info("[Auth] Feishu 认证成功 union_id={}", info_data.get("union_id", "unknown"))
 
             return ExternalUserInfo(
                 provider_type=self.provider_type,
@@ -424,7 +424,7 @@ class DingTalkAuthProvider(BaseAuthProvider):
                 raise Exception(f"Failed to fetch user info: {err_msg}")
 
             # DingTalk new OAuth2 returns openId, unionId, nick, avatarUrl, mobile, email
-            logger.info(f"DingTalk user info: {info_data}")
+            logger.info("[Auth] DingTalk 认证成功 openId={}", info_data.get("openId") or info_data.get("userid", "unknown"))
             return ExternalUserInfo(
                 provider_type=self.provider_type,
                 provider_union_id=info_data.get("unionId"),

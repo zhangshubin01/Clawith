@@ -4,6 +4,8 @@ Public endpoints for self-service company creation and joining.
 Admin endpoints for platform-level company management.
 """
 
+from loguru import logger
+
 import re
 import secrets
 import uuid

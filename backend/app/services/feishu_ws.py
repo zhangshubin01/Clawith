@@ -353,7 +353,7 @@ class FeishuWSManager:
             try:
                 await client._disconnect()
             except Exception as e:
-                logger.error(f"[Feishu-WS] Error disconnecting client for {agent_id}: {e}")
+                logger.debug("[Feishu-WS] Error disconnecting client for {}: {}", agent_id, e)
 
     async def start_all(self):
         """Start WS clients for all configured Feishu agents."""

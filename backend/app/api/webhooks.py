@@ -15,6 +15,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.core.events import get_redis
+from app.core.logging_config import new_trace_id
 from app.database import async_session
 from app.models.agent import Agent
 from app.models.audit import AuditLog
@@ -54,6 +55,7 @@ async def receive_webhook(token: str, request: Request):
     - Payload size limit (64KB)
     """
     # Rate limiting — use per-agent limit if available
+    new_trace_id()
     hit_count = await _record_and_count_hits(token)
 
     # We'll check per-agent rate limit after finding the trigger below.

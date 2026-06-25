@@ -1,5 +1,7 @@
 """Structured Focus API for Aware."""
 
+from loguru import logger
+
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException

@@ -330,10 +330,10 @@ export default function TakeControlPanel({ agentId, sessionId, onClose, envType 
             );
             // Pass the last screenshot to the parent so live preview updates
             if (lastScreenshotRef.current && onLastScreenshot) {
-                console.log('[TakeControl] Passing last screenshot to parent on complete, size:', lastScreenshotRef.current.length);
+                console.debug('[TakeControl] Passing last screenshot to parent on complete, size:', lastScreenshotRef.current.length);
                 onLastScreenshot(lastScreenshotRef.current);
             } else {
-                console.log('[TakeControl] No screenshot to pass: ref=', !!lastScreenshotRef.current, 'callback=', !!onLastScreenshot);
+                console.debug('[TakeControl] No screenshot to pass: ref=', !!lastScreenshotRef.current, 'callback=', !!onLastScreenshot);
             }
             setTimeout(onClose, 1200);
         } catch (err: any) {
@@ -349,10 +349,10 @@ export default function TakeControlPanel({ agentId, sessionId, onClose, envType 
         if (!locked) {
             // Still pass the last screenshot even if not locked
             if (lastScreenshotRef.current && onLastScreenshot) {
-                console.log('[TakeControl] Passing last screenshot to parent on cancel (unlocked), size:', lastScreenshotRef.current.length);
+                console.debug('[TakeControl] Passing last screenshot to parent on cancel (unlocked), size:', lastScreenshotRef.current.length);
                 onLastScreenshot(lastScreenshotRef.current);
             } else {
-                console.log('[TakeControl] No screenshot to pass on cancel (unlocked): ref=', !!lastScreenshotRef.current, 'callback=', !!onLastScreenshot);
+                console.debug('[TakeControl] No screenshot to pass on cancel (unlocked): ref=', !!lastScreenshotRef.current, 'callback=', !!onLastScreenshot);
             }
             onClose();
             return;
@@ -381,10 +381,10 @@ export default function TakeControlPanel({ agentId, sessionId, onClose, envType 
         } catch {}
         // Pass the last screenshot to the parent so live preview updates
         if (lastScreenshotRef.current && onLastScreenshot) {
-            console.log('[TakeControl] Passing last screenshot to parent on cancel (locked), size:', lastScreenshotRef.current.length);
+            console.debug('[TakeControl] Passing last screenshot to parent on cancel (locked), size:', lastScreenshotRef.current.length);
             onLastScreenshot(lastScreenshotRef.current);
         } else {
-            console.log('[TakeControl] No screenshot to pass on cancel (locked): ref=', !!lastScreenshotRef.current, 'callback=', !!onLastScreenshot);
+            console.debug('[TakeControl] No screenshot to pass on cancel (locked): ref=', !!lastScreenshotRef.current, 'callback=', !!onLastScreenshot);
         }
         onClose();
     }, [locked, agentId, sessionId, onClose, onLastScreenshot, flashStatus]);

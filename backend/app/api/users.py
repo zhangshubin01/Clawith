@@ -1,5 +1,7 @@
 """用户管理 REST API — 用户列表、搜索、创建、邀请码管理。"""
 
+from loguru import logger
+
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
