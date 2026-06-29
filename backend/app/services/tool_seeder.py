@@ -462,7 +462,7 @@ BUILTIN_TOOLS = [
     {
         "name": "send_channel_file",
         "display_name": "Send File",
-        "description": "Send a file to a specific person or back to the current conversation. If member_name is provided, the system resolves the recipient across all connected channels (Feishu, Slack, etc.) and delivers the file via the appropriate channel.",
+        "description": "Send a file to a human from query_roster or back to the current conversation. Use query_roster(member_type='human') first, then pass target_member_id.",
         "category": "communication",
         "icon": "📎",
         "is_default": True,
@@ -470,7 +470,8 @@ BUILTIN_TOOLS = [
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "Workspace-relative path to the file"},
-                "member_name": {"type": "string", "description": "Name of the person to send the file to. The system looks up this person across all configured channels and delivers via the appropriate one."},
+                "target_member_id": {"type": "string", "description": "Stable human target_member_id returned by query_roster."},
+                "channel": {"type": "string", "enum": ["feishu", "slack"], "description": "Optional channel override when the roster member has multiple reachable providers."},
                 "message": {"type": "string", "description": "Optional message to accompany the file"},
             },
             "required": ["file_path"],
@@ -526,18 +527,18 @@ BUILTIN_TOOLS = [
     {
         "name": "send_message_to_agent",
         "display_name": "Agent Message",
-        "description": "Send a message to a digital employee colleague. Decision guide: target needs to DO WORK and return results? → task_delegate. Just FYI? → notify. Quick factual question? → consult. When unsure, prefer task_delegate.",
+        "description": "Send a message to a digital employee colleague. Use query_roster first to get target_agent_id. Decision guide: target needs to DO WORK and return results? → task_delegate. Just FYI? → notify. Quick factual question? → consult. When unsure, prefer task_delegate.",
         "category": "communication",
         "icon": "🤖",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "agent_name": {"type": "string", "description": "Target agent name"},
+                "target_agent_id": {"type": "string", "description": "Target digital employee ID returned by query_roster"},
                 "message": {"type": "string", "description": "Message content"},
                 "msg_type": {"type": "string", "enum": ["notify", "consult", "task_delegate"], "description": "(1) Target needs to DO WORK and return results? → task_delegate. (2) Just FYI? → notify. (3) Quick factual question? → consult. When unsure, prefer task_delegate."},
             },
-            "required": ["agent_name", "message", "msg_type"],
+            "required": ["target_agent_id", "message", "msg_type"],
         },
         "config": {},
         "config_schema": {},
@@ -545,18 +546,18 @@ BUILTIN_TOOLS = [
     {
         "name": "send_file_to_agent",
         "display_name": "Agent File Transfer",
-        "description": "Send a workspace file to another digital employee. The file is copied to the target agent's workspace/inbox/files/ and an inbox note is created.",
+        "description": "Send a workspace file to another digital employee. Use query_roster first to get target_agent_id. The file is copied to the target agent's workspace/inbox/files/ and an inbox note is created.",
         "category": "communication",
         "icon": "📤",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "agent_name": {"type": "string", "description": "Target agent name"},
+                "target_agent_id": {"type": "string", "description": "Target digital employee ID returned by query_roster"},
                 "file_path": {"type": "string", "description": "Workspace-relative source file path"},
                 "message": {"type": "string", "description": "Optional delivery note"},
             },
-            "required": ["agent_name", "file_path"],
+            "required": ["target_agent_id", "file_path"],
         },
         "config": {},
         "config_schema": {},

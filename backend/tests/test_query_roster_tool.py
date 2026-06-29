@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services import agent_tools
+from app.services import agent_tools, tool_seeder
 
 
 def _make_agent(**overrides):
@@ -87,6 +87,17 @@ def test_a2a_tools_expose_target_agent_id_not_agent_name():
 
     for tool_name in ("send_message_to_agent", "send_file_to_agent"):
         schema = tools[tool_name]["parameters"]
+        assert "target_agent_id" in schema["properties"]
+        assert "target_agent_id" in schema["required"]
+        assert "agent_name" not in schema["properties"]
+        assert "agent_name" not in schema["required"]
+
+
+def test_seeded_a2a_tools_expose_target_agent_id_not_agent_name():
+    tools = {tool["name"]: tool for tool in tool_seeder.BUILTIN_TOOLS}
+
+    for tool_name in ("send_message_to_agent", "send_file_to_agent"):
+        schema = tools[tool_name]["parameters_schema"]
         assert "target_agent_id" in schema["properties"]
         assert "target_agent_id" in schema["required"]
         assert "agent_name" not in schema["properties"]

@@ -395,6 +395,25 @@ async def test_missing_target_agent_id_returns_error():
     assert "❌" in result
 
 
+@pytest.mark.asyncio
+async def test_legacy_agent_name_returns_roster_routing_error():
+    """Memory or old tasks using agent_name must be routed back through query_roster."""
+    from app.services.agent_tools import _send_message_to_agent
+
+    result = await _send_message_to_agent(
+        uuid.uuid4(),
+        {
+            "agent_name": "Native Research Partner",
+            "message": "Hello",
+            "msg_type": "notify",
+        },
+    )
+
+    assert "agent_name is no longer supported" in result
+    assert "query_roster" in result
+    assert "target_agent_id" in result
+
+
 def test_company_auto_contact_helper_rejects_non_company_boundaries():
     """Phase-1 company auto-contact only applies inside tenant, not self, and not expired."""
     from app.core.permissions import can_auto_contact_company_agent

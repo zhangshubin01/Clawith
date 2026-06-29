@@ -581,7 +581,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_channel_file",
-            "description": "Send a file to a specific person or back to the current conversation. If member_name is provided, the system resolves the recipient across all connected channels (Feishu, Slack, etc.) and delivers the file via the appropriate channel. If member_name is omitted, the file is sent back through the current conversation channel.",
+            "description": "Send a file to a human from query_roster or back to the current conversation. Use query_roster(member_type='human') first, then pass target_member_id. If target_member_id is omitted, the file is sent back through the current conversation channel.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -589,9 +589,14 @@ AGENT_TOOLS = [
                         "type": "string",
                         "description": "Workspace-relative path to the file, e.g. workspace/report.md",
                     },
-                    "member_name": {
+                    "target_member_id": {
                         "type": "string",
-                        "description": "Name of the person to send the file to. If provided, the system looks up this person across all configured channels and delivers via the appropriate one.",
+                        "description": "Stable human target_member_id returned by query_roster.",
+                    },
+                    "channel": {
+                        "type": "string",
+                        "enum": ["feishu", "slack"],
+                        "description": "Optional channel override when the roster member has multiple reachable providers.",
                     },
                     "message": {
                         "type": "string",
@@ -2165,6 +2170,30 @@ def _strip_a2a_msg_type(tools: list[dict]) -> list[dict]:
     return result
 
 
+_CANONICAL_LLM_TOOL_NAMES = {
+    "send_message_to_agent",
+    "send_file_to_agent",
+    "send_platform_message",
+    "send_channel_message",
+    "send_channel_file",
+    "query_roster",
+}
+
+
+def _canonicalize_llm_tool(tool_def: dict) -> dict:
+    """Replace stale DB tool schemas with the current model-facing contract."""
+    import copy
+
+    name = tool_def.get("function", {}).get("name")
+    if name not in _CANONICAL_LLM_TOOL_NAMES:
+        return tool_def
+    canonical = next(
+        (tool for tool in AGENT_TOOLS if tool.get("function", {}).get("name") == name),
+        None,
+    )
+    return copy.deepcopy(canonical) if canonical else tool_def
+
+
 async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
     """Load enabled tools for an agent from DB (OpenAI function-calling format).
 
@@ -2277,6 +2306,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                         "parameters": t.parameters_schema or {"type": "object", "properties": {}},
                     },
                 }
+                tool_def = _canonicalize_llm_tool(tool_def)
                 # Defensive dedup: skip if this name was already added.
                 # Normally the UNIQUE constraint on tool.name prevents duplicate
                 # rows, but old DB dumps (pre-constraint) may have them. Without
@@ -4032,16 +4062,22 @@ async def _send_channel_file(agent_id: uuid.UUID, ws: Path, arguments: dict) -> 
     """Send a file to a person or back to the current channel.
     
     Priority:
-    1. If member_name is provided, resolve the recipient across all configured channels
-       and deliver via the appropriate one (Feishu, Slack, etc.).
+    1. If target_member_id is provided, deliver via that roster member's channel.
     2. If channel_file_sender ContextVar is set (channel-initiated), use it directly.
     3. Fall back to web chat download URL when no explicit recipient is requested.
     """
     rel_path = arguments.get("file_path", "").strip()
     accompany_msg = arguments.get("message", "")
     member_name = (arguments.get("member_name") or "").strip()
+    target_member_id = (arguments.get("target_member_id") or "").strip()
+    target_channel = _normalize_roster_provider_type(arguments.get("channel"))
     if not rel_path:
         return "Error: file_path is required"
+    if member_name and not target_member_id:
+        return (
+            "❌ member_name is no longer supported for send_channel_file. "
+            "Call query_roster(member_type=\"human\", query=\"...\") first, then retry with target_member_id."
+        )
 
     # Resolve file path within agent workspace
     file_path = (ws / rel_path).resolve()
@@ -4053,14 +4089,14 @@ async def _send_channel_file(agent_id: uuid.UUID, ws: Path, arguments: dict) -> 
     if not file_path.exists():
         return f"Error: File not found: {rel_path}"
 
-    # Priority 1: explicit recipient - resolve member across channels
-    if member_name:
-        result = await _send_file_to_recipient(agent_id, file_path, member_name, accompany_msg)
-        if result:
-            return result
-        return (
-            f"Failed to send file to '{member_name}': recipient not reachable via configured channels. "
-            "Use send_message_to_agent for digital employees, or omit member_name to return a download link."
+    # Priority 1: explicit recipient from roster
+    if target_member_id:
+        return await _send_file_to_human_target(
+            agent_id,
+            file_path,
+            target_member_id,
+            target_channel,
+            accompany_msg,
         )
 
     # Priority 2: channel-initiated (ContextVar set by channel webhook handler)
@@ -4089,80 +4125,76 @@ async def _send_channel_file(agent_id: uuid.UUID, ws: Path, arguments: dict) -> 
     return msg
 
 
-async def _send_file_to_recipient(
-    agent_id: uuid.UUID, file_path: Path, member_name: str, message: str = ""
-) -> str | None:
-    """Resolve a recipient by name and send file via their reachable channel.
-    
-    Checks Feishu and Slack channels configured for this agent.
-    Returns a result string, or None if no channel found.
-    """
+async def _send_file_to_human_target(
+    agent_id: uuid.UUID,
+    file_path: Path,
+    target_member_id: str,
+    target_channel: str | None,
+    message: str = "",
+) -> str:
+    """Send a file to an already selected human roster target."""
     from app.models.channel_config import ChannelConfig
 
     async with async_session() as db:
-        # Load all channel configs for this agent
+        target, error = await _resolve_roster_human_target(
+            db,
+            agent_id,
+            target_member_id=target_member_id,
+            provider_type=target_channel,
+        )
+        if error:
+            return error
+
         result = await db.execute(
             select(ChannelConfig).where(ChannelConfig.agent_id == agent_id)
         )
         configs = {c.channel_type: c for c in result.scalars().all()}
 
-    # --- Try Feishu ---
-    feishu_config = configs.get("feishu")
-    if feishu_config:
-        feishu_result = await _send_file_via_feishu(agent_id, feishu_config, file_path, member_name, message)
-        if feishu_result:
-            return feishu_result
+    target_member = target.member
+    display_name = target_member.name or target_member_id
+    provider_type = target.provider_type
+    if not provider_type and (target_member.external_id or target_member.open_id):
+        provider_type = "feishu"
 
-    # --- Try Slack ---
-    slack_config = configs.get("slack")
-    if slack_config:
-        slack_result = await _send_file_via_slack(agent_id, slack_config, file_path, member_name, message)
-        if slack_result:
-            return slack_result
+    if provider_type == "feishu":
+        config = configs.get("feishu")
+        if not config:
+            return "❌ This agent has no Feishu channel configured"
+        if target_member.external_id:
+            return await _send_file_via_feishu_resolved(
+                agent_id, config, file_path, display_name, target_member.external_id, "user_id", message
+            )
+        if target_member.open_id:
+            return await _send_file_via_feishu_resolved(
+                agent_id, config, file_path, display_name, target_member.open_id, "open_id", message
+            )
+        return f"❌ {display_name} has no Feishu user_id/open_id."
 
-    return None  # No channel could reach this recipient
+    if provider_type == "slack":
+        config = configs.get("slack")
+        if not config:
+            return "❌ This agent has no Slack channel configured"
+        slack_user_id = target_member.external_id or target_member.open_id or target_member.unionid
+        if not slack_user_id:
+            return f"❌ {display_name} has no Slack user id."
+        return await _send_file_via_slack_user_id(agent_id, config, file_path, display_name, slack_user_id, message)
 
-
-async def _resolve_feishu_recipient(agent_id: uuid.UUID, config, member_name: str) -> tuple[str, str] | None:
-    """Resolve a Feishu recipient by name. Returns (receive_id, id_type) or None."""
-    # 1. Try feishu_user_search (checks cache, OrgMember, User table)
-    import re as _re
-    search_result = await _feishu_user_search(agent_id, {"name": member_name})
-    
-    uid_match = _re.search(r'user_id: `([A-Za-z0-9]+)`', search_result)
-    oid_match = _re.search(r'open_id: `(ou_[A-Za-z0-9]+)`', search_result)
-    
-    if uid_match:
-        return (uid_match.group(1), "user_id")
-    if oid_match:
-        return (oid_match.group(1), "open_id")
-    
-    # 2. Try AgentRelationship
-    from app.models.org import AgentRelationship
-    from sqlalchemy.orm import selectinload
-    async with async_session() as db:
-        result = await db.execute(
-            select(AgentRelationship)
-            .where(AgentRelationship.agent_id == agent_id)
-            .options(selectinload(AgentRelationship.member))
-        )
-        for r in result.scalars().all():
-            if r.member and r.member.name == member_name:
-                if r.member.external_id:
-                    return (r.member.external_id, "user_id")
-                if r.member.open_id:
-                    return (r.member.open_id, "open_id")
-                break
-    return None
+    return (
+        f"❌ File delivery via {provider_type or 'this channel'} is not supported yet. "
+        "Use send_channel_message to send a download link, or omit target_member_id to return a link here."
+    )
 
 
-async def _send_file_via_feishu(agent_id, config, file_path: Path, member_name: str, message: str) -> str | None:
-    """Send file to a person via Feishu. Returns result string or None."""
-    recipient = await _resolve_feishu_recipient(agent_id, config, member_name)
-    if not recipient:
-        return None
-    
-    receive_id, id_type = recipient
+async def _send_file_via_feishu_resolved(
+    agent_id,
+    config,
+    file_path: Path,
+    display_name: str,
+    receive_id: str,
+    id_type: str,
+    message: str,
+) -> str:
+    """Send file to a resolved Feishu recipient."""
     from app.services.feishu_service import feishu_service
     try:
         await feishu_service.upload_and_send_file(
@@ -4171,7 +4203,7 @@ async def _send_file_via_feishu(agent_id, config, file_path: Path, member_name: 
             receive_id_type=id_type,
             accompany_msg=message,
         )
-        return f"File '{file_path.name}' sent to {member_name} via Feishu."
+        return f"File '{file_path.name}' sent to {display_name} via Feishu."
     except Exception as e:
         # If upload fails, try sending a download link as fallback
         import json as _j
@@ -4197,39 +4229,27 @@ async def _send_file_via_feishu(agent_id, config, file_path: Path, member_name: 
                 _j.dumps({"text": "\n\n".join(parts)}, ensure_ascii=False),
                 receive_id_type=id_type,
             )
-            return f"File upload to Feishu failed, sent download link to {member_name} instead."
+            return f"File upload to Feishu failed, sent download link to {display_name} instead."
         except Exception:
-            return f"Failed to send file to {member_name} via Feishu: {e}"
+            return f"Failed to send file to {display_name} via Feishu: {e}"
 
 
-async def _send_file_via_slack(agent_id, config, file_path: Path, member_name: str, message: str) -> str | None:
-    """Send file to a person via Slack DM. Returns result string or None."""
+async def _send_file_via_slack_user_id(
+    agent_id,
+    config,
+    file_path: Path,
+    display_name: str,
+    slack_user_id: str,
+    message: str,
+) -> str:
+    """Send file to a resolved Slack user id."""
     import httpx
     bot_token = config.app_secret or ""
     if not bot_token:
-        return None
+        return "❌ This agent has no Slack bot token configured"
     
-    # Resolve Slack user by name
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                "https://slack.com/api/users.list",
-                headers={"Authorization": f"Bearer {bot_token}"},
-                params={"limit": 200},
-            )
-            data = resp.json()
-            if not data.get("ok"):
-                return None
-            slack_user_id = None
-            for u in data.get("members", []):
-                profile = u.get("profile", {})
-                display = profile.get("display_name", "") or profile.get("real_name", "") or u.get("real_name", "")
-                if display == member_name or u.get("name") == member_name:
-                    slack_user_id = u.get("id")
-                    break
-            if not slack_user_id:
-                return None
-            
             # Open a DM channel
             dm_resp = await client.post(
                 "https://slack.com/api/conversations.open",
@@ -4238,7 +4258,7 @@ async def _send_file_via_slack(agent_id, config, file_path: Path, member_name: s
             )
             dm_data = dm_resp.json()
             if not dm_data.get("ok"):
-                return None
+                return f"Slack DM open failed: {dm_data.get('error')}"
             channel_id = dm_data["channel"]["id"]
             
             # Upload file
@@ -4260,7 +4280,7 @@ async def _send_file_via_slack(agent_id, config, file_path: Path, member_name: s
             )
             if not complete.json().get("ok"):
                 return f"Slack file upload complete failed: {complete.json().get('error')}"
-            return f"File '{file_path.name}' sent to {member_name} via Slack."
+            return f"File '{file_path.name}' sent to {display_name} via Slack."
     except Exception as e:
         return f"Failed to send file via Slack: {e}"
 
@@ -6115,150 +6135,23 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
 
     if not message_text:
         return "❌ Please provide message content"
-    if not target_member_id and not member_name and not direct_user_id:
-        return "❌ Please provide target_member_id, member_name, or user_id"
+    if (member_name or direct_user_id) and not target_member_id:
+        return (
+            "❌ send_feishu_message is a legacy shortcut and no longer accepts member_name or user_id. "
+            "Call query_roster(member_type=\"human\", query=\"...\") first, then retry with "
+            "send_channel_message(target_member_id=\"...\", channel=\"feishu\", message=\"...\")."
+        )
+    if not target_member_id:
+        return "❌ Please provide target_member_id from query_roster, or use send_channel_message for Feishu."
 
     return await _send_channel_message(
         agent_id,
         {
             "target_member_id": target_member_id,
-            "provider_user_id": direct_user_id,
-            "member_name": member_name,
             "message": message_text,
             "channel": "feishu",
         },
     )
-
-    try:
-        from app.services.feishu_service import FeishuAPIError, feishu_service
-        from sqlalchemy.orm import selectinload
-
-        async with async_session() as db:
-            # ── Shortcut: if caller provided user_id directly ──
-            config_result = await db.execute(
-                select(ChannelConfig).where(ChannelConfig.agent_id == agent_id, ChannelConfig.channel_type == "feishu")
-            )
-            config = config_result.scalar_one_or_none()
-            if not config:
-                return "❌ This agent has no Feishu channel configured"
-            if direct_user_id and not member_name:
-                rel_result = await db.execute(
-                    select(AgentRelationship)
-                    .join(OrgMember, AgentRelationship.member_id == OrgMember.id)
-                    .where(
-                        AgentRelationship.agent_id == agent_id,
-                        (OrgMember.external_id == direct_user_id) | (OrgMember.open_id == direct_user_id),
-                        OrgMember.status == "active",
-                    )
-                    .options(selectinload(AgentRelationship.member))
-                )
-                direct_rel = rel_result.scalars().first()
-                if not direct_rel:
-                    return "❌ Recipient is not in your active relationship network"
-                status_info = await evaluate_human_relationship_status(db, direct_rel)
-                if status_info["access_status"] != "active":
-                    return f"❌ Relationship to recipient is not active ({status_info['access_status_reason'] or 'restricted'})"
-                try:
-                    resp = await feishu_service.send_message(
-                        config.app_id, config.app_secret,
-                        receive_id=direct_user_id, msg_type="text",
-                        content=json.dumps({"text": message_text}, ensure_ascii=False),
-                        receive_id_type="user_id",
-                    )
-                    if resp.get("code") == 0:
-                        # Save to history session
-                        await _save_outgoing_to_feishu_session(direct_user_id)
-                        return f"✅ 消息已发送（user_id: {direct_user_id}）"
-                    return f"❌ 发送失败：{resp.get('msg')} (code {resp.get('code')})"
-                except FeishuAPIError as user_id_err:
-                    logger.info(f"❌ 发送失败(user_id): {user_id_err.msg}")
-                    return f"❌ 飞书发送失败：{user_id_err.user_message}"
-
-            # Find the relationship member by name
-            result = await db.execute(
-                select(AgentRelationship)
-                .where(AgentRelationship.agent_id == agent_id)
-                .options(selectinload(AgentRelationship.member))
-            )
-            rels = result.scalars().all()
-
-            target_member = None
-            for r in rels:
-                status_info = await evaluate_human_relationship_status(db, r)
-                if r.member and status_info["access_status"] == "active" and r.member.name == member_name:
-                    target_member = r.member
-                    break
-
-            if not target_member:
-                logger.info(f"❌ {member_name} has no Feishu user_id in relationship")   
-                return f"❌ {member_name} 不是我的关系"
-                
-            logger.info(f"target_member={target_member.external_id}, {target_member.open_id}, {target_member.email}, {target_member.phone}")
-            if not target_member.external_id:
-                logger.error(f"❌ {member_name} has no linked Feishu user_id")
-                return f"❌ {member_name} 没有关联可用的飞书 user_id"
-
-            content = json.dumps({"text": message_text}, ensure_ascii=False)
-
-            async def _try_send(app_id: str, app_secret: str, receive_id: str, id_type: str = "user_id") -> dict:
-                return await feishu_service.send_message(
-                    app_id, app_secret,
-                    receive_id=receive_id, msg_type="text",
-                    content=content, receive_id_type=id_type,
-                )
-
-            async def _save_outgoing_to_feishu_session(feishu_user_id: str):
-                """Save the outgoing message to the Feishu P2P chat session."""
-                try:
-                    from datetime import datetime as _dt, timezone as _tz
-
-
-                    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-                    agent_obj = agent_r.scalar_one_or_none()
-                    creator_id = agent_obj.creator_id if agent_obj else agent_id
-
-                    # Get or create platform user from OrgMember (unified logic)
-                    platform_user = await get_platform_user_by_org_member(
-                        db=db,
-                        org_member=target_member,
-                        agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
-                    )
-                    user_id = platform_user.id
-
-                    ext_conv_id = f"feishu_p2p_{feishu_user_id}"
-                    sess = await find_or_create_channel_session(
-                        db=db,
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        external_conv_id=ext_conv_id,
-                        source_channel="feishu",
-                        first_message_title=f"[Agent → {member_name or feishu_user_id}]",
-                    )
-                    db.add(ChatMessage(
-                        agent_id=agent_id,
-                        user_id=user_id,
-                        role="assistant",
-                        content=message_text,
-                        conversation_id=str(sess.id),
-                    ))
-                    sess.last_message_at = _dt.now(_tz.utc)
-                    await db.commit()
-                    logger.info(f"[Feishu] Saved outgoing message to session {sess.id} (user_id: {feishu_user_id})")
-                except Exception as e:
-                    logger.error(f"[Feishu] Failed to save outgoing message to history: {e}")
-
-            try:
-                resp = await _try_send(config.app_id, config.app_secret, target_member.external_id, "user_id")
-                if resp.get("code") == 0:
-                    await _save_outgoing_to_feishu_session(target_member.external_id)
-                    return f"✅ Successfully sent message to {member_name}"
-                logger.info(f"❌ Failed to send message to {target_member.external_id} via Feishu (user_id): {resp}")
-                return f"发送失败: {resp.get('msg')} (code {resp.get('code')})"
-            except FeishuAPIError as user_id_err:
-                logger.info(f"❌ Failed to send message to {target_member.external_id} via Feishu (user_id): {user_id_err}")
-                return f"❌ 飞书发送失败：{user_id_err.user_message}"
-    except Exception as e:
-        return f"❌ Message send error: {str(e)[:200]}"
 
 
 async def _send_feishu_message_to_member(
@@ -6348,8 +6241,13 @@ async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:
 
     if not message_text:
         return "❌ Please provide message content"
-    if not target_member_id and not provider_user_id and not member_name:
-        return "❌ Please provide target_member_id, provider_user_id, or member_name"
+    if (provider_user_id or member_name) and not target_member_id:
+        return (
+            "❌ provider_user_id and member_name are no longer supported for send_channel_message. "
+            "Call query_roster(member_type=\"human\", query=\"...\") first, then retry with target_member_id."
+        )
+    if not target_member_id:
+        return "❌ Please provide target_member_id from query_roster."
 
     try:
         async with async_session() as db:
@@ -6357,16 +6255,13 @@ async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:
                 db,
                 agent_id,
                 target_member_id=target_member_id,
-                provider_user_id=provider_user_id,
-                member_name=member_name,
                 provider_type=target_channel,
-                require_provider_identity=bool(provider_user_id),
             )
             if error:
                 return error
 
             target_member = target.member
-            display_name = target_member.name or member_name or provider_user_id or target_member_id
+            display_name = target_member.name or target_member_id
             provider_type = target.provider_type
             if not provider_type:
                 if target.platform_user and not target_channel:
@@ -6848,34 +6743,20 @@ async def _send_platform_message(agent_id: uuid.UUID, args: dict) -> str:
 
     if not message_text:
         return "❌ Please provide message content"
-    if not target_member_id and not platform_user_id and not username:
-        return "❌ Please provide target_member_id, platform_user_id, or username"
+    if username and not target_member_id and not platform_user_id:
+        return (
+            "❌ username is no longer supported for send_platform_message. "
+            "Call query_roster(member_type=\"human\", query=\"...\") first, then retry with "
+            "target_member_id or platform_user_id."
+        )
+    if not target_member_id and not platform_user_id:
+        return "❌ Please provide target_member_id or platform_user_id from query_roster."
 
     try:
         from datetime import datetime as _dt, timezone as _tz
 
         async with async_session() as db:
             resolved_platform_user_id = platform_user_id
-            if username and not target_member_id and not resolved_platform_user_id:
-                source_result = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-                source_agent = source_result.scalar_one_or_none()
-                if not source_agent:
-                    return "❌ Source agent was not found."
-
-                user_query = select(UserModel).where(
-                    or_(
-                        UserModel.username == username,
-                        UserModel.display_name == username,
-                    )
-                )
-                if source_agent.tenant_id:
-                    user_query = user_query.where(UserModel.tenant_id == source_agent.tenant_id)
-                user_result = await db.execute(user_query)
-                target_user_by_name = user_result.scalar_one_or_none()
-                if not target_user_by_name:
-                    return f"❌ No user named '{username}' found in your organization. Use query_roster to choose a person."
-                resolved_platform_user_id = str(target_user_by_name.id)
-
             target, error = await _resolve_roster_human_target(
                 db,
                 agent_id,
@@ -6974,9 +6855,15 @@ async def _resolve_a2a_target_by_id(
 async def _send_file_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
     """Send a workspace file to another digital employee (agent)."""
     target_agent_id = (args.get("target_agent_id") or "").strip()
+    legacy_agent_name = (args.get("agent_name") or "").strip()
     rel_path = (args.get("file_path") or "").strip()
     delivery_note = (args.get("message") or "").strip()
 
+    if legacy_agent_name and not target_agent_id:
+        return (
+            "❌ agent_name is no longer supported for send_file_to_agent. "
+            "Call query_roster(member_type=\"agent\", query=\"...\") first, then retry with target_agent_id."
+        )
     if not target_agent_id or not rel_path:
         return "❌ Please provide both target_agent_id and file_path"
 
@@ -7377,10 +7264,16 @@ async def _build_a2a_context(
     origin_session_id: str | None = None,
 ) -> A2AContext | str:
     target_agent_id = args.get("target_agent_id", "").strip()
+    legacy_agent_name = (args.get("agent_name") or "").strip()
     message_text = args.get("message", "").strip()
     msg_type = args.get("msg_type", "notify").strip().lower()
     force_async = bool(args.get("force_async"))
 
+    if legacy_agent_name and not target_agent_id:
+        return (
+            "❌ agent_name is no longer supported for send_message_to_agent. "
+            "Call query_roster(member_type=\"agent\", query=\"...\") first, then retry with target_agent_id."
+        )
     if not target_agent_id or not message_text:
         return "❌ Please provide target_agent_id and message content"
 
