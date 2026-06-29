@@ -144,27 +144,36 @@ query_roster(member_type="human", query="...")
 
 ## Phase 4 - UI 产品化
 
-Phase 4 再改 UI。它不阻塞 Phase 3.1 的旧工具下线，也不和 Phase 3 的 prompt / legacy 入口清理混做。
+Phase 4 再改 UI。它不阻塞 Phase 3.1/3.2 的旧工具和旧 prompt 下线，也不和 Phase 3 的 runtime 兼容清理混做。
 
-### Phase 4.1 - 管理设置 UI
+详细文档：[Agent 通讯录 Phase 4 - 通讯录 UI 产品化](./phase4-contact-directory-ui.md)
+
+### Phase 4.1 - Agent 详情页通讯录数据源
 
 范围：
 
-- 前端设置页拆成：
-  - 可见性 / 使用范围：`company/custom/private`
-  - 管理成员：创建者、管理员、被授权成员
+- 新增只读 roster HTTP API。
+- 让前端能拿到和 `query_roster` 一致的实际可联系对象。
+- 不再用旧 `relationships` API 冒充通讯录数据源。
 
 ### Phase 4.2 - 通讯录 UI / roster UI
 
 范围：
 
-- 数字员工通讯录。
-- 人类成员通讯录。
+- Agent 详情页 `关系 / Relationships` 改成 `通讯录 / Directory`。
+- 数字员工通讯录和人类成员通讯录。
 - 搜索、过滤、部门、状态。
 - 展示可联系 / 不可联系原因。
 - 重名时展示部门、职位、provider 身份。
 
-### Phase 4.3 - 组织架构 UI 增强
+### Phase 4.3 - 旧 Relationships 管理入口处理
+
+范围：
+
+- 隐藏旧 relationships 编辑入口，或迁移到高级设置 / legacy 区域。
+- 旧关系表继续作为 OKR 或历史兼容数据存在，但不再作为通讯录主入口。
+
+### Phase 4.4 - 组织架构 UI 增强
 
 范围：
 
@@ -184,12 +193,13 @@ Phase 4 再改 UI。它不阻塞 Phase 3.1 的旧工具下线，也不和 Phase 
 
 ## 当前执行结论
 
-Phase 3 已完成 **3.1 模型工具入口下线**，下一步做 **3.2 Prompt 与人类 Relationships 背景下线**。
+Phase 3 已完成 **3.1 模型工具入口下线** 和 **3.2 Prompt 与人类 Relationships 背景下线**。
+
+下一步进入 **Phase 4：通讯录 UI 产品化**。
 
 原因：
 
-- 3.1 已经让模型工具 schema 看不到旧入口。
-- 3.2 继续把 prompt 里的旧发送语义收掉，避免模型继续解释或推荐旧路径。
-- 不会破坏旧内部函数、历史兼容、Relationships API 或 UI。
-
-3.2 到 3.4 分阶段推进，不和 3.1 混成一个大改动。UI 统一留到 Phase 4。
+- 模型工具 schema 已经看不到旧入口。
+- prompt 已经不再引导模型使用旧发送语义。
+- 产品侧还需要把 Agent 详情页里的 `Relationships` 改成真正的“通讯录”：它展示当前 Agent 实际可联系的人类成员和数字员工，而不是旧关系表的备注视图。
+- 第一刀应先建立 roster HTTP 数据源，再替换前端页面语义。
