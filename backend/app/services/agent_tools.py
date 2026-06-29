@@ -59,6 +59,7 @@ from app.services.focus_service import (
     list_focus_items,
     upsert_focus_item,
 )
+from app.services import agent_roster
 from app.services.workspace_collaboration import (
     delete_workspace_file,
     move_workspace_path,
@@ -6004,44 +6005,15 @@ def _query_text_match_rank(member: dict, query: str) -> int:
 
 
 def _roster_sort_key(member: dict, query: str) -> tuple:
-    return (
-        0 if member.get("can_contact") else 1,
-        _query_text_match_rank(member, query),
-        0 if member.get("member_type") == "agent" else 1,
-        (member.get("display_name") or "").casefold(),
-        member.get("target_agent_id") or member.get("target_member_id") or "",
-    )
+    return agent_roster.roster_sort_key(member, query)
 
 
 def _department_name(member: OrgMember, department: OrgDepartment | None) -> str | None:
-    if department and department.name:
-        return department.name
-    department_path = (getattr(member, "department_path", None) or "").strip()
-    if not department_path:
-        return None
-    for sep in ("/", ">"):
-        if sep in department_path:
-            return department_path.split(sep)[-1].strip() or None
-    return department_path
+    return agent_roster.department_name(member, department)
 
 
 def _format_roster_agent(source_agent: AgentModel, target_agent: AgentModel) -> dict | None:
-    visibility = evaluate_roster_agent_visibility(source_agent, target_agent)
-    if not visibility.visible:
-        return None
-    return {
-        "member_type": "agent",
-        "target_agent_id": str(target_agent.id),
-        "display_name": target_agent.name,
-        "role_description": target_agent.role_description or "",
-        "capabilities": [],
-        "department": None,
-        "skills": [],
-        "access_mode": getattr(target_agent, "access_mode", None) or "company",
-        "can_contact": visibility.can_contact,
-        "contact_tools": ["send_message_to_agent"] if visibility.can_contact else [],
-        "unavailable_reason": visibility.unavailable_reason,
-    }
+    return agent_roster.format_roster_agent(source_agent, target_agent)
 
 
 def _format_roster_human(
@@ -6050,52 +6022,7 @@ def _format_roster_human(
     provider: IdentityProvider | None,
     department: OrgDepartment | None,
 ) -> dict | None:
-    visibility = evaluate_roster_human_visibility(source_agent, member)
-    if not visibility.visible:
-        return None
-
-    provider_type = _provider_type_value(getattr(provider, "provider_type", None))
-    contact_tools: list[str] = []
-    if visibility.can_contact and member.user_id:
-        contact_tools.append("send_platform_message")
-    channel_provider_types = {"feishu", "dingtalk", "wecom", "slack", "teams", "microsoft_teams", "wechat"}
-    if visibility.can_contact and provider_type in channel_provider_types and (member.external_id or member.open_id):
-        contact_tools.append("send_channel_message")
-
-    can_contact = visibility.can_contact and bool(contact_tools)
-    unavailable_reason = visibility.unavailable_reason
-    if visibility.can_contact and not contact_tools:
-        unavailable_reason = "missing_contact_target"
-
-    dept_name = _department_name(member, department)
-    department_payload = None
-    if member.department_id or dept_name:
-        department_payload = {
-            "id": str(member.department_id) if member.department_id else None,
-            "name": dept_name,
-        }
-
-    provider_payload = None
-    if provider or member.provider_id or member.open_id or member.external_id:
-        provider_payload = {
-            "provider_id": str(member.provider_id) if member.provider_id else None,
-            "provider_type": provider_type,
-            "open_id": member.open_id,
-            "external_id": member.external_id,
-        }
-
-    return {
-        "member_type": "human",
-        "target_member_id": str(member.id),
-        "platform_user_id": str(member.user_id) if member.user_id else None,
-        "display_name": member.name,
-        "title": member.title or "",
-        "department": department_payload,
-        "can_contact": can_contact,
-        "contact_tools": contact_tools if can_contact else [],
-        "provider": provider_payload,
-        "unavailable_reason": None if can_contact else unavailable_reason,
-    }
+    return agent_roster.format_roster_human(source_agent, member, provider, department)
 
 
 async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
@@ -6152,88 +6079,24 @@ async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
                 },
             })
 
-    fetch_size = offset + limit + 1
-    members: list[dict] = []
-
     try:
         async with async_session() as db:
-            source = (await db.execute(select(AgentModel).where(AgentModel.id == agent_id))).scalar_one_or_none()
-            if not source:
-                return _json_tool_result({
-                    "ok": False,
-                    "error": {"code": "source_agent_not_found", "message": "Source agent was not found."},
-                })
-
-            source_mode = getattr(source, "access_mode", None) or "company"
-
-            if member_type in {"all", "agent"} and not target_member_id:
-                agent_conditions = [
-                    AgentModel.tenant_id == source.tenant_id,
-                    AgentModel.id != source.id,
-                ]
-                if source_mode == "private":
-                    agent_conditions.extend([
-                        AgentModel.access_mode == "private",
-                        AgentModel.creator_id == source.creator_id,
-                    ])
-                else:
-                    agent_conditions.append(AgentModel.access_mode.in_(["company", "custom"]))
-                if query:
-                    agent_conditions.append(or_(
-                        AgentModel.name.ilike(f"%{query}%"),
-                        AgentModel.role_description.ilike(f"%{query}%"),
-                    ))
-
-                agent_result = await db.execute(
-                    select(AgentModel)
-                    .where(*agent_conditions)
-                    .order_by(AgentModel.name.asc(), AgentModel.created_at.asc())
-                    .limit(fetch_size)
-                )
-                for target_agent in agent_result.scalars().all():
-                    payload = _format_roster_agent(source, target_agent)
-                    if payload and (include_uncontactable or payload["can_contact"]):
-                        members.append(payload)
-
-            if member_type in {"all", "human"}:
-                human_conditions = [OrgMember.tenant_id == source.tenant_id]
-                if target_member_id:
-                    human_conditions.append(OrgMember.id == target_member_id)
-                if source_mode == "private":
-                    human_conditions.append(OrgMember.user_id == source.creator_id)
-                if query and not target_member_id:
-                    human_conditions.append(or_(
-                        OrgMember.name.ilike(f"%{query}%"),
-                        OrgMember.title.ilike(f"%{query}%"),
-                        OrgMember.department_path.ilike(f"%{query}%"),
-                    ))
-
-                human_result = await db.execute(
-                    select(OrgMember, IdentityProvider, OrgDepartment)
-                    .outerjoin(IdentityProvider, OrgMember.provider_id == IdentityProvider.id)
-                    .outerjoin(OrgDepartment, OrgMember.department_id == OrgDepartment.id)
-                    .where(*human_conditions)
-                    .order_by(OrgMember.name.asc(), OrgMember.synced_at.asc())
-                    .limit(fetch_size)
-                )
-                for member, provider, department in human_result.all():
-                    payload = _format_roster_human(source, member, provider, department)
-                    if payload and (include_uncontactable or payload["can_contact"]):
-                        members.append(payload)
-
-        members.sort(key=lambda member: _roster_sort_key(member, query))
-        page = members[offset:offset + limit]
+            result = await agent_roster.query_agent_roster(
+                db,
+                source_agent_id=agent_id,
+                query=query,
+                target_member_id=target_member_id,
+                member_type=member_type,
+                include_uncontactable=include_uncontactable,
+                limit=limit,
+                offset=offset,
+                max_limit=50,
+            )
+        return _json_tool_result(result)
+    except agent_roster.RosterQueryError as e:
         return _json_tool_result({
-            "ok": True,
-            "source_agent_id": str(agent_id),
-            "query": query,
-            "member_type": member_type,
-            "include_uncontactable": include_uncontactable,
-            "returned_count": len(page),
-            "limit": limit,
-            "offset": offset,
-            "has_more": len(members) > offset + limit,
-            "members": page,
+            "ok": False,
+            "error": {"code": e.code, "message": e.message},
         })
     except Exception as e:
         logger.exception(f"[Roster] query_roster failed: agent={agent_id}")
