@@ -303,10 +303,20 @@
       "emptyDesc": "尝试同步组织通讯录，或检查这个 Agent 的可见性设置。",
       "count": "{{count}} 个对象",
       "digitalEmployee": "数字员工",
-      "platformUser": "平台用户",
+      "clawithUser": "Clawith 用户",
       "targetAgentId": "Agent ID",
       "targetMemberId": "成员 ID",
-      "platformUserId": "平台用户 ID"
+      "directoryId": "通讯录 ID",
+      "platformUserId": "平台用户 ID",
+      "provider": {
+        "feishu": "飞书用户",
+        "dingtalk": "钉钉用户",
+        "wecom": "企业微信用户",
+        "slack": "Slack 用户",
+        "googleWorkspace": "Google 用户",
+        "microsoftTeams": "Microsoft Teams 用户",
+        "fallback": "{{provider}} 用户"
+      }
     },
     "tasks": {
       "todo": "待办",

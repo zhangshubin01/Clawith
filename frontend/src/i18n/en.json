@@ -296,10 +296,20 @@
       "emptyDesc": "Try syncing the organization directory, or check this agent's visibility settings.",
       "count": "{{count}} targets",
       "digitalEmployee": "Agent",
-      "platformUser": "Platform User",
+      "clawithUser": "Clawith User",
       "targetAgentId": "Agent ID",
       "targetMemberId": "Member ID",
-      "platformUserId": "Platform User ID"
+      "directoryId": "Directory ID",
+      "platformUserId": "Platform User ID",
+      "provider": {
+        "feishu": "Feishu User",
+        "dingtalk": "DingTalk User",
+        "wecom": "WeCom User",
+        "slack": "Slack User",
+        "googleWorkspace": "Google User",
+        "microsoftTeams": "Microsoft Teams User",
+        "fallback": "{{provider}} User"
+      }
     },
     "tasks": {
       "todo": "Todo",

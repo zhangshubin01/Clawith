@@ -192,9 +192,17 @@ export default function AgentDirectory({
         if (member.member_type === 'agent') return t('agent.directory.digitalEmployee');
         const providerType = (member.provider?.provider_type || '').trim();
         if (!providerType || providerType === 'web' || providerType === 'platform') {
-            return t('agent.directory.platformUser');
+            return t('agent.directory.clawithUser');
         }
-        return providerType;
+        const providerLabels: Record<string, string> = {
+            feishu: t('agent.directory.provider.feishu'),
+            dingtalk: t('agent.directory.provider.dingtalk'),
+            wecom: t('agent.directory.provider.wecom'),
+            slack: t('agent.directory.provider.slack'),
+            google_workspace: t('agent.directory.provider.googleWorkspace'),
+            microsoft_teams: t('agent.directory.provider.microsoftTeams'),
+        };
+        return providerLabels[providerType] || t('agent.directory.provider.fallback', { provider: providerType });
     };
 
     const primaryId = (member: DirectoryMember) => (
@@ -562,7 +570,7 @@ export default function AgentDirectory({
                                     </span>
                                 </div>
                                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                    {secondaryText(member) || (member.member_type === 'agent' ? member.access_mode : member.platform_user_id) || '—'}
+                                    {secondaryText(member) || (member.member_type === 'agent' ? member.access_mode : '') || '—'}
                                 </div>
                                 <div style={{ marginTop: '5px', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', fontSize: '11px', color: 'var(--text-tertiary)' }}>
                                     {renderContactTools(member)}
@@ -573,13 +581,8 @@ export default function AgentDirectory({
                             </div>
                             <div style={{ flex: '0 1 260px', minWidth: '180px', marginLeft: 'auto', textAlign: 'right', fontSize: '11px', color: 'var(--text-tertiary)' }}>
                                 <div style={{ fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={primaryId(member)}>
-                                    {member.member_type === 'agent' ? t('agent.directory.targetAgentId') : t('agent.directory.targetMemberId')}: {primaryId(member)}
+                                    {member.member_type === 'agent' ? t('agent.directory.targetAgentId') : t('agent.directory.directoryId')}: {primaryId(member)}
                                 </div>
-                                {member.member_type === 'human' && member.platform_user_id && (
-                                    <div style={{ fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={member.platform_user_id}>
-                                        {t('agent.directory.platformUserId')}: {member.platform_user_id}
-                                    </div>
-                                )}
                             </div>
                         </div>
                     ))}
