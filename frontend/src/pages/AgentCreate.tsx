@@ -395,7 +395,7 @@ export default function AgentCreate() {
                             {[
                                 { value: 'company', label: t('wizard.step4.companyWide'), desc: t('wizard.step4.companyWideDesc') },
                                 { value: 'user', label: t('wizard.step4.selfOnly'), desc: t('wizard.step4.selfOnlyDesc') },
-                                { value: 'custom', label: t('agent.settings.perm.custom', 'Custom'), desc: t('agent.settings.perm.customDesc', 'Everyone can use it; choose managers explicitly. Plaza is disabled') },
+                                { value: 'custom', label: t('agent.settings.perm.custom', 'Custom'), desc: t('agent.settings.perm.customDesc', 'Only selected members and agents can see and use it. Plaza is disabled') },
                             ].map((scope) => (
                                 <label key={scope.value} style={{
                                     flex: 1, display: 'flex', alignItems: 'center', gap: '10px', padding: '12px',
@@ -605,7 +605,7 @@ export default function AgentCreate() {
                             {[
                                 { value: 'company', label: t('wizard.step4.companyWide'), desc: t('wizard.step4.companyWideDesc') },
                                 { value: 'user', label: t('wizard.step4.selfOnly'), desc: t('wizard.step4.selfOnlyDesc') },
-                                { value: 'custom', label: t('agent.settings.perm.custom', 'Custom'), desc: t('agent.settings.perm.customDesc', 'Everyone can use it; choose managers explicitly. Plaza is disabled') },
+                                { value: 'custom', label: t('agent.settings.perm.custom', 'Custom'), desc: t('agent.settings.perm.customDesc', 'Only selected members and agents can see and use it. Plaza is disabled') },
                             ].map((scope) => (
                                 <label key={scope.value} style={{
                                     display: 'flex', alignItems: 'center', gap: '12px', padding: '14px',

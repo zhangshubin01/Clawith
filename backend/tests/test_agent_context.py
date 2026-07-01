@@ -49,6 +49,6 @@ async def test_build_agent_context_does_not_prompt_legacy_human_send_path():
     prompt = f"{static}\n{dynamic}"
     assert "send_feishu_message" not in prompt
     assert "## 人类同事背景" not in prompt
-    assert "query_roster(member_type=\"human\"" in prompt
+    assert "query_directory(member_type=\"human\"" in prompt
     assert "send_platform_message(target_member_id=" in prompt
     assert "send_channel_message(target_member_id=" in prompt

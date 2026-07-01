@@ -59,7 +59,7 @@ from app.services.focus_service import (
     list_focus_items,
     upsert_focus_item,
 )
-from app.services import agent_roster
+from app.services import agent_directory
 from app.services.workspace_collaboration import (
     delete_workspace_file,
     move_workspace_path,
@@ -581,7 +581,7 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_channel_file",
-            "description": "Send a file to a human from query_roster or back to the current conversation. Use query_roster(member_type='human') first, then pass target_member_id. If target_member_id is omitted, the file is sent back through the current conversation channel.",
+            "description": "Send a file to a human from query_directory or back to the current conversation. Use query_directory(member_type='human') first, then pass target_member_id. If target_member_id is omitted, the file is sent back through the current conversation channel.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -591,7 +591,7 @@ AGENT_TOOLS = [
                     },
                     "target_member_id": {
                         "type": "string",
-                        "description": "Stable human target_member_id returned by query_roster.",
+                        "description": "Stable human target_member_id returned by query_directory.",
                     },
                     "channel": {
                         "type": "string",
@@ -610,8 +610,8 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "query_roster",
-            "description": "Query the people and digital employees this agent can see in its roster. Use this before recommending or contacting a colleague.",
+            "name": "query_directory",
+            "description": "Query the people and digital employees this agent can see in its Directory. Use this before recommending or contacting a colleague.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -621,7 +621,7 @@ AGENT_TOOLS = [
                     },
                     "target_member_id": {
                         "type": "string",
-                        "description": "Optional exact human member ID returned by query_roster. Use this to verify one specific person.",
+                        "description": "Optional exact human member ID returned by query_directory. Use this to verify one specific person.",
                     },
                     "member_type": {
                         "type": "string",
@@ -654,7 +654,7 @@ AGENT_TOOLS = [
             "name": "send_channel_message",
             "description": (
                 "Send a message to a human colleague via their configured external channel "
-                "(Feishu, DingTalk, WeCom, Slack, Teams, WeChat). Use query_roster first, "
+                "(Feishu, DingTalk, WeCom, Slack, Teams, WeChat). Use query_directory first, "
                 "then pass the returned target_member_id. For platform users, use send_platform_message."
             ),
             "parameters": {
@@ -662,7 +662,7 @@ AGENT_TOOLS = [
                 "properties": {
                     "target_member_id": {
                         "type": "string",
-                        "description": "Stable human member ID returned by query_roster. Preferred recipient identifier.",
+                        "description": "Stable human member ID returned by query_directory. Preferred recipient identifier.",
                     },
                     "message": {
                         "type": "string",
@@ -688,11 +688,11 @@ AGENT_TOOLS = [
                 "properties": {
                     "target_member_id": {
                         "type": "string",
-                        "description": "Stable human member ID returned by query_roster. Preferred recipient identifier.",
+                        "description": "Stable human member ID returned by query_directory. Preferred recipient identifier.",
                     },
                     "platform_user_id": {
                         "type": "string",
-                        "description": "Platform user ID returned by query_roster for first-party platform users.",
+                        "description": "Platform user ID returned by query_directory for first-party platform users.",
                     },
                     "message": {
                         "type": "string",
@@ -707,13 +707,13 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_message_to_agent",
-            "description": "Send a message to a digital employee colleague. Use query_roster first to find the target and pass the returned target_agent_id. Do not send by name and do not guess IDs.\n\nDECISION GUIDE for msg_type:\nAsk yourself: does the target agent need to DO WORK (analyze, research, summarize, write, compare, plan, etc.) and RETURN RESULTS to you or the user?\n\n- If YES, the target needs to do work → use task_delegate. Examples: 'summarize X', 'analyze Y', 'check Z', 'prepare a report', 'review and give feedback', 'find out X', 'confirm with X and report back'. The target works asynchronously and you will be woken when they finish.\n\n- If the target just needs to KNOW something → use notify. Examples: 'meeting cancelled', 'I updated the doc', 'heads up about X', 'FYI'. No reply expected.\n\n- If you need a quick factual answer right now → use consult. Examples: 'what is X?', 'do you know Y?'. Synchronous, blocks until reply.\n\nWhen in doubt between notify and task_delegate, prefer task_delegate — it is safer because it guarantees the user gets a result.",
+            "description": "Send a message to a digital employee colleague. Use query_directory first to find the target and pass the returned target_agent_id. Do not send by name and do not guess IDs.\n\nDECISION GUIDE for msg_type:\nAsk yourself: does the target agent need to DO WORK (analyze, research, summarize, write, compare, plan, etc.) and RETURN RESULTS to you or the user?\n\n- If YES, the target needs to do work → use task_delegate. Examples: 'summarize X', 'analyze Y', 'check Z', 'prepare a report', 'review and give feedback', 'find out X', 'confirm with X and report back'. The target works asynchronously and you will be woken when they finish.\n\n- If the target just needs to KNOW something → use notify. Examples: 'meeting cancelled', 'I updated the doc', 'heads up about X', 'FYI'. No reply expected.\n\n- If you need a quick factual answer right now → use consult. Examples: 'what is X?', 'do you know Y?'. Synchronous, blocks until reply.\n\nWhen in doubt between notify and task_delegate, prefer task_delegate — it is safer because it guarantees the user gets a result.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "target_agent_id": {
                         "type": "string",
-                        "description": "Target digital employee ID returned by query_roster",
+                        "description": "Target digital employee ID returned by query_directory",
                     },
                     "message": {
                         "type": "string",
@@ -733,13 +733,13 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "send_file_to_agent",
-            "description": "Send a workspace file to another digital employee. Use query_roster first to find the target and pass the returned target_agent_id. The file is copied into the target agent's workspace/inbox/files/ directory and a delivery note is created in their inbox.",
+            "description": "Send a workspace file to another digital employee. Use query_directory first to find the target and pass the returned target_agent_id. The file is copied into the target agent's workspace/inbox/files/ directory and a delivery note is created in their inbox.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "target_agent_id": {
                         "type": "string",
-                        "description": "Target digital employee ID returned by query_roster",
+                        "description": "Target digital employee ID returned by query_directory",
                     },
                     "file_path": {
                         "type": "string",
@@ -1951,7 +1951,7 @@ _ALWAYS_INCLUDE_CORE = {
     "complete_focus_item",
     FINISH_TOOL_NAME,
     "list_focus_items",
-    "query_roster",
+    "query_directory",
     "send_channel_file",
     "send_file_to_agent",
     "upsert_focus_item",
@@ -1962,6 +1962,7 @@ _CHANNEL_MESSAGE_TOOL_NAMES = {
     "send_channel_message",
 }
 _HIDDEN_FROM_LLM_TOOL_NAMES = {
+    "query_roster",
     "send_feishu_message",
 }
 # Feishu tools are ONLY included when the agent has a configured Feishu channel,
@@ -2176,7 +2177,7 @@ _CANONICAL_LLM_TOOL_NAMES = {
     "send_platform_message",
     "send_channel_message",
     "send_channel_file",
-    "query_roster",
+    "query_directory",
 }
 
 
@@ -2886,8 +2887,8 @@ async def _execute_tool_direct(
             return await _bing_search_tool(arguments, agent_id)
         elif tool_name == "send_feishu_message":
             return await _send_feishu_message(agent_id, arguments)
-        elif tool_name == "query_roster":
-            return await _query_roster(agent_id, arguments)
+        elif tool_name == "query_directory":
+            return await _query_directory(agent_id, arguments)
         elif tool_name == "send_message_to_agent":
             return await _send_message_to_agent(
                 agent_id,
@@ -3117,8 +3118,8 @@ async def execute_tool(
             result = await _handle_cancel_trigger(agent_id, arguments)
         elif tool_name == "list_triggers":
             result = await _handle_list_triggers(agent_id)
-        elif tool_name == "query_roster":
-            result = await _query_roster(agent_id, arguments)
+        elif tool_name == "query_directory":
+            result = await _query_directory(agent_id, arguments)
         elif tool_name == "send_feishu_message":
             result = await _send_feishu_message(agent_id, arguments)
         elif tool_name == "send_platform_message":
@@ -4078,7 +4079,7 @@ async def _send_channel_file(agent_id: uuid.UUID, ws: Path, arguments: dict) -> 
     if member_name and not target_member_id:
         return (
             "❌ member_name is no longer supported for send_channel_file. "
-            "Call query_roster(member_type=\"human\", query=\"...\") first, then retry with target_member_id."
+            "Call query_directory(member_type=\"human\", query=\"...\") first, then retry with target_member_id."
         )
 
     # Resolve file path within agent workspace
@@ -5926,14 +5927,14 @@ async def _resolve_roster_human_target(
         try:
             member_id = uuid.UUID(target_member_id_raw)
         except ValueError:
-            return None, "❌ Invalid target_member_id. Use query_roster to get a valid target_member_id."
+            return None, "❌ Invalid target_member_id. Use query_directory to get a valid target_member_id."
         conditions.append(OrgMember.id == member_id)
     elif platform_user_id_raw:
         lookup_kind = "platform_user_id"
         try:
             user_id = uuid.UUID(platform_user_id_raw)
         except ValueError:
-            return None, "❌ Invalid platform_user_id. Use query_roster to get a valid platform_user_id."
+            return None, "❌ Invalid platform_user_id. Use query_directory to get a valid platform_user_id."
         conditions.append(OrgMember.user_id == user_id)
         require_platform_user = True
     elif provider_user_id_raw:
@@ -5955,12 +5956,23 @@ async def _resolve_roster_human_target(
     )
     rows = result.all()
     if not rows:
-        return None, "❌ Human recipient not found. Use query_roster to find an available human target."
+        return None, "❌ Human recipient not found. Use query_directory to find an available human target."
 
     candidates: list[RosterHumanTarget] = []
     blocked_reason: str | None = None
     for member, provider in rows:
-        visibility = evaluate_roster_human_visibility(source_agent, member)
+        authorized_custom_human = False
+        if getattr(source_agent, "access_mode", None) == "custom":
+            authorized_custom_human = await agent_directory.is_custom_human_authorized(
+                db,
+                source=source_agent,
+                member=member,
+            )
+        visibility = evaluate_roster_human_visibility(
+            source_agent,
+            member,
+            authorized_custom_human=authorized_custom_human,
+        )
         if not visibility.visible:
             blocked_reason = blocked_reason or "not_visible"
             continue
@@ -6003,11 +6015,11 @@ async def _resolve_roster_human_target(
     if not candidates:
         if requested_provider_type and blocked_reason == "provider_type_mismatch":
             return None, f"❌ Human recipient was found, but not in {requested_provider_type} channel."
-        return None, f"❌ Human recipient is not contactable ({blocked_reason or 'restricted'}). Use query_roster to choose an available person."
+        return None, f"❌ Human recipient is not contactable ({blocked_reason or 'restricted'}). Use query_directory to choose an available person."
     if len(candidates) > 1:
         if lookup_kind == "member_name":
-            return None, "❌ Multiple human recipients match this member_name. Use query_roster and retry with target_member_id."
-        return None, "❌ Multiple human recipients match this identifier. Use query_roster and retry with target_member_id."
+            return None, "❌ Multiple human recipients match this member_name. Use query_directory and retry with target_member_id."
+        return None, "❌ Multiple human recipients match this identifier. Use query_directory and retry with target_member_id."
 
     return candidates[0], None
 
@@ -6027,15 +6039,15 @@ def _query_text_match_rank(member: dict, query: str) -> int:
 
 
 def _roster_sort_key(member: dict, query: str) -> tuple:
-    return agent_roster.roster_sort_key(member, query)
+    return agent_directory.roster_sort_key(member, query)
 
 
 def _department_name(member: OrgMember, department: OrgDepartment | None) -> str | None:
-    return agent_roster.department_name(member, department)
+    return agent_directory.department_name(member, department)
 
 
 def _format_roster_agent(source_agent: AgentModel, target_agent: AgentModel) -> dict | None:
-    return agent_roster.format_roster_agent(source_agent, target_agent)
+    return agent_directory.format_roster_agent(source_agent, target_agent)
 
 
 def _format_roster_human(
@@ -6045,10 +6057,10 @@ def _format_roster_human(
     department: OrgDepartment | None,
     platform_user: UserModel | None = None,
 ) -> dict | None:
-    return agent_roster.format_roster_human(source_agent, member, provider, department, platform_user)
+    return agent_directory.format_roster_human(source_agent, member, provider, department, platform_user)
 
 
-async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
+async def _query_directory(agent_id: uuid.UUID, args: dict) -> str:
     query = (args.get("query") or "").strip()
     target_member_id_raw = (args.get("target_member_id") or "").strip()
     member_type = (args.get("member_type") or "all").strip().lower()
@@ -6104,7 +6116,7 @@ async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
 
     try:
         async with async_session() as db:
-            result = await agent_roster.query_agent_roster(
+            result = await agent_directory.query_agent_directory(
                 db,
                 source_agent_id=agent_id,
                 query=query,
@@ -6116,16 +6128,16 @@ async def _query_roster(agent_id: uuid.UUID, args: dict) -> str:
                 max_limit=50,
             )
         return _json_tool_result(result)
-    except agent_roster.RosterQueryError as e:
+    except agent_directory.DirectoryQueryError as e:
         return _json_tool_result({
             "ok": False,
             "error": {"code": e.code, "message": e.message},
         })
     except Exception as e:
-        logger.exception(f"[Roster] query_roster failed: agent={agent_id}")
+        logger.exception(f"[Directory] query_directory failed: agent={agent_id}")
         return _json_tool_result({
             "ok": False,
-            "error": {"code": "query_roster_failed", "message": f"query_roster failed: {type(e).__name__}"},
+            "error": {"code": "query_directory_failed", "message": f"query_directory failed: {type(e).__name__}"},
         })
 
 
@@ -6141,11 +6153,11 @@ async def _send_feishu_message(agent_id: uuid.UUID, args: dict) -> str:
     if (member_name or direct_user_id) and not target_member_id:
         return (
             "❌ send_feishu_message is a legacy shortcut and no longer accepts member_name or user_id. "
-            "Call query_roster(member_type=\"human\", query=\"...\") first, then retry with "
+            "Call query_directory(member_type=\"human\", query=\"...\") first, then retry with "
             "send_channel_message(target_member_id=\"...\", channel=\"feishu\", message=\"...\")."
         )
     if not target_member_id:
-        return "❌ Please provide target_member_id from query_roster, or use send_channel_message for Feishu."
+        return "❌ Please provide target_member_id from query_directory, or use send_channel_message for Feishu."
 
     return await _send_channel_message(
         agent_id,
@@ -6247,10 +6259,10 @@ async def _send_channel_message(agent_id: uuid.UUID, args: dict) -> str:
     if (provider_user_id or member_name) and not target_member_id:
         return (
             "❌ provider_user_id and member_name are no longer supported for send_channel_message. "
-            "Call query_roster(member_type=\"human\", query=\"...\") first, then retry with target_member_id."
+            "Call query_directory(member_type=\"human\", query=\"...\") first, then retry with target_member_id."
         )
     if not target_member_id:
-        return "❌ Please provide target_member_id from query_roster."
+        return "❌ Please provide target_member_id from query_directory."
 
     try:
         async with async_session() as db:
@@ -6749,11 +6761,11 @@ async def _send_platform_message(agent_id: uuid.UUID, args: dict) -> str:
     if username and not target_member_id and not platform_user_id:
         return (
             "❌ username is no longer supported for send_platform_message. "
-            "Call query_roster(member_type=\"human\", query=\"...\") first, then retry with "
+            "Call query_directory(member_type=\"human\", query=\"...\") first, then retry with "
             "target_member_id or platform_user_id."
         )
     if not target_member_id and not platform_user_id:
-        return "❌ Please provide target_member_id or platform_user_id from query_roster."
+        return "❌ Please provide target_member_id or platform_user_id from query_directory."
 
     try:
         from datetime import datetime as _dt, timezone as _tz
@@ -6833,7 +6845,7 @@ async def _resolve_a2a_target_by_id(
     try:
         target_id = uuid.UUID((target_agent_id or "").strip())
     except (TypeError, ValueError):
-        return None, "❌ Invalid target_agent_id. Use query_roster to get a valid target_agent_id."
+        return None, "❌ Invalid target_agent_id. Use query_directory to get a valid target_agent_id."
 
     if target_id == source_agent.id:
         return None, "❌ You cannot send a message to yourself."
@@ -6841,13 +6853,24 @@ async def _resolve_a2a_target_by_id(
     target_result = await db.execute(select(AgentModel).where(AgentModel.id == target_id))
     target = target_result.scalar_one_or_none()
     if not target:
-        return None, "❌ Target agent not found. Use query_roster to find an available digital employee."
+        return None, "❌ Target agent not found. Use query_directory to find an available digital employee."
     if target.tenant_id != source_agent.tenant_id:
         return None, "❌ Target agent is outside your tenant and cannot be contacted."
 
-    visibility = evaluate_roster_agent_visibility(source_agent, target)
+    authorized_custom_target = False
+    if getattr(target, "access_mode", None) == "custom":
+        authorized_custom_target = await agent_directory.is_custom_agent_target_authorized(
+            db,
+            source_agent_id=source_agent.id,
+            target_agent_id=target.id,
+        )
+    visibility = evaluate_roster_agent_visibility(
+        source_agent,
+        target,
+        authorized_custom_target=authorized_custom_target,
+    )
     if not visibility.visible:
-        return None, "❌ Target agent is not visible to you. Use query_roster to choose a visible digital employee."
+        return None, "❌ Target agent is not visible to you. Use query_directory to choose a visible digital employee."
     if not visibility.can_contact:
         reason = visibility.unavailable_reason or "target_not_contactable"
         return None, f"❌ Target agent is currently unavailable ({reason})."
@@ -6865,7 +6888,7 @@ async def _send_file_to_agent(from_agent_id: uuid.UUID, args: dict) -> str:
     if legacy_agent_name and not target_agent_id:
         return (
             "❌ agent_name is no longer supported for send_file_to_agent. "
-            "Call query_roster(member_type=\"agent\", query=\"...\") first, then retry with target_agent_id."
+            "Call query_directory(member_type=\"agent\", query=\"...\") first, then retry with target_agent_id."
         )
     if not target_agent_id or not rel_path:
         return "❌ Please provide both target_agent_id and file_path"
@@ -7275,7 +7298,7 @@ async def _build_a2a_context(
     if legacy_agent_name and not target_agent_id:
         return (
             "❌ agent_name is no longer supported for send_message_to_agent. "
-            "Call query_roster(member_type=\"agent\", query=\"...\") first, then retry with target_agent_id."
+            "Call query_directory(member_type=\"agent\", query=\"...\") first, then retry with target_agent_id."
         )
     if not target_agent_id or not message_text:
         return "❌ Please provide target_agent_id and message content"

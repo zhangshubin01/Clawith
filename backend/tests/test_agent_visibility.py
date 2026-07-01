@@ -42,7 +42,7 @@ def test_build_visible_agents_query_restricts_to_same_tenant_and_non_private_age
     assert "agents.tenant_id" in sql
     assert "agents.creator_id" in sql
     assert "agents.access_mode" in sql
-    assert "agent_permissions" not in sql
+    assert "agent_permissions" in sql
 
 
 def test_build_visible_agents_query_platform_admin_still_uses_visibility_filters():
@@ -172,12 +172,12 @@ async def test_agent_relationship_status_active_when_original_creator_still_mana
     assert status["access_status"] == "active"
 
 
-def test_can_use_agent_static_allows_same_tenant_non_private_agents():
+def test_can_use_agent_static_does_not_grant_custom_without_db_permission():
     tenant_id = uuid.uuid4()
     user = make_user(tenant_id=tenant_id)
 
     assert permissions.can_use_agent_static(user, make_agent(tenant_id=tenant_id, access_mode="company")) is True
-    assert permissions.can_use_agent_static(user, make_agent(tenant_id=tenant_id, access_mode="custom")) is True
+    assert permissions.can_use_agent_static(user, make_agent(tenant_id=tenant_id, access_mode="custom")) is False
     assert permissions.can_use_agent_static(user, make_agent(tenant_id=tenant_id, access_mode="private")) is False
 
 
@@ -200,12 +200,38 @@ def test_evaluate_roster_agent_visibility_matches_phase1_rules():
     private_target = make_agent(tenant_id=tenant_id, creator_id=creator_id, access_mode="private")
 
     custom_visibility = permissions.evaluate_roster_agent_visibility(source, custom_target)
-    assert custom_visibility.visible is True
-    assert custom_visibility.can_contact is True
+    assert custom_visibility.visible is False
+    assert custom_visibility.can_contact is False
+
+    authorized_custom_visibility = permissions.evaluate_roster_agent_visibility(
+        source,
+        custom_target,
+        authorized_custom_target=True,
+    )
+    assert authorized_custom_visibility.visible is True
+    assert authorized_custom_visibility.can_contact is True
 
     private_visibility = permissions.evaluate_roster_agent_visibility(source, private_target)
     assert private_visibility.visible is False
     assert private_visibility.can_contact is False
+
+
+def test_evaluate_roster_human_visibility_limits_custom_to_authorized_members():
+    tenant_id = uuid.uuid4()
+    source = make_agent(tenant_id=tenant_id, access_mode="custom")
+    member = SimpleNamespace(tenant_id=tenant_id, user_id=uuid.uuid4(), status="active")
+
+    custom_visibility = permissions.evaluate_roster_human_visibility(source, member)
+    assert custom_visibility.visible is False
+    assert custom_visibility.can_contact is False
+
+    authorized_custom_visibility = permissions.evaluate_roster_human_visibility(
+        source,
+        member,
+        authorized_custom_human=True,
+    )
+    assert authorized_custom_visibility.visible is True
+    assert authorized_custom_visibility.can_contact is True
 
 
 def test_evaluate_roster_agent_visibility_allows_same_creator_private_only():

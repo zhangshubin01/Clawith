@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services import agent_tools, tool_seeder
+from app.services import agent_directory, agent_tools, tool_seeder
 
 
 def _make_agent(**overrides):
@@ -85,12 +85,16 @@ class RecordingDB:
         return self.responses.pop(0)
 
 
-def test_query_roster_tool_is_available_to_agents():
+def test_query_directory_tool_is_available_to_agents():
     tool_names = {tool["function"]["name"] for tool in agent_tools.AGENT_TOOLS}
 
-    assert "query_roster" in tool_names
-    assert "query_roster" in agent_tools._ALWAYS_INCLUDE_CORE
-    query_schema = next(tool["function"]["parameters"] for tool in agent_tools.AGENT_TOOLS if tool["function"]["name"] == "query_roster")
+    assert "query_directory" in tool_names
+    assert "query_directory" in agent_tools._ALWAYS_INCLUDE_CORE
+    assert "query_directory" not in agent_tools._HIDDEN_FROM_LLM_TOOL_NAMES
+    assert "query_roster" not in tool_names
+    assert "query_roster" not in agent_tools._ALWAYS_INCLUDE_CORE
+    assert "query_roster" in agent_tools._HIDDEN_FROM_LLM_TOOL_NAMES
+    query_schema = next(tool["function"]["parameters"] for tool in agent_tools.AGENT_TOOLS if tool["function"]["name"] == "query_directory")
     assert "target_member_id" in query_schema["properties"]
 
 
@@ -108,6 +112,9 @@ def test_a2a_tools_expose_target_agent_id_not_agent_name():
 def test_seeded_a2a_tools_expose_target_agent_id_not_agent_name():
     tools = {tool["name"]: tool for tool in tool_seeder.BUILTIN_TOOLS}
 
+    assert "query_directory" in tools
+    assert "query_roster" not in tools
+
     for tool_name in ("send_message_to_agent", "send_file_to_agent"):
         schema = tools[tool_name]["parameters_schema"]
         assert "target_agent_id" in schema["properties"]
@@ -117,25 +124,25 @@ def test_seeded_a2a_tools_expose_target_agent_id_not_agent_name():
 
 
 @pytest.mark.asyncio
-async def test_query_roster_rejects_invalid_member_type_before_db():
-    result = json.loads(await agent_tools._query_roster(uuid.uuid4(), {"member_type": "team"}))
+async def test_query_directory_rejects_invalid_member_type_before_db():
+    result = json.loads(await agent_tools._query_directory(uuid.uuid4(), {"member_type": "team"}))
 
     assert result["ok"] is False
     assert result["error"]["code"] == "invalid_member_type"
 
 
 @pytest.mark.asyncio
-async def test_query_roster_rejects_invalid_target_member_id_before_db():
-    result = json.loads(await agent_tools._query_roster(uuid.uuid4(), {"target_member_id": "not-a-uuid"}))
+async def test_query_directory_rejects_invalid_target_member_id_before_db():
+    result = json.loads(await agent_tools._query_directory(uuid.uuid4(), {"target_member_id": "not-a-uuid"}))
 
     assert result["ok"] is False
     assert result["error"]["code"] == "invalid_target_member_id"
 
 
 @pytest.mark.asyncio
-async def test_query_roster_rejects_agent_type_with_target_member_id_before_db():
+async def test_query_directory_rejects_agent_type_with_target_member_id_before_db():
     result = json.loads(
-        await agent_tools._query_roster(
+        await agent_tools._query_directory(
             uuid.uuid4(),
             {"member_type": "agent", "target_member_id": str(uuid.uuid4())},
         )
@@ -146,7 +153,7 @@ async def test_query_roster_rejects_agent_type_with_target_member_id_before_db()
 
 
 @pytest.mark.asyncio
-async def test_query_roster_target_member_id_returns_exact_human_without_agent_lookup():
+async def test_query_directory_target_member_id_returns_exact_human_without_agent_lookup():
     tenant_id = uuid.uuid4()
     source = _make_agent(tenant_id=tenant_id)
     user = _make_user(tenant_id=tenant_id)
@@ -163,7 +170,7 @@ async def test_query_roster_target_member_id_returns_exact_human_without_agent_l
         mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
 
         result = json.loads(
-            await agent_tools._query_roster(
+            await agent_tools._query_directory(
                 source.id,
                 {"target_member_id": str(member.id), "query": "完全不匹配"},
             )
@@ -177,10 +184,35 @@ async def test_query_roster_target_member_id_returns_exact_human_without_agent_l
     assert "lower(org_members.name)" not in str(db.statements[1])
 
 
+@pytest.mark.asyncio
+async def test_query_directory_agent_list_uses_sql_offset_and_limit():
+    tenant_id = uuid.uuid4()
+    source = _make_agent(tenant_id=tenant_id)
+    db = RecordingDB(
+        responses=[
+            DummyResult(scalar_value=source),
+            DummyResult(values=[]),
+        ]
+    )
+
+    result = await agent_directory.query_agent_directory(
+        db,
+        source_agent_id=source.id,
+        member_type="agent",
+        limit=20,
+        offset=40,
+    )
+
+    assert result["ok"] is True
+    statement = str(db.statements[1])
+    assert "LIMIT" in statement
+    assert "OFFSET" in statement
+
+
 def test_format_roster_agent_returns_stable_id_and_contact_tool():
     tenant_id = uuid.uuid4()
     source = _make_agent(tenant_id=tenant_id)
-    target = _make_agent(tenant_id=tenant_id, access_mode="custom")
+    target = _make_agent(tenant_id=tenant_id, access_mode="company")
 
     payload = agent_tools._format_roster_agent(source, target)
 

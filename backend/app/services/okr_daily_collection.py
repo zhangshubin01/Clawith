@@ -86,7 +86,7 @@ async def trigger_daily_collection_for_tenant(tenant_id: uuid.UUID) -> dict:
 
     async with async_session() as db:
         # OKR still uses legacy relationship rows as an explicit tracking list.
-        # Directory/roster visibility is intentionally not the source of truth here.
+        # Directory visibility is intentionally not the source of truth here.
         rel_result = await db.execute(
             select(AgentRelationship, OrgMember)
             .join(OrgMember, AgentRelationship.member_id == OrgMember.id)

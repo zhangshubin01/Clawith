@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Tuple
 
 from fastapi import HTTPException, status
-from sqlalchemy import false, or_, select
+from sqlalchemy import false, or_, select, exists
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent import Agent, AgentPermission
@@ -42,7 +42,7 @@ def _non_private_mode(agent: Agent) -> bool:
 
 
 def can_use_agent_static(user: User, agent: Agent) -> bool:
-    """Return whether an active human user can use an agent under roster rules."""
+    """Return whether a user can use an agent without DB-backed custom checks."""
     if not user or not agent:
         return False
     if not getattr(user, "is_active", True):
@@ -51,16 +51,41 @@ def can_use_agent_static(user: User, agent: Agent) -> bool:
         return False
     if getattr(agent, "creator_id", None) == getattr(user, "id", None):
         return True
-    return _non_private_mode(agent)
+    access_mode = _agent_access_mode(agent)
+    if access_mode == "company":
+        return True
+    if access_mode == "private":
+        return False
+    # custom access needs AgentPermission and must use can_use_agent().
+    return False
 
 
 async def can_use_agent(db: AsyncSession, user: User, agent: Agent) -> bool:
-    """Async entrypoint for human user use access.
+    """Return whether an active human user can use an agent under Directory rules."""
+    if can_use_agent_static(user, agent):
+        return True
+    if not user or not agent:
+        return False
+    if not getattr(user, "is_active", True):
+        return False
+    if not _agent_tenant_matches_user(agent, user):
+        return False
 
-    Kept async for API/service call sites that may later need DB-backed checks;
-    the Phase 1.1 use rule itself is static.
-    """
-    return can_use_agent_static(user, agent)
+    access_mode = _agent_access_mode(agent)
+    if access_mode != "custom":
+        return False
+    if _is_admin(user):
+        return True
+
+    result = await db.execute(
+        select(AgentPermission.id).where(
+            AgentPermission.agent_id == agent.id,
+            AgentPermission.scope_type == "user",
+            AgentPermission.scope_id == user.id,
+            AgentPermission.access_level.in_(["use", "manage"]),
+        ).limit(1)
+    )
+    return result.scalar_one_or_none() is not None
 
 
 async def can_manage_agent(db: AsyncSession, user: User, agent: Agent) -> bool:
@@ -107,8 +132,13 @@ def _roster_agent_unavailable_reason(agent: Agent) -> str | None:
     return None
 
 
-def evaluate_roster_agent_visibility(source_agent: Agent, target_agent: Agent) -> RosterVisibility:
-    """Evaluate whether source can see and currently contact target in roster."""
+def evaluate_roster_agent_visibility(
+    source_agent: Agent,
+    target_agent: Agent,
+    *,
+    authorized_custom_target: bool = False,
+) -> RosterVisibility:
+    """Evaluate whether source can see and currently contact target in Directory."""
     if not source_agent or not target_agent:
         return RosterVisibility(False, False)
     if getattr(source_agent, "id", None) == getattr(target_agent, "id", None):
@@ -126,7 +156,7 @@ def evaluate_roster_agent_visibility(source_agent: Agent, target_agent: Agent) -
             and getattr(source_agent, "creator_id", None) == getattr(target_agent, "creator_id", None)
         )
     else:
-        visible = target_mode != "private"
+        visible = target_mode == "company" or (target_mode == "custom" and authorized_custom_target)
 
     if not visible:
         return RosterVisibility(False, False)
@@ -135,7 +165,12 @@ def evaluate_roster_agent_visibility(source_agent: Agent, target_agent: Agent) -
     return RosterVisibility(True, unavailable_reason is None, unavailable_reason)
 
 
-def evaluate_roster_human_visibility(source_agent: Agent, member: OrgMember) -> RosterVisibility:
+def evaluate_roster_human_visibility(
+    source_agent: Agent,
+    member: OrgMember,
+    *,
+    authorized_custom_human: bool = False,
+) -> RosterVisibility:
     """Evaluate whether source can see and currently contact a human org member."""
     if not source_agent or not member:
         return RosterVisibility(False, False)
@@ -147,6 +182,8 @@ def evaluate_roster_human_visibility(source_agent: Agent, member: OrgMember) -> 
     source_mode = _agent_access_mode(source_agent)
     if source_mode == "private":
         visible = getattr(member, "user_id", None) == getattr(source_agent, "creator_id", None)
+    elif source_mode == "custom":
+        visible = authorized_custom_human
     else:
         visible = True
 
@@ -176,12 +213,25 @@ def build_visible_agents_query(
     if target_tenant_id is None:
         return stmt.where(false())
 
+    visible_conditions = [
+        Agent.creator_id == user.id,
+        Agent.access_mode == "company",
+    ]
+    if _is_admin(user):
+        visible_conditions.append(Agent.access_mode == "custom")
+    else:
+        visible_conditions.append(
+            exists().where(
+                AgentPermission.agent_id == Agent.id,
+                AgentPermission.scope_type == "user",
+                AgentPermission.scope_id == user.id,
+                AgentPermission.access_level.in_(["use", "manage"]),
+            )
+        )
+
     return stmt.where(
         Agent.tenant_id == target_tenant_id,
-        or_(
-            Agent.creator_id == user.id,
-            Agent.access_mode.in_(["company", "custom"]),
-        ),
+        or_(*visible_conditions),
     )
 
 
@@ -218,7 +268,7 @@ async def get_agent_access_level_for_user_id(
 
     if await can_manage_agent(db, user, agent):
         return "manage"
-    if can_use_agent_static(user, agent):
+    if await can_use_agent(db, user, agent):
         return "use"
     return None
 
@@ -238,7 +288,7 @@ async def get_agent_accessible_user_ids(db: AsyncSession, agent: Agent) -> set[u
         ids.add(agent.creator_id)
 
     access_mode = _agent_access_mode(agent)
-    if access_mode in ("company", "custom"):
+    if access_mode == "company":
         result = await db.execute(
             select(User.id).where(
                 User.tenant_id == agent.tenant_id,
@@ -246,6 +296,27 @@ async def get_agent_accessible_user_ids(db: AsyncSession, agent: Agent) -> set[u
             )
         )
         ids.update(row[0] for row in result.fetchall())
+        return ids
+
+    if access_mode == "custom":
+        admin_result = await db.execute(
+            select(User.id).where(
+                User.tenant_id == agent.tenant_id,
+                User.is_active == True,  # noqa: E712
+                User.role.in_(["platform_admin", "org_admin"]),
+            )
+        )
+        ids.update(row[0] for row in admin_result.fetchall())
+
+        perm_result = await db.execute(
+            select(AgentPermission.scope_id).where(
+                AgentPermission.agent_id == agent.id,
+                AgentPermission.scope_type == "user",
+                AgentPermission.scope_id.is_not(None),
+                AgentPermission.access_level.in_(["use", "manage"]),
+            )
+        )
+        ids.update(row[0] for row in perm_result.fetchall() if row[0])
         return ids
 
     return ids
@@ -415,7 +486,7 @@ async def check_agent_access(db: AsyncSession, user: User, agent_id: uuid.UUID) 
 
     if await can_manage_agent(db, user, agent):
         return agent, "manage"
-    if can_use_agent_static(user, agent):
+    if await can_use_agent(db, user, agent):
         return agent, "use"
 
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this agent")

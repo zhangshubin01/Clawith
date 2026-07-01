@@ -1,4 +1,4 @@
-"""Read-only agent roster API."""
+"""Read-only agent directory API."""
 
 import uuid
 
@@ -9,13 +9,13 @@ from app.core.permissions import check_agent_access
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.user import User
-from app.services.agent_roster import RosterQueryError, query_agent_roster
+from app.services.agent_directory import DirectoryQueryError, query_agent_directory
 
-router = APIRouter(prefix="/agents/{agent_id}/roster", tags=["agent-roster"])
+router = APIRouter(prefix="/agents/{agent_id}/directory", tags=["agent-directory"])
 
 
 @router.get("")
-async def get_agent_roster(
+async def get_agent_directory(
     agent_id: uuid.UUID,
     member_type: str = "all",
     query: str = "",
@@ -28,7 +28,7 @@ async def get_agent_roster(
     """Return the people and agents the source agent can currently contact."""
     await check_agent_access(db, current_user, agent_id)
     try:
-        return await query_agent_roster(
+        return await query_agent_directory(
             db,
             source_agent_id=agent_id,
             query=query,
@@ -38,5 +38,5 @@ async def get_agent_roster(
             offset=offset,
             max_limit=100,
         )
-    except RosterQueryError as exc:
+    except DirectoryQueryError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}) from exc

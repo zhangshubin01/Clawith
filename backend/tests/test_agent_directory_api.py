@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from app.api import roster as roster_api
+from app.api import directory as directory_api
 
 
 def _make_agent(**overrides):
@@ -52,8 +52,13 @@ class RecordingDB:
         return self.responses.pop(0)
 
 
+def test_agent_directory_router_uses_directory_prefix_only():
+    assert directory_api.router.prefix == "/agents/{agent_id}/directory"
+    assert "agent-directory" in directory_api.router.tags
+
+
 @pytest.mark.asyncio
-async def test_get_agent_roster_filters_uncontactable_agents_by_default(monkeypatch):
+async def test_get_agent_directory_filters_uncontactable_agents_by_default(monkeypatch):
     tenant_id = uuid.uuid4()
     source = _make_agent(tenant_id=tenant_id)
     running = _make_agent(tenant_id=tenant_id, name="Running Agent")
@@ -66,9 +71,9 @@ async def test_get_agent_roster_filters_uncontactable_agents_by_default(monkeypa
     async def fake_check_agent_access(_db, _current_user, _agent_id):
         return source, "use"
 
-    monkeypatch.setattr(roster_api, "check_agent_access", fake_check_agent_access)
+    monkeypatch.setattr(directory_api, "check_agent_access", fake_check_agent_access)
 
-    result = await roster_api.get_agent_roster(
+    result = await directory_api.get_agent_directory(
         agent_id=source.id,
         member_type="agent",
         current_user=SimpleNamespace(id=uuid.uuid4(), tenant_id=tenant_id),
@@ -82,17 +87,17 @@ async def test_get_agent_roster_filters_uncontactable_agents_by_default(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_get_agent_roster_returns_structured_400_for_invalid_limit(monkeypatch):
+async def test_get_agent_directory_returns_structured_400_for_invalid_limit(monkeypatch):
     tenant_id = uuid.uuid4()
     source = _make_agent(tenant_id=tenant_id)
 
     async def fake_check_agent_access(_db, _current_user, _agent_id):
         return source, "manage"
 
-    monkeypatch.setattr(roster_api, "check_agent_access", fake_check_agent_access)
+    monkeypatch.setattr(directory_api, "check_agent_access", fake_check_agent_access)
 
     with pytest.raises(HTTPException) as exc:
-        await roster_api.get_agent_roster(
+        await directory_api.get_agent_directory(
             agent_id=source.id,
             limit=101,
             current_user=SimpleNamespace(id=uuid.uuid4(), tenant_id=tenant_id),

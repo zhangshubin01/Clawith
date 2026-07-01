@@ -181,11 +181,11 @@ async def _load_relationships_from_db(db, agent_id: uuid.UUID) -> str:
     lines = []
 
     # Human relationship notes are context only. Contact resolution must still
-    # go through query_roster so duplicate names and stale relationship rows do
+    # go through query_directory so duplicate names and stale relationship rows do
     # not become a send path.
     if human_rows:
         lines.append("## 人类协作备注\n")
-        lines.append("这些备注只用于理解协作背景，不是联系人或发送入口。联系人类前必须重新使用 query_roster 获取当次返回的稳定 ID。\n")
+        lines.append("这些备注只用于理解协作背景，不是联系人或发送入口。联系人类前必须重新使用 query_directory 获取当次返回的稳定 ID。\n")
         for r, provider_name in human_rows:
             m = r.member
             if not m:
@@ -283,9 +283,9 @@ When installing or importing an MCP server via `discover_resources` / `import_mc
     static_parts.append("""
 ## Digital Employee Roster
 
-To find or contact digital employees, use `query_roster`.
+To find or contact digital employees, use `query_directory`.
 Do not rely on preloaded colleague lists for digital employees.
-If you know a target name, role, or capability, call `query_roster` with `member_type="agent"` and a query.
+If you know a target name, role, or capability, call `query_directory` with `member_type="agent"` and a query.
 Then use the returned `target_agent_id` when calling `send_message_to_agent` or `send_file_to_agent`.
 """)
 
@@ -341,7 +341,7 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
 | `feishu_doc_append` | `document_token` (real Token from feishu_doc_create), `content` (Markdown format). |
 | `feishu_drive_share` | `document_token`, `doc_type`(docx/bitable/sheet/doc/folder, default: docx), `action`(add/remove/list), `member_names`(name list, auto-lookup), `permission`(view/edit/full_access). |
 | `feishu_drive_delete` | `file_token`, `file_type`(file/docx/bitable/folder/doc/sheet/mindnote/shortcut/slides). Moves to recycle bin. |
-| `send_channel_message` | `target_member_id`, optional `channel`, `message`. Use `query_roster(member_type="human")` first. |
+| `send_channel_message` | `target_member_id`, optional `channel`, `message`. Use `query_directory(member_type="human")` first. |
 
 🚫 **NEVER**:
 - Use `discover_resources` or `import_mcp_server` for any Feishu tool above
@@ -358,10 +358,10 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
 → **Never say "cannot read sub-pages" — call feishu_wiki_list to get the sub-page list first!**
 
 ✅ **When user asks to message a colleague by name:**
-→ First call `query_roster(member_type="human", query="John")`.
+→ First call `query_directory(member_type="human", query="John")`.
 → If the returned human has `send_platform_message` in `contact_tools`, call `send_platform_message(target_member_id="...", message="...")`.
 → If the returned human has `send_channel_message` in `contact_tools`, call `send_channel_message(target_member_id="...", message="...", channel="<provider_type if needed>")`.
-→ Do not guess names or IDs. If multiple humans match, use the exact `target_member_id` from query_roster.
+→ Do not guess names or IDs. If multiple humans match, use the exact `target_member_id` from query_directory.
 
 ✅ **When user asks to invite a colleague to a calendar event:**
 → Use `attendee_names=["John"]` in `feishu_calendar_create` — names are resolved automatically.
@@ -590,9 +590,9 @@ Default visual style for generated HTML or rich visual documents:
    - Decide whether to mention pending tasks based on timing, context, and urgency
    - DON'T mechanically remind people of every pending item
 
-9. **Choose the correct human messaging tool from query_roster results.**
+9. **Choose the correct human messaging tool from query_directory results.**
    - Human colleague background is context only; do not use it as a send entry.
-   - Before messaging a human colleague, call `query_roster(member_type="human", query="...")`.
+   - Before messaging a human colleague, call `query_directory(member_type="human", query="...")`.
    - Use the returned stable IDs. Prefer `target_member_id`; use `platform_user_id` only when `target_member_id` is unavailable.
    - If the chosen human has `send_platform_message` in `contact_tools`, call `send_platform_message(target_member_id="...", message="...")`.
    - If the chosen human has `send_channel_message` in `contact_tools`, call `send_channel_message(target_member_id="...", message="...", channel="<provider_type if needed>")`.
@@ -606,7 +606,7 @@ Default visual style for generated HTML or rich visual documents:
      `set_trigger(name="wait_john_reply", type="on_message", config={"from_user_name": "John"}, reason="John replied about the XX task. Process the reply: 1) If completed → cancel nag_john_xx_loop trigger, notify the requester, complete the related Focus item; 2) If says 'wait X minutes' → cancel interval, set a once trigger X minutes later to resume reminding, and re-create on_message + interval; 3) If other reply → assess intent and continue follow-up.")`
 
    **🔴 FILE DELIVERY — Use `send_channel_file` for attachments:**
-   - When asked to SEND A FILE to someone, call `query_roster(member_type="human", query="...")` first.
+   - When asked to SEND A FILE to someone, call `query_directory(member_type="human", query="...")` first.
    - Then call `send_channel_file(file_path="workspace/xxx", target_member_id="...", channel="<provider_type if needed>", message="optional text")`.
    - `send_channel_file` uses the stable roster ID and delivers via supported file channels such as Feishu or Slack.
    - **Do NOT use `send_channel_message` to notify someone about a file — use `send_channel_file` which sends the actual file attachment.**

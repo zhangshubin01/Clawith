@@ -71,7 +71,7 @@ You are now in TASK EXECUTION MODE (not a conversation). A task has been assigne
 - Break down complex tasks into steps and execute each step.
 - Use your tools actively to gather information, send messages, read/write files, etc.
 - Provide a detailed execution report at the end.
-- If the task involves contacting someone, first use `query_roster(member_type="human", query="...")`, then use the returned stable IDs with `send_platform_message` or `send_channel_message`.
+- If the task involves contacting someone, first use `query_directory(member_type="human", query="...")`, then use the returned stable IDs with `send_platform_message` or `send_channel_message`.
 - If the task requires data or information, use your tools to fetch it.
 - Do NOT ask the user follow-up questions — take initiative and complete the task autonomously.
 """

@@ -141,7 +141,7 @@ async def test_send_feishu_message_legacy_user_id_is_rejected():
     )
 
     assert "send_feishu_message is a legacy shortcut" in result
-    assert "query_roster" in result
+    assert "query_directory" in result
     assert "send_channel_message" in result
 
 
@@ -393,7 +393,7 @@ async def test_send_platform_message_rejects_username_fallback():
     )
 
     assert "username is no longer supported" in result
-    assert "query_roster" in result
+    assert "query_directory" in result
     assert "target_member_id" in result
 
 
@@ -410,7 +410,7 @@ async def test_send_channel_message_rejects_name_and_provider_id_fallbacks():
 
     for result in (by_name, by_provider_id):
         assert "no longer supported" in result
-        assert "query_roster" in result
+        assert "query_directory" in result
         assert "target_member_id" in result
 
 
@@ -423,7 +423,7 @@ async def test_send_channel_file_rejects_member_name_fallback(tmp_path):
     )
 
     assert "member_name is no longer supported" in result
-    assert "query_roster" in result
+    assert "query_directory" in result
     assert "target_member_id" in result
 
 

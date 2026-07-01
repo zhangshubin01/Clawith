@@ -56,7 +56,7 @@ import MindTab from './tabs/MindTab';
 import SettingsTab from './tabs/SettingsTab';
 import SkillsTab from './tabs/SkillsTab';
 import ToolsTab from './tabs/ToolsTab';
-import RosterDirectory from './RosterDirectory';
+import AgentDirectory from './AgentDirectory';
 import { useAgentDetailRoute } from './hooks/useAgentDetailRoute';
 import { fetchAuth } from './utils/fetchAuth';
 
@@ -428,6 +428,7 @@ function AccessPermissionsPanel({
             body: JSON.stringify(payload),
         });
         queryClient.invalidateQueries({ queryKey: ['agent-permissions', agentId] });
+        queryClient.invalidateQueries({ queryKey: ['agent-directory', agentId] });
         queryClient.invalidateQueries({ queryKey: ['agent', agentId] });
         queryClient.invalidateQueries({ queryKey: ['agents'] });
     };
@@ -449,7 +450,7 @@ function AccessPermissionsPanel({
             value: 'custom',
             icon: <IconLock size={14} stroke={1.8} />,
             label: isChinese ? '指定访问' : 'Custom',
-            desc: isChinese ? '指定可访问的平台用户；不可参与 Plaza。Agent 关系请在“关系”里配置。' : 'Choose platform users explicitly; Plaza is disabled. Agent relationships are configured in Relationships.',
+            desc: isChinese ? '指定成员和数字员工可见、可用；不可参与 Plaza。' : 'Only selected members and agents can see and use it; Plaza is disabled.',
         },
     ] as const;
 
@@ -5760,7 +5761,7 @@ export default function AgentDetailPage() {
                 {/* ── Directory Tab ── */}
                 {
                     activeTab === 'relationships' && (
-                        <RosterDirectory agentId={id!} />
+                        <AgentDirectory agentId={id!} />
                     )
                 }
 

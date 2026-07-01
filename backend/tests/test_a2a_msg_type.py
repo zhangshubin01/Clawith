@@ -397,7 +397,7 @@ async def test_missing_target_agent_id_returns_error():
 
 @pytest.mark.asyncio
 async def test_legacy_agent_name_returns_roster_routing_error():
-    """Memory or old tasks using agent_name must be routed back through query_roster."""
+    """Memory or old tasks using agent_name must be routed back through query_directory."""
     from app.services.agent_tools import _send_message_to_agent
 
     result = await _send_message_to_agent(
@@ -410,7 +410,7 @@ async def test_legacy_agent_name_returns_roster_routing_error():
     )
 
     assert "agent_name is no longer supported" in result
-    assert "query_roster" in result
+    assert "query_directory" in result
     assert "target_agent_id" in result
 
 
@@ -436,7 +436,7 @@ def test_company_auto_contact_helper_rejects_non_company_boundaries():
 
 @pytest.mark.asyncio
 async def test_relationship_prompt_excludes_company_agent_without_relationship():
-    """Digital employees should be discovered through query_roster, not preloaded prompt lists."""
+    """Digital employees should be discovered through query_directory, not preloaded prompt lists."""
     from app.services.agent_context import _load_relationships_from_db
 
     tenant_id = uuid.uuid4()
@@ -459,7 +459,7 @@ async def test_relationship_prompt_excludes_company_agent_without_relationship()
 
 @pytest.mark.asyncio
 async def test_relationship_prompt_keeps_human_notes_without_send_entry():
-    """Human relationship notes stay context-only while sending goes through query_roster."""
+    """Human relationship notes stay context-only while sending goes through query_directory."""
     from app.services.agent_context import _load_relationships_from_db
 
     tenant_id = uuid.uuid4()
@@ -489,7 +489,7 @@ async def test_relationship_prompt_keeps_human_notes_without_send_entry():
     assert "## 人类同事背景" not in relationships
     assert "## 人类协作备注" in relationships
     assert "不是联系人或发送入口" in relationships
-    assert "query_roster" in relationships
+    assert "query_directory" in relationships
     assert "张三" in relationships
     assert "负责产品需求" in relationships
     assert "数字员工同事" not in relationships

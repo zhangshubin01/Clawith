@@ -462,7 +462,7 @@ BUILTIN_TOOLS = [
     {
         "name": "send_channel_file",
         "display_name": "Send File",
-        "description": "Send a file to a human from query_roster or back to the current conversation. Use query_roster(member_type='human') first, then pass target_member_id.",
+        "description": "Send a file to a human from query_directory or back to the current conversation. Use query_directory(member_type='human') first, then pass target_member_id.",
         "category": "communication",
         "icon": "📎",
         "is_default": True,
@@ -470,11 +470,33 @@ BUILTIN_TOOLS = [
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "Workspace-relative path to the file"},
-                "target_member_id": {"type": "string", "description": "Stable human target_member_id returned by query_roster."},
+                "target_member_id": {"type": "string", "description": "Stable human target_member_id returned by query_directory."},
                 "channel": {"type": "string", "enum": ["feishu", "slack"], "description": "Optional channel override when the roster member has multiple reachable providers."},
                 "message": {"type": "string", "description": "Optional message to accompany the file"},
             },
             "required": ["file_path"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "query_directory",
+        "display_name": "Query Directory",
+        "description": "Query the people and digital employees this agent can see in its Directory. Use this before recommending or contacting a colleague.",
+        "category": "communication",
+        "icon": "📇",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Optional search keyword for name, role, title, department, or skill."},
+                "target_member_id": {"type": "string", "description": "Optional exact human member ID returned by query_directory. Use this to verify one specific person."},
+                "member_type": {"type": "string", "enum": ["all", "agent", "human"], "description": "Filter by member type. Defaults to all."},
+                "include_uncontactable": {"type": "boolean", "description": "Whether to include members that are visible but currently unavailable. Defaults to false. This never returns invisible members."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "Maximum number of members to return. Defaults to 20."},
+                "offset": {"type": "integer", "minimum": 0, "description": "Number of matching members to skip. Defaults to 0."},
+            },
+            "required": [],
         },
         "config": {},
         "config_schema": {},
@@ -485,15 +507,15 @@ BUILTIN_TOOLS = [
     {
         "name": "send_platform_message",
         "display_name": "Platform Message",
-        "description": "Send a proactive message to a human colleague on the Clawith first-party platform (web or app). Use query_roster first, then pass target_member_id or platform_user_id.",
+        "description": "Send a proactive message to a human colleague on the Clawith first-party platform (web or app). Use query_directory first, then pass target_member_id or platform_user_id.",
         "category": "communication",
         "icon": "🌐",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "target_member_id": {"type": "string", "description": "Stable human member ID returned by query_roster. Preferred recipient identifier."},
-                "platform_user_id": {"type": "string", "description": "Platform user ID returned by query_roster for first-party platform users."},
+                "target_member_id": {"type": "string", "description": "Stable human member ID returned by query_directory. Preferred recipient identifier."},
+                "platform_user_id": {"type": "string", "description": "Platform user ID returned by query_directory for first-party platform users."},
                 "message": {"type": "string", "description": "Message content"},
             },
             "required": ["message"],
@@ -504,14 +526,14 @@ BUILTIN_TOOLS = [
     {
         "name": "send_channel_message",
         "display_name": "Channel Message",
-        "description": "Send a message to a human colleague via their configured external channel (Feishu, DingTalk, WeCom, Slack, Teams, WeChat). Use query_roster first, then pass target_member_id.",
+        "description": "Send a message to a human colleague via their configured external channel (Feishu, DingTalk, WeCom, Slack, Teams, WeChat). Use query_directory first, then pass target_member_id.",
         "category": "communication",
         "icon": "💬",
         "is_default": False,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "target_member_id": {"type": "string", "description": "Stable human member ID returned by query_roster. Preferred recipient identifier."},
+                "target_member_id": {"type": "string", "description": "Stable human member ID returned by query_directory. Preferred recipient identifier."},
                 "message": {"type": "string", "description": "Message content"},
                 "channel": {
                     "type": "string",
@@ -527,14 +549,14 @@ BUILTIN_TOOLS = [
     {
         "name": "send_message_to_agent",
         "display_name": "Agent Message",
-        "description": "Send a message to a digital employee colleague. Use query_roster first to get target_agent_id. Decision guide: target needs to DO WORK and return results? → task_delegate. Just FYI? → notify. Quick factual question? → consult. When unsure, prefer task_delegate.",
+        "description": "Send a message to a digital employee colleague. Use query_directory first to get target_agent_id. Decision guide: target needs to DO WORK and return results? → task_delegate. Just FYI? → notify. Quick factual question? → consult. When unsure, prefer task_delegate.",
         "category": "communication",
         "icon": "🤖",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "target_agent_id": {"type": "string", "description": "Target digital employee ID returned by query_roster"},
+                "target_agent_id": {"type": "string", "description": "Target digital employee ID returned by query_directory"},
                 "message": {"type": "string", "description": "Message content"},
                 "msg_type": {"type": "string", "enum": ["notify", "consult", "task_delegate"], "description": "(1) Target needs to DO WORK and return results? → task_delegate. (2) Just FYI? → notify. (3) Quick factual question? → consult. When unsure, prefer task_delegate."},
             },
@@ -546,14 +568,14 @@ BUILTIN_TOOLS = [
     {
         "name": "send_file_to_agent",
         "display_name": "Agent File Transfer",
-        "description": "Send a workspace file to another digital employee. Use query_roster first to get target_agent_id. The file is copied to the target agent's workspace/inbox/files/ and an inbox note is created.",
+        "description": "Send a workspace file to another digital employee. Use query_directory first to get target_agent_id. The file is copied to the target agent's workspace/inbox/files/ and an inbox note is created.",
         "category": "communication",
         "icon": "📤",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "target_agent_id": {"type": "string", "description": "Target digital employee ID returned by query_roster"},
+                "target_agent_id": {"type": "string", "description": "Target digital employee ID returned by query_directory"},
                 "file_path": {"type": "string", "description": "Workspace-relative source file path"},
                 "message": {"type": "string", "description": "Optional delivery note"},
             },
@@ -1993,7 +2015,7 @@ BUILTIN_TOOLS = [
     {
         "name": "send_feishu_message",
         "display_name": "Feishu Message",
-        "description": "Hidden legacy compatibility shortcut for old Feishu tool calls. New model calls must use query_roster followed by send_channel_message(channel='feishu').",
+        "description": "Hidden legacy compatibility shortcut for old Feishu tool calls. New model calls must use query_directory followed by send_channel_message(channel='feishu').",
         "category": "feishu",
         "icon": "💬",
         "is_default": False,

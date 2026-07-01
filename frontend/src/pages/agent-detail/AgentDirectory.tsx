@@ -5,9 +5,11 @@ import { IconRobot, IconSearch, IconUser } from '@tabler/icons-react';
 
 import { fetchAuth } from './utils/fetchAuth';
 
-type RosterMemberType = 'all' | 'human' | 'agent';
+const PAGE_SIZE = 50;
 
-type RosterMember = {
+type DirectoryMemberType = 'all' | 'human' | 'agent';
+
+type DirectoryMember = {
     member_type: 'human' | 'agent';
     target_member_id?: string | null;
     platform_user_id?: string | null;
@@ -28,54 +30,75 @@ type RosterMember = {
     unavailable_reason?: string | null;
 };
 
-type RosterResponse = {
+type DirectoryResponse = {
     ok: boolean;
     source_agent_id: string;
     query: string;
-    member_type: RosterMemberType;
+    member_type: DirectoryMemberType;
     include_uncontactable: boolean;
     returned_count: number;
     limit: number;
     offset: number;
     has_more: boolean;
-    members: RosterMember[];
+    members: DirectoryMember[];
 };
 
-export default function RosterDirectory({ agentId }: { agentId: string }) {
+export default function AgentDirectory({ agentId }: { agentId: string }) {
     const { t, i18n } = useTranslation();
     const isChinese = i18n.language?.startsWith('zh');
     const [search, setSearch] = useState('');
     const [debouncedSearch, setDebouncedSearch] = useState('');
-    const [memberType, setMemberType] = useState<RosterMemberType>('all');
+    const [memberType, setMemberType] = useState<DirectoryMemberType>('all');
     const [includeUnavailable, setIncludeUnavailable] = useState(false);
+    const [offset, setOffset] = useState(0);
+    const [loadedMembers, setLoadedMembers] = useState<DirectoryMember[]>([]);
 
     useEffect(() => {
         const timer = setTimeout(() => setDebouncedSearch(search.trim()), 300);
         return () => clearTimeout(timer);
     }, [search]);
 
-    const rosterQuery = useQuery({
-        queryKey: ['agent-roster', agentId, debouncedSearch, memberType, includeUnavailable],
+    useEffect(() => {
+        setOffset(0);
+        setLoadedMembers([]);
+    }, [agentId, debouncedSearch, memberType, includeUnavailable]);
+
+    const directoryQuery = useQuery({
+        queryKey: ['agent-directory', agentId, debouncedSearch, memberType, includeUnavailable, offset],
         queryFn: () => {
             const params = new URLSearchParams({
                 member_type: memberType,
-                limit: '50',
+                limit: String(PAGE_SIZE),
+                offset: String(offset),
                 include_uncontactable: includeUnavailable ? 'true' : 'false',
             });
             if (debouncedSearch) params.set('query', debouncedSearch);
-            return fetchAuth<RosterResponse>(`/agents/${agentId}/roster?${params.toString()}`);
+            return fetchAuth<DirectoryResponse>(`/agents/${agentId}/directory?${params.toString()}`);
         },
         enabled: Boolean(agentId),
     });
 
-    const members = rosterQuery.data?.members || [];
-    const typeOptions: Array<{ value: RosterMemberType; label: string }> = [
+    useEffect(() => {
+        const data = directoryQuery.data;
+        if (!data) return;
+        setLoadedMembers((current) => {
+            if (data.offset === 0) return data.members;
+            const seen = new Set(current.map((member) => `${member.member_type}:${primaryId(member)}`));
+            const next = data.members.filter((member) => !seen.has(`${member.member_type}:${primaryId(member)}`));
+            return [...current, ...next];
+        });
+    }, [directoryQuery.data]);
+
+    const members = loadedMembers;
+    const isInitialLoading = directoryQuery.isLoading && offset === 0 && members.length === 0;
+    const isLoadingMore = directoryQuery.isFetching && offset > 0;
+    const typeOptions: Array<{ value: DirectoryMemberType; label: string }> = [
         { value: 'all', label: t('agent.directory.all') },
         { value: 'human', label: t('agent.directory.people') },
         { value: 'agent', label: t('agent.directory.agents') },
     ];
 
-    const providerLabel = (member: RosterMember) => {
+    const providerLabel = (member: DirectoryMember) => {
         if (member.member_type === 'agent') return t('agent.directory.digitalEmployee');
         const providerType = (member.provider?.provider_type || '').trim();
         if (!providerType || providerType === 'web' || providerType === 'platform') {
@@ -84,13 +107,13 @@ export default function RosterDirectory({ agentId }: { agentId: string }) {
         return providerType;
     };
 
-    const primaryId = (member: RosterMember) => (
+    const primaryId = (member: DirectoryMember) => (
         member.member_type === 'agent'
             ? member.target_agent_id
             : member.target_member_id
     ) || '';
 
-    const secondaryText = (member: RosterMember) => {
+    const secondaryText = (member: DirectoryMember) => {
         if (member.member_type === 'agent') {
             return member.role_description || member.access_mode || '';
         }
@@ -98,7 +121,7 @@ export default function RosterDirectory({ agentId }: { agentId: string }) {
         return parts.join(' · ');
     };
 
-    const renderContactTools = (member: RosterMember) => {
+    const renderContactTools = (member: DirectoryMember) => {
         const tools = member.contact_tools || [];
         if (!tools.length) return <span style={{ color: 'var(--text-tertiary)' }}>—</span>;
         return tools.map((tool) => (
@@ -118,7 +141,7 @@ export default function RosterDirectory({ agentId }: { agentId: string }) {
                     </div>
                 </div>
                 <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>
-                    {rosterQuery.data ? t('agent.directory.count', { count: rosterQuery.data.returned_count }) : ''}
+                    {directoryQuery.data ? t('agent.directory.count', { count: directoryQuery.data.returned_count }) : ''}
                 </div>
             </div>
 
@@ -164,19 +187,19 @@ export default function RosterDirectory({ agentId }: { agentId: string }) {
                 </label>
             </div>
 
-            {rosterQuery.isLoading && (
+            {isInitialLoading && (
                 <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px' }}>
                     {t('agent.detail.loading')}
                 </div>
             )}
 
-            {rosterQuery.isError && (
+            {directoryQuery.isError && (
                 <div style={{ border: '1px solid rgba(239,68,68,0.25)', borderRadius: '8px', padding: '12px', color: 'var(--error)', fontSize: '13px' }}>
-                    {String((rosterQuery.error as Error)?.message || t('common.error.loadFailed', 'Load failed'))}
+                    {String((directoryQuery.error as Error)?.message || t('common.error.loadFailed', 'Load failed'))}
                 </div>
             )}
 
-            {!rosterQuery.isLoading && !rosterQuery.isError && members.length === 0 && (
+            {!isInitialLoading && !directoryQuery.isError && members.length === 0 && (
                 <div style={{ border: '1px dashed var(--border-subtle)', borderRadius: '8px', padding: '24px', textAlign: 'center' }}>
                     <div style={{ fontWeight: 600, marginBottom: '6px' }}>{t('agent.directory.emptyTitle')}</div>
                     <div style={{ fontSize: '12px', color: 'var(--text-tertiary)' }}>
@@ -185,7 +208,7 @@ export default function RosterDirectory({ agentId }: { agentId: string }) {
                 </div>
             )}
 
-            {!rosterQuery.isLoading && !rosterQuery.isError && members.length > 0 && (
+            {!isInitialLoading && !directoryQuery.isError && members.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {members.map((member) => (
                         <div
@@ -250,9 +273,18 @@ export default function RosterDirectory({ agentId }: { agentId: string }) {
                             </div>
                         </div>
                     ))}
-                    {rosterQuery.data?.has_more && (
-                        <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', textAlign: 'center', paddingTop: '4px' }}>
-                            {isChinese ? '还有更多结果，请搜索缩小范围。' : 'More results are available. Refine the search to narrow the list.'}
+                    {directoryQuery.data?.has_more && (
+                        <div style={{ display: 'flex', justifyContent: 'center', paddingTop: '4px' }}>
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={isLoadingMore}
+                                onClick={() => setOffset((directoryQuery.data?.offset || 0) + (directoryQuery.data?.limit || PAGE_SIZE))}
+                            >
+                                {isLoadingMore
+                                    ? t('agent.directory.loadingMore', isChinese ? '加载中...' : 'Loading...')
+                                    : t('agent.directory.loadMore', isChinese ? '加载更多' : 'Load more')}
+                            </button>
                         </div>
                     )}
                 </div>
