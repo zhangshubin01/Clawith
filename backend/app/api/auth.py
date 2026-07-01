@@ -586,6 +586,7 @@ async def get_email_hint(username: str):
 async def forgot_password(
     data: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
 ):
     """Request a password reset link for a global Identity."""
     from app.services.system_email_service import resolve_email_config_async
@@ -615,7 +616,7 @@ async def forgot_password(
 
         raw_token, expires_at = await create_password_reset_token(identity.id)
 
-        reset_url = await build_password_reset_url(raw_token)
+        reset_url = await build_password_reset_url(raw_token, request=request)
         expiry_minutes = int((expires_at - datetime.now(timezone.utc)).total_seconds() // 60)
         background_tasks.add_task(
             send_password_reset_email,

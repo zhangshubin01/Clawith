@@ -46,19 +46,18 @@ class BroadcastEmailRecipient:
 
 
 
-async def resolve_email_config_async(db, *, include_disabled: bool = False) -> SystemEmailConfig | None:
-    """Resolve email configuration by searching in order:
-    1. Platform-level settings in DB ('system_email_platform')
-    """
-    from sqlalchemy import select
-    from app.models.system_settings import SystemSetting
+async def resolve_email_config_async(db=None, *, include_disabled: bool = False) -> SystemEmailConfig | None:
+    """Resolve email configuration from the 'system_email_platform' system setting.
 
-    # 1. Try platform-level config in DB
+    ``db`` is accepted for call-site compatibility but ignored — the lookup
+    goes through ``system_setting_dao`` which manages its own session.
+    """
+    from app.dao import system_setting_dao
+
+    # Try platform-level config in DB
     try:
-        result = await db.execute(select(SystemSetting).where(SystemSetting.key == "system_email_platform"))
-        setting = result.scalar_one_or_none()
-        if setting and setting.value:
-            v = setting.value
+        v = await system_setting_dao.get_value("system_email_platform", {})
+        if v:
             if v.get("SYSTEM_EMAIL_ENABLED") is False and not include_disabled:
                 return None
             if v.get("SYSTEM_EMAIL_FROM_ADDRESS") and v.get("SYSTEM_SMTP_HOST"):
@@ -67,7 +66,8 @@ async def resolve_email_config_async(db, *, include_disabled: bool = False) -> S
                     from_name=str(v.get("SYSTEM_EMAIL_FROM_NAME", "Clawith")).strip() or "Clawith",
                     smtp_host=str(v.get("SYSTEM_SMTP_HOST", "")).strip(),
                     smtp_port=int(v.get("SYSTEM_SMTP_PORT", 465)),
-                    smtp_username=str(v.get("SYSTEM_SMTP_USERNAME", "")).strip() or str(v.get("SYSTEM_EMAIL_FROM_ADDRESS", "")).strip(),
+                    smtp_username=str(v.get("SYSTEM_SMTP_USERNAME", "")).strip()
+                    or str(v.get("SYSTEM_EMAIL_FROM_ADDRESS", "")).strip(),
                     smtp_password=str(v.get("SYSTEM_SMTP_PASSWORD", "")),
                     smtp_ssl=bool(v.get("SYSTEM_SMTP_SSL", True)),
                     smtp_timeout_seconds=max(1, int(v.get("SYSTEM_SMTP_TIMEOUT_SECONDS", 15))),
