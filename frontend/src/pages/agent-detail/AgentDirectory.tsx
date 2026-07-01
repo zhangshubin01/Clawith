@@ -388,10 +388,13 @@ export default function AgentDirectory({
                         <label style={{ position: 'relative', display: 'block', marginBottom: '8px' }}>
                             <IconSearch size={15} stroke={1.7} style={{ position: 'absolute', left: '9px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
                             <input
+                                id={`agent-directory-custom-search-${customTab}`}
+                                name="agent_directory_custom_search"
                                 className="input"
                                 value={customSearch}
                                 onChange={(event) => setCustomSearch(event.target.value)}
                                 placeholder={candidatePlaceholder}
+                                aria-label={candidatePlaceholder}
                                 style={{ width: '100%', paddingLeft: '32px', fontSize: '12px' }}
                             />
                         </label>
@@ -465,10 +468,13 @@ export default function AgentDirectory({
                 <label style={{ position: 'relative', minWidth: '220px', flex: '1 1 260px' }}>
                     <IconSearch size={16} stroke={1.7} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
                     <input
+                        id="agent-directory-search"
+                        name="agent_directory_search"
                         className="input"
                         value={search}
                         onChange={(event) => setSearch(event.target.value)}
                         placeholder={t('agent.directory.searchPlaceholder')}
+                        aria-label={t('agent.directory.searchPlaceholder')}
                         style={{ width: '100%', paddingLeft: '34px' }}
                     />
                 </label>
@@ -495,6 +501,8 @@ export default function AgentDirectory({
                 </div>
                 <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
                     <input
+                        id="agent-directory-include-unavailable"
+                        name="agent_directory_include_unavailable"
                         type="checkbox"
                         checked={includeUnavailable}
                         onChange={(event) => setIncludeUnavailable(event.target.checked)}
