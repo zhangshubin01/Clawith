@@ -57,6 +57,17 @@ def test_agent_directory_router_uses_directory_prefix_only():
     assert "agent-directory" in directory_api.router.tags
 
 
+def test_agent_directory_router_exposes_custom_maintenance_routes():
+    paths = {route.path for route in directory_api.router.routes}
+
+    assert "/custom/humans" in paths
+    assert "/custom/human-candidates" in paths
+    assert "/custom/humans/{user_id}" in paths
+    assert "/custom/agents" in paths
+    assert "/custom/agent-candidates" in paths
+    assert "/custom/agents/{target_agent_id}" in paths
+
+
 @pytest.mark.asyncio
 async def test_get_agent_directory_filters_uncontactable_agents_by_default(monkeypatch):
     tenant_id = uuid.uuid4()

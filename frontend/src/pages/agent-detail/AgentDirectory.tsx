@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { IconRobot, IconSearch, IconUser } from '@tabler/icons-react';
 
@@ -43,8 +43,40 @@ type DirectoryResponse = {
     members: DirectoryMember[];
 };
 
-export default function AgentDirectory({ agentId }: { agentId: string }) {
+type CustomHumanEntry = {
+    user_id: string;
+    member_id?: string | null;
+    display_name?: string | null;
+    email?: string | null;
+    title?: string | null;
+    department?: string | null;
+    access_level: 'use' | 'manage';
+    removable: boolean;
+};
+
+type CustomAgentEntry = {
+    target_agent_id: string;
+    display_name?: string | null;
+    role_description?: string | null;
+    access_mode?: string | null;
+    status?: string | null;
+};
+
+type CustomHumanCandidate = Omit<CustomHumanEntry, 'access_level' | 'removable'>;
+type CustomAgentCandidate = CustomAgentEntry;
+type CustomTab = 'human' | 'agent';
+
+export default function AgentDirectory({
+    agentId,
+    accessMode,
+    canManage = false,
+}: {
+    agentId: string;
+    accessMode?: string | null;
+    canManage?: boolean;
+}) {
     const { t, i18n } = useTranslation();
+    const queryClient = useQueryClient();
     const isChinese = i18n.language?.startsWith('zh');
     const [search, setSearch] = useState('');
     const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -52,6 +84,13 @@ export default function AgentDirectory({ agentId }: { agentId: string }) {
     const [includeUnavailable, setIncludeUnavailable] = useState(false);
     const [offset, setOffset] = useState(0);
     const [loadedMembers, setLoadedMembers] = useState<DirectoryMember[]>([]);
+    const showCustomMaintenance = accessMode === 'custom' && canManage;
+    const [customTab, setCustomTab] = useState<CustomTab>('human');
+    const [customSearch, setCustomSearch] = useState('');
+    const [debouncedCustomSearch, setDebouncedCustomSearch] = useState('');
+    const [candidateOffset, setCandidateOffset] = useState(0);
+    const [loadedCandidates, setLoadedCandidates] = useState<Array<CustomHumanCandidate | CustomAgentCandidate>>([]);
+    const [savingKey, setSavingKey] = useState<string | null>(null);
 
     useEffect(() => {
         const timer = setTimeout(() => setDebouncedSearch(search.trim()), 300);
@@ -59,9 +98,19 @@ export default function AgentDirectory({ agentId }: { agentId: string }) {
     }, [search]);
 
     useEffect(() => {
+        const timer = setTimeout(() => setDebouncedCustomSearch(customSearch.trim()), 300);
+        return () => clearTimeout(timer);
+    }, [customSearch]);
+
+    useEffect(() => {
         setOffset(0);
         setLoadedMembers([]);
     }, [agentId, debouncedSearch, memberType, includeUnavailable]);
+
+    useEffect(() => {
+        setCandidateOffset(0);
+        setLoadedCandidates([]);
+    }, [agentId, customTab, debouncedCustomSearch]);
 
     const directoryQuery = useQuery({
         queryKey: ['agent-directory', agentId, debouncedSearch, memberType, includeUnavailable, offset],
@@ -78,6 +127,34 @@ export default function AgentDirectory({ agentId }: { agentId: string }) {
         enabled: Boolean(agentId),
     });
 
+    const customHumansQuery = useQuery({
+        queryKey: ['agent-directory-custom-humans', agentId],
+        queryFn: () => fetchAuth<{ members: CustomHumanEntry[] }>(`/agents/${agentId}/directory/custom/humans`),
+        enabled: showCustomMaintenance,
+    });
+
+    const customAgentsQuery = useQuery({
+        queryKey: ['agent-directory-custom-agents', agentId],
+        queryFn: () => fetchAuth<{ agents: CustomAgentEntry[] }>(`/agents/${agentId}/directory/custom/agents`),
+        enabled: showCustomMaintenance,
+    });
+
+    const customCandidatesQuery = useQuery({
+        queryKey: ['agent-directory-custom-candidates', agentId, customTab, debouncedCustomSearch, candidateOffset],
+        queryFn: () => {
+            const params = new URLSearchParams({
+                limit: String(PAGE_SIZE),
+                offset: String(candidateOffset),
+            });
+            if (debouncedCustomSearch) params.set('query', debouncedCustomSearch);
+            const path = customTab === 'human' ? 'human-candidates' : 'agent-candidates';
+            return fetchAuth<{ candidates: Array<CustomHumanCandidate | CustomAgentCandidate>; limit: number; offset: number; has_more: boolean }>(
+                `/agents/${agentId}/directory/custom/${path}?${params.toString()}`
+            );
+        },
+        enabled: showCustomMaintenance,
+    });
+
     useEffect(() => {
         const data = directoryQuery.data;
         if (!data) return;
@@ -88,6 +165,19 @@ export default function AgentDirectory({ agentId }: { agentId: string }) {
             return [...current, ...next];
         });
     }, [directoryQuery.data]);
+
+    useEffect(() => {
+        const data = customCandidatesQuery.data;
+        if (!data) return;
+        setLoadedCandidates((current) => {
+            if (data.offset === 0) return data.candidates;
+            const idOf = (item: CustomHumanCandidate | CustomAgentCandidate) => (
+                customTab === 'human' ? (item as CustomHumanCandidate).user_id : (item as CustomAgentCandidate).target_agent_id
+            );
+            const seen = new Set(current.map(idOf));
+            return [...current, ...data.candidates.filter((item) => !seen.has(idOf(item)))];
+        });
+    }, [customCandidatesQuery.data, customTab]);
 
     const members = loadedMembers;
     const isInitialLoading = directoryQuery.isLoading && offset === 0 && members.length === 0;
@@ -129,6 +219,224 @@ export default function AgentDirectory({ agentId }: { agentId: string }) {
                 {tool}
             </span>
         ));
+    };
+
+    const refreshDirectory = () => {
+        queryClient.invalidateQueries({ queryKey: ['agent-directory', agentId] });
+        queryClient.invalidateQueries({ queryKey: ['agent-directory-custom-humans', agentId] });
+        queryClient.invalidateQueries({ queryKey: ['agent-directory-custom-agents', agentId] });
+        queryClient.invalidateQueries({ queryKey: ['agent-directory-custom-candidates', agentId] });
+    };
+
+    const addCustomCandidate = async (candidate: CustomHumanCandidate | CustomAgentCandidate) => {
+        const key = customTab === 'human' ? (candidate as CustomHumanCandidate).user_id : (candidate as CustomAgentCandidate).target_agent_id;
+        setSavingKey(`add:${key}`);
+        try {
+            if (customTab === 'human') {
+                await fetchAuth(`/agents/${agentId}/directory/custom/humans`, {
+                    method: 'POST',
+                    body: JSON.stringify({ user_id: (candidate as CustomHumanCandidate).user_id }),
+                });
+            } else {
+                await fetchAuth(`/agents/${agentId}/directory/custom/agents`, {
+                    method: 'POST',
+                    body: JSON.stringify({ target_agent_id: (candidate as CustomAgentCandidate).target_agent_id }),
+                });
+            }
+            setLoadedCandidates((current) => current.filter((item) => (
+                customTab === 'human'
+                    ? (item as CustomHumanCandidate).user_id !== key
+                    : (item as CustomAgentCandidate).target_agent_id !== key
+            )));
+            refreshDirectory();
+        } finally {
+            setSavingKey(null);
+        }
+    };
+
+    const removeCustomHuman = async (entry: CustomHumanEntry) => {
+        setSavingKey(`remove:${entry.user_id}`);
+        try {
+            await fetchAuth(`/agents/${agentId}/directory/custom/humans/${entry.user_id}`, { method: 'DELETE' });
+            refreshDirectory();
+        } finally {
+            setSavingKey(null);
+        }
+    };
+
+    const removeCustomAgent = async (entry: CustomAgentEntry) => {
+        setSavingKey(`remove:${entry.target_agent_id}`);
+        try {
+            await fetchAuth(`/agents/${agentId}/directory/custom/agents/${entry.target_agent_id}`, { method: 'DELETE' });
+            refreshDirectory();
+        } finally {
+            setSavingKey(null);
+        }
+    };
+
+    const renderCustomMaintenance = () => {
+        if (!showCustomMaintenance) return null;
+        const humans = customHumansQuery.data?.members || [];
+        const agents = customAgentsQuery.data?.agents || [];
+        const entries = customTab === 'human' ? humans : agents;
+        const candidatePlaceholder = customTab === 'human'
+            ? (isChinese ? '搜索可加入的人类成员' : 'Search people to add')
+            : (isChinese ? '搜索可加入的数字员工' : 'Search agents to add');
+
+        return (
+            <div style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', padding: '12px', marginBottom: '16px', background: 'var(--bg-elevated)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', marginBottom: '10px' }}>
+                    <div>
+                        <div style={{ fontWeight: 600, fontSize: '13px' }}>{isChinese ? 'Custom 通讯录维护' : 'Custom Directory'}</div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
+                            {isChinese ? '维护这个 Agent 可见、可联系的指定成员和数字员工。' : 'Maintain the selected people and agents visible to this agent.'}
+                        </div>
+                    </div>
+                    <div style={{ display: 'inline-flex', border: '1px solid var(--border-subtle)', borderRadius: '8px', overflow: 'hidden', height: '32px' }}>
+                        {[
+                            { value: 'human' as const, label: t('agent.directory.people') },
+                            { value: 'agent' as const, label: t('agent.directory.agents') },
+                        ].map((option) => (
+                            <button
+                                key={option.value}
+                                type="button"
+                                onClick={() => setCustomTab(option.value)}
+                                style={{
+                                    border: 0,
+                                    borderRight: option.value === 'human' ? '1px solid var(--border-subtle)' : 0,
+                                    background: customTab === option.value ? 'var(--bg-tertiary)' : 'var(--bg-primary)',
+                                    color: 'var(--text-primary)',
+                                    padding: '0 12px',
+                                    fontSize: '12px',
+                                    cursor: 'pointer',
+                                }}
+                            >
+                                {option.label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '12px' }}>
+                    <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px', fontWeight: 600 }}>
+                            {isChinese ? '已加入' : 'Added'} ({entries.length})
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            {entries.length === 0 && (
+                                <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', border: '1px dashed var(--border-subtle)', borderRadius: '8px', padding: '12px' }}>
+                                    {isChinese ? '还没有显式加入对象。' : 'No explicit entries yet.'}
+                                </div>
+                            )}
+                            {customTab === 'human' && humans.map((entry) => (
+                                <div key={entry.user_id} style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', padding: '10px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                    <IconUser size={16} stroke={1.7} style={{ color: 'rgb(16,185,129)', flexShrink: 0 }} />
+                                    <div style={{ minWidth: 0, flex: 1 }}>
+                                        <div style={{ fontWeight: 600, fontSize: '12px' }}>{entry.display_name || entry.email || entry.user_id}</div>
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {[entry.title, entry.department, entry.email].filter(Boolean).join(' · ') || entry.user_id}
+                                        </div>
+                                    </div>
+                                    <span className="badge" style={{ fontSize: '10px' }}>{entry.access_level}</span>
+                                    <button
+                                        type="button"
+                                        className="btn btn-ghost"
+                                        disabled={!entry.removable || savingKey === `remove:${entry.user_id}`}
+                                        title={!entry.removable ? (isChinese ? '请先在权限设置里降级管理权限' : 'Downgrade manager access in Permissions first') : undefined}
+                                        onClick={() => removeCustomHuman(entry)}
+                                        style={{ fontSize: '12px', color: entry.removable ? 'var(--error)' : 'var(--text-tertiary)' }}
+                                    >
+                                        {t('common.remove', 'Remove')}
+                                    </button>
+                                </div>
+                            ))}
+                            {customTab === 'agent' && agents.map((entry) => (
+                                <div key={entry.target_agent_id} style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', padding: '10px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                    <IconRobot size={16} stroke={1.7} style={{ color: 'rgb(79,70,229)', flexShrink: 0 }} />
+                                    <div style={{ minWidth: 0, flex: 1 }}>
+                                        <div style={{ fontWeight: 600, fontSize: '12px' }}>{entry.display_name || entry.target_agent_id}</div>
+                                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {entry.role_description || entry.access_mode || entry.target_agent_id}
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        className="btn btn-ghost"
+                                        disabled={savingKey === `remove:${entry.target_agent_id}`}
+                                        onClick={() => removeCustomAgent(entry)}
+                                        style={{ fontSize: '12px', color: 'var(--error)' }}
+                                    >
+                                        {t('common.remove', 'Remove')}
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px', fontWeight: 600 }}>
+                            {isChinese ? '添加对象' : 'Add entries'}
+                        </div>
+                        <label style={{ position: 'relative', display: 'block', marginBottom: '8px' }}>
+                            <IconSearch size={15} stroke={1.7} style={{ position: 'absolute', left: '9px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
+                            <input
+                                className="input"
+                                value={customSearch}
+                                onChange={(event) => setCustomSearch(event.target.value)}
+                                placeholder={candidatePlaceholder}
+                                style={{ width: '100%', paddingLeft: '32px', fontSize: '12px' }}
+                            />
+                        </label>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            {loadedCandidates.length === 0 && !customCandidatesQuery.isLoading && (
+                                <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', border: '1px dashed var(--border-subtle)', borderRadius: '8px', padding: '12px' }}>
+                                    {isChinese ? '没有可加入的候选对象。' : 'No candidates available.'}
+                                </div>
+                            )}
+                            {loadedCandidates.map((candidate) => {
+                                const isHuman = customTab === 'human';
+                                const key = isHuman ? (candidate as CustomHumanCandidate).user_id : (candidate as CustomAgentCandidate).target_agent_id;
+                                const title = isHuman ? (candidate as CustomHumanCandidate).display_name : (candidate as CustomAgentCandidate).display_name;
+                                const desc = isHuman
+                                    ? [(candidate as CustomHumanCandidate).title, (candidate as CustomHumanCandidate).department, (candidate as CustomHumanCandidate).email].filter(Boolean).join(' · ')
+                                    : (candidate as CustomAgentCandidate).role_description || (candidate as CustomAgentCandidate).access_mode || '';
+                                return (
+                                    <div key={key} style={{ border: '1px solid var(--border-subtle)', borderRadius: '8px', padding: '10px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                        {isHuman ? <IconUser size={16} stroke={1.7} style={{ color: 'rgb(16,185,129)', flexShrink: 0 }} /> : <IconRobot size={16} stroke={1.7} style={{ color: 'rgb(79,70,229)', flexShrink: 0 }} />}
+                                        <div style={{ minWidth: 0, flex: 1 }}>
+                                            <div style={{ fontWeight: 600, fontSize: '12px' }}>{title || key}</div>
+                                            <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc || key}</div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            className="btn btn-secondary"
+                                            disabled={savingKey === `add:${key}`}
+                                            onClick={() => addCustomCandidate(candidate)}
+                                            style={{ fontSize: '12px' }}
+                                        >
+                                            {isChinese ? '加入' : 'Add'}
+                                        </button>
+                                    </div>
+                                );
+                            })}
+                            {customCandidatesQuery.data?.has_more && (
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    disabled={customCandidatesQuery.isFetching}
+                                    onClick={() => setCandidateOffset((customCandidatesQuery.data?.offset || 0) + (customCandidatesQuery.data?.limit || PAGE_SIZE))}
+                                    style={{ fontSize: '12px', alignSelf: 'center' }}
+                                >
+                                    {customCandidatesQuery.isFetching
+                                        ? t('agent.directory.loadingMore', isChinese ? '加载中...' : 'Loading...')
+                                        : t('agent.directory.loadMore', isChinese ? '加载更多' : 'Load more')}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
     };
 
     return (
@@ -186,6 +494,8 @@ export default function AgentDirectory({ agentId }: { agentId: string }) {
                     {t('agent.directory.showUnavailable')}
                 </label>
             </div>
+
+            {renderCustomMaintenance()}
 
             {isInitialLoading && (
                 <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px' }}>

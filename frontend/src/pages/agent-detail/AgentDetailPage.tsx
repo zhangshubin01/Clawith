@@ -5761,7 +5761,11 @@ export default function AgentDetailPage() {
                 {/* ── Directory Tab ── */}
                 {
                     activeTab === 'relationships' && (
-                        <AgentDirectory agentId={id!} />
+                        <AgentDirectory
+                            agentId={id!}
+                            accessMode={(agent as any)?.access_mode}
+                            canManage={canManage}
+                        />
                     )
                 }
 
