@@ -579,11 +579,6 @@ export default function AgentDirectory({
                                     )}
                                 </div>
                             </div>
-                            <div style={{ flex: '0 1 260px', minWidth: '180px', marginLeft: 'auto', textAlign: 'right', fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                                <div style={{ fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={primaryId(member)}>
-                                    {member.member_type === 'agent' ? t('agent.directory.targetAgentId') : t('agent.directory.directoryId')}: {primaryId(member)}
-                                </div>
-                            </div>
                         </div>
                     ))}
                     {directoryQuery.data?.has_more && (

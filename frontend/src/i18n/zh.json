@@ -304,10 +304,6 @@
       "count": "{{count}} 个对象",
       "digitalEmployee": "数字员工",
       "clawithUser": "Clawith 用户",
-      "targetAgentId": "Agent ID",
-      "targetMemberId": "成员 ID",
-      "directoryId": "通讯录 ID",
-      "platformUserId": "平台用户 ID",
       "provider": {
         "feishu": "飞书用户",
         "dingtalk": "钉钉用户",

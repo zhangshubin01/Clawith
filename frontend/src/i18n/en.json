@@ -297,10 +297,6 @@
       "count": "{{count}} targets",
       "digitalEmployee": "Agent",
       "clawithUser": "Clawith User",
-      "targetAgentId": "Agent ID",
-      "targetMemberId": "Member ID",
-      "directoryId": "Directory ID",
-      "platformUserId": "Platform User ID",
       "provider": {
         "feishu": "Feishu User",
         "dingtalk": "DingTalk User",
