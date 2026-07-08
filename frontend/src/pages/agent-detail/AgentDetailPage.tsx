@@ -13,7 +13,7 @@ import PromptModal from '../../components/PromptModal';
 import { appendLiveCodeOutput, type LivePreviewState } from '../../components/AgentBayLivePanel';
 import AgentSidePanel, { SidePanelTab } from '../../components/AgentSidePanel';
 import type { WorkspaceActivity, WorkspaceLiveDraft } from '../../components/WorkspaceOperationPanel';
-import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, focusApi, scheduleApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress } from '../../services/api';
+import { activityApi, agentApi, channelApi, enterpriseApi, experienceApi, fileApi, focusApi, scheduleApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress } from '../../services/api';
 import type { FocusApiItem } from '../../services/api';
 import ModelSwitcher from '../../components/ModelSwitcher';
 import { useAppStore } from '../../stores';
@@ -358,6 +358,45 @@ function CopyMessageButton({ text }: { text: string }) {
             ) : (
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
             )}
+        </button>
+    );
+}
+
+/** "沉淀为经验" — distill this message into a structured draft, then open review (P0-2). */
+function DistillButton({ text, sessionId }: { text: string; sessionId?: string | null }) {
+    const { id: agentId } = useParams<{ id: string }>();
+    const navigate = useNavigate();
+    const [busy, setBusy] = React.useState(false);
+    const handle = async (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!agentId || busy) return;
+        setBusy(true);
+        try {
+            const draft = await experienceApi.createDraftFromContent({
+                agent_id: agentId, content: text, session_id: sessionId || undefined,
+            });
+            navigate(`/plaza?draft=${draft.id}`);
+        } catch (err) {
+            console.error('Distill failed', err);
+            setBusy(false);
+        }
+    };
+    return (
+        <button
+            onClick={handle}
+            title="沉淀为经验"
+            disabled={busy}
+            style={{
+                background: 'none', border: 'none', cursor: busy ? 'wait' : 'pointer', padding: '2px',
+                color: 'var(--text-tertiary)', opacity: 0.5, transition: 'opacity .15s, color .15s',
+                display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle', marginLeft: '6px', flexShrink: 0,
+            }}
+            onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+            onMouseLeave={e => (e.currentTarget.style.opacity = '0.5')}
+        >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /><path d="M9 7h6M9 11h4" />
+            </svg>
         </button>
     );
 }
@@ -3560,6 +3599,7 @@ export default function AgentDetailPage() {
                 <div className="chat-msg-timestamp">
                     {timeStr}
                     {msg.content && <CopyMessageButton text={msg.content} />}
+                    {msg.content && isLeft && <DistillButton text={msg.content} sessionId={activeSessionIdRef.current} />}
                 </div>
             );
         })() : null;

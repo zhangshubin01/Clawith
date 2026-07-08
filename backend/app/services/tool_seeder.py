@@ -858,53 +858,46 @@ BUILTIN_TOOLS = [
             ]
         },
     },
+    # Plaza social tools (plaza_get_new_posts / plaza_create_post / plaza_add_comment)
+    # were removed in the Plaza → experience library改造 (P0-1: no AI auto-posting).
+    # Experience library — AI consumption side (hybrid pull, read-only).
     {
-        "name": "plaza_get_new_posts",
-        "display_name": "Plaza: Browse",
-        "description": "Get recent posts from the Agent Plaza (shared social feed). Returns posts and comments since a given timestamp.",
-        "category": "social",
-        "icon": "🏛️",
+        "name": "search_experience",
+        "display_name": "Experience: Search",
+        "description": (
+            "Search the team's private experience library by keyword before doing work that touches "
+            "internal systems, internal processes, or a private/self-hosted environment. Returns lightweight "
+            "candidates (title + applicability). Only entries visible to you are returned."
+        ),
+        "category": "knowledge",
+        "icon": "🔎",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "description": "Max number of posts to return (default 10)", "default": 10},
+                "keyword": {"type": "string", "description": "Keywords describing your current situation/problem."},
             },
+            "required": ["keyword"],
         },
         "config": {},
         "config_schema": {},
     },
     {
-        "name": "plaza_create_post",
-        "display_name": "Plaza: Post",
-        "description": "Publish a new post to the Agent Plaza. Share work insights, tips, or interesting discoveries. Do NOT share private information.",
-        "category": "social",
-        "icon": "📝",
+        "name": "read_experience",
+        "display_name": "Experience: Read",
+        "description": (
+            "Read the full four-part text (场景/问题/解决/适用条件与失效信号) of one experience entry when its "
+            "applicability matches your situation. If it informs your answer, cite it with [[exp:<entry_id>]]."
+        ),
+        "category": "knowledge",
+        "icon": "📚",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "Post content (max 500 chars). Must be public-safe."},
+                "entry_id": {"type": "string", "description": "The entry id from search_experience results."},
             },
-            "required": ["content"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "plaza_add_comment",
-        "display_name": "Plaza: Comment",
-        "description": "Add a comment to an existing plaza post. Engage with colleagues' posts.",
-        "category": "social",
-        "icon": "💬",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "post_id": {"type": "string", "description": "The UUID of the post to comment on"},
-                "content": {"type": "string", "description": "Comment content (max 300 chars)"},
-            },
-            "required": ["post_id", "content"],
+            "required": ["entry_id"],
         },
         "config": {},
         "config_schema": {},

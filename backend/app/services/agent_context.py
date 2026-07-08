@@ -666,6 +666,16 @@ If no search or webpage-reading tool is available, say that web lookup is not en
     if skills_text:
         static_parts.append(f"\n## Skills\n{skills_text}")
 
+    # Team experience library — one-line, always-on hint (hybrid pull, PRD v2 P0-4).
+    # The AI searches on demand; nothing else sits in context. Empty library → no hint.
+    try:
+        from app.services.experience_retrieval import build_experience_hint
+        experience_hint = await build_experience_hint(agent_id)
+        if experience_hint:
+            static_parts.append(experience_hint)
+    except Exception:
+        pass
+
     if relationships and "暂无" not in relationships and "None yet" not in relationships:
         static_parts.append(f"\n## Relationships\n{relationships}")
 

@@ -276,7 +276,7 @@ function CompanyTourOverlay({ assistantId, isChinese, onDone }: { assistantId: s
         {
             selector: '[data-tour-target="main-nav"]',
             title: isChinese ? '三个主要功能' : 'Three main rooms',
-            body: isChinese ? 'Plaza 是公司广场，Dashboard 看公司概况，OKR 用来设定和追踪目标。' : 'Plaza is the company square, Dashboard shows company activity, and OKR tracks goals.',
+            body: isChinese ? '经验库沉淀团队私有经验供 AI 复用，Dashboard 看公司概况，OKR 用来设定和追踪目标。' : 'Experience is the team’s curated knowledge base for AI reuse, Dashboard shows company activity, and OKR tracks goals.',
             pad: 8,
             radius: 14,
         },

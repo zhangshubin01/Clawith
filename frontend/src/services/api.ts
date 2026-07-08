@@ -591,3 +591,55 @@ export const controlApi = {
     unlock: (agentId: string, data: { session_id: string; export_cookies?: boolean; platform_hint?: string }) =>
         request<any>(`/agents/${agentId}/control/unlock`, { method: 'POST', body: JSON.stringify(data) }),
 };
+
+// ─── Experience Library ───────────────────────────────
+export interface ExperienceEntry {
+    id: string;
+    tenant_id: string | null;
+    title: string;
+    scenario: string;
+    problem: string;
+    solution: string;
+    applicability: string;
+    status: 'draft' | 'published' | 'retired';
+    tags: string[];
+    visibility_scope: 'company' | 'department' | 'user';
+    visibility_scope_id: string | null;
+    origin: 'chat' | 'legacy_plaza';
+    origin_session_id: string | null;
+    origin_agent_id: string | null;
+    created_by: string;
+    reviewed_by: string | null;
+    last_reviewed_at: string | null;
+    created_at: string;
+    updated_at: string | null;
+}
+
+export type ExperienceView = 'team' | 'mine' | 'history' | 'all';
+
+export const experienceApi = {
+    list: (params: { view?: ExperienceView; status?: string; tag?: string; q?: string } = {}) => {
+        const qs = new URLSearchParams();
+        if (params.view) qs.set('view', params.view);
+        if (params.status) qs.set('status', params.status);
+        if (params.tag) qs.set('tag', params.tag);
+        if (params.q) qs.set('q', params.q);
+        const s = qs.toString();
+        return request<ExperienceEntry[]>(`/experience/entries${s ? `?${s}` : ''}`);
+    },
+    get: (id: string) => request<ExperienceEntry>(`/experience/entries/${id}`),
+    createDraftFromContent: (data: { agent_id: string; content: string; session_id?: string }) =>
+        request<ExperienceEntry>('/experience/drafts', { method: 'POST', body: JSON.stringify(data) }),
+    create: (data: Partial<ExperienceEntry>) =>
+        request<ExperienceEntry>('/experience/entries', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: Partial<ExperienceEntry>) =>
+        request<ExperienceEntry>(`/experience/entries/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    publish: (id: string) =>
+        request<ExperienceEntry>(`/experience/entries/${id}/publish`, { method: 'POST' }),
+    retire: (id: string) =>
+        request<ExperienceEntry>(`/experience/entries/${id}/retire`, { method: 'POST' }),
+    review: (id: string) =>
+        request<ExperienceEntry>(`/experience/entries/${id}/review`, { method: 'POST' }),
+    references: (id: string) =>
+        request<{ entry_id: string; read_count: number; cited_count: number }>(`/experience/entries/${id}/references`),
+};

@@ -1088,4 +1088,17 @@ class WebSocketChatHandler:
                 user_id=self.user.id,
             )
             await db.commit()
+            await db.refresh(assistant_msg)
         logger.info("[WS] Assistant message saved")
+
+        # Record experience-library citations ([[exp:<id>]] markers) as `cited` (adoption metric).
+        try:
+            from app.services.experience_retrieval import record_experience_citations
+            await record_experience_citations(
+                assistant_response,
+                agent_id=self.agent_id,
+                session_id=self.conv_id,
+                message_id=assistant_msg.id,
+            )
+        except Exception as e:
+            logger.warning(f"[WS] experience citation recording failed for agent {self.agent_id}: {e}")

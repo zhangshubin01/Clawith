@@ -1,8 +1,8 @@
 """Heartbeat service — proactive agent awareness loop.
 
-Periodically triggers agents to check their environment (tasks, plaza,
-etc.) and take autonomous actions. Inspired by OpenClaw's heartbeat
-mechanism.
+Periodically triggers agents to check their environment (tasks,
+notifications, etc.) and take autonomous actions. Inspired by OpenClaw's
+heartbeat mechanism.
 
 Runs as a background task inside the FastAPI process.
 """
@@ -36,7 +36,7 @@ Identify topics or questions that:
 - Represent emerging trends or changes in your professional domain
 - Could improve your ability to serve your users
 
-If no genuine, informative topics emerge from recent context, **skip exploration** and go directly to Phase 3.
+If no genuine, informative topics emerge from recent context, **skip exploration** and go directly to Wrap Up.
 Do NOT search for generic or obvious topics just to fill time. Quality over quantity.
 
 ## Phase 2: Targeted Exploration (Conditional)
@@ -59,16 +59,7 @@ Format for curiosity_journal.md entries:
 - **Follow-up**: [Optional: questions this raises for next time]
 ```
 
-## Phase 3: Agent Plaza
-
-1. Call `plaza_get_new_posts` to check recent activity
-2. If you found something genuinely valuable in Phase 2:
-   - Share the most impactful discovery to plaza (max 1 post)
-   - **Always include the source URL** when sharing internet findings
-   - Frame it in terms of how it's relevant to your team/domain
-3. Comment on relevant existing posts (max 2 comments)
-
-## Phase 4: Wrap Up
+## Phase 3: Wrap Up
 
 - If nothing needed attention and no exploration was warranted: reply with HEARTBEAT_OK
 - Otherwise, briefly summarize what you explored and why
@@ -85,21 +76,13 @@ Format for curiosity_journal.md entries:
 - NEVER share content from memory/memory.md
 - NEVER share content from workspace/ files
 - NEVER share task details from tasks.json
-- You may ONLY share: general work insights, public information, opinions on plaza posts
-- If unsure whether something is private, do NOT share it
-
-⚠️ POSTING LIMITS per heartbeat:
-- Maximum 1 new post
-- Maximum 2 comments on existing posts
-- Do NOT post trivial or repetitive content
+- Keep private information in your own memory/curiosity_journal only
+- If unsure whether something is private, do NOT record it anywhere shared
 """
 
 PRIVATE_AGENT_HEARTBEAT_APPEND = """
 
 ⚠️ PRIVATE AGENT RULE — STRICTLY FOLLOW:
-- You are a private agent. Do NOT browse Agent Plaza.
-- Do NOT call plaza_get_new_posts, plaza_create_post, or plaza_add_comment.
-- Do NOT share any findings, summaries, or opinions in Plaza.
 - If you have no user-facing or task-facing work to do, reply with HEARTBEAT_OK.
 """
 
@@ -206,12 +189,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
 - NEVER share content from memory/memory.md
 - NEVER share content from workspace/ files
 - NEVER share task details from tasks.json
-- You may ONLY share: general work insights, public information, opinions on plaza posts
-
-⚠️ POSTING LIMITS per heartbeat:
-- Maximum 1 new post
-- Maximum 2 comments on existing posts
-- Do NOT post trivial or repetitive content
+- Keep private information in your own memory/curiosity_journal only
 """
                 except Exception:
                     pass
@@ -292,8 +270,6 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
         tools_for_llm = await get_agent_tools_for_llm(agent_id)
 
         reply = ""
-        plaza_posts_made = 0       # hard limit: 1 new post per heartbeat
-        plaza_comments_made = 0    # hard limit: 2 comments per heartbeat
         _hb_accumulated_usage = None
         _hb_unsaved_usage = None
 
@@ -313,7 +289,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
             LLMMessage(role="user", content=full_instruction)
         ]
 
-        for round_i in range(20):  # More rounds for search + write + plaza
+        for round_i in range(20):  # More rounds for search + write
             # Check token usage limit mid-loop (every 3 rounds)
             if round_i > 0 and round_i % 3 == 0:
                 if agent_id and _hb_unsaved_usage.total_tokens > 0:
@@ -408,21 +384,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                         ))
                         continue
 
-                    # ── Hard rate limits for plaza actions ──
-                    if tool_name == "plaza_create_post":
-                        if plaza_posts_made >= 1:
-                            tool_result = "[BLOCKED] You have already made 1 plaza post this heartbeat. Do not post again."
-                        else:
-                            tool_result = await execute_tool(tool_name, args, agent_id, agent_creator_id)
-                            plaza_posts_made += 1
-                    elif tool_name == "plaza_add_comment":
-                        if plaza_comments_made >= 2:
-                            tool_result = "[BLOCKED] You have already made 2 comments this heartbeat. Do not comment again."
-                        else:
-                            tool_result = await execute_tool(tool_name, args, agent_id, agent_creator_id)
-                            plaza_comments_made += 1
-                    else:
-                        tool_result = await execute_tool(tool_name, args, agent_id, agent_creator_id)
+                    tool_result = await execute_tool(tool_name, args, agent_id, agent_creator_id)
 
                     llm_messages.append(LLMMessage(
                         role="tool",
@@ -453,6 +415,14 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                 f"Heartbeat: {reply[:80]}",
                 detail={"reply": reply[:500]},
             )
+
+        # Record experience-library citations ([[exp:<id>]]) as `cited` (adoption metric).
+        if reply:
+            try:
+                from app.services.experience_retrieval import record_experience_citations
+                await record_experience_citations(reply, agent_id=agent_id)
+            except Exception as e:
+                logger.warning(f"[Heartbeat] experience citation recording failed for agent {agent_id}: {e}")
 
         logger.info(f"💓 Heartbeat for {agent_name}: {'OK' if is_ok else reply[:60]}")
 
@@ -820,6 +790,13 @@ async def run_agent_oneshot(
                 )
             except Exception:
                 pass
+
+            # Record experience-library citations ([[exp:<id>]]) as `cited` (adoption metric).
+            try:
+                from app.services.experience_retrieval import record_experience_citations
+                await record_experience_citations(reply, agent_id=agent_id)
+            except Exception as e:
+                logger.warning(f"[Oneshot] experience citation recording failed for agent {agent_id}: {e}")
 
         # ── Phase 4: Clear any previous error notifications ──────────
         if triggered_by_user_id:

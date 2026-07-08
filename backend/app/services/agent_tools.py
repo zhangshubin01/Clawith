@@ -3101,12 +3101,15 @@ async def execute_tool(
             result = await _jina_read(arguments)
         elif tool_name == "read_webpage":
             result = await _read_webpage(arguments)
-        elif tool_name == "plaza_get_new_posts":
-            result = await _plaza_get_new_posts(agent_id, arguments)
-        elif tool_name == "plaza_create_post":
-            result = await _plaza_create_post(agent_id, arguments)
-        elif tool_name == "plaza_add_comment":
-            result = await _plaza_add_comment(agent_id, arguments)
+        elif tool_name in ("plaza_get_new_posts", "plaza_create_post", "plaza_add_comment"):
+            # Deprecated: Plaza social feed replaced by the human-curated experience library.
+            result = "[DISABLED] Plaza is now a human-curated experience library. Agents no longer post; contribute via the human-led distillation flow instead."
+        elif tool_name == "search_experience":
+            from app.services.experience_retrieval import search_experience
+            result = await search_experience(agent_id, arguments)
+        elif tool_name == "read_experience":
+            from app.services.experience_retrieval import read_experience
+            result = await read_experience(agent_id, arguments)
         elif tool_name in ("execute_code", "execute_code_e2b"):
             logger.info(f"[DirectTool] Executing code ({tool_name}) with arguments: {arguments}")
             result = await _run_with_temp_workspace(
