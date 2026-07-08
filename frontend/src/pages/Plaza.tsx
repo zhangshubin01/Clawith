@@ -32,10 +32,10 @@ const badgeStyle = (bg: string, fg: string): React.CSSProperties => ({
 
 function Badge({ children, tone = 'muted' }: { children: React.ReactNode; tone?: 'muted' | 'warn' | 'ok' | 'accent' }) {
     const tones: Record<string, [string, string]> = {
-        muted: ['var(--bg-tertiary, #eee)', 'var(--text-secondary, #666)'],
-        warn: ['rgba(220,120,20,.14)', '#c46a10'],
-        ok: ['rgba(30,160,90,.14)', '#1a9a56'],
-        accent: ['var(--accent-soft, rgba(80,110,220,.14))', 'var(--accent-text, #4a6bdb)'],
+        muted: ['var(--bg-tertiary)', 'var(--text-secondary)'],
+        warn: ['var(--error-subtle)', 'var(--error)'],
+        ok: ['var(--success-subtle)', 'var(--success)'],
+        accent: ['var(--accent-subtle)', 'var(--accent-text)'],
     };
     const [bg, fg] = tones[tone];
     return <span style={badgeStyle(bg, fg)}>{children}</span>;
@@ -82,8 +82,8 @@ export default function Plaza() {
             style={{
                 display: 'block', width: '100%', textAlign: 'left', padding: '8px 12px', marginBottom: 2,
                 borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 14,
-                background: view === key ? 'var(--accent-soft, rgba(80,110,220,.12))' : 'transparent',
-                color: view === key ? 'var(--accent-text, #4a6bdb)' : 'var(--text-primary, #222)',
+                background: view === key ? 'var(--accent-subtle)' : 'transparent',
+                color: view === key ? 'var(--accent-text)' : 'var(--text-primary)',
                 fontWeight: view === key ? 600 : 400,
             }}
         >{label}</button>
@@ -92,8 +92,8 @@ export default function Plaza() {
     return (
         <div style={{ display: 'flex', height: '100%', gap: 0 }}>
             {/* Left nav */}
-            <aside style={{ width: 220, flexShrink: 0, borderRight: '1px solid var(--border, #eee)', padding: 16, overflowY: 'auto' }}>
-                <h2 style={{ fontSize: 16, margin: '0 0 12px', color: 'var(--text-primary, #222)' }}>
+            <aside style={{ width: 220, flexShrink: 0, borderRight: '1px solid var(--border-subtle)', padding: 16, overflowY: 'auto' }}>
+                <h2 style={{ fontSize: 16, margin: '0 0 12px', color: 'var(--text-primary)' }}>
                     {t('experience.title', '经验库')}
                 </h2>
                 {navItem('team', t('experience.nav.team', '团队经验'))}
@@ -102,7 +102,7 @@ export default function Plaza() {
 
                 {tags.length > 0 && (
                     <div style={{ marginTop: 18 }}>
-                        <div style={{ fontSize: 12, color: 'var(--text-tertiary, #999)', margin: '0 0 6px', padding: '0 12px' }}>
+                        <div style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '0 0 6px', padding: '0 12px' }}>
                             {t('experience.tags', '标签')}
                         </div>
                         <button onClick={() => setTag(null)} style={tagBtnStyle(tag === null)}>
@@ -121,12 +121,12 @@ export default function Plaza() {
             <main style={{ flex: 1, padding: 20, overflowY: 'auto' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                     <div>
-                        <h1 style={{ fontSize: 20, margin: 0, color: 'var(--text-primary, #222)' }}>
+                        <h1 style={{ fontSize: 20, margin: 0, color: 'var(--text-primary)' }}>
                             {view === 'team' ? t('experience.feedTitle', '公司最新经验')
                                 : view === 'mine' ? t('experience.nav.mine', '我的经验')
                                     : t('experience.nav.history', '历史沉淀（待整理）')}
                         </h1>
-                        <p style={{ fontSize: 13, color: 'var(--text-tertiary, #999)', margin: '4px 0 0' }}>
+                        <p style={{ fontSize: 13, color: 'var(--text-tertiary)', margin: '4px 0 0' }}>
                             {view === 'history'
                                 ? t('experience.historyHint', '旧 Plaza 迁入的草稿，编辑补齐四段后可转正，不进入 AI 检索。')
                                 : t('experience.subtitle', '人工策展、AI 按需检索的团队私有经验。')}
@@ -138,9 +138,9 @@ export default function Plaza() {
                 </div>
 
                 {isLoading ? (
-                    <div style={{ color: 'var(--text-tertiary, #999)' }}>{t('common.loading', '加载中...')}</div>
+                    <div style={{ color: 'var(--text-tertiary)' }}>{t('common.loading', '加载中...')}</div>
                 ) : shown.length === 0 ? (
-                    <div style={{ color: 'var(--text-tertiary, #999)', padding: '40px 0', textAlign: 'center' }}>
+                    <div style={{ color: 'var(--text-tertiary)', padding: '40px 0', textAlign: 'center' }}>
                         {t('experience.empty', '暂无经验。冷启动不预置内容，靠真实沉淀逐步积累。')}
                     </div>
                 ) : (
@@ -166,18 +166,18 @@ function tagBtnStyle(active: boolean): React.CSSProperties {
     return {
         display: 'block', width: '100%', textAlign: 'left', padding: '5px 12px', marginBottom: 1,
         borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 13,
-        background: active ? 'var(--accent-soft, rgba(80,110,220,.12))' : 'transparent',
-        color: active ? 'var(--accent-text, #4a6bdb)' : 'var(--text-secondary, #666)',
+        background: active ? 'var(--accent-subtle)' : 'transparent',
+        color: active ? 'var(--accent-text)' : 'var(--text-secondary)',
     };
 }
 
 const primaryBtn: React.CSSProperties = {
     padding: '8px 14px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 14,
-    background: 'var(--accent, #4a6bdb)', color: '#fff', fontWeight: 500, flexShrink: 0,
+    background: 'var(--accent-primary)', color: 'var(--text-inverse)', fontWeight: 500, flexShrink: 0,
 };
 const secondaryBtn: React.CSSProperties = {
-    padding: '7px 12px', borderRadius: 8, border: '1px solid var(--border, #ddd)', cursor: 'pointer',
-    fontSize: 13, background: 'var(--bg-secondary, #fff)', color: 'var(--text-primary, #222)',
+    padding: '7px 12px', borderRadius: 8, border: '1px solid var(--border-default)', cursor: 'pointer',
+    fontSize: 13, background: 'var(--bg-card)', color: 'var(--text-primary)',
 };
 
 function EntryCard({ entry, onOpen }: { entry: ExperienceEntry; onOpen: () => void }) {
@@ -186,12 +186,12 @@ function EntryCard({ entry, onOpen }: { entry: ExperienceEntry; onOpen: () => vo
         <div
             onClick={onOpen}
             style={{
-                border: '1px solid var(--border, #eee)', borderRadius: 12, padding: 16, cursor: 'pointer',
-                background: 'var(--bg-secondary, #fff)', transition: 'border-color .15s',
+                border: '1px solid var(--border-subtle)', borderRadius: 12, padding: 16, cursor: 'pointer',
+                background: 'var(--bg-card)', transition: 'border-color .15s',
             }}
         >
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
-                <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary, #222)' }}>
+                <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
                     {entry.title || '(未命名)'}
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -201,14 +201,14 @@ function EntryCard({ entry, onOpen }: { entry: ExperienceEntry; onOpen: () => vo
                 </div>
             </div>
             {entry.scenario && (
-                <div style={{ fontSize: 13, color: 'var(--text-secondary, #666)', margin: '8px 0', lineHeight: 1.5,
+                <div style={{ fontSize: 13, color: 'var(--text-secondary)', margin: '8px 0', lineHeight: 1.5,
                     display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
                     {entry.scenario}
                 </div>
             )}
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 {(entry.tags || []).map(tg => (
-                    <span key={tg} style={{ fontSize: 12, color: 'var(--text-tertiary, #999)' }}>#{tg}</span>
+                    <span key={tg} style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>#{tg}</span>
                 ))}
             </div>
         </div>
@@ -219,7 +219,7 @@ function Drawer({ children, onClose }: { children: React.ReactNode; onClose: () 
     return (
         <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)', zIndex: 1000, display: 'flex', justifyContent: 'flex-end' }}>
             <div onClick={e => e.stopPropagation()} style={{
-                width: 'min(560px, 92vw)', height: '100%', background: 'var(--bg-primary, #fff)',
+                width: 'min(560px, 92vw)', height: '100%', background: 'var(--bg-primary)',
                 boxShadow: '-4px 0 24px rgba(0,0,0,.12)', overflowY: 'auto', padding: 24,
             }}>{children}</div>
         </div>
@@ -246,7 +246,7 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
     return (
         <Drawer onClose={onClose}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary, #222)' }}>{entry.title || '(未命名)'}</h2>
+                <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary)' }}>{entry.title || '(未命名)'}</h2>
                 <button onClick={onClose} style={{ ...secondaryBtn, padding: '4px 10px' }}>✕</button>
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', margin: '10px 0 16px' }}>
@@ -256,15 +256,15 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
             </div>
             {FIELDS.map(fl => (
                 <section key={fl.key} style={{ marginBottom: 14 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary, #666)', marginBottom: 4 }}>{fl.label}</div>
-                    <div style={{ fontSize: 14, color: 'var(--text-primary, #222)', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>{fl.label}</div>
+                    <div style={{ fontSize: 14, color: 'var(--text-primary)', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
                         {(entry[fl.key] as string) || '—'}
                     </div>
                 </section>
             ))}
             {refs && (
-                <div style={{ margin: '8px 0 16px', fontSize: 13, color: 'var(--text-tertiary, #999)' }}>
-                    被 AI 阅读 {refs.read_count} 次 · <strong style={{ color: 'var(--text-secondary,#666)' }}>实际采纳（引用） {refs.cited_count} 次</strong>
+                <div style={{ margin: '8px 0 16px', fontSize: 13, color: 'var(--text-tertiary)' }}>
+                    被 AI 阅读 {refs.read_count} 次 · <strong style={{ color: 'var(--text-secondary)' }}>实际采纳（引用） {refs.cited_count} 次</strong>
                 </div>
             )}
             <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
@@ -272,11 +272,11 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
                 {entry.status === 'published' && (
                     <button onClick={() => review.mutate()} style={secondaryBtn} disabled={review.isPending}>标记已复核</button>
                 )}
-                <button onClick={() => retire.mutate()} style={{ ...secondaryBtn, color: '#c0392b' }} disabled={retire.isPending}>
+                <button onClick={() => retire.mutate()} style={{ ...secondaryBtn, color: 'var(--error)' }} disabled={retire.isPending}>
                     下架
                 </button>
             </div>
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary,#999)', marginTop: 10 }}>
+            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 10 }}>
                 下架仅数字员工创立者可执行；无权限时操作会被拒绝。
             </p>
         </Drawer>
@@ -321,12 +321,12 @@ function DraftEditor({ draft, onClose, onSaved }: { draft: Draft; onClose: () =>
     return (
         <Drawer onClose={onClose}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary, #222)' }}>
+                <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary)' }}>
                     {isNew ? '新建经验草稿' : '审核 / 编辑草稿'}
                 </h2>
                 <button onClick={onClose} style={{ ...secondaryBtn, padding: '4px 10px' }}>✕</button>
             </div>
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary,#999)', margin: '6px 0 16px' }}>
+            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '6px 0 16px' }}>
                 四段齐全（尤其“适用条件与失效信号”）方可发布；发布前均可修改。
             </p>
 
@@ -335,7 +335,7 @@ function DraftEditor({ draft, onClose, onSaved }: { draft: Draft; onClose: () =>
 
             {FIELDS.map(f => (
                 <div key={f.key}>
-                    <label style={labelStyle}>{f.label}{f.hint && <span style={{ color: 'var(--text-tertiary,#999)', fontWeight: 400 }}> — {f.hint}</span>}</label>
+                    <label style={labelStyle}>{f.label}{f.hint && <span style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}> — {f.hint}</span>}</label>
                     <textarea value={(form[f.key] as string) || ''} onChange={e => set(f.key, e.target.value)}
                         style={{ ...inputStyle, minHeight: 72, resize: 'vertical' }} />
                 </div>
@@ -358,12 +358,12 @@ function DraftEditor({ draft, onClose, onSaved }: { draft: Draft; onClose: () =>
                 )}
             </div>
             {form.visibility_scope !== 'company' && (
-                <p style={{ fontSize: 12, color: 'var(--text-tertiary,#999)' }}>
+                <p style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
                     组织架构未同步时，部门/用户可见性发布后会自动降级为全公司。
                 </p>
             )}
 
-            {err && <div style={{ color: '#c0392b', fontSize: 13, margin: '10px 0' }}>{err}</div>}
+            {err && <div style={{ color: 'var(--error)', fontSize: 13, margin: '10px 0' }}>{err}</div>}
 
             <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
                 <button onClick={() => save.mutate()} style={secondaryBtn} disabled={save.isPending}>保存草稿</button>
@@ -377,9 +377,9 @@ function DraftEditor({ draft, onClose, onSaved }: { draft: Draft; onClose: () =>
 }
 
 const labelStyle: React.CSSProperties = {
-    display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary, #666)', margin: '12px 0 4px',
+    display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', margin: '12px 0 4px',
 };
 const inputStyle: React.CSSProperties = {
-    width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border, #ddd)',
-    fontSize: 14, background: 'var(--bg-secondary, #fff)', color: 'var(--text-primary, #222)', boxSizing: 'border-box',
+    width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border-default)',
+    fontSize: 14, background: 'var(--bg-card)', color: 'var(--text-primary)', boxSizing: 'border-box',
 };
