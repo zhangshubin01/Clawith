@@ -51,7 +51,7 @@ const Icons = {
     hash: sicon('M3 6h10M3 10h10M6.5 2.5l-1 11M10.5 2.5l-1 11'),
 };
 
-const MINE_ALL = '全部', MINE_UNTAGGED = '未分类', MINE_HISTORY = '历史沉淀';
+const MINE_ALL = '全部', MINE_DRAFTS = '草稿箱', MINE_UNTAGGED = '未分类', MINE_HISTORY = '历史沉淀';
 
 export default function Plaza() {
     const { t } = useTranslation();
@@ -104,6 +104,7 @@ export default function Plaza() {
     }, [mineEntries]);
 
     const mineShown = cat === MINE_HISTORY ? historyEntries
+        : cat === MINE_DRAFTS ? mineEntries.filter(e => e.status === 'draft')
         : cat === MINE_UNTAGGED ? mineEntries.filter(e => !(e.tags || []).length)
         : cat === MINE_ALL ? mineEntries
         : mineEntries.filter(e => (e.tags || []).includes(cat));
@@ -139,7 +140,7 @@ export default function Plaza() {
                     onOpen={openEntry} onNew={newEntry} onTag={(tg) => { setView('mine'); setCat(tg); }} />
             ) : (
                 <MineView loading={mineQ.isLoading || historyQ.isLoading}
-                    cats={[MINE_ALL, MINE_UNTAGGED, MINE_HISTORY, ...mineTags]}
+                    cats={[MINE_ALL, MINE_DRAFTS, MINE_UNTAGGED, MINE_HISTORY, ...mineTags]}
                     cat={cat} setCat={setCat} entries={mineShown} onOpen={openEntry} />
             )}
 
@@ -147,7 +148,9 @@ export default function Plaza() {
                 <EntryDrawer entryId={openId} onClose={() => setOpenId(null)} onEdit={(e) => { setOpenId(null); setEditing(e); }} onChanged={refreshAll} />
             )}
             {editing && (
-                <DraftEditor draft={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refreshAll(); }} />
+                <DraftEditor draft={editing} onClose={() => setEditing(null)}
+                    onSaved={() => { setEditing(null); refreshAll(); }}
+                    onDeleted={() => { setEditing(null); refreshAll(); }} />
             )}
         </div>
     );
@@ -362,10 +365,14 @@ function EntryCard({ entry, onOpen }: { entry: ExperienceEntry; onOpen: () => vo
 function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
     entryId: string; onClose: () => void; onEdit: (e: ExperienceEntry) => void; onChanged: () => void;
 }) {
+    const qc = useQueryClient();
     const { data: entry } = useQuery({ queryKey: ['experience-entry', entryId], queryFn: () => experienceApi.get(entryId) });
     const { data: refs } = useQuery({ queryKey: ['experience-refs', entryId], queryFn: () => experienceApi.references(entryId) });
     const retire = useMutation({ mutationFn: () => experienceApi.retire(entryId), onSuccess: () => { onChanged(); onClose(); } });
-    const review = useMutation({ mutationFn: () => experienceApi.review(entryId), onSuccess: () => onChanged() });
+    const review = useMutation({
+        mutationFn: () => experienceApi.review(entryId),
+        onSuccess: () => { qc.invalidateQueries({ queryKey: ['experience-entry', entryId] }); onChanged(); },
+    });
 
     if (!entry) return <Drawer onClose={onClose}><div>加载中...</div></Drawer>;
     const f = freshness(entry);
@@ -397,7 +404,9 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
             <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                 <button onClick={() => onEdit(entry)} style={secondaryBtn}>编辑</button>
                 {entry.status === 'published' && (
-                    <button onClick={() => review.mutate()} style={secondaryBtn} disabled={review.isPending}>标记已复核</button>
+                    <button onClick={() => review.mutate()} style={secondaryBtn} disabled={review.isPending}>
+                        {entry.last_reviewed_at ? '标记为未复核' : '标记已复核'}
+                    </button>
                 )}
                 <button onClick={() => retire.mutate()} style={{ ...secondaryBtn, color: 'var(--error)' }} disabled={retire.isPending}>
                     下架

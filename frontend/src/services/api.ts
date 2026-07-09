@@ -644,6 +644,8 @@ export const experienceApi = {
         request<ExperienceEntry>(`/experience/entries/${id}/publish`, { method: 'POST' }),
     retire: (id: string) =>
         request<ExperienceEntry>(`/experience/entries/${id}/retire`, { method: 'POST' }),
+    remove: (id: string) =>
+        request<{ deleted: boolean }>(`/experience/entries/${id}`, { method: 'DELETE' }),
     review: (id: string) =>
         request<ExperienceEntry>(`/experience/entries/${id}/review`, { method: 'POST' }),
     references: (id: string) =>

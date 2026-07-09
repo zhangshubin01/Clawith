@@ -508,17 +508,37 @@ async def retire_entry(entry_id: uuid.UUID, current_user: User = Depends(get_cur
 
 @router.post("/entries/{entry_id}/review", response_model=EntryOut)
 async def review_entry(entry_id: uuid.UUID, current_user: User = Depends(get_current_user)):
-    """Re-affirm that a published entry is still valid, refreshing its review time (P1-2)."""
+    """Toggle review state (P1-2): if reviewed, mark un-reviewed; else mark reviewed now."""
     async with async_session() as db:
         entry = await _get_entry_scoped(db, entry_id, current_user)
         agent_creator = await _agent_creator_id(db, entry.origin_agent_id)
         if not _can_edit(current_user, entry, agent_creator):
             raise HTTPException(403, "Not allowed to review this entry")
-        entry.last_reviewed_at = datetime.now(timezone.utc)
-        entry.reviewed_by = current_user.id
+        if entry.last_reviewed_at is None:
+            entry.last_reviewed_at = datetime.now(timezone.utc)
+            entry.reviewed_by = current_user.id
+        else:
+            entry.last_reviewed_at = None  # toggle back to 未复核
         await db.commit()
         await db.refresh(entry)
         return EntryOut.model_validate(entry)
+
+
+@router.delete("/entries/{entry_id}")
+async def delete_entry(entry_id: uuid.UUID, current_user: User = Depends(get_current_user)):
+    """Hard-delete an entry. Published entries must be retired first (to preserve adoption
+    records); drafts and retired entries can be deleted outright."""
+    async with async_session() as db:
+        entry = await _get_entry_scoped(db, entry_id, current_user)
+        agent_creator = await _agent_creator_id(db, entry.origin_agent_id)
+        if not _can_edit(current_user, entry, agent_creator):
+            raise HTTPException(403, "Not allowed to delete this entry")
+        if entry.status == "published":
+            raise HTTPException(409, "已发布经验请先下架再删除（以保留采纳记录）")
+        await db.delete(entry)
+        await db.commit()
+        logger.info(f"Experience entry {entry_id} deleted by {current_user.id}")
+        return {"deleted": True}
 
 
 @router.get("/entries/{entry_id}/references", response_model=ReferenceStats)

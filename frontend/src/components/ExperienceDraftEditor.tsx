@@ -75,7 +75,9 @@ export function Drawer({ header, children, footer, onClose, docked = false }: {
     return createPortal(content, document.body);
 }
 
-export function DraftEditor({ draft, onClose, onSaved, docked }: { draft: Draft; onClose: () => void; onSaved: () => void; docked?: boolean }) {
+export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked }: {
+    draft: Draft; onClose: () => void; onSaved: () => void; onDeleted?: () => void; docked?: boolean;
+}) {
     const [form, setForm] = useState<Draft>({
         title: '', scenario: '', problem: '', solution: '', applicability: '',
         tags: [], visibility_scope: 'company', visibility_scope_id: null, ...draft,
@@ -113,6 +115,15 @@ export function DraftEditor({ draft, onClose, onSaved, docked }: { draft: Draft;
         onError: (e: any) => setErr(String(e?.message || e)),
     });
 
+    const del = useMutation({
+        mutationFn: () => experienceApi.remove(draft.id!),
+        onSuccess: () => onDeleted && onDeleted(),
+        onError: (e: any) => setErr(String(e?.message || e)),
+    });
+    const handleDelete = () => {
+        if (window.confirm('确定删除这条草稿？此操作不可撤销。')) del.mutate();
+    };
+
     const fourFilled = EXP_FIELDS.every(f => ((form[f.key] as string) || '').trim());
     const set = (k: keyof ExperienceEntry, v: any) => setForm(p => ({ ...p, [k]: v }));
 
@@ -128,12 +139,18 @@ export function DraftEditor({ draft, onClose, onSaved, docked }: { draft: Draft;
     const footer = (
         <>
             {err && <div style={{ color: 'var(--error)', fontSize: 13, margin: '0 0 10px' }}>{err}</div>}
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <button onClick={() => save.mutate()} style={secondaryBtn} disabled={save.isPending}>保存草稿</button>
                 <button onClick={() => publish.mutate()} style={{ ...primaryBtn, opacity: fourFilled ? 1 : .5 }}
                     disabled={!fourFilled || publish.isPending} title={fourFilled ? '' : '四段缺一不可发布'}>
                     确认入库（发布）
                 </button>
+                {!isNew && onDeleted && (
+                    <button onClick={handleDelete} disabled={del.isPending}
+                        style={{ ...secondaryBtn, color: 'var(--error)', borderColor: 'var(--error)', marginLeft: 'auto' }}>
+                        删除
+                    </button>
+                )}
             </div>
         </>
     );
