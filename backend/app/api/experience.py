@@ -284,12 +284,46 @@ async def list_entries(
         return await _serialize_entries(db, entries)
 
 
+def _norm(s: str | None) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def _signature(title, scenario, problem, solution, applicability) -> tuple:
+    return tuple(_norm(x) for x in (title, scenario, problem, solution, applicability))
+
+
+async def _find_identical(db, eff: str | None, body: "EntryCreate"):
+    """Return an existing non-retired entry in this tenant with identical title + four parts.
+
+    Guards against accidental duplicate sedimentation (double-click, re-opening the same
+    card). Any edit to the content changes the signature, so genuine variants still pass.
+    """
+    sig = _signature(body.title, body.scenario, body.problem, body.solution, body.applicability)
+    if not any(sig[1:]):  # all four parts blank → don't dedupe (allow starting blank drafts)
+        return None
+    q = select(ExperienceEntry).where(ExperienceEntry.status != "retired")
+    if eff:
+        q = q.where(ExperienceEntry.tenant_id == eff)
+    q = q.limit(500)
+    for e in (await db.execute(q)).scalars().all():
+        if _signature(e.title, e.scenario, e.problem, e.solution, e.applicability) == sig:
+            return e
+    return None
+
+
 @router.post("/entries", response_model=EntryOut)
 async def create_entry(body: EntryCreate, current_user: User = Depends(get_current_user)):
-    """Create a draft entry. Publishing (making it retrievable) is a separate, explicit step."""
+    """Create a draft entry. Publishing (making it retrievable) is a separate, explicit step.
+
+    Rejects an exact duplicate (same title + four parts) that already exists — prevents
+    accidental repeated sedimentation while still allowing edited variants.
+    """
     eff = _effective_tenant_id(current_user)
     scope = body.visibility_scope if body.visibility_scope in VISIBILITY_SCOPES else "company"
     async with async_session() as db:
+        dupe = await _find_identical(db, eff, body)
+        if dupe:
+            raise HTTPException(409, f"内容完全相同的经验已存在（“{dupe.title or '未命名'}”），未重复沉淀。")
         entry = ExperienceEntry(
             tenant_id=eff,
             title=body.title[:200],
