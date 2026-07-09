@@ -323,7 +323,7 @@ async def create_entry(body: EntryCreate, current_user: User = Depends(get_curre
     async with async_session() as db:
         dupe = await _find_identical(db, eff, body)
         if dupe:
-            raise HTTPException(409, f"内容完全相同的经验已存在（“{dupe.title or '未命名'}”），未重复沉淀。")
+            raise HTTPException(409, f"内容完全相同的经验已存在（“{dupe.title or '未命名'}”），无需重复沉淀。")
         entry = ExperienceEntry(
             tenant_id=eff,
             title=body.title[:200],
