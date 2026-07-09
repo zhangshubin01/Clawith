@@ -401,6 +401,34 @@ function DistillButton({ text, sessionId }: { text: string; sessionId?: string |
     );
 }
 
+/** Renders a [[exp:<uuid>]] citation as a green inline pill: 「经验:<title 8>…」→ /plaza detail. */
+function ExperienceCitation({ id }: { id: string }) {
+    const navigate = useNavigate();
+    const { data } = useQuery({ queryKey: ['exp-cite', id], queryFn: () => experienceApi.get(id), staleTime: 300000, retry: false });
+    const title = data?.title || '';
+    const label = title ? `经验:${title.slice(0, 8)}${title.length > 8 ? '…' : ''}` : '经验';
+    return (
+        <button
+            onClick={(e) => { e.stopPropagation(); navigate(`/plaza?entry=${id}`); }}
+            title={title || '团队经验库条目'}
+            style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4, padding: '1px 8px', borderRadius: 999,
+                fontSize: 12, lineHeight: '18px', border: '1px solid var(--success)', color: 'var(--success)',
+                background: 'var(--success-subtle)', cursor: 'pointer', verticalAlign: 'middle',
+            }}
+        >📚 {label}</button>
+    );
+}
+
+function ExperienceCitations({ ids }: { ids: string[] }) {
+    if (!ids.length) return null;
+    return (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+            {ids.map(id => <ExperienceCitation key={id} id={id} />)}
+        </div>
+    );
+}
+
 type AccessUser = {
     id: string;
     name: string;
@@ -3585,6 +3613,15 @@ export default function AgentDetailPage() {
                 return ''; // always strip the marker from displayed text
             }).trim();
         }
+        // Experience-library citations: strip the raw [[exp:<uuid>]] markers from the shown text and
+        // collect the ids — they render as green pills below (storage/extraction logic unchanged).
+        const expCiteIds: string[] = [];
+        if (displayContent.includes('[[exp:')) {
+            displayContent = displayContent.replace(/\[\[exp:([0-9a-fA-F-]{36})\]\]/g, (_m: string, uuid: string) => {
+                if (!expCiteIds.includes(uuid)) expCiteIds.push(uuid);
+                return '';
+            }).replace(/[ \t]{2,}/g, ' ').trim();
+        }
 
         const timestampHtml = msg.timestamp ? (() => {
             const d = new Date(msg.timestamp);
@@ -3645,7 +3682,12 @@ export default function AgentDetailPage() {
                                         <div className="thinking-dots"><span /><span /><span /></div>
                                         <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
                                     </div>
-                                ) : <MarkdownRenderer content={displayContent} />
+                                ) : (
+                                    <>
+                                        <MarkdownRenderer content={displayContent} />
+                                        {expCiteIds.length > 0 && <ExperienceCitations ids={expCiteIds} />}
+                                    </>
+                                )
                             ) : <MarkdownRenderer content={displayContent} />}
                         </div>
                     </div>

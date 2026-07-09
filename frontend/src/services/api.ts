@@ -613,6 +613,8 @@ export interface ExperienceEntry {
     last_reviewed_at: string | null;
     created_at: string;
     updated_at: string | null;
+    created_by_name?: string | null;
+    origin_agent_name?: string | null;
 }
 
 export type ExperienceView = 'team' | 'mine' | 'history' | 'all';

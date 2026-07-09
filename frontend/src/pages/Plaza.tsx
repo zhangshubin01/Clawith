@@ -68,15 +68,21 @@ export default function Plaza() {
     const mineQ = useQuery({ queryKey: ['experience', 'mine'], queryFn: () => experienceApi.list({ view: 'mine' }), enabled: view === 'mine' });
     const historyQ = useQuery({ queryKey: ['experience', 'history'], queryFn: () => experienceApi.list({ view: 'history' }), enabled: view === 'mine' });
 
-    // Deep-link from the chat "沉淀为经验" action: /plaza?draft=<id> opens the review drawer.
+    // Deep-links: ?draft=<id> opens the review drawer (from chat 沉淀); ?entry=<id> opens the
+    // entry (from a chat citation pill) — published → detail drawer, draft → editor.
     const draftParam = params.get('draft');
+    const entryParam = params.get('entry');
     useEffect(() => {
-        if (!draftParam) return;
-        experienceApi.get(draftParam).then(e => { setEditing(e); }).catch(() => {});
-        params.delete('draft');
+        if (!draftParam && !entryParam) return;
+        const id = draftParam || entryParam!;
+        experienceApi.get(id).then(e => {
+            if (draftParam) setEditing(e);
+            else (e.status === 'published' ? setOpenId(e.id) : setEditing(e));
+        }).catch(() => {});
+        params.delete('draft'); params.delete('entry');
         setParams(params, { replace: true });
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [draftParam]);
+    }, [draftParam, entryParam]);
 
     const refreshAll = () => { qc.invalidateQueries({ queryKey: ['experience'] }); qc.invalidateQueries({ queryKey: ['experience-stats'] }); };
     const openEntry = (e: ExperienceEntry) => (e.status === 'published' ? setOpenId(e.id) : setEditing(e));
@@ -314,6 +320,18 @@ const secondaryBtn: React.CSSProperties = {
     fontSize: 13, background: 'var(--bg-card)', color: 'var(--text-primary)',
 };
 
+// PRD v3: every entry shows its two creators — the human who published it + the source agent.
+function CreatorLine({ entry }: { entry: ExperienceEntry }) {
+    if (!entry.created_by_name && !entry.origin_agent_name) return null;
+    return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-tertiary)', flexWrap: 'wrap' }}>
+            {entry.created_by_name && <span>👤 发布 {entry.created_by_name}</span>}
+            {entry.created_by_name && entry.origin_agent_name && <span style={{ opacity: .5 }}>·</span>}
+            {entry.origin_agent_name && <span>🤖 来源 {entry.origin_agent_name}</span>}
+        </div>
+    );
+}
+
 function EntryCard({ entry, onOpen }: { entry: ExperienceEntry; onOpen: () => void }) {
     const f = freshness(entry);
     return (
@@ -340,11 +358,12 @@ function EntryCard({ entry, onOpen }: { entry: ExperienceEntry; onOpen: () => vo
                     {entry.scenario}
                 </div>
             )}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
                 {(entry.tags || []).map(tg => (
                     <span key={tg} style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>#{tg}</span>
                 ))}
             </div>
+            <CreatorLine entry={entry} />
         </div>
     );
 }
@@ -388,6 +407,7 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
                 {f.label && <Badge tone={f.stale ? 'warn' : 'ok'}>{f.label}</Badge>}
                 {(entry.tags || []).map(tg => <Badge key={tg}>#{tg}</Badge>)}
             </div>
+            <div style={{ marginBottom: 16 }}><CreatorLine entry={entry} /></div>
             {FIELDS.map(fl => (
                 <section key={fl.key} style={{ marginBottom: 14 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>{fl.label}</div>

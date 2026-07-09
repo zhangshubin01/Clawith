@@ -82,6 +82,9 @@ class EntryOut(BaseModel):
     last_reviewed_at: datetime | None
     created_at: datetime
     updated_at: datetime | None
+    # Display-only (PRD v3 dual creator): resolved names for the publisher + source agent.
+    created_by_name: str | None = None
+    origin_agent_name: str | None = None
 
     class Config:
         from_attributes = True
@@ -182,6 +185,31 @@ async def _resolve_publish_visibility(db, entry: ExperienceEntry) -> tuple[str, 
     return scope, scope_id
 
 
+async def _serialize_entries(db, entries: list[ExperienceEntry]) -> list[EntryOut]:
+    """EntryOut list with the publisher + source-agent names resolved (display only)."""
+    user_ids = {e.created_by for e in entries if e.created_by}
+    agent_ids = {e.origin_agent_id for e in entries if e.origin_agent_id}
+    users = {}
+    if user_ids:
+        users = {
+            u.id: (u.display_name or u.username or None)
+            for u in (await db.execute(select(User).where(User.id.in_(user_ids)))).scalars().all()
+        }
+    agents = {}
+    if agent_ids:
+        agents = {
+            a.id: a.name
+            for a in (await db.execute(select(Agent).where(Agent.id.in_(agent_ids)))).scalars().all()
+        }
+    out = []
+    for e in entries:
+        o = EntryOut.model_validate(e)
+        o.created_by_name = users.get(e.created_by)
+        o.origin_agent_name = agents.get(e.origin_agent_id) if e.origin_agent_id else None
+        out.append(o)
+    return out
+
+
 async def _get_entry_scoped(db, entry_id: uuid.UUID, current_user: User) -> ExperienceEntry:
     """Fetch an entry, enforcing tenant isolation. Raises 404 if not visible."""
     q = select(ExperienceEntry).where(ExperienceEntry.id == entry_id)
@@ -251,7 +279,7 @@ async def list_entries(
         # tag filter is applied in Python to stay portable across JSON backends
         if tag:
             entries = [e for e in entries if tag in (e.tags or [])]
-        return [EntryOut.model_validate(e) for e in entries]
+        return await _serialize_entries(db, entries)
 
 
 @router.post("/entries", response_model=EntryOut)
@@ -380,7 +408,7 @@ async def create_draft_from_content(body: DraftFromContent, current_user: User =
 async def get_entry(entry_id: uuid.UUID, current_user: User = Depends(get_current_user)):
     async with async_session() as db:
         entry = await _get_entry_scoped(db, entry_id, current_user)
-        return EntryOut.model_validate(entry)
+        return (await _serialize_entries(db, [entry]))[0]
 
 
 @router.patch("/entries/{entry_id}", response_model=EntryOut)

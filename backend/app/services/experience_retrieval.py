@@ -35,8 +35,10 @@ _HINT = (
     "search cannot surface. When your current work touches internal systems, internal processes, "
     "or a private/self-hosted environment, FIRST call `search_experience` with a few keywords. "
     "If a candidate's applicability matches your situation, call `read_experience` to read it in full "
-    "and follow it. When an entry actually informs your answer, cite it by appending its marker "
-    "`[[exp:<entry_id>]]` (the id is given in the search/read results) — this is how reuse is tracked. "
+    "and follow it. When an entry actually informs your answer, do BOTH: (1) state it in plain language "
+    "to the user — e.g. begin the relevant part with 「本次参考了团队经验库」and name what you drew on; "
+    "and (2) append the marker `[[exp:<entry_id>]]` (id from the search/read results) right there — the "
+    "marker is the machine record of adoption, the sentence is for the human. "
     "If nothing matches, ignore this and do not invent experiences."
 )
 
@@ -262,7 +264,9 @@ async def read_experience(agent_id: uuid.UUID, arguments: dict) -> str:
                 f"## 遇到的问题\n{entry.problem}\n\n"
                 f"## 解决方式\n{entry.solution}\n\n"
                 f"## 适用条件与失效信号\n{entry.applicability}\n\n"
-                f"If this informs your answer, cite it with [[exp:{entry.id}]]. "
+                f"If this informs your answer: (1) tell the user in plain language you referenced the "
+                f"team experience library and what you took from it, and (2) append [[exp:{entry.id}]] "
+                "right there as the adoption record. "
                 "If your situation no longer matches the applicability above, do not apply it."
             )
     except Exception as e:
