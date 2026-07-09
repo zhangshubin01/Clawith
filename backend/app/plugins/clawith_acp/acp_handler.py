@@ -11,6 +11,7 @@ import os
 import re
 import time
 import uuid
+from typing import Any
 
 from loguru import logger
 from sqlalchemy import select
@@ -22,10 +23,30 @@ from app.models.agent import Agent as AgentModel
 from app.models.org import OrgMember
 from app.models.user import User as UserModel
 from app.plugins.clawith_acp.acp_session import AcpSessionManager
+from app.plugins.clawith_acp.acp_document import (
+    DOCUMENT_NOTIFICATION_METHODS,
+    document_store,
+    handle_document_notification,
+)
+from app.plugins.clawith_acp.acp_features import acp_feature_enabled
+from app.plugins.clawith_acp.acp_nes import (
+    handle_nes_accept_reject,
+    handle_nes_close,
+    handle_nes_start,
+    handle_nes_suggest,
+)
 from app.plugins.clawith_acp.tool_bridge import current_acp_handler, is_agent_internal_path
 from app.plugins.clawith_acp.tool_hooks import install_acp_tool_hooks
+from app.plugins.clawith_acp.turn_budget import (
+    BudgetExceededError,
+    PERMISSION_GATED_METHODS,
+    TurnBudget,
+    get_turn_budget,
+    set_turn_budget,
+)
 
 ACP_PROTOCOL_VERSION = 1
+# 向后兼容：未设 ACP_COMPUTE_BUDGET_SECONDS 时 TurnBudget.from_env 读取此值
 LLM_TIMEOUT_SECONDS = int(os.getenv("ACP_LLM_TIMEOUT_SECONDS", "600"))
 
 # ── 背压控制：读写分离阈值 ──────────────────────────────────────
@@ -33,6 +54,8 @@ LLM_TIMEOUT_SECONDS = int(os.getenv("ACP_LLM_TIMEOUT_SECONDS", "600"))
 # 写操作(write/build/reformat)需 EDT+WriteAction, 保持保守阈值
 _READ_BACKPRESSURE_THRESHOLD = 15
 _WRITE_BACKPRESSURE_THRESHOLD = 5
+# 需 IDE 权限弹窗的 RPC — 超时须与 ACP_PERMISSION_TIMEOUT(120s) 对齐
+_PERMISSION_GATED_METHODS = PERMISSION_GATED_METHODS
 _READ_METHODS = frozenset({
     "fs/read_text_file", "fs/list_directory", "fs/find_file",
     "fs/search_text", "fs/find_class", "fs/find_symbol",
@@ -51,6 +74,31 @@ _CHUNK_IDLE_SEC_LONG = 0.10
 # 时间驱动 periodic flush: 每 60ms 兜底发送 (~16fps), 不依赖内容边界
 _PERIODIC_FLUSH_SEC = 0.06
 # 中英文句末标点均触发句子边界 flush
+
+_ACP_A2A_OBS_LOG = os.getenv(
+    "DEBUG_SESSION_LOG_PATH",
+    "/data/agents/.debug/debug-f3071f.log" if os.path.isdir("/data/agents")
+    else "/Users/shubinzhang/Documents/agent/.cursor/debug-f3071f.log",
+)
+
+
+def _acp_a2a_obs_log(hypothesis_id: str, location: str, message: str, **data) -> None:
+    entry = {
+        "sessionId": "f3071f",
+        "timestamp": int(time.time() * 1000),
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+    }
+    logger.info("[ACP-A2A-OBS] {} {} {}", hypothesis_id, message, data)
+    try:
+        os.makedirs(os.path.dirname(_ACP_A2A_OBS_LOG), exist_ok=True)
+        with open(_ACP_A2A_OBS_LOG, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
 _SENTENCE_END_RE = re.compile(r'[.!?。！？…~]["\'」』）\)]*\s*$')
 _SPLIT_NL_RE = re.compile(r"(?<=\n)")
 
@@ -100,6 +148,37 @@ _TOOL_CN_NAME = {
     "apply_quickfix": "应用修复",
     "git_status": "Git状态", "git_diff": "Git差异", "git_stage": "Git暂存", "git_commit": "Git提交",
 }
+
+class _ThinkingCoalescer:
+    """ACP 专用：仅转发 phase hint，reasoning 正文不推 WebSocket。"""
+
+    def __init__(self, handler: "AcpHandler"):
+        self._handler = handler
+        self._enabled = os.getenv("ACP_THINKING_COALESCE_ENABLED", "true").lower() == "true"
+        self._phase_sent: set[str] = set()
+
+    def on_new_prompt(self) -> None:
+        self._phase_sent.clear()
+
+    @staticmethod
+    def _is_phase_hint(text: str) -> bool:
+        prefix = text[:40]
+        return "轮" in prefix or "round" in prefix.lower()
+
+    async def handle(self, text: str) -> None:
+        if not self._enabled or not text:
+            return
+        if self._is_phase_hint(text):
+            key = text[:80]
+            if key in self._phase_sent:
+                logger.info("[ACP-THINK] suppressed duplicate phase={}", key[:40])
+                return
+            self._phase_sent.add(key)
+            await self._handler._push_thinking(text)
+            return
+        logger.info("[ACP-THINK] suppressed reasoning len={}", len(text))
+
+
 class AcpHandler:
     """ACP JSON-RPC 2.0 路由 + Agent 管理。"""
 
@@ -116,8 +195,10 @@ class AcpHandler:
         self.role_description: str = ""
         self.session_mgr = AcpSessionManager()
         self._active_tasks: dict[str, asyncio.Task] = {}
+        self._terminal_events: dict[str, asyncio.Event] = {}
         self._pending_tools: dict[str, asyncio.Future] = {}
         self._pending_requests: dict[str, tuple[asyncio.Future, float]] = {}
+        self._pending_lock = asyncio.Lock()
         self._cancel_event: asyncio.Event | None = None
         self._closing = False  # 关闭保护: 标记 WebSocket 正在关闭, 拒绝新 dispatch
         self._close_lock = asyncio.Lock()  # 防止并发 close()/cleanup()
@@ -134,6 +215,7 @@ class AcpHandler:
         # 参考 gptme PR #1586: 时间驱动周期性 flush, 确保 LLM 流式输出期间
         # 不依赖内容边界即可每 150ms 发送一次文本到插件端
         self._periodic_flush_task: asyncio.Task | None = None
+        self._thinking_coalescer = _ThinkingCoalescer(self)
         self._chunk_template = json.dumps({
             "jsonrpc": "2.0", "method": "session/update",
             "params": {
@@ -185,8 +267,25 @@ class AcpHandler:
                     continue
 
                 params = request.get("params", {})
+                session_id_param = params.get("sessionId") or params.get("session_id")
+                if session_id_param and not self.session_id:
+                    self.session_id = str(session_id_param)
 
                 logger.debug(f"[ACP conn={self.conn_id}] method={method} id={msg_id}")
+
+                if msg_id is None and method:
+                    # ACP SDK ClientSession.cancel() 发送 session/cancel 通知（无 JSON-RPC id）
+                    if method in ("session/cancel", "$/cancelRequest"):
+                        await self._handle_cancel(params)
+                        continue
+                    if acp_feature_enabled("document") and method in DOCUMENT_NOTIFICATION_METHODS:
+                        handle_document_notification(self.session_id, method, params)
+                        continue
+                    if acp_feature_enabled("nes") and method in ("nes/accept", "nes/reject"):
+                        handle_nes_accept_reject(self.session_id, method, params)
+                        continue
+                    logger.debug("[ACP] 忽略无 id 通知: method={}", method)
+                    continue
 
                 try:
                     if method == "initialize":
@@ -232,10 +331,28 @@ class AcpHandler:
                         result = await self._handle_list_agents(params)
                     elif method == "_clawith/set_agent":
                         result = await self._handle_set_agent(params)
+                    elif method == "_clawith/last_assistant":
+                        result = await self._handle_last_assistant(params)
+                    elif method == "_clawith/session_meta":
+                        result = await self._handle_session_meta(params)
                     elif method == "_clawith/tool_result":
                         result = await self._handle_tool_result(params)
                     elif method == "session/set_mode":
                         result = await self._handle_set_mode(params)
+                    elif method == "session/set_model":
+                        result = await self._handle_set_model(params)
+                    elif method == "providers/list":
+                        result = await self._handle_providers_list(params)
+                    elif method == "providers/set":
+                        result = await self._handle_providers_set(params)
+                    elif method == "logout":
+                        result = await self._handle_logout(params)
+                    elif method == "nes/start":
+                        result = await handle_nes_start(self.session_id, params)
+                    elif method == "nes/suggest":
+                        result = await handle_nes_suggest(self.session_id, params)
+                    elif method == "nes/close":
+                        result = await handle_nes_close(self.session_id, params)
                     else:
                         await self._send_error(msg_id, -32601, f"Method not found: {method}")
                         continue
@@ -311,14 +428,6 @@ class AcpHandler:
                 self._current_prompt_perf = None
             await self._flush_chunk_buffer()
             logger.info(f"[ACP] prompt 派发结束: session={self.session_id} id={msg_id}")
-
-            try:
-                await self._send_notification("session/update", {
-                    "sessionId": self.session_id,
-                    "update": {"traceId": get_trace_id(), "type": "prompt_done"}
-                })
-            except Exception as _pd_e:
-                logger.warning("[ACP] prompt_done 通知失败 session={}: {}", self.session_id, _pd_e)
 
     # ── ACP 方法实现 ──────────────────────────────────────────
 
@@ -419,6 +528,8 @@ class AcpHandler:
             "sessionId": session_id,
             "cwd": result.get("cwd", ""),
             "history": result.get("history", []),
+            "historyHasTools": result.get("historyHasTools", False),
+            "tool_call_count": result.get("tool_call_count", 0),
         }
 
     async def _handle_prompt(self, params: dict, msg_id=None):
@@ -438,6 +549,20 @@ class AcpHandler:
         user_text_raw = _extract_user_text(messages)
         if not user_text_raw:
             user_text_raw = json.dumps(messages, ensure_ascii=False)
+
+        if acp_feature_enabled("document") and self.session_id:
+            meta = params.get("_meta") or {}
+            if isinstance(meta, dict) and meta.get("documents"):
+                docs = meta["documents"]
+                open_n = len(docs.get("openUris") or []) if isinstance(docs, dict) else 0
+                focused = docs.get("focusedUri") if isinstance(docs, dict) else None
+                logger.info(
+                    "[ACP-DOC] prompt meta snapshot session={} open={} focused={}",
+                    self.session_id,
+                    open_n,
+                    focused,
+                )
+                document_store.apply_snapshot(self.session_id, meta["documents"])
 
         # 项目上下文只注入当前轮 LLM 输入，不写入 DB（避免历史膨胀）
         user_text_for_llm = user_text_raw
@@ -474,12 +599,17 @@ class AcpHandler:
         _log = logger.bind(trace_id=trace_id)  # type: ignore[assignment]
         from app.services.llm.caller import call_llm_with_failover
 
+        self._streamed_reply_parts: list[str] = []
         self._current_prompt_perf = {
             "start": time.perf_counter(),
             "pushed_chunks": 0,
             "first_chunk_ms": None,
             "reply_chars": 0,
         }
+        self._turn_persisted_by_grace = False
+        budget = TurnBudget.from_env()
+        set_turn_budget(budget)
+        _running_tool_call_ids: set[str] = set()
         # 每轮独立的 tool_call 计时: 并行执行时 call_id 隔离, 防跨 round 竞态
         _tool_call_starts: dict[str, float] = {}
         logger.info(
@@ -503,25 +633,54 @@ class AcpHandler:
             tool_name = data.get("name", "")
             call_id = data.get("call_id", "") or uuid.uuid4().hex[:12]
             status = data.get("status", "")
+            if status == "running" and call_id:
+                _running_tool_call_ids.add(call_id)
+            elif status == "done" and call_id:
+                _running_tool_call_ids.discard(call_id)
             args = data.get("args") or {}
-            if status == "running":
-                _tool_call_starts[call_id] = time.perf_counter()
-                elapsed_ms = 0
-            else:
-                t0 = _tool_call_starts.pop(call_id, time.perf_counter())
-                elapsed_ms = int((time.perf_counter() - t0) * 1000)
             path_hint = args.get("path") or args.get("command") or ""
-            # 去掉公共前缀 cd <cwd> && , 保留命令的区分部分。
-            # 不再硬截断 — 插件端 ToolTimelineRow 无长度限制, 截断导致不同命令在 UI 上无法区分。
             if path_hint and self._cwd and isinstance(path_hint, str):
                 cwd_prefix = f"cd {self._cwd} && "
                 if path_hint.startswith(cwd_prefix):
                     path_hint = path_hint[len(cwd_prefix):]
             cn_name = _TOOL_CN_NAME.get(tool_name, tool_name)
             title = cn_name if not path_hint else f"{cn_name}({path_hint})"
+            if status == "running":
+                _tool_call_starts[call_id] = time.perf_counter()
+                elapsed_ms = 0
+            else:
+                t0 = _tool_call_starts.pop(call_id, time.perf_counter())
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
             _log.info(
                 f"[ACP-PERF] tool_notify tool={tool_name} call_id={call_id} status={status} elapsed_ms={elapsed_ms}"
             )
+            # 跨 prompt 记忆：与 WS/caller 默认路径一致，将 tool 结果写入 ChatMessage(tool_call)
+            if status == "done":
+                _b = get_turn_budget()
+                if _b is not None:
+                    _b.record_tool_completed()
+            if status == "done" and self.session_id and self.agent_id and self.user_id:
+                try:
+                    from app.services.chat_session_service import save_tool_call_log
+
+                    await save_tool_call_log(
+                        agent_id=uuid.UUID(self.agent_id),
+                        user_id=uuid.UUID(self.user_id),
+                        conversation_id=self.session_id,
+                        tool_name=tool_name,
+                        arguments=args,
+                        result=data.get("result"),
+                        status="done",
+                        tool_call_id=call_id,
+                        reasoning_content=data.get("reasoning_content"),
+                    )
+                except Exception as persist_err:
+                    _log.warning(f"[ACP] tool_call persist 失败 tool={tool_name}: {persist_err}")
+            if tool_name == "send_message_to_agent":
+                _acp_a2a_obs_log("H4", "acp_handler.py:on_tool_call", "a2a_tool_notify",
+                                 status=status, elapsed_ms=elapsed_ms, call_id=call_id,
+                                 target=args.get("agent_name", ""), msg_type=args.get("msg_type", ""),
+                                 acp_session=self.session_id)
             acp_status = (
                 "in_progress"
                 if status == "running"
@@ -560,12 +719,15 @@ class AcpHandler:
             except Exception as push_err:
                 _log.warning(f"[ACP-PERF] tool_notify push failed: {push_err}")
 
+        self._thinking_coalescer.on_new_prompt()
+
         async def _do_llm():
             full_reply = ""
             try:
                 # Load primary model from agent config
                 primary_model = None
                 fallback_model = None
+                agent_row = None
                 if self.agent_id:
                     from app.models.agent import Agent as _AgentModel
                     from app.models.llm import LLMModel as _LLMModel
@@ -594,11 +756,19 @@ class AcpHandler:
                         else:
                             _log.warning(f"[ACP-MODEL] agent_id={self.agent_id} DB 查询无结果!")
 
+                from app.services.llm.context_compressor import _est_tokens_str, _get_ctx_guard_max_window
+
+                _model_for_ctx = getattr(primary_model, "model", None) or getattr(fallback_model, "model", "") or ""
+                _ctx_window = _get_ctx_guard_max_window(_model_for_ctx)
+
                 history: list[dict] = []
                 if self.session_id and self.user_id:
                     history = await self.session_mgr.load_history_for_llm(
-                        self.session_id, self.user_id
+                        self.session_id, self.user_id, ctx_window=_ctx_window,
                     )
+
+                # hydrate（acp_session.load_history_for_llm）已完成 F2 token 预算 + Layer0 压缩；
+                # token 级 in-loop 压缩由 caller.call_llm 内 CTX-GUARD 负责。
 
                 # 历史消息直接传递给 call_llm_with_failover。
                 # build_agent_context (soul.md + memory.md + skills + MCP 配置)
@@ -607,9 +777,18 @@ class AcpHandler:
                 llm_messages = list(history) + [
                     {"role": "user", "content": user_text_for_llm}
                 ]
-                _log.debug(
-                    f"[ACP-CTX] prompt history={len(history)} "
-                    f"total={len(llm_messages)} session={self.session_id}"
+                _tool_text = "".join(
+                    m.get("content") or ""
+                    for m in history
+                    if m.get("role") == "tool" and isinstance(m.get("content"), str)
+                )
+                _log.info(
+                    "[ACP-CTX] path=acp history={} total={} chars={} tool_tokens={} session={}",
+                    len(history),
+                    len(llm_messages),
+                    sum(len(m.get("content") or "") for m in llm_messages if isinstance(m.get("content"), str)),
+                    _est_tokens_str(_tool_text, _model_for_ctx),
+                    self.session_id,
                 )
 
                 # 模型未配置时提前返回友好错误, 避免 call_llm_with_failover 瞬间返回
@@ -622,7 +801,7 @@ class AcpHandler:
                     await self._push_chunk(err_msg)
                     return err_msg
 
-                await self._push_thinking("第 1 轮：规划中…")
+                await self._thinking_coalescer.handle("第 1 轮：规划中…")
 
                 _llm_t0 = time.perf_counter()
                 _log.info(
@@ -641,7 +820,7 @@ class AcpHandler:
                     session_id=self.session_id or "",
                     cancel_event=self._cancel_event,
                     on_chunk=push_chunk,
-                    on_thinking=self._push_thinking,
+                    on_thinking=self._thinking_for_acp,
                     on_tool_call=on_tool_call,
                 )
                 full_reply = result or ""
@@ -655,6 +834,19 @@ class AcpHandler:
                 if full_reply and (self._current_prompt_perf or {}).get("pushed_chunks", 0) == 0:
                     _log.warning(f"[ACP] prompt 未收到流式 chunk，使用最终结果兜底推送: {len(full_reply)} chars")
                     await self._push_chunk(full_reply)
+            except BudgetExceededError as budget_exc:
+                _log.warning(
+                    "[ACP-BUDGET] {} stats={}",
+                    budget_exc.reason,
+                    budget_exc.stats,
+                )
+                await self._terminate_turn_gracefully(
+                    budget_exc.reason,
+                    budget_exc.stats,
+                    user_text_raw,
+                    running_tool_ids=list(_running_tool_call_ids),
+                )
+                return full_reply
             except asyncio.CancelledError:
                 _log.info(f"[ACP] LLM 调用取消: {prompt_id}")
                 # 取消前清空缓冲区中的残余文本, 确保已流式输出的内容不丢失
@@ -667,10 +859,12 @@ class AcpHandler:
                 await self._push_chunk(f"\n\n*错误: {e}*")
             return full_reply
 
+        result = ""
+        already_persisted = False
         try:
-            result = await asyncio.wait_for(_do_llm(), timeout=LLM_TIMEOUT_SECONDS)
+            wf_remaining = budget.remaining_workflow()
+            result = await asyncio.wait_for(_do_llm(), timeout=max(0.1, wf_remaining))
             _log.info(f"[ACP] prompt 完成: {len(result)} chars")
-            # 诊断日志: 打印最终回复前 120 字符, 用于确认答案内容正确抵达
             if result:
                 preview = result[:120].replace("\n", "\\n")
                 _log.info(f"[ACP-ANSWER] session={self.session_id} len={len(result)} preview={preview!r}")
@@ -682,19 +876,110 @@ class AcpHandler:
                     user_text=user_text_raw,
                     assistant_text=result,
                 )
+                already_persisted = True
+        except BudgetExceededError as budget_exc:
+            await self._terminate_turn_gracefully(
+                budget_exc.reason,
+                budget_exc.stats,
+                user_text_raw,
+                running_tool_ids=list(_running_tool_call_ids),
+            )
         except asyncio.TimeoutError:
-            _log.error(f"[ACP] LLM 超时 ({LLM_TIMEOUT_SECONDS}s)")
-            # 超时前清空缓冲区, 确保已流式输出的部分内容不丢失
-            await self._flush_chunk_buffer()
-            await self._push_chunk("\n\n*错误: AI 响应超时*")
+            stats = budget.to_audit_dict()
+            _log.error(
+                "[ACP-BUDGET] workflow_exceeded workflow_s={} stats={}",
+                budget.workflow_seconds,
+                stats,
+            )
+            await self._terminate_turn_gracefully(
+                "workflow_exceeded",
+                stats,
+                user_text_raw,
+                running_tool_ids=list(_running_tool_call_ids),
+            )
         except asyncio.CancelledError:
             # 取消前清空缓冲区
             await self._flush_chunk_buffer()
             await self._push_chunk("\n\n*[已取消]*")
             raise
         finally:
+            perf = self._current_prompt_perf or {}
+            chunks = int(perf.get("pushed_chunks", 0))
+            reply_len = len(result or "")
+            streamed = "".join(getattr(self, "_streamed_reply_parts", None) or []).strip()
+            # B3: 深 loop 多 chunk 但最终 reply 极短 → 用 streamed 兜底 UI/DB
+            if chunks > 50 and reply_len < 50 and streamed:
+                await self._flush_chunk_buffer()
+                _log.warning(
+                    "[ACP-UX] short_reply_fallback chunks={} reply={} streamed={}",
+                    chunks,
+                    reply_len,
+                    len(streamed),
+                )
+                try:
+                    await self._push_chunk(streamed)
+                except Exception as push_exc:
+                    _log.warning("[ACP-UX] short_reply_fallback push failed: {}", push_exc)
+            if (
+                not already_persisted
+                and not getattr(self, "_turn_persisted_by_grace", False)
+                and not (result or "").strip()
+            ):
+                await self._persist_streamed_reply_fallback(user_text_raw)
+            elif not already_persisted and chunks > 50 and reply_len < 50 and streamed:
+                await self._persist_streamed_reply_fallback(user_text_raw)
+            self._streamed_reply_parts = []
             self._active_tasks.pop(prompt_id, None)
             self._cancel_event = None
+            set_turn_budget(None)
+            self._turn_persisted_by_grace = False
+
+    async def _terminate_turn_gracefully(
+        self,
+        reason: str,
+        stats: dict,
+        user_text: str,
+        *,
+        running_tool_ids: list[str] | None = None,
+    ) -> None:
+        """超时优雅收尾：保留已流式内容 + 部分结果说明 + IDE 清扫通知。"""
+        await self._flush_chunk_buffer()
+        tools = int(stats.get("tools_completed", 0))
+        streamed = "".join(getattr(self, "_streamed_reply_parts", None) or [])
+        chars = len(streamed)
+        if reason == "compute_exceeded":
+            label = "计算预算超时"
+        elif reason == "workflow_exceeded":
+            label = "任务总时长超时"
+        else:
+            label = "任务超时"
+        notice = (
+            f"\n\n*{label}（已完成 {tools} 个工具调用，已输出 {chars} 字）。"
+            f"可继续对话让智能体收尾。*"
+        )
+        try:
+            await self._push_chunk(notice)
+        except Exception as push_exc:
+            logger.warning("[ACP-BUDGET] partial notice push failed: {}", push_exc)
+        await self._persist_streamed_reply_fallback(user_text)
+        self._turn_persisted_by_grace = True
+        logger.warning(
+            "[ACP-BUDGET] terminate reason={} stats={} running_tools={}",
+            reason,
+            stats,
+            running_tool_ids or [],
+        )
+        if running_tool_ids:
+            try:
+                await self._send_notification("_clawith/turn_timeout", {
+                    "sessionId": self.session_id,
+                    "reason": reason,
+                    "runningToolCallIds": running_tool_ids,
+                    "stats": stats,
+                })
+            except Exception as notify_exc:
+                logger.warning("[ACP-BUDGET] turn_timeout notify failed: {}", notify_exc)
+
 
     async def _push_chunk(self, text: str):
         """追加流式文本到缓冲区，按边界触发 flush。
@@ -759,6 +1044,9 @@ class AcpHandler:
         self._chunk_buffer = ""  # 必须在 await 前清空, 确保新 chunk 不被重复发送
         if not text:
             return
+        parts = getattr(self, "_streamed_reply_parts", None)
+        if isinstance(parts, list):
+            parts.append(text)
         raw = self._chunk_template.replace("__SID__", self.session_id or "").replace(
             "__TEXT__", json.dumps(text, ensure_ascii=False)[1:-1]
         )
@@ -766,8 +1054,19 @@ class AcpHandler:
             # asyncio.shield 防止取消中断发送导致 chunk 永久丢失 (buffer 已清空)
             # WebSocket 断开时 send_text 会抛 ConnectionClosedError, 捕获防止重入竞态
             await asyncio.shield(self.ws.send_text(raw))
-        except Exception:
-            logger.warning("[ACP-FLUSH] 发送失败 conn={} session={} len={}", self.conn_id, self.session_id, len(text))
+        except Exception as flush_exc:
+            logger.warning(
+                "[ACP-FLUSH] 发送失败 conn={} session={} len={} err={}",
+                self.conn_id,
+                self.session_id,
+                len(text),
+                flush_exc,
+            )
+            await self._persist_streamed_reply_fallback()
+            try:
+                await self._push_recovery_notice("连接中断，已将会话内容写入历史")
+            except Exception:
+                pass
         preview = text[:60].replace("\n", "\\n")
         logger.debug(
             "[ACP-FLUSH] conn={} session={} len={} preview={!r}",
@@ -818,8 +1117,34 @@ class AcpHandler:
             except Exception:
                 pass  # WS 已断开, 静默丢弃
 
+    async def _push_recovery_notice(self, notice: str) -> None:
+        """断连时推送可见摘要，避免 IDE 时间线完全空白。"""
+        if not notice:
+            return
+        await self._send_notification("session/update", {
+            "sessionId": self.session_id,
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": f"\n\n*{notice}*"},
+            },
+        })
+
+    async def _persist_streamed_reply_fallback(self, user_text: str = "") -> None:
+        parts = getattr(self, "_streamed_reply_parts", None) or []
+        text = "".join(parts).strip()
+        if not text or not self.session_id or not self.agent_id or not self.user_id:
+            return
+        try:
+            await self.session_mgr.persist_turn(session_id=self.session_id, user_id=self.user_id, agent_id=self.agent_id, user_text=user_text, assistant_text=text)
+            logger.info("[ACP] persist_streamed_fallback session={} chars={}", self.session_id, len(text))
+        except Exception as exc:
+            logger.warning("[ACP] persist_streamed_fallback failed session={} err={}", self.session_id, exc)
+
+    async def _thinking_for_acp(self, text: str) -> None:
+        await self._thinking_coalescer.handle(text)
+
     async def _push_thinking(self, text: str):
-        # 轮次状态（A2）推送时打一条 hint，便于与 [LSP4J-PERF] Round 交叉验证
+        # 轮次状态（A2）推送时打一条 hint，便于与 [ACP-PERF] Round 交叉验证
         if text and ("轮" in text[:40] or "round" in text[:40].lower()):
             logger.info(
                 f"[ACP-PERF] round_hint conn={self.conn_id} session={self.session_id} "
@@ -859,12 +1184,35 @@ class AcpHandler:
     async def _handle_cancel(self, params: dict) -> dict:
         if self._cancel_event:
             self._cancel_event.set()
-        for pid, task in list(self._active_tasks.items()):
-            if not task.done():
-                task.cancel()
-        logger.info("[ACP] cancel")
+        # 联动 terminal 流式 poll_loop，使其优雅 kill 而非仅靠 task.cancel()
+        for ev in getattr(self, "_terminal_events", {}).values():
+            ev.set()
+        tasks = [t for t in self._active_tasks.values() if not t.done()]
+        for task in tasks:
+            task.cancel()
+        logger.info(
+            "[ACP] cancel session={} tasks={} terminal_events={}",
+            self.session_id,
+            len(tasks),
+            len(getattr(self, "_terminal_events", {})),
+        )
+        if tasks:
+            try:
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=30.0)
+            except TimeoutError:
+                logger.warning("[ACP] cancel 等待 task 结束超时 session={}", self.session_id)
+        # 清除已结束 task，避免 _has_in_flight_prompt 误判阻塞下一 prompt
+        for key in [k for k, t in list(self._active_tasks.items()) if t.done()]:
+            self._active_tasks.pop(key, None)
+        logger.info(
+            "[ACP] cancel 完成 session={} remaining_tasks={}",
+            self.session_id,
+            sum(1 for t in self._active_tasks.values() if not t.done()),
+        )
         return {"cancelled": True}
     async def _handle_session_close(self, params: dict) -> dict:
+        if self.session_id and acp_feature_enabled("document"):
+            document_store.clear_session(self.session_id)
         logger.info(f"[ACP] session/close: {self.session_id}")
         return {"closed": True}
 
@@ -884,6 +1232,47 @@ class AcpHandler:
             return {"ok": True}
         logger.warning(f"[ACP] set_agent: agent not found: {agent_id}")
         return {"ok": False, "error": f"Agent not found: {agent_id}"}
+
+    async def _handle_last_assistant(self, params: dict) -> dict:
+        """断连恢复：返回会话最后一条 assistant 正文，供 IDE 补渲染。"""
+        session_id = str(params.get("sessionId") or self.session_id or "")
+        if not session_id:
+            return {"text": ""}
+        from app.models.audit import ChatMessage
+
+        try:
+            async with async_session() as db:
+                hr = await db.execute(
+                    select(ChatMessage)
+                    .where(ChatMessage.conversation_id == session_id)
+                    .where(ChatMessage.role == "assistant")
+                    .order_by(ChatMessage.created_at.desc())
+                    .limit(1)
+                )
+                msg = hr.scalar_one_or_none()
+            text = (msg.content if msg else "") or ""
+            logger.info(
+                "[ACP-UX] last_assistant session={} chars={}",
+                session_id[:8],
+                len(text),
+            )
+            return {"text": text}
+        except Exception as exc:
+            logger.warning("[ACP-UX] last_assistant failed session={} err={}", session_id[:8], exc)
+            return {"text": ""}
+
+    async def _handle_session_meta(self, params: dict) -> dict:
+        """E0：返回会话是否含历史 tool 行（旧 session 无 tool_call 需提示新开）。"""
+        session_id = str(params.get("sessionId") or self.session_id or "")
+        if not session_id or not self.user_id:
+            return {"historyHasTools": False, "tool_call_count": 0}
+        loaded = await self.session_mgr.load(session_id, self.user_id)
+        if not loaded:
+            return {"historyHasTools": False, "tool_call_count": 0}
+        return {
+            "historyHasTools": bool(loaded.get("historyHasTools")),
+            "tool_call_count": int(loaded.get("tool_call_count") or 0),
+        }
 
     async def _handle_tool_result(self, params: dict) -> dict:
         """Handle client tool result notification — must return JSON-RPC response."""
@@ -932,6 +1321,29 @@ class AcpHandler:
                  "is_default": i == 0}
                 for i, a in enumerate(agents)
             ]}
+
+    async def _handle_providers_list(self, params: dict) -> dict:
+        if not acp_feature_enabled("providers"):
+            return {"providers": []}
+        data = await self._handle_list_agents(params)
+        providers = [
+            {"id": a.get("id", ""), "name": a.get("name", ""), "description": a.get("description", "")}
+            for a in data.get("agents", [])
+        ]
+        logger.info("[ACP] providers/list count={}", len(providers))
+        return {"providers": providers}
+
+    async def _handle_providers_set(self, params: dict) -> dict:
+        if not acp_feature_enabled("providers"):
+            return {"ok": False, "error": "providers feature disabled"}
+        agent_id = params.get("providerId") or params.get("agentId") or params.get("id") or ""
+        return await self._handle_set_agent({"agentId": agent_id})
+
+    async def _handle_logout(self, params: dict) -> dict:
+        self.agent_id = None
+        self.agent_name = "ACP Agent"
+        logger.info("[ACP] logout session={}", self.session_id)
+        return {"ok": True}
 
     # ── 辅助方法 ──────────────────────────────────────────────
 
@@ -1004,6 +1416,8 @@ class AcpHandler:
         logger.info("[ACP] cleanup: active_tasks={} pending_tools={} pending_requests={}",
             len(self._active_tasks), len(self._pending_tools), len(self._pending_requests))
         self._cancel_idle_task()
+        for ev in getattr(self, "_terminal_events", {}).values():
+            ev.set()
         # 取消所有活跃任务 (dispatch + terminal streaming)
         for task in self._active_tasks.values():
             if not task.done():
@@ -1020,6 +1434,7 @@ class AcpHandler:
             if not entry[0].done():
                 entry[0].cancel()
         self._active_tasks.clear()
+        getattr(self, "_terminal_events", {}).clear()
         self._pending_tools.clear()
         self._pending_requests.clear()
         duration = time.monotonic() - self._start_time
@@ -1035,7 +1450,17 @@ class AcpHandler:
             "jsonrpc": "2.0", "id": msg_id, "result": result
         }, ensure_ascii=False, default=str)
         logger.debug(f"[ACP-RAW-OUT] {raw}")
-        await asyncio.shield(self.ws.send_text(raw))
+        try:
+            await asyncio.shield(self.ws.send_text(raw))
+        except Exception as exc:
+            # cancel 后客户端可能仍连着也可能已断开，不向 ERROR 升级
+            logger.warning(
+                "[ACP] _send_result 丢弃 conn={} session={} err={}",
+                self.conn_id,
+                self.session_id,
+                exc,
+            )
+            await self._persist_streamed_reply_fallback()
 
     async def _send_error(self, msg_id, code: int, message: str):
         # P1-2: error_ref 随机码，用户报 ref=abc12345 → grep 秒级定位
@@ -1068,6 +1493,46 @@ class AcpHandler:
         logger.debug(f"[ACP-RAW-OUT] {raw}")
         await asyncio.shield(self.ws.send_text(raw))
 
+
+    async def _notify_abort_permissions(self, reason: str) -> None:
+        """通知 IDE 中止挂起的权限弹窗，防止后端已超时后用户点击仍执行删除。"""
+        if not self.session_id:
+            return
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "_clawith/abort_permissions",
+            "params": {"sessionId": self.session_id, "reason": reason},
+        }
+        try:
+            await asyncio.shield(self.ws.send_text(json.dumps(payload, ensure_ascii=False)))
+            logger.info(
+                "[ACP-PERF] abort_permissions notified session={} reason={}",
+                self.session_id,
+                reason,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[ACP-PERF] abort_permissions notify failed session={} reason={} err={}",
+                self.session_id,
+                reason,
+                exc,
+            )
+
+    async def _wait_pending_future(self, future: asyncio.Future, *, timeout: float) -> Any:
+        """等待 IDE RPC 响应；每秒检查 cancel_event，避免权限等待阻塞取消。"""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            if self._cancel_event and self._cancel_event.is_set():
+                raise asyncio.CancelledError("ACP send_request cancelled")
+            try:
+                return await asyncio.wait_for(asyncio.shield(future), timeout=min(1.0, remaining))
+            except asyncio.TimeoutError:
+                continue
+
+
     async def send_request(self, method: str, params: dict, timeout: float = 30.0):
         """Send ACP JSON-RPC request and wait for response.
 
@@ -1091,31 +1556,31 @@ class AcpHandler:
             oldest = min(ts for _, (_, ts) in self._pending_requests.items())
             if time.monotonic() - oldest > 120:
                 await self.cleanup_stale_requests()
-        # 背压控制: pending 积压时拒绝新请求, 防止 IDE 端无响应时队列无限增长
-        # 读写分离: 读操作 (VFS/索引) 允许更高并发, 写操作保持保守
-        pending_count = len(self._pending_requests)
-        is_read = method in _READ_METHODS
-        threshold = _READ_BACKPRESSURE_THRESHOLD if is_read else _WRITE_BACKPRESSURE_THRESHOLD
-        if pending_count >= threshold:
-            logger.error(
-                f"[ACP-BACKPRESSURE] 拒绝 {method}: pending={pending_count} >= {threshold} "
-                f"(type={'read' if is_read else 'write'}). "
-                f"IDE 端可能 EDT 阻塞或无响应, 请检查 IDE 状态。"
-            )
-            raise RuntimeError(
-                f"ACP backpressure: {pending_count} pending requests. "
-                f"IDE 端可能忙或无响应。请稍后重试。"
-            )
-        elif pending_count >= 5:
-            oldest_age = min(time.monotonic() - ts for _, (_, ts) in self._pending_requests.items())
-            logger.warning(
-                f"[ACP-QUEUE] pending 积压: count={pending_count} "
-                f"method={method} oldest_age={oldest_age:.1f}s "
-                f"total_pending={len(self._pending_requests)}"
-            )
         req_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_running_loop().create_future()
-        self._pending_requests[req_id] = (future, time.monotonic())
+        async with self._pending_lock:
+            # 背压控制: 原子 check-then-act，避免 gather 并发 TOCTOU
+            pending_count = len(self._pending_requests)
+            is_read = method in _READ_METHODS
+            threshold = _READ_BACKPRESSURE_THRESHOLD if is_read else _WRITE_BACKPRESSURE_THRESHOLD
+            if pending_count >= threshold:
+                logger.error(
+                    f"[ACP-BACKPRESSURE] 拒绝 {method}: pending={pending_count} >= {threshold} "
+                    f"(type={'read' if is_read else 'write'}). "
+                    f"IDE 端可能 EDT 阻塞或无响应, 请检查 IDE 状态。"
+                )
+                raise RuntimeError(
+                    f"ACP backpressure: {pending_count} pending requests. "
+                    f"IDE 端可能忙或无响应。请稍后重试。"
+                )
+            elif pending_count >= 5:
+                oldest_age = min(time.monotonic() - ts for _, (_, ts) in self._pending_requests.items())
+                logger.warning(
+                    f"[ACP-QUEUE] pending 积压: count={pending_count} "
+                    f"method={method} oldest_age={oldest_age:.1f}s "
+                    f"total_pending={len(self._pending_requests)}"
+                )
+            self._pending_requests[req_id] = (future, time.monotonic())
         # 端到端追踪: 将 trace_id 和 req_id 注入 ACP params, IDE 插件侧可解析关联
         # trace_id 由 _do_llm 中 get_trace_id() 生成, 用于跨请求聚合
         _trace_id = get_trace_id()
@@ -1137,7 +1602,7 @@ class AcpHandler:
         )
         try:
             await asyncio.shield(self.ws.send_text(raw))
-            result = await asyncio.wait_for(future, timeout=timeout)
+            result = await self._wait_pending_future(future, timeout=timeout)
             elapsed = time.perf_counter() - t0
             logger.debug(
                 "[ACP-PERF] send_request DONE session={} method={} elapsed={:.3f}s req_id={}",
@@ -1149,11 +1614,15 @@ class AcpHandler:
             return result
         except asyncio.TimeoutError:
             elapsed = time.perf_counter() - t0
+            # 超时后丢弃 pending future，避免 late response 在用户已点「允许」后误执行
+            self._pending_requests.pop(req_id, None)
             logger.warning(
                 f"[ACP-PERF] send_request TIMEOUT session={self.session_id} method={method} "
                 f"elapsed={elapsed:.3f}s timeout={timeout}s req_id={req_id} "
-                f"pending={len(self._pending_requests)} (future kept for late response)"
+                f"pending={len(self._pending_requests)}"
             )
+            if method in _PERMISSION_GATED_METHODS:
+                asyncio.create_task(self._notify_abort_permissions("permission_timeout"))
             # 熔断器: 记录超时失败
             if os.getenv("ACP_CIRCUIT_ENABLED", "true").lower() != "false":
                 self._circuit.failure()
@@ -1162,27 +1631,33 @@ class AcpHandler:
     def _build_project_context(self) -> str:
         """Build IDE project context string for prompt injection."""
         cwd = getattr(self, "_cwd", "")
-        if not cwd:
-            return ""
-
-        return (
-            f"## IDE Project Environment\n"
-            f"Working directory: {cwd}\n"
-            f"\n"
-            f"## Rules\n"
-            f"- 回答简洁直接。如果用户的问题不需要读取项目文件(如问候/身份确认), 只回复不扫描项目。\n"
-            f"- 需要读文件时用 read_file, 不要用 cat/head/tail。\n"
-            f"- build/test/git 用 execute_command。\n"
-            f"🔍 **代码搜索强制规则**: 搜索代码时必须用 IDE 索引工具 (find_symbol/search_text/find_class/"
-            f"find_references/find_definition/find_file/find_implementations/list_files)，"
-            f"比 grep -r 快 100-1000 倍且支持语义匹配。**严禁用 execute_command + grep 替代 IDE 搜索**。\n"
-            f"📍 **查找引用/实现优先**: 找到符号后，必须用 find_references（查所有引用）或 find_implementations（查所有实现），"
-            f"一次性获取所有相关位置，不要逐文件搜索。\n"
-            f"⚠️ 注意: index_status 返回错误不代表其他 IDE 工具不可用，各工具独立运作。\n"
-            f"- Agent 内部文件(memory/, skills/ 前缀)不在 IDE, 由后端本地读取。\n"
-            f"- 🚀 并行执行: 多个独立的 read_file/search/list/find 操作必须在一次函数调用批次中并行调用, "
-            f"不要逐个串行。例如: 需要读 3 个文件时, 一次 tool_calls 中同时调用 3 个 read_file。\n"
-        )
+        parts: list[str] = []
+        if cwd:
+            parts.append(
+                f"## IDE Project Environment\n"
+                f"Working directory: {cwd}\n"
+                f"\n"
+                f"## Rules\n"
+                f"- 回答简洁直接。如果用户的问题不需要读取项目文件(如问候/身份确认), 只回复不扫描项目。\n"
+                f"- 需要读文件时用 read_file, 不要用 cat/head/tail。\n"
+                f"- 所有项目文件路径必须相对 Working directory; 不要把包名、类名猜成目录。\n"
+                f"- 删除、移动、重命名前, 必须先用 find_file/list_files 确认真实路径。\n"
+                f"- build/test/git 用 execute_command; 禁止在命令中 cd 到绝对路径, 直接在项目根执行相对命令。\n"
+                f"🔍 **代码搜索强制规则**: 搜索代码时必须用 IDE 索引工具 (find_symbol/search_text/find_class/"
+                f"find_references/find_definition/find_file/find_implementations/list_files)，"
+                f"比 grep -r 快 100-1000 倍且支持语义匹配。**严禁用 execute_command + grep 替代 IDE 搜索**。\n"
+                f"📍 **查找引用/实现优先**: 找到符号后，必须用 find_references（查所有引用）或 find_implementations（查所有实现），"
+                f"一次性获取所有相关位置，不要逐文件搜索。\n"
+                f"⚠️ 注意: index_status 返回错误不代表其他 IDE 工具不可用，各工具独立运作。\n"
+                f"- Agent 内部文件(memory/, skills/ 前缀)不在 IDE, 由后端本地读取。\n"
+                f"- 🚀 并行执行: 多个独立的 read_file/search/list/find 操作必须在一次函数调用批次中并行调用, "
+                f"不要逐个串行。例如: 需要读 3 个文件时, 一次 tool_calls 中同时调用 3 个 read_file。\n"
+            )
+        if acp_feature_enabled("document") and self.session_id:
+            doc_ctx = document_store.format_for_prompt(self.session_id)
+            if doc_ctx:
+                parts.append(doc_ctx)
+        return "\n\n".join(parts) if parts else ""
 
 
 def _extract_user_text(messages: list) -> str:

@@ -2653,8 +2653,8 @@ _TOOL_AUTONOMY_MAP = {
     "web_search": "web_search",
     "execute_code": "execute_code",
     "execute_code_e2b": "execute_code",
-    # ★ P2-1 修复：IDE 高敏工具（LSP4J 路径下也必须走 autonomy 检查）
-    # 历史问题：LSP4J 工具调用绕过 execute_tool 内部检查直达 IDE，相当于无门槛运行。
+    # ★ P2-1 修复：IDE 高敏工具（ACP 路由下也必须走 autonomy 检查）
+    # 历史问题：IDE 工具调用若绕过 execute_tool 内部检查，相当于无门槛运行。
     # 这些工具会修改用户磁盘或执行任意命令，必须与本地等效工具共享同一道审批闸门。
     "delete_file_by_path": "delete_files",          # 删除 IDE 项目文件
     "run_in_terminal": "execute_code",               # 终端命令执行
@@ -2675,7 +2675,7 @@ async def check_tool_autonomy(
 ) -> str | None:
     """前置 autonomy 检查 —— 高敏工具在任何执行路径之前调用。
 
-    Phase P2-1 修复：抽离原 execute_tool 内部的 autonomy 块，使 LSP4J 路由也能复用。
+    Phase P2-1 修复：抽离原 execute_tool 内部的 autonomy 块，使 ACP/本地路径复用同一闸门。
 
     Args:
         notify: False 时跳过所有外部通知 (WebUI/飞书等)。ACP 插件会话设 False。
@@ -3021,7 +3021,7 @@ async def execute_tool(
 
     # 0. 工具执行速率限制（per-session）：防止 Agent 失控时无限循环调用工具
     # 写操作工具（write_file/delete_file 等）使用更严格的频率限制
-    # 参考 jsonrpc_router.py L2628-2645 的 LSP4J 端限流实现
+    # per-session 工具执行速率限制
     from app.core.rate_limit import check_session_rate_limit, is_write_tool
     try:
         limit_key = "tool_write" if is_write_tool(tool_name) else "tool_execute"
@@ -3043,17 +3043,7 @@ async def execute_tool(
 
     ws = _agent_workspace_root(agent_id)
 
-    # IDE 删除：已连接 LSP4J 时改走插件内 PENDING 审批，避免 L3 只回文本、IDE 无授权按钮
-    if tool_name in ("delete_file_by_path", "delete_file"):
-        from app.plugins.clawith_lsp4j.jsonrpc_router import get_active_router, invoke_lsp4j_tool
-
-        agent_key = (str(user_id), str(agent_id))
-        if await get_active_router(agent_key) is not None:
-            _invoke_name = "delete_file_by_path" if tool_name == "delete_file" else tool_name
-            return await invoke_lsp4j_tool(_invoke_name, arguments, agent_id, user_id)
-
-
-    # ── Autonomy boundary check ──（提取到 check_tool_autonomy，与 LSP4J 路径复用同一闸门）
+    # ── Autonomy boundary check ──（提取到 check_tool_autonomy，ACP/本地路径复用同一闸门）
     _autonomy_blocked = await check_tool_autonomy(tool_name, arguments, agent_id, user_id)
     if _autonomy_blocked is not None:
         return _autonomy_blocked
@@ -3076,8 +3066,29 @@ async def execute_tool(
             )
 
     try:
-        if tool_name == "list_files":
-            result = await _storage_list_dir(agent_id, arguments.get("path", ""), tenant_id=_agent_tenant_id)
+        if tool_name == "retrieve_context":
+            # CCR 取回：按 (session_id, hash) 返回被压缩前的完整原文
+            from app.services.llm.ccr_store import retrieve_context_tool
+            result = await retrieve_context_tool(session_id, arguments)
+        elif tool_name == "list_files":
+            from app.plugins.clawith_acp.list_dedup import (
+                get_cached_list,
+                normalize_list_key,
+                store_list_result,
+            )
+            _list_rel = arguments.get("path", "")
+            _list_key = normalize_list_key(session_id or str(agent_id), "", _list_rel, arguments)
+            _list_hit = get_cached_list(_list_key)
+            if _list_hit is not None:
+                logger.info(
+                    "[LIST-DEDUP] storage hit session={} path={}",
+                    (session_id or str(agent_id))[:8],
+                    _list_rel,
+                )
+                result = _list_hit
+            else:
+                result = await _storage_list_dir(agent_id, _list_rel, tenant_id=_agent_tenant_id)
+                store_list_result(_list_key, result)
         elif tool_name == "list_focus_items":
             items = await list_focus_items(agent_id, include_completed=bool(arguments.get("include_completed", True)))
             if not items:
@@ -3528,6 +3539,22 @@ async def execute_tool(
             logger.warning("[TOOL-PERF] 慢工具: {} elapsed={:.0f}ms result_len={}", tool_name, _tool_elapsed, _rlen)
         elif _tool_elapsed > 200:
             logger.info("[TOOL-PERF] {} elapsed={:.0f}ms result_len={}", tool_name, _tool_elapsed, _rlen)
+        from app.plugins.clawith_acp.list_dedup import (
+            LIST_CACHE_INVALIDATE_TOOLS,
+            invalidate_list_cache_for_path,
+        )
+        if (
+            tool_name in LIST_CACHE_INVALIDATE_TOOLS
+            and isinstance(result, str)
+            and not result.startswith("❌")
+        ):
+            _inv_path = (
+                arguments.get("path")
+                or arguments.get("file_path")
+                or arguments.get("filePath", "")
+            )
+            _parent = os.path.dirname((_inv_path or ".").replace("\\", "/")) or "."
+            invalidate_list_cache_for_path(session_id or str(agent_id), "", _parent)
         return result
     except Exception as e:
         # #169 修复：区分网络超时（WARNING）与真正异常（ERROR）
@@ -3573,6 +3600,64 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
         return f"❌ Search error ({engine}): {str(e)[:200]}"
 
 
+_TOOL_PHASE_DEBUG_LOG = "/Users/shubinzhang/Documents/agent/.cursor/debug-b6cea0.log"
+_A2A_OBS_DEBUG_LOG = os.getenv(
+    "DEBUG_SESSION_LOG_PATH",
+    "/data/agents/.debug/debug-f3071f.log" if os.path.isdir("/data/agents")
+    else "/Users/shubinzhang/Documents/agent/.cursor/debug-f3071f.log",
+)
+_A2A_OBS_SESSION_ID = "f3071f"
+
+
+def _a2a_obs_log(hypothesis_id: str, location: str, message: str, **data) -> None:
+    """A2A consult 观察日志：NDJSON + loguru 双写，Docker 内 file 失败仍可从 docker logs 检索。"""
+    entry = {
+        "sessionId": _A2A_OBS_SESSION_ID,
+        "timestamp": int(time.time() * 1000),
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+    }
+    logger.info("[A2A-OBS] {} {} {}", hypothesis_id, message, data)
+    try:
+        os.makedirs(os.path.dirname(_A2A_OBS_DEBUG_LOG), exist_ok=True)
+        with open(_A2A_OBS_DEBUG_LOG, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+
+
+def _log_tool_phase(tool, phase, elapsed_ms, *, total_ms=None, hypothesis_id="", **fields):
+    parts = [f"[TOOL-PHASE] tool={tool} phase={phase} elapsed_ms={elapsed_ms:.1f}"]
+    if total_ms is not None:
+        parts.append(f"total_ms={total_ms:.1f}")
+    if hypothesis_id:
+        parts.append(f"hypothesis={hypothesis_id}")
+    for key, value in fields.items():
+        parts.append(f"{key}={value}")
+    logger.info(" ".join(parts))
+    # region agent log
+    try:
+        entry = {
+            "sessionId": "b6cea0",
+            "timestamp": int(time.time() * 1000),
+            "tool": tool,
+            "phase": phase,
+            "elapsed_ms": round(elapsed_ms, 2),
+            "hypothesis_id": hypothesis_id,
+            **({"total_ms": round(total_ms, 2)} if total_ms is not None else {}),
+            **fields,
+        }
+        with open(_TOOL_PHASE_DEBUG_LOG, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # endregion
+
+
 async def _search_duckduckgo(query: str, max_results: int) -> str:
     """Search via DuckDuckGo HTML (free, no API key).
 
@@ -3582,8 +3667,12 @@ async def _search_duckduckgo(query: str, max_results: int) -> str:
     import httpx
     import re
 
+    tool = "duckduckgo_search"
+    total_start = time.perf_counter()
     last_error = None
+    resp = None
     for attempt in range(3):
+        http_start = time.perf_counter()
         try:
             async with httpx.AsyncClient(follow_redirects=False) as client:
                 resp = await client.get(
@@ -3592,21 +3681,39 @@ async def _search_duckduckgo(query: str, max_results: int) -> str:
                     headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
                     timeout=10,
                 )
+            _log_tool_phase(
+                tool, "http", (time.perf_counter() - http_start) * 1000,
+                hypothesis_id="H2", attempt=attempt + 1, status=resp.status_code,
+                body_len=len(resp.text), retry_delay_ms=0, outcome="ok",
+            )
             break  # 成功，跳出重试循环
         except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as e:
             last_error = e
+            retry_delay_ms = int(1.0 * (2 ** attempt) * 1000) if attempt < 2 else 0
+            _log_tool_phase(
+                tool, "http", (time.perf_counter() - http_start) * 1000,
+                hypothesis_id="H4", attempt=attempt + 1, status=0, body_len=0,
+                retry_delay_ms=retry_delay_ms, outcome=type(e).__name__,
+            )
             if attempt < 2:
                 _delay = 1.0 * (2 ** attempt)  # 1s → 3s
                 logger.info("[DDG] 尝试 {}/3 失败: {}，{}s后重试...", attempt + 1, type(e).__name__, _delay)
                 await asyncio.sleep(_delay)
             else:
                 logger.warning("[DDG] 3次重试均失败: {} - {}", type(e).__name__, str(e)[:120])
+                _log_tool_phase(tool, "total", (time.perf_counter() - total_start) * 1000, outcome="timeout")
                 return f'🔍 DuckDuckGo 搜索不可用（网络超时）: "{query}"。请稍后重试或使用其他搜索引擎。'
         except Exception as e:
-            # 非网络错误（解析失败等）不重试
+            _log_tool_phase(
+                tool, "http", (time.perf_counter() - http_start) * 1000,
+                hypothesis_id="H2", attempt=attempt + 1, status=0, body_len=0,
+                retry_delay_ms=0, outcome=type(e).__name__,
+            )
             logger.warning("[DDG] 搜索失败（非网络错误）: {} - {}", type(e).__name__, str(e)[:100])
+            _log_tool_phase(tool, "total", (time.perf_counter() - total_start) * 1000, outcome="error")
             return f'🔍 DuckDuckGo 搜索出错: "{query}" - {type(e).__name__}'
 
+    parse_start = time.perf_counter()
     results = []
     blocks = re.findall(
         r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?'
@@ -3621,7 +3728,13 @@ async def _search_duckduckgo(query: str, max_results: int) -> str:
             parsed = parse_qs(urlparse(url).query)
             url = unquote(parsed.get("uddg", [url])[0])
         results.append(f"**{title}**\n{url}\n{snippet}")
+    parse_outcome = "ok" if results else "no_results"
+    _log_tool_phase(
+        tool, "parse", (time.perf_counter() - parse_start) * 1000,
+        hypothesis_id="H3", body_len=len(resp.text), outcome=parse_outcome,
+    )
 
+    _log_tool_phase(tool, "total", (time.perf_counter() - total_start) * 1000, outcome=parse_outcome)
     if not results:
         return f'🔍 No results found for "{query}"'
     return f'🔍 DuckDuckGo results for "{query}" ({len(results)} items):\n\n' + "\n\n---\n\n".join(results)
@@ -3694,15 +3807,27 @@ async def _jina_search(arguments: dict) -> str:
 async def _jina_read(arguments: dict) -> str:
     """Read web page via Jina AI Reader API (r.jina.ai). Returns clean structured markdown."""
     import httpx
+    from urllib.parse import urlparse
+
+    tool = "jina_read"
+    total_start = time.perf_counter()
 
     url = arguments.get("url", "").strip()
     if not url:
+        _log_tool_phase(tool, "total", (time.perf_counter() - total_start) * 1000, outcome="missing_url")
         return "❌ Please provide a URL"
     if not url.startswith("http"):
         url = "https://" + url
+    url_host = urlparse(url).hostname or ""
 
     max_chars = min(arguments.get("max_chars", 8000), 20000)
+    api_key_start = time.perf_counter()
     api_key = await _get_jina_api_key()
+    has_key = bool(api_key)
+    _log_tool_phase(
+        tool, "api_key", (time.perf_counter() - api_key_start) * 1000,
+        hypothesis_id="H5", url_host=url_host, has_key=has_key, outcome="ok",
+    )
 
     headers: dict = {
         "Accept": "text/plain, text/markdown, */*",
@@ -3713,29 +3838,58 @@ async def _jina_read(arguments: dict) -> str:
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
+        http_start = time.perf_counter()
         async with httpx.AsyncClient(follow_redirects=False, timeout=30) as client:
             resp = await client.get(
                 f"https://r.jina.ai/{url}",
                 headers=headers,
             )
+        _log_tool_phase(
+            tool, "http", (time.perf_counter() - http_start) * 1000,
+            hypothesis_id="H2", url_host=url_host, has_key=has_key,
+            status=resp.status_code, body_len=len(resp.text), outcome="ok",
+        )
 
         if resp.status_code != 200:
+            _log_tool_phase(tool, "total", (time.perf_counter() - total_start) * 1000,
+                            url_host=url_host, has_key=has_key, status=resp.status_code,
+                            body_len=len(resp.text), result_len=0, outcome="http_error")
             return f"❌ Jina Reader error HTTP {resp.status_code}: {resp.text[:200]}"
 
+        postprocess_start = time.perf_counter()
         text = resp.text.strip()
         if not text or len(text) < 100:
+            _log_tool_phase(
+                tool, "postprocess", (time.perf_counter() - postprocess_start) * 1000,
+                hypothesis_id="H3", url_host=url_host, body_len=len(resp.text),
+                result_len=len(text), outcome="empty",
+            )
+            _log_tool_phase(tool, "total", (time.perf_counter() - total_start) * 1000,
+                            url_host=url_host, has_key=has_key, status=resp.status_code,
+                            body_len=len(resp.text), result_len=len(text), outcome="empty")
             return f"❌ Jina Reader returned empty content for {url}"
 
         if len(text) > max_chars:
             text = text[:max_chars] + f"\n\n[... truncated at {max_chars} chars]"
 
-        return f"📄 **Content from: {url}**\n\n{text}"
+        result = f"📄 **Content from: {url}**\n\n{text}"
+        _log_tool_phase(
+            tool, "postprocess", (time.perf_counter() - postprocess_start) * 1000,
+            hypothesis_id="H3", url_host=url_host, body_len=len(resp.text),
+            result_len=len(result), outcome="ok",
+        )
+        _log_tool_phase(tool, "total", (time.perf_counter() - total_start) * 1000,
+                        url_host=url_host, has_key=has_key, status=resp.status_code,
+                        body_len=len(resp.text), result_len=len(result), outcome="ok")
+        return result
 
     except Exception as e:
+        _log_tool_phase(tool, "total", (time.perf_counter() - total_start) * 1000,
+                        url_host=url_host, has_key=has_key, outcome=type(e).__name__)
         return f"❌ Jina Reader error: {str(e)[:300]}"
 
 
-async def _validate_public_http_url(url: str) -> tuple[str | None, str | None]:
+async def _validate_public_http_url(url: str, *, _perf_tool: str | None = None) -> tuple[str | None, str | None]:
     """Normalize a URL and reject local/private network targets."""
     import ipaddress
     import socket
@@ -3763,6 +3917,7 @@ async def _validate_public_http_url(url: str) -> tuple[str | None, str | None]:
     if hostname.lower() in {"localhost", "localhost.localdomain"}:
         return None, "❌ Localhost URLs are blocked for safety"
 
+    dns_start = time.perf_counter()
     try:
         if host_is_ip:
             addresses = [hostname]
@@ -3773,7 +3928,17 @@ async def _validate_public_http_url(url: str) -> tuple[str | None, str | None]:
                 lambda: socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM),
             )
             addresses = [info[4][0] for info in infos]
+            if _perf_tool:
+                _log_tool_phase(
+                    _perf_tool, "dns", (time.perf_counter() - dns_start) * 1000,
+                    hypothesis_id="H1", hostname=hostname, outcome="ok",
+                )
     except Exception as exc:
+        if _perf_tool and not host_is_ip:
+            _log_tool_phase(
+                _perf_tool, "dns", (time.perf_counter() - dns_start) * 1000,
+                hypothesis_id="H1", hostname=hostname, outcome="error",
+            )
         return None, f"❌ Could not resolve hostname {hostname}: {str(exc)[:160]}"
 
     for address in set(addresses):
@@ -3830,10 +3995,33 @@ async def _read_webpage(arguments: dict) -> str:
     import httpx
     import trafilatura
     from bs4 import BeautifulSoup
+    from urllib.parse import urlparse
 
-    url, validation_error = await _validate_public_http_url(arguments.get("url", ""))
+    tool = "read_webpage"
+    total_start = time.perf_counter()
+    raw_url = arguments.get("url", "")
+    phases: dict[str, float] = {}
+
+    def _finish_read_webpage(result, outcome, **fields):
+        total_ms = (time.perf_counter() - total_start) * 1000
+        fields.setdefault(
+            "url_host",
+            urlparse(raw_url if "://" in raw_url else f"https://{raw_url}").hostname or "",
+        )
+        _log_tool_phase(
+            tool, "total", total_ms, total_ms=total_ms,
+            outcome=outcome, **fields,
+        )
+        return result
+
+    validate_start = time.perf_counter()
+    url, validation_error = await _validate_public_http_url(raw_url, _perf_tool=tool)
+    phases["validate"] = (time.perf_counter() - validate_start) * 1000
+    url_host = urlparse(url or raw_url if "://" in (url or raw_url) else f"https://{url or raw_url}").hostname or ""
+    _log_tool_phase(tool, "validate", phases["validate"], url_host=url_host,
+                    outcome="error" if validation_error else "ok")
     if validation_error:
-        return validation_error
+        return _finish_read_webpage(validation_error, "validation_error", url_host=url_host)
 
     max_chars = min(max(int(arguments.get("max_chars", 12000)), 500), 50000)
     include_links = bool(arguments.get("include_links", False))
@@ -3843,12 +4031,19 @@ async def _read_webpage(arguments: dict) -> str:
         "Accept": "text/html, text/plain, application/json, application/xml;q=0.9, text/*;q=0.8, */*;q=0.5",
     }
 
+    http_start = time.perf_counter()
     try:
         async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
             async with client.stream("GET", url, headers=headers) as resp:
                 content_length = resp.headers.get("content-length")
                 if content_length and content_length.isdigit() and int(content_length) > max_bytes:
-                    return f"❌ Page is too large to read safely ({content_length} bytes, limit {max_bytes} bytes)"
+                    phases["http"] = (time.perf_counter() - http_start) * 1000
+                    _log_tool_phase(tool, "http", phases["http"], hypothesis_id="H2",
+                                    url_host=url_host, status=resp.status_code, bytes=0, outcome="too_large")
+                    return _finish_read_webpage(
+                        f"❌ Page is too large to read safely ({content_length} bytes, limit {max_bytes} bytes)",
+                        "too_large", url_host=url_host, status=resp.status_code, bytes=0, result_len=0,
+                    )
 
                 chunks: list[bytes] = []
                 total = 0
@@ -3868,14 +4063,25 @@ async def _read_webpage(arguments: dict) -> str:
                 content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
                 encoding = resp.encoding or "utf-8"
 
+        phases["http"] = (time.perf_counter() - http_start) * 1000
+        _log_tool_phase(tool, "http", phases["http"], hypothesis_id="H2",
+                        url_host=url_host, status=status_code, bytes=total, outcome="ok")
+
         if status_code >= 400:
-            return f"❌ Webpage fetch failed HTTP {status_code}: {final_url}"
+            return _finish_read_webpage(
+                f"❌ Webpage fetch failed HTTP {status_code}: {final_url}",
+                "http_error", url_host=url_host, status=status_code, bytes=total, result_len=0,
+            )
 
         raw = b"".join(chunks)
         text = raw.decode(encoding, errors="replace").strip()
         if not text:
-            return f"❌ Empty response from {final_url}"
+            return _finish_read_webpage(
+                f"❌ Empty response from {final_url}",
+                "empty_response", url_host=url_host, status=status_code, bytes=total, result_len=0,
+            )
 
+        extract_start = time.perf_counter()
         title = ""
         description = ""
         extracted = text
@@ -3902,12 +4108,26 @@ async def _read_webpage(arguments: dict) -> str:
         elif content_type.startswith("text/") or content_type in {"application/json", "application/xml", "text/xml"}:
             title = final_url
         else:
-            return f"❌ Unsupported content type: {content_type or 'unknown'}"
+            phases["extract"] = (time.perf_counter() - extract_start) * 1000
+            _log_tool_phase(tool, "extract", phases["extract"], hypothesis_id="H3",
+                            url_host=url_host, outcome="unsupported_type")
+            return _finish_read_webpage(
+                f"❌ Unsupported content type: {content_type or 'unknown'}",
+                "unsupported_type", url_host=url_host, status=status_code, bytes=total, result_len=0,
+            )
 
         extracted = extracted.strip()
-        if not extracted:
-            return f"❌ Could not extract readable content from {final_url}"
+        phases["extract"] = (time.perf_counter() - extract_start) * 1000
+        _log_tool_phase(tool, "extract", phases["extract"], hypothesis_id="H3",
+                        url_host=url_host, outcome="ok" if extracted else "empty")
 
+        if not extracted:
+            return _finish_read_webpage(
+                f"❌ Could not extract readable content from {final_url}",
+                "extract_empty", url_host=url_host, status=status_code, bytes=total, result_len=0,
+            )
+
+        format_start = time.perf_counter()
         truncated_chars = len(extracted) > max_chars
         if truncated_chars:
             extracted = extracted[:max_chars].rstrip() + f"\n\n[... truncated at {max_chars} chars]"
@@ -3928,12 +4148,23 @@ async def _read_webpage(arguments: dict) -> str:
         result = "🌐 **Webpage content**\n\n" + "\n".join(meta_lines) + "\n\n---\n\n" + extracted
         if links:
             result += "\n\n---\n\nLinks:\n" + "\n".join(links)
-        return result
+        phases["format"] = (time.perf_counter() - format_start) * 1000
+        _log_tool_phase(tool, "format", phases["format"], url_host=url_host, result_len=len(result), outcome="ok")
+        return _finish_read_webpage(
+            result, "ok", url_host=url_host, status=status_code, bytes=total, result_len=len(result),
+        )
 
     except httpx.TimeoutException:
-        return f"❌ Webpage fetch timed out: {url}"
+        phases["http"] = phases.get("http", (time.perf_counter() - http_start) * 1000)
+        _log_tool_phase(tool, "http", phases["http"], hypothesis_id="H2",
+                        url_host=url_host, outcome="timeout")
+        return _finish_read_webpage(
+            f"❌ Webpage fetch timed out: {url}", "timeout", url_host=url_host, result_len=0,
+        )
     except Exception as e:
-        return f"❌ Webpage read error: {str(e)[:300]}"
+        return _finish_read_webpage(
+            f"❌ Webpage read error: {str(e)[:300]}", type(e).__name__, url_host=url_host, result_len=0,
+        )
 
 
 
@@ -5027,6 +5258,10 @@ def _read_file(ws: Path, rel_path: str, tenant_id: str | None = None, offset: in
 
     try:
         content = file_path.read_text(encoding="utf-8", errors="replace")
+        rel_norm = rel_path.replace("\\", "/").lower()
+        if "skills/" in rel_norm and rel_norm.endswith(".md"):
+            from app.services.agent_context import filter_skill_body_for_mode
+            content = filter_skill_body_for_mode(content, mode="agent")
         lines = content.splitlines()
         total_lines = len(lines)
 
@@ -7453,6 +7688,8 @@ async def _build_a2a_context(
                     pass
             if not _a2a_async and not force_async:
                 if msg_type in ("notify", "task_delegate"):
+                    _a2a_obs_log("H1", "agent_tools.py:_build_a2a_context", "msg_type_forced_consult",
+                                 requested=msg_type, target=agent_name, a2a_async=False)
                     msg_type = "consult"
 
             primary_model = None
@@ -7490,6 +7727,10 @@ async def _build_a2a_context(
                         role = "assistant"
                     conversation_history.append({"role": role, "content": m.content})
 
+            _a2a_obs_log("H2", "agent_tools.py:_build_a2a_context", "context_built",
+                         requested=args.get("msg_type", "notify"), effective=msg_type,
+                         from_agent=source_name, to_agent=target.name, a2a_async=_a2a_async,
+                         origin_session=origin_session_id)
             return A2AContext(
                 source_agent=source_agent,
                 target_agent=target,
@@ -7640,6 +7881,10 @@ async def _a2a_handle_task_delegate(ctx: A2AContext) -> str:
 
 
 async def _a2a_handle_consult(ctx: A2AContext) -> str:
+    _consult_t0 = time.perf_counter()
+    _a2a_obs_log("H1", "agent_tools.py:_a2a_handle_consult", "consult_start",
+                 from_agent=ctx.source_agent.name, to_agent=ctx.target_agent.name,
+                 msg_len=len(ctx.message_text), origin_session=ctx.origin_session_id)
     try:
         suffix = (
             "\n\n--- Agent-to-Agent Message ---\n"
@@ -7705,9 +7950,17 @@ async def _a2a_handle_consult(ctx: A2AContext) -> str:
             detail={"partner": ctx.target_agent.name, "message": ctx.message_text[:200], "reply": target_reply[:200]},
         )
 
+        _a2a_obs_log("H1", "agent_tools.py:_a2a_handle_consult", "consult_done",
+                     from_agent=ctx.source_agent.name, to_agent=ctx.target_agent.name,
+                     elapsed_ms=int((time.perf_counter() - _consult_t0) * 1000),
+                     reply_len=len(target_reply or ""))
         return f"💬 {ctx.target_agent.name} replied:\n{target_reply}"
 
     except Exception as e:
+        _a2a_obs_log("H1", "agent_tools.py:_a2a_handle_consult", "consult_error",
+                     from_agent=ctx.source_agent.name, to_agent=ctx.target_agent.name,
+                     elapsed_ms=int((time.perf_counter() - _consult_t0) * 1000),
+                     error=f"{type(e).__name__}: {str(e)[:200]}")
         logger.exception(f"[A2A] _a2a_handle_consult failed: from={ctx.source_agent.id}, to={ctx.target_agent.id}")
         return f"❌ Consult request error ({type(e).__name__}): {str(e)[:200]}"
 
@@ -7732,14 +7985,24 @@ async def _send_message_to_agent(
     if isinstance(ctx_or_err, str):
         return ctx_or_err
     ctx = ctx_or_err
+    _dispatch_t0 = time.perf_counter()
+    _a2a_obs_log("H2", "agent_tools.py:_send_message_to_agent", "dispatch",
+                 requested=args.get("msg_type", "notify"), effective=ctx.msg_type,
+                 from_agent=ctx.source_agent.name, to_agent=ctx.target_agent.name,
+                 origin_session=origin_session_id)
 
     if ctx.target_agent.agent_type == "openclaw":
-        return await _a2a_handle_openclaw(ctx)
-    if ctx.msg_type == "notify":
-        return await _a2a_handle_notify(ctx)
-    if ctx.msg_type == "task_delegate":
-        return await _a2a_handle_task_delegate(ctx)
-    return await _a2a_handle_consult(ctx)
+        result = await _a2a_handle_openclaw(ctx)
+    elif ctx.msg_type == "notify":
+        result = await _a2a_handle_notify(ctx)
+    elif ctx.msg_type == "task_delegate":
+        result = await _a2a_handle_task_delegate(ctx)
+    else:
+        result = await _a2a_handle_consult(ctx)
+    _a2a_obs_log("H2", "agent_tools.py:_send_message_to_agent", "dispatch_done",
+                 effective=ctx.msg_type, elapsed_ms=int((time.perf_counter() - _dispatch_t0) * 1000),
+                 result_len=len(result or ""))
+    return result
 
 
 
@@ -14472,46 +14735,6 @@ async def _upsert_member_daily_report(agent_id: uuid.UUID | None, arguments: dic
     except Exception as e:
         logger.exception("[OKR] upsert_member_daily_report failed")
         return f"Failed to upsert member daily report: {str(e)[:200]}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 搜索能力统一门面（Phase 3 — 搜索工具归位）
-#
-# 设计目标：agent_tools.py 作为搜索能力的对外统一入口，外部代码（如 tool_hooks）
-#          通过此处的门面访问，而非直接耦合到 clawith_lsp4j.jsonrpc_router。
-#
-# 实现策略：懒导入（运行期再 import）— 避免与 jsonrpc_router 形成模块级
-#          循环依赖（jsonrpc_router 间接被 tool_hooks 加载，tool_hooks 已 import
-#          agent_tools）。
-#
-# 后续工作：物理迁移 _rg_search / _execute_local_tool 等 ~700 行到本模块，
-#          目前先建立门面契约，避免一次性大规模搬迁带来的回归风险。
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def search_local_tool(tool_name: str, arguments: dict, project_path: str = "") -> tuple[str, list[dict]]:
-    """本地搜索工具门面 — 转发到 LSP4J 模块内的实现。
-
-    Args:
-        tool_name: 工具名（list_dir / search_file / search_codebase / grep_code / search_symbol）
-        arguments: 工具参数
-        project_path: IDE 项目根路径；为空时退回当前 CWD
-
-    Returns:
-        (result_json_str, results_list) — 与底层实现签名一致
-    """
-    from app.plugins.clawith_lsp4j.jsonrpc_router import _execute_local_tool
-    return _execute_local_tool(tool_name, arguments, project_path)
-
-
-def rg_search(project_root: str, pattern: str, max_results: int = 50) -> list[dict] | None:
-    """ripgrep 搜索门面 — 转发到 LSP4J 模块内的实现。
-
-    Returns:
-        [{"fileName", "path", "startLine", "endLine", "matchLine"}] 或 None（rg 不可用）
-    """
-    from app.plugins.clawith_lsp4j.jsonrpc_router import _rg_search
-    return _rg_search(project_root, pattern, max_results)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

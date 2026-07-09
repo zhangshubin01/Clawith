@@ -5,15 +5,20 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi.security import HTTPAuthorizationCredentials
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.core.security import (
     create_access_token,
+    decode_access_token_soft,
     get_authenticated_user,
     get_current_user,
     hash_password_async,
+    is_refresh_within_grace,
+    security,
     verify_password_async,
 )
 from app.dao import identity_dao, system_setting_dao, tenant_dao, user_dao
@@ -35,6 +40,7 @@ from app.schemas.schemas import (
     TenantChoice,
     TenantSwitchRequest,
     TenantSwitchResponse,
+    RefreshTokenResponse,
     TokenResponse,
     UserLogin,
     UserOut,
@@ -655,6 +661,57 @@ async def reset_password(data: ResetPasswordRequest):
 
     return {"ok": True}
 
+
+
+
+@router.post("/refresh", response_model=RefreshTokenResponse)
+async def refresh_access_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    db: AsyncSession = Depends(get_db),
+):
+    """用有效 JWT（含宽限期内已过期 token）换取新 access token。
+
+    对齐 IDE 插件 POST /api/auth/refresh：Authorization Bearer，无 body。
+    """
+    from app.core.rate_limit import check_ip_rate_limit, check_session_rate_limit
+
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    client_ip = request.client.host if request.client else "0.0.0.0"
+    await check_ip_rate_limit(client_ip, "auth_refresh")
+
+    payload = decode_access_token_soft(credentials.credentials)
+    if not is_refresh_within_grace(payload):
+        logger.warning("[Auth] token_refresh rejected: outside grace window ip={}", client_ip)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="token_expired")
+
+    user_id = payload.get("sub")
+    role = payload.get("role")
+    if not user_id or not role:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    try:
+        user_uuid = uuid.UUID(str(user_id))
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    try:
+        await check_session_rate_limit(str(user_uuid), "auth_refresh")
+    except RuntimeError:
+        logger.warning("[Auth] token_refresh rate limited user_id={} ip={}", user_uuid, client_ip)
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many refresh attempts")
+
+    result = await db.execute(select(User).where(User.id == user_uuid))
+    user = result.scalar_one_or_none()
+    if not user or not user.is_active:
+        logger.warning("[Auth] token_refresh rejected: user missing or inactive user_id={}", user_uuid)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    new_token = create_access_token(str(user.id), user.role)
+    logger.info("[Auth] token_refresh result=OK user_id={} ip={}", user_uuid, client_ip)
+    return RefreshTokenResponse(access_token=new_token)
 
 @router.get("/me", response_model=UserOut)
 async def get_me(current_user: User = Depends(get_authenticated_user)):

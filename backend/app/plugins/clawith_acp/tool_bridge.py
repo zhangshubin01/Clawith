@@ -8,25 +8,47 @@ ContextVar:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import pathlib
+import re
 import shlex
 import time
+import uuid
 from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
 
 from loguru import logger
 
+from app.plugins.clawith_acp.turn_budget import (
+    PERMISSION_GATED_METHODS,
+    get_turn_budget,
+)
+from app.services.llm.tool_execution_policy import WORKSPACE_WRITE_TOOLS
+
 # ── 进行中读请求合并: 对同一 (session, method, path) 的并行读请求只发一次 IDE 调用 ──
 # 消除 LLM 并行发起多个 search_text / read_text_file 到同一路径时的重复 IDE 调用
 _METHODS_FOR_COALESCE: frozenset[str] = frozenset({
     "fs/read_text_file",
     "fs/list_directory",
-    "fs/search_text",
 })
 _inflight: dict[str, asyncio.Task[Any]] = {}
 _inflight_lock = asyncio.Lock()
+
+
+def _coalesce_key(session_id: str, method: str, path: str, args: dict | None = None) -> str:
+    """并行读/list 合并：同 session+path+参数只发一次 IDE RPC。"""
+    args = args or {}
+    if method == "fs/read_text_file":
+        if args.get("line") is not None or args.get("limit") is not None:
+            return ""
+        return f"{session_id}:{method}:{path}"
+    if method == "fs/list_directory":
+        from app.plugins.clawith_acp.list_dedup import normalize_list_args, _norm_path
+        depth, limit = normalize_list_args(args)
+        return f"{session_id}:{method}:{_norm_path(path)}:{depth}:{limit}"
+    return ""
 
 
 async def coalesce_or_execute(
@@ -34,37 +56,36 @@ async def coalesce_or_execute(
     path: str,
     session_id: str,
     executor: Callable[[], Any],
+    args: dict | None = None,
 ) -> Any:
-    """对同一 (session, method, path) 合并并行请求，复用已有 Task 结果。
-
-    Args:
-        method: ACP 方法名 (如 "fs/read_text_file")
-        path: 请求的路径参数
-        session_id: ACP 会话 ID
-        executor: 实际执行请求的协程工厂
-
-    Returns:
-        executor() 的返回值, 或复用已有 Task 的返回值
-
-    实现要点:
-      - asyncio.Lock 保护 check-set 原子性, 消除 TOCTOU 窗口
-      - CancelledError 传播时不清理 key, 让原始 Task 继续服务其他等待者
-      - 异常或正常完成时通过 identity check 安全清理 key
-    """
+    """对同一 (session, method, path) 合并并行读请求，复用已有 Task 结果。"""
     if method not in _METHODS_FOR_COALESCE:
         return await executor()
 
-    key = f"{session_id}:{method}:{path}"
+    key = _coalesce_key(session_id, method, path, args)
+    if not key:
+        return await executor()
 
     async with _inflight_lock:
         existing = _inflight.get(key)
-        if existing is not None and not existing.done():
-            logger.debug("[ACP-COALESCE] hit key={} method={} — 复用已有请求", key, method)
-            return await existing               # 复用已有 Task, 不创建新请求
-
-        task = asyncio.create_task(executor())
-        _inflight[key] = task
-        logger.debug("[ACP-COALESCE] new key={} method={} — 创建新请求", key, method)
+        if existing is not None:
+            if not existing.done():
+                logger.info("[ACP-COALESCE] hit key={} method={} — 复用已有请求", key, method)
+                waiter = existing
+            else:
+                try:
+                    return existing.result()
+                except Exception:
+                    _inflight.pop(key, None)
+                    waiter = None
+        else:
+            waiter = None
+        if waiter is None:
+            task = asyncio.create_task(executor())
+            _inflight[key] = task
+            logger.debug("[ACP-COALESCE] new key={} method={} — 创建新请求", key, method)
+        else:
+            task = waiter
 
     try:
         return await task
@@ -103,6 +124,21 @@ _FAST_METHODS: frozenset[str] = frozenset({
 })
 
 
+async def _send_with_budget(handler: Any, method: str, params: dict[str, Any], timeout: float) -> Any:
+    """send_request + TurnBudget deadline 裁剪；权限 RPC 期间暂停 compute 计时。"""
+    budget = get_turn_budget()
+    is_hitl = method in PERMISSION_GATED_METHODS
+    if budget is not None:
+        timeout = budget.cap_timeout(timeout, for_hitl=is_hitl)
+    if is_hitl and budget is not None:
+        budget.suspend_for_hitl(method)
+        try:
+            return await handler.send_request(method, params, timeout)
+        finally:
+            budget.resume_from_hitl()
+    return await handler.send_request(method, params, timeout)
+
+
 async def polite_send(
     handler: Any,          # AcpHandler instance
     method: str,
@@ -120,7 +156,7 @@ async def polite_send(
       - 其他方法: 应用 16ms 最小间隔
     """
     if not _POLITENESS_ENABLED:
-        return await handler.send_request(method, params, timeout)
+        return await _send_with_budget(handler, method, params, timeout)
 
     # 写操作的方法族 (来自 _METHOD_FAMILIES)
     _write_methods_for_polite: frozenset[str] = frozenset({
@@ -130,7 +166,7 @@ async def polite_send(
     })
 
     if method in _FAST_METHODS or method in _write_methods_for_polite:
-        return await handler.send_request(method, params, timeout)
+        return await _send_with_budget(handler, method, params, timeout)
 
     # 计算与上次发送的间隔, 必要时等待
     async with handler._polite_lock:
@@ -148,7 +184,7 @@ async def polite_send(
         )
         await asyncio.sleep(gap)
 
-    return await handler.send_request(method, params, timeout)
+    return await _send_with_budget(handler, method, params, timeout)
 
 
 # ── 延迟基线追踪 (第二梯队): 每方法族 RTT 采样 + P50/P95/P99 定期输出 ──
@@ -243,6 +279,49 @@ _failed_paths: dict[str, int] = {}
 _FAILED_PATH_BLOCK = 3
 
 current_acp_handler: ContextVar[Any | None] = ContextVar("current_acp_handler", default=None)
+
+# region agent log
+_AGENT_DEBUG_LOG_PATH = "/Users/shubinzhang/Documents/agent/.cursor/debug-9e9222.log"
+_AGENT_DEBUG_SESSION_ID = "9e9222"
+
+
+def _redact_debug_value(value: Any, project_root: str = "") -> Any:
+    """调试日志仅保留判断结果, 本机绝对路径统一脱敏。"""
+    home = os.path.expanduser("~")
+    if isinstance(value, str):
+        redacted = value
+        if project_root:
+            redacted = redacted.replace(project_root, "<PROJECT_ROOT>")
+        if home:
+            redacted = redacted.replace(home, "<HOME>")
+        return redacted
+    if isinstance(value, list):
+        return [_redact_debug_value(item, project_root) for item in value]
+    if isinstance(value, dict):
+        nested_root = str(value.get("cwd") or project_root or "")
+        return {key: _redact_debug_value(item, nested_root) for key, item in value.items()}
+    return value
+
+
+def _agent_debug_log(run_id: str, hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    """写入本轮调试 NDJSON; 只记录路径/状态, 不记录文件内容或密钥。"""
+    payload = {
+        "sessionId": _AGENT_DEBUG_SESSION_ID,
+        "id": f"log_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}",
+        "timestamp": int(time.time() * 1000),
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": _redact_debug_value(data),
+    }
+    try:
+        os.makedirs(os.path.dirname(_AGENT_DEBUG_LOG_PATH), exist_ok=True)
+        with open(_AGENT_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.debug("[ACP-DEBUG] {} write_failed={} payload={}", message, type(exc).__name__, payload)
+# endregion
 
 # ACP 协议方法映射
 _ACP_METHOD_MAP = {
@@ -528,6 +607,19 @@ async def _build_find_super_methods_params(
     if args.get("column"): params["column"] = int(args["column"])
     if args.get("language"): params["language"] = args["language"]
     if args.get("symbol"): params["symbol"] = args["symbol"]
+    has_position = all(params.get(key) is not None for key in ("file", "line", "column"))
+    symbol = str(params.get("symbol") or "").strip()
+    if symbol and "#" not in symbol:
+        return (
+            "⚠️ find_super_methods 需要方法符号, 不是类符号。"
+            "请传 symbol='com.example.Class#methodName'，或传 file+line+column 定位到方法体内。"
+        )
+    if not has_position and not symbol:
+        return (
+            "⚠️ find_super_methods 参数不足。"
+            "请先用 find_definition/open_file 定位方法，再传 file+line+column；"
+            "或传 symbol='com.example.Class#methodName'。"
+        )
     logger.debug(f"[ACP] find_super_methods file={args.get('file')}")
     return params
 
@@ -727,12 +819,41 @@ async def _build_project_params(
 ) -> dict | str:
     """构建 build_project 参数 — 编译项目。"""
     logger.debug(f"[ACP] build_project rebuild={args.get('rebuild')}")
-    return {
+    params: dict[str, Any] = {
         "sessionId": session_id,
         "rebuild": args.get("rebuild", False),
         "includeRawOutput": args.get("includeRawOutput", False),
-        "timeoutSeconds": int(args.get("timeoutSeconds", 120)),
     }
+    if args.get("timeoutSeconds") is not None:
+        params["timeoutSeconds"] = int(_bounded_build_timeout(args["timeoutSeconds"]))
+    return params
+
+
+def _bounded_build_timeout(raw: Any | None) -> float:
+    """限制 build_project 超时, 避免 LLM 输入极大值长期占用 IDE。"""
+    try:
+        seconds = float(raw if raw is not None else os.getenv("ACP_BUILD_TIMEOUT", "180"))
+    except (TypeError, ValueError):
+        seconds = 180.0
+    return min(max(seconds, 30.0), 600.0)
+
+
+def _permission_timeout_seconds() -> float:
+    """权限弹窗类 RPC 超时 — 与 IDE requestPermissions 120s 对齐。"""
+    return float(os.getenv("ACP_PERMISSION_TIMEOUT", "120"))
+
+
+def _timeout_for_acp_method(method: str, params: dict[str, Any]) -> float:
+    """按 ACP 方法类型选择超时; build_project 不能沿用文件工具 15s 默认值。"""
+    if method == "fs/safe_delete":
+        return _permission_timeout_seconds()
+    if method == "fs/write_text_file":
+        return float(os.getenv("ACP_FS_WRITE_TIMEOUT", "60"))
+    if method == "fs/edit_text_file":
+        return float(os.getenv("ACP_FS_EDIT_TIMEOUT", "30"))
+    if method == "ide/build_project":
+        return _bounded_build_timeout(params.get("timeoutSeconds"))
+    return float(os.getenv("ACP_FS_TIMEOUT", "15"))
 
 
 async def _build_get_documentation_params(
@@ -918,41 +1039,242 @@ def _lazy_import_agent_tools():
     if "check_tool_autonomy" not in _INLINE_IMPORTED:
         from app.services.agent_tools import (
             _DANGEROUS_BASH_ALWAYS as _bash_always,
+            _DANGEROUS_BASH_NETWORK as _bash_network,
             check_tool_autonomy as _check_autonomy,
         )
         _INLINE_IMPORTED["_DANGEROUS_BASH_ALWAYS"] = _bash_always
+        _INLINE_IMPORTED["_DANGEROUS_BASH_NETWORK"] = _bash_network
         _INLINE_IMPORTED["check_tool_autonomy"] = _check_autonomy
         from app.services.agent_tools import _TOOL_AUTONOMY_MAP as _autonomy_map
         _INLINE_IMPORTED["_TOOL_AUTONOMY_MAP"] = _autonomy_map
 
+def _is_within_path(root: str, candidate: str) -> bool:
+    """用 commonpath 判断路径边界, 避免 /project2 误匹配 /project。"""
+    if not root or not candidate:
+        return False
+    try:
+        root_norm = os.path.normpath(os.path.expanduser(root))
+        cand_norm = os.path.normpath(os.path.expanduser(candidate))
+        return os.path.commonpath([root_norm, cand_norm]) == root_norm
+    except ValueError:
+        return False
+
+
+def _looks_agent_internal_path(path: str) -> bool:
+    """只按约定前缀/文件名识别 Agent 内部文件, 不依赖 IDE cwd。"""
+    normalized = (path or "").strip().replace("\\", "/")
+    if not normalized:
+        return False
+    agent_prefixes = ("memory/", "skills/", "enterprise_info/")
+    if any(normalized.startswith(p) for p in agent_prefixes):
+        return True
+    agent_files = ("soul.md", "focus.md", "memory.md", "tasks.json", "reflections.md")
+    return normalized.split("/")[-1] in agent_files
+
+
 def _is_project_file(path: str, cwd: str = "") -> bool:
-    """判断路径是否是 IDE 项目文件（应走 ACP）还是 agent 自身文件（走本地）。"""
+    """判断路径是否是 IDE 项目文件(应走 ACP)还是 agent 自身文件(走本地)。"""
     if not path:
         return False
-    if not cwd:
-        return False  # 拒绝空 cwd，防止所有绝对路径被放行（安全审计 V1/V4）
-    if path.startswith("/"):
-        # 绝对路径: 规范化后检查是否在项目根下，防路径穿越 (如 /etc/passwd)
-        if cwd and not os.path.normpath(path).startswith(os.path.normpath(cwd)):
-            return False
-        return True
-    # agent 自身文件前缀
-    agent_prefixes = ("memory/", "skills/", "enterprise_info/", "workspace/")
-    if any(path.startswith(p) for p in agent_prefixes):
+    normalized = path.strip().replace("\\", "/")
+    if _looks_agent_internal_path(normalized):
         return False
-    agent_files = ("soul.md", "focus.md", "memory.md", "tasks.json", "reflections.md")
-    if path.split("/")[-1] in agent_files:
-        return False
+    if normalized.startswith("/") or normalized.startswith("~"):
+        return bool(cwd) and _is_within_path(cwd, normalized)
     return True  # 其余相对路径 → IDE 项目根
 
 
 def is_agent_internal_path(path: str) -> bool:
-    """Agent 后端内部文件（记忆、技能等），不应在 IDE 时间线展示工具卡片。"""
-    normalized = (path or "").strip()
-    if not normalized:
-        return False
-    return not _is_project_file(normalized)
+    """Agent 后端内部文件(记忆、技能等), 不应在 IDE 时间线展示工具卡片。"""
+    return _looks_agent_internal_path(path)
 
+
+def _normalize_acp_project_path(raw: str, cwd: str) -> tuple[str, str | None, bool]:
+    """把 ACP 项目路径压成相对项目根路径; 越界绝对路径直接拒绝。"""
+    path = str(raw or "").strip().replace("\\", "/")
+    if not path:
+        return "", None, False
+    if path.startswith("workspace/"):
+        path = path[len("workspace/"):]
+    expanded = os.path.expanduser(path)
+    if os.path.isabs(expanded):
+        if not cwd:
+            return path, "IDE 项目根未知, 拒绝项目文件路径", False
+        norm_abs = os.path.normpath(expanded)
+        if not _is_within_path(cwd, norm_abs):
+            return path, f"路径越界: {path} 不在 IDE 项目根 {cwd} 内", False
+        rel = os.path.relpath(norm_abs, os.path.normpath(os.path.expanduser(cwd))).replace("\\", "/")
+        return rel if rel != "." else ".", None, False
+    if is_agent_internal_path(path):
+        return path, None, True
+    if not cwd:
+        return path, "IDE 项目根未知, 拒绝项目文件路径", False
+    norm_rel = os.path.normpath(path).replace("\\", "/")
+    if norm_rel in ("..",) or norm_rel.startswith("../") or os.path.isabs(norm_rel):
+        return path, f"路径不合法: {path}", False
+    return norm_rel if norm_rel != "." else ".", None, False
+
+
+def _normalize_acp_tool_args(tool_name: str, args: dict, cwd: str) -> tuple[dict, str, str | None, bool]:
+    """统一归一化 ACP 工具参数里的项目路径, 避免 builder 各自漏处理。"""
+    normalized_args = dict(args)
+    path_keys = ("path", "file", "file_path", "filePath", "destination")
+    primary_path = ""
+    internal = False
+    for key in path_keys:
+        value = normalized_args.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        normalized, error, is_internal = _normalize_acp_project_path(value, cwd)
+        if error:
+            return normalized_args, value, error, False
+        if is_internal:
+            internal = True
+        normalized_args[key] = normalized
+        if not primary_path and key in ("path", "file", "file_path", "filePath"):
+            primary_path = normalized
+    for key in ("paths", "files"):
+        values = normalized_args.get(key)
+        if not isinstance(values, list):
+            continue
+        normalized_values = []
+        for value in values:
+            if not isinstance(value, str):
+                normalized_values.append(value)
+                continue
+            normalized, error, is_internal = _normalize_acp_project_path(value, cwd)
+            if error:
+                return normalized_args, value, error, False
+            if is_internal:
+                internal = True
+            normalized_values.append(normalized)
+        normalized_args[key] = normalized_values
+        if not primary_path and normalized_values:
+            primary_path = str(normalized_values[0])
+    return normalized_args, primary_path, None, internal
+
+
+_ALLOWED_EXECUTABLE_PREFIXES = ("/bin/", "/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/")
+_LEADING_CD_RE = re.compile(r'^\s*cd\s+((?:"[^"]+"|\'[^\']+\'|[^;&|]+))\s*&&\s*(.+)$', re.S)
+_ANY_CD_RE = re.compile(r'(?:^|[;&|]\s*)cd\s+((?:"[^"]+"|\'[^\']+\'|[^;&|\s]+))')
+
+
+def _parse_shell_path_token(token: str) -> str:
+    try:
+        parts = shlex.split(token)
+    except ValueError:
+        return token.strip().strip('"\'')
+    return parts[0] if parts else ""
+
+
+def _resolve_command_path(token: str, cwd_norm: str) -> tuple[str, str] | None:
+    """识别 shell token 中的路径值，并解析到绝对路径用于边界校验。"""
+    if not token or token.startswith("http://") or token.startswith("https://"):
+        return None
+    value = token.split("=", 1)[1] if "=" in token else token
+    if not value or value in (".", "-"):
+        return None
+    if value.startswith("~") or "$HOME" in value or "${HOME}" in value or "$PWD" in value or "${PWD}" in value:
+        return value, value
+    expanded = os.path.expanduser(value)
+    if os.path.isabs(expanded):
+        return value, os.path.normpath(expanded)
+    if value == ".." or value.startswith("./") or value.startswith("../") or "/" in value:
+        return value, os.path.normpath(os.path.join(cwd_norm, value))
+    return None
+
+
+def _rewrite_token_path(token: str, old_value: str, new_value: str) -> str:
+    if "=" in token:
+        key, _ = token.split("=", 1)
+        return f"{key}={new_value}"
+    return new_value
+
+
+def _guard_acp_command_paths(command: str, cwd: str) -> tuple[str, str | None, dict[str, Any]]:
+    """阻止 execute_command 越过 IDE 项目根; 合法项目绝对路径改写为相对路径。"""
+    original = str(command or "")
+    rewritten = original.strip()
+    debug: dict[str, Any] = {"cwd": cwd, "rewritten": False, "absolutePaths": [], "relativePaths": []}
+    if not rewritten or not cwd:
+        return rewritten, None, debug
+    cwd_norm = os.path.normpath(os.path.expanduser(cwd))
+    leading_cd = _LEADING_CD_RE.match(rewritten)
+    if leading_cd:
+        cd_target = _parse_shell_path_token(leading_cd.group(1))
+        debug["leadingCdTarget"] = cd_target
+        resolved = _resolve_command_path(cd_target, cwd_norm)
+        if resolved:
+            _, abs_target = resolved
+            if not _is_within_path(cwd_norm, abs_target):
+                return rewritten, f"命令路径越界: cd 目标不在 IDE 项目根内: {cd_target}", debug
+            rel = os.path.relpath(abs_target, cwd_norm).replace("\\", "/")
+            rest = leading_cd.group(2).strip()
+            rewritten = rest if rel == "." else f"cd {shlex.quote(rel)} && {rest}"
+            debug["rewritten"] = True
+    for match in _ANY_CD_RE.finditer(rewritten):
+        cd_target = _parse_shell_path_token(match.group(1))
+        resolved = _resolve_command_path(cd_target, cwd_norm)
+        if resolved:
+            _, abs_target = resolved
+            if not _is_within_path(cwd_norm, abs_target):
+                debug["cdTarget"] = cd_target
+                return rewritten, f"命令路径越界: cd 目标不在 IDE 项目根内: {cd_target}", debug
+    try:
+        tokens = shlex.split(rewritten)
+    except ValueError:
+        return rewritten, "命令解析失败, 拒绝执行含不完整引号的命令", debug
+    for index, token in enumerate(tokens):
+        resolved = _resolve_command_path(token, cwd_norm)
+        if not resolved:
+            continue
+        raw_value, abs_path = resolved
+        if raw_value == abs_path and (raw_value.startswith("~") or "$" in raw_value):
+            return rewritten, f"命令路径越界: 禁止使用 shell 展开路径: {token}", debug
+        if index == 0 and abs_path.startswith(_ALLOWED_EXECUTABLE_PREFIXES):
+            continue
+        if os.path.isabs(raw_value):
+            debug["absolutePaths"].append(raw_value)
+        else:
+            debug["relativePaths"].append(raw_value)
+        if not _is_within_path(cwd_norm, abs_path):
+            if os.path.isabs(raw_value):
+                return rewritten, f"命令路径越界: 绝对路径不在 IDE 项目根内: {raw_value}", debug
+            return rewritten, f"命令路径越界: 路径不在 IDE 项目根内: {raw_value}", debug
+        if os.path.isabs(raw_value):
+            rel = os.path.relpath(abs_path, cwd_norm).replace("\\", "/")
+            replacement = _rewrite_token_path(token, raw_value, rel if rel != "." else ".")
+            if replacement != token:
+                rewritten = rewritten.replace(token, shlex.quote(replacement))
+            else:
+                rewritten = rewritten.replace(raw_value, shlex.quote(rel if rel != "." else "."))
+            debug["rewritten"] = True
+    return rewritten, None, debug
+
+
+def _guard_acp_dangerous_command(command: str) -> str | None:
+    """共享危险命令拦截; 非流式和流式终端必须一致。"""
+    try:
+        _lazy_import_agent_tools()
+    except Exception as exc:
+        logger.warning("[ACP] agent_tools 安全常量加载失败, 使用内置保底规则: {}", type(exc).__name__)
+    lower_cmd = str(command or "").strip().lower()
+    extra_dangerous = [
+        "> /dev/sda", "parted", "fdisk", "dd if=/dev/zero of=/",
+        "eval ", "$(", "`", "mkfs.", ":(){ :|:& };:",
+    ]
+    fallback_network = ["curl ", "wget ", "nc ", "netcat ", "ssh ", "scp ", "rsync ", "telnet "]
+    for pattern in extra_dangerous:
+        if pattern in lower_cmd:
+            return f"❌ 危险命令已被拦截: pattern={pattern}"
+    for pattern in _INLINE_IMPORTED.get("_DANGEROUS_BASH_ALWAYS", []):
+        if pattern in lower_cmd:
+            return f"❌ 危险命令已被拦截: pattern={pattern}"
+    network_patterns = _INLINE_IMPORTED.get("_DANGEROUS_BASH_NETWORK", []) or fallback_network
+    for pattern in network_patterns:
+        if pattern in lower_cmd:
+            return f"❌ 网络命令已被拦截: pattern={pattern}"
+    return None
 
 
 # 方案4: Autonomy blocked 阈值 — 同工具被拦截 3 次后引导 LLM 停止重试
@@ -973,39 +1295,73 @@ def _handle_autonomy_blocked(tool_name: str, reason: str) -> str:
         f"已提交审批请求。请勿重复尝试, 先执行其他任务。"
     )
 
-# P1-5: list_files/list_directory 去重缓存 (3s TTL)
-_ls_cache: dict[str, tuple[float, str]] = {}
-_LS_CACHE_TTL = 3.0
+
+
+def _list_cache_key_for(session_id: str, cwd: str, path: str, args: dict | None) -> str:
+    from app.plugins.clawith_acp.list_dedup import normalize_list_key
+    return normalize_list_key(session_id, cwd, path, args)
+
+
+def _invalidate_list_cache_on_success(handler, tool_name: str, path: str, result: Any) -> None:
+    if isinstance(result, dict) and result.get("error"):
+        return
+    s = str(result)
+    if s.startswith("❌") or s.startswith('{"error"'):
+        return
+    _maybe_invalidate_list_cache(handler, tool_name, path)
+
+
+def _maybe_invalidate_list_cache(handler, tool_name: str, path: str) -> None:
+    from app.plugins.clawith_acp.list_dedup import (
+        LIST_CACHE_INVALIDATE_TOOLS,
+        invalidate_list_cache_for_path,
+    )
+    if tool_name not in LIST_CACHE_INVALIDATE_TOOLS:
+        return
+    session_id = _get_session_id(handler)
+    cwd = getattr(handler, "_cwd", "") or ""
+    parent = os.path.dirname((path or ".").replace("\\", "/")) or "."
+    invalidate_list_cache_for_path(session_id, cwd, parent)
+
+
 async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
     """通过 ACP 协议执行文件操作。
 
     返回 None 表示不应由 ACP 处理（如 path 为空或 agent 自身文件）。
     返回字符串表示 ACP 执行结果。
     """
-    path = args.get("path") or args.get("file") or args.get("file_path") or args.get("filePath", "")
-    # 无 path 参数的工具（如 index_status, build_project）不需要项目文件检查
-    _cwd = getattr(handler, '_cwd', '')
-    if path and not _is_project_file(path, cwd=_cwd):
+    method = _ACP_METHOD_MAP.get(tool_name)
+    if not method:
         return None
 
-    method = _ACP_METHOD_MAP.get(tool_name)
-
-    # 统一路径穿越防护 — 对所有含 path 参数的工具检查（安全审计 V1）
-    path = args.get("path") or args.get("file") or args.get("file_path") or args.get("filePath", "")
-    if path and ".." in path:
-        logger.warning(f"[ACP] 拒绝路径穿越: {tool_name} path={path}")
-        return f'{{"error": "路径不合法: 禁止路径穿越"}}'
+    _cwd = getattr(handler, '_cwd', '')
+    raw_path = args.get("path") or args.get("file") or args.get("file_path") or args.get("filePath", "")
+    args, path, normalize_error, internal_path = _normalize_acp_tool_args(tool_name, args, _cwd)
+    if normalize_error:
+        logger.warning("[ACP-PATH] reject tool={} raw_path={} cwd={} reason={}", tool_name, raw_path, _cwd, normalize_error)
+        _agent_debug_log(
+            "fix-acp-path-guard", "H1", "tool_bridge.py:_try_acp_execute",
+            "reject project path",
+            {"tool": tool_name, "rawPath": raw_path, "cwd": _cwd, "reason": normalize_error},
+        )
+        return json.dumps({"error": normalize_error}, ensure_ascii=False)
+    if internal_path:
+        _agent_debug_log(
+            "fix-acp-path-guard", "H1", "tool_bridge.py:_try_acp_execute",
+            "skip internal path",
+            {"tool": tool_name, "rawPath": raw_path, "normalizedPath": path},
+        )
+        return None
+    _agent_debug_log(
+        "fix-acp-path-guard", "H1", "tool_bridge.py:_try_acp_execute",
+        "normalize project path",
+        {"tool": tool_name, "rawPath": raw_path, "normalizedPath": path, "cwd": _cwd},
+    )
 
     # Autonomy 闸门: 写操作需要经过 check_tool_autonomy 检查
     # 删除类工具由 ACP 插件 DeletePermissionRow 把关，跳过后端 L3 web 审批阻断
     _DELETE_TOOLS_PLUGIN_GATED = frozenset({"delete_file", "safe_delete"})
-    _WRITE_TOOLS = frozenset({
-        "write_file", "edit_file", "delete_file",
-        "refactor_rename", "move_file", "safe_delete",
-        "reformat_code", "optimize_imports", "convert_java_to_kotlin",
-        "apply_quickfix", "git_stage", "git_commit",
-    })
-    if tool_name in _WRITE_TOOLS and tool_name not in _DELETE_TOOLS_PLUGIN_GATED:
+    if tool_name in WORKSPACE_WRITE_TOOLS and tool_name not in _DELETE_TOOLS_PLUGIN_GATED:
         _lazy_import_agent_tools()
         # 确保 agent_tools.py 的 _TOOL_AUTONOMY_MAP 包含 ACP 写工具映射 (安全审计 V2)
         _autonomy_map = _INLINE_IMPORTED.get("_TOOL_AUTONOMY_MAP", {})
@@ -1071,19 +1427,29 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
     t0 = time.perf_counter()
     logger.info(f"[ACP-PERF] fs START tool={tool_name} path={path} session={session_id}")
     try:
-        # P2-1: 文件大小阶梯超时
-        _timeout = float(os.getenv("ACP_FS_TIMEOUT", "15"))
-        if method == "fs/write_text_file":
-            _timeout = float(os.getenv("ACP_FS_WRITE_TIMEOUT", "60"))
-        elif method == "fs/edit_text_file":
-            _timeout = float(os.getenv("ACP_FS_EDIT_TIMEOUT", "30"))
+        # P2-1: 文件大小阶梯超时; build_project 使用独立长超时。
+        _timeout = _timeout_for_acp_method(method, params)
         logger.debug(
             f"[ACP-FS] timeout tier tool={tool_name} method={method} "
             f"timeout={_timeout}s"
         )
+        if method == "fs/list_directory":
+            from app.plugins.clawith_acp.list_dedup import get_cached_list
+
+            _lk = _list_cache_key_for(session_id, _cwd, path, params)
+            _cached_list = get_cached_list(_lk)
+            if _cached_list is not None:
+                logger.info(
+                    "[LIST-DEDUP] cache hit session={} path={}",
+                    (session_id or "")[:8],
+                    os.path.basename(path or "."),
+                )
+                return _cached_list
+            logger.debug("[ACP] list_files MISS path={}", path or ".")
         result = await coalesce_or_execute(
             method, path, session_id,
             executor=lambda: polite_send(handler, method, params, timeout=_timeout),
+            args=params,
         )
         _elapsed = time.perf_counter() - t0
         logger.info(
@@ -1092,6 +1458,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         )
         # 第二梯队: 基线延迟追踪 (每方法族 P50/P95/P99 统计)
         record_baseline_rtt(method, _elapsed)
+        if tool_name in ("write_file", "edit_file", "move_file", "delete_file", "sync_files"):
+            _invalidate_list_cache_on_success(handler, tool_name, path, result)
         # P1-6: 检测 IDE 索引未就绪，引导 LLM 等待而非反复重试
         if isinstance(result, str) and ("索引未就绪" in result or "索引构建中" in result):
             logger.warning(f"[ACP] {tool_name} blocked by IDE indexing: {result[:100]}")
@@ -1106,37 +1474,22 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                 return result.get("content", "")
             return str(result)
         if method == "fs/list_directory":
-            # P1-5: 去重缓存 — 相同路径 3s 内不重复查询 IDE
-            _depth = str(params.get("depth", 1))
-            # P1-5+H8: 缓存键含 session_id + cwd 防止跨项目缓存污染
-            _cache_key = f"{session_id}:{_cwd}:{path}:{_depth}"
-            _cached_ts, _cached_val = _ls_cache.get(_cache_key, (0, ""))
-            if time.monotonic() - _cached_ts < _LS_CACHE_TTL:
-                logger.info(f"[ACP] list_files cache hit path={path} depth={_depth}")
-                return _cached_val
-            # P1-5: 缓存 MISS 日志
-            logger.debug(
-                f"[ACP] list_files MISS path={path or '.'} depth={_depth}"
+            from app.plugins.clawith_acp.list_dedup import (
+                format_list_directory_result,
+                store_list_result,
             )
-            if isinstance(result, dict):
-                entries = result.get("entries") or result.get("files") or []
-                if not entries:
-                    _ls_cache[_cache_key] = (time.monotonic(), "(目录为空)")
-                    return "(目录为空)"
-                lines = []
-                for e in entries:
-                    if isinstance(e, dict):
-                        prefix = "📁 " if e.get("isDirectory") else "📄 "
-                        lines.append(f"{prefix}{e.get('name', '?')}")
-                    else:
-                        lines.append(str(e))
-                if result.get("truncated"):
-                    lines.append(f"... (截断, 共 {result.get('totalCount', '?')} 项)")
-                _out = "\n".join(lines)
-                _ls_cache[_cache_key] = (time.monotonic(), _out)
-                logger.info(f"[ACP] list_files {len(lines)} entries (cached)")
-                return _out
-            return str(result)
+            _list_args = {"depth": params.get("depth"), "limit": params.get("limit")}
+            _out = format_list_directory_result(result)
+            store_list_result(
+                _list_cache_key_for(session_id, _cwd, path, _list_args),
+                _out,
+            )
+            logger.info(
+                "[ACP] list_files {} entries path={}",
+                _out.count("\n") + 1 if _out else 0,
+                os.path.basename(path or "."),
+            )
+            return _out
         if method == "fs/find_file":
             if isinstance(result, dict):
                 files = result.get("files") or []
@@ -1357,15 +1710,18 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         return "文件操作成功"
     except TimeoutError:
         logger.warning(f"[ACP] timeout: {tool_name} {path}, 尝试本地读取")
-        if method == "fs/read_text_file" and os.path.isfile(path):
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                logger.info(f"[ACP] 本地读取成功: {path} ({len(content)} bytes)")
-                return content
-            except Exception as e:
-                logger.error(f"[ACP] 本地读取失败: {path}: {e}")
-                return f"⚠️ 文件读取失败: {e}"
+        if method == "fs/read_text_file" and _cwd:
+            cwd_norm = os.path.normpath(os.path.expanduser(_cwd))
+            local_path = os.path.normpath(os.path.join(cwd_norm, path))
+            if _is_within_path(cwd_norm, local_path) and os.path.isfile(local_path):
+                try:
+                    with open(local_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    logger.info(f"[ACP] 本地读取成功: {path} ({len(content)} bytes)")
+                    return content
+                except Exception as e:
+                    logger.error(f"[ACP] 本地读取失败: {path}: {e}")
+                    return f"⚠️ 文件读取失败: {e}"
         return f"⚠️ IDE 文件操作超时: {path}"
     except Exception as e:
         err_msg = str(e)
@@ -1384,6 +1740,13 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                 tool_name, path
             )
             return f"❌ IDE 插件不支持此操作: {tool_name}（需升级插件版本）"
+        if tool_name == "find_super_methods" and "-32602" in err_msg:
+            logger.warning("[ACP] find_super_methods 参数/定位无效: path={} err={}", path, err_msg[:120])
+            return (
+                "⚠️ find_super_methods 未能定位到方法。"
+                "请传 file+line+column，且光标位置必须在方法体或方法声明内；"
+                "或传 symbol='com.example.Class#methodName'。"
+            )
         # ── 文件不存在去重: 同路径失败 ≥3 次时拦截 ──
         if tool_name in ("read_file", "find_file", "list_files") and path:
             key = f"{tool_name}:{path.lower().rstrip('/')}"
@@ -1411,45 +1774,40 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         return f"⚠️ IDE 文件操作失败: {e}"
 
 
-async def _try_acp_terminal(args: dict, handler) -> str | None:
+async def _try_acp_terminal(
+    args: dict,
+    handler,
+    policy: "TerminalPolicy | None" = None,
+) -> str | None:
+    """blocking 终端 — wait_for_exit 后返回完整 output + exitCode。"""
+    from .terminal_policy import resolve_terminal_policy
+
     command = args.get("command", "")
     if not command:
         return None
 
-    # P0-3: 危险命令拦截 —— 跳过 _DANGEROUS_BASH_ALWAYS 中定义的毁灭性命令
-    # 与 agent_tools.py 中 execute_command 的处理逻辑一致，防止 LLM 通过 ACP 通道绕过安全检查
-    _lazy_import_agent_tools()
-    _dangerous = _INLINE_IMPORTED.get("_DANGEROUS_BASH_ALWAYS", [])
-    _EXTRA_DANGEROUS = [
-        "> /dev/sda", "parted", "fdisk", "dd if=/dev/zero of=/",
-        "eval ", "$(", "`", "mkfs.", ":(){ :|:& };:",
-    ]
-    lower_cmd = command.strip().lower()
-    for pattern in _EXTRA_DANGEROUS:
-        if pattern in lower_cmd:
-            msg = f"❌ 危险命令已被拦截: pattern={pattern}"
-            logger.warning(f"[ACP] {msg} cmd={command[:80]}")
-            return msg
-    for pattern in _dangerous:
-        if pattern in lower_cmd:
-            msg = f"❌ 危险命令已被拦截: pattern={pattern}"
-            logger.warning(f"[ACP] {msg} cmd={command[:80]}")
-            return msg
+    _cwd = getattr(handler, '_cwd', '')
+    guarded_command, guard_error, guard_debug = _guard_acp_command_paths(command, _cwd)
+    _agent_debug_log(
+        "fix-acp-path-guard", "H2", "tool_bridge.py:_try_acp_terminal",
+        "guard execute command",
+        {"cwd": _cwd, "commandLen": len(command), "error": guard_error, **guard_debug},
+    )
+    if guard_error:
+        logger.warning("[ACP-CMD] reject cmd_len={} cwd={} reason={}", len(command), _cwd, guard_error)
+        return guard_error
+    command = guarded_command
+    args = {**args, "command": command}
 
-    # 网络危险命令检查（curl/wget/nc/ssh/scp 等数据外泄通道）
-    _lazy_import_agent_tools()
-    _network = _INLINE_IMPORTED.get("_DANGEROUS_BASH_NETWORK", [])
-    for pattern in _network:
-        if pattern in lower_cmd:
-            msg = f"❌ 网络命令已被拦截: pattern={pattern}"
-            logger.warning(f"[ACP] {msg} cmd={command[:80]}")
-            return msg
-    # 路径穿越检查
-    if "../../" in command:
-        return "❌ 路径穿越已被拦截"
+    guard_msg = _guard_acp_dangerous_command(command)
+    if guard_msg:
+        logger.warning(f"[ACP] {guard_msg} cmd={command[:80]}")
+        return guard_msg
 
-    # P0-3: autonomy 审批闸门 —— 高敏工具（写文件/执行命令）需要 agent autonomy 策略检查
-    # 从 handler 获取 agent/user 身份，传给 check_tool_autonomy 判定 L1/L2/L3 策略
+    if policy is None:
+        policy = resolve_terminal_policy(command)
+
+    # P0-3: autonomy 审批闸门
     agent_id = getattr(handler, "agent_id", None)
     user_id = getattr(handler, "user_id", None)
     if agent_id is not None and user_id is not None:
@@ -1462,17 +1820,22 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
 
     session_id = getattr(handler, "session_id", "")
     conn_id = getattr(handler, "conn_id", "?")
-
+    terminal_id = ""
     t0 = time.perf_counter()
-    logger.info(f"[ACP-PERF] terminal START session={session_id} cmd={command[:120]}")
+    wait_timeout = policy.timeout_seconds + 30
+    logger.info(
+        "[ACP-TERM] BLOCKING START bucket={} timeoutSec={} session={} cmd={}",
+        policy.bucket,
+        int(policy.timeout_seconds),
+        session_id,
+        command[:120],
+    )
     try:
-        # 1. 创建终端并执行命令
         create_result = await handler.send_request("terminal/create", {
             "sessionId": session_id,
             "command": command,
         }, timeout=float(os.getenv("ACP_TERMINAL_CREATE_TIMEOUT", "30")))
 
-        terminal_id = ""
         if isinstance(create_result, dict):
             terminal_id = create_result.get("terminalId", "")
 
@@ -1484,7 +1847,7 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
         wait_result = await handler.send_request("terminal/wait_for_exit", {
             "sessionId": session_id,
             "terminalId": terminal_id,
-        }, timeout=float(os.getenv("ACP_TERMINAL_WAIT_TIMEOUT", "300")))
+        }, timeout=wait_timeout)
         exit_code = -1
         if isinstance(wait_result, dict):
             exit_code = int(wait_result.get("exitCode", -1))
@@ -1497,45 +1860,92 @@ async def _try_acp_terminal(args: dict, handler) -> str | None:
 
         if isinstance(output, dict):
             out_text = output.get("output", "")
-            logger.info(
-                f"[ACP-PERF] terminal DONE session={session_id} terminalId={terminal_id} "
-                f"elapsed={time.perf_counter() - t0:.3f}s outputLen={len(out_text)} exitCode={exit_code}"
-            )
         else:
             out_text = str(output) if output else "命令执行完毕，无输出"
-            logger.info(
-                f"[ACP-PERF] terminal DONE session={session_id} terminalId={terminal_id} "
-                f"elapsed={time.perf_counter() - t0:.3f}s outputLen={len(out_text)} exitCode={exit_code}"
-            )
 
-        # P0-4: exitCode != 0 时添加失败标记，防止 LLM 将编译/测试失败误判为成功
+        elapsed = time.perf_counter() - t0
+        logger.info(
+            "[ACP-TERM] BLOCKING DONE bucket={} timeoutSec={} elapsed={:.3f}s "
+            "outputLen={} exitCode={} session={} terminalId={}",
+            policy.bucket,
+            int(policy.timeout_seconds),
+            elapsed,
+            len(out_text),
+            exit_code,
+            session_id,
+            terminal_id,
+        )
         if exit_code != 0:
             return f"❌ 命令失败 (exit={exit_code}):\n{out_text}"
         return out_text
 
     except TimeoutError:
         logger.error(
-            f"[ACP-PERF] terminal TIMEOUT session={session_id} "
-            f"elapsed={time.perf_counter() - t0:.3f}s cmd={command[:80]}"
+            "[ACP-TERM] BLOCKING TIMEOUT bucket={} elapsed={:.3f}s session={} cmd={}",
+            policy.bucket,
+            time.perf_counter() - t0,
+            session_id,
+            command[:80],
         )
         return f"⚠️ 终端命令超时: {command[:80]}"
     except Exception as e:
-        logger.error(f"[ACP-terminal conn={conn_id}] error: {command[:80]} session={session_id}: {e}")
+        logger.error(
+            "[ACP-TERM] BLOCKING error conn={} session={} cmd={}: {}",
+            conn_id,
+            session_id,
+            command[:80],
+            e,
+        )
         return f"⚠️ 终端执行失败: {e}"
+    finally:
+        if terminal_id:
+            try:
+                await handler.send_request(
+                    "terminal/release",
+                    {"sessionId": session_id, "terminalId": terminal_id},
+                    timeout=10,
+                )
+            except Exception as rel_err:
+                logger.warning(
+                    "[ACP-TERM] BLOCKING release failed terminalId={}: {}",
+                    terminal_id,
+                    rel_err,
+                )
 
 
 async def _try_acp_terminal_streaming(
-    args: dict, handler, cancel_event: asyncio.Event | None = None,
+    args: dict,
+    handler,
+    cancel_event: asyncio.Event | None = None,
+    policy: "TerminalPolicy | None" = None,
 ) -> str | None:
-    """流式 Terminal 执行 — 自适应轮询策略 (v15.5: 15 项缺陷修复)。
+    """流式 Terminal — 仅 tail -f / watch；不以静默误判 DISAPPEARED。"""
+    from .terminal_policy import resolve_terminal_policy
 
-    Phase 1 (500ms 静默): 短命令直接返回聚合结果, 零轮询开销。
-    Phase 2 (300ms 轮询): 长命令进入流式推送, 每 300ms 发送增量输出。
-    600s 超时保护 + WS 断开检测 + 空输出/进程消失检测 + cancel 支持。
-    """
     command = args.get("command", "")
     if not command:
         return None
+
+    _cwd = getattr(handler, '_cwd', '')
+    guarded_command, guard_error, guard_debug = _guard_acp_command_paths(command, _cwd)
+    _agent_debug_log(
+        "fix-acp-path-guard", "H2", "tool_bridge.py:_try_acp_terminal_streaming",
+        "guard execute command",
+        {"cwd": _cwd, "commandLen": len(command), "error": guard_error, **guard_debug},
+    )
+    if guard_error:
+        logger.warning("[ACP-CMD] reject streaming cmd_len={} cwd={} reason={}", len(command), _cwd, guard_error)
+        return guard_error
+    command = guarded_command
+    args = {**args, "command": command}
+
+    guard_msg = _guard_acp_dangerous_command(command)
+    if guard_msg:
+        logger.warning(f"[ACP] {guard_msg} streaming cmd={command[:80]}")
+        return guard_msg
+
+    if policy is None:
+        policy = resolve_terminal_policy(command)
 
     session_id = getattr(handler, "session_id", "")
     conn_id = getattr(handler, "conn_id", "?")
@@ -1634,11 +2044,10 @@ async def _try_acp_terminal_streaming(
     seq = 0
     # H1+R7: 增量跟踪, 从 Phase1 输出长度开始避免重复
     _last_output_len = len(check.get("output", "")) if isinstance(check, dict) else 0
-    _empty_streak = 0  # R2: 空输出计数, 检测进程消失
-    deadline = time.monotonic() + float(os.getenv("ACP_TERMINAL_STREAM_TIMEOUT", "600"))
+    deadline = time.monotonic() + policy.timeout_seconds
 
     async def poll_loop():
-        nonlocal seq, _last_output_len, _empty_streak
+        nonlocal seq, _last_output_len
         _key = f"terminal-stream-{terminal_id}"
         try:
             while True:
@@ -1683,7 +2092,7 @@ async def _try_acp_terminal_streaming(
                         "sessionId": session_id,
                         "update": {
                             "sessionUpdate": "agent_message_chunk",
-                            "content": {"type": "text", "text": "\n\n[timeout: 600s]"},
+                            "content": {"type": "text", "text": f"\n\n[timeout: {int(policy.timeout_seconds)}s]"},
                         },
                     })
                     break
@@ -1733,14 +2142,16 @@ async def _try_acp_terminal_streaming(
                         # R4: WS 断开时 notification 失败, 终止轮询
                         break
                     _last_output_len = len(new_text)
-                    _empty_streak = 0
-                else:
-                    # R2: 连续空输出检测 — terminal 可能已被 release
-                    _empty_streak += 1
-                    if _empty_streak >= 5:
+                # 无新输出时继续 poll — 构建工具启动期可长时间零输出
+
+                if isinstance(output, dict) and output.get("error"):
+                    err_text = str(output.get("error", ""))
+                    if "不存在" in err_text or "not found" in err_text.lower():
                         logger.warning(
-                            f"[ACP-PERF] terminal-streaming DISAPPEARED conn={conn_id} "
-                            f"session={session_id} (no output for {_empty_streak} polls)"
+                            "[ACP-PERF] terminal-streaming GONE conn={} session={} err={}",
+                            conn_id,
+                            session_id,
+                            err_text[:80],
                         )
                         break
 
@@ -1789,8 +2200,16 @@ async def _try_acp_terminal_streaming(
                 f"session={session_id}: {e}"
             )
         finally:
-            # CR2: 自清理 — 从 _active_tasks 移除
             handler._active_tasks.pop(_key, None)
+            getattr(handler, "_terminal_events", {}).pop(terminal_id, None)
+            try:
+                await handler.send_request(
+                    "terminal/release",
+                    {"sessionId": session_id, "terminalId": terminal_id},
+                    timeout=10,
+                )
+            except Exception:
+                pass
 
     # CR2: 注册到 handler._active_tasks, 确保 cleanup() 和 _handle_cancel 可取消
     _key = f"terminal-stream-{terminal_id}"

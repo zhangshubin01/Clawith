@@ -382,10 +382,8 @@ run_docker_mode() {
     if command -v docker &>/dev/null && docker ps --filter 'name=clawith' --filter 'status=running' -q 2>/dev/null | grep -q .; then
         echo -e "${YELLOW}Detected running Docker containers. Starting in Docker mode...${NC}"
         echo -e "  ${YELLOW}Tip: use --source to force source (non-Docker) mode.${NC}"
-        DIR_NAME=$(basename "$(dirname "$ROOT")")
-        [ -z "$DIR_NAME" ] && DIR_NAME="custom"
-
-        PROJECT_NAME="clawith-${DIR_NAME}"
+        # 固定项目名，避免与手动 docker compose（默认 clawith）或不同工作区路径产生第二套栈
+        PROJECT_NAME="${COMPOSE_PROJECT_NAME:-clawith}"
         echo -e "  Using project name: ${GREEN}$PROJECT_NAME${NC}"
         export COMPOSE_PROJECT_NAME="$PROJECT_NAME"
 

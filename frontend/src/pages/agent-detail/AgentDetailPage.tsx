@@ -2525,16 +2525,12 @@ export default function AgentDetailPage() {
     };
     const upsertToolCallMessage = (toolMsg: ChatMsg) => {
         setChatMessages(prev => {
-            const incomingTarget = getToolTargetKey(toolMsg.toolArgs);
+            // 并行只读时同 path 多 call 必须按 toolCallId 区分，禁止 path 级 merge
             const sameTool = (msg: ChatMsg) => (
                 msg.role === 'tool_call'
-                && msg.toolName === toolMsg.toolName
                 && msg.toolStatus === 'running'
-                && (
-                    (!!toolMsg.toolCallId && !!msg.toolCallId && msg.toolCallId === toolMsg.toolCallId)
-                    || (!!incomingTarget && getToolTargetKey(msg.toolArgs) === incomingTarget)
-                    || (!toolMsg.toolCallId && !incomingTarget)
-                )
+                && !!toolMsg.toolCallId
+                && msg.toolCallId === toolMsg.toolCallId
             );
             const runningIdx = [...prev].reverse().findIndex(sameTool);
             if (runningIdx >= 0) {
@@ -5896,6 +5892,8 @@ export default function AgentDetailPage() {
                                                         wechat: t('common.channels.wechat'),
                                                         dingtalk: t('common.channels.dingtalk'),
                                                         wecom: t('common.channels.wecom'),
+                                                        acp: t('common.channels.acp'),
+                                                        ide_acp: t('common.channels.ide_acp'),
                                                     };
                                                     const chLabel = channelLabel[s.source_channel];
                                                     return (
@@ -5980,7 +5978,9 @@ export default function AgentDetailPage() {
                                                             wechat: t('common.channels.wechat'),
                                                             dingtalk: t('common.channels.dingtalk'),
                                                             wecom: t('common.channels.wecom'),
-                                                        };
+                                                            acp: t('common.channels.acp'),
+                                                            ide_acp: t('common.channels.ide_acp'),
+                                                            };
                                                         const chLabel = channelLabel[s.source_channel];
                                                         return (
                                                             <div key={s.id} onClick={() => selectSession(s, 'all')}

@@ -1631,7 +1631,8 @@
       "whatsapp": "WhatsApp",
       "dingtalk": "DingTalk",
       "wecom": "WeCom",
-      "ide_lsp4j": "IDE"
+      "ide_acp": "IDE",
+      "acp": "IDE"
     },
     "searching": "Searching...",
     "upload": "⬆ Upload",

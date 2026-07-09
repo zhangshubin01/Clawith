@@ -178,17 +178,45 @@ async def save_tool_call_log(
     if not conversation_id:
         return
     import json
+    from app.config import get_settings
     from app.database import async_session
     from loguru import logger
+
+    result_str = str(result) if result is not None else ""
+    ccr_hash = ""
+    threshold = int(getattr(get_settings(), "CTX_HISTORY_CCR_THRESHOLD", 2048) or 2048)
+    if len(result_str) >= threshold:
+        try:
+            from app.services.llm.ccr_store import store_entry
+            from app.services.llm.context_compressor import _est_tokens_str
+
+            ccr_hash = await store_entry(
+                session_id=conversation_id,
+                agent_id=agent_id,
+                content=result_str,
+                tool_name=tool_name,
+                path="history_persist",
+                original_tokens=_est_tokens_str(result_str, ""),
+                compressed_tokens=max(1, threshold // 4),
+            ) or ""
+            if ccr_hash:
+                logger.info(
+                    "[CTX-HISTORY] persist ccr_hash tool={} session={} chars={}",
+                    tool_name, conversation_id[:8], len(result_str),
+                )
+        except Exception as e:
+            logger.warning("[CTX-HISTORY] persist store failed tool={} err={}", tool_name, e)
 
     payload = {
         "name": tool_name,
         "args": arguments or {},
         "status": status,
-        "result": str(result) if result is not None else "",
+        "result": result_str,
         "tool_call_id": tool_call_id,
         "reasoning_content": reasoning_content,
     }
+    if ccr_hash:
+        payload["ccr_hash"] = ccr_hash
 
     try:
         async with async_session() as db:
@@ -200,6 +228,9 @@ async def save_tool_call_log(
                 conversation_id=conversation_id,
             ))
             await db.commit()
+        from app.plugins.clawith_acp.history_cache import invalidate_history_cache
+
+        invalidate_history_cache(conversation_id)
     except Exception as e:
         logger.warning(f"Failed to save tool call log: {e}")
 

@@ -1,12 +1,9 @@
-"""ACP 工具桥钩子 — 参考 LSP4J tool_hooks.py 模式。
+"""ACP 工具桥钩子 — IDE 工具路由到 ACP WebSocket。
 
-链式 Hook 注册（P0-7 修复）：
-- 不再直接覆盖 agent_tools.execute_tool，而是注册到 _bridge_handlers 列表。
-- _chained_execute_tool 遍历所有 handler，任一返回非 None 即短路。
-- 解决 ACP/LSP4J 双桥互相覆盖的问题，使两者可同时工作。
-- LSP4J 的 install_lsp4j_tool_hooks 同样向 _bridge_handlers 注册。
+链式 Hook 注册：
+- 注册到 _bridge_handlers 列表，由 _chained_execute_tool 统一分发。
+- 任一 handler 返回非 None 即短路；全部返回 None 时回落 base handler。
 
-直接包裹 agent_tools.execute_tool 和 get_agent_tools_for_llm，
 通过 ContextVar(current_acp_handler) 在 ACP 会话中将工具路由到 IDE 插件执行。
 
 三层钩子：
@@ -28,12 +25,11 @@ from app.services import agent_tools
 from .tool_bridge import current_acp_handler
 
 # ──────────────────────────────────────────────
-# 链式 Handler 注册 — P0-7 双桥互斥覆盖修复
+# 链式 Handler 注册
 # ──────────────────────────────────────────────
-# _bridge_handlers 是共享列表，ACP 和 LSP4J 的 install 函数各自 append handler。
+# _bridge_handlers 存放 ACP 工具路由 handler。
 # _chained_execute_tool 遍历调用，首个返回非 None 的 handler 结果即工具终态。
 # 所有 handler 都返回 None 时，回落 base handler。
-# 使用模块级变量保证跨模块可见，LSP4J 通过 import 访问同一列表引用。
 _bridge_handlers: list[Callable[..., Any]] = []
 _base_execute_tool_snapshot: Callable[..., Any] | None = None
 
@@ -921,8 +917,7 @@ _installed = False
 def install_acp_tool_hooks() -> None:
     """安装 ACP 工具钩子（idempotent）。
 
-    使用链式模式注册到 _bridge_handlers（P0-7 修复），
-    不再直接覆盖 agent_tools.execute_tool，解决与 LSP4J 双桥互斥覆盖问题。
+    使用链式模式注册到 _bridge_handlers。
 
     同时包裹 agent_tools.get_agent_tools_for_llm，
     在 ACP 活跃时路由到 IDE 插件。
@@ -1017,23 +1012,44 @@ def install_acp_tool_hooks() -> None:
                 )
                 return result
 
-        # terminal 工具 → ACP (流式优先)
+        # terminal 工具 → ACP（policy 路由 blocking / streaming）
         if tool_name in ("execute_command", "bash"):
-            from .tool_bridge import _try_acp_terminal_streaming
+            from .terminal_policy import TerminalMode, effective_terminal_mode, resolve_terminal_policy
+            from .tool_bridge import _try_acp_terminal, _try_acp_terminal_streaming
+
+            command = str(args.get("command", ""))
+            policy = resolve_terminal_policy(command)
+            mode = effective_terminal_mode(policy)
             _cancel = getattr(handler, "_cancel_event", None)
-            result = await _try_acp_terminal_streaming(args, handler, cancel_event=_cancel)
+
+            if mode == TerminalMode.BLOCKING:
+                result = await _try_acp_terminal(args, handler, policy=policy)
+                if result is not None:
+                    logger.info(
+                        "[ACP] route=acp-blocking tool={} bucket={} cmd={} elapsed={:.3f}s",
+                        tool_name,
+                        policy.bucket,
+                        command[:80],
+                        time.perf_counter() - route_t0,
+                    )
+                    return result
+                return "⚠️ 终端 blocking 执行未返回结果"
+
+            result = await _try_acp_terminal_streaming(
+                args, handler, cancel_event=_cancel, policy=policy,
+            )
             if result is not None:
                 logger.info(
                     "[ACP] route=acp-streaming tool={} cmd={} elapsed={:.3f}s",
                     tool_name,
-                    str(args.get("command", ""))[:80],
+                    command[:80],
                     time.perf_counter() - route_t0,
                 )
                 return result
-            # result is None → 已进入流式模式，返回占位提示
             logger.info(
                 "[ACP] route=acp-streaming tool={} cmd={} streaming...",
-                tool_name, str(args.get("command", ""))[:80],
+                tool_name,
+                command[:80],
             )
             return "(terminal 流式输出中，请等待终端面板更新...)"
 

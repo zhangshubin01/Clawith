@@ -19,7 +19,7 @@ from app.models.channel_config import ChannelConfig
 from app.models.user import User
 from app.schemas.schemas import ChannelConfigCreate, ChannelConfigOut, TokenResponse, UserOut
 from app.services.feishu_service import feishu_service
-from app.services.llm.utils import convert_chat_messages_to_llm_format, truncate_messages_with_pair_integrity
+from app.services.llm.utils import convert_chat_messages_to_llm_format
 from app.services.storage import agent_upload_key, get_storage_backend, store_agent_upload
 
 router = APIRouter(tags=["feishu"])
@@ -672,7 +672,20 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
                 .limit(ctx_size)
             )
             history_msgs = history_result.scalars().all()
-            history = convert_chat_messages_to_llm_format(reversed(history_msgs))
+            from app.services.llm.context_compressor import _get_ctx_guard_max_window
+            _feishu_ctx = _get_ctx_guard_max_window("")
+            history = convert_chat_messages_to_llm_format(
+                reversed(history_msgs), ctx_window=_feishu_ctx, path="feishu",
+            )
+
+            from app.services.llm.history_hydrate import hydrate_history_tool_results
+            history = await hydrate_history_tool_results(
+                history,
+                session_id=_history_conv_id,
+                agent_id=agent_id,
+                ctx_path="feishu",
+                ctx_window=_feishu_ctx,
+            )
 
             # --- Resolve Feishu sender identity & find/create platform user ---
             import httpx as _httpx
@@ -1037,7 +1050,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
                         tool_name=tool_name,
                         status=status,
                         arguments=evt.get("args") or evt.get("arguments") or {},
-                        result=(str(result) if result is not None else "")[:500],
+                        result=str(result) if result is not None else "",
                         tool_call_id=evt.get("call_id"),
                         reasoning_content=evt.get("reasoning_content"),
                     )
@@ -1405,6 +1418,16 @@ async def _handle_feishu_file(
         )
         _history = convert_chat_messages_to_llm_format(reversed(_hist_r.scalars().all()))
 
+        from app.services.llm.history_hydrate import hydrate_history_tool_results
+        from app.services.llm.context_compressor import _get_ctx_guard_max_window
+        _history = await hydrate_history_tool_results(
+            _history,
+            session_id=session_conv_id,
+            agent_id=agent_id,
+            ctx_path="feishu",
+            ctx_window=_get_ctx_guard_max_window(""),
+        )
+
         # Pre-load agent/model for LLM call before releasing DB connection
         _agent_model_img, _llm_model_img, _fallback_model_img = await _load_agent_and_model(db, agent_id)
 
@@ -1656,6 +1679,7 @@ async def _call_llm_with_config(
     This is the hot path — all DB queries should be done before calling this.
     """
     from app.services.llm import call_llm
+    from app.services.llm.caller import current_ctx_path
 
     if is_agent_expired(agent):
         return "This Agent has expired and is off duty. Please contact your admin to extend its service."
@@ -1665,15 +1689,26 @@ async def _call_llm_with_config(
 
     # Build conversation messages (without system prompt — call_llm adds it)
     messages: list[dict] = []
-    from app.models.agent import DEFAULT_CONTEXT_WINDOW_SIZE
-    ctx_size = agent.context_window_size or DEFAULT_CONTEXT_WINDOW_SIZE
     if history:
-        messages.extend(truncate_messages_with_pair_integrity(history, ctx_size))
+        messages.extend(history)
+        logger.info(
+            "[FEISHU-CTX] path=feishu history={} total={} chars={} session={}",
+            len(history),
+            len(history) + 1,
+            sum(
+                len(m.get("content") or "")
+                for m in history
+                if isinstance(m.get("content"), str)
+            )
+            + len(user_text),
+            session_id,
+        )
     messages.append({"role": "user", "content": user_text})
 
     effective_user_id = user_id or agent_id
     _timeout = _get_llm_timeout(model)
 
+    _ctx_token = current_ctx_path.set("feishu")
     try:
         reply = await asyncio.wait_for(
             call_llm(
@@ -1765,6 +1800,8 @@ async def _call_llm_with_config(
                 traceback.print_exc()
                 return f"⚠️ Model error: Primary: {str(e)[:80]} | Fallback: {str(e2)[:80]}"
         return f"⚠️ 调用模型出错: {error_msg[:150]}"
+    finally:
+        current_ctx_path.reset(_ctx_token)
 
 
 async def _call_agent_llm(

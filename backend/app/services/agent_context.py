@@ -4,6 +4,7 @@ Loads soul, memory, skills summary, and relationships from the agent's
 workspace files and composes a comprehensive system prompt.
 """
 
+import re
 import uuid
 from pathlib import Path
 
@@ -11,6 +12,44 @@ from app.config import get_settings
 from app.services.storage import get_storage_backend, normalize_storage_key
 
 settings = get_settings()
+
+CTX_FIDELITY_INVARIANTS = """
+## When NOT to compress (context fidelity)
+- Tool results from read/list/search/write/edit tools are authoritative — do not summarize from memory.
+- Content with `<!-- ccr:retrieved -->` is verbatim archived text — never re-summarize.
+- If you see `<!-- ccr:<hash> -->`, call retrieve_context(hash=...) when you need omitted detail.
+- After a file edit, treat earlier read_file output as potentially stale — re-read for current content.
+
+## Fallback when compressed
+- Prefer retrieve_context over guessing omitted lines.
+- For stale read markers, re-read the file path shown in the marker.
+"""
+
+CTX_SUBAGENT_CCR_RULES = """
+## Background / delegated task CCR rules
+- Prior steps may leave `<!-- ccr:<hash> -->` markers in tool output you did not see verbatim.
+- Call retrieve_context(hash=...) before editing files or citing line numbers from compressed summaries.
+- Do not invent omitted content; re-read or retrieve when precision matters.
+"""
+
+_MODE_BLOCK_RE = re.compile(
+    r"<!--\s*mode:([^\s>]+)\s*-->(.*?)<!--\s*/mode\s*-->",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def filter_skill_body_for_mode(content: str, mode: str = "agent") -> str:
+    """ponytail filterSkillBodyForMode — 仅保留当前 mode 对应区块。"""
+    mode_key = (mode or "agent").strip().lower()
+    if "<!-- mode:" not in content.lower():
+        return content
+
+    def _repl(match: re.Match[str]) -> str:
+        return match.group(2).strip() if match.group(1).strip().lower() == mode_key else ""
+
+    filtered = _MODE_BLOCK_RE.sub(_repl, content).strip()
+    return filtered or content
+
 
 async def _read_file_safe(key: str, max_chars: int = 3000) -> str:
     """Read a storage-backed text file, return empty string if missing."""
@@ -647,7 +686,16 @@ Default visual style for generated HTML or rich visual documents:
    - Prefer plain text labels such as "Success", "Warning", "Error", "Summary", or "Next steps" instead of emoji-prefixed headings.
    - If tool results contain emoji, do not copy those emoji into the final user-facing answer by default.
 
-12. **Never assume a file exists — always verify with `list_files` first.**
+12. **Never assume a file exists — reuse prior `list_files` / `find_file` results in this conversation first; only call `list_files` when no recent listing covers that path.**
+
+## Context Decision Ladder (token budget — ponytail D2)
+
+Before adding more context, follow this order:
+1. **Reuse** — If recent tool results already answer the question, do not re-read the same file or re-list the same directory at the same depth.
+2. **Search** — Prefer `find_file` / `search_text` / `file_structure` over reading entire large files or listing large directories.
+3. **Chunk** — Use read_file offset/limit for large files; full-file read only when chunks cannot answer.
+4. **Focus once** — Call list_focus_items at most once per user turn unless you upserted or completed a focus item in that turn.
+5. **Full read last** — Whole-file reads are the most expensive step; use only after steps 1–4 fail.
 
 ## Web Search & Reading
 
@@ -718,4 +766,7 @@ If no search or webpage-reading tool is available, say that web lookup is not en
     if current_user_name:
         dynamic_parts.append(f"\n## Current Conversation\nYou are currently chatting with **{current_user_name}**. Address them by name when appropriate.")
 
-    return "\n".join(static_parts), "\n".join(dynamic_parts)
+    dynamic_text = "\n".join(dynamic_parts)
+    if CTX_FIDELITY_INVARIANTS.strip() not in dynamic_text:
+        dynamic_text += CTX_FIDELITY_INVARIANTS
+    return "\n".join(static_parts), dynamic_text

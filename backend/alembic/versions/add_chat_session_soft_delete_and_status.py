@@ -14,9 +14,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("chat_sessions", sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True))
-    op.add_column("chat_sessions", sa.Column("status", sa.String(20), nullable=False, server_default="active"))
-    op.add_column("chat_sessions", sa.Column("message_count", sa.Integer(), nullable=False, server_default="0"))
+    # IF NOT EXISTS：create_all 或旧库可能已有列，避免 DuplicateColumnError 阻塞启动
+    op.execute("ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP WITH TIME ZONE")
+    op.execute(
+        "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'"
+    )
+    op.execute(
+        "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS message_count INTEGER NOT NULL DEFAULT 0"
+    )
 
 
 def downgrade() -> None:

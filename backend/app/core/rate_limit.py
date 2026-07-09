@@ -1,7 +1,7 @@
 """统一速率限制模块。
 
 提供 IP 粒度和 session 粒度的滑动窗口速率限制。
-auth.py / websocket.py / jsonrpc_router.py 共用此模块，
+auth.py / websocket.py / ide_plugin API 等共用此模块，
 避免速率限制逻辑散落在各文件中。
 
 优先使用 Redis 滑动窗口（跨 worker 一致），Redis 不可用时回退到内存实现。
@@ -58,12 +58,13 @@ def _get_redis():
 # 格式: key → (max_attempts, window_seconds)
 _DEFAULT_IP_LIMITS: dict[str, tuple[int, int]] = {
     "ws_connect": (10, 60),       # WebSocket 连接：10次/60s
-    "ws_connect_lsp4j": (10, 60), # LSP4J WebSocket：10次/60s
+    "auth_refresh": (10, 60),     # JWT 刷新：10次/60s
 }
 
 _DEFAULT_SESSION_LIMITS: dict[str, tuple[int, int]] = {
     "tool_execute": (30, 10),     # 工具执行：30次/10s（同一 session）
     "tool_write": (10, 60),       # 写操作工具：10次/60s（file_write/delete 类）
+    "auth_refresh": (10, 60),     # JWT 刷新：10次/60s（按 user_id）
 }
 
 
@@ -193,15 +194,9 @@ def _rate_limit_exceeded(key: str, max_attempts: int, window_s: int, count: int 
     )
 
 
-# ── 用于工具执行的便捷写入标记 ──
-_WRITE_TOOLS = {
-    "write_file", "save_file", "replace_text_by_path",
-    "create_file_with_text", "delete_file_by_path",
-    "apply_patch", "run_in_terminal",
-    "execute_code", "apply_diff",
-}
+from app.services.llm.tool_execution_policy import WORKSPACE_WRITE_TOOLS, SERIAL_ALWAYS
 
 
 def is_write_tool(tool_name: str) -> bool:
     """判断工具是否为写操作（更严格的频率限制）。"""
-    return tool_name in _WRITE_TOOLS
+    return tool_name in WORKSPACE_WRITE_TOOLS or tool_name in SERIAL_ALWAYS

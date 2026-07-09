@@ -51,7 +51,7 @@
 - `consult` 模式同步等待回复，`task_delegate` 异步委托（后台处理）
 
 ### IDE 项目路径
-- 项目根路径在初始化时由 LSP4J 传入，已知路径直接使用，不需要反复 list_dir
+- 项目根路径在 ACP 会话初始化时由 IDE 传入，已知路径直接使用，不需要反复 list_dir
 - 包名/模块结构在首次探索后缓存到 `memory/android_project_layout.md`
 
 ## 记忆管理

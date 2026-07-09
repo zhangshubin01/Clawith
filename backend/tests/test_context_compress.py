@@ -545,19 +545,16 @@ class TestMultiRoleCompress:
         # dynamic_content 应合并到首条 system
         assert getattr(result[0], 'dynamic_content', '') == "reminder: finish soon"
 
-    def test_assistant_compressed(self):
-        """P1: 长 assistant 纯文本 (>800 chars) 应被压缩."""
+    def test_assistant_not_compressed_stage4(self):
+        """P1: Stage4 禁止 assistant _text 删行 — 长文保持 verbatim."""
         long_text = "I will now provide a detailed analysis of the code. " * 300
         msgs = self._make_msgs(
             ("system", "base"),
             ("user", "hello"),
             ("assistant", long_text),
         )
-        before = len(long_text)
         result = _multi_role_compress(msgs, ctx_window=1000)
-        after = len(getattr(result[2], 'content', ''))
-        # _text() 应对长文本产生压缩效果
-        assert after < before, f"Expected compression: {before} -> {after}"
+        assert getattr(result[2], 'content', '') == long_text
 
     def test_assistant_with_tool_calls_not_compressed(self):
         """P1: 有 tool_calls 的 assistant 消息不被压缩."""

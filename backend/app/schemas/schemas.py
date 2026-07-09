@@ -107,6 +107,13 @@ class TokenResponse(BaseModel):
     tenant_name: str | None = None
 
 
+class RefreshTokenResponse(BaseModel):
+    """POST /api/auth/refresh — 对齐 IDE 插件 RefreshResponse（仅 access_token）。"""
+
+    access_token: str
+    token_type: str = "bearer"
+
+
 class TenantChoice(BaseModel):
     """Multi-tenant login: tenant selection info."""
 

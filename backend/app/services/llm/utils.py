@@ -50,7 +50,7 @@ def get_model_api_key(model: LLMModel) -> str:
 
     优先读取运行时密钥 _runtime_api_key（BYOK 场景），不入库、不写日志。
     """
-    # 优先读取运行时密钥（LSP4J BYOK 场景，用户自带密钥不入库）
+    # 优先读取运行时密钥（IDE BYOK 场景，用户自带密钥不入库）
     runtime_key = getattr(model, "_runtime_api_key", None)
     if runtime_key:
         return runtime_key
@@ -82,7 +82,94 @@ def get_tool_params(provider: str) -> dict:
     return {}
 
 
-def convert_chat_messages_to_llm_format(messages) -> list[dict]:
+_HISTORY_MIN_CHARS = 512
+_HISTORY_MAX_CHARS = 16384
+
+
+def _history_tool_char_limit(tool_name: str, ctx_window: int = 100_000) -> int:
+    """跨 prompt 加载单条 tool 结果的字符上限（对齐运行时 token budget）。"""
+    from .tool_trim import _TOOL_HARD_CEIL_CHARS, _tool_token_budget
+
+    settings = get_settings()
+    cap = int(getattr(settings, "CTX_HISTORY_TOOL_MAX_CHARS", 0) or 0)
+    if cap > 0:
+        return max(_HISTORY_MIN_CHARS, min(cap, _TOOL_HARD_CEIL_CHARS))
+    budget_chars = _tool_token_budget(tool_name or "", ctx_window) * 4
+    return max(_HISTORY_MIN_CHARS, min(budget_chars, _TOOL_HARD_CEIL_CHARS))
+
+
+from .truncate_caps import never_worse
+
+
+def emit_guarded_history(excerpt: str, marker: str, original: str, *, ctx_path: str = "history") -> str:
+    """历史 hydrate 用：marker + excerpt，走 never_worse。"""
+    if marker in excerpt:
+        return excerpt
+    return never_worse(excerpt, marker, original, ctx_path=ctx_path)
+
+
+def format_history_tool_content(
+    tool_name: str,
+    raw: str,
+    *,
+    ctx_window: int = 100_000,
+    path: str = "history",
+    ccr_hash: str | None = None,
+) -> tuple[str, str]:
+    """DB 历史 tool 结果格式化：budget 内 verbatim，超长 head/tail + 省略通知。"""
+    from .tool_trim import _TOOL_TYPE_ROUTE, _hard_head_tail, _list_head_tail
+
+    text = raw if isinstance(raw, str) else str(raw)
+    before = len(text)
+    if before == 0:
+        return text, "empty"
+
+    if ccr_hash:
+        from .ccr_store import ccr_marker
+
+        excerpt = text
+        if before > _history_tool_char_limit(tool_name, ctx_window):
+            excerpt = _hard_head_tail(text, max_chars=min(before, 1200))
+        body = emit_guarded_history(excerpt, ccr_marker(ccr_hash), text, ctx_path=path)
+        logger.info(
+            "[CTX-HISTORY] path={} tool={} chars={}→{} strategy=ccr_hash",
+            path, tool_name, before, len(body),
+        )
+        return body, "ccr_hash"
+
+    limit = _history_tool_char_limit(tool_name, ctx_window)
+    if before <= limit:
+        if before > 500:
+            logger.info(
+                "[CTX-HISTORY] path={} tool={} chars={}→{} strategy=verbatim",
+                path, tool_name, before, before,
+            )
+        return text, "verbatim"
+
+    route = _TOOL_TYPE_ROUTE.get(tool_name or "", "")
+    if route == "list":
+        trimmed = _list_head_tail(text)
+        strategy = "list_head_tail"
+    else:
+        trimmed = _hard_head_tail(text, max_chars=limit)
+        strategy = "hard_head_tail"
+
+    omitted = before - len(trimmed)
+    if omitted > 0 and "已省略" not in trimmed:
+        trimmed = trimmed + f"\n[... {omitted} 字符已省略；完整内容见 CCR retrieve]"
+    logger.info(
+        "[CTX-HISTORY] path={} tool={} chars={}→{} strategy={}",
+        path, tool_name, before, len(trimmed), strategy,
+    )
+    return trimmed, strategy
+
+
+def convert_chat_messages_to_llm_format(
+    messages,
+    *,
+    ctx_window: int = 100_000,
+    path: str = "history",
+) -> list[dict]:
     """Convert ChatMessage DB records to LLM-compatible message dicts.
 
     Properly handles ``tool_call`` role records by splitting them into an
@@ -111,6 +198,7 @@ def convert_chat_messages_to_llm_format(messages) -> list[dict]:
                 tc_name = tc_data.get("name", "unknown")
                 tc_args = tc_data.get("args", {})
                 tc_result = tc_data.get("result", "")
+                tc_ccr_hash = tc_data.get("ccr_hash") or ""
                 tc_id = f"call_{msg.id}"  # synthetic tool_call_id
 
                 # Assistant message with tool_calls array
@@ -136,10 +224,17 @@ def convert_chat_messages_to_llm_format(messages) -> list[dict]:
                     sanitized_result = sanitize_history_tool_result(str(tc_result))
                 except ImportError:
                     sanitized_result = str(tc_result)
+                tool_content, _ = format_history_tool_content(
+                    tc_name,
+                    sanitized_result,
+                    ctx_window=ctx_window,
+                    path=path,
+                    ccr_hash=str(tc_ccr_hash).strip() or None,
+                )
                 result.append({
                     "role": "tool",
                     "tool_call_id": tc_id,
-                    "content": sanitized_result[:500],
+                    "content": tool_content,
                 })
             except Exception:
                 continue  # Skip malformed tool_call records
@@ -231,6 +326,7 @@ __all__ = [
     "get_model_api_key",
     # Message conversion utilities
     "convert_chat_messages_to_llm_format",
+    "format_history_tool_content",
     "truncate_messages_with_pair_integrity",
     # New client classes
     "LLMClient",

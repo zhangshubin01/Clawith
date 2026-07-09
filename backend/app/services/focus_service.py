@@ -204,6 +204,11 @@ def _serialize_focus_item(item: AgentFocusItemModel) -> dict:
     }
 
 
+async def ensure_focus_migrated(agent_id: uuid.UUID, db=None) -> int:
+    """Session bootstrap / 首次写路径调用；list 只读路径不触发。"""
+    return await migrate_legacy_focus_file(agent_id, db=db)
+
+
 async def migrate_legacy_focus_file(agent_id: uuid.UUID, db=None) -> int:
     """Import legacy focus.md once when the DB has no focus rows."""
     if db is not None:
@@ -261,7 +266,6 @@ async def _migrate_legacy_focus_file_impl(db, agent_id: uuid.UUID, should_commit
 
 
 async def list_focus_items(agent_id: uuid.UUID, *, include_completed: bool = True, db=None) -> list[dict]:
-    await migrate_legacy_focus_file(agent_id, db=db)
     if db is not None:
         return await _list_focus_items_impl(db, agent_id, include_completed)
     async with async_session() as new_db:

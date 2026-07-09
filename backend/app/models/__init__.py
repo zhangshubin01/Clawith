@@ -1,1 +1,1 @@
-from app.models.plugin_config import IDEPluginConfig  # noqa: F401
+"""SQLAlchemy 模型包；各模型从 app.models.<module> 直接导入。"""

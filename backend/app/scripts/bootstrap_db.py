@@ -12,6 +12,7 @@ import app.models.agent  # noqa: F401
 import app.models.audit  # noqa: F401
 import app.models.channel_config  # noqa: F401
 import app.models.chat_session  # noqa: F401
+import app.models.ctx_ccr  # noqa: F401  # CCR 原文归档表（保真上下文压缩）
 import app.models.gateway_message  # noqa: F401
 import app.models.invitation_code  # noqa: F401
 import app.models.llm  # noqa: F401

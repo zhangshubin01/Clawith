@@ -241,6 +241,18 @@ def decode_access_token_soft(token: str) -> dict:
         )
 
 
+
+
+def is_refresh_within_grace(payload: dict) -> bool:
+    """判断 JWT 是否在 refresh 宽限窗口内（exp 过期后仍可续期）。"""
+    exp = payload.get("exp")
+    if exp is None:
+        return False
+    grace_seconds = settings.JWT_REFRESH_GRACE_DAYS * 86400
+    now = datetime.now(timezone.utc).timestamp()
+    return now <= float(exp) + grace_seconds
+
+
 async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),

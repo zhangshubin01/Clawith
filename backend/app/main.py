@@ -4,11 +4,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import shutil
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from app.config import get_settings
+from app.core.security import get_current_admin
 from app.core.events import close_redis
 from app.core.logging_config import configure_logging, intercept_standard_logging
 from app.core.middleware import TraceIdMiddleware
@@ -190,6 +191,7 @@ async def lifespan(app: FastAPI):
             import app.models.onboarding     # noqa
 
             import app.models.identity       # noqa
+            import app.models.ctx_ccr         # noqa  # CCR 原文归档表（保真上下文压缩）
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
             logger.info("[Startup] Database tables ready")
@@ -214,11 +216,11 @@ async def lifespan(app: FastAPI):
         try:
             import shutil
             from pathlib import Path as _Path
-            from app.config import get_settings as _gs
+            from app.config import get_settings
             from app.models.tenant import Tenant as _T
             from app.database import async_session as _ses
             from sqlalchemy import select as _sel
-            _data_dir = _Path(_gs().AGENT_DATA_DIR)
+            _data_dir = _Path(get_settings().AGENT_DATA_DIR)
             _old_dir = _data_dir / "enterprise_info"
             if _old_dir.exists() and any(_old_dir.iterdir()):
                 async with _ses() as _db:
@@ -240,14 +242,6 @@ async def lifespan(app: FastAPI):
             await clean_orphaned_mcp_tools()
         except Exception as e:
             logger.warning(f"[Startup] Builtin tools seed or cleanup failed: {e}")
-
-        # ── Install LSP4J tool hooks (wrap agent_tools for IDE plugin support) ──
-        try:
-            from app.plugins.clawith_lsp4j.tool_hooks import install_lsp4j_tool_hooks
-            install_lsp4j_tool_hooks()
-            logger.info("[Startup] LSP4J tool hooks installed")
-        except Exception as e:
-            logger.warning(f"[Startup] LSP4J tool hooks install failed: {e}")
 
         try:
             from app.services.tool_seeder import seed_atlassian_rovo_config, get_atlassian_api_key
@@ -331,6 +325,12 @@ async def lifespan(app: FastAPI):
             task = asyncio.create_task(coro, name=name)
             task.add_done_callback(_bg_task_error)
             logger.info(f"[Startup] created bg task: {name}")
+
+        from app.services.llm.ccr_maintenance import ccr_maintenance_loop
+        _ccr_task = asyncio.create_task(ccr_maintenance_loop(), name="ccr_maintenance")
+        _ccr_task.add_done_callback(_bg_task_error)
+        logger.info("[Startup] created bg task: ccr_maintenance")
+
         logger.info("[Startup] all background tasks created!")
     except Exception as e:
         logger.error(f"[Startup] Background tasks failed: {e}")
@@ -412,7 +412,6 @@ from app.api.agent_credentials import router as credentials_router
 from app.api.agentbay_control import router as agentbay_control_router
 from app.api.okr import router as okr_router
 from app.api.ide_plugin import router as ide_plugin_router
-from app.plugins.clawith_lsp4j.router import router as lsp4j_router
 from app.plugins.clawith_acp.router import router as acp_router
 from app.api.frontend_log import router as frontend_log_router
 from app.api.onboarding import router as onboarding_router
@@ -462,7 +461,6 @@ app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
 app.include_router(okr_router)  # OKR — self-prefixed at /api/okr
 app.include_router(ide_plugin_router)  # IDE Plugin — self-prefixed at /api/ide-plugin
-app.include_router(lsp4j_router, prefix="/api/plugins/clawith-lsp4j")  # LSP4J WebSocket endpoint
 app.include_router(acp_router)  # ACP WebSocket endpoint — self-prefixed at /ws/acp
 app.include_router(frontend_log_router)  # Frontend log — self-prefixed at /api/log
 app.include_router(onboarding_router, prefix=settings.API_PREFIX)
@@ -472,6 +470,14 @@ app.include_router(onboarding_router, prefix=settings.API_PREFIX)
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(status="ok", version=settings.APP_VERSION)
+
+
+@app.get("/api/health/ctx", tags=["health"])
+async def ctx_health_check(_admin=Depends(get_current_admin)):
+    """上下文压缩健康快照；需 admin 认证；只暴露计数和配置。"""
+    from app.services.llm.ccr_store import get_ccr_metrics_snapshot
+
+    return {"status": "ok", **get_ccr_metrics_snapshot()}
 
 
 # ── Version endpoint (public, no auth required) ──

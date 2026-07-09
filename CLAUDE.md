@@ -144,32 +144,18 @@ The core LLM execution in `api/websocket.py` runs up to 50 iterations. Each iter
 
 Each agent has a private file workspace under `agent_template/`. The files `soul.md` (personality) and `memory.md` (long-term memory) are injected into every LLM context via `services/agent_context.py`.
 
-## LSP4J IntelliJ Plugin Integration
+## ACP IntelliJ Plugin Integration
 
-The `backend/app/plugins/clawith_lsp4j/` module bridges Clawith to the IntelliJ IDE plugin via WebSocket JSON-RPC (LSP4J protocol).
-
-### Architecture
+IDE 插件通过 ACP（Agent Client Protocol）WebSocket 连接后端，入口 `/ws/acp`。
 
 ```
-IntelliJ Plugin (Java/Kotlin)  ←→  WebSocket JSON-RPC  ←→  clawith_lsp4j plugin  ←→  Clawith Backend
+demo-new/acp-plugin  ←→  /ws/acp  ←→  plugins/clawith_acp/  ←→  Clawith Backend
 ```
 
-- **`jsonrpc_router.py`** — Main router: handles tool/invoke, tool/call/sync, chat/resolve, workspace operations
-- **`tool_hooks.py`** — Monkey-patches ACP's `_custom_execute_tool` / `_custom_get_tools` to add LSP4J routing via ContextVar
-- **`tool_constants.py`** — Tool name mappings and parameter name conventions
-- **`context.py`** — Per-request ContextVar (`current_lsp4j_ws`) for async-safe LSP4J state
-
-### Key Design Decisions
-
-1. **Plug-in native tool names**: The IntelliJ plugin's `ToolInvokeProcessor` only recognizes ~8 native tool names (`read_file`, `save_file`, `replace_text_by_path`, `create_file_with_text`, `delete_file_by_path`, `search_file`, `list_dir`, `run_in_terminal`). ACP's `ide_` prefix names are mapped to native names before sending to the plugin.
-
-2. **Parameter name conventions vary per tool**: Some handlers use `file_path` (snake_case, via `getRequestFilePathWithUnderLine`), others use `filePath` (camelCase, via `getRequestFilePath`). See `tool_hooks.py:_PARAM_NAME_MAP` for the mapping table.
-
-3. **Memory context injection takes precedence over DB**: When building LLM message history, in-memory tool call records (via `_tool_call_history_by_session`) always replace DB-injected context. This ensures the most recent tool calls (within the persistence window) are never lost — see `jsonrpc_router.py` `_handle_chat_ask`.
-
-4. **`search_replace` is semantically correct**: The backend reads the file from IDE first, performs `str.replace(searchText, replaceText)` locally, then sends the complete new content via `replace_text_by_path`. This prevents semantic degradation where the LLM believes it's doing a localized edit but the entire file gets replaced.
-
-5. **Per-tool timeouts**: `_TOOL_TIMEOUTS` in `jsonrpc_router.py` defines differentiated timeouts — `run_in_terminal` uses a three-tier system (600s build / 30s readonly / 180s default).
+- **`acp_handler.py`** — ACP JSON-RPC 协议处理，路由 prompt 到 `call_llm_with_failover`
+- **`tool_hooks.py`** — 链式 `_bridge_handlers`，ACP 会话中将工具路由到 IDE
+- **`tool_bridge.py`** — 文件/终端/删除等 IDE 工具代理
+- **`acp_session.py`** — 会话持久化（`source_channel=acp`）
 
 ## Tech Stack
 
@@ -183,8 +169,22 @@ IntelliJ Plugin (Java/Kotlin)  ←→  WebSocket JSON-RPC  ←→  clawith_lsp4j
 ## Code Guidelines
 
 - **Python Imports**: Python imports should be placed at the top of the file (file header) as much as possible. Avoid inline imports within functions or methods unless strictly necessary (e.g., to prevent circular import dependencies).
-- **Log Prefix**: All log messages MUST use `[Module]` prefix format. See workspace `CLAUDE.md` §2.1 for the complete prefix table and formatting rules. Key prefixes: `[LLM]`, `[CTX]`, `[TOOL]`, `[WS]`, `[ACP]`, `[LSP4J]`, `[SEC]`, `[HB]`, `[Startup]`, `[API]`. Never `except Exception: pass` without a `logger.warning`.
+- **Log Prefix**: All log messages MUST use `[Module]` prefix format. See workspace `CLAUDE.md` §2.1 for the complete prefix table and formatting rules. Key prefixes: `[LLM]`, `[CTX]`, `[TOOL]`, `[WS]`, `[ACP]`, `[SEC]`, `[HB]`, `[Startup]`, `[API]`. Never `except Exception: pass` without a `logger.warning`.
 - **Logging Library**: Backend uses `loguru` (`from loguru import logger`). All API endpoint files under `app/api/` must import logger and log at minimum request start and completion.
+
+## ACP Turn 超时环境变量
+
+| 环境变量 | 默认 | 含义 |
+|---|---|---|
+| `ACP_WORKFLOW_TIMEOUT_SECONDS` | `7200` | 整轮墙钟上限（含 HITL 权限等待） |
+| `ACP_COMPUTE_BUDGET_SECONDS` | `1800` | LLM+工具纯计算预算（HITL 等待不计入） |
+| `ACP_LLM_TIMEOUT_SECONDS` | — | **向后兼容**：未设 `ACP_COMPUTE_BUDGET_SECONDS` 时作为 compute 预算 |
+| `ACP_PERMISSION_TIMEOUT` | `120` | 单次权限 RPC（`fs/safe_delete`） |
+| `ACP_TOOL_TIMEOUT_SECONDS` | `180` | 单次工具执行默认上限 |
+| `ACP_LLM_CALL_TIMEOUT_SECONDS` | `120` | 单次 LLM HTTP 调用参考值 |
+
+实现：`app/plugins/clawith_acp/turn_budget.py`（双时钟 + HITL suspend/resume）。
+
 
 ## graphify
 

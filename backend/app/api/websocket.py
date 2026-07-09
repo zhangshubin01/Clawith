@@ -27,7 +27,7 @@ from app.services.activity_logger import log_activity
 from app.services.agentbay_live import detect_agentbay_env, get_browser_snapshot, get_desktop_screenshot
 from app.services.chat_session_service import ensure_primary_platform_session
 from app.services.llm import call_llm_with_failover
-from app.services.llm.utils import convert_chat_messages_to_llm_format, truncate_messages_with_pair_integrity
+from app.services.llm.utils import convert_chat_messages_to_llm_format
 from app.services.onboarding import is_onboarded, mark_onboarding_phase, resolve_onboarding_prompt
 from app.services.quota_guard import (
     AgentExpired,
@@ -452,16 +452,50 @@ class WebSocketChatHandler:
             )
             self.history_messages = list(reversed(history_result.scalars().all()))
             logger.info(f"[WS] Loaded {len(self.history_messages)} history messages for session {self.conv_id}")
+            try:
+                from sqlalchemy import func
+                tc_r = await db.execute(
+                    select(func.count())
+                    .select_from(ChatMessage)
+                    .where(ChatMessage.conversation_id == self.conv_id)
+                    .where(ChatMessage.role == "tool_call")
+                )
+                tool_call_count = int(tc_r.scalar() or 0)
+                if len(self.history_messages) >= 2 and tool_call_count == 0:
+                    logger.info(
+                        "[WS-CTX] E0 old_session_warn session={} msgs={}",
+                        (self.conv_id or "")[:8],
+                        len(self.history_messages),
+                    )
+                    self._pending_session_warn = {
+                        "type": "session_warn",
+                        "code": "E0",
+                        "message": "此会话创建于工具记忆修复前，跨轮工具细节可能缺失，建议新建会话。",
+                    }
+            except Exception as e0_err:
+                logger.warning("[WS-CTX] E0 check failed: {}", e0_err)
         except Exception as e:
             logger.warning(f"[WS] History load failed (non-fatal): {e}")
 
     def _build_conversation_context(self) -> list[dict]:
         """Translates historical ChatMessages to LLM inputs."""
-        return convert_chat_messages_to_llm_format(self.history_messages)
+        from app.services.llm.context_compressor import _get_ctx_guard_max_window
+
+        model_name = getattr(self.llm_model, "model", "") or ""
+        ctx_window = _get_ctx_guard_max_window(model_name)
+        return convert_chat_messages_to_llm_format(
+            self.history_messages,
+            ctx_window=ctx_window,
+            path="ws",
+        )
 
     async def message_loop(self):
         """Core message processing loop."""
         # Send welcome message on new session (no history)
+        warn = getattr(self, "_pending_session_warn", None)
+        if warn:
+            await self.websocket.send_json(warn)
+            self._pending_session_warn = None
         if self.welcome_message and not self.history_messages:
             await self.websocket.send_json({"type": "done", "role": "assistant", "content": self.welcome_message})
 
@@ -839,7 +873,39 @@ class WebSocketChatHandler:
                 async def _on_failover(reason: str):
                     await self.websocket.send_json({"type": "info", "content": f"Primary model error, {reason}"})
 
-                _truncated = truncate_messages_with_pair_integrity(self.conversation, self.ctx_size)
+                from app.services.llm.context_compressor import _est_tokens_str, _get_ctx_guard_max_window
+                from app.services.llm.history_hydrate import hydrate_history_tool_results
+
+                _model_name = getattr(effective_llm_model, "model", "") or ""
+                _ctx_window = _get_ctx_guard_max_window(_model_name)
+                self.conversation = await hydrate_history_tool_results(
+                    self.conversation,
+                    session_id=self.conv_id or "",
+                    agent_id=self.agent_id,
+                    ctx_path="ws",
+                    ctx_window=_ctx_window,
+                    model_name=_model_name,
+                )
+                _messages_for_llm = self.conversation
+                logger.info(
+                    "[WS-CTX] path=ws history={} total={} chars={} tool_tokens={} session={}",
+                    len(_messages_for_llm),
+                    len(_messages_for_llm) + 1,
+                    sum(
+                        len(m.get("content") or "")
+                        for m in _messages_for_llm
+                        if isinstance(m.get("content"), str)
+                    ),
+                    _est_tokens_str(
+                        "".join(
+                            m.get("content") or ""
+                            for m in _messages_for_llm
+                            if m.get("role") == "tool" and isinstance(m.get("content"), str)
+                        ),
+                        _model_name,
+                    ),
+                    self.conv_id or "",
+                )
 
                 # Resolve onboarding prompt
                 skip_tools_for_greeting = False
@@ -853,7 +919,7 @@ class WebSocketChatHandler:
                             user_locale=self.lang,
                         )
                     if _onb:
-                        _truncated = [{"role": "system", "content": _onb.prompt}] + _truncated
+                        _messages_for_llm = [{"role": "system", "content": _onb.prompt}] + _messages_for_llm
                         if _onb.lock_on_first_chunk:
                             needs_onboarding_mark = True
                             onboarding_target_phase = _onb.target_phase
@@ -899,7 +965,7 @@ class WebSocketChatHandler:
                 return await call_llm_with_failover(
                     primary_model=effective_llm_model,
                     fallback_model=self.fallback_llm_model,
-                    messages=_truncated,
+                    messages=_messages_for_llm,
                     agent_name=self.agent_name,
                     role_description=self.role_description,
                     agent_id=self.agent_id,
@@ -1025,19 +1091,29 @@ class WebSocketChatHandler:
             logger.info(f"[WS][Workspace] activity: {_done_tool_name} → {_ws_path}")
 
     async def _save_completed_tool_call_to_db(self, data: dict):
-        """Persist completed tool calls in ChatMessage DB logs."""
+        """将已完成的 tool 调用写入 ChatMessage，供跨 prompt hydrate 全量恢复。"""
         try:
             from app.services.chat_session_service import save_tool_call_log
+
+            # 与 ACP on_tool_call 一致：全量 result，由 save_tool_call_log 负责 ccr_hash
+            result_str = str(data.get("result") or "")
+            tool_name = data.get("name", "")
             await save_tool_call_log(
                 agent_id=self.agent_id,
                 user_id=self.user.id,
                 conversation_id=self.conv_id,
-                tool_name=data.get("name", ""),
+                tool_name=tool_name,
                 arguments=data.get("args"),
-                result=(data.get("result") or "")[:500],
+                result=result_str,
                 status="done",
                 tool_call_id=data.get("call_id"),
                 reasoning_content=data.get("reasoning_content"),
+            )
+            logger.info(
+                "[WS-CTX] tool_persist tool={} chars={} session={}",
+                tool_name,
+                len(result_str),
+                (self.conv_id or "")[:8],
             )
             async with async_session() as _tc_db:
                 await maybe_mark_session_read_for_active_viewer(

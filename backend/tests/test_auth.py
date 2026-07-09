@@ -235,3 +235,81 @@ async def test_oauth_callback_passes_redirect_uri():
 
     provider.exchange_code_for_token.assert_awaited_once_with("oauth-code", "https://example.com/oauth/callback/google")
     assert result.access_token == "jwt-token"
+
+# ---------------------------------------------------------------------------
+# /refresh tests
+# ---------------------------------------------------------------------------
+
+
+def _make_request(client_host="127.0.0.1"):
+  return SimpleNamespace(client=SimpleNamespace(host=client_host))
+
+
+@pytest.mark.asyncio
+async def test_refresh_success():
+    """Valid JWT within grace window returns new access_token."""
+    user_id = uuid.uuid4()
+    user = _make_user(uuid.uuid4(), role="member")
+    user.id = user_id
+    db = RecordingDB(responses=[DummyResult(scalar_value=user)])
+    payload = {"sub": str(user_id), "role": "member", "exp": 9_999_999_999}
+    credentials = SimpleNamespace(credentials="old-jwt")
+
+    with patch("app.api.auth.decode_access_token_soft", return_value=payload):
+        with patch("app.api.auth.is_refresh_within_grace", return_value=True):
+            with patch("app.core.rate_limit.check_ip_rate_limit", new_callable=AsyncMock):
+                with patch("app.core.rate_limit.check_session_rate_limit", new_callable=AsyncMock):
+                    with patch.object(auth_api, "create_access_token", return_value="new-jwt"):
+                        result = await run_with_db(
+                            db,
+                            auth_api.refresh_access_token,
+                            _make_request(),
+                            credentials,
+                            db,
+                        )
+    assert result.access_token == "new-jwt"
+
+
+@pytest.mark.asyncio
+async def test_refresh_invalid_token_no_credentials():
+    with pytest.raises(HTTPException) as exc:
+        await auth_api.refresh_access_token(_make_request(), None, RecordingDB())
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_refresh_outside_grace_window():
+    user_id = uuid.uuid4()
+    credentials = SimpleNamespace(credentials="expired-jwt")
+    payload = {"sub": str(user_id), "role": "member", "exp": 1}
+
+    with patch("app.api.auth.decode_access_token_soft", return_value=payload):
+        with patch("app.api.auth.is_refresh_within_grace", return_value=False):
+            with patch("app.core.rate_limit.check_ip_rate_limit", new_callable=AsyncMock):
+                with pytest.raises(HTTPException) as exc:
+                    await auth_api.refresh_access_token(_make_request(), credentials, RecordingDB())
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "token_expired"
+
+
+@pytest.mark.asyncio
+async def test_refresh_user_not_found():
+    user_id = uuid.uuid4()
+    db = RecordingDB(responses=[DummyResult(scalar_value=None)])
+    credentials = SimpleNamespace(credentials="old-jwt")
+    payload = {"sub": str(user_id), "role": "member", "exp": 9_999_999_999}
+
+    with patch("app.api.auth.decode_access_token_soft", return_value=payload):
+        with patch("app.api.auth.is_refresh_within_grace", return_value=True):
+            with patch("app.core.rate_limit.check_ip_rate_limit", new_callable=AsyncMock):
+                with patch("app.core.rate_limit.check_session_rate_limit", new_callable=AsyncMock):
+                    with pytest.raises(HTTPException) as exc:
+                        await run_with_db(
+                            db,
+                            auth_api.refresh_access_token,
+                            _make_request(),
+                            credentials,
+                            db,
+                        )
+    assert exc.value.status_code == 401
+

@@ -57,10 +57,14 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       # Password reset token lifetime in minutes (default: 30)
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
+      DEBUG_SESSION_LOG_PATH: /debug-session/debug-17de78.log
+      DEBUG_SESSION_ID: "17de78"
+      AGENT_DEBUG_LOG_PATH: /debug-session/debug-7cda9a.log
     volumes:
       - ./backend/agent_data:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
+      - ../.cursor:/debug-session
     privileged: true
     cap_add:
       - SYS_ADMIN
@@ -98,8 +102,13 @@ services:
       - backend
 
 volumes:
+  # 复用原 clawith-agent 项目的数据卷（external 避免 compose 项目名变更告警）
   pgdata:
+    external: true
+    name: clawith-agent_pgdata
   redisdata:
+    external: true
+    name: clawith-agent_redisdata
 
 
 networks:
