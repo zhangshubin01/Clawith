@@ -1090,7 +1090,7 @@ function describeAnalysis(items: AnalysisItem[], t: (k: string, opts?: any) => s
 }
 
 function AnalysisCard({
-    items, t, expanded, onToggle, isGroupRunning,
+    items, t, expanded, onToggle, isGroupRunning, sessionId,
 }: {
     items: AnalysisItem[];
     t: (k: string, opts?: any) => string;
@@ -1098,7 +1098,13 @@ function AnalysisCard({
     onToggle: () => void;
     /** True when parent isWaiting/isStreaming AND this is the last active group */
     isGroupRunning: boolean;
+    sessionId?: string | null;
 }) {
+    // propose_experience_draft is a human-facing proposal, not a reasoning step —
+    // render it as an always-visible card outside the collapsible trace.
+    const proposeItems = items.filter(
+        (i): i is Extract<AnalysisItem, { type: 'tool' }> => i.type === 'tool' && (i as any).name === 'propose_experience_draft'
+    );
     const toolItems = items.filter(i => i.type === 'tool') as Extract<AnalysisItem, { type: 'tool' }>[];
     const hasTools = toolItems.length > 0;
     const hasRunningTool = toolItems.some(tc => tc.status === 'running');
@@ -1127,10 +1133,14 @@ function AnalysisCard({
                         stroke={1.8}
                     />
                 </button>
+                {proposeItems.map((it, i) => (
+                    <ExperienceDraftCard key={`propose-${i}`} args={(it as any).args} sessionId={sessionId} />
+                ))}
                 {expanded && (
                     <div className="analysis-trace-body">
                         {items.map((item, idx) => {
                             const isLast = idx === items.length - 1;
+                            if (item.type === 'tool' && (item as any).name === 'propose_experience_draft') return null;
                             if (item.type === 'thinking') {
                                 const itemPreview = item.content.length > 360 ? item.content.slice(0, 360).trimEnd() + '...' : item.content;
                                 return (
@@ -6247,6 +6257,9 @@ export default function AgentDetailPage() {
                                                         if (m.role === 'tool_call') {
                                                             const tName = m.toolName || (() => { try { return JSON.parse(m.content || '{}').name; } catch { return 'tool'; } })();
                                                             const tArgs = m.toolArgs || (() => { try { return JSON.parse(m.content || '{}').args; } catch { return {}; } })();
+                                                            if (tName === 'propose_experience_draft') {
+                                                                return <ExperienceDraftCard key={i} args={tArgs} sessionId={activeSessionIdRef.current} />;
+                                                            }
                                                             const tResult = m.toolResult ?? (() => { try { return JSON.parse(m.content || '{}').result; } catch { return ''; } })();
                                                             return (
                                                                 <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '36px', minWidth: 0 }}>
@@ -6470,6 +6483,7 @@ export default function AgentDetailPage() {
                                                                         expanded={toolGroupExpandedRef.current.has(entry.key) ? !!toolGroupExpandedRef.current.get(entry.key) : false}
                                                                         onToggle={() => toggleToolGroup(entry.key)}
                                                                         isGroupRunning={groupIsRunning}
+                                                                        sessionId={activeSessionIdRef.current}
                                                                     />
                                                                 </div>
                                                             );
