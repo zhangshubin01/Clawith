@@ -28,21 +28,22 @@ export const secondaryBtn: React.CSSProperties = {
     fontSize: 13, background: 'var(--bg-card)', color: 'var(--text-primary)',
 };
 const labelStyle: React.CSSProperties = {
-    display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', margin: '12px 0 4px',
+    display: 'block', fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', margin: '12px 0 4px',
 };
 const inputStyle: React.CSSProperties = {
-    width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border-default)',
-    fontSize: 14, background: 'var(--bg-card)', color: 'var(--text-primary)', boxSizing: 'border-box',
+    width: '100%', padding: '9px 11px', borderRadius: 8, border: '1px solid var(--border-strong, var(--border-default))',
+    fontSize: 14, background: 'var(--bg-primary)', color: 'var(--text-primary)', boxSizing: 'border-box',
 };
 
 export function Drawer({ children, onClose, docked = false }: { children: React.ReactNode; onClose: () => void; docked?: boolean }) {
-    // Solid elevated surface (opaque) so the text is always readable.
+    // Solid elevated surface (opaque) + own scroll so long forms are fully reachable.
     const panel = (
         <div onClick={e => e.stopPropagation()} style={{
-            position: 'fixed', top: 0, right: 0, bottom: 0,
-            width: docked ? 'min(460px, 46vw)' : 'min(560px, 92vw)', height: '100%',
-            background: 'var(--bg-elevated)', borderLeft: '1px solid var(--border-default)',
-            boxShadow: '-8px 0 32px rgba(0,0,0,.28)', overflowY: 'auto', padding: 24, zIndex: 1001,
+            position: 'fixed', top: 0, right: 0, height: '100vh',
+            width: docked ? 'min(460px, 46vw)' : 'min(560px, 92vw)',
+            background: 'var(--bg-elevated)', borderLeft: '1px solid var(--border-strong, var(--border-default))',
+            boxShadow: '-8px 0 32px rgba(0,0,0,.28)', overflowY: 'auto', WebkitOverflowScrolling: 'touch',
+            padding: 24, zIndex: 1001, boxSizing: 'border-box',
         }}>{children}</div>
     );
     // Docked: no backdrop — the rest of the page stays fully bright, scrollable and interactive.
