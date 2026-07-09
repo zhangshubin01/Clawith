@@ -3,12 +3,7 @@
 FROM python:3.12-slim AS deps
 
 WORKDIR /app
-RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
-    else \
-        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list; \
-    fi && \
-    apt-get update && \
+RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc libpq-dev libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 shared-mime-info pango1.0-tools && \
     rm -rf /var/lib/apt/lists/*
 
@@ -27,15 +22,19 @@ RUN if [ -n "$CLAWITH_PIP_INDEX_URL" ] && [ -n "$CLAWITH_PIP_TRUSTED_HOST" ]; th
 FROM python:3.12-slim AS production
 
 WORKDIR /app
-RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
-    else \
-        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list; \
-    fi && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends libpq5 curl shadowsocks-libev gosu bubblewrap libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 shared-mime-info pango1.0-tools fonts-wqy-microhei fonts-wqy-zenhei fonts-noto-cjk chromium && \
+# Install runtime system deps (no chromium/fonts-noto-cjk to avoid OOM/network issues)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpq5 curl shadowsocks-libev gosu bubblewrap \
+        libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
+        libgdk-pixbuf-2.0-0 shared-mime-info pango1.0-tools \
+        fonts-wqy-microhei fonts-wqy-zenhei && \
     fc-cache -fv && \
     rm -rf /var/lib/apt/lists/*
+
+# If chromium / fonts-noto-cjk are needed for WeasyPrint (HTML→PDF), install later:
+#   docker exec -u root clawith-backend-1 apt-get update && \
+#   docker exec -u root clawith-backend-1 apt-get install -y chromium fonts-noto-cjk
 
 # Copy installed packages from deps stage
 COPY --from=deps /usr/local/lib/python3.12/site-packages/ /usr/local/lib/python3.12/site-packages/

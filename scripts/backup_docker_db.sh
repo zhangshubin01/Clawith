@@ -23,9 +23,9 @@ docker exec -e PGPASSWORD=clawith clawith-postgres-1 \
 docker exec -i clawith-postgres-1 pg_restore -l < "$DUMP_FILE" > "$META_FILE"
 
 # 3) 备份 agent 工作区文件（如有）
-AGENT_DIR="${HOME}/.clawith/data/agents"
+AGENT_DIR="$(cd "$SCRIPT_DIR/../backend/agent_data" 2>/dev/null && pwd)"
 if [[ -d "$AGENT_DIR" ]]; then
-    tar -czf "$OUT_DIR/agents_data.tar.gz" -C "${HOME}/.clawith/data" agents 2>/dev/null || true
+    tar -czf "$OUT_DIR/agents_data.tar.gz" -C "$AGENT_DIR" . 2>/dev/null || true
 fi
 
 # 4) 生成 README
