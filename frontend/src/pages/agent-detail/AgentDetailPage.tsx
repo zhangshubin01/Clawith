@@ -406,6 +406,7 @@ function DistillButton({ text, sessionId }: { text: string; sessionId?: string |
             {draft && (
                 <ExperienceDraftEditor
                     draft={draft}
+                    docked
                     onClose={() => setDraft(null)}
                     onSaved={() => { setDraft(null); qc.invalidateQueries({ queryKey: ['experience'] }); toast.success('沉淀成功'); }}
                 />
@@ -490,6 +491,7 @@ function ExperienceDraftCard({ args, sessionId }: { args: any; sessionId?: strin
             {open && (
                 <ExperienceDraftEditor
                     draft={prefill}
+                    docked
                     onClose={() => setOpen(false)}
                     onSaved={() => { setOpen(false); qc.invalidateQueries({ queryKey: ['experience'] }); toast.success('沉淀成功'); }}
                 />

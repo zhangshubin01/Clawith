@@ -35,18 +35,26 @@ const inputStyle: React.CSSProperties = {
     fontSize: 14, background: 'var(--bg-card)', color: 'var(--text-primary)', boxSizing: 'border-box',
 };
 
-export function Drawer({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+export function Drawer({ children, onClose, docked = false }: { children: React.ReactNode; onClose: () => void; docked?: boolean }) {
+    // Solid elevated surface (opaque) so the text is always readable.
+    const panel = (
+        <div onClick={e => e.stopPropagation()} style={{
+            position: 'fixed', top: 0, right: 0, bottom: 0,
+            width: docked ? 'min(460px, 46vw)' : 'min(560px, 92vw)', height: '100%',
+            background: 'var(--bg-elevated)', borderLeft: '1px solid var(--border-default)',
+            boxShadow: '-8px 0 32px rgba(0,0,0,.28)', overflowY: 'auto', padding: 24, zIndex: 1001,
+        }}>{children}</div>
+    );
+    // Docked: no backdrop — the rest of the page stays fully bright, scrollable and interactive.
+    if (docked) return panel;
     return (
-        <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)', zIndex: 1000, display: 'flex', justifyContent: 'flex-end' }}>
-            <div onClick={e => e.stopPropagation()} style={{
-                width: 'min(560px, 92vw)', height: '100%', background: 'var(--bg-primary)',
-                boxShadow: '-4px 0 24px rgba(0,0,0,.12)', overflowY: 'auto', padding: 24,
-            }}>{children}</div>
+        <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)', zIndex: 1000 }}>
+            {panel}
         </div>
     );
 }
 
-export function DraftEditor({ draft, onClose, onSaved }: { draft: Draft; onClose: () => void; onSaved: () => void }) {
+export function DraftEditor({ draft, onClose, onSaved, docked }: { draft: Draft; onClose: () => void; onSaved: () => void; docked?: boolean }) {
     const [form, setForm] = useState<Draft>({
         title: '', scenario: '', problem: '', solution: '', applicability: '',
         tags: [], visibility_scope: 'company', visibility_scope_id: null, ...draft,
@@ -84,7 +92,7 @@ export function DraftEditor({ draft, onClose, onSaved }: { draft: Draft; onClose
     const set = (k: keyof ExperienceEntry, v: any) => setForm(p => ({ ...p, [k]: v }));
 
     return (
-        <Drawer onClose={onClose}>
+        <Drawer onClose={onClose} docked={docked}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary)' }}>
                     {isNew ? '新建经验草稿' : '审核 / 编辑草稿'}
