@@ -2083,10 +2083,23 @@
     "tags": "Tags",
     "allTags": "All",
     "nav": {
-      "team": "Team experience",
+      "team": "Company feed",
       "mine": "My experience",
       "history": "Legacy (to triage)"
     },
-    "distill": "Distill to experience"
+    "distill": "Distill to experience",
+    "stat": {
+      "total": "Entries",
+      "today": "Today",
+      "cited": "Adopted"
+    },
+    "topContributors": "Top contributors",
+    "trendingTags": "Trending tags",
+    "mineHint": "Experience you started or can manage; includes legacy imports from the old Plaza.",
+    "emptyTitle": "No published experience yet",
+    "emptyBody": "In a chat with a digital employee, click “Distill to experience”, or create one directly — capture what the team learned and AI will retrieve it on relevant tasks.",
+    "sidebarEmpty": "Once entries are published, top contributors and tags will show here.",
+    "mineEmpty": "No experience under this category yet.",
+    "historyEmpty": "No legacy imports from the old Plaza."
   }
 }

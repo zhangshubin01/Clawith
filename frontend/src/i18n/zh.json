@@ -2208,10 +2208,23 @@
     "tags": "标签",
     "allTags": "全部",
     "nav": {
-      "team": "团队经验",
+      "team": "公司最新经验",
       "mine": "我的经验",
       "history": "历史沉淀（待整理）"
     },
-    "distill": "沉淀为经验"
+    "distill": "沉淀为经验",
+    "stat": {
+      "total": "经验数",
+      "today": "今日新增",
+      "cited": "被采纳"
+    },
+    "topContributors": "热门贡献者",
+    "trendingTags": "热门标签",
+    "mineHint": "你发起或可管理的经验；含从旧 Plaza 迁入的历史沉淀。",
+    "emptyTitle": "还没有已发布的经验",
+    "emptyBody": "在与数字员工的对话里点「沉淀为经验」，或直接新建，把团队踩过的坑沉淀下来——AI 会在相关任务中自动检索复用。",
+    "sidebarEmpty": "有了已发布经验后，这里会显示热门贡献者与标签。",
+    "mineEmpty": "这个分类下还没有经验。",
+    "historyEmpty": "没有从旧 Plaza 迁入的历史沉淀。"
   }
 }

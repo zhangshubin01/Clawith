@@ -642,4 +642,6 @@ export const experienceApi = {
         request<ExperienceEntry>(`/experience/entries/${id}/review`, { method: 'POST' }),
     references: (id: string) =>
         request<{ entry_id: string; read_count: number; cited_count: number }>(`/experience/entries/${id}/references`),
+    stats: () =>
+        request<{ total: number; today: number; cited: number; top_contributors: { name: string; count: number }[] }>('/experience/stats'),
 };

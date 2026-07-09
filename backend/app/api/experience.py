@@ -483,3 +483,63 @@ async def entry_references(entry_id: uuid.UUID, current_user: User = Depends(get
             read_count=counts.get("read", 0),
             cited_count=counts.get("cited", 0),
         )
+
+
+class LibraryStats(BaseModel):
+    total: int
+    today: int
+    cited: int
+    top_contributors: list[dict]
+
+
+@router.get("/stats", response_model=LibraryStats)
+async def library_stats(current_user: User = Depends(get_current_user)):
+    """Header stats for the 公司最新经验 feed, over entries visible to the caller.
+
+    total = published visible entries; today = of those, created today;
+    cited = adoption events on them; top_contributors = publishers by entry count.
+    """
+    eff = _effective_tenant_id(current_user)
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    async with async_session() as db:
+        base = [ExperienceEntry.status == "published", ExperienceEntry.origin != "legacy_plaza"]
+        if eff:
+            base.append(ExperienceEntry.tenant_id == eff)
+        if not _is_admin(current_user):
+            dept_ids = await _user_department_ids(db, current_user)
+            base.append(_human_visibility_condition(dept_ids, current_user.id))
+
+        total = (await db.execute(select(func.count(ExperienceEntry.id)).where(*base))).scalar() or 0
+        today = (
+            await db.execute(select(func.count(ExperienceEntry.id)).where(*base, ExperienceEntry.created_at >= today_start))
+        ).scalar() or 0
+
+        visible_ids = select(ExperienceEntry.id).where(*base)
+        cited = (
+            await db.execute(
+                select(func.count(ExperienceReference.id)).where(
+                    ExperienceReference.kind == "cited",
+                    ExperienceReference.entry_id.in_(visible_ids),
+                )
+            )
+        ).scalar() or 0
+
+        rows = (
+            await db.execute(
+                select(ExperienceEntry.created_by, func.count(ExperienceEntry.id).label("n"))
+                .where(*base)
+                .group_by(ExperienceEntry.created_by)
+                .order_by(desc("n"))
+                .limit(5)
+            )
+        ).all()
+        contributors = []
+        if rows:
+            uids = [r[0] for r in rows]
+            users = {
+                u.id: (u.display_name or u.username or "—")
+                for u in (await db.execute(select(User).where(User.id.in_(uids)))).scalars().all()
+            }
+            contributors = [{"name": users.get(r[0], "—"), "count": r[1]} for r in rows]
+
+        return LibraryStats(total=total, today=today, cited=cited, top_contributors=contributors)
