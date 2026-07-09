@@ -12,6 +12,7 @@ Read != used — the kill-switch metric counts `cited` only.
 All reads honor P0-6 visibility and never surface legacy_plaza imports.
 """
 
+import math
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -135,7 +136,29 @@ async def build_experience_hint(agent_id: uuid.UUID) -> str:
                     )
                 )
             ).scalar()
-            return _HINT if has_any else ""
+            if not has_any:
+                return ""
+            hint = _HINT
+            # ④ Existing tag vocabulary — nudge the agent to reuse tags instead of coining near-duplicates.
+            tag_rows = await db.execute(
+                select(ExperienceEntry.tags).where(
+                    ExperienceEntry.tenant_id == agent.tenant_id,
+                    ExperienceEntry.status != "retired",
+                )
+            )
+            counts: dict[str, int] = {}
+            for (tags,) in tag_rows.all():
+                for tg in (tags or []):
+                    tg = str(tg).strip()
+                    if tg:
+                        counts[tg] = counts.get(tg, 0) + 1
+            if counts:
+                top = [tg for tg, _ in sorted(counts.items(), key=lambda x: -x[1])[:40]]
+                hint += (
+                    "\n沉淀经验时，标签优先从下列现有标签中复用；语义相同就用既有的，不要新造近义标签："
+                    + " / ".join(top)
+                )
+            return hint
     except Exception as e:
         logger.warning(f"build_experience_hint failed for {agent_id}: {e}")
         return ""
@@ -183,7 +206,9 @@ async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
             # A CJK compound token (e.g. "合同条款") that doesn't appear verbatim also matches on any of
             # its 2-char slices ("合同"/"条款") — approximates Chinese segmentation without a tokenizer.
             token_needles = [_token_needles(tok) for tok in tokens]
-            scored: list[tuple[int, ExperienceEntry]] = []
+            # First pass: which query tokens each entry matches, and each token's document frequency.
+            hits: list[tuple[ExperienceEntry, set[int]]] = []
+            df = [0] * len(tokens)
             for e in pool:
                 blob = " ".join(
                     filter(None, [
@@ -191,15 +216,21 @@ async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
                         " ".join(str(t) for t in (e.tags or [])),
                     ])
                 ).lower()
-                score = sum(1 for needles in token_needles if any(n in blob for n in needles))
-                if score:
-                    scored.append((score, e))
+                matched = {ti for ti, needles in enumerate(token_needles) if any(n in blob for n in needles)}
+                if matched:
+                    for ti in matched:
+                        df[ti] += 1
+                    hits.append((e, matched))
 
-            if not scored:
+            if not hits:
                 return f"No experience entries match “{keyword}”. Proceed without internal experience."
 
-            # Rank: more matched tokens first, then more-recently reviewed.
+            # Score = sum of matched tokens' IDF. Rarer tokens weigh more; smoothed so any
+            # match always scores > 0 (log((N+1)/df) stays positive even when df == N).
+            n_docs = len(pool)
+            idf = [math.log((n_docs + 1) / d) if d else 0.0 for d in df]
             _floor = datetime.min.replace(tzinfo=timezone.utc)
+            scored = [(sum(idf[ti] for ti in matched), e) for e, matched in hits]
             scored.sort(key=lambda se: (se[0], se[1].last_reviewed_at or _floor), reverse=True)
             entries = [e for _, e in scored[:_MAX_CANDIDATES]]
 

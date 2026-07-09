@@ -288,6 +288,18 @@ def _norm(s: str | None) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+def _norm_tags(tags) -> list[str]:
+    """Strip/collapse whitespace, drop blanks, dedupe (case-insensitive), keep order."""
+    out, seen = [], set()
+    for t in (tags or []):
+        t = _norm(str(t))
+        k = t.lower()
+        if t and k not in seen:
+            seen.add(k)
+            out.append(t)
+    return out
+
+
 def _signature(title, scenario, problem, solution, applicability) -> tuple:
     return tuple(_norm(x) for x in (title, scenario, problem, solution, applicability))
 
@@ -331,7 +343,7 @@ async def create_entry(body: EntryCreate, current_user: User = Depends(get_curre
             problem=body.problem,
             solution=body.solution,
             applicability=body.applicability,
-            tags=body.tags or [],
+            tags=_norm_tags(body.tags),
             status="draft",
             visibility_scope=scope,
             visibility_scope_id=body.visibility_scope_id if scope != "company" else None,
@@ -489,6 +501,8 @@ async def update_entry(entry_id: uuid.UUID, body: EntryUpdate, current_user: Use
         for field, value in data.items():
             if field == "title" and value is not None:
                 value = value[:200]
+            if field == "tags" and value is not None:
+                value = _norm_tags(value)
             setattr(entry, field, value)
         if entry.visibility_scope == "company":
             entry.visibility_scope_id = None
