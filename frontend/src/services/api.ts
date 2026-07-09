@@ -632,6 +632,10 @@ export const experienceApi = {
     get: (id: string) => request<ExperienceEntry>(`/experience/entries/${id}`),
     createDraftFromContent: (data: { agent_id: string; content: string; session_id?: string }) =>
         request<ExperienceEntry>('/experience/drafts', { method: 'POST', body: JSON.stringify(data) }),
+    // Distill chat content into the four-part fields WITHOUT persisting (human confirms in the editor).
+    distill: (data: { agent_id: string; content: string; session_id?: string }) =>
+        request<{ title: string; scenario: string; problem: string; solution: string; applicability: string; tags: string[] }>(
+            '/experience/distill', { method: 'POST', body: JSON.stringify(data) }),
     create: (data: Partial<ExperienceEntry>) =>
         request<ExperienceEntry>('/experience/entries', { method: 'POST', body: JSON.stringify(data) }),
     update: (id: string, data: Partial<ExperienceEntry>) =>

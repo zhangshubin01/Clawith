@@ -366,39 +366,51 @@ function CopyMessageButton({ text }: { text: string }) {
 /** "沉淀为经验" — distill this message into a structured draft, then open review (P0-2). */
 function DistillButton({ text, sessionId }: { text: string; sessionId?: string | null }) {
     const { id: agentId } = useParams<{ id: string }>();
-    const navigate = useNavigate();
+    const qc = useQueryClient();
+    const toast = useToast();
     const [busy, setBusy] = React.useState(false);
+    const [draft, setDraft] = React.useState<ExperienceDraft | null>(null);
     const handle = async (e: React.MouseEvent) => {
         e.stopPropagation();
         if (!agentId || busy) return;
         setBusy(true);
         try {
-            const draft = await experienceApi.createDraftFromContent({
-                agent_id: agentId, content: text, session_id: sessionId || undefined,
-            });
-            navigate(`/plaza?draft=${draft.id}`);
+            // Distill only — nothing persists until the human confirms in the drawer below.
+            const f = await experienceApi.distill({ agent_id: agentId, content: text, session_id: sessionId || undefined });
+            setDraft({ ...f, visibility_scope: 'company', origin_agent_id: agentId, origin_session_id: sessionId || null });
         } catch (err) {
             console.error('Distill failed', err);
+            toast.error('生成草稿失败，请重试');
+        } finally {
             setBusy(false);
         }
     };
     return (
-        <button
-            onClick={handle}
-            title="沉淀为经验"
-            disabled={busy}
-            style={{
-                background: 'none', border: 'none', cursor: busy ? 'wait' : 'pointer', padding: '2px',
-                color: 'var(--text-tertiary)', opacity: 0.5, transition: 'opacity .15s, color .15s',
-                display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle', marginLeft: '6px', flexShrink: 0,
-            }}
-            onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
-            onMouseLeave={e => (e.currentTarget.style.opacity = '0.5')}
-        >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /><path d="M9 7h6M9 11h4" />
-            </svg>
-        </button>
+        <>
+            <button
+                onClick={handle}
+                title="沉淀为经验"
+                disabled={busy}
+                style={{
+                    background: 'none', border: 'none', cursor: busy ? 'wait' : 'pointer', padding: '2px',
+                    color: 'var(--text-tertiary)', opacity: 0.5, transition: 'opacity .15s, color .15s',
+                    display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle', marginLeft: '6px', flexShrink: 0,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+                onMouseLeave={e => (e.currentTarget.style.opacity = '0.5')}
+            >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /><path d="M9 7h6M9 11h4" />
+                </svg>
+            </button>
+            {draft && (
+                <ExperienceDraftEditor
+                    draft={draft}
+                    onClose={() => setDraft(null)}
+                    onSaved={() => { setDraft(null); qc.invalidateQueries({ queryKey: ['experience'] }); toast.success('沉淀成功'); }}
+                />
+            )}
+        </>
     );
 }
 
@@ -438,6 +450,7 @@ function ExperienceCitations({ ids }: { ids: string[] }) {
 function ExperienceDraftCard({ args, sessionId }: { args: any; sessionId?: string | null }) {
     const { id: agentId } = useParams<{ id: string }>();
     const qc = useQueryClient();
+    const toast = useToast();
     const [open, setOpen] = React.useState(false);
     // tool args may arrive as an object or a JSON string.
     const a = React.useMemo(() => {
@@ -478,7 +491,7 @@ function ExperienceDraftCard({ args, sessionId }: { args: any; sessionId?: strin
                 <ExperienceDraftEditor
                     draft={prefill}
                     onClose={() => setOpen(false)}
-                    onSaved={() => { setOpen(false); qc.invalidateQueries({ queryKey: ['experience'] }); }}
+                    onSaved={() => { setOpen(false); qc.invalidateQueries({ queryKey: ['experience'] }); toast.success('沉淀成功'); }}
                 />
             )}
         </div>

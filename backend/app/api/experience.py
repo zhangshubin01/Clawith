@@ -336,12 +336,69 @@ def _parse_draft_json(text: str) -> dict:
         return {}
 
 
-@router.post("/drafts", response_model=EntryOut)
-async def create_draft_from_content(body: DraftFromContent, current_user: User = Depends(get_current_user)):
-    """P0-2: distill selected chat content into a structured draft (never auto-published).
+class DistillResult(BaseModel):
+    title: str = ""
+    scenario: str = ""
+    problem: str = ""
+    solution: str = ""
+    applicability: str = ""
+    tags: list[str] = Field(default_factory=list)
 
-    On LLM/parse failure, returns a draft with the raw content in `problem` so the
-    human can still fill it in — the flow never hard-fails.
+
+async def _distill_fields(db, agent, content: str) -> dict:
+    """Run the LLM distillation and normalize to the four-part fields. Persists nothing.
+
+    On LLM/parse failure, seeds `problem` with the raw text so the human can still
+    fill it in — the flow never hard-fails.
+    """
+    fields: dict = {}
+    try:
+        model_id = agent.primary_model_id or agent.fallback_model_id
+        model = (
+            (await db.execute(select(LLMModel).where(LLMModel.id == model_id))).scalar_one_or_none()
+            if model_id else None
+        )
+        if model:
+            from app.services.llm import get_model_api_key
+            from app.services.llm.client import chat_complete
+
+            resp = await chat_complete(
+                provider=model.provider,
+                api_key=get_model_api_key(model),
+                model=model.model,
+                base_url=model.base_url,
+                messages=[
+                    {"role": "system", "content": _DISTILL_SYSTEM},
+                    {"role": "user", "content": content[:6000]},
+                ],
+                temperature=0.2,
+            )
+            fields = _parse_draft_json(resp["choices"][0]["message"].get("content") or "")
+    except Exception as e:
+        logger.warning(f"Experience distillation LLM call failed: {e}")
+
+    tags = fields.get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+    problem = (fields.get("problem") or "").strip()
+    if not any((fields.get(k) or "").strip() for k in FOUR_PARTS):
+        problem = content[:2000]
+    return {
+        "title": (fields.get("title") or "")[:200],
+        "scenario": fields.get("scenario") or "",
+        "problem": problem,
+        "solution": fields.get("solution") or "",
+        "applicability": fields.get("applicability") or "",
+        "tags": [str(t)[:40] for t in tags][:5],
+    }
+
+
+@router.post("/distill", response_model=DistillResult)
+async def distill_content(body: DraftFromContent, current_user: User = Depends(get_current_user)):
+    """Distill selected chat content into the four-part fields WITHOUT persisting.
+
+    The human reviews/confirms in the editor; a row is created only then (via /entries).
+    Keeps the human-gate: clicking 沉淀 creates no library row until the user confirms.
     """
     if not body.content.strip():
         raise HTTPException(400, "Content cannot be empty")
@@ -350,55 +407,26 @@ async def create_draft_from_content(body: DraftFromContent, current_user: User =
         agent = (await db.execute(select(Agent).where(Agent.id == body.agent_id))).scalar_one_or_none()
         if not agent or (eff and str(agent.tenant_id) != eff):
             raise HTTPException(404, "Agent not found")
+        return DistillResult(**await _distill_fields(db, agent, body.content))
 
-        fields: dict = {}
-        try:
-            model_id = agent.primary_model_id or agent.fallback_model_id
-            model = (
-                (await db.execute(select(LLMModel).where(LLMModel.id == model_id))).scalar_one_or_none()
-                if model_id else None
-            )
-            if model:
-                from app.services.llm import get_model_api_key
-                from app.services.llm.client import chat_complete
 
-                resp = await chat_complete(
-                    provider=model.provider,
-                    api_key=get_model_api_key(model),
-                    model=model.model,
-                    base_url=model.base_url,
-                    messages=[
-                        {"role": "system", "content": _DISTILL_SYSTEM},
-                        {"role": "user", "content": body.content[:6000]},
-                    ],
-                    temperature=0.2,
-                )
-                fields = _parse_draft_json(resp["choices"][0]["message"].get("content") or "")
-        except Exception as e:
-            logger.warning(f"Experience distillation LLM call failed: {e}")
-
-        tags = fields.get("tags") or []
-        if not isinstance(tags, list):
-            tags = []
-        # Graceful fallback: if the model produced nothing usable, seed problem with the raw text.
-        problem = (fields.get("problem") or "").strip()
-        if not any((fields.get(k) or "").strip() for k in FOUR_PARTS):
-            problem = body.content[:2000]
-
+@router.post("/drafts", response_model=EntryOut)
+async def create_draft_from_content(body: DraftFromContent, current_user: User = Depends(get_current_user)):
+    """Distill + persist a draft in one step (kept for compatibility). Prefer /distill
+    then /entries so nothing persists until the human confirms."""
+    if not body.content.strip():
+        raise HTTPException(400, "Content cannot be empty")
+    eff = _effective_tenant_id(current_user)
+    async with async_session() as db:
+        agent = (await db.execute(select(Agent).where(Agent.id == body.agent_id))).scalar_one_or_none()
+        if not agent or (eff and str(agent.tenant_id) != eff):
+            raise HTTPException(404, "Agent not found")
+        f = await _distill_fields(db, agent, body.content)
         entry = ExperienceEntry(
-            tenant_id=eff,
-            title=(fields.get("title") or "")[:200],
-            scenario=fields.get("scenario") or "",
-            problem=problem,
-            solution=fields.get("solution") or "",
-            applicability=fields.get("applicability") or "",
-            tags=[str(t)[:40] for t in tags][:5],
-            status="draft",
-            visibility_scope="company",
-            origin="chat",
-            origin_session_id=body.session_id,
-            origin_agent_id=body.agent_id,
-            created_by=current_user.id,
+            tenant_id=eff, title=f["title"], scenario=f["scenario"], problem=f["problem"],
+            solution=f["solution"], applicability=f["applicability"], tags=f["tags"],
+            status="draft", visibility_scope="company", origin="chat",
+            origin_session_id=body.session_id, origin_agent_id=body.agent_id, created_by=current_user.id,
         )
         db.add(entry)
         await db.commit()
