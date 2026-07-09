@@ -6,6 +6,7 @@
  * confirms here (save draft or publish).
  */
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useMutation } from '@tanstack/react-query';
 import { experienceApi, type ExperienceEntry } from '../services/api';
 
@@ -35,24 +36,43 @@ const inputStyle: React.CSSProperties = {
     fontSize: 14, background: 'var(--bg-primary)', color: 'var(--text-primary)', boxSizing: 'border-box',
 };
 
-export function Drawer({ children, onClose, docked = false }: { children: React.ReactNode; onClose: () => void; docked?: boolean }) {
-    // Solid elevated surface (opaque) + own scroll so long forms are fully reachable.
+export function Drawer({ header, children, footer, onClose, docked = false }: {
+    header?: React.ReactNode; children: React.ReactNode; footer?: React.ReactNode;
+    onClose: () => void; docked?: boolean;
+}) {
+    // Flex column: fixed header / scrollable body / pinned footer. Solid opaque surface.
     const panel = (
         <div onClick={e => e.stopPropagation()} style={{
             position: 'fixed', top: 0, right: 0, height: '100vh',
             width: docked ? 'min(460px, 46vw)' : 'min(560px, 92vw)',
             background: 'var(--bg-elevated)', borderLeft: '1px solid var(--border-strong, var(--border-default))',
-            boxShadow: '-8px 0 32px rgba(0,0,0,.28)', overflowY: 'auto', WebkitOverflowScrolling: 'touch',
-            padding: 24, zIndex: 1001, boxSizing: 'border-box',
-        }}>{children}</div>
+            boxShadow: '-8px 0 32px rgba(0,0,0,.28)', zIndex: 1001, boxSizing: 'border-box',
+            display: 'flex', flexDirection: 'column',
+        }}>
+            {header && (
+                <div style={{ flex: 'none', padding: '20px 24px 12px', borderBottom: '1px solid var(--border-default)' }}>
+                    {header}
+                </div>
+            )}
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', WebkitOverflowScrolling: 'touch', padding: 24 }}>
+                {children}
+            </div>
+            {footer && (
+                <div style={{ flex: 'none', padding: '14px 24px', borderTop: '1px solid var(--border-default)', background: 'var(--bg-elevated)' }}>
+                    {footer}
+                </div>
+            )}
+        </div>
     );
-    // Docked: no backdrop — the rest of the page stays fully bright, scrollable and interactive.
-    if (docked) return panel;
-    return (
+    // Docked: no backdrop — the rest of the page stays fully bright and interactive.
+    const content = docked ? panel : (
         <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)', zIndex: 1000 }}>
             {panel}
         </div>
     );
+    // Portal to <body> so the drawer escapes any opacity/transform ancestor in the chat DOM
+    // (which would otherwise make it translucent and break position:fixed sizing).
+    return createPortal(content, document.body);
 }
 
 export function DraftEditor({ draft, onClose, onSaved, docked }: { draft: Draft; onClose: () => void; onSaved: () => void; docked?: boolean }) {
@@ -92,15 +112,31 @@ export function DraftEditor({ draft, onClose, onSaved, docked }: { draft: Draft;
     const fourFilled = EXP_FIELDS.every(f => ((form[f.key] as string) || '').trim());
     const set = (k: keyof ExperienceEntry, v: any) => setForm(p => ({ ...p, [k]: v }));
 
-    return (
-        <Drawer onClose={onClose} docked={docked}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary)' }}>
-                    {isNew ? '新建经验草稿' : '审核 / 编辑草稿'}
-                </h2>
-                <button onClick={onClose} style={{ ...secondaryBtn, padding: '4px 10px' }}>✕</button>
+    const header = (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary)' }}>
+                {isNew ? '新建经验草稿' : '审核 / 编辑草稿'}
+            </h2>
+            <button onClick={onClose} style={{ ...secondaryBtn, padding: '4px 10px' }}>✕</button>
+        </div>
+    );
+
+    const footer = (
+        <>
+            {err && <div style={{ color: 'var(--error)', fontSize: 13, margin: '0 0 10px' }}>{err}</div>}
+            <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => save.mutate()} style={secondaryBtn} disabled={save.isPending}>保存草稿</button>
+                <button onClick={() => publish.mutate()} style={{ ...primaryBtn, opacity: fourFilled ? 1 : .5 }}
+                    disabled={!fourFilled || publish.isPending} title={fourFilled ? '' : '四段缺一不可发布'}>
+                    确认入库（发布）
+                </button>
             </div>
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '6px 0 16px' }}>
+        </>
+    );
+
+    return (
+        <Drawer onClose={onClose} docked={docked} header={header} footer={footer}>
+            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '0 0 16px' }}>
                 四段齐全（尤其“适用条件与失效信号”）方可发布；发布前均可修改。
             </p>
 
@@ -136,16 +172,6 @@ export function DraftEditor({ draft, onClose, onSaved, docked }: { draft: Draft;
                     组织架构未同步时，部门/用户可见性发布后会自动降级为全公司。
                 </p>
             )}
-
-            {err && <div style={{ color: 'var(--error)', fontSize: 13, margin: '10px 0' }}>{err}</div>}
-
-            <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
-                <button onClick={() => save.mutate()} style={secondaryBtn} disabled={save.isPending}>保存草稿</button>
-                <button onClick={() => publish.mutate()} style={{ ...primaryBtn, opacity: fourFilled ? 1 : .5 }}
-                    disabled={!fourFilled || publish.isPending} title={fourFilled ? '' : '四段缺一不可发布'}>
-                    确认入库（发布）
-                </button>
-            </div>
         </Drawer>
     );
 }
