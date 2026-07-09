@@ -41,6 +41,19 @@ _HINT = (
 )
 
 _MAX_CANDIDATES = 8
+_SEARCH_POOL_CAP = 500  # visible-published rows scored in Python per search; log if exceeded
+
+
+def _token_needles(token: str) -> list[str]:
+    """Substrings that count as a match for one query token.
+
+    For CJK compounds longer than 2 chars (which whitespace tokenization can't split),
+    also accept any adjacent 2-char slice — a lightweight stand-in for segmentation so
+    "合同条款" matches text containing "合同" or "条款".
+    """
+    if len(token) > 2 and any("一" <= c <= "鿿" for c in token):
+        return [token] + [token[i:i + 2] for i in range(len(token) - 1)]
+    return [token]
 
 
 async def _resolve_agent(db, agent_id: uuid.UUID) -> Agent | None:
@@ -124,7 +137,10 @@ async def build_experience_hint(agent_id: uuid.UUID) -> str:
 async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
     """Keyword search over the visible, published library. Returns lightweight candidates."""
     keyword = (arguments.get("keyword") or arguments.get("query") or "").strip()
-    if not keyword:
+    # Tokenize on whitespace: agents pass multi-word queries (e.g. "合同 验收 合格"),
+    # which must match per-term, not as one contiguous substring. Dedup, keep order.
+    tokens = list(dict.fromkeys(tok for tok in keyword.lower().split() if tok))[:24]
+    if not tokens:
         return "Provide a `keyword` to search the experience library."
     try:
         async with async_session() as db:
@@ -133,49 +149,52 @@ async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
                 return "This agent cannot access the experience library."
             dept_ids = await _agent_department_ids(db, agent)
 
-            like = f"%{keyword}%"
-            q = (
+            # Candidate pool: entries visible to this agent (published, non-legacy).
+            # Tokenized scoring across all four parts + title + JSON tags is done in Python —
+            # tags aren't portably matchable in SQL, and per-token scoring drives ranking.
+            # For a curated private library this pool is small.
+            pool_q = (
                 select(ExperienceEntry)
                 .where(
                     ExperienceEntry.tenant_id == agent.tenant_id,
                     ExperienceEntry.status == "published",
                     ExperienceEntry.origin != "legacy_plaza",
                     _visibility_condition(dept_ids),
-                    or_(
-                        ExperienceEntry.title.ilike(like),
-                        ExperienceEntry.applicability.ilike(like),
-                        ExperienceEntry.scenario.ilike(like),
-                    ),
                 )
                 .order_by(ExperienceEntry.last_reviewed_at.desc())
-                .limit(_MAX_CANDIDATES)
+                .limit(_SEARCH_POOL_CAP + 1)
             )
-            entries = (await db.execute(q)).scalars().all()
-
-            # Tag matches aren't expressible in SQL portably; fold them in as a fallback.
-            if len(entries) < _MAX_CANDIDATES:
-                seen = {e.id for e in entries}
-                tag_q = (
-                    select(ExperienceEntry)
-                    .where(
-                        ExperienceEntry.tenant_id == agent.tenant_id,
-                        ExperienceEntry.status == "published",
-                        ExperienceEntry.origin != "legacy_plaza",
-                        _visibility_condition(dept_ids),
-                    )
-                    .order_by(ExperienceEntry.last_reviewed_at.desc())
-                    .limit(50)
+            pool = (await db.execute(pool_q)).scalars().all()
+            if len(pool) > _SEARCH_POOL_CAP:
+                logger.warning(
+                    f"search_experience: visible pool exceeds {_SEARCH_POOL_CAP} for agent {agent_id}; "
+                    "ranking over the most-recently-reviewed subset only (evolve to tag/keyword prefilter)."
                 )
-                for e in (await db.execute(tag_q)).scalars().all():
-                    if e.id in seen:
-                        continue
-                    if any(keyword.lower() in str(t).lower() for t in (e.tags or [])):
-                        entries.append(e)
-                        if len(entries) >= _MAX_CANDIDATES:
-                            break
+                pool = pool[:_SEARCH_POOL_CAP]
 
-            if not entries:
+            # Score each entry by how many query tokens appear across title + 场景/问题/解决/适用 + tags.
+            # A CJK compound token (e.g. "合同条款") that doesn't appear verbatim also matches on any of
+            # its 2-char slices ("合同"/"条款") — approximates Chinese segmentation without a tokenizer.
+            token_needles = [_token_needles(tok) for tok in tokens]
+            scored: list[tuple[int, ExperienceEntry]] = []
+            for e in pool:
+                blob = " ".join(
+                    filter(None, [
+                        e.title, e.scenario, e.problem, e.solution, e.applicability,
+                        " ".join(str(t) for t in (e.tags or [])),
+                    ])
+                ).lower()
+                score = sum(1 for needles in token_needles if any(n in blob for n in needles))
+                if score:
+                    scored.append((score, e))
+
+            if not scored:
                 return f"No experience entries match “{keyword}”. Proceed without internal experience."
+
+            # Rank: more matched tokens first, then more-recently reviewed.
+            _floor = datetime.min.replace(tzinfo=timezone.utc)
+            scored.sort(key=lambda se: (se[0], se[1].last_reviewed_at or _floor), reverse=True)
+            entries = [e for _, e in scored[:_MAX_CANDIDATES]]
 
             lines = [
                 f"Found {len(entries)} candidate experience entr(y/ies) for “{keyword}”. "
