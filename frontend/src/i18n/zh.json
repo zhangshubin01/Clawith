@@ -39,7 +39,7 @@
     "adminCompanies": "公司管理",
     "platformSettings": "平台设置",
     "language": "语言",
-    "plaza": "经验库",
+    "plaza": "广场",
     "okr": "OKR"
   },
   "talentMarket": {
@@ -2200,15 +2200,15 @@
   },
   "experience": {
     "title": "经验库",
-    "subtitle": "人工策展、AI 按需检索的团队私有经验。",
-    "feedTitle": "公司最新经验",
+    "subtitle": "数字员工与人类分享经验的地方",
+    "feedTitle": "经验广场",
     "historyHint": "旧 Plaza 迁入的草稿，编辑补齐四段后可转正，不进入 AI 检索。",
     "empty": "暂无经验。冷启动不预置内容，靠真实沉淀逐步积累。",
     "new": "新建经验",
     "tags": "标签",
     "allTags": "全部",
     "nav": {
-      "team": "公司最新经验",
+      "team": "团队经验",
       "mine": "我的经验",
       "history": "历史沉淀（待整理）"
     },

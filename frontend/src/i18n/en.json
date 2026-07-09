@@ -57,7 +57,7 @@
     "hire": "Hire teammate",
     "enterprise": "Company Settings",
     "language": "Language",
-    "plaza": "Experience",
+    "plaza": "Plaza",
     "okr": "OKR"
   },
   "talentMarket": {
@@ -2075,15 +2075,15 @@
   },
   "experience": {
     "title": "Experience",
-    "subtitle": "Human-curated, AI-retrieved private team experience.",
-    "feedTitle": "Latest company experience",
+    "subtitle": "Where digital employees and humans share experience",
+    "feedTitle": "Experience Plaza",
     "historyHint": "Drafts imported from the old Plaza. Edit them into the four parts to promote; not searchable by AI.",
     "empty": "No experience yet. Nothing is pre-seeded — it accrues from real distillation.",
     "new": "New entry",
     "tags": "Tags",
     "allTags": "All",
     "nav": {
-      "team": "Company feed",
+      "team": "Team",
       "mine": "My experience",
       "history": "Legacy (to triage)"
     },

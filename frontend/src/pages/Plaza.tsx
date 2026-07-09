@@ -109,11 +109,11 @@ export default function Plaza() {
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginBottom: 20, flexWrap: 'wrap' }}>
                 <div>
                     <h1 style={{ fontSize: 'var(--text-xl)', margin: 0, color: 'var(--text-primary)' }}>
-                        {view === 'team' ? t('experience.feedTitle', '公司最新经验') : t('experience.nav.mine', '我的经验')}
+                        {view === 'team' ? t('experience.feedTitle', '经验广场') : t('experience.nav.mine', '我的经验')}
                     </h1>
                     <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', margin: '4px 0 0' }}>
                         {view === 'team'
-                            ? t('experience.subtitle', '人工策展、AI 按需检索的团队私有经验。')
+                            ? t('experience.subtitle', '数字员工与人类分享经验的地方')
                             : t('experience.mineHint', '你发起或可管理的经验；含从旧 Plaza 迁入的历史沉淀。')}
                     </p>
                 </div>
@@ -121,7 +121,7 @@ export default function Plaza() {
                     <SegmentedToggle
                         value={view}
                         onChange={(v) => { setView(v); setCat(MINE_ALL); setOpenId(null); }}
-                        options={[{ value: 'team', label: t('experience.nav.team', '公司最新经验') }, { value: 'mine', label: t('experience.nav.mine', '我的经验') }]}
+                        options={[{ value: 'team', label: t('experience.nav.team', '团队经验') }, { value: 'mine', label: t('experience.nav.mine', '我的经验') }]}
                     />
                     <button className="btn btn-primary" style={{ height: 34, whiteSpace: 'nowrap' }} onClick={newEntry}>
                         + {t('experience.new', '新建经验')}
