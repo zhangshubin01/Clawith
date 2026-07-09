@@ -1090,7 +1090,7 @@ function describeAnalysis(items: AnalysisItem[], t: (k: string, opts?: any) => s
 }
 
 function AnalysisCard({
-    items, t, expanded, onToggle, isGroupRunning, sessionId,
+    items, t, expanded, onToggle, isGroupRunning, chatActive, sessionId,
 }: {
     items: AnalysisItem[];
     t: (k: string, opts?: any) => string;
@@ -1098,6 +1098,8 @@ function AnalysisCard({
     onToggle: () => void;
     /** True when parent isWaiting/isStreaming AND this is the last active group */
     isGroupRunning: boolean;
+    /** True while the chat is actively streaming/waiting (any turn in flight) */
+    chatActive?: boolean;
     sessionId?: string | null;
 }) {
     // propose_experience_draft is a human-facing proposal, not a reasoning step —
@@ -1108,12 +1110,14 @@ function AnalysisCard({
     const toolItems = items.filter(i => i.type === 'tool') as Extract<AnalysisItem, { type: 'tool' }>[];
     const hasTools = toolItems.length > 0;
     const hasRunningTool = toolItems.some(tc => tc.status === 'running');
-    const isRunning = hasRunningTool || (!hasTools && isGroupRunning);
+    // Stopped responding: a tool is still marked running but the chat is no longer streaming.
+    const stopped = hasRunningTool && chatActive === false;
+    const isRunning = !stopped && (hasRunningTool || (!hasTools && isGroupRunning));
     const runningTool = [...toolItems].reverse().find(tc => tc.status === 'running') ?? null;
     const headerTitle = isRunning && runningTool ? getToolMeta(runningTool).title : describeAnalysis(items, t);
 
     return (
-        <div className={`analysis-trace${expanded ? ' analysis-trace--open' : ''}${isRunning ? ' analysis-trace--running' : ''}`}>
+        <div className={`analysis-trace${expanded ? ' analysis-trace--open' : ''}${isRunning ? ' analysis-trace--running' : ''}${stopped ? ' analysis-trace--stopped' : ''}`}>
             <div className="analysis-trace-shell">
                 <button
                     className="analysis-trace-header"
@@ -6483,6 +6487,7 @@ export default function AgentDetailPage() {
                                                                         expanded={toolGroupExpandedRef.current.has(entry.key) ? !!toolGroupExpandedRef.current.get(entry.key) : false}
                                                                         onToggle={() => toggleToolGroup(entry.key)}
                                                                         isGroupRunning={groupIsRunning}
+                                                                        chatActive={isWaiting || isStreaming}
                                                                         sessionId={activeSessionIdRef.current}
                                                                     />
                                                                 </div>

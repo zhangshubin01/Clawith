@@ -5906,7 +5906,15 @@ select:focus {
 }
 
 .analysis-trace--running .analysis-trace-signal span:first-child {
+  background: var(--success);
   animation: analysis-tool-running-dot 1.25s ease-in-out infinite;
+}
+
+/* Stopped responding: a tool is still marked running but the chat is no longer streaming. */
+.analysis-trace--stopped .analysis-trace-signal span:first-child {
+  background: var(--error);
+  opacity: 1;
+  animation: none;
 }
 
 .analysis-trace-chevron {
