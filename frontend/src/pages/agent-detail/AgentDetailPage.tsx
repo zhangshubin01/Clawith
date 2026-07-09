@@ -9,6 +9,7 @@ import { useToast } from '../../components/Toast/ToastProvider';
 import type { FileBrowserApi } from '../../components/FileBrowser';
 import FileBrowser from '../../components/FileBrowser';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
+import { DraftEditor as ExperienceDraftEditor, type Draft as ExperienceDraft } from '../../components/ExperienceDraftEditor';
 import PromptModal from '../../components/PromptModal';
 import { appendLiveCodeOutput, type LivePreviewState } from '../../components/AgentBayLivePanel';
 import AgentSidePanel, { SidePanelTab } from '../../components/AgentSidePanel';
@@ -425,6 +426,61 @@ function ExperienceCitations({ ids }: { ids: string[] }) {
     return (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
             {ids.map(id => <ExperienceCitation key={id} id={id} />)}
+        </div>
+    );
+}
+
+/**
+ * Renders a propose_experience_draft tool call as a review card. The agent writes
+ * nothing — clicking 沉淀/编辑 opens the shared human-gated DraftEditor prefilled;
+ * a row is created only when the human confirms there.
+ */
+function ExperienceDraftCard({ args, sessionId }: { args: any; sessionId?: string | null }) {
+    const { id: agentId } = useParams<{ id: string }>();
+    const qc = useQueryClient();
+    const [open, setOpen] = React.useState(false);
+    // tool args may arrive as an object or a JSON string.
+    const a = React.useMemo(() => {
+        if (args && typeof args === 'object') return args;
+        try { return JSON.parse(args || '{}'); } catch { return {}; }
+    }, [args]);
+    const toArr = (v: any) => Array.isArray(v) ? v : (typeof v === 'string' && v ? v.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean) : []);
+    const prefill: ExperienceDraft = {
+        title: a.title || '', scenario: a.scenario || '', problem: a.problem || '',
+        solution: a.solution || '', applicability: a.applicability || '', tags: toArr(a.tags),
+        visibility_scope: 'company',
+        origin_agent_id: agentId, origin_session_id: sessionId || null,
+    };
+    const parts: [string, string][] = [
+        ['场景', a.scenario], ['遇到的问题', a.problem], ['解决方式', a.solution], ['适用条件与失效信号', a.applicability],
+    ];
+    return (
+        <div style={{
+            border: '1px solid var(--success)', borderRadius: 'var(--radius-lg, 8px)', padding: 14,
+            background: 'var(--success-subtle)', marginTop: 6,
+        }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                <span>📝</span>
+                <strong style={{ fontSize: 13, color: 'var(--text-primary)' }}>{a.title || '经验草稿'}</strong>
+                <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>· 待你确认（AI 不会自动入库）</span>
+            </div>
+            {parts.map(([label, val]) => (val ? (
+                <div key={label} style={{ fontSize: 12, marginBottom: 4, lineHeight: 1.5 }}>
+                    <span style={{ color: 'var(--text-tertiary)' }}>{label}：</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>{String(val).length > 80 ? String(val).slice(0, 80) + '…' : val}</span>
+                </div>
+            ) : null))}
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <button className="btn btn-primary" style={{ height: 28, fontSize: 12 }} onClick={() => setOpen(true)}>沉淀为经验</button>
+                <button className="btn btn-secondary" style={{ height: 28, fontSize: 12 }} onClick={() => setOpen(true)}>编辑</button>
+            </div>
+            {open && (
+                <ExperienceDraftEditor
+                    draft={prefill}
+                    onClose={() => setOpen(false)}
+                    onSaved={() => { setOpen(false); qc.invalidateQueries({ queryKey: ['experience'] }); }}
+                />
+            )}
         </div>
     );
 }
@@ -5642,6 +5698,10 @@ export default function AgentDetailPage() {
                                                                             if (msg.role === 'tool_call') {
                                                                                 const tName = msg.toolName || (() => { try { return JSON.parse(msg.content || '{}').name; } catch { return ''; } })() || 'tool';
                                                                                 const tArgs = msg.toolArgs || (() => { try { return JSON.parse(msg.content || '{}').args; } catch { return {}; } })();
+                                                                                // Experience draft proposal renders as a human-gated review card, not a raw tool blob.
+                                                                                if (tName === 'propose_experience_draft') {
+                                                                                    return <ExperienceDraftCard key={mi} args={tArgs} sessionId={activeSessionIdRef.current} />;
+                                                                                }
                                                                                 const tResult = msg.toolResult || '';
                                                                                 const argsStr = typeof tArgs === 'string' ? tArgs : JSON.stringify(tArgs || {}, null, 2);
                                                                                 const resultStr = typeof tResult === 'string' ? tResult : JSON.stringify(tResult, null, 2);

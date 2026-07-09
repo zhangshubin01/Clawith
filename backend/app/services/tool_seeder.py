@@ -903,6 +903,36 @@ BUILTIN_TOOLS = [
         "config_schema": {},
     },
     {
+        "name": "propose_experience_draft",
+        "display_name": "Experience: Propose Draft",
+        "description": (
+            "当用户要求你把某条经验『记成经验 / 沉淀』时调用本工具。**此工具不写入任何存储，"
+            "仅将结构化草稿呈现给用户确认**——用户点击『沉淀为经验』并人工确认后才会由人落库。"
+            "你无权直接写入团队经验库，也不要把它写进 memory 或 workspace。"
+            "四段必须填全，尤其 applicability（适用条件与失效信号）为必填。"
+        ),
+        "category": "knowledge",
+        "icon": "📝",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "简短标题"},
+                "scenario": {"type": "string", "description": "场景：这条经验适用的情境"},
+                "problem": {"type": "string", "description": "遇到的问题"},
+                "solution": {"type": "string", "description": "解决方式"},
+                "applicability": {
+                    "type": "string",
+                    "description": "适用条件与失效信号（必填）：此经验在什么前提下成立、出现什么信号说明它已过时失效",
+                },
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "1-3 个简短标签"},
+            },
+            "required": ["title", "scenario", "problem", "solution", "applicability"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
         "name": "execute_code",
         "display_name": "Code Executor",
         "description": "Execute code (Python, Bash, Node.js) in a local sandboxed subprocess within the agent's workspace. Useful for data processing, calculations, file transformations, and automation.",

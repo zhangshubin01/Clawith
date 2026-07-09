@@ -39,7 +39,12 @@ _HINT = (
     "to the user — e.g. begin the relevant part with 「本次参考了团队经验库」and name what you drew on; "
     "and (2) append the marker `[[exp:<entry_id>]]` (id from the search/read results) right there — the "
     "marker is the machine record of adoption, the sentence is for the human. "
-    "If nothing matches, ignore this and do not invent experiences."
+    "If nothing matches, ignore this and do not invent experiences.\n"
+    "你无权写入团队经验库。当用户要求你把某条经验『记成经验 / 沉淀』时，"
+    "不要写进 memory 或 workspace，而是调用 `propose_experience_draft`，把它整理成四段"
+    "（场景 / 遇到的问题 / 解决方式 / 适用条件与失效信号，其中适用条件与失效信号必填），"
+    "并如实回执：例如「我不能直接帮你记成经验，但我已把相关内容整理成结构化草稿，"
+    "点击下方『沉淀为经验』确认后即可入库」。"
 )
 
 _MAX_CANDIDATES = 8
