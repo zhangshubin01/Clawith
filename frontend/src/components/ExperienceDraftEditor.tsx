@@ -36,6 +36,14 @@ const inputStyle: React.CSSProperties = {
     fontSize: 14, background: 'var(--bg-primary)', color: 'var(--text-primary)', boxSizing: 'border-box',
 };
 
+// 2026年7月9日; empty string for null/invalid so callers can fall back.
+const fmtDate = (s?: string | null): string => {
+    if (!s) return '';
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+};
+
 export function Drawer({ header, children, footer, onClose, docked = false }: {
     header?: React.ReactNode; children: React.ReactNode; footer?: React.ReactNode;
     onClose: () => void; docked?: boolean;
@@ -75,8 +83,10 @@ export function Drawer({ header, children, footer, onClose, docked = false }: {
     return createPortal(content, document.body);
 }
 
-export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked }: {
+export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoExtractFailed }: {
     draft: Draft; onClose: () => void; onSaved: () => void; onDeleted?: () => void; docked?: boolean;
+    // Set when a chat distill produced none of the four parts — shows a manual-fill hint.
+    autoExtractFailed?: boolean;
 }) {
     const [form, setForm] = useState<Draft>({
         title: '', scenario: '', problem: '', solution: '', applicability: '',
@@ -160,6 +170,23 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked }: {
             <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '0 0 16px' }}>
                 四段齐全（尤其“适用条件与失效信号”）方可发布；发布前均可修改。
             </p>
+
+            {autoExtractFailed && (
+                <div style={{
+                    fontSize: 13, color: 'var(--error)', background: 'var(--error-subtle)',
+                    border: '1px solid var(--error)', borderRadius: 8, padding: '8px 11px', margin: '0 0 16px',
+                }}>
+                    未能自动抽取，请手动填写。
+                </div>
+            )}
+
+            {draft.created_at && (
+                <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-tertiary)', margin: '0 0 16px' }}>
+                    <span>添加日期：{fmtDate(draft.created_at) || '—'}</span>
+                    <span>修改日期：{fmtDate(draft.updated_at) || '—'}</span>
+                    <span>复核日期：{fmtDate(draft.last_reviewed_at) || '未复核'}</span>
+                </div>
+            )}
 
             <label style={labelStyle}>标题</label>
             <input value={form.title || ''} onChange={e => set('title', e.target.value)} style={inputStyle} maxLength={200} />

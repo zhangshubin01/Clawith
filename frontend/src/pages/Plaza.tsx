@@ -15,6 +15,14 @@ import { DraftEditor, Drawer, EXP_FIELDS, secondaryBtn, type Draft } from '../co
 
 const SCOPE_LABELS: Record<string, string> = { company: '全公司', department: '本部门', user: '指定人' };
 
+// 2026年7月9日; empty string for null/invalid.
+function fmtDate(s?: string | null): string {
+    if (!s) return '';
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+}
+
 function freshness(entry: ExperienceEntry): { label: string; stale: boolean } {
     if (entry.status !== 'published') return { label: '', stale: false };
     if (!entry.last_reviewed_at) return { label: '未复核', stale: true };
@@ -415,7 +423,12 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
                 {f.label && <Badge tone={f.stale ? 'warn' : 'ok'}>{f.label}</Badge>}
                 {(entry.tags || []).map(tg => <Badge key={tg}>#{tg}</Badge>)}
             </div>
-            <div style={{ marginBottom: 16 }}><CreatorLine entry={entry} /></div>
+            <div style={{ marginBottom: 12 }}><CreatorLine entry={entry} /></div>
+            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 16 }}>
+                <span>添加日期：{fmtDate(entry.created_at) || '—'}</span>
+                <span>修改日期：{fmtDate(entry.updated_at) || '—'}</span>
+                <span>复核日期：{fmtDate(entry.last_reviewed_at) || '未复核'}</span>
+            </div>
             {EXP_FIELDS.map(fl => (
                 <section key={fl.key} style={{ marginBottom: 14 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>{fl.label}</div>

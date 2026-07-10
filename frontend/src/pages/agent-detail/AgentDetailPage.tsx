@@ -407,6 +407,7 @@ function DistillButton({ text, sessionId }: { text: string; sessionId?: string |
                 <ExperienceDraftEditor
                     draft={draft}
                     docked
+                    autoExtractFailed={(draft as any).extracted === false}
                     onClose={() => setDraft(null)}
                     onSaved={() => { setDraft(null); qc.invalidateQueries({ queryKey: ['experience'] }); toast.success('沉淀成功'); }}
                 />
@@ -3664,7 +3665,7 @@ export default function AgentDetailPage() {
     }, [historyMsgs, activeSession?.id, scheduleHistoryScrollToBottom]);
     // Memoized component for each chat message to avoid re-renders while typing
     const ChatMessageItem = React.useMemo(() => React.memo(({
-        msg, i, isLeft, t, senderLabel, avatarText, forceSenderLabel = false, hideAvatar = false,
+        msg, i, isLeft, t, senderLabel, avatarText, forceSenderLabel = false, hideAvatar = false, hideDistill = false,
     }: {
         msg: any;
         i: number;
@@ -3674,6 +3675,9 @@ export default function AgentDetailPage() {
         avatarText?: string;
         forceSenderLabel?: boolean;
         hideAvatar?: boolean;
+        // True when this message's turn already renders a propose_experience_draft card,
+        // which is itself the review entry point — the manual 沉淀 button would be redundant.
+        hideDistill?: boolean;
     }) => {
         const fe = msg.fileName?.split('.').pop()?.toLowerCase() ?? '';
         const isImage = msg.imageUrl && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
@@ -3721,7 +3725,7 @@ export default function AgentDetailPage() {
                 <div className="chat-msg-timestamp">
                     {timeStr}
                     {msg.content && <CopyMessageButton text={msg.content} />}
-                    {msg.content && isLeft && <DistillButton text={msg.content} sessionId={activeSessionIdRef.current} />}
+                    {msg.content && isLeft && !hideDistill && <DistillButton text={msg.content} sessionId={activeSessionIdRef.current} />}
                 </div>
             );
         })() : null;
@@ -6252,6 +6256,27 @@ export default function AgentDetailPage() {
                                                     const thisAgentPid = isA2A && thisAgentName
                                                         ? historyMsgs.find((m: any) => m.sender_name === thisAgentName)?.participant_id
                                                         : null;
+                                                    // Mark assistant messages whose turn already renders a propose_experience_draft
+                                                    // card (a turn = rows between user messages). Their 沉淀 button is redundant.
+                                                    const proposeTurnIdx = new Set<number>();
+                                                    {
+                                                        const toolNameOf = (mm: any) => mm.toolName || (() => { try { return JSON.parse(mm.content || '{}').name; } catch { return ''; } })();
+                                                        let s = 0;
+                                                        for (let k = 0; k <= historyMsgs.length; k++) {
+                                                            if (k === historyMsgs.length || historyMsgs[k].role === 'user') {
+                                                                let hasPropose = false;
+                                                                for (let j = s; j < k; j++) {
+                                                                    if (historyMsgs[j].role === 'tool_call' && toolNameOf(historyMsgs[j]) === 'propose_experience_draft') { hasPropose = true; break; }
+                                                                }
+                                                                if (hasPropose) {
+                                                                    for (let j = s; j < k; j++) {
+                                                                        if (historyMsgs[j].role === 'assistant' && historyMsgs[j].content?.trim()) proposeTurnIdx.add(j);
+                                                                    }
+                                                                }
+                                                                s = k + 1;
+                                                            }
+                                                        }
+                                                    }
                                                     return historyMsgs.map((m: any, i: number) => {
                                                         // Determine if this message is from "this agent" (left) or peer (right)
                                                         // Actually, "this agent" should be on the RIGHT (like 'me'), and peer on the LEFT
@@ -6301,6 +6326,7 @@ export default function AgentDetailPage() {
                                                                     senderLabel={isHumanReadonly ? (isLeft ? ((agent as any)?.name || 'Agent') : (activeSession.username || 'User')) : undefined}
                                                                     avatarText={isHumanReadonly ? (isLeft ? (((agent as any)?.name || 'Agent')[0]) : ((activeSession.username || 'User')[0])) : undefined}
                                                                     forceSenderLabel={isHumanReadonly}
+                                                                    hideDistill={proposeTurnIdx.has(i)}
                                                                 />
                                                             </React.Fragment>
                                                         );
@@ -6469,6 +6495,10 @@ export default function AgentDetailPage() {
                                                         const hideAssistantAvatar = entry.type === 'msg'
                                                             && entry.msg.role === 'assistant'
                                                             && previousEntry?.type === 'analysis_group';
+                                                        // The assistant text that follows a propose_experience_draft group
+                                                        // already has the review card above it — suppress its 沉淀 button.
+                                                        const prevGroupHasPropose = previousEntry?.type === 'analysis_group'
+                                                            && previousEntry.items.some((it: any) => it.type === 'tool' && it.name === 'propose_experience_draft');
                                                         if (entry.type === 'analysis_group') {
                                                             // Group is considered running if it has a running tool,
                                                             // or if it's the very last entry and the agent is still active
@@ -6513,6 +6543,7 @@ export default function AgentDetailPage() {
                                                                             senderLabel={(agent as any)?.name || 'Agent'}
                                                                             avatarText={((agent as any)?.name || 'Agent')[0]}
                                                                             hideAvatar={hideAssistantAvatar}
+                                                                            hideDistill={prevGroupHasPropose}
                                                                         />
                                                                     )}
                                                                 </React.Fragment>
@@ -6528,6 +6559,7 @@ export default function AgentDetailPage() {
                                                                 senderLabel={msg.role === 'assistant' ? ((agent as any)?.name || 'Agent') : (currentUser?.display_name || undefined)}
                                                                 avatarText={msg.role === 'assistant' ? (((agent as any)?.name || 'Agent')[0]) : (currentUser?.display_name?.[0] || undefined)}
                                                                 hideAvatar={hideAssistantAvatar}
+                                                                hideDistill={prevGroupHasPropose}
                                                             />
                                                         );
                                                     });

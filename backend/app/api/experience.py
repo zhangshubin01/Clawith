@@ -386,13 +386,17 @@ class DistillResult(BaseModel):
     solution: str = ""
     applicability: str = ""
     tags: list[str] = Field(default_factory=list)
+    # False when the LLM produced none of the four parts — the UI then shows a
+    # "未能自动抽取，请手动填写" hint instead of seeding any field with raw text.
+    extracted: bool = True
 
 
 async def _distill_fields(db, agent, content: str) -> dict:
     """Run the LLM distillation and normalize to the four-part fields. Persists nothing.
 
-    On LLM/parse failure, seeds `problem` with the raw text so the human can still
-    fill it in — the flow never hard-fails.
+    On LLM/parse failure the four parts are left empty and `extracted=False` is
+    returned, so the editor prompts the human to fill them in manually. We never
+    seed a field with the raw text — a wrong auto-fill is worse than an empty one.
     """
     fields: dict = {}
     try:
@@ -423,16 +427,15 @@ async def _distill_fields(db, agent, content: str) -> dict:
     tags = fields.get("tags") or []
     if not isinstance(tags, list):
         tags = []
-    problem = (fields.get("problem") or "").strip()
-    if not any((fields.get(k) or "").strip() for k in FOUR_PARTS):
-        problem = content[:2000]
+    extracted = any((fields.get(k) or "").strip() for k in FOUR_PARTS)
     return {
         "title": (fields.get("title") or "")[:200],
         "scenario": fields.get("scenario") or "",
-        "problem": problem,
+        "problem": fields.get("problem") or "",
         "solution": fields.get("solution") or "",
         "applicability": fields.get("applicability") or "",
         "tags": [str(t)[:40] for t in tags][:5],
+        "extracted": extracted,
     }
 
 
