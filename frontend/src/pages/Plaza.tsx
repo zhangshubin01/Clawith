@@ -481,7 +481,7 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
             <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 10 }}>
                 {entry.status === 'retired'
                     ? `已下架${daysLeft !== null ? `，${daysLeft} 天后自动删除` : ''}。重新发布可恢复到团队经验并清除删除倒计时。`
-                    : '下架可由发起人、数字员工创立者或管理员执行；无权限时操作会被拒绝。'}
+                    : '编辑、复核、下架均可由发起人、数字员工创立者或管理员执行；无权限时操作会被拒绝。'}
             </p>
         </Drawer>
     );
