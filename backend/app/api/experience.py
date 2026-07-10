@@ -86,6 +86,10 @@ class EntryOut(BaseModel):
     # Display-only (PRD v3 dual creator): resolved names for the publisher + source agent.
     created_by_name: str | None = None
     origin_agent_name: str | None = None
+    # Whether the caller may edit / review / retire / re-publish this entry (same permission
+    # set: initiator, source-agent creator, or admin). Populated on single-entry fetch so the
+    # UI can hide actions the user can't perform. None in list responses.
+    can_manage: bool | None = None
 
     class Config:
         from_attributes = True
@@ -491,7 +495,10 @@ async def create_draft_from_content(body: DraftFromContent, current_user: User =
 async def get_entry(entry_id: uuid.UUID, current_user: User = Depends(get_current_user)):
     async with async_session() as db:
         entry = await _get_entry_scoped(db, entry_id, current_user)
-        return (await _serialize_entries(db, [entry]))[0]
+        out = (await _serialize_entries(db, [entry]))[0]
+        agent_creator = await _agent_creator_id(db, entry.origin_agent_id)
+        out.can_manage = _can_edit(current_user, entry, agent_creator)
+        return out
 
 
 @router.patch("/entries/{entry_id}", response_model=EntryOut)

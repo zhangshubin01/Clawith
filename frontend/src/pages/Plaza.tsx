@@ -461,28 +461,38 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
                     被 AI 阅读 {refs.read_count} 次 · <strong style={{ color: 'var(--text-secondary)' }}>实际采纳（引用） {refs.cited_count} 次</strong>
                 </div>
             )}
-            <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                <button onClick={() => onEdit(entry)} style={secondaryBtn}>编辑</button>
-                {entry.status === 'published' && (
-                    <button onClick={() => review.mutate()} style={secondaryBtn} disabled={review.isPending}>
-                        {entry.last_reviewed_at ? '标记为未复核' : '标记已复核'}
-                    </button>
-                )}
-                {entry.status === 'retired' ? (
-                    <button onClick={() => republish.mutate()} style={{ ...secondaryBtn, color: 'var(--success)' }} disabled={republish.isPending}>
-                        重新发布
-                    </button>
-                ) : (
-                    <button onClick={() => retire.mutate()} style={{ ...secondaryBtn, color: 'var(--error)' }} disabled={retire.isPending}>
-                        下架
-                    </button>
-                )}
-            </div>
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 10 }}>
-                {entry.status === 'retired'
-                    ? `已下架${daysLeft !== null ? `，${daysLeft} 天后自动删除` : ''}。重新发布可恢复到团队经验并清除删除倒计时。`
-                    : '编辑、复核、下架均可由发起人、数字员工创立者或管理员执行；无权限时操作会被拒绝。'}
-            </p>
+            {entry.can_manage ? (
+                <>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                        <button onClick={() => onEdit(entry)} style={secondaryBtn}>编辑</button>
+                        {entry.status === 'published' && (
+                            <button onClick={() => review.mutate()} style={secondaryBtn} disabled={review.isPending}>
+                                {entry.last_reviewed_at ? '标记为未复核' : '标记已复核'}
+                            </button>
+                        )}
+                        {entry.status === 'retired' ? (
+                            <button onClick={() => republish.mutate()} style={{ ...secondaryBtn, color: 'var(--success)' }} disabled={republish.isPending}>
+                                重新发布
+                            </button>
+                        ) : (
+                            <button onClick={() => retire.mutate()} style={{ ...secondaryBtn, color: 'var(--error)' }} disabled={retire.isPending}>
+                                下架
+                            </button>
+                        )}
+                    </div>
+                    {entry.status === 'retired' && daysLeft !== null && (
+                        <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 10 }}>
+                            已下架，{daysLeft} 天后自动删除。重新发布可恢复到团队经验并清除删除倒计时。
+                        </p>
+                    )}
+                </>
+            ) : (
+                <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 10 }}>
+                    {entry.status === 'retired'
+                        ? `已下架${daysLeft !== null ? `，${daysLeft} 天后自动删除` : ''}。仅发起人、数字员工创立者或管理员可编辑或重新发布。`
+                        : '仅发起人、数字员工创立者或管理员可编辑、复核或下架此经验。'}
+                </p>
+            )}
         </Drawer>
     );
 }

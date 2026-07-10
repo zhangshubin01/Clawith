@@ -616,6 +616,8 @@ export interface ExperienceEntry {
     updated_at: string | null;
     created_by_name?: string | null;
     origin_agent_name?: string | null;
+    // Whether the caller may edit/review/retire/re-publish (single-entry fetch only; null in lists).
+    can_manage?: boolean | null;
 }
 
 export type ExperienceView = 'team' | 'mine' | 'all';
