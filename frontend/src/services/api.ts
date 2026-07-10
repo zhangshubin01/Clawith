@@ -653,3 +653,17 @@ export const experienceApi = {
     stats: () =>
         request<{ total: number; today: number; cited: number; top_contributors: { name: string; count: number }[] }>('/experience/stats'),
 };
+
+// ─── Org structure (synced from Feishu/DingTalk/WeCom; empty until org sync runs) ───
+export interface OrgDepartmentItem {
+    id: string;
+    name: string;
+    path?: string;
+    parent_id?: string | null;
+    member_count?: number;
+}
+
+export const orgApi = {
+    departments: () =>
+        request<{ items: OrgDepartmentItem[]; total_member: number }>('/enterprise/org/departments'),
+};
