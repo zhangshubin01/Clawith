@@ -1040,12 +1040,6 @@ export default function Layout() {
 
 
                     <div className="sidebar-section" data-tour-target="main-nav">
-                        <NavLink to="/plaza" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
-                            <span className="sidebar-item-icon" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                                <IconBuildingMonument size={14} stroke={1.5} />
-                            </span>
-                            <span className="sidebar-item-text">{t('nav.plaza', 'Plaza')}</span>
-                        </NavLink>
                         <NavLink to="/dashboard" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
                             <span className="sidebar-item-icon" style={{ display: 'flex' }}>{SidebarIcons.home}</span>
                             <span className="sidebar-item-text">{t('nav.dashboard')}</span>
@@ -1060,6 +1054,12 @@ export default function Layout() {
                                 </svg>
                             </span>
                             <span className="sidebar-item-text">{t('nav.okr', 'OKR')}</span>
+                        </NavLink>
+                        <NavLink to="/plaza" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
+                            <span className="sidebar-item-icon" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                                <IconBuildingMonument size={14} stroke={1.5} />
+                            </span>
+                            <span className="sidebar-item-text">{t('nav.plaza', 'Plaza')}</span>
                         </NavLink>
                     </div>
                 </div>
