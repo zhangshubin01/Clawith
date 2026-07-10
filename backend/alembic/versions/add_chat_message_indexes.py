@@ -12,6 +12,7 @@ Create Date: 2026-05-14
 """
 from typing import Union
 
+import sqlalchemy as sa
 from alembic import op
 
 revision: str = 'add_chat_message_indexes'
@@ -21,18 +22,23 @@ depends_on: Union[str, None] = None
 
 
 def upgrade():
-    # 使用 autocommit_block 在事务外执行 CREATE INDEX CONCURRENTLY
-    # PostgreSQL 的 CONCURRENTLY 不允许在事务块内执行，且不支持 IF NOT EXISTS
-    with op.get_context().autocommit_block():
-        op.execute("""
-            CREATE INDEX CONCURRENTLY idx_chat_messages_agent_conv_created
-            ON chat_messages (agent_id, conversation_id, created_at)
-        """)
+    # CONCURRENTLY 不能在事务内执行；IF NOT EXISTS 避免索引已存在时启动崩溃
+    engine = op.get_bind().engine
+    with engine.connect() as conn:
+        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+        conn.execute(
+            sa.text(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+                "idx_chat_messages_agent_conv_created "
+                "ON chat_messages (agent_id, conversation_id, created_at)"
+            )
+        )
 
 
 def downgrade():
-    # DROP INDEX CONCURRENTLY 也需要在事务外执行
-    with op.get_context().autocommit_block():
-        op.execute("""
-            DROP INDEX IF EXISTS idx_chat_messages_agent_conv_created
-        """)
+    engine = op.get_bind().engine
+    with engine.connect() as conn:
+        conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+        conn.execute(
+            sa.text("DROP INDEX CONCURRENTLY IF EXISTS idx_chat_messages_agent_conv_created")
+        )

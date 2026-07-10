@@ -15,7 +15,19 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+
+
+def _has_table(table_name: str) -> bool:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    return table_name in inspector.get_table_names()
+
 def upgrade() -> None:
+    if _has_table("ctx_ccr_entries"):
+        op.create_index("ix_ctx_ccr_session_created", "ctx_ccr_entries", ["session_id", "created_at"], if_not_exists=True)
+        op.create_index("ix_ctx_ccr_expires_at", "ctx_ccr_entries", ["expires_at"], if_not_exists=True)
+        op.drop_index("ix_ctx_ccr_session_hash", table_name="ctx_ccr_entries", if_exists=True)
+        return
     # 确保表存在（首次部署时 alembic 在 create_all 之前执行，表可能未创建）
     op.create_table(
         "ctx_ccr_entries",

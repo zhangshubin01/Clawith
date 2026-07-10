@@ -26,29 +26,20 @@ from app.plugins.clawith_acp.turn_budget import (
     get_turn_budget,
 )
 from app.services.llm.tool_execution_policy import WORKSPACE_WRITE_TOOLS
+from app.plugins.clawith_acp.acp_routes import ACP_METHOD_MAP
+from app.plugins.clawith_acp.coalesce_keys import METHODS_FOR_COALESCE, normalize_coalesce_key
+from app.plugins.clawith_acp.search_dedup import (
+    get_cached_search,
+    invalidate_search_cache_for_session,
+    normalize_search_key,
+    search_cache_enabled,
+    store_search_result,
+)
 
-# ── 进行中读请求合并: 对同一 (session, method, path) 的并行读请求只发一次 IDE 调用 ──
-# 消除 LLM 并行发起多个 search_text / read_text_file 到同一路径时的重复 IDE 调用
-_METHODS_FOR_COALESCE: frozenset[str] = frozenset({
-    "fs/read_text_file",
-    "fs/list_directory",
-})
+# ── 进行中读请求合并: 对同一 (session, method, params) 的并行读请求只发一次 IDE 调用 ──
+_METHODS_FOR_COALESCE = METHODS_FOR_COALESCE
 _inflight: dict[str, asyncio.Task[Any]] = {}
 _inflight_lock = asyncio.Lock()
-
-
-def _coalesce_key(session_id: str, method: str, path: str, args: dict | None = None) -> str:
-    """并行读/list 合并：同 session+path+参数只发一次 IDE RPC。"""
-    args = args or {}
-    if method == "fs/read_text_file":
-        if args.get("line") is not None or args.get("limit") is not None:
-            return ""
-        return f"{session_id}:{method}:{path}"
-    if method == "fs/list_directory":
-        from app.plugins.clawith_acp.list_dedup import normalize_list_args, _norm_path
-        depth, limit = normalize_list_args(args)
-        return f"{session_id}:{method}:{_norm_path(path)}:{depth}:{limit}"
-    return ""
 
 
 async def coalesce_or_execute(
@@ -62,7 +53,7 @@ async def coalesce_or_execute(
     if method not in _METHODS_FOR_COALESCE:
         return await executor()
 
-    key = _coalesce_key(session_id, method, path, args)
+    key = normalize_coalesce_key(session_id, method, path, args)
     if not key:
         return await executor()
 
@@ -323,49 +314,8 @@ def _agent_debug_log(run_id: str, hypothesis_id: str, location: str, message: st
         logger.debug("[ACP-DEBUG] {} write_failed={} payload={}", message, type(exc).__name__, payload)
 # endregion
 
-# ACP 协议方法映射
-_ACP_METHOD_MAP = {
-    "read_file": "fs/read_text_file",
-    "write_file": "fs/write_text_file",
-    "edit_file": "fs/edit_text_file",
-    "delete_file": "fs/safe_delete",
-    "list_files": "fs/list_directory",
-    # P0-2: find_file/search_text builder handler 已实现 (line 76, 95) 且在
-    # _ACP_PARAM_BUILDERS 已注册 (line 468-469), 补充 _ACP_METHOD_MAP 入口。
-    # _try_acp_execute (line 593) 用此映射查 method, 此前缺失导致退回基路径。
-    "find_file": "fs/find_file",
-    "search_text": "fs/search_text",
-    "find_class": "fs/find_class",
-    "find_symbol": "fs/find_symbol",
-    "index_status": "ide/index_status",
-    "find_references": "fs/find_references",
-    "find_definition": "fs/find_definition",
-    "find_implementations": "fs/find_implementations",
-    "find_super_methods": "fs/find_super_methods",
-    "call_hierarchy": "fs/call_hierarchy",
-    "type_hierarchy": "fs/type_hierarchy",
-    "diagnostics": "fs/diagnostics",
-    "refactor_rename": "fs/refactor_rename",
-    "move_file": "fs/move_file",
-    "reformat_code": "fs/reformat_code",
-    "optimize_imports": "fs/optimize_imports",
-    "safe_delete": "fs/safe_delete",
-    "convert_java_to_kotlin": "fs/convert_java_to_kotlin",
-    "sync_files": "ide/sync_files",
-    "active_file": "ide/active_file",
-    "open_file": "ide/open_file",
-    "file_structure": "fs/file_structure",
-    "build_project": "ide/build_project",
-    "get_documentation": "fs/get_documentation",
-    "apply_quickfix": "ide/apply_quickfix",
-    "git_status": "git/status",
-    "git_diff": "git/diff",
-    "git_stage": "git/stage",
-    "git_commit": "git/commit",
-    "ide/screenshot": "ide/screenshot",
-    "ide_screenshot": "ide/screenshot",
-}
-
+# ACP 协议方法映射（见 acp_routes.ACP_METHOD_MAP）
+_ACP_METHOD_MAP = ACP_METHOD_MAP
 
 # ── 辅助函数 ──
 
@@ -1311,6 +1261,12 @@ def _invalidate_list_cache_on_success(handler, tool_name: str, path: str, result
     _maybe_invalidate_list_cache(handler, tool_name, path)
 
 
+def _maybe_invalidate_search_cache(handler) -> None:
+    if not search_cache_enabled():
+        return
+    invalidate_search_cache_for_session(_get_session_id(handler))
+
+
 def _maybe_invalidate_list_cache(handler, tool_name: str, path: str) -> None:
     from app.plugins.clawith_acp.list_dedup import (
         LIST_CACHE_INVALIDATE_TOOLS,
@@ -1322,6 +1278,222 @@ def _maybe_invalidate_list_cache(handler, tool_name: str, path: str) -> None:
     cwd = getattr(handler, "_cwd", "") or ""
     parent = os.path.dirname((path or ".").replace("\\", "/")) or "."
     invalidate_list_cache_for_path(session_id, cwd, parent)
+    _maybe_invalidate_search_cache(handler)
+
+
+
+_FIND_FILES_DEBUG_LOG = "/Users/shubinzhang/Documents/agent/.cursor/debug-17de78.log"
+_FIND_FILES_DEBUG_SESSION = "17de78"
+
+
+def _find_files_debug_log(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    # region agent log
+    payload = {
+        "sessionId": _FIND_FILES_DEBUG_SESSION,
+        "timestamp": int(time.time() * 1000),
+        "runId": "find-files-route",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": _redact_debug_value(data),
+    }
+    try:
+        os.makedirs(os.path.dirname(_FIND_FILES_DEBUG_LOG), exist_ok=True)
+        with open(_FIND_FILES_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # endregion
+
+
+def _is_broad_glob_pattern(pattern: str) -> bool:
+    """判断 find_files 的 glob 是否等价于列目录（避免走 agent storage）。"""
+    p = (pattern or "").strip().replace(" ", "")
+    if not p:
+        return True
+    if p in {"**/*", "*", "**", "**/**", "./**/*", "**/*.*"}:
+        return True
+    if p.endswith("/**") or p.endswith("/**/*"):
+        return True
+    return False
+
+
+def _basename_glob(pattern: str) -> str:
+  return (pattern or "").replace("\\", "/").split("/")[-1]
+
+
+
+
+def _format_find_file_result(result: Any) -> str:
+    if isinstance(result, dict):
+        files = result.get("files") or []
+        if not files:
+            return "(未找到匹配的文件)"
+        lines = []
+        for f in files[:50]:
+            if isinstance(f, dict):
+                lines.append(f.get("path", f.get("name", "?")))
+            else:
+                lines.append(str(f))
+        if len(files) > 50:
+            lines.append(f"... (共 {len(files)} 个匹配)")
+        return "\n".join(lines)
+    return str(result)
+
+
+def _format_search_text_result(result: Any) -> str:
+    if isinstance(result, dict):
+        matches = result.get("matches") or []
+        if not matches:
+            return "(未找到匹配的文本)"
+        lines = []
+        for m in matches[:30]:
+            if isinstance(m, dict):
+                ctx = m.get("context", "").strip()
+                if len(ctx) > 120:
+                    ctx = ctx[:117] + "..."
+                lines.append(f"{m.get('file', '?')}:{m.get('line', '?')}:{m.get('column', '?')}  {ctx}")
+            else:
+                lines.append(str(m))
+        total = result.get("totalCount", len(matches))
+        if total > len(matches):
+            lines.append(f"... (共 {total} 个匹配)")
+        return "\n".join(lines)
+    return str(result)
+
+
+
+def _normalize_search_files_file_pattern(dir_path: str, file_pattern: str) -> str | None:
+    """将 search_files 的 path + file_pattern 折进 IDE filePattern。"""
+    fp = (file_pattern or "*").strip() or "*"
+    p = (dir_path or "").strip().replace("\\", "/").strip("/")
+    if not p or p == ".":
+        return None if fp == "*" else fp
+    if fp == "*":
+        return f"{p}/**/*"
+    if "/" not in fp and not fp.startswith("**"):
+        return f"{p}/**/{fp}"
+    return f"{p}/{fp}"
+
+
+async def _try_acp_search_files(args: dict, handler) -> str | None:
+    """IDE 会话中将 search_files 从 agent storage 改路由到 search_text。"""
+    pattern = (args.get("pattern") or "").strip()
+    if not pattern:
+        return json.dumps(
+            {"error": "Missing required argument 'pattern' for search_files"},
+            ensure_ascii=False,
+        )
+    _cwd = getattr(handler, "_cwd", "")
+    raw_path = args.get("path") or "."
+    _norm_args, path, normalize_error, internal_path = _normalize_acp_tool_args(
+        "search_files", {"path": raw_path, **args}, _cwd,
+    )
+    if normalize_error:
+        return json.dumps({"error": normalize_error}, ensure_ascii=False)
+    if internal_path:
+        logger.debug("[ACP] search_files internal path, fallback storage path={}", raw_path)
+        return None
+
+    file_pattern = str(args.get("file_pattern") or "*")
+    folded = _normalize_search_files_file_pattern(path or ".", file_pattern)
+    mapped: dict[str, Any] = {
+        "query": pattern,
+        "regex": True,
+        "caseSensitive": not bool(args.get("ignore_case", False)),
+    }
+    if folded:
+        mapped["filePattern"] = folded
+    elif file_pattern and file_pattern != "*":
+        mapped["filePattern"] = file_pattern
+    elif path and path not in (".", ""):
+        logger.warning(
+            "[ACP] search_files path={} has no IDE directory scope; searching whole project",
+            path,
+        )
+
+    logger.info(
+        "[ACP] route search_files→search_text query_len={} filePattern={}",
+        len(pattern),
+        mapped.get("filePattern", "*"),
+    )
+    return await _try_acp_execute("search_text", mapped, handler)
+
+
+
+async def _try_acp_find_files(args: dict, handler) -> str | None:
+    """IDE 会话中将 find_files 从 agent storage 改路由到 list_files / find_file。"""
+    pattern = (args.get("pattern") or "").strip()
+    if not pattern:
+        pattern = "**/*"
+    _cwd = getattr(handler, "_cwd", "")
+    raw_path = args.get("path") or "."
+    norm_args, path, normalize_error, internal_path = _normalize_acp_tool_args(
+        "find_files", {"path": raw_path, **args}, _cwd,
+    )
+    if normalize_error:
+        _find_files_debug_log(
+            "H-FIND", "tool_bridge.py:_try_acp_find_files",
+            "path normalize rejected",
+            {"pattern": pattern, "rawPath": raw_path, "reason": normalize_error},
+        )
+        return json.dumps({"error": normalize_error}, ensure_ascii=False)
+    if internal_path:
+        _find_files_debug_log(
+            "H-FIND", "tool_bridge.py:_try_acp_find_files",
+            "skip internal agent path",
+            {"pattern": pattern, "rawPath": raw_path},
+        )
+        return None
+
+    route = "list_files"
+    list_args: dict[str, Any] = {
+        "path": path or ".",
+        "depth": max(1, min(int(args.get("depth", 3) or 3), 10)),
+        "limit": max(10, min(int(args.get("limit", 500) or 500), 2000)),
+    }
+    find_args: dict[str, Any] | None = None
+
+    if _is_broad_glob_pattern(pattern):
+        route = "list_files_broad"
+    else:
+        base = _basename_glob(pattern)
+        if base.startswith("*.") and base.count("*") == 1 and base.count("?") == 0:
+            route = "list_files_ext"
+            list_args["depth"] = max(list_args["depth"], 5)
+        elif base and ("*" in base or "?" in base):
+            literal = base.replace("**", "").replace("*", "").replace("?", "").strip(".")
+            if len(literal) >= 2:
+                route = "find_file"
+                find_args = {"query": literal}
+        elif base and "*" not in base and "?" not in base:
+            route = "find_file"
+            find_args = {"query": base}
+
+    _find_files_debug_log(
+        "H-FIND", "tool_bridge.py:_try_acp_find_files",
+        "route find_files to IDE",
+        {"pattern": pattern, "route": route, "path": path or ".", "cwd": _cwd},
+    )
+
+    if route == "find_file" and find_args:
+        result = await _try_acp_execute("find_file", find_args, handler)
+        if result and not result.startswith("❌") and "No files" not in result:
+            return result
+
+    result = await _try_acp_execute("list_files", list_args, handler)
+    if route == "list_files_ext" and result and not result.startswith("❌"):
+        ext = _basename_glob(pattern)[1:]
+        lines = [
+            ln for ln in result.splitlines()
+            if ln.strip() and (ln.rstrip().endswith(ext) or f"{ext} " in ln or f"{ext}(" in ln)
+        ]
+        if lines:
+            header = next((ln for ln in result.splitlines() if ln.strip()), "")
+            body = "\n".join(lines[:100])
+            return f"📂 Found {len(lines)} item(s) matching '{pattern}':\n{body}" if header else body
+    return result
+
 
 
 async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
@@ -1330,6 +1502,11 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
     返回 None 表示不应由 ACP 处理（如 path 为空或 agent 自身文件）。
     返回字符串表示 ACP 执行结果。
     """
+    if tool_name == "find_files":
+        return await _try_acp_find_files(args, handler)
+    if tool_name == "search_files":
+        return await _try_acp_search_files(args, handler)
+
     method = _ACP_METHOD_MAP.get(tool_name)
     if not method:
         return None
@@ -1446,6 +1623,16 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                 )
                 return _cached_list
             logger.debug("[ACP] list_files MISS path={}", path or ".")
+        if method in ("fs/search_text", "fs/find_file") and search_cache_enabled():
+            _sk = normalize_search_key(method, session_id, params)
+            _cached_search = get_cached_search(_sk)
+            if _cached_search is not None:
+                logger.info(
+                    "[SEARCH-DEDUP] cache hit session={} method={}",
+                    (session_id or "")[:8],
+                    method,
+                )
+                return _cached_search
         result = await coalesce_or_execute(
             method, path, session_id,
             executor=lambda: polite_send(handler, method, params, timeout=_timeout),
@@ -1491,20 +1678,10 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
             )
             return _out
         if method == "fs/find_file":
-            if isinstance(result, dict):
-                files = result.get("files") or []
-                if not files:
-                    return "(未找到匹配的文件)"
-                lines = []
-                for f in files[:50]:  # 最多显示 50 个
-                    if isinstance(f, dict):
-                        lines.append(f.get("path", f.get("name", "?")))
-                    else:
-                        lines.append(str(f))
-                if len(files) > 50:
-                    lines.append(f"... (共 {len(files)} 个匹配)")
-                return "\n".join(lines)
-            return str(result)
+            _out = _format_find_file_result(result)
+            if search_cache_enabled():
+                store_search_result(normalize_search_key(method, session_id, params), _out)
+            return _out
         if method == "fs/find_class":
             if isinstance(result, dict):
                 classes = result.get("classes") or result.get("files") or result.get("results") or []
@@ -1565,24 +1742,10 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                 return "\n".join(lines)
             return str(result)
         if method == "fs/search_text":
-            if isinstance(result, dict):
-                matches = result.get("matches") or []
-                if not matches:
-                    return "(未找到匹配的文本)"
-                lines = []
-                for m in matches[:30]:  # 最多显示 30 条
-                    if isinstance(m, dict):
-                        ctx = m.get("context", "").strip()
-                        if len(ctx) > 120:
-                            ctx = ctx[:117] + "..."
-                        lines.append(f"{m.get('file', '?')}:{m.get('line', '?')}:{m.get('column', '?')}  {ctx}")
-                    else:
-                        lines.append(str(m))
-                total = result.get("totalCount", len(matches))
-                if total > len(matches):
-                    lines.append(f"... (共 {total} 个匹配)")
-                return "\n".join(lines)
-            return str(result)
+            _out = _format_search_text_result(result)
+            if search_cache_enabled():
+                store_search_result(normalize_search_key(method, session_id, params), _out)
+            return _out
         # ── 新增: find_references / find_definition / find_implementations 等结果处理器 ──
         if method == "fs/find_references":
             if isinstance(result, dict):

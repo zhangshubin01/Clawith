@@ -72,3 +72,41 @@ async def test_coalesce_read_with_line_not_merged():
     ),
   )
   assert calls == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_coalesce_search_text_same_query_merged():
+    calls = []
+
+    async def exec_once():
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return "ok"
+
+    args = {"query": "same", "filePattern": "*.kt", "regex": True, "caseSensitive": True}
+    r1, r2 = await asyncio.gather(
+        tool_bridge.coalesce_or_execute("fs/search_text", "", "sess4", exec_once, args=args),
+        tool_bridge.coalesce_or_execute("fs/search_text", "", "sess4", exec_once, args=args),
+    )
+    assert r1 == "ok"
+    assert r2 == "ok"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_coalesce_find_file_same_query_merged():
+    calls = []
+
+    async def exec_once():
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return "ok"
+
+    args = {"query": "Foo.kt", "scope": "project_files", "pageSize": 25}
+    r1, r2 = await asyncio.gather(
+        tool_bridge.coalesce_or_execute("fs/find_file", "", "sess5", exec_once, args=args),
+        tool_bridge.coalesce_or_execute("fs/find_file", "", "sess5", exec_once, args=args),
+    )
+    assert r1 == "ok"
+    assert r2 == "ok"
+    assert len(calls) == 1

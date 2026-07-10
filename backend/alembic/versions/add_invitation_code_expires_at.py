@@ -21,7 +21,23 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _has_table(table_name: str) -> bool:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    return table_name in inspector.get_table_names()
+
+
+def _has_column(table_name: str, column_name: str) -> bool:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if table_name not in inspector.get_table_names():
+        return False
+    return any(col.get("name") == column_name for col in inspector.get_columns(table_name))
+
+
 def upgrade() -> None:
+    if not _has_table("invitation_codes") or _has_column("invitation_codes", "expires_at"):
+        return
     op.add_column(
         "invitation_codes",
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
@@ -29,4 +45,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not _has_table("invitation_codes") or not _has_column("invitation_codes", "expires_at"):
+        return
     op.drop_column("invitation_codes", "expires_at")

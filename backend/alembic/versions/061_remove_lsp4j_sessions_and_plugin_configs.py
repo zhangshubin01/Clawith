@@ -20,15 +20,22 @@ _LSP4J_SESSION_FILTER = """
 """
 
 
+def _has_table(table_name: str) -> bool:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    return table_name in inspector.get_table_names()
+
+
 def upgrade() -> None:
-    op.execute(
-        f"""
+    if _has_table("ctx_ccr_entries"):
+        op.execute(
+            f"""
         DELETE FROM ctx_ccr_entries
         WHERE session_id IN (
             SELECT id::text FROM chat_sessions WHERE {_LSP4J_SESSION_FILTER}
         )
         """
-    )
+        )
     op.execute(
         f"""
         DELETE FROM chat_messages

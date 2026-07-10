@@ -20,6 +20,7 @@ from collections.abc import Callable
 from typing import Any
 
 from loguru import logger
+from app.plugins.clawith_acp.acp_routes import ACP_OVERLAP_BASE_TOOL_NAMES, ACP_TOOL_MAP
 
 from app.services import agent_tools
 from .tool_bridge import current_acp_handler
@@ -881,13 +882,8 @@ _ACP_IDE_TOOLS = [
     },
 ]
 
-# ACP 活跃时过滤基础工具中与 ACP 代理工具重名的
-_ACP_OVERLAP_BASE_TOOL_NAMES = frozenset({
-    "read_file", "write_file", "edit_file", "delete_file",
-    "find_file", "search_text", "list_files", "move_file",  # 系统提示替代
-    "tree",                                                     # 系统提示替代
-    "execute_bash",                                             # 替换为 execute_command
-})
+# ACP 活跃时过滤基础工具中与 ACP 代理工具重名的（见 acp_routes.ACP_OVERLAP_BASE_TOOL_NAMES）
+_ACP_OVERLAP_BASE_TOOL_NAMES = ACP_OVERLAP_BASE_TOOL_NAMES
 
 # 无关工具：IDE 编辑场景不需要的工具
 _ACP_IRRELEVANT_TOOL_NAMES = frozenset({
@@ -938,44 +934,8 @@ def install_acp_tool_hooks() -> None:
 
     _base_get_tools = agent_tools.get_agent_tools_for_llm
 
-    # ── 工具名映射 ──
-    _ACP_TOOL_MAP = {
-        "read_file": "fs/read_text_file",
-        "write_file": "fs/write_text_file",
-        "edit_file": "fs/edit_text_file",
-        "delete_file": "fs/safe_delete",
-        "list_files": "fs/list_directory",
-        "find_file": "fs/find_file",
-        "search_text": "fs/search_text",
-        "find_class": "fs/find_class",
-        "find_symbol": "fs/find_symbol",
-        "index_status": "ide/index_status",
-        "find_references": "fs/find_references",
-        "find_definition": "fs/find_definition",
-        "find_implementations": "fs/find_implementations",
-        "find_super_methods": "fs/find_super_methods",
-        "call_hierarchy": "fs/call_hierarchy",
-        "type_hierarchy": "fs/type_hierarchy",
-        "diagnostics": "fs/diagnostics",
-        "refactor_rename": "fs/refactor_rename",
-        "move_file": "fs/move_file",
-        "reformat_code": "fs/reformat_code",
-        "optimize_imports": "fs/optimize_imports",
-        "safe_delete": "fs/safe_delete",
-        "convert_java_to_kotlin": "fs/convert_java_to_kotlin",
-        "sync_files": "ide/sync_files",
-        "active_file": "ide/active_file",
-        "open_file": "ide/open_file",
-        "file_structure": "fs/file_structure",
-        "build_project": "ide/build_project",
-        "get_documentation": "fs/get_documentation",
-        "apply_quickfix": "ide/apply_quickfix",
-        "git_status": "git/status",
-        "git_diff": "git/diff",
-        "git_stage": "git/stage",
-        "git_commit": "git/commit",
-        "ide_screenshot": "ide/screenshot",
-    }
+    # ── 工具名映射（见 acp_routes.ACP_TOOL_MAP）──
+    _ACP_TOOL_MAP = ACP_TOOL_MAP
 
     async def _acp_aware_execute_tool(
         tool_name: str,
