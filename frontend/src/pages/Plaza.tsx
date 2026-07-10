@@ -352,12 +352,18 @@ function MineView({ loading, cats, cat, setCat, entries, onOpen }: {
 
 // PRD v3: every entry shows its two creators — the human who published it + the source agent.
 function CreatorLine({ entry }: { entry: ExperienceEntry }) {
-    if (!entry.created_by_name && !entry.origin_agent_name) return null;
+    const created = fmtDate(entry.created_at);
+    // Never-modified entries have a null updated_at → fall back to created, so 上次修改 always shows.
+    const updated = fmtDate(entry.updated_at) || created;
+    const hasCreators = !!(entry.created_by_name || entry.origin_agent_name);
     return (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-tertiary)', flexWrap: 'wrap' }}>
             {entry.created_by_name && <span>👤 发布 {entry.created_by_name}</span>}
             {entry.created_by_name && entry.origin_agent_name && <span style={{ opacity: .5 }}>·</span>}
             {entry.origin_agent_name && <span>🤖 来源 {entry.origin_agent_name}</span>}
+            {hasCreators && created && <span style={{ opacity: .5 }}>·</span>}
+            {created && <span>创建日期 {created}</span>}
+            {updated && <span>上次修改 {updated}</span>}
         </div>
     );
 }
@@ -423,12 +429,7 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
                 {f.label && <Badge tone={f.stale ? 'warn' : 'ok'}>{f.label}</Badge>}
                 {(entry.tags || []).map(tg => <Badge key={tg}>#{tg}</Badge>)}
             </div>
-            <div style={{ marginBottom: 12 }}><CreatorLine entry={entry} /></div>
-            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 16 }}>
-                <span>添加日期：{fmtDate(entry.created_at) || '—'}</span>
-                <span>修改日期：{fmtDate(entry.updated_at) || '—'}</span>
-                <span>复核日期：{fmtDate(entry.last_reviewed_at) || '未复核'}</span>
-            </div>
+            <div style={{ marginBottom: 16 }}><CreatorLine entry={entry} /></div>
             {EXP_FIELDS.map(fl => (
                 <section key={fl.key} style={{ marginBottom: 14 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>{fl.label}</div>
