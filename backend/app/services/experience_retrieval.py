@@ -24,10 +24,22 @@ from app.database import async_session
 from app.models.agent import Agent
 from app.models.experience import ExperienceEntry
 from app.models.experience_reference import ExperienceReference
+from app.models.llm import LLMModel
 from app.models.org import OrgMember
+from app.models.system_settings import SystemSetting
 
 # Agents echo this marker in their final answer to cite an entry they actually used.
 CITATION_RE = re.compile(r"\[\[exp:([0-9a-fA-F-]{36})\]\]")
+
+# ── Query expansion (① synonym expansion; toggle via system setting) ──
+_QUERY_EXPANSION_SETTING = "experience_query_expansion"  # value {"enabled": bool}, default on
+_EXPANSION_CACHE: dict[str, list[str]] = {}
+_EXPANSION_CACHE_CAP = 512
+_EXPANSION_SYS_PROMPT = (
+    "你是检索同义词扩展器。为给定检索词生成 5-8 个语义相同或高度相近的中文近义表达/同义词，"
+    "用于在企业内部经验库做关键词匹配。严格要求：只给近义或同义词，不要扩展到相关但不同的概念，"
+    "不要发散，不要解释，只输出用逗号分隔的词。检索词："
+)
 
 _HINT = (
     "\n## Team Experience Library\n"
@@ -164,6 +176,53 @@ async def build_experience_hint(agent_id: uuid.UUID) -> str:
         return ""
 
 
+async def _query_expansion_enabled(db) -> bool:
+    """Read the on/off toggle (default enabled if the setting is absent)."""
+    try:
+        row = (await db.execute(select(SystemSetting).where(SystemSetting.key == _QUERY_EXPANSION_SETTING))).scalar_one_or_none()
+        if row and isinstance(row.value, dict) and "enabled" in row.value:
+            return bool(row.value["enabled"])
+    except Exception:
+        pass
+    return True
+
+
+async def _expand_query(db, agent, keyword: str) -> list[str]:
+    """Return 5-8 strict synonyms/near-expressions for the keyword (cached, best-effort).
+
+    Uses the agent's own model, low tokens, temperature 0. Any failure → []."""
+    key = keyword.lower().strip()
+    if key in _EXPANSION_CACHE:
+        return _EXPANSION_CACHE[key]
+    terms: list[str] = []
+    try:
+        model_id = agent.primary_model_id or agent.fallback_model_id
+        model = (await db.execute(select(LLMModel).where(LLMModel.id == model_id))).scalar_one_or_none() if model_id else None
+        if model:
+            from app.services.llm import get_model_api_key
+            from app.services.llm.client import chat_complete
+            resp = await chat_complete(
+                provider=model.provider, api_key=get_model_api_key(model), model=model.model, base_url=model.base_url,
+                messages=[{"role": "system", "content": _EXPANSION_SYS_PROMPT + keyword}],
+                temperature=0.0, max_tokens=120,
+            )
+            text = resp["choices"][0]["message"].get("content") or ""
+            seen = set()
+            for t in re.split(r"[,，、\n]+", text):
+                t = t.strip().strip("·-•").strip()
+                if t and t.lower() not in seen and len(t) <= 20:
+                    seen.add(t.lower())
+                    terms.append(t)
+            terms = terms[:8]
+    except Exception as e:
+        logger.warning(f"query expansion failed for “{keyword}”: {e}")
+        terms = []
+    if len(_EXPANSION_CACHE) > _EXPANSION_CACHE_CAP:
+        _EXPANSION_CACHE.clear()
+    _EXPANSION_CACHE[key] = terms
+    return terms
+
+
 async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
     """Keyword search over the visible, published library. Returns lightweight candidates."""
     keyword = (arguments.get("keyword") or arguments.get("query") or "").strip()
@@ -178,6 +237,14 @@ async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
             if not agent or agent.is_system:
                 return "This agent cannot access the experience library."
             dept_ids = await _agent_department_ids(db, agent)
+
+            # ① Query expansion: fold in strict synonyms so differently-phrased entries still match.
+            if await _query_expansion_enabled(db):
+                for term in await _expand_query(db, agent, keyword):
+                    tl = term.lower().strip()
+                    if tl and tl not in tokens:
+                        tokens.append(tl)
+                tokens = tokens[:24]
 
             # Candidate pool: entries visible to this agent (published, non-legacy).
             # Tokenized scoring across all four parts + title + JSON tags is done in Python —
