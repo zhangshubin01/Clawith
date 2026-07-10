@@ -61,6 +61,7 @@ export default function Plaza() {
     const [params, setParams] = useSearchParams();
     const [view, setView] = useState<'team' | 'mine'>('team');
     const [cat, setCat] = useState<string>(MINE_ALL);
+    const [teamTag, setTeamTag] = useState<string | null>(null);
     const [openId, setOpenId] = useState<string | null>(null);
     const [editing, setEditing] = useState<Draft | null>(null);
 
@@ -90,6 +91,7 @@ export default function Plaza() {
     const newEntry = () => setEditing({ visibility_scope: 'company', tags: [] });
 
     const teamEntries = teamQ.data ?? [];
+    const teamShown = teamTag ? teamEntries.filter(e => (e.tags || []).includes(teamTag)) : teamEntries;
     const mineEntries = mineQ.data ?? [];
     const historyEntries = historyQ.data ?? [];
 
@@ -128,7 +130,7 @@ export default function Plaza() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <SegmentedToggle
                         value={view}
-                        onChange={(v) => { setView(v); setCat(MINE_ALL); setOpenId(null); }}
+                        onChange={(v) => { setView(v); setCat(MINE_ALL); setTeamTag(null); setOpenId(null); }}
                         options={[{ value: 'team', label: t('experience.nav.team', '团队经验') }, { value: 'mine', label: t('experience.nav.mine', '我的经验') }]}
                     />
                     <button className="btn btn-primary" style={{ height: 34, whiteSpace: 'nowrap' }} onClick={newEntry}>
@@ -138,8 +140,10 @@ export default function Plaza() {
             </div>
 
             {view === 'team' ? (
-                <TeamView loading={teamQ.isLoading} entries={teamEntries} stats={statsQ.data} trending={trending}
-                    onOpen={openEntry} onNew={newEntry} onTag={(tg) => { setView('mine'); setCat(tg); }} />
+                <TeamView loading={teamQ.isLoading} entries={teamShown} stats={statsQ.data} trending={trending}
+                    activeTag={teamTag} onOpen={openEntry} onNew={newEntry}
+                    onTag={(tg) => setTeamTag(prev => prev === tg ? null : tg)}
+                    onClearTag={() => setTeamTag(null)} />
             ) : (
                 <MineView loading={mineQ.isLoading || historyQ.isLoading}
                     cats={[MINE_ALL, MINE_DRAFTS, MINE_UNTAGGED, MINE_HISTORY, ...mineTags]}
@@ -215,10 +219,11 @@ function SidebarSection({ icon, title, children }: { icon: React.ReactNode; titl
     );
 }
 
-function TeamView({ loading, entries, stats, trending, onOpen, onNew, onTag }: {
+function TeamView({ loading, entries, stats, trending, activeTag, onOpen, onNew, onTag, onClearTag }: {
     loading: boolean; entries: ExperienceEntry[];
     stats?: { total: number; today: number; cited: number; top_contributors: { name: string; count: number }[] };
-    trending: [string, number][]; onOpen: (e: ExperienceEntry) => void; onNew: () => void; onTag: (tg: string) => void;
+    trending: [string, number][]; activeTag: string | null;
+    onOpen: (e: ExperienceEntry) => void; onNew: () => void; onTag: (tg: string) => void; onClearTag: () => void;
 }) {
     const { t } = useTranslation();
     return (
@@ -226,19 +231,39 @@ function TeamView({ loading, entries, stats, trending, onOpen, onNew, onTag }: {
             <StatsBar stats={stats} />
             <div style={{ display: 'flex', gap: 24, alignItems: 'flex-start' }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
+                    {activeTag && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
+                            <span>{t('experience.filteredByTag', '按标签筛选：')}</span>
+                            <button onClick={onClearTag} style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 6, padding: '2px 8px', borderRadius: 'var(--radius-sm)',
+                                fontSize: 'var(--text-xs)', background: 'var(--accent-soft, var(--bg-tertiary))', color: 'var(--accent, var(--text-primary))',
+                                fontWeight: 600, border: 'none', cursor: 'pointer',
+                            }}>{activeTag} <span aria-hidden style={{ fontSize: 13, lineHeight: 1 }}>×</span></button>
+                            <span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--text-xs)' }}>{entries.length}</span>
+                        </div>
+                    )}
                     {loading ? (
                         <div style={{ color: 'var(--text-tertiary)', padding: '40px 0', textAlign: 'center', fontSize: 'var(--text-sm)' }}>{t('common.loading', '加载中...')}</div>
                     ) : entries.length === 0 ? (
-                        <div style={{ border: '1px dashed var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '48px 24px', textAlign: 'center' }}>
-                            <div style={{ fontSize: 30, marginBottom: 10 }}>📚</div>
-                            <div style={{ fontSize: 'var(--text-base)', color: 'var(--text-primary)', fontWeight: 600, marginBottom: 6 }}>
-                                {t('experience.emptyTitle', '还没有已发布的经验')}
+                        activeTag ? (
+                            <div style={{ border: '1px dashed var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '40px 24px', textAlign: 'center' }}>
+                                <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', marginBottom: 12 }}>
+                                    {t('experience.emptyTag', '该标签下暂无团队经验。')}
+                                </div>
+                                <button className="btn btn-secondary" onClick={onClearTag}>{t('experience.clearFilter', '清除筛选')}</button>
                             </div>
-                            <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', maxWidth: 440, margin: '0 auto 16px', lineHeight: 1.6 }}>
-                                {t('experience.emptyBody', '在与数字员工的对话里点「沉淀为经验」，或直接新建，把团队踩过的坑沉淀下来——AI 会在相关任务中自动检索复用。')}
+                        ) : (
+                            <div style={{ border: '1px dashed var(--border-default)', borderRadius: 'var(--radius-lg)', padding: '48px 24px', textAlign: 'center' }}>
+                                <div style={{ fontSize: 30, marginBottom: 10 }}>📚</div>
+                                <div style={{ fontSize: 'var(--text-base)', color: 'var(--text-primary)', fontWeight: 600, marginBottom: 6 }}>
+                                    {t('experience.emptyTitle', '还没有已发布的经验')}
+                                </div>
+                                <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-tertiary)', maxWidth: 440, margin: '0 auto 16px', lineHeight: 1.6 }}>
+                                    {t('experience.emptyBody', '在与数字员工的对话里点「沉淀为经验」，或直接新建，把团队踩过的坑沉淀下来——AI 会在相关任务中自动检索复用。')}
+                                </div>
+                                <button className="btn btn-primary" onClick={onNew}>+ {t('experience.new', '新建经验')}</button>
                             </div>
-                            <button className="btn btn-primary" onClick={onNew}>+ {t('experience.new', '新建经验')}</button>
-                        </div>
+                        )
                     ) : (
                         <div style={{ display: 'grid', gap: 12 }}>
                             {entries.map(e => <EntryCard key={e.id} entry={e} onOpen={() => onOpen(e)} />)}
@@ -263,12 +288,17 @@ function TeamView({ loading, entries, stats, trending, onOpen, onNew, onTag }: {
                     {trending.length > 0 && (
                         <SidebarSection icon={Icons.hash} title={t('experience.trendingTags', '热门标签')}>
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                                {trending.map(([tg, n]) => (
-                                    <button key={tg} onClick={() => onTag(tg)} style={{
-                                        padding: '2px 8px', borderRadius: 'var(--radius-sm)', fontSize: 'var(--text-xs)',
-                                        background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', fontWeight: 500, border: 'none', cursor: 'pointer',
-                                    }}>{tg} <span style={{ color: 'var(--text-tertiary)', fontSize: 10 }}>×{n}</span></button>
-                                ))}
+                                {trending.map(([tg, n]) => {
+                                    const on = tg === activeTag;
+                                    return (
+                                        <button key={tg} onClick={() => onTag(tg)} aria-pressed={on} style={{
+                                            padding: '2px 8px', borderRadius: 'var(--radius-sm)', fontSize: 'var(--text-xs)',
+                                            background: on ? 'var(--accent-soft, var(--accent, var(--bg-tertiary)))' : 'var(--bg-tertiary)',
+                                            color: on ? 'var(--accent, var(--text-primary))' : 'var(--text-secondary)',
+                                            fontWeight: on ? 600 : 500, border: 'none', cursor: 'pointer',
+                                        }}>{tg} <span style={{ color: 'var(--text-tertiary)', fontSize: 10 }}>×{n}</span></button>
+                                    );
+                                })}
                             </div>
                         </SidebarSection>
                     )}
