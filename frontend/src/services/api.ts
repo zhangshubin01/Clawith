@@ -611,6 +611,7 @@ export interface ExperienceEntry {
     created_by: string;
     reviewed_by: string | null;
     last_reviewed_at: string | null;
+    retired_at: string | null;
     created_at: string;
     updated_at: string | null;
     created_by_name?: string | null;

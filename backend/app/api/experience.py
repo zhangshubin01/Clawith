@@ -80,6 +80,7 @@ class EntryOut(BaseModel):
     created_by: uuid.UUID
     reviewed_by: uuid.UUID | None
     last_reviewed_at: datetime | None
+    retired_at: datetime | None
     created_at: datetime
     updated_at: datetime | None
     # Display-only (PRD v3 dual creator): resolved names for the publisher + source agent.
@@ -142,9 +143,11 @@ def _human_visibility_condition(dept_ids: set[uuid.UUID], user_id: uuid.UUID):
 
 
 # ── P0-7: operation permissions (orthogonal to P0-6 visibility) ──
-# chat initiator (created_by): may publish + edit
-# agent creator (origin_agent_id → creator): may edit + retire; retire is theirs alone
+# chat initiator (created_by): may publish + edit + retire
+# agent creator (origin_agent_id → creator): may edit + retire + re-publish
 # admins act as a governance backstop across all three.
+# Retire is shared by the initiator and the agent creator: an initiator who
+# sedimented a mistake must be able to take it down themselves.
 
 def _can_edit(current_user: User, entry: ExperienceEntry, agent_creator: uuid.UUID | None) -> bool:
     return (
@@ -158,8 +161,12 @@ def _can_publish(current_user: User, entry: ExperienceEntry) -> bool:
     return _is_admin(current_user) or entry.created_by == current_user.id
 
 
-def _can_retire(current_user: User, agent_creator: uuid.UUID | None) -> bool:
-    return _is_admin(current_user) or (agent_creator is not None and agent_creator == current_user.id)
+def _can_retire(current_user: User, entry: ExperienceEntry, agent_creator: uuid.UUID | None) -> bool:
+    return (
+        _is_admin(current_user)
+        or entry.created_by == current_user.id
+        or (agent_creator is not None and agent_creator == current_user.id)
+    )
 
 
 async def _resolve_publish_visibility(db, entry: ExperienceEntry) -> tuple[str, uuid.UUID | None]:
@@ -516,7 +523,15 @@ async def publish_entry(entry_id: uuid.UUID, current_user: User = Depends(get_cu
     """Publish a draft. Enforces the P0-3 hard constraint: all four parts must be present."""
     async with async_session() as db:
         entry = await _get_entry_scoped(db, entry_id, current_user)
-        if not _can_publish(current_user, entry):
+        # Re-publishing a retired entry is also allowed to the source agent's creator
+        # (they can retire it, so they can bring it back); first-time publish stays the
+        # initiator's gate.
+        is_republish = entry.status == "retired"
+        agent_creator = await _agent_creator_id(db, entry.origin_agent_id) if is_republish else None
+        allowed = _can_publish(current_user, entry) or (
+            is_republish and agent_creator is not None and agent_creator == current_user.id
+        )
+        if not allowed:
             raise HTTPException(403, "Not allowed to publish this entry")
         if entry.origin == "legacy_plaza":
             # History imports must be triaged (four parts filled) before entering the live library.
@@ -527,6 +542,7 @@ async def publish_entry(entry_id: uuid.UUID, current_user: User = Depends(get_cu
         # P0-6 degrade rule applied at publish time.
         entry.visibility_scope, entry.visibility_scope_id = await _resolve_publish_visibility(db, entry)
         entry.status = "published"
+        entry.retired_at = None  # re-publishing clears the 30-day deletion clock
         entry.reviewed_by = current_user.id
         entry.last_reviewed_at = datetime.now(timezone.utc)
         await db.commit()
@@ -539,15 +555,17 @@ async def publish_entry(entry_id: uuid.UUID, current_user: User = Depends(get_cu
 async def retire_entry(entry_id: uuid.UUID, current_user: User = Depends(get_current_user)):
     """Retire an entry so it is no longer returned by search_experience (P0-5).
 
-    P0-7: retiring affects others' reuse, so it is restricted to the agent's creator
-    (admins retained as a governance backstop).
+    P0-7: allowed to the chat initiator, the source agent's creator, or an admin.
+    Retired entries move to the "已下架" bin; if not re-published within 30 days the
+    background sweep hard-deletes them.
     """
     async with async_session() as db:
         entry = await _get_entry_scoped(db, entry_id, current_user)
         agent_creator = await _agent_creator_id(db, entry.origin_agent_id)
-        if not _can_retire(current_user, agent_creator):
-            raise HTTPException(403, "Only the agent's creator can retire this entry")
+        if not _can_retire(current_user, entry, agent_creator):
+            raise HTTPException(403, "Not allowed to retire this entry")
         entry.status = "retired"
+        entry.retired_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(entry)
         logger.info(f"Experience entry {entry_id} retired by {current_user.id}")

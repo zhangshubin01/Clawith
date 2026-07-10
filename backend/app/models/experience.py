@@ -55,6 +55,7 @@ class ExperienceEntry(Base):
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)  # initiator (chat participant)
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))          # who approved publish
     last_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # P1-3
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))        # when retired; 30d later → hard-deleted (cleared on re-publish)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at: Mapped[datetime] = mapped_column(

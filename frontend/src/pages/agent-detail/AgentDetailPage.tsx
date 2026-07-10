@@ -446,7 +446,7 @@ function ExperienceCitations({ ids }: { ids: string[] }) {
 
 /**
  * Renders a propose_experience_draft tool call as a review card. The agent writes
- * nothing — clicking 沉淀/编辑 opens the shared human-gated DraftEditor prefilled;
+ * nothing — clicking 编辑后沉淀为经验 opens the shared human-gated DraftEditor prefilled;
  * a row is created only when the human confirms there.
  */
 function ExperienceDraftCard({ args, sessionId }: { args: any; sessionId?: string | null }) {
@@ -486,8 +486,7 @@ function ExperienceDraftCard({ args, sessionId }: { args: any; sessionId?: strin
                 </div>
             ) : null))}
             <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                <button className="btn btn-primary" style={{ height: 28, fontSize: 12 }} onClick={() => setOpen(true)}>沉淀为经验</button>
-                <button className="btn btn-secondary" style={{ height: 28, fontSize: 12 }} onClick={() => setOpen(true)}>编辑</button>
+                <button className="btn btn-primary" style={{ height: 28, fontSize: 12 }} onClick={() => setOpen(true)}>编辑后沉淀为经验</button>
             </div>
             {open && (
                 <ExperienceDraftEditor

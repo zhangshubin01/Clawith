@@ -33,6 +33,16 @@ function freshness(entry: ExperienceEntry): { label: string; stale: boolean } {
     return { label: `${stale ? '复核超期' : '已复核'}（${dateStr}）`, stale };
 }
 
+const RETIRED_TTL_DAYS = 30;
+// Days left before a retired entry is auto-deleted (retired_at + 30d). null when not applicable.
+function retiredDaysLeft(entry: ExperienceEntry): number | null {
+    if (entry.status !== 'retired' || !entry.retired_at) return null;
+    const d = new Date(entry.retired_at);
+    if (isNaN(d.getTime())) return null;
+    const deadline = d.getTime() + RETIRED_TTL_DAYS * 86400000;
+    return Math.max(0, Math.ceil((deadline - Date.now()) / 86400000));
+}
+
 const badgeStyle = (bg: string, fg: string): React.CSSProperties => ({
     display: 'inline-block', padding: '1px 7px', borderRadius: 10, fontSize: 11,
     background: bg, color: fg, whiteSpace: 'nowrap',
@@ -60,7 +70,7 @@ const Icons = {
     hash: sicon('M3 6h10M3 10h10M6.5 2.5l-1 11M10.5 2.5l-1 11'),
 };
 
-const MINE_ALL = '全部', MINE_DRAFTS = '草稿箱', MINE_UNTAGGED = '未分类';
+const MINE_ALL = '全部', MINE_DRAFTS = '草稿箱', MINE_RETIRED = '已下架', MINE_UNTAGGED = '未分类';
 
 export default function Plaza() {
     const { t } = useTranslation();
@@ -85,7 +95,7 @@ export default function Plaza() {
         const id = draftParam || entryParam!;
         experienceApi.get(id).then(e => {
             if (draftParam) setEditing(e);
-            else (e.status === 'published' ? setOpenId(e.id) : setEditing(e));
+            else (e.status === 'draft' ? setEditing(e) : setOpenId(e.id));
         }).catch(() => {});
         params.delete('draft'); params.delete('entry');
         setParams(params, { replace: true });
@@ -93,7 +103,8 @@ export default function Plaza() {
     }, [draftParam, entryParam]);
 
     const refreshAll = () => { qc.invalidateQueries({ queryKey: ['experience'] }); qc.invalidateQueries({ queryKey: ['experience-stats'] }); };
-    const openEntry = (e: ExperienceEntry) => (e.status === 'published' ? setOpenId(e.id) : setEditing(e));
+    // Drafts open the editor; published & retired open the read/action drawer (retired → 重新发布).
+    const openEntry = (e: ExperienceEntry) => (e.status === 'draft' ? setEditing(e) : setOpenId(e.id));
     const newEntry = () => setEditing({ visibility_scope: 'company', tags: [] });
 
     const teamEntries = teamQ.data ?? [];
@@ -108,14 +119,17 @@ export default function Plaza() {
 
     const mineTags = useMemo(() => {
         const m = new Map<string, number>();
-        mineEntries.forEach(e => (e.tags || []).forEach(tg => m.set(tg, (m.get(tg) || 0) + 1)));
+        // Retired entries live only in the 已下架 bin, so their tags don't drive tag chips.
+        mineEntries.filter(e => e.status !== 'retired').forEach(e => (e.tags || []).forEach(tg => m.set(tg, (m.get(tg) || 0) + 1)));
         return [...m.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
     }, [mineEntries]);
 
+    // 已下架 is its own bucket; every other category excludes retired entries.
     const mineShown = cat === MINE_DRAFTS ? mineEntries.filter(e => e.status === 'draft')
-        : cat === MINE_UNTAGGED ? mineEntries.filter(e => !(e.tags || []).length)
-        : cat === MINE_ALL ? mineEntries
-        : mineEntries.filter(e => (e.tags || []).includes(cat));
+        : cat === MINE_RETIRED ? mineEntries.filter(e => e.status === 'retired')
+        : cat === MINE_UNTAGGED ? mineEntries.filter(e => e.status !== 'retired' && !(e.tags || []).length)
+        : cat === MINE_ALL ? mineEntries.filter(e => e.status !== 'retired')
+        : mineEntries.filter(e => e.status !== 'retired' && (e.tags || []).includes(cat));
 
     return (
         <div style={{ padding: 24, maxWidth: 1120, margin: '0 auto' }}>
@@ -150,7 +164,7 @@ export default function Plaza() {
                     onClearTag={() => setTeamTag(null)} />
             ) : (
                 <MineView loading={mineQ.isLoading}
-                    cats={[MINE_ALL, MINE_DRAFTS, MINE_UNTAGGED, ...mineTags]}
+                    cats={[MINE_ALL, MINE_DRAFTS, MINE_RETIRED, MINE_UNTAGGED, ...mineTags]}
                     cat={cat} setCat={setCat} entries={mineShown} onOpen={openEntry} />
             )}
 
@@ -370,6 +384,7 @@ function CreatorLine({ entry }: { entry: ExperienceEntry }) {
 
 function EntryCard({ entry, onOpen }: { entry: ExperienceEntry; onOpen: () => void }) {
     const f = freshness(entry);
+    const daysLeft = retiredDaysLeft(entry);
     return (
         <div
             onClick={onOpen}
@@ -384,6 +399,7 @@ function EntryCard({ entry, onOpen }: { entry: ExperienceEntry; onOpen: () => vo
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     {entry.status !== 'published' && <Badge tone="warn">{entry.status === 'retired' ? '已下架' : '草稿'}</Badge>}
+                    {daysLeft !== null && <Badge tone="warn">{daysLeft} 天后自动删除</Badge>}
                     <Badge tone="accent">{SCOPE_LABELS[entry.visibility_scope] || entry.visibility_scope}</Badge>
                     {f.label && <Badge tone={f.stale ? 'warn' : 'ok'}>{f.label}</Badge>}
                 </div>
@@ -411,6 +427,7 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
     const { data: entry } = useQuery({ queryKey: ['experience-entry', entryId], queryFn: () => experienceApi.get(entryId) });
     const { data: refs } = useQuery({ queryKey: ['experience-refs', entryId], queryFn: () => experienceApi.references(entryId) });
     const retire = useMutation({ mutationFn: () => experienceApi.retire(entryId), onSuccess: () => { onChanged(); onClose(); } });
+    const republish = useMutation({ mutationFn: () => experienceApi.publish(entryId), onSuccess: () => { onChanged(); onClose(); } });
     const review = useMutation({
         mutationFn: () => experienceApi.review(entryId),
         onSuccess: () => { qc.invalidateQueries({ queryKey: ['experience-entry', entryId] }); onChanged(); },
@@ -418,6 +435,7 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
 
     if (!entry) return <Drawer onClose={onClose}><div>加载中...</div></Drawer>;
     const f = freshness(entry);
+    const daysLeft = retiredDaysLeft(entry);
     return (
         <Drawer onClose={onClose}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
@@ -450,12 +468,20 @@ function EntryDrawer({ entryId, onClose, onEdit, onChanged }: {
                         {entry.last_reviewed_at ? '标记为未复核' : '标记已复核'}
                     </button>
                 )}
-                <button onClick={() => retire.mutate()} style={{ ...secondaryBtn, color: 'var(--error)' }} disabled={retire.isPending}>
-                    下架
-                </button>
+                {entry.status === 'retired' ? (
+                    <button onClick={() => republish.mutate()} style={{ ...secondaryBtn, color: 'var(--success)' }} disabled={republish.isPending}>
+                        重新发布
+                    </button>
+                ) : (
+                    <button onClick={() => retire.mutate()} style={{ ...secondaryBtn, color: 'var(--error)' }} disabled={retire.isPending}>
+                        下架
+                    </button>
+                )}
             </div>
             <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 10 }}>
-                下架仅数字员工创立者可执行；无权限时操作会被拒绝。
+                {entry.status === 'retired'
+                    ? `已下架${daysLeft !== null ? `，${daysLeft} 天后自动删除` : ''}。重新发布可恢复到团队经验并清除删除倒计时。`
+                    : '下架可由发起人、数字员工创立者或管理员执行；无权限时操作会被拒绝。'}
             </p>
         </Drawer>
     );
