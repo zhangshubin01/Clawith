@@ -6,45 +6,25 @@ import hashlib
 import hmac
 import uuid
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator
 from app.core.security import get_current_user
-from app.database import async_session as _async_session, get_db
+from app.database import get_db
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
 from app.schemas.schemas import ChannelConfigOut
 from app.services.agent_runtime.channel_chat import (
     channel_message_id,
     enqueue_channel_chat_runtime,
-    wait_for_channel_chat,
 )
 
 
 router = APIRouter(tags=["whatsapp"])
 
-WHATSAPP_TEXT_LIMIT = 4096
 DEFAULT_WHATSAPP_API_VERSION = "v23.0"
-
-
-def _split_text(text: str, limit: int = WHATSAPP_TEXT_LIMIT) -> list[str]:
-    remaining = text or ""
-    chunks: list[str] = []
-    while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
-        segment = remaining[:limit]
-        cut = max(segment.rfind("\n\n"), segment.rfind("\n"), segment.rfind(" "))
-        if cut <= 0:
-            cut = limit
-        chunks.append(remaining[:cut].rstrip())
-        remaining = remaining[cut:].lstrip()
-    return chunks or [""]
 
 
 def _verify_signature(app_secret: str, body: bytes, signature: str | None) -> bool:
@@ -66,35 +46,6 @@ def _extract_message_text(message: dict) -> str:
         list_reply = interactive.get("list_reply") or {}
         return str(button_reply.get("title") or list_reply.get("title") or "").strip()
     return ""
-
-
-async def _send_whatsapp_messages(config: ChannelConfig, to_phone: str, text: str) -> None:
-    token = (config.app_secret or "").strip()
-    phone_number_id = (config.app_id or "").strip()
-    if not token or not phone_number_id:
-        raise RuntimeError("WhatsApp channel is not fully configured")
-
-    api_version = str((config.extra_config or {}).get("api_version") or DEFAULT_WHATSAPP_API_VERSION).strip()
-    url = f"https://graph.facebook.com/{api_version}/{phone_number_id}/messages"
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        for chunk in _split_text(text):
-            resp = await client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "messaging_product": "whatsapp",
-                    "recipient_type": "individual",
-                    "to": to_phone,
-                    "type": "text",
-                    "text": {"preview_url": False, "body": chunk},
-                },
-            )
-            if resp.status_code >= 400:
-                raise RuntimeError(f"WhatsApp send failed: {resp.text[:300]}")
 
 
 @router.post("/agents/{agent_id}/whatsapp-channel", response_model=ChannelConfigOut, status_code=201)
@@ -289,9 +240,8 @@ async def whatsapp_event_webhook(
                     first_message_title=user_text,
                     created_by_user_id=platform_user_id,
                 )
-                session_id = sess.id
                 _, model, _ = await _load_agent_and_model(db, agent_id)
-                intake = await enqueue_channel_chat_runtime(
+                await enqueue_channel_chat_runtime(
                     db,
                     agent=agent_obj,
                     user=platform_user,
@@ -299,6 +249,7 @@ async def whatsapp_event_webhook(
                     model=model,
                     content=user_text,
                     source_channel="whatsapp",
+                    channel_delivery_target={"phone": sender_phone},
                     message_id=channel_message_id(
                         agent_id,
                         "whatsapp",
@@ -307,19 +258,6 @@ async def whatsapp_event_webhook(
                 )
 
                 await db.commit()
-
-                outcome = await wait_for_channel_chat(
-                    handle=intake.handle,
-                    session_id=session_id,
-                    session_factory=_async_session,
-                    after=intake.stream_after,
-                )
-                reply_text = outcome.content
-
-                try:
-                    await _send_whatsapp_messages(config, sender_phone, reply_text)
-                except Exception as exc:
-                    logger.exception(f"[WhatsApp] Send failed for agent {agent_id}: {exc}")
 
 
     return {"ok": True}

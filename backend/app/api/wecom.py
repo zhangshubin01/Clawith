@@ -11,7 +11,6 @@ import struct
 import time
 import uuid
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
 
 import asyncio
 import httpx
@@ -29,13 +28,10 @@ from app.models.agent import Agent as AgentModel
 from app.models.channel_config import ChannelConfig
 from app.models.identity import IdentityProvider, SSOScanSession
 from app.models.user import User
-from app.services.activity_logger import log_activity
 from app.services.agent_runtime.channel_chat import (
     channel_message_id,
     enqueue_channel_chat_runtime,
-    wait_for_channel_chat,
 )
-from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
 from app.services.auth_registry import auth_provider_registry
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import channel_user_service
@@ -423,7 +419,7 @@ async def wecom_event_webhook(
             return Response(content="success", media_type="text/plain")
 
         try:
-            attachment = await _accept_wecom_text(
+            await _accept_wecom_text(
                 agent_id=agent_id,
                 from_user=from_user,
                 user_text=user_text,
@@ -437,16 +433,6 @@ async def wecom_event_webhook(
             _processed_wecom_events.add(dedup_key)
             if len(_processed_wecom_events) > 1000:
                 _processed_wecom_events.clear()
-
-        asyncio.create_task(
-            _deliver_wecom_text(
-                attachment=attachment,
-                agent_id=agent_id,
-                config=config,
-                from_user=from_user,
-                user_text=user_text,
-            )
-        )
 
     elif msg_type == "event":
         event = msg_root.findtext("Event", "")
@@ -531,20 +517,16 @@ async def _process_wecom_kf_event(agent_id: uuid.UUID, config_obj: ChannelConfig
         logger.error(f"[WeCom KF] Error in background task: {e}")
 
 
-@dataclass(frozen=True, slots=True)
-class _WeComRuntimeAttachment:
-    intake: ChatRuntimeIntake
-    session_id: uuid.UUID
-
-
 async def _accept_wecom_text(
     *,
     agent_id: uuid.UUID,
     from_user: str,
     user_text: str,
     chat_id: str = "",
+    is_kf: bool = False,
+    open_kfid: str | None = None,
     external_event_id: str | None = None,
-) -> _WeComRuntimeAttachment:
+) -> None:
     """Persist one WeCom input and Runtime Command before provider acknowledgement."""
     from app.api.feishu import _load_agent_and_model
 
@@ -575,7 +557,7 @@ async def _accept_wecom_text(
             created_by_user_id=platform_user.id,
         )
         _, model, _ = await _load_agent_and_model(db, agent_id)
-        intake = await enqueue_channel_chat_runtime(
+        await enqueue_channel_chat_runtime(
             db,
             agent=agent_obj,
             user=platform_user,
@@ -583,89 +565,18 @@ async def _accept_wecom_text(
             model=model,
             content=user_text,
             source_channel="wecom",
+            channel_delivery_target={
+                "user_id": from_user,
+                "is_kf": is_kf,
+                "open_kfid": open_kfid,
+            },
             message_id=channel_message_id(
                 agent_id,
                 "wecom",
                 external_event_id,
             ),
         )
-        session_id = session.id
         await db.commit()
-    return _WeComRuntimeAttachment(intake=intake, session_id=session_id)
-
-
-async def _deliver_wecom_text(
-    *,
-    attachment: _WeComRuntimeAttachment,
-    agent_id: uuid.UUID,
-    config: ChannelConfig,
-    from_user: str,
-    user_text: str,
-    is_kf: bool = False,
-    open_kfid: str | None = None,
-) -> None:
-    """Wait for the stable Runtime result and deliver it through WeCom."""
-    outcome = await wait_for_channel_chat(
-        handle=attachment.intake.handle,
-        session_id=attachment.session_id,
-        session_factory=async_session,
-        after=attachment.intake.stream_after,
-    )
-    reply_text = outcome.content
-    logger.info(f"[WeCom] Runtime reply: {reply_text[:100]}")
-
-    wecom_agent_id = (config.extra_config or {}).get("wecom_agent_id", "")
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            tok_resp = await client.get(
-                "https://qyapi.weixin.qq.com/cgi-bin/gettoken",
-                params={"corpid": config.app_id, "corpsecret": config.app_secret},
-            )
-            access_token = tok_resp.json().get("access_token", "")
-            if access_token:
-                if is_kf and open_kfid:
-                    res_state = await client.post(
-                        f"https://qyapi.weixin.qq.com/cgi-bin/kf/service_state/trans?access_token={access_token}",
-                        json={
-                            "open_kfid": open_kfid,
-                            "external_userid": from_user,
-                            "service_state": 1,
-                        },
-                    )
-                    logger.info(f"[WeCom KF] trans state result: {res_state.json()}")
-                    res_send = await client.post(
-                        f"https://qyapi.weixin.qq.com/cgi-bin/kf/send_msg?access_token={access_token}",
-                        json={
-                            "touser": from_user,
-                            "open_kfid": open_kfid,
-                            "msgtype": "text",
-                            "text": {"content": reply_text},
-                        },
-                    )
-                    logger.info(f"[WeCom KF] send_msg result: {res_send.json()}")
-                else:
-                    await client.post(
-                        f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access_token}",
-                        json={
-                            "touser": from_user,
-                            "msgtype": "text",
-                            "agentid": int(wecom_agent_id) if wecom_agent_id else 0,
-                            "text": {"content": reply_text},
-                        },
-                    )
-    except Exception as exc:
-        logger.error(f"[WeCom] Failed to send reply: {exc}")
-
-    await log_activity(
-        agent_id,
-        "chat_reply",
-        f"Replied to WeCom message: {reply_text[:80]}",
-        detail={
-            "channel": "wecom",
-            "user_text": user_text[:200],
-            "reply": reply_text[:500],
-        },
-    )
 
 
 async def _process_wecom_text(
@@ -678,22 +589,15 @@ async def _process_wecom_text(
     kf_msg_id: str = None,
     chat_id: str = "",
 ):
-    """Accept and deliver a WeCom message outside webhook-specific orchestration."""
-    attachment = await _accept_wecom_text(
+    """Accept a WeCom message; the durable outbox delivers its Runtime result."""
+    await _accept_wecom_text(
         agent_id=agent_id,
         from_user=from_user,
         user_text=user_text,
         chat_id=chat_id,
-        external_event_id=kf_msg_id,
-    )
-    await _deliver_wecom_text(
-        attachment=attachment,
-        agent_id=agent_id,
-        config=config,
-        from_user=from_user,
-        user_text=user_text,
         is_kf=is_kf,
         open_kfid=open_kfid,
+        external_event_id=kf_msg_id,
     )
 
 

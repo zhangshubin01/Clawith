@@ -21,6 +21,13 @@ from app.config import Settings, get_settings
 from app.services.agent_runtime.a2a_completion import A2ARuntimeCompletionHandler
 from app.services.agent_runtime.a2a_runtime import RuntimeA2AService
 from app.services.agent_runtime.cancel_source import DatabaseRuntimeCancelSource
+from app.services.agent_runtime.channel_delivery import (
+    ChannelDeliveryWorkResult,
+    ChannelDeliveryWorker,
+)
+from app.services.agent_runtime.channel_provider_delivery import (
+    DatabaseChannelDeliverySender,
+)
 from app.services.agent_runtime.checkpoint_side_effects import RuntimeCheckpointSideEffects
 from app.services.agent_runtime.checkpointer import (
     checkpoint_database_url,
@@ -88,6 +95,7 @@ _REQUIRED_PRODUCT_TABLES = (
     "agent_run_events",
     "agent_tool_executions",
     "session_context_states",
+    "channel_deliveries",
 )
 _EXPECTED_CHECKPOINT_MIGRATION = len(AsyncPostgresSaver.MIGRATIONS) - 1
 
@@ -109,6 +117,7 @@ class RuntimeWorkerComponents:
     graph_registry: RuntimeGraphRegistry
     driver: LangGraphRuntimeDriver
     worker: RuntimeCommandWorker
+    channel_delivery_worker: ChannelDeliveryWorker
     session_context_scanner: SessionContextCompactionScanner
 
 
@@ -282,6 +291,7 @@ def build_runtime_worker_components(
             SchedulingLaneCompletionHandler(session_factory=session_factory),
         ),
     )
+    resolved_claimant = claimant or runtime_worker_claimant()
     worker = RuntimeCommandWorker(
         session_factory=session_factory,
         lock_engine=lock_engine,
@@ -291,7 +301,13 @@ def build_runtime_worker_components(
             session_factory=session_factory,
         ),
         post_checkpoint_handler=post_checkpoint_handler,
-        claimant=claimant or runtime_worker_claimant(),
+        claimant=resolved_claimant,
+        settings=runtime_settings,
+    )
+    channel_delivery_worker = ChannelDeliveryWorker(
+        session_factory=session_factory,
+        sender=DatabaseChannelDeliverySender(session_factory=session_factory),
+        claimant=resolved_claimant,
         settings=runtime_settings,
     )
     return RuntimeWorkerComponents(
@@ -300,6 +316,7 @@ def build_runtime_worker_components(
         graph_registry=graph_registry,
         driver=driver,
         worker=worker,
+        channel_delivery_worker=channel_delivery_worker,
         session_context_scanner=session_context_scanner,
     )
 
@@ -354,6 +371,42 @@ class RuntimeCommandDaemon:
         return 0.0
 
 
+class ChannelDeliveryDaemon:
+    """Continuously drain provider deliveries independently of Graph execution."""
+
+    def __init__(
+        self,
+        worker: ChannelDeliveryWorker,
+        *,
+        scan_delay_seconds: float,
+        error_delay_seconds: float = 1.0,
+    ) -> None:
+        if scan_delay_seconds <= 0 or error_delay_seconds <= 0:
+            raise ValueError("Channel delivery daemon delays must be positive")
+        self._worker = worker
+        self._scan_delay_seconds = scan_delay_seconds
+        self._error_delay_seconds = error_delay_seconds
+
+    async def run(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                result = await self._worker.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Runtime channel delivery iteration failed")
+                delay = self._error_delay_seconds
+            else:
+                delay = self._delay_after(result)
+            if delay:
+                await RuntimeCommandDaemon._wait(stop, delay)
+
+    def _delay_after(self, result: ChannelDeliveryWorkResult) -> float:
+        if result.status in {"idle", "retry", "failed"}:
+            return self._scan_delay_seconds
+        return 0.0
+
+
 @asynccontextmanager
 async def runtime_worker_context(
     *,
@@ -395,8 +448,9 @@ async def running_runtime_worker_context(
     verify_schema: bool = True,
 ) -> AsyncIterator[RuntimeWorkerComponents]:
     """Run and cancel the daemon within the Checkpointer component lifetime."""
+    runtime_settings = settings or get_settings()
     async with runtime_worker_context(
-        settings=settings,
+        settings=runtime_settings,
         checkpointer_manager=checkpointer_manager,
         session_factory=session_factory,
         lock_engine=lock_engine,
@@ -413,19 +467,32 @@ async def running_runtime_worker_context(
             components.session_context_scanner.run(stop),
             name="agent-runtime-session-context-compact",
         )
+        channel_delivery_task = asyncio.create_task(
+            ChannelDeliveryDaemon(
+                components.channel_delivery_worker,
+                scan_delay_seconds=(
+                    runtime_settings.AGENT_RUNTIME_CHANNEL_DELIVERY_SCAN_SECONDS
+                ),
+            ).run(stop),
+            name="agent-runtime-channel-delivery",
+        )
         try:
             yield components
         finally:
             stop.set()
             task.cancel()
             compact_task.cancel()
+            channel_delivery_task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
             with suppress(asyncio.CancelledError):
                 await compact_task
+            with suppress(asyncio.CancelledError):
+                await channel_delivery_task
 
 
 __all__ = [
+    "ChannelDeliveryDaemon",
     "RuntimeCommandDaemon",
     "RuntimeSchemaNotReady",
     "RuntimeWorkerComponents",

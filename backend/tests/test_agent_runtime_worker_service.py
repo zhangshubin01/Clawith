@@ -14,6 +14,7 @@ import pytest
 from app.config import Settings
 from app.services.agent_runtime.a2a_completion import A2ARuntimeCompletionHandler
 from app.services.agent_runtime.command_worker import CommandWorkResult, RuntimeRunRecord
+from app.services.agent_runtime.channel_delivery import ChannelDeliveryWorkResult
 from app.services.agent_runtime.heartbeat_completion import (
     HeartbeatRuntimeCompletionHandler,
 )
@@ -35,6 +36,7 @@ from app.services.agent_runtime.state import RunRegistrySnapshot
 from app.services.agent_runtime.task_completion import TaskRuntimeCompletionHandler
 from app.services.agent_runtime.trigger_completion import TriggerRuntimeCompletionHandler
 from app.services.agent_runtime.worker_service import (
+    ChannelDeliveryDaemon,
     RuntimeCommandDaemon,
     RuntimeSchemaNotReady,
     assert_runtime_schema_ready,
@@ -136,6 +138,33 @@ async def test_daemon_continues_after_iteration_error_until_stopped() -> None:
     assert worker.calls == 2
 
 
+@pytest.mark.asyncio
+async def test_channel_delivery_daemon_continues_after_retry() -> None:
+    stop = asyncio.Event()
+
+    class DeliveryWorker:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run_once(self) -> ChannelDeliveryWorkResult:
+            self.calls += 1
+            if self.calls == 2:
+                stop.set()
+                return ChannelDeliveryWorkResult(status="idle")
+            return ChannelDeliveryWorkResult(status="retry")
+
+    worker = DeliveryWorker()
+    daemon = ChannelDeliveryDaemon(
+        worker,  # type: ignore[arg-type]
+        scan_delay_seconds=0.001,
+        error_delay_seconds=0.001,
+    )
+
+    await asyncio.wait_for(daemon.run(stop), timeout=1)
+
+    assert worker.calls == 2
+
+
 def test_component_builder_installs_pinned_agent_and_planning_graphs() -> None:
     components = build_runtime_worker_components(
         checkpointer=InMemorySaver(),
@@ -178,6 +207,7 @@ def test_component_builder_installs_pinned_agent_and_planning_graphs() -> None:
     )
     assert components.worker._checkpoint_reader is components.driver
     assert components.worker._command_executor is components.driver
+    assert components.channel_delivery_worker._claimant == "worker-test"
     assert isinstance(
         components.worker._pre_command_handler,
         RuntimeGroupStartAcknowledgementHandler,
@@ -270,6 +300,7 @@ async def test_schema_readiness_requires_every_product_table() -> None:
                     "agent_run_commands",
                     "agent_run_events",
                     "session_context_states",
+                    "channel_deliveries",
                 }
             ),  # type: ignore[arg-type]
             settings=_settings(),
@@ -295,6 +326,7 @@ async def test_schema_readiness_requires_pinned_checkpoint_version() -> None:
                     "agent_run_events",
                     "agent_tool_executions",
                     "session_context_states",
+                    "channel_deliveries",
                 }
             ),  # type: ignore[arg-type]
             settings=_settings(),
@@ -318,6 +350,7 @@ async def test_schema_readiness_accepts_complete_pinned_schema() -> None:
                     "agent_run_events",
                     "agent_tool_executions",
                     "session_context_states",
+                    "channel_deliveries",
                 }
             ),  # type: ignore[arg-type]
             settings=_settings(),

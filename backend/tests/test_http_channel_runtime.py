@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 import json
 from types import SimpleNamespace
@@ -13,8 +12,7 @@ import pytest
 from app import database
 from app.api import feishu as feishu_api
 from app.api import dingtalk, discord_bot, slack, teams, wecom, whatsapp
-from app.services import activity_logger, channel_session
-from app.services.agent_runtime.channel_chat import ChannelChatOutcome
+from app.services import channel_session
 from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
 from app.services.agent_runtime.contracts import RunHandle, RuntimeEventCursor
 from app.services.channel_user_service import channel_user_service
@@ -112,7 +110,7 @@ async def test_slack_webhook_uses_runtime_intake(monkeypatch) -> None:
     session = SimpleNamespace(id=session_id)
     model = SimpleNamespace(id=uuid.uuid4())
     db = _Session(config, agent)
-    intake, cursor = _runtime(tenant_id)
+    intake, _cursor = _runtime(tenant_id)
     calls: dict[str, object] = {}
 
     async def resolve_user(**_kwargs):
@@ -129,15 +127,10 @@ async def test_slack_webhook_uses_runtime_intake(monkeypatch) -> None:
         calls["intake"] = kwargs
         return intake
 
-    async def wait(**kwargs):
-        calls["wait"] = kwargs
-        return ChannelChatOutcome("completed", "Slack Runtime reply", uuid.uuid4())
-
     monkeypatch.setattr(channel_user_service, "resolve_channel_user", resolve_user)
     monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
     monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_model)
     monkeypatch.setattr(slack, "enqueue_channel_chat_runtime", enqueue)
-    monkeypatch.setattr(slack, "wait_for_channel_chat", wait)
 
     result = await slack.slack_event_webhook(
         agent_id,
@@ -165,17 +158,12 @@ async def test_slack_webhook_uses_runtime_intake(monkeypatch) -> None:
     intake_call = calls["intake"]
     assert isinstance(intake_call, dict)
     assert intake_call["source_channel"] == "slack"
+    assert intake_call["channel_delivery_target"] == {"channel_id": "D123"}
     assert intake_call["message_id"] == slack.channel_message_id(
         agent_id,
         "slack",
         event_id,
     )
-    assert calls["wait"] == {
-        "handle": intake.handle,
-        "session_id": session_id,
-        "session_factory": slack._async_session,
-        "after": cursor,
-    }
 
 
 @pytest.mark.asyncio
@@ -196,7 +184,7 @@ async def test_teams_webhook_uses_runtime_intake(monkeypatch) -> None:
     session = SimpleNamespace(id=session_id)
     model = SimpleNamespace(id=uuid.uuid4())
     db = _Session(config, agent)
-    intake, cursor = _runtime(tenant_id)
+    intake, _cursor = _runtime(tenant_id)
     calls: dict[str, object] = {}
 
     async def resolve_user(**_kwargs):
@@ -213,15 +201,10 @@ async def test_teams_webhook_uses_runtime_intake(monkeypatch) -> None:
         calls["intake"] = kwargs
         return intake
 
-    async def wait(**kwargs):
-        calls["wait"] = kwargs
-        return ChannelChatOutcome("completed", "Teams Runtime reply", uuid.uuid4())
-
     monkeypatch.setattr(channel_user_service, "resolve_channel_user", resolve_user)
     monkeypatch.setattr(teams, "find_or_create_channel_session", find_session)
     monkeypatch.setattr(teams, "_load_agent_and_model", load_model)
     monkeypatch.setattr(teams, "enqueue_channel_chat_runtime", enqueue)
-    monkeypatch.setattr(teams, "wait_for_channel_chat", wait)
 
     result = await teams.teams_event_webhook(
         agent_id,
@@ -247,17 +230,17 @@ async def test_teams_webhook_uses_runtime_intake(monkeypatch) -> None:
     intake_call = calls["intake"]
     assert isinstance(intake_call, dict)
     assert intake_call["source_channel"] == "microsoft_teams"
+    assert intake_call["channel_delivery_target"] == {
+        "conversation_id": "teams-conversation-1",
+        "reply_to_id": activity_id,
+        "bot_account": {"id": "bot-1"},
+        "recipient": {"id": "sender-1", "name": "Alice"},
+    }
     assert intake_call["message_id"] == teams.channel_message_id(
         agent_id,
         "microsoft_teams",
         activity_id,
     )
-    assert calls["wait"] == {
-        "handle": intake.handle,
-        "session_id": session_id,
-        "session_factory": teams._async_session,
-        "after": cursor,
-    }
 
 
 @pytest.mark.asyncio
@@ -273,7 +256,7 @@ async def test_whatsapp_webhook_uses_runtime_intake(monkeypatch) -> None:
     session = SimpleNamespace(id=session_id)
     model = SimpleNamespace(id=uuid.uuid4())
     db = _Session(config, agent)
-    intake, cursor = _runtime(tenant_id)
+    intake, _cursor = _runtime(tenant_id)
     calls: dict[str, object] = {}
 
     async def resolve_user(**_kwargs):
@@ -290,19 +273,10 @@ async def test_whatsapp_webhook_uses_runtime_intake(monkeypatch) -> None:
         calls["intake"] = kwargs
         return intake
 
-    async def wait(**kwargs):
-        calls["wait"] = kwargs
-        return ChannelChatOutcome("completed", "WhatsApp Runtime reply", uuid.uuid4())
-
-    async def send(_config, to_phone, text):
-        calls["send"] = (to_phone, text)
-
     monkeypatch.setattr(channel_user_service, "resolve_channel_user", resolve_user)
     monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
     monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_model)
     monkeypatch.setattr(whatsapp, "enqueue_channel_chat_runtime", enqueue)
-    monkeypatch.setattr(whatsapp, "wait_for_channel_chat", wait)
-    monkeypatch.setattr(whatsapp, "_send_whatsapp_messages", send)
 
     result = await whatsapp.whatsapp_event_webhook(
         agent_id,
@@ -337,24 +311,16 @@ async def test_whatsapp_webhook_uses_runtime_intake(monkeypatch) -> None:
     intake_call = calls["intake"]
     assert isinstance(intake_call, dict)
     assert intake_call["source_channel"] == "whatsapp"
+    assert intake_call["channel_delivery_target"] == {"phone": "15551234567"}
     assert intake_call["message_id"] == whatsapp.channel_message_id(
         agent_id,
         "whatsapp",
         provider_message_id,
     )
-    assert calls["wait"] == {
-        "handle": intake.handle,
-        "session_id": session_id,
-        "session_factory": whatsapp._async_session,
-        "after": cursor,
-    }
-    assert calls["send"] == ("15551234567", "WhatsApp Runtime reply")
 
 
 @pytest.mark.asyncio
 async def test_dingtalk_message_uses_runtime_and_group_scope(monkeypatch) -> None:
-    import httpx
-
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     user_id = uuid.uuid4()
@@ -371,8 +337,8 @@ async def test_dingtalk_message_uses_runtime_and_group_scope(monkeypatch) -> Non
     model = SimpleNamespace(id=uuid.uuid4())
     db = _Session(agent, None)
     session_factory = _SessionFactory(db)
-    intake, cursor = _runtime(tenant_id)
-    calls: dict[str, object] = {"posts": []}
+    intake, _cursor = _runtime(tenant_id)
+    calls: dict[str, object] = {}
 
     async def resolve_user(**_kwargs):
         return user
@@ -388,32 +354,11 @@ async def test_dingtalk_message_uses_runtime_and_group_scope(monkeypatch) -> Non
         calls["intake"] = kwargs
         return intake
 
-    async def wait(**kwargs):
-        calls["wait"] = kwargs
-        return ChannelChatOutcome("completed", "DingTalk Runtime reply", uuid.uuid4())
-
-    async def log(*_args, **_kwargs):
-        return None
-
-    class _HTTPClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return False
-
-        async def post(self, url, **kwargs):
-            calls["posts"].append((url, kwargs))  # type: ignore[union-attr]
-            return SimpleNamespace()
-
     monkeypatch.setattr(database, "async_session", session_factory)
     monkeypatch.setattr(channel_user_service, "resolve_channel_user", resolve_user)
     monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
     monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_model)
     monkeypatch.setattr(dingtalk, "enqueue_channel_chat_runtime", enqueue)
-    monkeypatch.setattr(dingtalk, "wait_for_channel_chat", wait)
-    monkeypatch.setattr(activity_logger, "log_activity", log)
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: _HTTPClient())
 
     await dingtalk.process_dingtalk_message(
         agent_id=agent_id,
@@ -433,20 +378,18 @@ async def test_dingtalk_message_uses_runtime_and_group_scope(monkeypatch) -> Non
     intake_call = calls["intake"]
     assert isinstance(intake_call, dict)
     assert intake_call["source_channel"] == "dingtalk"
+    assert intake_call["channel_delivery_target"] == {
+        "session_webhook": "https://dingtalk.example/session",
+        "user_id": "staff-1",
+        "title": "Runtime Agent",
+        "source_message_id": provider_message_id,
+        "conversation_id": "group-1",
+    }
     assert intake_call["message_id"] == dingtalk.channel_message_id(
         agent_id,
         "dingtalk",
         provider_message_id,
     )
-    assert calls["wait"] == {
-        "handle": intake.handle,
-        "session_id": session_id,
-        "session_factory": session_factory,
-        "after": cursor,
-    }
-    posts = calls["posts"]
-    assert isinstance(posts, list)
-    assert posts[0][1]["json"]["markdown"]["text"] == "DingTalk Runtime reply"
 
 
 @pytest.mark.asyncio
@@ -462,8 +405,8 @@ async def test_discord_interaction_commits_runtime_before_deferred_ack(monkeypat
     session = SimpleNamespace(id=session_id)
     model = SimpleNamespace(id=uuid.uuid4())
     db = _Session(config, agent)
-    intake, cursor = _runtime(tenant_id)
-    calls: dict[str, object] = {"tasks": []}
+    intake, _cursor = _runtime(tenant_id)
+    calls: dict[str, object] = {}
 
     async def resolve_user(**_kwargs):
         return user
@@ -479,25 +422,10 @@ async def test_discord_interaction_commits_runtime_before_deferred_ack(monkeypat
         calls["intake"] = kwargs
         return intake
 
-    async def wait(**kwargs):
-        calls["wait"] = kwargs
-        return ChannelChatOutcome("completed", "Discord Runtime reply", uuid.uuid4())
-
-    async def send_followup(*args):
-        calls["send"] = args
-
-    def create_task(coro):
-        assert db.commits == 1
-        calls["tasks"].append(coro)  # type: ignore[union-attr]
-        return SimpleNamespace()
-
     monkeypatch.setattr(channel_user_service, "resolve_channel_user", resolve_user)
     monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
     monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_model)
     monkeypatch.setattr(discord_bot, "enqueue_channel_chat_runtime", enqueue)
-    monkeypatch.setattr(discord_bot, "wait_for_channel_chat", wait)
-    monkeypatch.setattr(discord_bot, "_send_discord_followup", send_followup)
-    monkeypatch.setattr(asyncio, "create_task", create_task)
 
     result = await discord_bot.discord_interaction_webhook(
         agent_id,
@@ -521,25 +449,14 @@ async def test_discord_interaction_commits_runtime_before_deferred_ack(monkeypat
     assert result == {"type": 5}
     intake_call = calls["intake"]
     assert isinstance(intake_call, dict)
+    assert intake_call["channel_delivery_target"] == {
+        "channel_id": "channel-1",
+        "interaction_token": "interaction-token-1",
+    }
     assert intake_call["message_id"] == discord_bot.channel_message_id(
         agent_id,
         "discord",
         interaction_id,
-    )
-    tasks = calls["tasks"]
-    assert isinstance(tasks, list)
-    await tasks[0]
-    assert calls["wait"] == {
-        "handle": intake.handle,
-        "session_id": session_id,
-        "session_factory": discord_bot._async_session,
-        "after": cursor,
-    }
-    assert calls["send"] == (
-        "app-1",
-        "bot-token-1",
-        "interaction-token-1",
-        "Discord Runtime reply",
     )
 
 
@@ -579,7 +496,7 @@ async def test_wecom_accepts_runtime_before_async_delivery(monkeypatch) -> None:
     monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_model)
     monkeypatch.setattr(wecom, "enqueue_channel_chat_runtime", enqueue)
 
-    attachment = await wecom._accept_wecom_text(
+    result = await wecom._accept_wecom_text(
         agent_id=agent_id,
         from_user="wecom-user-1",
         user_text="Hello WeCom",
@@ -588,8 +505,7 @@ async def test_wecom_accepts_runtime_before_async_delivery(monkeypatch) -> None:
     )
 
     assert db.commits == 1
-    assert attachment.intake is intake
-    assert attachment.session_id == session_id
+    assert result is None
     session_call = calls["session"]
     assert isinstance(session_call, dict)
     assert session_call["is_group"] is True

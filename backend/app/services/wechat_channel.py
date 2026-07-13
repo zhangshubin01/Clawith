@@ -20,7 +20,6 @@ from app.models.channel_config import ChannelConfig
 from app.services.agent_runtime.channel_chat import (
     channel_message_id,
     enqueue_channel_chat_runtime,
-    wait_for_channel_chat,
 )
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import channel_user_service
@@ -190,7 +189,6 @@ def _extract_wechat_text(item_list: list[dict[str, Any]] | None) -> str:
 
 async def _process_wechat_message(agent_id: uuid.UUID, msg: dict[str, Any], config: ChannelConfig) -> None:
     from app.api.feishu import _load_agent_and_model
-    from app.services.activity_logger import log_activity
 
     from_user_id = str(msg.get("from_user_id") or "").strip()
     if not from_user_id or from_user_id == (config.app_id or "").strip():
@@ -235,7 +233,6 @@ async def _process_wechat_message(agent_id: uuid.UUID, msg: dict[str, Any], conf
             first_message_title=user_text,
             created_by_user_id=platform_user_id,
         )
-        session_id = sess.id
         await remember_wechat_context(
             db,
             agent_id=agent_id,
@@ -256,7 +253,7 @@ async def _process_wechat_message(agent_id: uuid.UUID, msg: dict[str, Any], conf
             ),
             None,
         )
-        intake = await enqueue_channel_chat_runtime(
+        await enqueue_channel_chat_runtime(
             db,
             agent=agent_obj,
             user=platform_user,
@@ -264,6 +261,7 @@ async def _process_wechat_message(agent_id: uuid.UUID, msg: dict[str, Any], conf
             model=runtime_model,
             content=user_text,
             source_channel="wechat",
+            channel_delivery_target={"user_id": from_user_id},
             message_id=channel_message_id(
                 agent_id,
                 "wechat",
@@ -272,34 +270,6 @@ async def _process_wechat_message(agent_id: uuid.UUID, msg: dict[str, Any], conf
         )
 
         await db.commit()
-
-    token = str((config.extra_config or {}).get("bot_token") or "").strip()
-    base_url = str((config.extra_config or {}).get("baseurl") or WECHAT_ILINK_BASE_URL).strip()
-    route_tag = str((config.extra_config or {}).get("route_tag") or "").strip() or None
-
-    outcome = await wait_for_channel_chat(
-        handle=intake.handle,
-        session_id=session_id,
-        session_factory=async_session,
-        after=intake.stream_after,
-    )
-    reply_text = outcome.content
-
-    await send_wechat_text_message(
-        token=token,
-        base_url=base_url,
-        to_user_id=from_user_id,
-        context_token=context_token,
-        text=reply_text,
-        route_tag=route_tag,
-    )
-
-    await log_activity(
-        agent_id,
-        "chat_reply",
-        f"Replied to WeChat message: {reply_text[:80]}",
-        detail={"channel": "wechat", "user_text": user_text[:200], "reply": reply_text[:500]},
-    )
 
 
 class WeChatPollManager:

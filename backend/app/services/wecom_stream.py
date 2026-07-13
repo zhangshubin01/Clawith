@@ -167,10 +167,10 @@ class WeComStreamManager:
                         external_event_id=_extract_wecom_message_id(body),
                     )
 
-                    # Reply via streaming
-                    stream_id = generate_req_id("stream")
-                    await client.reply_stream(frame, stream_id, reply_text, finish=True)
-                    logger.info(f"[WeCom Stream] Replied to {sender_id}: {reply_text[:80]}")
+                    if reply_text:
+                        stream_id = generate_req_id("stream")
+                        await client.reply_stream(frame, stream_id, reply_text, finish=True)
+                        logger.info(f"[WeCom Stream] Replied to {sender_id}: {reply_text[:80]}")
 
                 except Exception as e:
                     logger.error(f"[WeCom Stream] Error handling text message: {e}")
@@ -295,6 +295,24 @@ class WeComStreamManager:
                 pass
         self._connected.pop(agent_id, None)
 
+    async def send_message(
+        self,
+        agent_id: uuid.UUID,
+        chat_id: str,
+        content: str,
+    ) -> None:
+        """Proactively deliver through the currently connected AI Bot client."""
+        client = self._clients.get(agent_id)
+        if client is None or not self._connected.get(agent_id, False):
+            raise RuntimeError("WeCom AI Bot connection is unavailable")
+        await client.send_message(
+            chat_id,
+            {
+                "msgtype": "markdown",
+                "markdown": {"content": content},
+            },
+        )
+
     async def start_all(self):
         """Start WebSocket clients for all configured WeCom agents with bot credentials."""
         logger.info("[WeCom Stream] Initializing all active WeCom AI Bot channels...")
@@ -339,17 +357,15 @@ async def _process_wecom_stream_message(
     chat_type: str = "single",
     external_event_id: str | None = None,
 ) -> str:
-    """Attach a WeCom message to the durable Runtime and return its delivery."""
+    """Attach a WeCom message; the durable outbox sends the eventual result."""
     from sqlalchemy import select as _select
 
     from app.api.feishu import _load_agent_and_model
     from app.database import async_session
     from app.models.agent import Agent as AgentModel
-    from app.services.activity_logger import log_activity
     from app.services.agent_runtime.channel_chat import (
         channel_message_id,
         enqueue_channel_chat_runtime,
-        wait_for_channel_chat,
     )
     from app.services.channel_session import find_or_create_channel_session
     from app.services.channel_user_service import channel_user_service
@@ -385,9 +401,8 @@ async def _process_wecom_stream_message(
             group_name=f"WeCom Group {chat_id[:8]}" if _is_group else None,
             created_by_user_id=platform_user_id,
         )
-        session_id = sess.id
         _, model, _ = await _load_agent_and_model(db, agent_id)
-        intake = await enqueue_channel_chat_runtime(
+        await enqueue_channel_chat_runtime(
             db,
             agent=agent_obj,
             user=platform_user,
@@ -395,6 +410,11 @@ async def _process_wecom_stream_message(
             model=model,
             content=user_text,
             source_channel="wecom",
+            channel_delivery_target={
+                "user_id": sender_id,
+                "chat_id": chat_id or sender_id,
+                "transport": "websocket",
+            },
             message_id=channel_message_id(
                 agent_id,
                 "wecom",
@@ -403,23 +423,7 @@ async def _process_wecom_stream_message(
         )
 
         await db.commit()
-
-    outcome = await wait_for_channel_chat(
-        handle=intake.handle,
-        session_id=session_id,
-        session_factory=async_session,
-        after=intake.stream_after,
-    )
-    reply_text = outcome.content
-    logger.info(f"[WeCom Stream] LLM reply: {reply_text[:100]}")
-
-    await log_activity(
-        agent_id, "chat_reply",
-        f"Replied to WeCom message: {reply_text[:80]}",
-        detail={"channel": "wecom", "user_text": user_text[:200], "reply": reply_text[:500]},
-    )
-
-    return reply_text
+    return ""
 
 
 wecom_stream_manager = WeComStreamManager()

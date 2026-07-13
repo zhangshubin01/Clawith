@@ -19,7 +19,6 @@ from app.schemas.schemas import ChannelConfigOut
 from app.services.agent_runtime.channel_chat import (
     channel_message_id,
     enqueue_channel_chat_runtime,
-    wait_for_channel_chat,
 )
 
 router = APIRouter(tags=["dingtalk"])
@@ -163,13 +162,11 @@ async def process_dingtalk_message(
         sender_nick: Display name of the sender from DingTalk.
         message_id: DingTalk message ID (used for reactions).
     """
-    import httpx
     from sqlalchemy import select as _select
 
     from app.api.feishu import _load_agent_and_model
     from app.database import async_session
     from app.models.agent import Agent as AgentModel
-    from app.services.activity_logger import log_activity
     from app.services.channel_session import find_or_create_channel_session
     from app.services.channel_user_service import channel_user_service
 
@@ -216,8 +213,6 @@ async def process_dingtalk_message(
             group_name=f"DingTalk Group {conversation_id[:8]}" if is_group else None,
             created_by_user_id=platform_user_id,
         )
-        session_id = sess.id
-
         # Build saved_content for DB (no base64 blobs, keep it display-friendly)
         import re as _re_dt
         _clean_text = _re_dt.sub(
@@ -233,17 +228,6 @@ async def process_dingtalk_message(
         else:
             saved_content = _clean_text or user_text
 
-        # Load DingTalk credentials for reaction cleanup.
-        _dt_cfg_r = await db.execute(
-            _select(ChannelConfig).where(
-                ChannelConfig.agent_id == agent_id,
-                ChannelConfig.channel_type == "dingtalk",
-            )
-        )
-        _dt_cfg = _dt_cfg_r.scalar_one_or_none()
-        _dt_app_key = _dt_cfg.app_id if _dt_cfg else None
-        _dt_app_secret = _dt_cfg.app_secret if _dt_cfg else None
-
         _agent_name = agent_obj.name
 
         # Build Runtime input text: image markers remain executable while storage stays concise.
@@ -255,7 +239,7 @@ async def process_dingtalk_message(
             llm_user_text = f"{user_text}\n{image_markers}" if user_text else image_markers
 
         _, model, _ = await _load_agent_and_model(db, agent_id)
-        intake = await enqueue_channel_chat_runtime(
+        await enqueue_channel_chat_runtime(
             db,
             agent=agent_obj,
             user=platform_user,
@@ -264,6 +248,13 @@ async def process_dingtalk_message(
             content=llm_user_text,
             display_content=saved_content,
             source_channel="dingtalk",
+            channel_delivery_target={
+                "session_webhook": session_webhook,
+                "user_id": sender_staff_id,
+                "title": _agent_name,
+                "source_message_id": message_id,
+                "conversation_id": conversation_id,
+            },
             message_id=channel_message_id(
                 agent_id,
                 "dingtalk",
@@ -272,59 +263,6 @@ async def process_dingtalk_message(
         )
 
         await db.commit()
-
-        try:
-            outcome = await wait_for_channel_chat(
-                handle=intake.handle,
-                session_id=session_id,
-                session_factory=async_session,
-                after=intake.stream_after,
-            )
-            reply_text = outcome.content
-        finally:
-            if message_id and _dt_app_key:
-                try:
-                    from app.services.dingtalk_reaction import recall_thinking_reaction
-                    await recall_thinking_reaction(
-                        _dt_app_key, _dt_app_secret,
-                        message_id, conversation_id,
-                    )
-                except Exception as _recall_err:
-                    logger.warning(f"[DingTalk] Failed to recall thinking reaction: {_recall_err}")
-
-        has_media = bool(image_base64_list or saved_file_paths)
-        logger.info(
-            f"[DingTalk] LLM reply ({'media' if has_media else 'text'} input): "
-            f"{reply_text[:100]}"
-        )
-
-        # Reply via session webhook (markdown)
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.post(session_webhook, json={
-                    "msgtype": "markdown",
-                    "markdown": {
-                        "title": _agent_name or "AI Reply",
-                        "text": reply_text,
-                    },
-                })
-        except Exception as e:
-            logger.error(f"[DingTalk] Failed to reply via webhook: {e}")
-            # Fallback: try plain text
-            try:
-                async with httpx.AsyncClient(timeout=10) as client:
-                    await client.post(session_webhook, json={
-                        "msgtype": "text",
-                        "text": {"content": reply_text},
-                    })
-            except Exception as e2:
-                logger.error(f"[DingTalk] Fallback text reply also failed: {e2}")
-
-        await log_activity(
-            agent_id, "chat_reply",
-            f"Replied to DingTalk message: {reply_text[:80]}",
-            detail={"channel": "dingtalk", "user_text": user_text[:200], "reply": reply_text[:500]},
-        )
 
 
 # ─── OAuth Callback (SSO) ──────────────────────────────

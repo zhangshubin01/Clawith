@@ -230,6 +230,10 @@ async def test_external_group_chat_uses_unified_session_without_native_group_sco
             model=model,
             content="[发送者: Ada] Review this update",
             source_channel="feishu",
+            channel_delivery_target={
+                "receive_id": "oc_123",
+                "receive_id_type": "chat_id",
+            },
             settings_override=_settings(enabled=True),
         )
 
@@ -243,6 +247,14 @@ async def test_external_group_chat_uses_unified_session_without_native_group_sco
     assert command.delivery_target == {
         "kind": "session",
         "session_id": str(session.id),
+        "channel_delivery": {
+            "version": 1,
+            "channel": "feishu",
+            "target": {
+                "receive_id": "oc_123",
+                "receive_id_type": "chat_id",
+            },
+        },
     }
     assert command.payload["source_channel"] == "feishu"
 
@@ -250,6 +262,11 @@ async def test_external_group_chat_uses_unified_session_without_native_group_sco
 @pytest.mark.asyncio
 async def test_chat_resume_persists_explicit_correlation_with_the_user_message() -> None:
     agent, user, session, model = _records()
+    session.session_type = "group"
+    session.source_channel = "slack"
+    session.external_conv_id = "slack_D123"
+    session.is_group = True
+    session.is_primary = False
     run_id = uuid.uuid4()
     waiting_run = AgentRun(
         id=run_id,
@@ -267,6 +284,15 @@ async def test_chat_resume_persists_explicit_correlation_with_the_user_message()
         graph_version="v1",
         lane_held=False,
         delivery_status="delivered",
+        delivery_target={
+            "kind": "session",
+            "session_id": str(session.id),
+            "channel_delivery": {
+                "version": 1,
+                "channel": "slack",
+                "target": {"channel_id": "D-old"},
+            },
+        },
         origin_user_id=user.id,
     )
     waiting_event = AgentRunEvent(
@@ -306,6 +332,8 @@ async def test_chat_resume_persists_explicit_correlation_with_the_user_message()
             message_id=message_id,
             resume_run_id=run_id,
             resume_correlation_id="confirm-7",
+            source_channel="slack",
+            channel_delivery_target={"channel_id": "D-new"},
             settings_override=_settings(enabled=True),
         )
 
@@ -323,6 +351,15 @@ async def test_chat_resume_persists_explicit_correlation_with_the_user_message()
         "payload": {
             "message_id": str(message_id),
             "content": "Yes, continue",
+        },
+    }
+    assert waiting_run.delivery_target == {
+        "kind": "session",
+        "session_id": str(session.id),
+        "channel_delivery": {
+            "version": 1,
+            "channel": "slack",
+            "target": {"channel_id": "D-new"},
         },
     }
     assert len(db.added) == 1

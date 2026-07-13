@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from types import SimpleNamespace
 import uuid
 
 import pytest
 
 from app.api import feishu as feishu_api
-from app.services import activity_logger, wechat_channel
-from app.services.agent_runtime.channel_chat import ChannelChatOutcome
-from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
-from app.services.agent_runtime.contracts import RunHandle, RuntimeEventCursor
+from app.services import wechat_channel
 
 
 class _Result:
@@ -57,31 +53,13 @@ async def test_wechat_message_uses_runtime_delivery_without_legacy_llm_loop(
     agent_id = uuid.uuid4()
     user_id = uuid.uuid4()
     session_id = uuid.uuid4()
-    run_id = uuid.uuid4()
     agent = SimpleNamespace(id=agent_id, tenant_id=tenant_id)
     user = SimpleNamespace(id=user_id)
     chat_session = SimpleNamespace(id=session_id)
     model = SimpleNamespace(id=uuid.uuid4())
     db = _Session(agent)
     session_factory = _SessionFactory(db)
-    cursor = RuntimeEventCursor(
-        created_at=datetime(2026, 7, 14, 12, 0, tzinfo=UTC),
-        event_id=uuid.uuid4(),
-    )
-    handle = RunHandle(
-        tenant_id=tenant_id,
-        run_id=run_id,
-        thread_id=str(run_id),
-        command_id=uuid.uuid4(),
-        runtime_type="langgraph",
-        created=False,
-    )
-    intake = ChatRuntimeIntake(
-        handle=handle,
-        message_id=uuid.uuid4(),
-        resumed=True,
-        stream_after=cursor,
-    )
+    intake = SimpleNamespace()
     calls: dict[str, object] = {}
 
     async def resolve_channel_user(**kwargs):
@@ -103,20 +81,6 @@ async def test_wechat_message_uses_runtime_delivery_without_legacy_llm_loop(
         calls["intake"] = kwargs
         return intake
 
-    async def wait_runtime(**kwargs):
-        calls["wait"] = kwargs
-        return ChannelChatOutcome(
-            status="completed",
-            content="Runtime reply",
-            message_id=uuid.uuid4(),
-        )
-
-    async def send_text(**kwargs):
-        calls["send"] = kwargs
-
-    async def log_activity(*args, **kwargs):
-        calls["activity"] = (args, kwargs)
-
     monkeypatch.setattr(wechat_channel, "async_session", session_factory)
     monkeypatch.setattr(
         wechat_channel.channel_user_service,
@@ -127,9 +91,6 @@ async def test_wechat_message_uses_runtime_delivery_without_legacy_llm_loop(
     monkeypatch.setattr(wechat_channel, "remember_wechat_context", remember_context)
     monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_agent_and_model)
     monkeypatch.setattr(wechat_channel, "enqueue_channel_chat_runtime", enqueue_runtime)
-    monkeypatch.setattr(wechat_channel, "wait_for_channel_chat", wait_runtime)
-    monkeypatch.setattr(wechat_channel, "send_wechat_text_message", send_text)
-    monkeypatch.setattr(activity_logger, "log_activity", log_activity)
 
     await wechat_channel._process_wechat_message(
         agent_id,
@@ -160,15 +121,9 @@ async def test_wechat_message_uses_runtime_delivery_without_legacy_llm_loop(
     assert intake_call["model"] is model
     assert intake_call["content"] == "Hello Runtime"
     assert intake_call["source_channel"] == "wechat"
+    assert intake_call["channel_delivery_target"] == {"user_id": "wechat-user-1"}
     assert intake_call["message_id"] == wechat_channel.channel_message_id(
         agent_id,
         "wechat",
         "provider-message-1",
     )
-    assert calls["wait"] == {
-        "handle": handle,
-        "session_id": session_id,
-        "session_factory": session_factory,
-        "after": cursor,
-    }
-    assert calls["send"]["text"] == "Runtime reply"  # type: ignore[index]

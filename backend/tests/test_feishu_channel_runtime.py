@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 import uuid
@@ -110,7 +109,7 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
     monkeypatch.setattr(feishu, "_load_agent_and_model", load_model)
     monkeypatch.setattr(feishu, "enqueue_channel_chat_runtime", enqueue)
 
-    attachment = await feishu._accept_feishu_runtime_message(
+    result = await feishu._accept_feishu_runtime_message(
         agent_id=agent_id,
         config=config,  # type: ignore[arg-type]
         sender_open_id="ou_sender",
@@ -123,9 +122,7 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
     )
 
     assert db.commits == 1
-    assert attachment.session_id == session_id
-    assert attachment.reply_target == "oc_group_1"
-    assert attachment.receive_id_type == "chat_id"
+    assert result is intake
     session_call = calls["session"]
     assert isinstance(session_call, dict)
     assert session_call["is_group"] is True
@@ -134,6 +131,10 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
     assert isinstance(intake_call, dict)
     assert intake_call["content"] == "[发送者: Alice] Hello Feishu"
     assert intake_call["display_content"] == "Hello Feishu"
+    assert intake_call["channel_delivery_target"] == {
+        "receive_id": "oc_group_1",
+        "receive_id_type": "chat_id",
+    }
     assert intake_call["message_id"] == feishu.channel_message_id(
         agent_id,
         "feishu",
@@ -142,40 +143,22 @@ async def test_feishu_group_message_uses_runtime_intake(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_feishu_event_commits_runtime_before_scheduling_delivery(monkeypatch) -> None:
+async def test_feishu_event_commits_runtime_before_provider_ack(monkeypatch) -> None:
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     event_id = f"feishu-event-{uuid.uuid4()}"
     config = SimpleNamespace(app_id="app-1", app_secret="secret-1")
     intake = _runtime(tenant_id)
-    attachment = feishu._FeishuRuntimeAttachment(
-        intake=intake,
-        session_id=uuid.uuid4(),
-        agent_name="Runtime Agent",
-        reply_target="ou_sender",
-        receive_id_type="open_id",
-        user_text="Hello Feishu",
-    )
     config_db = _Session(config)
-    calls: dict[str, object] = {"tasks": []}
+    calls: dict[str, object] = {}
 
     async def accept(**kwargs):
         calls["accept"] = kwargs
-        return attachment
-
-    async def deliver(**kwargs):
-        calls["deliver"] = kwargs
-
-    def create_task(coro):
-        assert calls.get("accept") is not None
-        calls["tasks"].append(coro)  # type: ignore[union-attr]
-        return SimpleNamespace()
+        return intake
 
     feishu._processed_events.discard(event_id)
     monkeypatch.setattr(feishu, "_async_session", _SessionFactory(config_db))
     monkeypatch.setattr(feishu, "_accept_feishu_runtime_message", accept)
-    monkeypatch.setattr(feishu, "_deliver_feishu_runtime", deliver)
-    monkeypatch.setattr(asyncio, "create_task", create_task)
 
     result = await feishu.process_feishu_event(
         agent_id,
@@ -207,14 +190,6 @@ async def test_feishu_event_commits_runtime_before_scheduling_delivery(monkeypat
     accepted = calls["accept"]
     assert isinstance(accepted, dict)
     assert accepted["external_event_id"] == event_id
-    tasks = calls["tasks"]
-    assert isinstance(tasks, list)
-    await tasks[0]
-    assert calls["deliver"] == {
-        "attachment": attachment,
-        "agent_id": agent_id,
-        "config": config,
-    }
 
 
 @pytest.mark.asyncio

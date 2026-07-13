@@ -1,8 +1,6 @@
 """Feishu OAuth and Channel API routes."""
 
-import asyncio
 import uuid
-from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse
@@ -19,7 +17,6 @@ from app.schemas.schemas import ChannelConfigCreate, ChannelConfigOut, TokenResp
 from app.services.agent_runtime.channel_chat import (
     channel_message_id,
     enqueue_channel_chat_runtime,
-    wait_for_channel_chat,
 )
 from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
 from app.services.feishu_service import feishu_service
@@ -27,52 +24,10 @@ from app.services.storage import store_agent_upload
 
 router = APIRouter(tags=["feishu"])
 
-# Number of tool status lines to keep visible in the Feishu card.
-# Shows the last N non-running lines plus any active "running" entry.
-_TOOL_STATUS_KEEP_LINES = 20
-
 _USER_RESOLUTION_ERROR_TIP = (
     "抱歉，我暂时无法稳定识别你的飞书账号，已停止本次处理以避免重复创建账号。"
     "请稍后重试，或联系管理员检查飞书 Contact API 权限。"
 )
-
-
-
-def _build_card(
-    answer_text: str,
-    thinking_text: str = "",
-    streaming: bool = False,
-    tool_status_lines: list[str] | None = None,
-    agent_name: str = "AI 回复",
-) -> dict:
-    """Build a Feishu interactive card for streaming replies."""
-    elements = []
-
-    if tool_status_lines:
-        elements.append({
-            "tag": "markdown",
-            "content": "\n".join(tool_status_lines[-_TOOL_STATUS_KEEP_LINES:]),
-        })
-        elements.append({"tag": "hr"})
-
-    if thinking_text:
-        think_preview = thinking_text[:200].replace("\n", " ")
-        elements.append({
-            "tag": "markdown",
-            "content": f"<font color='grey'>💭 **Thinking**\n{think_preview}{'...' if len(thinking_text) > 200 else ''}</font>",
-        })
-        elements.append({"tag": "hr"})
-
-    body = answer_text + ("▌" if streaming and answer_text else ("..." if streaming else ""))
-    elements.append({"tag": "markdown", "content": body or "..."})
-    return {
-        "config": {"update_multi": True},
-        "header": {
-            "template": "blue",
-            "title": {"content": agent_name, "tag": "plain_text"},
-        },
-        "elements": elements,
-    }
 
 
 # ─── OAuth ──────────────────────────────────────────────
@@ -282,16 +237,6 @@ async def delete_channel_config(
 # ─── Feishu Event Webhook ───────────────────────────────
 
 
-@dataclass(frozen=True, slots=True)
-class _FeishuRuntimeAttachment:
-    intake: ChatRuntimeIntake
-    session_id: uuid.UUID
-    agent_name: str
-    reply_target: str
-    receive_id_type: str
-    user_text: str
-
-
 async def _resolve_feishu_sender(
     db: AsyncSession,
     *,
@@ -369,7 +314,7 @@ async def _accept_feishu_runtime_message(
     content: str,
     display_content: str,
     external_event_id: str | None,
-) -> _FeishuRuntimeAttachment:
+) -> ChatRuntimeIntake:
     """Persist a Feishu message and Runtime Command before acknowledging it."""
     from app.models.agent import Agent
     from app.services.channel_session import find_or_create_channel_session
@@ -416,117 +361,19 @@ async def _accept_feishu_runtime_message(
             content=executable_content,
             display_content=display_content,
             source_channel="feishu",
+            channel_delivery_target={
+                "receive_id": chat_id if is_group else sender_open_id,
+                "receive_id_type": "chat_id" if is_group else "open_id",
+            },
             message_id=channel_message_id(
                 agent_id,
                 "feishu",
                 external_event_id,
             ),
         )
-        session_id = session.id
         await db.commit()
+    return intake
 
-    return _FeishuRuntimeAttachment(
-        intake=intake,
-        session_id=session_id,
-        agent_name=agent.name,
-        reply_target=chat_id if is_group else sender_open_id,
-        receive_id_type="chat_id" if is_group else "open_id",
-        user_text=display_content or content,
-    )
-
-
-async def _deliver_feishu_runtime(
-    *,
-    attachment: _FeishuRuntimeAttachment,
-    agent_id: uuid.UUID,
-    config: ChannelConfig,
-) -> None:
-    """Render one stable Runtime boundary into a Feishu interactive card."""
-    import json
-
-    patch_message_id: str | None = None
-    try:
-        initial_card = _build_card(
-            answer_text="",
-            streaming=True,
-            agent_name=attachment.agent_name,
-        )
-        response = await feishu_service.send_message(
-            config.app_id,
-            config.app_secret,
-            attachment.reply_target,
-            "interactive",
-            json.dumps(initial_card),
-            receive_id_type=attachment.receive_id_type,
-            stage="runtime_waiting_card",
-        )
-        patch_message_id = response.get("data", {}).get("message_id")
-    except Exception as exc:
-        logger.warning(f"[Feishu] Failed to send Runtime waiting card: {exc}")
-
-    try:
-        outcome = await wait_for_channel_chat(
-            handle=attachment.intake.handle,
-            session_id=attachment.session_id,
-            session_factory=_async_session,
-            after=attachment.intake.stream_after,
-        )
-    except Exception as exc:
-        logger.exception(f"[Feishu] Runtime delivery failed for agent {agent_id}: {exc}")
-        return
-
-    reply_text = outcome.content
-    final_card = _build_card(
-        answer_text=reply_text or "...",
-        streaming=False,
-        agent_name=attachment.agent_name,
-    )
-    try:
-        if patch_message_id:
-            await feishu_service.patch_message(
-                config.app_id,
-                config.app_secret,
-                patch_message_id,
-                json.dumps(final_card),
-                stage="runtime_final_card",
-            )
-        else:
-            await feishu_service.send_message(
-                config.app_id,
-                config.app_secret,
-                attachment.reply_target,
-                "interactive",
-                json.dumps(final_card),
-                receive_id_type=attachment.receive_id_type,
-                stage="runtime_final_card",
-            )
-    except Exception as exc:
-        logger.error(f"[Feishu] Failed to send Runtime final card: {exc}")
-        try:
-            await feishu_service.send_message(
-                config.app_id,
-                config.app_secret,
-                attachment.reply_target,
-                "text",
-                json.dumps({"text": reply_text}),
-                receive_id_type=attachment.receive_id_type,
-                stage="runtime_final_fallback_text",
-            )
-        except Exception as fallback_exc:
-            logger.error(f"[Feishu] Final fallback delivery failed: {fallback_exc}")
-
-    from app.services.activity_logger import log_activity
-
-    await log_activity(
-        agent_id,
-        "chat_reply",
-        f"回复了飞书消息: {reply_text[:80]}",
-        detail={
-            "channel": "feishu",
-            "user_text": attachment.user_text[:200],
-            "reply": reply_text[:500],
-        },
-    )
 
 # Simple in-memory dedup to avoid processing retried events
 _processed_events: set[str] = set()
@@ -665,13 +512,6 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
                     _processed_events.add(event_id)
                     if len(_processed_events) > 1000:
                         _processed_events.clear()
-                asyncio.create_task(
-                    _deliver_feishu_runtime(
-                        attachment=attachment,
-                        agent_id=agent_id,
-                        config=config,
-                    )
-                )
             return {"code": 0, "msg": "ok"}
 
         if msg_type != "text":
@@ -694,7 +534,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
             display_content = "[图片]"
 
         try:
-            attachment = await _accept_feishu_runtime_message(
+            await _accept_feishu_runtime_message(
                 agent_id=agent_id,
                 config=config,
                 sender_open_id=sender_open_id,
@@ -727,13 +567,6 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
             _processed_events.add(event_id)
             if len(_processed_events) > 1000:
                 _processed_events.clear()
-        asyncio.create_task(
-            _deliver_feishu_runtime(
-                attachment=attachment,
-                agent_id=agent_id,
-                config=config,
-            )
-        )
         return {"code": 0, "msg": "ok"}
     return {"code": 0, "msg": "ok"}
 
@@ -748,7 +581,7 @@ async def _accept_feishu_file_runtime(
     chat_type: str,
     chat_id: str,
     external_event_id: str | None,
-) -> _FeishuRuntimeAttachment | None:
+) -> ChatRuntimeIntake | None:
     """Download a Feishu resource, then durably attach it to the Runtime."""
     import base64
     import json

@@ -19,6 +19,7 @@ from app.models.group import Group, GroupMember
 from app.models.participant import Participant
 from app.models.user import User
 from app.services.chat_session_service import get_primary_direct_session
+from app.services.agent_runtime.channel_delivery import stage_channel_delivery
 from app.services.participant_identity import get_or_create_agent_participant
 
 
@@ -811,6 +812,14 @@ async def deliver_runtime_message(
         )
     )
     session.last_message_at = now()
+    channel_delivery = stage_channel_delivery(
+        db,
+        run=run,
+        session=session,
+        message_id=message_id,
+        idempotency_key=request.idempotency_key,
+        clock=now,
+    )
     receipt = DeliveryReceipt(
         tenant_id=run.tenant_id,
         run_id=run.id,
@@ -824,7 +833,7 @@ async def deliver_runtime_message(
         fallback_reason=resolved.fallback_reason,
         error_code=None,
     )
-    run.delivery_status = "delivered"
+    run.delivery_status = "pending" if channel_delivery is not None else "delivered"
     _add_event(
         db,
         run=run,

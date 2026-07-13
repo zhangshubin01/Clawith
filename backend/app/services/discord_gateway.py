@@ -145,7 +145,6 @@ class DiscordGatewayManager:
             from app.services.agent_runtime.channel_chat import (
                 channel_message_id,
                 enqueue_channel_chat_runtime,
-                wait_for_channel_chat,
             )
             from app.services.channel_session import find_or_create_channel_session
             from app.services.channel_user_service import channel_user_service
@@ -197,9 +196,8 @@ class DiscordGatewayManager:
                     first_message_title=user_text,
                     created_by_user_id=platform_user_id,
                 )
-                session_id = sess.id
                 _, model, _ = await _load_agent_and_model(db, agent_id)
-                intake = await enqueue_channel_chat_runtime(
+                await enqueue_channel_chat_runtime(
                     db,
                     agent=agent_obj,
                     user=_platform_user,
@@ -207,6 +205,10 @@ class DiscordGatewayManager:
                     model=model,
                     content=user_text,
                     source_channel="discord",
+                    channel_delivery_target={
+                        "channel_id": channel_id,
+                        "reply_to_message_id": str(message.id),
+                    },
                     message_id=channel_message_id(
                         agent_id,
                         "discord",
@@ -215,17 +217,7 @@ class DiscordGatewayManager:
                 )
 
                 await db.commit()
-
-            outcome = await wait_for_channel_chat(
-                handle=intake.handle,
-                session_id=session_id,
-                session_factory=async_session,
-                after=intake.stream_after,
-            )
-            reply_text = outcome.content
-            logger.info(f"[Discord GW] LLM reply for {agent_id}: {reply_text[:80]}")
-
-            return reply_text
+            return None
 
         except Exception as e:
             logger.exception(

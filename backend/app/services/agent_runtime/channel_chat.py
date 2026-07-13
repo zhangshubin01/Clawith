@@ -132,6 +132,7 @@ async def enqueue_channel_chat_runtime(
     content: str,
     source_channel: str,
     message_id: uuid.UUID,
+    channel_delivery_target: dict,
     display_content: str = "",
     file_name: str = "",
 ) -> ChatRuntimeIntake:
@@ -161,6 +162,7 @@ async def enqueue_channel_chat_runtime(
         resume_run_id=resume[0] if resume is not None else None,
         resume_correlation_id=resume[1] if resume is not None else None,
         source_channel=source_channel,
+        channel_delivery_target=channel_delivery_target,
     )
     if intake is None:
         raise ChannelChatRuntimeError(

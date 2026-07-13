@@ -237,6 +237,7 @@ async def test_channel_intake_resumes_the_latest_waiting_run(monkeypatch) -> Non
         model=SimpleNamespace(id=uuid.uuid4()),  # type: ignore[arg-type]
         content="approve",
         source_channel="wechat",
+        channel_delivery_target={"user_id": "wechat-user-1"},
         message_id=message_id,
     )
 
@@ -252,6 +253,7 @@ async def test_channel_intake_resumes_the_latest_waiting_run(monkeypatch) -> Non
     assert enqueue["resume_run_id"] == waiting_run_id
     assert enqueue["resume_correlation_id"] == "approval-7"
     assert enqueue["source_channel"] == "wechat"
+    assert enqueue["channel_delivery_target"] == {"user_id": "wechat-user-1"}
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ from app.models.llm import LLMModel
 from app.models.user import User
 from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
 from app.services.agent_runtime.config import decide_runtime_v2
+from app.services.agent_runtime.channel_delivery import build_channel_delivery_route
 from app.services.agent_runtime.contracts import (
     ResumeRunCommand,
     RunHandle,
@@ -262,6 +263,7 @@ async def enqueue_chat_runtime(
     onboarding_target_phase: str = "",
     persist_user_message: bool = True,
     application_tools_enabled: bool = True,
+    channel_delivery_target: dict | None = None,
     settings_override: Settings | None = None,
 ) -> ChatRuntimeIntake | None:
     """Persist one chat message and its start/resume Command atomically.
@@ -291,6 +293,11 @@ async def enqueue_chat_runtime(
         )
     normalized_runtime_instruction = runtime_instruction.strip()
     normalized_onboarding_target_phase = onboarding_target_phase.strip()
+    channel_delivery_route = (
+        build_channel_delivery_route(normalized_channel, channel_delivery_target)
+        if channel_delivery_target is not None
+        else None
+    )
     tenant_id = _validate_scope(
         agent=agent,
         user=user,
@@ -327,7 +334,7 @@ async def enqueue_chat_runtime(
 
     adapter = TransactionalAgentRuntimeAdapter(db, settings=runtime_settings)
     if resume_run_id is not None:
-        await _require_resume_run(
+        resumed_run = await _require_resume_run(
             db,
             tenant_id=tenant_id,
             run_id=resume_run_id,
@@ -335,6 +342,10 @@ async def enqueue_chat_runtime(
             session_id=session.id,
             user_id=user.id,
         )
+        if channel_delivery_route is not None:
+            delivery_target = dict(resumed_run.delivery_target or {})
+            delivery_target["channel_delivery"] = channel_delivery_route
+            resumed_run.delivery_target = delivery_target
         stream_after = await _latest_event_cursor(
             db,
             tenant_id=tenant_id,
@@ -366,6 +377,20 @@ async def enqueue_chat_runtime(
         )
 
     source_execution_id = f"chat:{resolved_message_id}"
+    delivery_target = (
+        {
+            "kind": "direct",
+            "session_id": str(session.id),
+            "user_id": str(user.id),
+        }
+        if session.session_type == "direct"
+        else {
+            "kind": "session",
+            "session_id": str(session.id),
+        }
+    )
+    if channel_delivery_route is not None:
+        delivery_target["channel_delivery"] = channel_delivery_route
     handle = await adapter.start_run(
         StartRunCommand(
             tenant_id=tenant_id,
@@ -378,18 +403,7 @@ async def enqueue_chat_runtime(
             run_kind="foreground",
             model_id=model.id,
             delivery_status="pending",
-            delivery_target=(
-                {
-                    "kind": "direct",
-                    "session_id": str(session.id),
-                    "user_id": str(user.id),
-                }
-                if session.session_type == "direct"
-                else {
-                    "kind": "session",
-                    "session_id": str(session.id),
-                }
-            ),
+            delivery_target=delivery_target,
             idempotency_key=f"start:{source_execution_id}",
             payload={
                 "message_id": str(resolved_message_id),

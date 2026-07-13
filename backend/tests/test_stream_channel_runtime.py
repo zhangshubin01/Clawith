@@ -11,13 +11,11 @@ import pytest
 from app import database
 from app.api import feishu as feishu_api
 from app.services import (
-    activity_logger,
     channel_session,
     discord_gateway,
     wecom_stream,
 )
 from app.services.agent_runtime import channel_chat
-from app.services.agent_runtime.channel_chat import ChannelChatOutcome
 from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
 from app.services.agent_runtime.contracts import RunHandle, RuntimeEventCursor
 from app.services.channel_user_service import channel_user_service
@@ -98,7 +96,7 @@ async def test_wecom_stream_uses_runtime_for_group_message(monkeypatch) -> None:
     model = SimpleNamespace(id=uuid.uuid4())
     db = _Session(agent)
     session_factory = _SessionFactory(db)
-    intake, cursor = _runtime(tenant_id)
+    intake, _cursor = _runtime(tenant_id)
     calls: dict[str, object] = {}
 
     async def resolve_user(**kwargs):
@@ -115,20 +113,11 @@ async def test_wecom_stream_uses_runtime_for_group_message(monkeypatch) -> None:
         calls["intake"] = kwargs
         return intake
 
-    async def wait(**kwargs):
-        calls["wait"] = kwargs
-        return ChannelChatOutcome("completed", "WeCom Runtime reply", uuid.uuid4())
-
-    async def log(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(database, "async_session", session_factory)
     monkeypatch.setattr(channel_user_service, "resolve_channel_user", resolve_user)
     monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
     monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_model)
     monkeypatch.setattr(channel_chat, "enqueue_channel_chat_runtime", enqueue)
-    monkeypatch.setattr(channel_chat, "wait_for_channel_chat", wait)
-    monkeypatch.setattr(activity_logger, "log_activity", log)
 
     reply = await wecom_stream._process_wecom_stream_message(
         agent_id=agent_id,
@@ -139,7 +128,7 @@ async def test_wecom_stream_uses_runtime_for_group_message(monkeypatch) -> None:
         external_event_id="wecom-message-1",
     )
 
-    assert reply == "WeCom Runtime reply"
+    assert reply == ""
     assert db.commits == 1
     session_call = calls["session"]
     assert isinstance(session_call, dict)
@@ -148,17 +137,16 @@ async def test_wecom_stream_uses_runtime_for_group_message(monkeypatch) -> None:
     intake_call = calls["intake"]
     assert isinstance(intake_call, dict)
     assert intake_call["source_channel"] == "wecom"
+    assert intake_call["channel_delivery_target"] == {
+        "user_id": "wecom-user-1",
+        "chat_id": "wecom-group-1",
+        "transport": "websocket",
+    }
     assert intake_call["message_id"] == channel_chat.channel_message_id(
         agent_id,
         "wecom",
         "wecom-message-1",
     )
-    assert calls["wait"] == {
-        "handle": intake.handle,
-        "session_id": session_id,
-        "session_factory": session_factory,
-        "after": cursor,
-    }
 
 
 @pytest.mark.asyncio
@@ -173,7 +161,7 @@ async def test_discord_gateway_uses_runtime_delivery(monkeypatch) -> None:
     model = SimpleNamespace(id=uuid.uuid4())
     db = _Session(agent)
     session_factory = _SessionFactory(db)
-    intake, cursor = _runtime(tenant_id, resumed=False)
+    intake, _cursor = _runtime(tenant_id, resumed=False)
     calls: dict[str, object] = {}
 
     async def resolve_user(**kwargs):
@@ -190,16 +178,11 @@ async def test_discord_gateway_uses_runtime_delivery(monkeypatch) -> None:
         calls["intake"] = kwargs
         return intake
 
-    async def wait(**kwargs):
-        calls["wait"] = kwargs
-        return ChannelChatOutcome("completed", "Discord Runtime reply", uuid.uuid4())
-
     monkeypatch.setattr(discord_gateway, "async_session", session_factory)
     monkeypatch.setattr(channel_user_service, "resolve_channel_user", resolve_user)
     monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
     monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_model)
     monkeypatch.setattr(channel_chat, "enqueue_channel_chat_runtime", enqueue)
-    monkeypatch.setattr(channel_chat, "wait_for_channel_chat", wait)
 
     message = SimpleNamespace(
         id=987654,
@@ -213,20 +196,18 @@ async def test_discord_gateway_uses_runtime_delivery(monkeypatch) -> None:
         "Hello Discord",
     )
 
-    assert reply == "Discord Runtime reply"
+    assert reply is None
     assert db.commits == 1
     assert db.flushes == 1
     intake_call = calls["intake"]
     assert isinstance(intake_call, dict)
     assert intake_call["source_channel"] == "discord"
+    assert intake_call["channel_delivery_target"] == {
+        "channel_id": "456",
+        "reply_to_message_id": "987654",
+    }
     assert intake_call["message_id"] == channel_chat.channel_message_id(
         agent_id,
         "discord",
         "987654",
     )
-    assert calls["wait"] == {
-        "handle": intake.handle,
-        "session_id": session_id,
-        "session_factory": session_factory,
-        "after": cursor,
-    }

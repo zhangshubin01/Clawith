@@ -12,14 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator
 from app.core.security import get_current_user
-from app.database import async_session as _async_session, get_db
+from app.database import get_db
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
 from app.schemas.schemas import ChannelConfigOut
 from app.services.agent_runtime.channel_chat import (
     channel_message_id,
     enqueue_channel_chat_runtime,
-    wait_for_channel_chat,
 )
 from app.services.storage import store_agent_upload
 
@@ -300,8 +299,6 @@ async def slack_event_webhook(
         group_name=f"Slack Channel {channel_id[:8]}" if _is_group_slack else None,
         created_by_user_id=platform_user_id,
     )
-    session_id = sess.id
-
     # Handle file attachments: save to workspace/uploads/ before Runtime intake.
     import httpx as _httpx
 
@@ -349,7 +346,7 @@ async def slack_event_webhook(
         user_text += "\n" + " ".join(f"[file:{p.split('/')[-1]}]" for p in _file_user_messages)
 
     _, model, _ = await _load_agent_and_model(db, agent_id)
-    intake = await enqueue_channel_chat_runtime(
+    await enqueue_channel_chat_runtime(
         db,
         agent=agent_obj,
         user=platform_user,
@@ -357,31 +354,14 @@ async def slack_event_webhook(
         model=model,
         content=user_text,
         source_channel="slack",
+        channel_delivery_target={"channel_id": channel_id},
         message_id=channel_message_id(
             agent_id,
             "slack",
             event_id or event.get("client_msg_id") or event.get("event_ts"),
         ),
     )
-    _cfg_app_secret = config.app_secret or ""
-
     await db.commit()
     await db.close()
-
-    outcome = await wait_for_channel_chat(
-        handle=intake.handle,
-        session_id=session_id,
-        session_factory=_async_session,
-        after=intake.stream_after,
-    )
-    reply_text = outcome.content
-    logger.info(f"[Slack] LLM reply: {reply_text[:80]}")
-
-    # Send to Slack (chunked)
-    if _cfg_app_secret and channel_id:
-        try:
-            await _send_slack_messages(_cfg_app_secret, channel_id, reply_text)
-        except Exception as e:
-            logger.error(f"[Slack] Failed to send: {e}")
 
     return {"ok": True}

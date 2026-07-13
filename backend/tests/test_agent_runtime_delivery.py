@@ -13,6 +13,7 @@ from app.models.agent_run import AgentRun
 from app.models.agent_run_event import AgentRunEvent
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
+from app.models.channel_delivery import ChannelDelivery
 from app.models.group import Group, GroupMember
 from app.models.participant import Participant
 from app.models.user import User
@@ -318,7 +319,18 @@ async def test_external_group_delivery_uses_channel_scope_without_native_members
         session=session,
         agent_id=agent_id,
         origin_user_id=sender_user_id,
-        delivery_target={"kind": "session", "session_id": str(session.id)},
+        delivery_target={
+            "kind": "session",
+            "session_id": str(session.id),
+            "channel_delivery": {
+                "version": 1,
+                "channel": "feishu",
+                "target": {
+                    "receive_id": "oc_123",
+                    "receive_id_type": "chat_id",
+                },
+            },
+        },
     )
     participant = _participant(agent_id)
     db = _RecordingDB(
@@ -340,6 +352,12 @@ async def test_external_group_delivery_uses_channel_scope_without_native_members
     assert message.conversation_id == str(session.id)
     assert message.participant_id == participant.id
     assert message.user_id is None
+    outbox = _added(db, ChannelDelivery)
+    assert len(outbox) == 1
+    assert outbox[0].message_id == message.id
+    assert outbox[0].channel == "feishu"
+    assert outbox[0].target["receive_id"] == "oc_123"
+    assert run.delivery_status == "pending"
     assert len(db.statements) == 5
 
 

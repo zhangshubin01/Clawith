@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.core.permissions import check_agent_access, is_agent_creator
 from app.core.security import get_current_user
-from app.database import async_session as _async_session, get_db
+from app.database import get_db
 from app.models.agent import Agent as AgentModel
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
@@ -23,7 +23,6 @@ from app.schemas.schemas import ChannelConfigOut
 from app.services.agent_runtime.channel_chat import (
     channel_message_id,
     enqueue_channel_chat_runtime,
-    wait_for_channel_chat,
 )
 from app.services.channel_session import find_or_create_channel_session
 
@@ -386,7 +385,9 @@ async def teams_event_webhook(
         service_url = activity.get("serviceUrl")
         if service_url:
             if config.extra_config.get("service_url") != service_url:
-                config.extra_config["service_url"] = service_url
+                updated_extra_config = dict(config.extra_config or {})
+                updated_extra_config["service_url"] = service_url
+                config.extra_config = updated_extra_config
                 config.is_connected = True
                 await db.flush()
                 await db.commit()
@@ -469,9 +470,8 @@ async def teams_event_webhook(
             group_name=activity.get("conversation", {}).get("name") or (f"Teams Group {conversation_id[:8]}" if _is_group_teams else None),
             created_by_user_id=platform_user_id,
         )
-        session_id = sess.id
         _, model, _ = await _load_agent_and_model(db, agent_id)
-        intake = await enqueue_channel_chat_runtime(
+        await enqueue_channel_chat_runtime(
             db,
             agent=agent_obj,
             user=platform_user,
@@ -479,6 +479,12 @@ async def teams_event_webhook(
             model=model,
             content=user_text,
             source_channel="microsoft_teams",
+            channel_delivery_target={
+                "conversation_id": conversation_id,
+                "reply_to_id": reply_to_id,
+                "bot_account": dict(activity.get("recipient") or {}),
+                "recipient": dict(activity.get("from") or {}),
+            },
             message_id=channel_message_id(
                 agent_id,
                 "microsoft_teams",
@@ -488,53 +494,6 @@ async def teams_event_webhook(
 
         await db.commit()
         await db.close()
-
-        outcome = await wait_for_channel_chat(
-            handle=intake.handle,
-            session_id=session_id,
-            session_factory=_async_session,
-            after=intake.stream_after,
-        )
-        reply_text = outcome.content
-        logger.info(f"Teams: Runtime reply generated: {reply_text[:80]}")
-
-        # Send to Teams
-        use_managed_identity = config.extra_config.get("use_managed_identity", False)
-        has_credentials = (config.app_id and config.app_secret) or use_managed_identity
-        if has_credentials and conversation_id:
-            try:
-                # Get bot's channel account ID from the incoming activity's recipient field
-                # The recipient in the incoming message is the bot itself
-                bot_channel_account = activity.get("recipient", {})
-                if not bot_channel_account.get("id"):
-                    # Fallback: use app_id if recipient not available
-                    if config.app_id:
-                        bot_channel_account = {"id": config.app_id}
-                    else:
-                        logger.error("Teams: Cannot determine bot channel account ID - no recipient in activity and no app_id configured")
-                        raise ValueError("Cannot determine bot channel account ID")
-                
-                # Get the user (sender) from the incoming activity's from field
-                user_account = activity.get("from", {})
-                if not user_account.get("id"):
-                    user_account = {"id": sender_id, "name": sender_name}
-                
-                reply_activity = {
-                    "type": "message",
-                    "from": bot_channel_account,  # Required: Bot's channel account ID (from incoming activity's recipient)
-                    "conversation": {"id": conversation_id},
-                    "recipient": user_account,  # The user who sent the message (from incoming activity's from)
-                    "replyToId": reply_to_id,  # Reply to the specific incoming message
-                    "text": reply_text,
-                }
-                logger.info(f"Teams: Attempting to send reply to conversation {conversation_id}, from={bot_channel_account.get('id')}, recipient={user_account.get('id')}")
-                await _send_teams_message(config, conversation_id, reply_activity)
-                logger.info("Teams: Successfully sent reply to Teams")
-            except Exception as e:
-                logger.exception(f"Teams: Failed to send message to Teams: {e}")
-        else:
-            use_mi = config.extra_config.get("use_managed_identity", False)
-            logger.warning(f"Teams: Cannot send reply - missing credentials (managed_identity={use_mi}, app_id={bool(config.app_id)}, app_secret={bool(config.app_secret)}), conversation_id={bool(conversation_id)}")
 
         return {"ok": True}
     except Exception as e:

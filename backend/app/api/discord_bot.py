@@ -1,6 +1,5 @@
 """Discord Bot Channel API routes (slash command interactions)."""
 
-import os
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -10,20 +9,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator
 from app.core.security import get_current_user
-from app.database import async_session as _async_session, get_db
+from app.database import get_db
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
 from app.schemas.schemas import ChannelConfigOut
 from app.services.agent_runtime.channel_chat import (
     channel_message_id,
     enqueue_channel_chat_runtime,
-    wait_for_channel_chat,
 )
 
 router = APIRouter(tags=["discord"])
-
-DISCORD_MSG_LIMIT = 2000  # Discord message char limit
-
 
 # ─── Config CRUD ────────────────────────────────────────
 
@@ -199,29 +194,6 @@ def _verify_discord_signature(public_key: str, body: bytes, headers: dict) -> bo
         return False
 
 
-async def _send_discord_followup(application_id: str, bot_token: str, interaction_token: str, text: str) -> None:
-    """Send follow-up message(s) to Discord Interactions, chunked at 2000 chars."""
-    import httpx
-    chunks = [text[i:i + DISCORD_MSG_LIMIT] for i in range(0, len(text), DISCORD_MSG_LIMIT)]
-    proxy = os.environ.get("DISCORD_PROXY") or os.environ.get("HTTPS_PROXY") or None
-    async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
-        for i, chunk in enumerate(chunks):
-            if i == 0:
-                # Edit the original deferred response
-                await client.patch(
-                    f"https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}/messages/@original",
-                    headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
-                    json={"content": chunk},
-                )
-            else:
-                # Additional chunks as follow-up messages
-                await client.post(
-                    f"https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}",
-                    headers={"Authorization": f"Bot {bot_token}", "Content-Type": "application/json"},
-                    json={"content": chunk},
-                )
-
-
 @router.post("/channel/discord/{agent_id}/webhook")
 async def discord_interaction_webhook(
     agent_id: uuid.UUID,
@@ -248,7 +220,6 @@ async def discord_interaction_webhook(
         return Response(content="Invalid signature", status_code=401)
 
     import json
-    import asyncio
     body = json.loads(body_bytes)
     interaction_type = body.get("type", 0)
 
@@ -321,9 +292,8 @@ async def discord_interaction_webhook(
             group_name=f"Discord Channel {channel_id[:8]}" if _is_group_discord else None,
             created_by_user_id=platform_user_id,
         )
-        session_id = sess.id
         _, model, _ = await _load_agent_and_model(db, agent_id)
-        intake = await enqueue_channel_chat_runtime(
+        await enqueue_channel_chat_runtime(
             db,
             agent=agent_obj,
             user=platform_user,
@@ -331,37 +301,17 @@ async def discord_interaction_webhook(
             model=model,
             content=user_text,
             source_channel="discord",
+            channel_delivery_target={
+                "channel_id": channel_id,
+                "interaction_token": interaction_token,
+            },
             message_id=channel_message_id(
                 agent_id,
                 "discord",
                 str(body.get("id") or "").strip() or None,
             ),
         )
-        bot_token = config.app_secret or ""
-        app_id = config.app_id or ""
         await db.commit()
-
-        async def handle_in_background():
-            try:
-                outcome = await wait_for_channel_chat(
-                    handle=intake.handle,
-                    session_id=session_id,
-                    session_factory=_async_session,
-                    after=intake.stream_after,
-                )
-                reply_text = outcome.content
-                logger.info(f"[Discord] Runtime reply: {reply_text[:80]}")
-            except Exception as exc:
-                logger.exception(f"[Discord] Runtime delivery failed: {exc}")
-                return
-
-            if bot_token and interaction_token and app_id:
-                try:
-                    await _send_discord_followup(app_id, bot_token, interaction_token, reply_text)
-                except Exception as e:
-                    logger.error(f"[Discord] Failed to send follow-up: {e}")
-
-        asyncio.create_task(handle_in_background())
         # Return DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE — shows "thinking..." to user
         return {"type": 5}
 
