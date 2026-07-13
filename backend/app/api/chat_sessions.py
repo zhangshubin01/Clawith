@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import String, cast, func, select, tuple_
+from sqlalchemy import String, and_, cast, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access
@@ -19,6 +19,7 @@ from app.database import get_db
 from app.models.agent import Agent
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
+from app.models.participant import Participant
 from app.models.user import Identity, User
 from app.services.chat_session_service import (
     create_direct_session,
@@ -31,9 +32,7 @@ router = APIRouter(prefix="/api/agents", tags=["chat-sessions"])
 
 def _can_view_all_agent_chat_sessions(user: User, agent: Agent) -> bool:
     """Admins and the agent creator may inspect other users' direct sessions."""
-    return user.role in ("platform_admin", "org_admin", "agent_admin") or str(
-        agent.creator_id
-    ) == str(user.id)
+    return user.role in ("platform_admin", "org_admin", "agent_admin") or str(agent.creator_id) == str(user.id)
 
 
 def _require_tenant_id(user: User) -> uuid.UUID:
@@ -55,6 +54,32 @@ def _active_direct_filters(
     )
 
 
+def _active_agent_session_filters(
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+):
+    """Scope the legacy Agent session surface to active associated sessions."""
+    return (
+        ChatSession.tenant_id == tenant_id,
+        ChatSession.deleted_at.is_(None),
+        or_(
+            ChatSession.agent_id == agent_id,
+            and_(
+                ChatSession.session_type == "a2a",
+                ChatSession.peer_agent_id == agent_id,
+            ),
+        ),
+    )
+
+
+def _is_a2a_session(session: ChatSession) -> bool:
+    return session.session_type == "a2a"
+
+
+def _is_group_session(session: ChatSession) -> bool:
+    return session.session_type == "group"
+
+
 async def _check_direct_agent_access(
     db: AsyncSession,
     current_user: User,
@@ -68,9 +93,7 @@ async def _check_direct_agent_access(
 
 
 def _authorize_session_owner(current_user: User, agent: Agent, session: ChatSession) -> None:
-    if str(session.user_id) != str(current_user.id) and not _can_view_all_agent_chat_sessions(
-        current_user, agent
-    ):
+    if str(session.user_id) != str(current_user.id) and not _can_view_all_agent_chat_sessions(current_user, agent):
         raise HTTPException(status_code=403, detail="Not authorized")
 
 
@@ -109,6 +132,11 @@ def _session_out(
     username: str | None = None,
     message_count: int = 0,
     unread_count: int = 0,
+    peer_agent_id: uuid.UUID | None = None,
+    peer_agent_name: str | None = None,
+    participant_type: str = "user",
+    is_group: bool = False,
+    group_name: str | None = None,
 ) -> SessionOut:
     return SessionOut(
         id=str(session.id),
@@ -118,14 +146,15 @@ def _session_out(
         source_channel=session.source_channel,
         title=session.title,
         created_at=session.created_at.isoformat(),
-        last_message_at=session.last_message_at.isoformat()
-        if session.last_message_at
-        else None,
+        last_message_at=session.last_message_at.isoformat() if session.last_message_at else None,
         message_count=message_count,
         unread_count=unread_count,
         is_primary=bool(session.is_primary),
-        participant_type="user",
-        is_group=False,
+        peer_agent_id=str(peer_agent_id) if peer_agent_id else None,
+        peer_agent_name=peer_agent_name,
+        participant_type=participant_type,
+        is_group=is_group,
+        group_name=group_name,
     )
 
 
@@ -136,16 +165,22 @@ async def list_sessions(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List active direct sessions for an Agent in the current tenant."""
+    """List active sessions on the legacy Agent session surface."""
     agent, tenant_id = await _check_direct_agent_access(db, current_user, agent_id)
     if scope not in {"mine", "all"}:
         raise HTTPException(status_code=400, detail="scope must be 'mine' or 'all'")
     if scope == "all" and not _can_view_all_agent_chat_sessions(current_user, agent):
         raise HTTPException(status_code=403, detail="Not authorized to view all sessions")
 
-    session_query = select(ChatSession).where(*_active_direct_filters(tenant_id, agent_id))
     if scope == "mine":
-        session_query = session_query.where(ChatSession.user_id == current_user.id)
+        session_filters = _active_direct_filters(tenant_id, agent_id)
+        session_query = select(ChatSession).where(
+            *session_filters,
+            ChatSession.user_id == current_user.id,
+        )
+    else:
+        session_filters = _active_agent_session_filters(tenant_id, agent_id)
+        session_query = select(ChatSession).where(*session_filters)
     result = await db.execute(
         session_query.order_by(
             ChatSession.last_message_at.desc().nulls_last(),
@@ -163,7 +198,7 @@ async def list_sessions(
         select(ChatMessage.conversation_id, func.count(ChatMessage.id))
         .join(ChatSession, ChatMessage.conversation_id == cast(ChatSession.id, String))
         .where(
-            *_active_direct_filters(tenant_id, agent_id),
+            *session_filters,
             ChatSession.id.in_(session_ids),
             ChatMessage.conversation_id.in_(conversation_ids),
         )
@@ -190,8 +225,15 @@ async def list_sessions(
     unread_counts = {str(row[0]): int(row[1] or 0) for row in unread_result.all()}
 
     user_names: dict[str, str] = {}
+    agent_names: dict[str, str] = {}
     if scope == "all":
-        user_ids = list({session.user_id for session in sessions if session.user_id})
+        user_ids = list(
+            {
+                session.user_id
+                for session in sessions
+                if session.user_id and not _is_a2a_session(session) and not _is_group_session(session)
+            }
+        )
         if user_ids:
             user_result = await db.execute(
                 select(User.id, func.coalesce(User.display_name, Identity.username))
@@ -200,17 +242,59 @@ async def list_sessions(
             )
             user_names = {str(row[0]): row[1] or "Unknown" for row in user_result.all()}
 
+        a2a_agent_ids = {
+            candidate_id
+            for session in sessions
+            if _is_a2a_session(session)
+            for candidate_id in (session.agent_id, session.peer_agent_id)
+            if candidate_id is not None
+        }
+        if a2a_agent_ids:
+            agent_result = await db.execute(
+                select(Agent.id, Agent.name).where(
+                    Agent.tenant_id == tenant_id,
+                    Agent.id.in_(a2a_agent_ids),
+                )
+            )
+            agent_names = {str(row[0]): row[1] or "Agent" for row in agent_result.all()}
+
     output = []
     for session in sessions:
         count = message_counts.get(str(session.id), 0)
         if count == 0:
             continue
+        username = None
+        peer_agent_id = None
+        peer_agent_name = None
+        participant_type = "user"
+        is_group = False
+        group_name = None
+        if scope == "all" and _is_a2a_session(session):
+            participant_type = "agent"
+            peer_agent_id = session.peer_agent_id if session.agent_id == agent_id else session.agent_id
+            peer_agent_name = agent_names.get(str(peer_agent_id), "Agent")
+            primary_name = agent_names.get(str(session.agent_id), "Agent")
+            stored_peer_name = agent_names.get(str(session.peer_agent_id), "Agent")
+            username = f"Agent {primary_name} - {stored_peer_name}"
+        elif scope == "all" and _is_group_session(session):
+            participant_type = "group"
+            is_group = True
+            group_name = session.group_name
+            username = session.group_name or session.title or "Group Chat"
+        elif scope == "all":
+            username = user_names.get(str(session.user_id), "Unknown")
+
         output.append(
             _session_out(
                 session,
-                username=user_names.get(str(session.user_id)) if scope == "all" else None,
+                username=username,
                 message_count=count,
                 unread_count=unread_counts.get(str(session.id), 0),
+                peer_agent_id=peer_agent_id,
+                peer_agent_name=peer_agent_name,
+                participant_type=participant_type,
+                is_group=is_group,
+                group_name=group_name,
             )
         )
     return output
@@ -365,11 +449,11 @@ async def get_session_messages(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return direct messages ordered by the authoritative `(created_at, id)` position."""
+    """Return associated session messages by authoritative `(created_at, id)` position."""
     agent, tenant_id = await _check_direct_agent_access(db, current_user, agent_id)
     result = await db.execute(
         select(ChatSession).where(
-            *_active_direct_filters(tenant_id, agent_id),
+            *_active_agent_session_filters(tenant_id, agent_id),
             ChatSession.id == session_id,
         )
     )
@@ -382,7 +466,7 @@ async def get_session_messages(
         select(ChatMessage)
         .join(ChatSession, ChatMessage.conversation_id == cast(ChatSession.id, String))
         .where(
-            *_active_direct_filters(tenant_id, agent_id),
+            *_active_agent_session_filters(tenant_id, agent_id),
             ChatSession.id == session_id,
             ChatMessage.conversation_id == str(session_id),
         )
@@ -391,37 +475,70 @@ async def get_session_messages(
     )
     if before:
         before_created_at, before_id = _parse_message_cursor(before)
-        query = query.where(
-            tuple_(ChatMessage.created_at, ChatMessage.id)
-            < tuple_(before_created_at, before_id)
-        )
+        query = query.where(tuple_(ChatMessage.created_at, ChatMessage.id) < tuple_(before_created_at, before_id))
     message_result = await db.execute(query)
     messages = list(reversed(message_result.scalars().all()))
 
-    if str(session.user_id) == str(current_user.id):
-        session.last_read_at_by_user = datetime.now(UTC)
-        session.updated_at = datetime.now(UTC)
+    if session.session_type == "direct" and str(session.user_id) == str(current_user.id):
+        read_at = datetime.now(UTC)
+        session.last_read_at_by_user = read_at
+        session.updated_at = read_at
         await db.commit()
+
+    sender_names: dict[str, str] = {}
+    if _is_a2a_session(session):
+        participant_ids = {message.participant_id for message in messages if message.participant_id}
+        if participant_ids:
+            participant_result = await db.execute(
+                select(Participant.id, Participant.display_name)
+                .join(
+                    Agent,
+                    and_(
+                        Participant.type == "agent",
+                        Participant.ref_id == Agent.id,
+                    ),
+                )
+                .where(
+                    Participant.id.in_(participant_ids),
+                    Agent.tenant_id == tenant_id,
+                )
+            )
+            sender_names = {str(row[0]): row[1] or "Unknown" for row in participant_result.all()}
 
     output = []
     for message in messages:
+        sender_name = sender_names.get(str(message.participant_id)) if message.participant_id else None
         entry = _base_message_entry(message)
         if message.role == "tool_call":
             try:
                 data = json.loads(message.content)
+            except (TypeError, ValueError):
+                data = None
+            if isinstance(data, dict):
                 entry["content"] = ""
                 entry["toolName"] = data.get("name") or data.get("tool_name") or ""
                 entry["toolArgs"] = data.get("args") or data.get("arguments")
                 entry["toolStatus"] = data.get("status", "done")
                 entry["toolResult"] = data.get("result", "")
                 entry["toolThinking"] = data.get("reasoning_content", "")
-            except (TypeError, ValueError):
-                pass
-        if message.thinking:
+        if getattr(message, "thinking", None):
             entry["thinking"] = message.thinking
+        if sender_name:
+            entry["sender_name"] = sender_name
         if message.participant_id:
             entry["participant_id"] = str(message.participant_id)
-        output.append(entry)
+        if _is_a2a_session(session) and message.role == "assistant" and "```tool_code" in (message.content or ""):
+            for part in _split_inline_tools(message.content):
+                part["id"] = str(message.id)
+                part["created_at"] = message.created_at.isoformat() if message.created_at else None
+                part["cursor"] = _message_cursor(message)
+                if sender_name:
+                    part["sender_name"] = sender_name
+                if message.participant_id:
+                    part["participant_id"] = str(message.participant_id)
+                output.append(part)
+        else:
+            output.append(entry)
     return output
 
 
