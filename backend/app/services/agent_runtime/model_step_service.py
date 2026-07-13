@@ -34,6 +34,7 @@ from app.services.agent_runtime.state import (
 )
 from app.services.agent_tools import get_agent_tools_for_llm
 from app.services.llm.client import LLMMessage
+from app.services.llm.failover import FailoverErrorType, classify_error
 from app.services.llm.finish import (
     FINISH_TOOL_DEFINITION,
     find_finish_call,
@@ -84,6 +85,14 @@ class CompletionPort(Protocol):
 
 ToolProvider = Callable[[uuid.UUID], Awaitable[list[dict]]]
 PromptBuilder = Callable[..., Awaitable[tuple[str, str]]]
+
+
+class RuntimeModelCallError(RuntimeError):
+    """A provider call failed without a safe additional model attempt."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _error(code: str, message: str) -> ModelStepResult:
@@ -426,6 +435,109 @@ class RuntimeModelStepService:
             )
         return model, agent, _ledger(executions)
 
+    async def _fallback_model(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        agent: Agent,
+        primary_model: LLMModel,
+    ) -> LLMModel | None:
+        fallback_id = agent.fallback_model_id
+        if fallback_id is None or fallback_id == primary_model.id:
+            return None
+        async with self._session_factory() as db:
+            result = await db.execute(select(LLMModel).where(LLMModel.id == fallback_id))
+            fallback = result.scalar_one_or_none()
+        if (
+            fallback is None
+            or not fallback.enabled
+            or fallback.tenant_id not in {None, tenant_id}
+        ):
+            return None
+        return fallback
+
+    async def _prepare_messages(
+        self,
+        *,
+        state: RuntimeGraphState,
+        model: LLMModel,
+        agent: Agent,
+        ledger: dict[str, JsonObject],
+        tools: list[dict],
+        static_prompt: str,
+        dynamic_prompt: str,
+    ) -> list[LLMMessage] | ModelStepResult:
+        initial_build = await self._context_builder.build(
+            state,
+            tool_execution_ledger=ledger,
+        )
+        fixed_prompt_tokens = _estimate_tokens(
+            {
+                "static": static_prompt,
+                "dynamic": dynamic_prompt,
+                "runtime": _runtime_sections(initial_build),
+                "recent_session": initial_build.recent_session_messages_snapshot,
+            }
+        )
+        requested_output = get_max_tokens(
+            model.provider,
+            model.model,
+            model.max_output_tokens,
+        )
+        budget = ModelCapabilityResolver.runtime_budget(
+            model,
+            requested_max_output_tokens=requested_output,
+            static_prompt_tokens=fixed_prompt_tokens,
+            tool_schema_tokens=_estimate_tokens(tools),
+            reserved_runtime_tokens=256,
+            safety_margin_tokens=256,
+        )
+        build = await self._context_builder.build(
+            state,
+            tool_execution_ledger=ledger,
+            run_message_token_budget=budget.effective_runtime_budget,
+            token_counter=_message_token_counter,
+        )
+        if build.requires_confirmation:
+            return ModelStepResult(
+                intent="wait",
+                waiting_request={
+                    "waiting_type": "user",
+                    "correlation_id": f"tool-confirm:{state['registry'].run_id}",
+                    "reason": "A prior tool outcome is unknown and requires confirmation.",
+                },
+            )
+        if build.blocked:
+            return ModelStepResult(
+                intent="wait",
+                waiting_request={
+                    "waiting_type": "external",
+                    "correlation_id": f"tool-reconcile:{state['registry'].run_id}",
+                    "reason": "Tool execution reconciliation is required.",
+                },
+            )
+        return _prompt_messages(
+            static_prompt=static_prompt,
+            dynamic_prompt=dynamic_prompt,
+            build=build,
+        )
+
+    async def _call_prepared(
+        self,
+        *,
+        model: LLMModel,
+        agent: Agent,
+        messages: list[LLMMessage],
+        tools: list[dict],
+    ) -> LLMCompletionStep:
+        return await self._completion(
+            model,
+            messages,
+            tools=tools,
+            agent_id=agent.id,
+            supports_vision=bool(model.supports_vision),
+        )
+
     async def complete_once(
         self,
         state: RuntimeGraphState,
@@ -435,79 +547,91 @@ class RuntimeModelStepService:
         try:
             model, agent, ledger = await self._load(state)
             tools = _with_runtime_tools(await self._tool_provider(agent.id))
-            initial_build = await self._context_builder.build(
-                state,
-                tool_execution_ledger=ledger,
-            )
             static_prompt, dynamic_prompt = await self._prompt_builder(
                 agent.id,
                 agent.name,
                 agent.role_description or "",
             )
-            fixed_prompt_tokens = _estimate_tokens(
-                {
-                    "static": static_prompt,
-                    "dynamic": dynamic_prompt,
-                    "runtime": _runtime_sections(initial_build),
-                    "recent_session": initial_build.recent_session_messages_snapshot,
-                }
-            )
-            requested_output = get_max_tokens(
-                model.provider,
-                model.model,
-                model.max_output_tokens,
-            )
-            budget = ModelCapabilityResolver.runtime_budget(
-                model,
-                requested_max_output_tokens=requested_output,
-                static_prompt_tokens=fixed_prompt_tokens,
-                tool_schema_tokens=_estimate_tokens(tools),
-                reserved_runtime_tokens=256,
-                safety_margin_tokens=256,
-            )
-            build = await self._context_builder.build(
-                state,
-                tool_execution_ledger=ledger,
-                run_message_token_budget=budget.effective_runtime_budget,
-                token_counter=_message_token_counter,
-            )
-            if build.requires_confirmation:
-                return ModelStepResult(
-                    intent="wait",
-                    waiting_request={
-                        "waiting_type": "user",
-                        "correlation_id": f"tool-confirm:{state['registry'].run_id}",
-                        "reason": "A prior tool outcome is unknown and requires confirmation.",
-                    },
-                )
-            if build.blocked:
-                return ModelStepResult(
-                    intent="wait",
-                    waiting_request={
-                        "waiting_type": "external",
-                        "correlation_id": f"tool-reconcile:{state['registry'].run_id}",
-                        "reason": "Tool execution reconciliation is required.",
-                    },
-                )
-            messages = _prompt_messages(
+            prepared = await self._prepare_messages(
+                state=state,
+                model=model,
+                agent=agent,
+                ledger=ledger,
+                tools=tools,
                 static_prompt=static_prompt,
                 dynamic_prompt=dynamic_prompt,
-                build=build,
             )
-            step = await self._completion(
-                model,
-                messages,
-                tools=tools,
-                agent_id=agent.id,
-                supports_vision=bool(model.supports_vision),
-            )
+            if isinstance(prepared, ModelStepResult):
+                return prepared
+
+            actual_model = model
+            failed_over_from: LLMModel | None = None
+            try:
+                step = await self._call_prepared(
+                    model=model,
+                    agent=agent,
+                    messages=prepared,
+                    tools=tools,
+                )
+            except Exception as primary_error:
+                if classify_error(primary_error) != FailoverErrorType.RETRYABLE:
+                    raise RuntimeModelCallError(
+                        "model_call_failed",
+                        "Runtime primary model call failed without safe failover",
+                    ) from primary_error
+                tenant_id = uuid.UUID(state["registry"].tenant_id)
+                fallback = await self._fallback_model(
+                    tenant_id=tenant_id,
+                    agent=agent,
+                    primary_model=model,
+                )
+                if fallback is None:
+                    raise RuntimeModelCallError(
+                        "model_call_failed",
+                        "Runtime primary model call failed and no usable fallback is configured",
+                    ) from primary_error
+                fallback_prepared = await self._prepare_messages(
+                    state=state,
+                    model=fallback,
+                    agent=agent,
+                    ledger=ledger,
+                    tools=tools,
+                    static_prompt=static_prompt,
+                    dynamic_prompt=dynamic_prompt,
+                )
+                if isinstance(fallback_prepared, ModelStepResult):
+                    return fallback_prepared
+                try:
+                    step = await self._call_prepared(
+                        model=fallback,
+                        agent=agent,
+                        messages=fallback_prepared,
+                        tools=tools,
+                    )
+                except Exception as fallback_error:
+                    raise RuntimeModelCallError(
+                        "model_failover_failed",
+                        "Runtime fallback model call also failed",
+                    ) from fallback_error
+                actual_model = fallback
+                failed_over_from = model
+
             allowed_names = frozenset(name for name in (_tool_name(tool) for tool in tools) if name)
-            return _parse_step(
+            result = _parse_step(
                 state,
                 step,
                 allowed_tool_names=allowed_names,
             )
-        except (ContextBuildError, ModelCapabilityError) as exc:
+            if result.assistant_message is not None:
+                assistant_message = dict(result.assistant_message)
+                assistant_message["runtime_model_id"] = str(actual_model.id)
+                if failed_over_from is not None:
+                    assistant_message["runtime_failover_from_model_id"] = str(
+                        failed_over_from.id
+                    )
+                result = replace(result, assistant_message=assistant_message)
+            return result
+        except (ContextBuildError, ModelCapabilityError, RuntimeModelCallError) as exc:
             return _error(exc.code, str(exc))
         except Exception as exc:
             return _error(

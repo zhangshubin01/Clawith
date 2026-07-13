@@ -50,6 +50,31 @@ def _session_factory(model: LLMModel, agent: Agent):
     return factory
 
 
+def _failover_session_factory(
+    model: LLMModel,
+    agent: Agent,
+    fallback: LLMModel,
+):
+    calls = 0
+
+    @asynccontextmanager
+    async def factory():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield _DB(model, agent)
+            return
+
+        class _FallbackDB:
+            async def execute(self, statement):
+                del statement
+                return _Result([fallback])
+
+        yield _FallbackDB()
+
+    return factory
+
+
 class _ContextBuilder:
     def __init__(self, build: RuntimeContextBuild) -> None:
         self.build_result = build
@@ -190,6 +215,22 @@ def _service(
 ) -> RuntimeModelStepService:
     return RuntimeModelStepService(
         session_factory=_session_factory(model, agent),
+        context_builder=builder,  # type: ignore[arg-type]
+        completion=completion,
+        tool_provider=_tools,
+        prompt_builder=_prompt,
+    )
+
+
+def _failover_service(
+    model: LLMModel,
+    fallback: LLMModel,
+    agent: Agent,
+    builder: _ContextBuilder,
+    completion,
+) -> RuntimeModelStepService:
+    return RuntimeModelStepService(
+        session_factory=_failover_session_factory(model, agent, fallback),
         context_builder=builder,  # type: ignore[arg-type]
         completion=completion,
         tool_provider=_tools,
@@ -429,3 +470,88 @@ async def test_unknown_tool_outcome_waits_for_reconciliation_without_calling_mod
     assert result.waiting_request["waiting_type"] == "external"
     assert str(result.waiting_request["correlation_id"]).startswith("tool-reconcile:")
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_retryable_primary_error_rebuilds_budget_for_fallback_once() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    fallback = _model(tenant_id)
+    fallback.model = "fallback-model"
+    fallback.max_input_tokens = 20_000
+    agent = _agent(tenant_id)
+    agent.fallback_model_id = fallback.id
+    state = _state(tenant_id, model, agent)
+    builder = _ContextBuilder(_build())
+    called_models: list[uuid.UUID] = []
+
+    async def complete(model_arg, *args, **kwargs):
+        del args, kwargs
+        called_models.append(model_arg.id)
+        if model_arg.id == model.id:
+            raise TimeoutError("provider timeout")
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(
+                {
+                    "id": "finish-fallback",
+                    "type": "function",
+                    "function": {
+                        "name": "finish",
+                        "arguments": '{"content":"Fallback answer"}',
+                    },
+                },
+            ),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=12),
+        )
+
+    result = await _failover_service(
+        model,
+        fallback,
+        agent,
+        builder,
+        complete,
+    ).complete_once(state, _context(state))
+
+    assert result.intent == "finish"
+    assert result.finish_content == "Fallback answer"
+    assert called_models == [model.id, fallback.id]
+    assert len(builder.calls) == 4
+    primary_budget = builder.calls[1]["run_message_token_budget"]
+    fallback_budget = builder.calls[3]["run_message_token_budget"]
+    assert fallback_budget < primary_budget
+    assert result.assistant_message is not None
+    assert result.assistant_message["runtime_model_id"] == str(fallback.id)
+    assert result.assistant_message["runtime_failover_from_model_id"] == str(model.id)
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_primary_error_never_calls_configured_fallback() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    fallback = _model(tenant_id)
+    agent = _agent(tenant_id)
+    agent.fallback_model_id = fallback.id
+    state = _state(tenant_id, model, agent)
+    calls = 0
+
+    async def complete(*args, **kwargs):
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        raise RuntimeError("invalid API key")
+
+    result = await _failover_service(
+        model,
+        fallback,
+        agent,
+        _ContextBuilder(_build()),
+        complete,
+    ).complete_once(state, _context(state))
+
+    assert result.intent == "error"
+    assert result.error is not None
+    assert result.error["code"] == "model_call_failed"
+    assert calls == 1
