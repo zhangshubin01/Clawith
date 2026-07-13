@@ -162,7 +162,12 @@ class AgentRuntimeAdapter(Protocol):
     async def resume_run(self, run_id: UUID, resume: ResumeCommand) -> RunHandle: ...
     async def cancel_run(self, run_id: UUID, reason: str | None = None) -> None: ...
     async def get_run_state(self, run_id: UUID) -> RunView: ...
-    async def stream_run(self, handle: RunHandle) -> AsyncIterator[RuntimeEvent]: ...
+    def stream_run(
+        self,
+        handle: RunHandle,
+        *,
+        after: RuntimeEventCursor | None = None,
+    ) -> AsyncIterator[RuntimeEvent]: ...
 ```
 
 `StartRunCommand` 至少包含：
@@ -1138,6 +1143,8 @@ workspace_output, waiting, verification, completed, failed
 WebSocket 再映射为现有前端兼容事件。飞书、企业微信、Slack 等非流式渠道消费同一 Runtime Event，只投递需要展示的阶段和最终结果。
 
 Runtime Event 是 Clawith 契约；LangGraph 的 stream mode 只存在于 Adapter 内部。
+
+稳定流分成两层：`agent_run_events` 提供可重连的生命周期、waiting、verification、terminal 和 delivery 基线，cursor 必须使用 `(created_at, event_id)`，不能只用时间戳；`thinking_delta / assistant_delta / tool_call_delta / workspace_output` 是执行期瞬时事件，由 Worker 内的 `RuntimeEventMapper` 发布，不写入 `agent_run_events`。重连时先从稳定事件和 `ChatMessage` 恢复，再订阅瞬时流；前端不得把瞬时 delta 当作恢复事实。
 
 ## 11. A2A
 

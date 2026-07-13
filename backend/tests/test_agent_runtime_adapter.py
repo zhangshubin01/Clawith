@@ -1,7 +1,7 @@
 """Transactional intake tests for the product-facing Runtime Adapter."""
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import uuid
 
 import pytest
@@ -18,6 +18,7 @@ from app.services.agent_runtime.adapter import (
 from app.services.agent_runtime.contracts import (
     CancelRunCommand,
     ResumeRunCommand,
+    RunHandle,
     StartRunCommand,
 )
 from app.services.agent_runtime.persistence import (
@@ -361,3 +362,37 @@ async def test_run_handle_rejects_a_thread_id_that_differs_from_run_id() -> None
     assert exc_info.value.code == "runtime_identity_mismatch"
     enqueue.assert_not_awaited()
     db.commit.assert_not_awaited()
+
+
+def test_stream_run_requires_and_delegates_to_a_dedicated_stream_service() -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    handle = RunHandle(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        thread_id=str(run_id),
+        command_id=uuid.uuid4(),
+        runtime_type="langgraph",
+        created=True,
+    )
+    db = _session()
+    without_stream = TransactionalAgentRuntimeAdapter(
+        db,
+        settings=_settings(enabled=True),
+    )
+
+    with pytest.raises(RuntimeAdapterError) as exc_info:
+        without_stream.stream_run(handle)
+    assert exc_info.value.code == "runtime_event_stream_unavailable"
+
+    stream = MagicMock()
+    stream_iterator = object()
+    stream.stream_run.return_value = stream_iterator
+    adapter = TransactionalAgentRuntimeAdapter(
+        db,
+        settings=_settings(enabled=True),
+        event_stream=stream,
+    )
+
+    assert adapter.stream_run(handle) is stream_iterator
+    stream.stream_run.assert_called_once_with(handle, after=None)

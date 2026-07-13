@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import cast
 import uuid
 
@@ -20,10 +21,13 @@ from app.services.agent_runtime.contracts import (
     RunKind,
     RuntimeSourceType,
     RuntimeType,
+    RuntimeEvent,
+    RuntimeEventCursor,
     RunView,
     StartRunCommand,
 )
 from app.services.agent_runtime.graph import RuntimeGraphIdentity
+from app.services.agent_runtime.event_stream import DatabaseRuntimeEventStream
 from app.services.agent_runtime.persistence import (
     RunRegistration,
     enqueue_cancel,
@@ -53,11 +57,13 @@ class TransactionalAgentRuntimeAdapter:
         db: AsyncSession,
         *,
         settings: Settings | None = None,
+        event_stream: DatabaseRuntimeEventStream | None = None,
     ) -> None:
         runtime_settings = settings or get_settings()
         self._db = db
         self._rollout = RuntimeRolloutPolicy.from_settings(runtime_settings)
         self._current_graph = RuntimeGraphIdentity.from_settings(runtime_settings)
+        self._event_stream = event_stream
 
     @staticmethod
     def _require_v2(decision: RuntimeGateDecision) -> None:
@@ -254,3 +260,17 @@ class TransactionalAgentRuntimeAdapter:
             created_at=run.created_at,
             updated_at=run.updated_at,
         )
+
+    def stream_run(
+        self,
+        handle: RunHandle,
+        *,
+        after: RuntimeEventCursor | None = None,
+    ) -> AsyncIterator[RuntimeEvent]:
+        """Delegate long-lived reads to a fresh-session event stream service."""
+        if self._event_stream is None:
+            raise RuntimeAdapterError(
+                "runtime_event_stream_unavailable",
+                "Runtime event streaming requires a dedicated session factory",
+            )
+        return self._event_stream.stream_run(handle, after=after)

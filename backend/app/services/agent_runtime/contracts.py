@@ -124,10 +124,19 @@ class RuntimeEvent:
 
     tenant_id: uuid.UUID
     run_id: uuid.UUID
+    event_id: uuid.UUID | None
     event_type: RuntimeEventType
     payload: JsonObject = field(default_factory=dict)
     checkpoint_id: str | None = None
     created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEventCursor:
+    """Reconnect position ordered by the product event's full identity."""
+
+    created_at: datetime
+    event_id: uuid.UUID
 
 
 class AgentRuntimeAdapter(Protocol):
@@ -141,4 +150,9 @@ class AgentRuntimeAdapter(Protocol):
 
     async def get_run_state(self, tenant_id: uuid.UUID, run_id: uuid.UUID) -> RunView: ...
 
-    def stream_run(self, handle: RunHandle) -> AsyncIterator[RuntimeEvent]: ...
+    def stream_run(
+        self,
+        handle: RunHandle,
+        *,
+        after: RuntimeEventCursor | None = None,
+    ) -> AsyncIterator[RuntimeEvent]: ...

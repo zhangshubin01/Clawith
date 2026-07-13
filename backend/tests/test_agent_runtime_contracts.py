@@ -77,6 +77,7 @@ def test_run_view_and_runtime_event_are_query_only_values() -> None:
     event = RuntimeEvent(
         tenant_id=tenant_id,
         run_id=run_id,
+        event_id=uuid.uuid4(),
         event_type="status_changed",
         payload={"status": "running"},
         checkpoint_id="checkpoint-1",
