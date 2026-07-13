@@ -4,8 +4,10 @@ from functools import lru_cache
 import os
 from pathlib import Path
 import socket
+from typing import Self
 import uuid
 
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from app.services.sandbox.config import SandboxConfig, SandboxType
@@ -119,11 +121,30 @@ class Settings(BaseSettings):
     # Process role
     PROCESS_ROLE: str = "all"
 
-    # Agent Runtime model capabilities
-    AGENT_RUNTIME_SUMMARY_THRESHOLD_RATIO: float = 0.85
-    AGENT_RUNTIME_MODEL_CAPABILITY_REFRESH_SECONDS: int = 86400
+    # Agent Runtime
+    AGENT_RUNTIME_V2_ENABLED: bool = False
+    AGENT_RUNTIME_V2_AGENT_IDS: str = ""
+    AGENT_RUNTIME_V2_SOURCE_TYPES: str = "task"
+    AGENT_RUNTIME_GRAPH_NAME: str = "clawith_agent_runtime"
+    AGENT_RUNTIME_GRAPH_VERSION: str = "v1"
+    LANGGRAPH_CHECKPOINT_DATABASE_URL: str | None = None
+    LANGGRAPH_AES_KEY: str | None = None
+    AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS: int = Field(default=60, gt=0)
+    AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS: int = Field(default=20, gt=0)
+    AGENT_RUNTIME_COMMAND_MAX_ATTEMPTS: int = Field(default=5, gt=0)
+    AGENT_RUNTIME_SUMMARY_THRESHOLD_RATIO: float = Field(default=0.85, gt=0, le=1)
+    AGENT_RUNTIME_SESSION_RECENT_MESSAGES: int = Field(default=20, gt=0)
+    AGENT_RUNTIME_SESSION_COMPACT_MESSAGE_THRESHOLD: int | None = Field(default=None, gt=0)
+    AGENT_RUNTIME_RUN_COMPACT_MESSAGE_THRESHOLD: int | None = Field(default=None, gt=0)
+    AGENT_RUNTIME_RUN_COMPACT_TOOL_RESULT_BYTES: int | None = Field(default=None, gt=0)
+    AGENT_RUNTIME_VERIFY_REPAIR_COMPACT_ROUNDS: int | None = Field(default=None, gt=0)
+    AGENT_RUNTIME_MODEL_CAPABILITY_REFRESH_SECONDS: int = Field(default=86400, gt=0)
     MULTI_AGENT_COMPACT_MODEL_ID: uuid.UUID | None = None
     MULTI_AGENT_PLANNING_MODEL_ID: uuid.UUID | None = None
+    AGENT_RUNTIME_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, gt=0)
+    AGENT_RUNTIME_EVENT_PAYLOAD_MAX_BYTES: int = Field(default=16384, gt=0)
+    AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES: int = Field(default=8192, gt=0)
+    MAX_AGENT_CYCLE_COUNT: int = Field(default=5, gt=0)
 
     # Docker (for Agent containers)
     DOCKER_NETWORK: str = "clawith_network"
@@ -157,6 +178,41 @@ class Settings(BaseSettings):
     SANDBOX_ALLOW_UNSAFE_FALLBACK_WHEN_BWRAP_MISSING: bool = _default_allow_unsafe_bwrap_fallback()
     SANDBOX_DEFAULT_TIMEOUT: int = 30
     SANDBOX_MAX_TIMEOUT: int = 60
+
+    @field_validator(
+        "LANGGRAPH_CHECKPOINT_DATABASE_URL",
+        "LANGGRAPH_AES_KEY",
+        "MULTI_AGENT_COMPACT_MODEL_ID",
+        "MULTI_AGENT_PLANNING_MODEL_ID",
+        "AGENT_RUNTIME_SESSION_COMPACT_MESSAGE_THRESHOLD",
+        "AGENT_RUNTIME_RUN_COMPACT_MESSAGE_THRESHOLD",
+        "AGENT_RUNTIME_RUN_COMPACT_TOOL_RESULT_BYTES",
+        "AGENT_RUNTIME_VERIFY_REPAIR_COMPACT_ROUNDS",
+        mode="before",
+    )
+    @classmethod
+    def _blank_optional_runtime_values(cls, value: object) -> object | None:
+        """Treat blank optional environment variables as unset."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("AGENT_RUNTIME_GRAPH_NAME", "AGENT_RUNTIME_GRAPH_VERSION")
+    @classmethod
+    def _nonempty_runtime_identifiers(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Runtime graph name and version must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def _claim_renewal_precedes_expiry(self) -> Self:
+        if self.AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS >= self.AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS:
+            raise ValueError(
+                "AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS must be less than "
+                "AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS"
+            )
+        return self
 
     model_config = {
         "env_file": [".env", "../.env"],
