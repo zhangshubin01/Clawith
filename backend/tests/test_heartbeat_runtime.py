@@ -8,6 +8,7 @@ import uuid
 
 import pytest
 
+from app.services import heartbeat as heartbeat_service
 from app.config import Settings
 from app.models.agent import Agent
 from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
@@ -23,6 +24,10 @@ from app.services.heartbeat_runtime import (
 
 class _Session:
     pass
+
+
+def test_heartbeat_entrypoint_has_no_independent_model_tool_loop() -> None:
+    assert not hasattr(heartbeat_service, "_execute_heartbeat")
 
 
 def _settings(*, enabled: bool) -> Settings:
