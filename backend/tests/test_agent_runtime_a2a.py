@@ -20,6 +20,7 @@ from app.services.agent_runtime.a2a_runtime import (
     RuntimeA2AService,
     a2a_mode_from_correlation,
     a2a_waiting_request,
+    complete_gateway_a2a_runtime,
     enqueue_gateway_a2a_runtime,
 )
 from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
@@ -33,6 +34,12 @@ class _ScalarResult:
 
     def scalar_one_or_none(self):
         return self.value
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self.value if isinstance(self.value, list) else [self.value]
 
 
 class _Transaction:
@@ -390,9 +397,16 @@ async def test_delegate_creates_target_run_and_receipt_in_one_transaction() -> N
 
 
 @pytest.mark.asyncio
-async def test_disabled_target_rollout_falls_back_without_settling_receipt() -> None:
+async def test_disabled_native_target_fails_closed_and_settles_receipt() -> None:
     tenant_id, source, target, source_run, reservation = _records()
-    db = _Session(source_run, source)
+    intake_db = _Session(source_run, source)
+    rejection_db = _Session()
+
+    async def mark_failed(mark_db, **kwargs):
+        assert mark_db is rejection_db
+        reservation.execution.status = "failed"
+        reservation.execution.result_summary = kwargs["result_summary"]
+        return reservation.execution
 
     with (
         patch(
@@ -405,11 +419,11 @@ async def test_disabled_target_rollout_falls_back_without_settling_receipt() -> 
         ) as mark_succeeded,
         patch(
             "app.services.agent_runtime.a2a_runtime.mark_tool_execution_failed",
-            new=AsyncMock(),
+            new=AsyncMock(side_effect=mark_failed),
         ) as mark_failed,
     ):
         result = await RuntimeA2AService(
-            session_factory=_SessionFactory(db),  # type: ignore[arg-type]
+            session_factory=_SessionFactory(intake_db, rejection_db),  # type: ignore[arg-type]
             settings=_settings(enabled=False),
         ).execute(
             tenant_id=tenant_id,
@@ -426,10 +440,147 @@ async def test_disabled_target_rollout_falls_back_without_settling_receipt() -> 
             actor_user_id=source.creator_id,
         )
 
-    assert result is None
+    assert result.outcome.status == "failed"
+    assert result.target_run_id is None
+    assert "runtime_disabled" in (result.outcome.result_summary or "")
     mark_succeeded.assert_not_awaited()
-    mark_failed.assert_not_awaited()
-    assert reservation.execution.status == "started"
+    mark_failed.assert_awaited_once()
+    assert reservation.execution.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_openclaw_target_is_queued_atomically_without_legacy_executor() -> None:
+    tenant_id, source, target, source_run, reservation = _records()
+    target.agent_type = "openclaw"
+    target.primary_model_id = None
+    db = _Session(source_run, source)
+    cycle_guard = _CycleGuard()
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        agent_id=min((source.id, target.id), key=str),
+        last_message_at=None,
+    )
+    source_participant_id = uuid.uuid4()
+
+    async def mark_succeeded(mark_db, **kwargs):
+        reservation.execution.status = "succeeded"
+        reservation.execution.result_summary = kwargs["result_summary"]
+        reservation.execution.result_ref = kwargs["result_ref"]
+        return reservation.execution
+
+    with (
+        patch(
+            "app.services.agent_runtime.a2a_runtime._resolve_target",
+            new=AsyncMock(return_value=target),
+        ),
+        patch(
+            "app.services.agent_runtime.a2a_runtime.ensure_a2a_session",
+            new=AsyncMock(
+                return_value=(session, source_participant_id, uuid.uuid4())
+            ),
+        ),
+        patch(
+            "app.services.agent_runtime.a2a_runtime.mark_tool_execution_succeeded",
+            new=AsyncMock(side_effect=mark_succeeded),
+        ),
+        patch(
+            "app.services.agent_runtime.a2a_runtime.TransactionalAgentRuntimeAdapter.start_run",
+            new=AsyncMock(),
+        ) as start_run,
+    ):
+        result = await RuntimeA2AService(
+            session_factory=_SessionFactory(db),  # type: ignore[arg-type]
+            settings=_settings(enabled=False),
+            cycle_guard=cycle_guard,  # type: ignore[arg-type]
+        ).execute(
+            tenant_id=tenant_id,
+            source_run_id=source_run.id,
+            source_agent_id=source.id,
+            tool_call_id="delegate-call",
+            arguments={
+                "agent_name": target.name,
+                "message": "Research the latest facts",
+                "msg_type": "consult",
+            },
+            reservation=reservation,
+            lease_owner="runtime:command:delegate-call",
+            actor_user_id=source.creator_id,
+        )
+
+    start_run.assert_not_awaited()
+    gateway_message_id = uuid.uuid5(
+        source_run.id,
+        "a2a-gateway:delegate-call",
+    )
+    queued = next(value for value in db.added if isinstance(value, GatewayMessage))
+    assert queued.id == gateway_message_id
+    assert queued.agent_id == target.id
+    assert queued.sender_agent_id == source.id
+    assert queued.status == "pending"
+    assert result.outcome.result_ref == f"gateway-message:{gateway_message_id}"
+    assert result.waiting_request == {
+        "waiting_type": "agent",
+        "correlation_id": (
+            f"a2a:consult:"
+            f"{uuid.uuid5(source_run.id, 'a2a-result:delegate-call')}"
+        ),
+        "reason": "waiting_for_consult",
+        "gateway_message_id": str(gateway_message_id),
+    }
+
+
+@pytest.mark.asyncio
+async def test_openclaw_report_resumes_native_source_from_tool_receipt() -> None:
+    tenant_id, source, target, source_run, reservation = _records()
+    target.agent_type = "openclaw"
+    target.tenant_id = tenant_id
+    reservation.execution.status = "succeeded"
+    reservation.execution.sanitized_arguments = {
+        "agent_name": target.name,
+        "message": "Research the latest facts",
+        "msg_type": "task_delegate",
+    }
+    gateway_message = GatewayMessage(
+        id=uuid.uuid4(),
+        agent_id=target.id,
+        sender_agent_id=source.id,
+        content="Research the latest facts",
+        status="delivered",
+        conversation_id=str(uuid.uuid4()),
+    )
+    reservation.execution.result_ref = f"gateway-message:{gateway_message.id}"
+    db = _Session([reservation.execution], source_run)
+    handle = RunHandle(
+        tenant_id=tenant_id,
+        run_id=source_run.id,
+        thread_id=str(source_run.id),
+        command_id=uuid.uuid4(),
+        runtime_type="langgraph",
+        created=True,
+    )
+
+    with patch(
+        "app.services.agent_runtime.a2a_runtime.TransactionalAgentRuntimeAdapter.resume_run",
+        new=AsyncMock(return_value=handle),
+    ) as resume_run:
+        completion = await complete_gateway_a2a_runtime(
+            db,  # type: ignore[arg-type]
+            gateway_message=gateway_message,
+            target_agent=target,
+            result="Verified research result",
+            settings=_settings(enabled=False),
+        )
+
+    assert completion is not None
+    assert completion.source_run_id == source_run.id
+    assert completion.resumed is True
+    command = resume_run.await_args.args[0]
+    assert command.run_id == source_run.id
+    assert command.payload["resume_type"] == "agent_result"
+    assert command.payload["payload"]["gateway_message_id"] == str(
+        gateway_message.id
+    )
+    assert command.payload["payload"]["result_summary"] == "Verified research result"
 
 
 @pytest.mark.asyncio

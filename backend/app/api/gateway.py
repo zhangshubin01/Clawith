@@ -13,13 +13,14 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db, async_session
+from app.database import get_db
 from app.core.permissions import evaluate_agent_relationship_status, evaluate_human_relationship_status
 from app.models.agent import Agent
 from app.models.gateway_message import GatewayMessage
 from app.models.user import User
 from app.services.agent_runtime.a2a_runtime import (
     A2ARuntimeError,
+    complete_gateway_a2a_runtime,
     enqueue_gateway_a2a_runtime,
 )
 from app.schemas.schemas import (
@@ -216,6 +217,17 @@ async def report_result(
     if not msg:
         raise HTTPException(status_code=404, detail="Message not found")
 
+    if msg.status == "completed":
+        if msg.result != body.result:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "gateway_result_mismatch",
+                    "message": "Message already completed with a different result.",
+                },
+            )
+        return {"status": "ok"}
+
     msg.status = "completed"
     msg.result = body.result
     msg.completed_at = datetime.now(timezone.utc)
@@ -231,16 +243,61 @@ async def report_result(
         # Look up OpenClaw agent's participant_id
         part_r = await db.execute(select(Participant).where(Participant.type == "agent", Participant.ref_id == agent.id))
         participant = part_r.scalar_one_or_none()
-        
-        assistant_msg = ChatMessage(
-            agent_id=agent.id,
-            user_id=msg.sender_user_id or getattr(agent, "creator_id", agent.id),
-            role="assistant",
-            content=body.result,
-            conversation_id=msg.conversation_id,
-            participant_id=participant.id if participant else None,
-        )
-        db.add(assistant_msg)
+
+        result_message_id = uuid.uuid5(msg.id, "gateway-report-result")
+        result_message = await db.get(ChatMessage, result_message_id)
+        if result_message is None:
+            db.add(
+                ChatMessage(
+                    id=result_message_id,
+                    agent_id=agent.id,
+                    user_id=msg.sender_user_id or getattr(agent, "creator_id", agent.id),
+                    role="assistant",
+                    content=body.result,
+                    conversation_id=msg.conversation_id,
+                    participant_id=participant.id if participant else None,
+                    mentions=[],
+                )
+            )
+
+    runtime_completion = None
+    if body.result and msg.sender_agent_id:
+        try:
+            runtime_completion = await complete_gateway_a2a_runtime(
+                db,
+                gateway_message=msg,
+                target_agent=agent,
+                result=body.result,
+            )
+        except A2ARuntimeError as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+
+        if runtime_completion is None:
+            sender_result = await db.execute(
+                select(Agent).where(Agent.id == msg.sender_agent_id)
+            )
+            sender_agent = sender_result.scalar_one_or_none()
+            if sender_agent is not None and sender_agent.agent_type == "openclaw":
+                reply_id = uuid.uuid5(msg.id, "gateway-report-reply")
+                existing_reply = await db.get(GatewayMessage, reply_id)
+                if existing_reply is None:
+                    db.add(
+                        GatewayMessage(
+                            id=reply_id,
+                            agent_id=sender_agent.id,
+                            sender_agent_id=agent.id,
+                            content=body.result,
+                            status="pending",
+                            conversation_id=(
+                                msg.conversation_id
+                                or f"gw_agent_{sender_agent.id}_{agent.id}"
+                            ),
+                        )
+                    )
 
     await db.commit()
 
@@ -255,22 +312,6 @@ async def report_result(
             })
         except Exception:
             pass  # User may have disconnected
-
-    # If the original message was from another agent (OpenClaw-to-OpenClaw),
-    # write the reply back as a gateway_message for the sender agent to poll
-    if body.result and msg.sender_agent_id:
-        async with async_session() as reply_db:
-            conv_id = msg.conversation_id or f"gw_agent_{msg.sender_agent_id}_{agent.id}"
-            gw_reply = GatewayMessage(
-                agent_id=msg.sender_agent_id,
-                sender_agent_id=agent.id,
-                content=body.result,
-                status="pending",
-                conversation_id=conv_id,
-            )
-            reply_db.add(gw_reply)
-            await reply_db.commit()
-            logger.info(f"[Gateway] Reply routed back to sender agent {msg.sender_agent_id}")
 
     return {"status": "ok"}
 

@@ -14,6 +14,7 @@ from app.config import Settings, get_settings
 from app.core.permissions import evaluate_agent_relationship_status
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
+from app.models.agent_tool_execution import AgentToolExecution
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.gateway_message import GatewayMessage
@@ -21,7 +22,7 @@ from app.models.org import AgentAgentRelationship
 from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.config import decide_runtime_v2
-from app.services.agent_runtime.contracts import StartRunCommand
+from app.services.agent_runtime.contracts import ResumeRunCommand, StartRunCommand
 from app.services.agent_runtime.cycle_guard import (
     AgentCycleGuard,
     AgentCycleGuardError,
@@ -47,10 +48,6 @@ class A2ARuntimeError(RuntimeError):
         self.code = code
 
 
-class _A2ARuntimeFallback(RuntimeError):
-    """The target must remain on the legacy/OpenClaw path during rollout."""
-
-
 @dataclass(frozen=True, slots=True)
 class A2ARuntimeToolResult:
     """Durable tool result plus an optional source-Run interrupt."""
@@ -67,6 +64,14 @@ class GatewayA2ARuntimeIntake:
     gateway_message_id: uuid.UUID
     target_run_id: uuid.UUID
     session_id: uuid.UUID
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayA2ARuntimeCompletion:
+    """A native source Run resumed from an OpenClaw report."""
+
+    source_run_id: uuid.UUID
+    resumed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,15 +150,22 @@ def a2a_waiting_request(
     request = _request(arguments)
     if request.mode not in _RESPONSE_MODES or result_ref is None:
         return None
-    prefix = "agent-run:"
-    if not result_ref.startswith(prefix):
+    ref_field: str
+    ref_prefix: str
+    if result_ref.startswith("agent-run:"):
+        ref_field = "target_run_id"
+        ref_prefix = "agent-run:"
+    elif result_ref.startswith("gateway-message:"):
+        ref_field = "gateway_message_id"
+        ref_prefix = "gateway-message:"
+    else:
         return None
     try:
-        target_run_id = uuid.UUID(result_ref.removeprefix(prefix))
+        target_ref_id = uuid.UUID(result_ref.removeprefix(ref_prefix))
     except ValueError as exc:
         raise A2ARuntimeError(
             "a2a_result_ref_invalid",
-            "A2A tool receipt has an invalid target Run reference",
+            "A2A tool receipt has an invalid target reference",
         ) from exc
     return {
         "waiting_type": "agent",
@@ -163,7 +175,7 @@ def a2a_waiting_request(
             request.mode,
         ),
         "reason": f"waiting_for_{request.mode}",
-        "target_run_id": str(target_run_id),
+        ref_field: str(target_ref_id),
     }
 
 
@@ -177,6 +189,119 @@ def _session_id(tenant_id: uuid.UUID, first: uuid.UUID, second: uuid.UUID) -> uu
 
 def _input_message_id(source_run_id: uuid.UUID, tool_call_id: str) -> uuid.UUID:
     return uuid.uuid5(source_run_id, f"a2a-input:{tool_call_id}")
+
+
+def _gateway_message_id(source_run_id: uuid.UUID, tool_call_id: str) -> uuid.UUID:
+    return uuid.uuid5(source_run_id, f"a2a-gateway:{tool_call_id}")
+
+
+async def complete_gateway_a2a_runtime(
+    db: AsyncSession,
+    *,
+    gateway_message: GatewayMessage,
+    target_agent: Agent,
+    result: str,
+    settings: Settings | None = None,
+) -> GatewayA2ARuntimeCompletion | None:
+    """Resume a native source Run when its OpenClaw target reports a result.
+
+    A missing tool receipt means this is a user-originated or OpenClaw-to-OpenClaw
+    gateway message and the caller should retain the ordinary gateway behavior.
+    """
+    normalized_result = result.strip()
+    if not normalized_result:
+        raise A2ARuntimeError(
+            "a2a_gateway_result_missing",
+            "Gateway A2A result must not be blank",
+        )
+    if (
+        target_agent.tenant_id is None
+        or target_agent.agent_type != "openclaw"
+        or gateway_message.agent_id != target_agent.id
+        or gateway_message.sender_agent_id is None
+    ):
+        raise A2ARuntimeError(
+            "a2a_gateway_result_scope_mismatch",
+            "Gateway A2A result does not match an OpenClaw target message",
+        )
+
+    receipt_result = await db.execute(
+        select(AgentToolExecution)
+        .where(
+            AgentToolExecution.tenant_id == target_agent.tenant_id,
+            AgentToolExecution.tool_name == "send_message_to_agent",
+            AgentToolExecution.status == "succeeded",
+            AgentToolExecution.result_ref
+            == f"gateway-message:{gateway_message.id}",
+        )
+        .limit(2)
+    )
+    receipts = receipt_result.scalars().all()
+    if not receipts:
+        return None
+    if len(receipts) != 1:
+        raise A2ARuntimeError(
+            "a2a_gateway_receipt_ambiguous",
+            "Gateway A2A result matches more than one tool receipt",
+        )
+    receipt = receipts[0]
+    request = _request(receipt.sanitized_arguments or {})
+
+    source_result = await db.execute(
+        select(AgentRun).where(
+            AgentRun.tenant_id == target_agent.tenant_id,
+            AgentRun.id == receipt.run_id,
+        )
+    )
+    source_run = source_result.scalar_one_or_none()
+    if (
+        source_run is None
+        or source_run.agent_id != gateway_message.sender_agent_id
+        or source_run.runtime_type != "langgraph"
+    ):
+        raise A2ARuntimeError(
+            "a2a_gateway_source_run_mismatch",
+            "Gateway A2A receipt does not match its native source Run",
+        )
+    if request.mode == "notify":
+        return GatewayA2ARuntimeCompletion(
+            source_run_id=source_run.id,
+            resumed=False,
+        )
+
+    correlation_id = _correlation_id(
+        source_run.id,
+        receipt.tool_call_id,
+        request.mode,
+    )
+    await TransactionalAgentRuntimeAdapter(
+        db,
+        settings=settings or get_settings(),
+    ).resume_run(
+        ResumeRunCommand(
+            tenant_id=target_agent.tenant_id,
+            run_id=source_run.id,
+            idempotency_key=f"gateway-a2a-result:{gateway_message.id}",
+            payload={
+                "resume_type": "agent_result",
+                "correlation_id": correlation_id,
+                "payload": {
+                    "gateway_message_id": str(gateway_message.id),
+                    "target_agent_id": str(target_agent.id),
+                    "status": "completed",
+                    "result_summary": normalized_result,
+                    "artifact_refs": [],
+                    "error": None,
+                },
+            },
+            actor_user_id=source_run.origin_user_id,
+            actor_agent_id=target_agent.id,
+        )
+    )
+    return GatewayA2ARuntimeCompletion(
+        source_run_id=source_run.id,
+        resumed=True,
+    )
 
 
 async def _load_source_run(
@@ -579,8 +704,8 @@ class RuntimeA2AService:
         reservation: ToolExecutionReservation,
         lease_owner: str,
         actor_user_id: uuid.UUID | None,
-    ) -> A2ARuntimeToolResult | None:
-        """Return None only when rollout or a remote target requires legacy handling."""
+    ) -> A2ARuntimeToolResult:
+        """Persist every native or OpenClaw A2A side effect behind one receipt."""
         try:
             request = _request(arguments)
             async with self._session_factory() as db:
@@ -614,16 +739,19 @@ class RuntimeA2AService:
                         target_name=request.target_name,
                         actor_user_id=owner_user_id,
                     )
-                    if target.agent_type == "openclaw":
-                        raise _A2ARuntimeFallback
-                    decision = decide_runtime_v2(
-                        agent_id=target.id,
-                        source_type="a2a",
-                        settings=self._settings,
-                    )
-                    if not decision.use_v2:
-                        raise _A2ARuntimeFallback
-                    if target.primary_model_id is None:
+                    is_openclaw = target.agent_type == "openclaw"
+                    if not is_openclaw:
+                        decision = decide_runtime_v2(
+                            agent_id=target.id,
+                            source_type="a2a",
+                            settings=self._settings,
+                        )
+                        if not decision.use_v2:
+                            raise A2ARuntimeError(
+                                "runtime_disabled",
+                                "Durable Runtime is required for native A2A execution",
+                            )
+                    if not is_openclaw and target.primary_model_id is None:
                         raise A2ARuntimeError(
                             "a2a_target_model_missing",
                             f"Agent {target.name} has no primary model",
@@ -668,48 +796,84 @@ class RuntimeA2AService:
                             "Deterministic A2A input message has different content",
                         )
 
-                    correlation_id = _correlation_id(
-                        source_run_id,
-                        tool_call_id,
-                        request.mode,
-                    )
-                    source_execution_id = _source_execution_id(
-                        source_run_id,
-                        tool_call_id,
-                    )
-                    handle = await TransactionalAgentRuntimeAdapter(
-                        db,
-                        settings=self._settings,
-                    ).start_run(
-                        StartRunCommand(
-                            tenant_id=tenant_id,
-                            agent_id=target.id,
-                            session_id=session.id,
-                            source_type="a2a",
-                            source_id=str(session.id),
-                            source_execution_id=source_execution_id,
-                            correlation_id=correlation_id,
-                            goal=_target_goal(source_agent, request),
-                            run_kind="delegated",
-                            model_id=target.primary_model_id,
-                            origin_user_id=owner_user_id,
-                            origin_agent_id=source_agent.id,
-                            parent_run_id=source_run.id,
-                            root_run_id=source_run.root_run_id or source_run.id,
-                            delivery_status="not_required",
-                            idempotency_key=f"start:{source_execution_id}",
-                            payload={
-                                "a2a_mode": request.mode,
-                                "a2a_message": request.message,
-                                "source_agent_id": str(source_agent.id),
-                                "source_agent_name": source_agent.name,
-                                "source_run_id": str(source_run.id),
-                                "correlation_id": correlation_id,
-                            },
-                            actor_user_id=owner_user_id,
-                            actor_agent_id=source_agent.id,
+                    target_run_id: uuid.UUID | None = None
+                    if is_openclaw:
+                        gateway_message_id = _gateway_message_id(
+                            source_run_id,
+                            tool_call_id,
                         )
-                    )
+                        gateway_message = await db.get(
+                            GatewayMessage,
+                            gateway_message_id,
+                        )
+                        if gateway_message is None:
+                            db.add(
+                                GatewayMessage(
+                                    id=gateway_message_id,
+                                    agent_id=target.id,
+                                    sender_agent_id=source_agent.id,
+                                    sender_user_id=owner_user_id,
+                                    content=request.message,
+                                    status="pending",
+                                    conversation_id=str(session.id),
+                                )
+                            )
+                        elif (
+                            gateway_message.agent_id != target.id
+                            or gateway_message.sender_agent_id != source_agent.id
+                            or gateway_message.content != request.message
+                            or gateway_message.conversation_id != str(session.id)
+                        ):
+                            raise A2ARuntimeError(
+                                "a2a_gateway_message_mismatch",
+                                "Gateway A2A receipt has different immutable input",
+                            )
+                        result_ref = f"gateway-message:{gateway_message_id}"
+                    else:
+                        correlation_id = _correlation_id(
+                            source_run_id,
+                            tool_call_id,
+                            request.mode,
+                        )
+                        source_execution_id = _source_execution_id(
+                            source_run_id,
+                            tool_call_id,
+                        )
+                        handle = await TransactionalAgentRuntimeAdapter(
+                            db,
+                            settings=self._settings,
+                        ).start_run(
+                            StartRunCommand(
+                                tenant_id=tenant_id,
+                                agent_id=target.id,
+                                session_id=session.id,
+                                source_type="a2a",
+                                source_id=str(session.id),
+                                source_execution_id=source_execution_id,
+                                correlation_id=correlation_id,
+                                goal=_target_goal(source_agent, request),
+                                run_kind="delegated",
+                                model_id=target.primary_model_id,
+                                origin_user_id=owner_user_id,
+                                origin_agent_id=source_agent.id,
+                                parent_run_id=source_run.id,
+                                root_run_id=source_run.root_run_id or source_run.id,
+                                delivery_status="not_required",
+                                idempotency_key=f"start:{source_execution_id}",
+                                payload={
+                                    "a2a_mode": request.mode,
+                                    "a2a_message": request.message,
+                                    "source_agent_id": str(source_agent.id),
+                                    "source_agent_name": source_agent.name,
+                                    "source_run_id": str(source_run.id),
+                                    "correlation_id": correlation_id,
+                                },
+                                actor_user_id=owner_user_id,
+                                actor_agent_id=source_agent.id,
+                            )
+                        )
+                        target_run_id = handle.run_id
+                        result_ref = f"agent-run:{handle.run_id}"
                     summary = _accepted_summary(target, request.mode)
                     execution = await mark_tool_execution_succeeded(
                         db,
@@ -717,7 +881,7 @@ class RuntimeA2AService:
                         execution_id=reservation.execution.id,
                         lease_owner=lease_owner,
                         result_summary=summary,
-                        result_ref=f"agent-run:{handle.run_id}",
+                        result_ref=result_ref,
                     )
                     session.last_message_at = datetime.now(UTC)
 
@@ -733,11 +897,9 @@ class RuntimeA2AService:
                     result_summary=execution.result_summary,
                     result_ref=execution.result_ref,
                 ),
-                target_run_id=handle.run_id,
+                target_run_id=target_run_id,
                 waiting_request=waiting_request,
             )
-        except _A2ARuntimeFallback:
-            return None
         except AgentCycleGuardError as exc:
             return await self._mark_rejected(
                 tenant_id=tenant_id,
@@ -757,10 +919,12 @@ class RuntimeA2AService:
 __all__ = [
     "A2ARuntimeError",
     "A2ARuntimeToolResult",
+    "GatewayA2ARuntimeCompletion",
     "GatewayA2ARuntimeIntake",
     "RuntimeA2AService",
     "a2a_mode_from_correlation",
     "a2a_waiting_request",
+    "complete_gateway_a2a_runtime",
     "enqueue_gateway_a2a_runtime",
     "ensure_a2a_session",
 ]
