@@ -12,12 +12,18 @@ from typing import AsyncIterator
 import uuid
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg import AsyncConnection as PsycopgAsyncConnection
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings, get_settings
 from app.services.agent_runtime.cancel_source import DatabaseRuntimeCancelSource
 from app.services.agent_runtime.checkpoint_side_effects import RuntimeCheckpointSideEffects
-from app.services.agent_runtime.checkpointer import create_checkpointer
+from app.services.agent_runtime.checkpointer import (
+    checkpoint_database_url,
+    create_checkpointer,
+)
 from app.services.agent_runtime.command_worker import (
     CommandWorkResult,
     RuntimeCommandWorker,
@@ -39,6 +45,23 @@ from app.services.agent_runtime.tool_step_service import RuntimeToolStepService
 
 logger = logging.getLogger(__name__)
 
+_REQUIRED_PRODUCT_TABLES = (
+    "agent_runs",
+    "agent_run_commands",
+    "agent_run_events",
+    "agent_tool_executions",
+    "session_context_states",
+)
+_EXPECTED_CHECKPOINT_MIGRATION = len(AsyncPostgresSaver.MIGRATIONS) - 1
+
+
+class RuntimeSchemaNotReady(RuntimeError):
+    """Runtime code is enabled before its explicit migrations are complete."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeWorkerComponents:
@@ -54,6 +77,63 @@ def runtime_worker_claimant() -> str:
     """Return a process-unique claimant that fits the persisted column."""
     hostname = socket.gethostname().strip() or "unknown-host"
     return f"{hostname}:{os.getpid()}:{uuid.uuid4().hex}"[:128]
+
+
+async def _checkpoint_migration_version(settings: Settings) -> int | None:
+    try:
+        connection = await PsycopgAsyncConnection.connect(
+            checkpoint_database_url(settings),
+            autocommit=True,
+        )
+        async with connection:
+            async with connection.cursor() as cursor:
+                await cursor.execute("SELECT max(v) FROM checkpoint_migrations")
+                row = await cursor.fetchone()
+    except Exception as exc:
+        raise RuntimeSchemaNotReady(
+            "checkpoint_schema_unavailable",
+            "LangGraph checkpoint schema is unavailable; run the explicit setup command",
+        ) from exc
+    if row is None or row[0] is None:
+        return None
+    return int(row[0])
+
+
+async def assert_runtime_schema_ready(
+    engine: AsyncEngine,
+    *,
+    settings: Settings | None = None,
+) -> None:
+    """Fail startup unless product Alembic and official saver setup both ran."""
+    runtime_settings = settings or get_settings()
+    missing: list[str] = []
+    try:
+        async with engine.connect() as connection:
+            for table_name in _REQUIRED_PRODUCT_TABLES:
+                result = await connection.execute(
+                    text("SELECT to_regclass(:table_name)"),
+                    {"table_name": table_name},
+                )
+                if result.scalar_one_or_none() is None:
+                    missing.append(table_name)
+    except Exception as exc:
+        raise RuntimeSchemaNotReady(
+            "product_schema_unavailable",
+            "Agent Runtime product schema could not be inspected",
+        ) from exc
+    if missing:
+        raise RuntimeSchemaNotReady(
+            "product_schema_incomplete",
+            "Agent Runtime migration is required; missing tables: " + ", ".join(missing),
+        )
+
+    checkpoint_version = await _checkpoint_migration_version(runtime_settings)
+    if checkpoint_version != _EXPECTED_CHECKPOINT_MIGRATION:
+        raise RuntimeSchemaNotReady(
+            "checkpoint_schema_outdated",
+            "LangGraph checkpoint setup version does not match the pinned package "
+            f"(expected {_EXPECTED_CHECKPOINT_MIGRATION}, found {checkpoint_version})",
+        )
 
 
 def build_runtime_worker_components(
@@ -175,6 +255,7 @@ async def runtime_worker_context(
     session_factory: RuntimeSessionFactory | None = None,
     lock_engine: AsyncEngine | None = None,
     claimant: str | None = None,
+    verify_schema: bool = True,
 ) -> AsyncIterator[RuntimeWorkerComponents]:
     """Keep the Checkpointer open for exactly the Worker component lifetime."""
     runtime_settings = settings or get_settings()
@@ -183,6 +264,8 @@ async def runtime_worker_context(
 
         session_factory = session_factory or async_session
         lock_engine = lock_engine or engine
+    if verify_schema:
+        await assert_runtime_schema_ready(lock_engine, settings=runtime_settings)
     manager = checkpointer_manager or create_checkpointer(runtime_settings)
     async with manager as checkpointer:
         yield build_runtime_worker_components(
@@ -202,6 +285,7 @@ async def running_runtime_worker_context(
     session_factory: RuntimeSessionFactory | None = None,
     lock_engine: AsyncEngine | None = None,
     claimant: str | None = None,
+    verify_schema: bool = True,
 ) -> AsyncIterator[RuntimeWorkerComponents]:
     """Run and cancel the daemon within the Checkpointer component lifetime."""
     async with runtime_worker_context(
@@ -210,6 +294,7 @@ async def running_runtime_worker_context(
         session_factory=session_factory,
         lock_engine=lock_engine,
         claimant=claimant,
+        verify_schema=verify_schema,
     ) as components:
         stop = asyncio.Event()
         daemon = RuntimeCommandDaemon(components.worker)
@@ -228,7 +313,9 @@ async def running_runtime_worker_context(
 
 __all__ = [
     "RuntimeCommandDaemon",
+    "RuntimeSchemaNotReady",
     "RuntimeWorkerComponents",
+    "assert_runtime_schema_ready",
     "build_runtime_worker_components",
     "running_runtime_worker_context",
     "runtime_worker_claimant",

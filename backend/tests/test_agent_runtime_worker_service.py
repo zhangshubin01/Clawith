@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from collections import deque
 import asyncio
 import uuid
+from unittest.mock import AsyncMock, patch
 
 from langgraph.checkpoint.memory import InMemorySaver
 import pytest
@@ -15,6 +16,8 @@ from app.services.agent_runtime.command_worker import CommandWorkResult, Runtime
 from app.services.agent_runtime.state import RunRegistrySnapshot
 from app.services.agent_runtime.worker_service import (
     RuntimeCommandDaemon,
+    RuntimeSchemaNotReady,
+    assert_runtime_schema_ready,
     build_runtime_worker_components,
     running_runtime_worker_context,
     runtime_worker_context,
@@ -60,6 +63,37 @@ class _SessionFactory:
 
 class _Engine:
     pass
+
+
+class _ScalarResult:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def scalar_one_or_none(self) -> object:
+        return self.value
+
+
+class _SchemaConnection:
+    def __init__(self, tables: set[str]) -> None:
+        self.tables = tables
+
+    async def __aenter__(self) -> "_SchemaConnection":
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> bool:
+        return False
+
+    async def execute(self, _statement, parameters) -> _ScalarResult:
+        name = parameters["table_name"]
+        return _ScalarResult(name if name in self.tables else None)
+
+
+class _SchemaEngine:
+    def __init__(self, tables: set[str]) -> None:
+        self.connection = _SchemaConnection(tables)
+
+    def connect(self) -> _SchemaConnection:
+        return self.connection
 
 
 @pytest.mark.asyncio
@@ -133,6 +167,7 @@ async def test_worker_context_keeps_supplied_checkpointer_open() -> None:
         session_factory=_SessionFactory(),  # type: ignore[arg-type]
         lock_engine=_Engine(),  # type: ignore[arg-type]
         claimant="worker-test",
+        verify_schema=False,
     ):
         timeline.append("worker_active")
 
@@ -159,6 +194,7 @@ async def test_running_context_stops_daemon_before_closing_checkpointer() -> Non
         session_factory=_SessionFactory(),  # type: ignore[arg-type]
         lock_engine=_Engine(),  # type: ignore[arg-type]
         claimant="worker-test",
+        verify_schema=False,
     ):
         timeline.append("daemon_active")
         await asyncio.sleep(0)
@@ -168,3 +204,75 @@ async def test_running_context_stops_daemon_before_closing_checkpointer() -> Non
         "daemon_active",
         "checkpointer_exit",
     ]
+
+
+@pytest.mark.asyncio
+async def test_schema_readiness_requires_every_product_table() -> None:
+    with (
+        patch(
+            "app.services.agent_runtime.worker_service._checkpoint_migration_version",
+            new=AsyncMock(return_value=9),
+        ),
+        pytest.raises(RuntimeSchemaNotReady, match="agent_tool_executions") as raised,
+    ):
+        await assert_runtime_schema_ready(
+            _SchemaEngine(
+                {
+                    "agent_runs",
+                    "agent_run_commands",
+                    "agent_run_events",
+                    "session_context_states",
+                }
+            ),  # type: ignore[arg-type]
+            settings=_settings(),
+        )
+
+    assert raised.value.code == "product_schema_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_schema_readiness_requires_pinned_checkpoint_version() -> None:
+    with (
+        patch(
+            "app.services.agent_runtime.worker_service._checkpoint_migration_version",
+            new=AsyncMock(return_value=8),
+        ),
+        pytest.raises(RuntimeSchemaNotReady, match="expected 9") as raised,
+    ):
+        await assert_runtime_schema_ready(
+            _SchemaEngine(
+                {
+                    "agent_runs",
+                    "agent_run_commands",
+                    "agent_run_events",
+                    "agent_tool_executions",
+                    "session_context_states",
+                }
+            ),  # type: ignore[arg-type]
+            settings=_settings(),
+        )
+
+    assert raised.value.code == "checkpoint_schema_outdated"
+
+
+@pytest.mark.asyncio
+async def test_schema_readiness_accepts_complete_pinned_schema() -> None:
+    checkpoint_version = AsyncMock(return_value=9)
+    with patch(
+        "app.services.agent_runtime.worker_service._checkpoint_migration_version",
+        new=checkpoint_version,
+    ):
+        await assert_runtime_schema_ready(
+            _SchemaEngine(
+                {
+                    "agent_runs",
+                    "agent_run_commands",
+                    "agent_run_events",
+                    "agent_tool_executions",
+                    "session_context_states",
+                }
+            ),  # type: ignore[arg-type]
+            settings=_settings(),
+        )
+
+    checkpoint_version.assert_awaited_once()

@@ -323,13 +323,11 @@ async def lifespan(app: FastAPI):
         import traceback
         traceback.print_exc()
 
-    if _role_enabled("all", "worker") and settings.AGENT_RUNTIME_V2_ENABLED:
+    if _role_enabled("all", "worker"):
         from app.services.agent_runtime.worker_service import running_runtime_worker_context
 
         await runtime_stack.enter_async_context(running_runtime_worker_context(settings=settings))
         logger.info("[startup] durable Agent Runtime worker started")
-    elif _role_enabled("all", "worker"):
-        logger.info("[startup] durable Agent Runtime worker disabled")
 
     # Start ss-local SOCKS5 proxy for Discord API calls (non-fatal)
     ss_task = asyncio.create_task(_start_ss_local(), name="ss-local-proxy")
