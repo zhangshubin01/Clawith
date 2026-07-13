@@ -288,6 +288,52 @@ async def test_normal_tool_proposal_is_stable_and_does_not_execute_in_model_step
 
 
 @pytest.mark.asyncio
+async def test_group_snapshot_adds_only_current_group_tools_and_platform_rules() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    state["snapshots"] = RunInputSnapshots(
+        session_context={"version": 1, "summary": "shared"},
+        session_context_version=1,
+        recent_session_messages=state["snapshots"].recent_session_messages,
+        related_run_summaries=(),
+        initial_input={"group_context": {"group": {"group_id": str(uuid.uuid4())}}},
+    )
+    builder = _ContextBuilder(_build(initial_input=state["snapshots"].initial_input))
+    calls = []
+
+    async def complete(_model, messages, **kwargs):
+        calls.append((messages, kwargs))
+        return LLMCompletionStep(
+            content="Group reply",
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=20),
+        )
+
+    result = await _service(model, agent, builder, complete).complete_once(
+        state,
+        _context(state),
+    )
+
+    assert result.intent == "text"
+    tool_names = {tool["function"]["name"] for tool in calls[0][1]["tools"]}
+    assert {
+        "group_query_members",
+        "group_read_announcement",
+        "group_read_memory",
+        "group_write_memory",
+        "group_list_workspace",
+        "group_read_workspace_file",
+        "group_write_workspace_file",
+        "group_delete_workspace_file",
+    }.issubset(tool_names)
+    assert "Answer only from this group" in calls[0][0][0].dynamic_content
+
+
+@pytest.mark.asyncio
 async def test_finish_is_a_control_intent_not_an_unpaired_tool_exchange() -> None:
     tenant_id = uuid.uuid4()
     model = _model(tenant_id)

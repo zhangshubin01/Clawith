@@ -17,6 +17,13 @@ from app.services.agent_runtime.a2a_runtime import (
     a2a_waiting_request,
 )
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
+from app.services.agent_runtime.group_runtime_tools import (
+    GROUP_READ_TOOL_NAMES,
+    GROUP_TOOL_NAMES,
+    GROUP_WRITE_TOOL_NAMES,
+    GroupRuntimeToolService,
+    with_group_runtime_tools,
+)
 from app.services.agent_runtime.node_executor import (
     RuntimeCancelSource,
     ToolStepResult,
@@ -67,7 +74,7 @@ _READ_TOOL_NAMES = frozenset(
         "agentbay_browser_screenshot",
         "agentbay_code_read_file",
     }
-)
+) | GROUP_READ_TOOL_NAMES
 _CONTROL_TOOL_NAMES = frozenset({"finish", "wait"})
 _HEARTBEAT_PRIVATE_PLAZA_TOOLS = frozenset(
     {"plaza_get_new_posts", "plaza_create_post", "plaza_add_comment"}
@@ -102,6 +109,8 @@ class ToolPolicy:
 def _policy(tool_name: str) -> ToolPolicy:
     if tool_name in _READ_TOOL_NAMES:
         return ToolPolicy("read", "safe")
+    if tool_name in GROUP_WRITE_TOOL_NAMES:
+        return ToolPolicy("write", "conditional")
     return ToolPolicy("external_write", "never")
 
 
@@ -273,6 +282,7 @@ class RuntimeToolStepService:
         cancel_source: RuntimeCancelSource,
         tool_provider: ToolProvider = get_agent_tools_for_llm,
         tool_executor: ToolExecutor = execute_tool,
+        group_tool_service: GroupRuntimeToolService | None = None,
         a2a_service: RuntimeA2AService | None = None,
         lease_ttl_seconds: int = 300,
     ) -> None:
@@ -282,6 +292,9 @@ class RuntimeToolStepService:
         self._cancel_source = cancel_source
         self._tool_provider = tool_provider
         self._tool_executor = tool_executor
+        self._group_tool_service = group_tool_service or GroupRuntimeToolService(
+            session_factory=session_factory
+        )
         self._a2a_service = a2a_service
         self._lease_ttl_seconds = lease_ttl_seconds
 
@@ -452,7 +465,12 @@ class RuntimeToolStepService:
             run_id = uuid.UUID(state["registry"].run_id)
             agent = await self._agent(state)
             assistant_message_id = _assistant_message_id(state, tool_calls)
-            allowed_names = _allowed_tool_names(await self._tool_provider(agent.id))
+            allowed_names = _allowed_tool_names(
+                with_group_runtime_tools(
+                    await self._tool_provider(agent.id),
+                    state,
+                )
+            )
             messages: list[JsonObject] = []
             for index, call in enumerate(tool_calls):
                 cancel = await self._cancel_source.get_cancel(state, context)
@@ -611,13 +629,21 @@ class RuntimeToolStepService:
                         continue
 
                 try:
-                    raw_result = await self._tool_executor(
-                        tool_name,
-                        arguments,
-                        agent.id,
-                        context.actor_user_id and uuid.UUID(context.actor_user_id) or agent.creator_id,
-                        state["registry"].session_id or "",
-                    )
+                    if tool_name in GROUP_TOOL_NAMES:
+                        raw_result = await self._group_tool_service.execute(
+                            state,
+                            agent,
+                            tool_name,
+                            arguments,
+                        )
+                    else:
+                        raw_result = await self._tool_executor(
+                            tool_name,
+                            arguments,
+                            agent.id,
+                            context.actor_user_id and uuid.UUID(context.actor_user_id) or agent.creator_id,
+                            state["registry"].session_id or "",
+                        )
                     outcome = await self._mark_succeeded(
                         tenant_id=tenant_id,
                         reservation=reservation,

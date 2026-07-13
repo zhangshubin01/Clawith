@@ -303,6 +303,81 @@ async def test_success_is_reserved_before_execution_and_settled_afterwards(
 
 
 @pytest.mark.asyncio
+async def test_group_write_tool_uses_checkpoint_scoped_executor_and_conditional_policy(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = {
+        "id": "call-group-write",
+        "type": "function",
+        "function": {
+            "name": "group_write_memory",
+            "arguments": '{"content":"remember"}',
+        },
+    }
+    state = _state(tenant_id, agent, (call,))
+    state["snapshots"] = RunInputSnapshots(
+        session_context={"version": 0},
+        session_context_version=0,
+        recent_session_messages=(),
+        related_run_summaries=(),
+        initial_input={"group_context": {"agent": {"agent_id": str(agent.id)}}},
+    )
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-group-write",
+        "group_write_memory",
+    )
+    reserved = []
+
+    async def reserve(db, **kwargs):
+        del db
+        reserved.append(kwargs)
+        return _reservation(execution)
+
+    async def mark(db, **kwargs):
+        del db, kwargs
+        execution.status = "succeeded"
+        execution.result_summary = '{"path":"memory.md"}'
+        return execution
+
+    async def generic_executor(*_args, **_kwargs):
+        raise AssertionError("group tools must not use the Agent workspace executor")
+
+    class _GroupToolService:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def execute(self, state_arg, agent_arg, tool_name, arguments):
+            self.calls.append((state_arg, agent_arg, tool_name, arguments))
+            return '{"path":"memory.md"}'
+
+    group_tools = _GroupToolService()
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(tool_step_service, "mark_tool_execution_succeeded", mark)
+    service = tool_step_service.RuntimeToolStepService(
+        session_factory=_session_factory(agent),
+        cancel_source=_CancelSource(None),
+        tool_provider=_tools,
+        tool_executor=generic_executor,
+        group_tool_service=group_tools,  # type: ignore[arg-type]
+    )
+
+    result = await service.execute_pending(state, _context(state), (call,))
+
+    assert result.error is None
+    assert reserved[0]["side_effect_classification"] == "write"
+    assert reserved[0]["retry_policy"] == "conditional"
+    assert group_tools.calls[0][1] is agent
+    assert group_tools.calls[0][2:] == (
+        "group_write_memory",
+        {"content": "remember"},
+    )
+
+
+@pytest.mark.asyncio
 async def test_succeeded_receipt_is_reused_without_executing_tool(
     monkeypatch,
 ) -> None:
