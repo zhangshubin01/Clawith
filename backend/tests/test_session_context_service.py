@@ -116,6 +116,38 @@ def _sql(statement) -> str:
     return str(_compiled(statement))
 
 
+def test_terminal_delta_requires_the_exact_source_run_and_full_schema():
+    run_id = uuid.uuid4()
+    delta = service.SessionContextDelta.from_json(
+        {
+            "source_run_id": str(run_id),
+            "new_requirements": ["keep wording"],
+            "new_decisions": [{"decision": "use LangGraph"}],
+            "resolved_open_items": ["old question"],
+            "new_open_items": ["ship backend"],
+            "evidence_refs": ["checkpoint://1"],
+            "workspace_refs": ["workspace://runtime"],
+            "result_summary": "Runtime design completed",
+        },
+        expected_source_run_id=run_id,
+    )
+
+    assert delta.source_run_id == run_id
+    assert delta.new_requirements == ("keep wording",)
+    assert delta.result_summary == "Runtime design completed"
+    assert delta.to_json()["source_run_id"] == str(run_id)
+
+    with pytest.raises(service.SessionContextError) as exc_info:
+        service.SessionContextDelta.from_json(
+            {
+                **delta.to_json(),
+                "source_run_id": str(uuid.uuid4()),
+            },
+            expected_source_run_id=run_id,
+        )
+    assert exc_info.value.code == "session_context_delta_source_mismatch"
+
+
 @pytest.mark.asyncio
 async def test_context_pack_uses_latest_state_and_recent_20_user_visible_messages():
     session = _session()

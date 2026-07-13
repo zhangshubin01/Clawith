@@ -15,6 +15,7 @@ from app.services.agent_runtime.checkpointer import runtime_thread_config
 from app.services.agent_runtime.graph import build_agent_runtime_graph
 from app.services.agent_runtime.node_executor import (
     CancelSignal,
+    DefaultRuntimeFinalizer,
     DeterministicRuntimeNodeExecutor,
     FinalizationResult,
     ModelStepResult,
@@ -147,6 +148,28 @@ class Finalizer:
             session_context_delta={"decisions": [answer]},
             delivery_request={"content": answer},
         )
+
+
+@pytest.mark.asyncio
+async def test_default_finalizer_emits_a_source_bound_session_delta() -> None:
+    run_id = uuid.uuid4()
+    finalized = await DefaultRuntimeFinalizer().finalize(
+        _state(run_id),
+        cast(RuntimeContext, object()),
+        "Verified answer",
+        VerificationResult(outcome="pass", details={"code": "ok"}),
+    )
+
+    assert finalized.session_context_delta == {
+        "source_run_id": str(run_id),
+        "new_requirements": [],
+        "new_decisions": [],
+        "resolved_open_items": [],
+        "new_open_items": [],
+        "evidence_refs": [],
+        "workspace_refs": [],
+        "result_summary": "Verified answer",
+    }
 
 
 def _executor(

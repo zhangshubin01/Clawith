@@ -115,6 +115,81 @@ class SessionContextCandidate:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionContextDelta:
+    """One terminal Run's validated contribution to its Session Context."""
+
+    source_run_id: uuid.UUID
+    new_requirements: tuple[JsonValue, ...]
+    new_decisions: tuple[JsonValue, ...]
+    resolved_open_items: tuple[JsonValue, ...]
+    new_open_items: tuple[JsonValue, ...]
+    evidence_refs: tuple[JsonValue, ...]
+    workspace_refs: tuple[JsonValue, ...]
+    result_summary: str
+
+    @classmethod
+    def from_json(
+        cls,
+        value: object,
+        *,
+        expected_source_run_id: uuid.UUID,
+    ) -> "SessionContextDelta":
+        if not isinstance(value, Mapping):
+            raise SessionContextError(
+                "invalid_session_context_delta",
+                "SessionContextDelta must be an object",
+            )
+        source_run_id = value.get("source_run_id")
+        try:
+            parsed_source_run_id = uuid.UUID(source_run_id) if isinstance(source_run_id, str) else None
+        except ValueError as exc:
+            raise SessionContextError(
+                "invalid_session_context_delta",
+                "SessionContextDelta source_run_id must be a UUID",
+            ) from exc
+        if parsed_source_run_id != expected_source_run_id:
+            raise SessionContextError(
+                "session_context_delta_source_mismatch",
+                "SessionContextDelta source_run_id does not match the terminal Run",
+            )
+        result_summary = value.get("result_summary")
+        if not isinstance(result_summary, str) or not result_summary.strip():
+            raise SessionContextError(
+                "invalid_session_context_delta",
+                "SessionContextDelta result_summary must be a non-empty string",
+            )
+
+        def values(field: str) -> tuple[JsonValue, ...]:
+            return tuple(_copy_json_sequence(value.get(field), field))
+
+        return cls(
+            source_run_id=expected_source_run_id,
+            new_requirements=values("new_requirements"),
+            new_decisions=values("new_decisions"),
+            resolved_open_items=values("resolved_open_items"),
+            new_open_items=values("new_open_items"),
+            evidence_refs=values("evidence_refs"),
+            workspace_refs=values("workspace_refs"),
+            result_summary=result_summary.strip(),
+        )
+
+    def to_json(self) -> JsonObject:
+        return {
+            "source_run_id": str(self.source_run_id),
+            "new_requirements": _copy_json_sequence(self.new_requirements, "new_requirements"),
+            "new_decisions": _copy_json_sequence(self.new_decisions, "new_decisions"),
+            "resolved_open_items": _copy_json_sequence(
+                self.resolved_open_items,
+                "resolved_open_items",
+            ),
+            "new_open_items": _copy_json_sequence(self.new_open_items, "new_open_items"),
+            "evidence_refs": _copy_json_sequence(self.evidence_refs, "evidence_refs"),
+            "workspace_refs": _copy_json_sequence(self.workspace_refs, "workspace_refs"),
+            "result_summary": self.result_summary,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SessionContextPack:
     """Session snapshot plus the fixed recent user-visible message window."""
 
@@ -608,6 +683,7 @@ __all__ = [
     "MessagePosition",
     "SessionContextCandidate",
     "SessionContextConflict",
+    "SessionContextDelta",
     "SessionContextError",
     "SessionContextPack",
     "SessionContextService",

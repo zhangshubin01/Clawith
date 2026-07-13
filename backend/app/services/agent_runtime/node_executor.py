@@ -177,13 +177,23 @@ class DefaultRuntimeFinalizer:
         answer: str,
         verification: VerificationResult,
     ) -> FinalizationResult:
-        del state, context
+        del context
         return FinalizationResult(
             result_summary={
                 "summary": answer,
                 "verification": dict(verification.details),
                 "artifact_refs": [],
-            }
+            },
+            session_context_delta={
+                "source_run_id": state["registry"].run_id,
+                "new_requirements": [],
+                "new_decisions": [],
+                "resolved_open_items": [],
+                "new_open_items": [],
+                "evidence_refs": [],
+                "workspace_refs": [],
+                "result_summary": answer,
+            },
         )
 
 
