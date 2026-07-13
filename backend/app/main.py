@@ -136,6 +136,7 @@ async def lifespan(app: FastAPI):
     import asyncio
     import sys
     import os
+    from contextlib import AsyncExitStack
     from app.services.trigger_daemon import start_trigger_daemon
     from app.services.tool_seeder import seed_builtin_tools
     from app.services.template_seeder import seed_agent_templates
@@ -144,6 +145,8 @@ async def lifespan(app: FastAPI):
     from app.services.wecom_stream import wecom_stream_manager
     from app.services.wechat_channel import wechat_poll_manager
     from app.services.discord_gateway import discord_gateway_manager
+
+    runtime_stack = AsyncExitStack()
 
     if _role_enabled("all", "bootstrap"):
         # ── Step 0: Ensure all DB tables exist (idempotent, safe to run on every startup) ──
@@ -320,15 +323,26 @@ async def lifespan(app: FastAPI):
         import traceback
         traceback.print_exc()
 
+    if _role_enabled("all", "worker") and settings.AGENT_RUNTIME_V2_ENABLED:
+        from app.services.agent_runtime.worker_service import running_runtime_worker_context
+
+        await runtime_stack.enter_async_context(running_runtime_worker_context(settings=settings))
+        logger.info("[startup] durable Agent Runtime worker started")
+    elif _role_enabled("all", "worker"):
+        logger.info("[startup] durable Agent Runtime worker disabled")
+
     # Start ss-local SOCKS5 proxy for Discord API calls (non-fatal)
     ss_task = asyncio.create_task(_start_ss_local(), name="ss-local-proxy")
     ss_task.add_done_callback(_bg_task_error)
 
-    yield
-
-    # Shutdown
-    await realtime_router.stop()
-    await close_redis()
+    try:
+        yield
+    finally:
+        # Runtime shutdown cancels the active command task before closing its
+        # Checkpointer, which releases the advisory lock and claim heartbeat.
+        await runtime_stack.aclose()
+        await realtime_router.stop()
+        await close_redis()
 
 
 app = FastAPI(

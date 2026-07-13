@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
 import asyncio
 import logging
@@ -194,10 +194,43 @@ async def runtime_worker_context(
         )
 
 
+@asynccontextmanager
+async def running_runtime_worker_context(
+    *,
+    settings: Settings | None = None,
+    checkpointer_manager: AbstractAsyncContextManager[BaseCheckpointSaver] | None = None,
+    session_factory: RuntimeSessionFactory | None = None,
+    lock_engine: AsyncEngine | None = None,
+    claimant: str | None = None,
+) -> AsyncIterator[RuntimeWorkerComponents]:
+    """Run and cancel the daemon within the Checkpointer component lifetime."""
+    async with runtime_worker_context(
+        settings=settings,
+        checkpointer_manager=checkpointer_manager,
+        session_factory=session_factory,
+        lock_engine=lock_engine,
+        claimant=claimant,
+    ) as components:
+        stop = asyncio.Event()
+        daemon = RuntimeCommandDaemon(components.worker)
+        task = asyncio.create_task(
+            daemon.run(stop),
+            name="agent-runtime-command-worker",
+        )
+        try:
+            yield components
+        finally:
+            stop.set()
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+
 __all__ = [
     "RuntimeCommandDaemon",
     "RuntimeWorkerComponents",
     "build_runtime_worker_components",
+    "running_runtime_worker_context",
     "runtime_worker_claimant",
     "runtime_worker_context",
 ]

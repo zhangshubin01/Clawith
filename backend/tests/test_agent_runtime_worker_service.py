@@ -16,6 +16,7 @@ from app.services.agent_runtime.state import RunRegistrySnapshot
 from app.services.agent_runtime.worker_service import (
     RuntimeCommandDaemon,
     build_runtime_worker_components,
+    running_runtime_worker_context,
     runtime_worker_context,
 )
 
@@ -138,5 +139,32 @@ async def test_worker_context_keeps_supplied_checkpointer_open() -> None:
     assert timeline == [
         "checkpointer_enter",
         "worker_active",
+        "checkpointer_exit",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_running_context_stops_daemon_before_closing_checkpointer() -> None:
+    timeline: list[str] = []
+
+    @asynccontextmanager
+    async def manager():
+        timeline.append("checkpointer_enter")
+        yield InMemorySaver()
+        timeline.append("checkpointer_exit")
+
+    async with running_runtime_worker_context(
+        settings=_settings(),
+        checkpointer_manager=manager(),
+        session_factory=_SessionFactory(),  # type: ignore[arg-type]
+        lock_engine=_Engine(),  # type: ignore[arg-type]
+        claimant="worker-test",
+    ):
+        timeline.append("daemon_active")
+        await asyncio.sleep(0)
+
+    assert timeline == [
+        "checkpointer_enter",
+        "daemon_active",
         "checkpointer_exit",
     ]
