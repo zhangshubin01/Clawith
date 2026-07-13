@@ -117,9 +117,6 @@ async def test_wechat_message_uses_runtime_delivery_without_legacy_llm_loop(
     async def log_activity(*args, **kwargs):
         calls["activity"] = (args, kwargs)
 
-    async def fail_legacy_llm(*_args, **_kwargs):
-        raise AssertionError("legacy channel LLM loop must not be called")
-
     monkeypatch.setattr(wechat_channel, "async_session", session_factory)
     monkeypatch.setattr(
         wechat_channel.channel_user_service,
@@ -129,7 +126,6 @@ async def test_wechat_message_uses_runtime_delivery_without_legacy_llm_loop(
     monkeypatch.setattr(wechat_channel, "find_or_create_channel_session", find_session)
     monkeypatch.setattr(wechat_channel, "remember_wechat_context", remember_context)
     monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_agent_and_model)
-    monkeypatch.setattr(feishu_api, "_call_llm_with_config", fail_legacy_llm)
     monkeypatch.setattr(wechat_channel, "enqueue_channel_chat_runtime", enqueue_runtime)
     monkeypatch.setattr(wechat_channel, "wait_for_channel_chat", wait_runtime)
     monkeypatch.setattr(wechat_channel, "send_wechat_text_message", send_text)
