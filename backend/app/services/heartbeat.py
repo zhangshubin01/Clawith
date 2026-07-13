@@ -11,14 +11,19 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone, timedelta
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 from app.core.logging_config import new_trace_id
 from sqlalchemy import select, update, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.storage import agent_storage_key, get_storage_backend
 
 from app.services.llm.finish import FINISH_PROTOCOL_REMINDER, find_finish_call, parse_tool_arguments
+
+if TYPE_CHECKING:
+    from app.models.agent import Agent
 
 _HEARTBEAT_SEMAPHORE = asyncio.Semaphore(10)
 
@@ -103,6 +108,126 @@ PRIVATE_AGENT_HEARTBEAT_APPEND = """
 - If you have no user-facing or task-facing work to do, reply with HEARTBEAT_OK.
 """
 
+CUSTOM_HEARTBEAT_GUARDRAILS = """
+
+⚠️ PRIVACY RULES — STRICTLY FOLLOW:
+- NEVER share information from private user conversations
+- NEVER share content from memory/memory.md
+- NEVER share content from workspace/ files
+- NEVER share task details from tasks.json
+- You may ONLY share: general work insights, public information, opinions on plaza posts
+
+⚠️ POSTING LIMITS per heartbeat:
+- Maximum 1 new post
+- Maximum 2 comments on existing posts
+- Do NOT post trivial or repetitive content
+"""
+
+
+async def _build_heartbeat_instruction(
+    db: AsyncSession,
+    agent: "Agent",
+) -> str:
+    """Build one heartbeat input and drain its notification snapshot atomically."""
+    instruction = DEFAULT_HEARTBEAT_INSTRUCTION
+    storage = get_storage_backend()
+    hb_key = agent_storage_key(agent.id, "HEARTBEAT.md")
+    if await storage.exists(hb_key):
+        try:
+            custom = await storage.read_text(
+                hb_key,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if custom.strip():
+                instruction = custom.strip() + CUSTOM_HEARTBEAT_GUARDRAILS
+        except Exception as exc:
+            logger.warning(
+                "Failed to read custom heartbeat instruction for agent {}: {}",
+                agent.id,
+                exc,
+            )
+
+    is_private = (getattr(agent, "access_mode", None) or "company") != "company"
+    if is_private:
+        instruction += PRIVATE_AGENT_HEARTBEAT_APPEND
+
+    from app.models.activity_log import AgentActivityLog
+
+    recent_context = ""
+    try:
+        recent_result = await db.execute(
+            select(AgentActivityLog)
+            .where(AgentActivityLog.agent_id == agent.id)
+            .where(
+                AgentActivityLog.action_type.in_(
+                    ["chat_reply", "tool_call", "task_created", "task_updated"]
+                )
+            )
+            .order_by(AgentActivityLog.created_at.desc())
+            .limit(50)
+        )
+        recent_activities = recent_result.scalars().all()
+        if recent_activities:
+            items = []
+            for activity in reversed(recent_activities):
+                timestamp = (
+                    activity.created_at.strftime("%m-%d %H:%M")
+                    if activity.created_at
+                    else ""
+                )
+                items.append(
+                    f"- [{timestamp}] {activity.action_type}: "
+                    f"{activity.summary[:120]}"
+                )
+            recent_context = (
+                "\n\n---\n## Recent Activity Context\n"
+                "Here are your recent interactions and work to help you identify "
+                "relevant topics:\n\n"
+                + "\n".join(items)
+            )
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch recent activity for heartbeat context: {}",
+            exc,
+        )
+
+    from app.models.notification import Notification
+
+    inbox_context = ""
+    try:
+        notification_result = await db.execute(
+            select(Notification)
+            .where(
+                Notification.agent_id == agent.id,
+                Notification.is_read.is_(False),
+            )
+            .order_by(Notification.created_at)
+            .limit(10)
+        )
+        unread = notification_result.scalars().all()
+        if unread:
+            lines = [
+                "\n\n---\n## Inbox (new messages for you — please review and "
+                "respond if appropriate)"
+            ]
+            for notification in unread:
+                sender = (
+                    f"from {notification.sender_name}"
+                    if notification.sender_name
+                    else ""
+                )
+                lines.append(
+                    f"- [{notification.type}] {notification.title} {sender}: "
+                    f"{(notification.body or '')[:150]}"
+                )
+                notification.is_read = True
+            inbox_context = "\n".join(lines)
+    except Exception as exc:
+        logger.warning("Failed to drain agent notifications: {}", exc)
+
+    return instruction + recent_context + inbox_context
+
 
 def _is_in_active_hours(active_hours: str, tz_name: str = "UTC") -> bool:
     """Check if current time is within the agent's active hours.
@@ -153,14 +278,12 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
         agent_name = ""
         agent_role = ""
         agent_creator_id = None
-        agent_is_private = False
         model_provider = ""
         model_api_key = ""
         model_model = ""
         model_base_url = None
         model_temperature = None
         model_max_output_tokens = None
-        heartbeat_instruction = DEFAULT_HEARTBEAT_INSTRUCTION
 
         async with async_session() as db:
             result = await db.execute(select(Agent).where(Agent.id == agent_id))
@@ -181,7 +304,6 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
             agent_name = agent.name
             agent_role = agent.role_description or ""
             agent_creator_id = agent.creator_id
-            agent_is_private = (getattr(agent, "access_mode", None) or "company") != "company"
             model_provider = model.provider
             model_api_key = get_model_api_key(model)
             model_model = model.model
@@ -190,89 +312,17 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
             model_max_output_tokens = getattr(model, 'max_output_tokens', None)
             model_request_timeout = getattr(model, 'request_timeout', None)
 
-            # Read HEARTBEAT.md if it exists, otherwise use default
-            storage = get_storage_backend()
-            hb_key = agent_storage_key(agent_id, "HEARTBEAT.md")
-            if await storage.exists(hb_key):
-                try:
-                    custom = await storage.read_text(hb_key, encoding="utf-8", errors="replace")
-                    custom = custom.strip()
-                    if custom:
-                        # Prepend privacy rules to custom heartbeat
-                        heartbeat_instruction = custom + """
-
-⚠️ PRIVACY RULES — STRICTLY FOLLOW:
-- NEVER share information from private user conversations
-- NEVER share content from memory/memory.md
-- NEVER share content from workspace/ files
-- NEVER share task details from tasks.json
-- You may ONLY share: general work insights, public information, opinions on plaza posts
-
-⚠️ POSTING LIMITS per heartbeat:
-- Maximum 1 new post
-- Maximum 2 comments on existing posts
-- Do NOT post trivial or repetitive content
-"""
-                except Exception:
-                    pass
-            if agent_is_private:
-                heartbeat_instruction += PRIVATE_AGENT_HEARTBEAT_APPEND
+            full_instruction = await _build_heartbeat_instruction(db, agent)
 
             # Build context
             from app.services.agent_context import build_agent_context
             static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, agent_role)
 
-            # Fetch recent activity to give heartbeat context for curiosity exploration
-            from app.models.activity_log import AgentActivityLog
-            recent_context = ""
-            try:
-                recent_result = await db.execute(
-                    select(AgentActivityLog)
-                    .where(AgentActivityLog.agent_id == agent_id)
-                    .where(AgentActivityLog.action_type.in_(["chat_reply", "tool_call", "task_created", "task_updated"]))
-                    .order_by(AgentActivityLog.created_at.desc())
-                    .limit(50)
-                )
-                recent_activities = recent_result.scalars().all()
-                if recent_activities:
-                    itms = []
-                    for act in reversed(recent_activities):  # chronological order
-                        ts = act.created_at.strftime("%m-%d %H:%M") if act.created_at else ""
-                        itms.append(f"- [{ts}] {act.action_type}: {act.summary[:120]}")
-                    recent_context = "\\n\\n---\\n## Recent Activity Context\\nHere are your recent interactions and work to help you identify relevant topics:\\n\\n" + "\\n".join(itms)
-            except Exception as e:
-                logger.warning(f"Failed to fetch recent activity for heartbeat context: {e}")
-
-            # Fetch unread notifications for this agent (plaza replies, mentions, broadcasts)
-            inbox_context = ""
-            notif_lines = []
-            try:
-                from app.models.notification import Notification
-                notif_result = await db.execute(
-                    select(Notification).where(
-                        Notification.agent_id == agent_id,
-                        Notification.is_read == False,
-                    ).order_by(Notification.created_at).limit(10)
-                )
-                unread = notif_result.scalars().all()
-                if unread:
-                    notif_lines = ["\\n\\n---\\n## Inbox (new messages for you — please review and respond if appropriate)"]
-                    for n in unread:
-                        sender = f"from {n.sender_name}" if n.sender_name else ""
-                        notif_lines.append(f"- [{n.type}] {n.title} {sender}: {(n.body or '')[:150]}")
-                        n.is_read = True
-            except Exception as e:
-                logger.warning(f"Failed to drain agent notifications: {e}")
-            
-            inbox_context = "\\n".join(notif_lines)
-            
             # Commit Phase 1: release the DB connection before LLM calls
             await db.commit()
         # DB session is now closed — connection returned to pool
 
         # ── Phase 2: LLM calls (no DB connection held) ──
-        full_instruction = heartbeat_instruction + recent_context + inbox_context
-
         # Call LLM with tools using unified client
         from app.services.llm import create_llm_client, get_max_tokens, LLMMessage, LLMError, get_model_api_key
         from app.services.agent_tools import execute_tool, get_agent_tools_for_llm
@@ -464,20 +514,27 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
 
 async def _heartbeat_tick():
     """One heartbeat tick: find agents due for heartbeat."""
+    from app.config import get_settings
     from app.database import async_session
     from app.models.agent import Agent
+    from app.services.agent_runtime.config import decide_runtime_v2
     from app.services.audit_logger import write_audit_log
+    from app.services.heartbeat_runtime import (
+        HeartbeatRuntimeIntakeError,
+        enqueue_heartbeat_runtime,
+    )
     from app.services.timezone_utils import get_agent_timezone_sync
     from app.models.tenant import Tenant
 
     new_trace_id()
     now = datetime.now(timezone.utc)
+    runtime_settings = get_settings()
 
     try:
         async with async_session() as db:
             result = await db.execute(
                 select(Agent).where(
-                    Agent.heartbeat_enabled == True,
+                    Agent.heartbeat_enabled.is_(True),
                     Agent.status.in_(["running", "idle"]),
                 )
             )
@@ -514,32 +571,93 @@ async def _heartbeat_tick():
                 if agent.last_heartbeat_at and (now - agent.last_heartbeat_at) < interval:
                     continue
 
-                # Atomically claim this heartbeat slot before scheduling work.
-                claim_result = await db.execute(
-                    update(Agent)
-                    .where(
-                        Agent.id == agent.id,
-                        Agent.heartbeat_enabled == True,
-                        Agent.status.in_(["running", "idle"]),
-                        or_(
-                            Agent.last_heartbeat_at.is_(None),
-                            Agent.last_heartbeat_at <= now - interval,
-                        ),
+                runtime_handle = None
+                try:
+                    runtime_decision = decide_runtime_v2(
+                        agent_id=agent.id,
+                        source_type="heartbeat",
+                        settings=runtime_settings,
                     )
-                    .values(last_heartbeat_at=now)
-                )
-                if (claim_result.rowcount or 0) != 1:
+                    async with db.begin_nested():
+                        # The claim and Runtime registration share one commit so a
+                        # heartbeat cannot disappear between scheduling systems.
+                        claim_result = await db.execute(
+                            update(Agent)
+                            .where(
+                                Agent.id == agent.id,
+                                Agent.heartbeat_enabled.is_(True),
+                                Agent.status.in_(["running", "idle"]),
+                                or_(
+                                    Agent.last_heartbeat_at.is_(None),
+                                    Agent.last_heartbeat_at <= now - interval,
+                                ),
+                            )
+                            .values(last_heartbeat_at=now)
+                        )
+                        if (claim_result.rowcount or 0) != 1:
+                            continue
+                        if runtime_decision.use_v2:
+                            instruction = await _build_heartbeat_instruction(db, agent)
+                            runtime_handle = await enqueue_heartbeat_runtime(
+                                db,
+                                agent=agent,
+                                occurrence_at=now,
+                                instruction=instruction,
+                                settings_override=runtime_settings,
+                            )
+                            if runtime_handle is None:
+                                raise HeartbeatRuntimeIntakeError(
+                                    "runtime_gate_changed",
+                                    "Heartbeat Runtime gate changed during intake",
+                                )
+                    await db.commit()
+                except HeartbeatRuntimeIntakeError as exc:
+                    logger.error(
+                        "Heartbeat Runtime intake failed for {} ({}): {}",
+                        agent.name,
+                        exc.code,
+                        exc,
+                    )
+                    continue
+                except Exception as exc:
+                    logger.exception(
+                        "Heartbeat claim failed for {}: {}",
+                        agent.name,
+                        exc,
+                    )
                     continue
 
-                await db.commit()
-
-                # Fire heartbeat only after the DB claim has been committed.
-                logger.info(f"💓 Triggering heartbeat for {agent.name}")
+                logger.info(
+                    "💓 Triggering heartbeat for {} via {}",
+                    agent.name,
+                    "Runtime" if runtime_handle is not None else "legacy loop",
+                )
                 try:
-                    await write_audit_log("heartbeat_fire", {"agent_name": agent.name}, agent_id=agent.id)
-                except Exception as e:
-                    logger.warning(f"Failed to write heartbeat_fire audit log for {agent.name}: {e}")
-                asyncio.create_task(_execute_heartbeat(agent.id))
+                    await write_audit_log(
+                        "heartbeat_fire",
+                        {
+                            "agent_name": agent.name,
+                            "runtime_type": (
+                                runtime_handle.runtime_type
+                                if runtime_handle is not None
+                                else "legacy"
+                            ),
+                            "run_id": (
+                                str(runtime_handle.run_id)
+                                if runtime_handle is not None
+                                else None
+                            ),
+                        },
+                        agent_id=agent.id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to write heartbeat_fire audit log for {}: {}",
+                        agent.name,
+                        exc,
+                    )
+                if runtime_handle is None:
+                    asyncio.create_task(_execute_heartbeat(agent.id))
                 triggered += 1
 
             await db.commit()
