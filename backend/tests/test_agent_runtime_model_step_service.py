@@ -296,6 +296,100 @@ async def test_normal_tool_proposal_is_stable_and_does_not_execute_in_model_step
 
 
 @pytest.mark.asyncio
+async def test_current_input_uses_executable_content_and_trusted_runtime_instruction() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    state["snapshots"] = RunInputSnapshots(
+        session_context=state["snapshots"].session_context,
+        session_context_version=state["snapshots"].session_context_version,
+        recent_session_messages=(
+            {
+                "id": "session-message-1",
+                "role": "user",
+                "content": "Visible question",
+            },
+        ),
+        related_run_summaries=(),
+        initial_input={
+            "message_id": "session-message-1",
+            "input_content": "Executable question with workspace evidence",
+            "runtime_instruction": "Begin the trusted onboarding flow.",
+        },
+    )
+    builder = _ContextBuilder(
+        _build(
+            recent_session_messages_snapshot=state["snapshots"].recent_session_messages,
+            initial_input=state["snapshots"].initial_input,
+        )
+    )
+    calls = []
+
+    async def complete(_model, messages, **kwargs):
+        calls.append((messages, kwargs))
+        return LLMCompletionStep(
+            content="Done",
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=10),
+        )
+
+    result = await _service(model, agent, builder, complete).complete_once(
+        state,
+        _context(state),
+    )
+
+    assert result.intent == "text"
+    assert calls[0][0][1].content == "Executable question with workspace evidence"
+    assert "Begin the trusted onboarding flow." in calls[0][0][0].dynamic_content
+
+
+@pytest.mark.asyncio
+async def test_user_resume_envelope_is_rendered_as_plain_user_input() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    resume_message = {
+        "id": "resume-message-1",
+        "role": "user",
+        "content": {
+            "resume_type": "user_input",
+            "correlation_id": "confirm-7",
+            "payload": {
+                "message_id": "session-message-2",
+                "content": "Yes, continue",
+            },
+        },
+        "runtime_input": "resume",
+    }
+    state["lifecycle"]["run_messages"] = [resume_message]
+    builder = _ContextBuilder(_build(recent_run_messages=(resume_message,)))
+    calls = []
+
+    async def complete(_model, messages, **kwargs):
+        calls.append((messages, kwargs))
+        return LLMCompletionStep(
+            content="Continuing",
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=10),
+        )
+
+    result = await _service(model, agent, builder, complete).complete_once(
+        state,
+        _context(state),
+    )
+
+    assert result.intent == "text"
+    assert calls[0][0][-1].role == "user"
+    assert calls[0][0][-1].content == "Yes, continue"
+
+
+@pytest.mark.asyncio
 async def test_group_snapshot_adds_only_current_group_tools_and_platform_rules() -> None:
     tenant_id = uuid.uuid4()
     model = _model(tenant_id)

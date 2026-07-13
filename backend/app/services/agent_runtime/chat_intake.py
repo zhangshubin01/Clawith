@@ -258,6 +258,7 @@ async def enqueue_chat_runtime(
     resume_run_id: uuid.UUID | None = None,
     resume_correlation_id: str | None = None,
     source_channel: str = "web",
+    runtime_instruction: str = "",
     settings_override: Settings | None = None,
 ) -> ChatRuntimeIntake | None:
     """Persist one chat message and its start/resume Command atomically.
@@ -285,6 +286,7 @@ async def enqueue_chat_runtime(
             "invalid_source_channel",
             "Runtime Chat source_channel must not be blank",
         )
+    normalized_runtime_instruction = runtime_instruction.strip()
     tenant_id = _validate_scope(
         agent=agent,
         user=user,
@@ -386,8 +388,14 @@ async def enqueue_chat_runtime(
             idempotency_key=f"start:{source_execution_id}",
             payload={
                 "message_id": str(resolved_message_id),
+                "input_content": content,
                 "source_channel": normalized_channel,
                 "user_id": str(user.id),
+                **(
+                    {"runtime_instruction": normalized_runtime_instruction}
+                    if normalized_runtime_instruction
+                    else {}
+                ),
             },
             origin_user_id=user.id,
             actor_user_id=user.id,
