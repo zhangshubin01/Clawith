@@ -243,6 +243,31 @@ async def _runs_cancelled_by_session_deletion(
     return list(result.scalars().all())
 
 
+async def enqueue_session_deletion_cancels(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    session_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+) -> tuple[uuid.UUID, ...]:
+    """Cancel foreground collaboration rooted in a deleted ChatSession."""
+    runs = await _runs_cancelled_by_session_deletion(
+        db,
+        tenant_id=tenant_id,
+        session_id=session_id,
+    )
+    for run in runs:
+        await enqueue_cancel(
+            db,
+            tenant_id=tenant_id,
+            run_id=run.id,
+            idempotency_key=f"session-delete:{session_id}:run:{run.id}",
+            reason="session_deleted",
+            actor_user_id=actor_user_id,
+        )
+    return tuple(run.id for run in runs)
+
+
 async def soft_delete_direct_session(
     db: AsyncSession,
     *,
@@ -284,25 +309,17 @@ async def soft_delete_direct_session(
             replacement.updated_at = now
             await db.flush()
 
-    runs = await _runs_cancelled_by_session_deletion(
+    cancelled_run_ids = await enqueue_session_deletion_cancels(
         db,
         tenant_id=tenant_id,
         session_id=session_id,
+        actor_user_id=actor_user_id,
     )
-    for run in runs:
-        await enqueue_cancel(
-            db,
-            tenant_id=tenant_id,
-            run_id=run.id,
-            idempotency_key=f"session-delete:{session_id}:run:{run.id}",
-            reason="session_deleted",
-            actor_user_id=actor_user_id,
-        )
 
     return DirectSessionDeletion(
         session=session,
         replacement=replacement,
-        cancelled_run_ids=tuple(run.id for run in runs),
+        cancelled_run_ids=cancelled_run_ids,
     )
 
 
