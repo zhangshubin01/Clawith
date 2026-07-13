@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import uuid
-from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -15,17 +14,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import check_agent_access, is_agent_creator
 from app.core.security import get_current_user
-from app.database import get_db
+from app.database import async_session as _async_session, get_db
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
 from app.schemas.schemas import ChannelConfigOut
+from app.services.agent_runtime.channel_chat import (
+    channel_message_id,
+    enqueue_channel_chat_runtime,
+    wait_for_channel_chat,
+)
 
 
 router = APIRouter(tags=["whatsapp"])
 
 WHATSAPP_TEXT_LIMIT = 4096
 DEFAULT_WHATSAPP_API_VERSION = "v23.0"
-_processed_whatsapp_messages: set[str] = set()
 
 
 def _split_text(text: str, limit: int = WHATSAPP_TEXT_LIMIT) -> list[str]:
@@ -253,24 +256,15 @@ async def whatsapp_event_webhook(
 
             for message in messages:
                 message_id = str(message.get("id") or "").strip()
-                if message_id and message_id in _processed_whatsapp_messages:
-                    continue
-                if message_id:
-                    _processed_whatsapp_messages.add(message_id)
-                    if len(_processed_whatsapp_messages) > 2000:
-                        _processed_whatsapp_messages.clear()
-
                 user_text = _extract_message_text(message)
                 sender_phone = str(message.get("from") or "").strip()
                 if not user_text or not sender_phone:
                     continue
 
-                from app.api.feishu import _call_llm_with_config, _load_agent_and_model
-                from app.models.agent import Agent as AgentModel, DEFAULT_CONTEXT_WINDOW_SIZE
-                from app.models.audit import ChatMessage
+                from app.api.feishu import _load_agent_and_model
+                from app.models.agent import Agent as AgentModel
                 from app.services.channel_session import find_or_create_channel_session
                 from app.services.channel_user_service import channel_user_service
-                from app.database import async_session as _async_session
 
                 agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
                 agent_obj = agent_r.scalar_one_or_none()
@@ -293,52 +287,37 @@ async def whatsapp_event_webhook(
                     external_conv_id=conv_id,
                     source_channel="whatsapp",
                     first_message_title=user_text,
+                    created_by_user_id=platform_user_id,
                 )
-                session_conv_id = str(sess.id)
-                ctx_size = agent_obj.context_window_size or DEFAULT_CONTEXT_WINDOW_SIZE
-                history_r = await db.execute(
-                    select(ChatMessage)
-                    .where(ChatMessage.agent_id == agent_id, ChatMessage.conversation_id == session_conv_id)
-                    .order_by(ChatMessage.created_at.desc())
-                    .limit(ctx_size)
+                session_id = sess.id
+                _, model, _ = await _load_agent_and_model(db, agent_id)
+                intake = await enqueue_channel_chat_runtime(
+                    db,
+                    agent=agent_obj,
+                    user=platform_user,
+                    session=sess,
+                    model=model,
+                    content=user_text,
+                    source_channel="whatsapp",
+                    message_id=channel_message_id(
+                        agent_id,
+                        "whatsapp",
+                        message_id,
+                    ),
                 )
-                history = [{"role": m.role, "content": m.content} for m in reversed(history_r.scalars().all())]
-
-                db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="user", content=user_text, conversation_id=session_conv_id))
-                sess.last_message_at = datetime.now(timezone.utc)
-
-                # Pre-load agent/model before releasing connection
-                _agent_model, _llm_model, _fallback_model = await _load_agent_and_model(db, agent_id)
 
                 await db.commit()
-                await db.close()
-                # ── Phase 1 complete: release connection before slow LLM call ──
 
-                try:
-                    reply_text = await _call_llm_with_config(
-                        _agent_model, _llm_model, _fallback_model,
-                        agent_id,
-                        user_text,
-                        history=history,
-                        user_id=platform_user_id,
-                        session_id=session_conv_id,
-                    )
-                except Exception as exc:
-                    logger.exception(f"[WhatsApp] LLM failed for agent {agent_id}: {exc}")
-                    reply_text = "Sorry, I encountered an error processing your message."
+                outcome = await wait_for_channel_chat(
+                    handle=intake.handle,
+                    session_id=session_id,
+                    session_factory=_async_session,
+                    after=intake.stream_after,
+                )
+                reply_text = outcome.content
 
                 try:
                     await _send_whatsapp_messages(config, sender_phone, reply_text)
-                    async with _async_session() as _save_db:
-                        _save_db.add(ChatMessage(agent_id=agent_id, user_id=platform_user_id, role="assistant", content=reply_text, conversation_id=session_conv_id))
-                        from app.models.chat_session import ChatSession
-                        _sess_r = await _save_db.execute(
-                            select(ChatSession).where(ChatSession.id == uuid.UUID(session_conv_id))
-                        )
-                        _sess_fresh = _sess_r.scalar_one_or_none()
-                        if _sess_fresh:
-                            _sess_fresh.last_message_at = datetime.now(timezone.utc)
-                        await _save_db.commit()
                 except Exception as exc:
                     logger.exception(f"[WhatsApp] Send failed for agent {agent_id}: {exc}")
 
