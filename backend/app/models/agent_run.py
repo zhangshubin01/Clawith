@@ -154,6 +154,9 @@ class AgentRun(Base):
     projected_last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     projected_checkpoint_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     projection_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    session_context_applied_checkpoint_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )
     delivery_status: Mapped[str] = mapped_column(String(24), nullable=False)
     delivery_target: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     projected_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

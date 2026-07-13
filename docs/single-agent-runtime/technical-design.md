@@ -259,12 +259,15 @@ projected_execution_status, projected_waiting_type,
 projected_waiting_reason, projected_result_summary,
 projected_error_code, projected_last_error,
 projected_checkpoint_id, projection_updated_at,
+session_context_applied_checkpoint_id,
 delivery_status,
 projected_started_at, projected_completed_at,
 created_at, updated_at
 ```
 
 所有 `projected_*` 字段都只允许由 Projector 写入，并可随时从 Checkpointer 重建。恢复时始终由 Checkpointer 按 `thread_id` 读取最新 checkpoint；任何 Graph 节点、Command Worker 或 reconciliation 都不得根据投影字段决定下一步。
+
+`session_context_applied_checkpoint_id` 不是执行投影，而是终态副作用收据：它只表示该 Run 的 `SessionContextDelta` 已与哪一个 terminal checkpoint 一起幂等合并。每个 Run 最多写入一次；同一 checkpoint 重放为 no-op，不同 checkpoint 不得覆盖。该字段不能参与 Graph 路由、恢复或生命周期判断。
 
 LangGraph State 中的权威执行状态：
 

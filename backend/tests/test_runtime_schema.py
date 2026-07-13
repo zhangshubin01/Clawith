@@ -85,6 +85,7 @@ def test_agent_run_model_captures_registry_projection_and_lane_contract():
         "projected_last_error",
         "projected_checkpoint_id",
         "projection_updated_at",
+        "session_context_applied_checkpoint_id",
         "delivery_status",
         "delivery_target",
         "projected_started_at",
