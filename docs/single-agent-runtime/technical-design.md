@@ -794,7 +794,7 @@ finish      提交候选最终结果，随后由 verify 节点确定是否完成
 
 模型能力按以下规则 gate：
 
-1. 不支持可靠 tool calling 的模型不进入 LangGraph 工具 Runtime，只允许纯 Chat 能力或保留 legacy 路径。
+1. 不支持可靠 tool calling 的模型不进入 LangGraph 工具 Runtime；只允许经过验证的纯 Chat Graph，不能回退 legacy 路径。
 2. 支持 tool calling 但结构化输出稳定性不足的模型，只允许简单 Single Run；`wait`、Planning 和复杂依赖必须通过 Capability 校验后开放。
 3. 多 Agent Planning 必须使用显式配置且通过结构化输出验证的 Planning 模型；配置或验证失败时显式失败，不静默改用成员模型。
 4. Compact 使用第 9 章的独立规则；能力或窗口未知时 fail closed，不让模型猜测裁剪。
@@ -1376,7 +1376,7 @@ AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES=8192
 
 `MULTI_AGENT_COMPACT_MODEL_ID` 和 `MULTI_AGENT_PLANNING_MODEL_ID` 都是平台级配置，只允许解析到启用且 `tenant_id IS NULL` 的 `llm_models` 记录；配置缺失、模型停用或指向租户私有模型时显式失败，不回退到任意业务 Agent 模型。
 
-灰度优先级：显式 Agent allowlist > source type > 全局开关。关闭 v2 时走 legacy；但已由 v2 创建且产生 checkpoint 的 run 必须继续由 v2 恢复，不能中途回退 legacy。
+入口启用优先级：显式 Agent allowlist > source type > 全局开关。开关只决定是否接受新的 LangGraph Run；未命中时入口必须显式失败，不得回退旧 tool loop。已经创建并产生 checkpoint 的 LangGraph Run 必须继续按原 `graph_name + graph_version` 恢复，不受新 Run 开关影响。历史 `runtime_type = legacy` 只用于识别旧记录，Runtime Worker 不推进它，也不能把它转换为 LangGraph Run。
 
 ## 14. 分阶段实施
 
@@ -1388,7 +1388,7 @@ AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES=8192
 | `backend/app/models/` | 新增六个 Runtime 模型；`channel_deliveries` 只作为投递 Outbox |
 | `backend/alembic/versions/` | 新增表、约束、索引和 `LLMModel.max_input_tokens`、override、capability metadata |
 | `backend/app/services/agent_runtime/` | 新增 Adapter、Command Worker、Graph、nodes、Projector、幂等和 reconciliation |
-| `backend/app/services/llm/caller.py` | 抽出单次模型调用 port；保留 legacy 直到 Backend Cutover 完成 |
+| `backend/app/services/llm/caller.py` | 抽出供 Graph node 使用的单次模型调用 port；Backend Cutover 后删除入口级旧 tool loop |
 | `backend/app/services/agent_tools.py` | 增加工具 effect/retry 元数据；A2A 关联 run |
 | `backend/app/api/websocket.py` | 改为消费 RuntimeEvent；abort 对应 cancel_run |
 | `backend/app/api/feishu.py` | 迁移到 Runtime Adapter，删除入口级 runtime 逻辑 |
@@ -1407,7 +1407,7 @@ AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES=8192
 - 上线前已存在的 session 没有 `session_context_states` 时按空摘要启动，首次达到阈值后创建。
 - 前端先兼容现有 WebSocket 事件；RuntimeEvent 只作为后端内部稳定契约。
 - Runtime 自身的业务表和 nullable 字段可以按入口渐进增加；这不改变统一聊天 Schema 已完成强制迁移的前置条件。
-- 删除旧 loop 必须独立 PR，便于回滚。
+- 旧 loop 删除后不得通过 feature flag 恢复；回滚只能整体回滚到仍与旧 Schema 匹配的发布版本，不能在同一部署中混跑两套 Runtime。
 
 ### Phase 0：Schema、迁移与依赖基线
 

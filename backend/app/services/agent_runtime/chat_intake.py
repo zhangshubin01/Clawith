@@ -268,8 +268,9 @@ async def enqueue_chat_runtime(
 ) -> ChatRuntimeIntake | None:
     """Persist one chat message and its start/resume Command atomically.
 
-    Returning ``None`` means the rollout gate selected the untouched legacy
-    path. This function never commits; the WebSocket ingress owns the boundary.
+    Returning ``None`` means the Runtime intake is disabled for this new chat.
+    Callers must fail closed; there is no legacy execution fallback. This
+    function never commits; the ingress owns the transaction boundary.
     """
     runtime_settings = settings_override or get_settings()
     decision = decide_runtime_v2(
