@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiofiles
-from sqlalchemy import and_, delete, desc, select
+from sqlalchemy import delete, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workspace import WorkspaceEditLock, WorkspaceFileRevision
@@ -154,6 +154,8 @@ async def acquire_edit_lock(
     else:
         lock = WorkspaceEditLock(
             agent_id=agent_id,
+            scope_type="agent",
+            scope_id=agent_id,
             path=normalized,
             user_id=user_id,
             session_id=session_id,
@@ -251,6 +253,8 @@ async def record_revision(
 
     revision = WorkspaceFileRevision(
         agent_id=agent_id,
+        scope_type="agent",
+        scope_id=agent_id,
         path=normalized,
         operation=operation,
         actor_type=actor_type,
