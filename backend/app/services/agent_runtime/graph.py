@@ -31,6 +31,7 @@ TERMINAL_NODE = "terminal"
 
 _WAITING_STATUSES = frozenset({"waiting_user", "waiting_external", "waiting_agent"})
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_MAX_APPLIED_COMMAND_IDS = 64
 _ROUTE_STATUSES = {
     "model": frozenset({"running"}),
     "tool": frozenset({"running"}),
@@ -108,14 +109,26 @@ async def _execute_node(
         raise RuntimeGraphContractError(
             "Runtime nodes may only update lifecycle state: " + ", ".join(sorted(unexpected_keys))
         )
+    lifecycle_update = update.get("lifecycle", {})
+    if not isinstance(lifecycle_update, dict):
+        raise RuntimeGraphContractError("Runtime node lifecycle update must be an object")
+
+    existing_command_ids = state["lifecycle"].get("last_applied_command_ids", [])
+    if not isinstance(existing_command_ids, list) or any(
+        not isinstance(command_id, str) or not command_id for command_id in existing_command_ids
+    ):
+        raise RuntimeGraphContractError("Checkpoint last_applied_command_ids must contain non-empty strings")
+    command_ids = [command_id for command_id in existing_command_ids if command_id != context.command_id]
+    command_ids.append(context.command_id)
+    lifecycle = {
+        **state["lifecycle"],
+        **lifecycle_update,
+        "last_applied_command_ids": command_ids[-_MAX_APPLIED_COMMAND_IDS:],
+    }
     if node == "terminal":
-        terminal_lifecycle = update.get("lifecycle", state["lifecycle"])
-        if (
-            terminal_lifecycle.get("status") not in _TERMINAL_STATUSES
-            or terminal_lifecycle.get("next_route") != "terminal"
-        ):
+        if lifecycle.get("status") not in _TERMINAL_STATUSES or lifecycle.get("next_route") != "terminal":
             raise RuntimeGraphContractError("terminal node must preserve a terminal lifecycle")
-    return update
+    return {"lifecycle": lifecycle}
 
 
 def _make_node(

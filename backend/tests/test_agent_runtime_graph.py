@@ -222,6 +222,7 @@ async def test_graph_compiles_from_settings_and_checkpoints_terminal_lifecycle()
     assert graph.compiled.name == "test_agent_runtime@v-test"
     assert result["lifecycle"]["status"] == "completed"
     assert snapshot.values["lifecycle"]["status"] == "completed"
+    assert snapshot.values["lifecycle"]["last_applied_command_ids"] == ["command-1"]
     assert executor.calls == [
         ("control_guard", None),
         ("model", None),
@@ -257,6 +258,7 @@ async def test_wait_node_interrupts_and_resumes_the_same_thread() -> None:
 
     assert interrupted["lifecycle"]["status"] == "waiting_user"
     assert waiting_snapshot.next == ("wait",)
+    assert waiting_snapshot.values["lifecycle"]["last_applied_command_ids"] == ["command-start"]
     assert executor.calls == [("control_guard", None)]
 
     resumed = await graph.compiled.ainvoke(
@@ -266,6 +268,11 @@ async def test_wait_node_interrupts_and_resumes_the_same_thread() -> None:
     )
 
     assert resumed["lifecycle"]["status"] == "completed"
+    resumed_snapshot = await graph.compiled.aget_state(config)
+    assert resumed_snapshot.values["lifecycle"]["last_applied_command_ids"] == [
+        "command-start",
+        "command-resume",
+    ]
     assert executor.calls == [
         ("control_guard", None),
         ("wait", {"confirmed": True}),
@@ -304,3 +311,26 @@ async def test_terminal_node_cannot_end_with_an_active_lifecycle() -> None:
             runtime_thread_config(run_id),
             context=_context(run_id, InvalidTerminalExecutor(), command_id="command-1"),
         )
+
+
+@pytest.mark.asyncio
+async def test_graph_bounds_command_reconciliation_history() -> None:
+    run_id = uuid.uuid4()
+    state = _state(run_id, status="completed", route="terminal")
+    state["lifecycle"]["last_applied_command_ids"] = [f"command-{index}" for index in range(70)]
+    graph = build_agent_runtime_graph(
+        checkpointer=InMemorySaver(),
+        settings=_settings(),
+    )
+
+    await graph.compiled.ainvoke(
+        state,
+        runtime_thread_config(run_id),
+        context=_context(run_id, CompletingExecutor(), command_id="command-current"),
+    )
+    snapshot = await graph.compiled.aget_state(runtime_thread_config(run_id))
+
+    command_ids = snapshot.values["lifecycle"]["last_applied_command_ids"]
+    assert len(command_ids) == 64
+    assert command_ids[0] == "command-7"
+    assert command_ids[-1] == "command-current"
