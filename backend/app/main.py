@@ -178,9 +178,12 @@ async def lifespan(app: FastAPI):
             import app.models.onboarding     # noqa
 
             import app.models.identity       # noqa
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            logger.info("[startup] Database tables ready")
+            if settings.DATABASE_AUTO_CREATE_TABLES:
+                async with engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+                logger.warning("[startup] Legacy database auto-create is enabled")
+            else:
+                logger.info("[startup] Database auto-create disabled; schema is owned by Alembic")
         except Exception as e:
             logger.warning(f"[startup] create_all failed: {e}")
         logger.info("[startup] seeding...")

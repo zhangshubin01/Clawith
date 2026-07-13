@@ -86,6 +86,7 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://clawith:clawith@localhost:5432/clawith"
+    DATABASE_AUTO_CREATE_TABLES: bool = False
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"

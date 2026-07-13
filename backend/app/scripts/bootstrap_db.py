@@ -4,6 +4,7 @@ import asyncio
 
 from sqlalchemy import text
 
+from app.config import get_settings
 from app.database import Base, engine
 
 # Import all models so Base.metadata is fully populated before create_all.
@@ -82,9 +83,15 @@ PATCHES = [
 
 
 async def main() -> None:
+    settings = get_settings()
+    if not settings.DATABASE_AUTO_CREATE_TABLES:
+        print("[entrypoint] Legacy schema bootstrap disabled; schema is owned by Alembic", flush=True)
+        await engine.dispose()
+        return
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    print("[entrypoint] Tables created/verified", flush=True)
+    print("[entrypoint] Legacy schema bootstrap enabled", flush=True)
 
     patch_timeout_sql = text("SET lock_timeout = '2000ms'")
     for sql in PATCHES:
