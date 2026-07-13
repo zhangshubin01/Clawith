@@ -495,6 +495,49 @@ async def list_workspace(
     return tuple(output)
 
 
+async def index_workspace(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    group_id: uuid.UUID,
+    actor_participant_id: uuid.UUID,
+    limit: int = 100,
+) -> tuple[GroupWorkspaceEntry, ...]:
+    """Build a bounded recursive workspace index for one immutable Run snapshot."""
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    await _authorize_actor(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor_participant_id,
+    )
+    storage = get_storage_backend()
+    root = normalize_storage_key(f"{_group_root(group_id)}/workspace")
+    prefix = root.rstrip("/") + "/"
+    pending = [root]
+    output: list[GroupWorkspaceEntry] = []
+    while pending and len(output) < limit:
+        current = pending.pop(0)
+        for entry in await storage.list_dir(current):
+            relative = normalize_storage_key(entry.key).removeprefix(prefix)
+            output.append(
+                GroupWorkspaceEntry(
+                    path=relative,
+                    name=entry.name,
+                    is_dir=entry.is_dir,
+                    size=entry.size,
+                    modified_at=entry.modified_at,
+                    version_token=_entry_version(entry),
+                )
+            )
+            if entry.is_dir:
+                pending.append(entry.key)
+            if len(output) >= limit:
+                break
+    return tuple(output)
+
+
 async def read_workspace_file(
     db: AsyncSession,
     *,
@@ -585,6 +628,7 @@ __all__ = [
     "GroupWorkspaceEntry",
     "delete_agent_memory",
     "delete_workspace_file",
+    "index_workspace",
     "list_workspace",
     "read_agent_memory",
     "read_announcement",

@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +33,9 @@ from app.services.agent_runtime.tool_exchange import (
     ToolExchangeCompactionSummary,
     build_recent_tool_safe_window,
 )
+
+if TYPE_CHECKING:
+    from app.services.agent_runtime.group_context_builder import GroupContextBuilder
 
 
 class ContextBuildError(RuntimeError):
@@ -187,9 +190,17 @@ class ContextBuilder:
         *,
         recent_run_message_limit: int | None = None,
         settings: Settings | None = None,
+        group_context_builder: GroupContextBuilder | None = None,
     ) -> None:
         runtime_settings = settings or get_settings()
+        if group_context_builder is None:
+            from app.services.agent_runtime.group_context_builder import (
+                GroupContextBuilder,
+            )
+
+            group_context_builder = GroupContextBuilder(settings=runtime_settings)
         self.session_context_service = session_context_service
+        self.group_context_builder = group_context_builder
         self.recent_run_message_limit = (
             recent_run_message_limit
             if recent_run_message_limit is not None
@@ -204,6 +215,7 @@ class ContextBuilder:
         *,
         tenant_id: uuid.UUID,
         session_id: uuid.UUID | None,
+        agent_id: uuid.UUID | None = None,
         initial_input: Mapping[str, Any],
         related_run_summaries: Sequence[Mapping[str, Any]] = (),
     ) -> RunInputSnapshots:
@@ -227,6 +239,23 @@ class ContextBuilder:
             session_context_version = pack.snapshot.version
             recent_messages = _json_objects(
                 pack.recent_messages,
+                field="recent_session_messages",
+            )
+            _validate_session_messages(recent_messages)
+            group_capture = await self.group_context_builder.capture(
+                db,
+                tenant_id=tenant_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                initial_input=normalized_input,
+                recent_messages=recent_messages,
+            )
+            normalized_input = _json_object(
+                group_capture.initial_input,
+                field="initial_input",
+            )
+            recent_messages = _json_objects(
+                group_capture.recent_messages,
                 field="recent_session_messages",
             )
             _validate_session_messages(recent_messages)

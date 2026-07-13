@@ -104,6 +104,11 @@ class RuntimeInputSnapshotFactory:
                 db,
                 tenant_id=run.tenant_id,
                 session_id=session_id,
+                agent_id=(
+                    uuid.UUID(run.registry.agent_id)
+                    if run.registry.agent_id is not None
+                    else None
+                ),
                 initial_input=command.payload,
                 related_run_summaries=cast(Sequence[Mapping[str, object]], related),
             )

@@ -141,6 +141,9 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_MODEL_CAPABILITY_REFRESH_SECONDS: int = Field(default=86400, gt=0)
     MULTI_AGENT_COMPACT_MODEL_ID: uuid.UUID | None = None
     MULTI_AGENT_PLANNING_MODEL_ID: uuid.UUID | None = None
+    GROUP_CONTEXT_ANNOUNCEMENT_MAX_CHARS: int = Field(default=12000, gt=0)
+    GROUP_CONTEXT_MEMORY_MAX_CHARS: int = Field(default=12000, gt=0)
+    GROUP_CONTEXT_WORKSPACE_MAX_ENTRIES: int = Field(default=100, gt=0)
     AGENT_RUNTIME_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, gt=0)
     AGENT_RUNTIME_EVENT_PAYLOAD_MAX_BYTES: int = Field(default=16384, gt=0)
     AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES: int = Field(default=8192, gt=0)
