@@ -114,12 +114,20 @@ async def _execute_node(
         raise RuntimeGraphContractError("Runtime node lifecycle update must be an object")
 
     existing_command_ids = state["lifecycle"].get("last_applied_command_ids", [])
-    if not isinstance(existing_command_ids, list) or any(
-        not isinstance(command_id, str) or not command_id for command_id in existing_command_ids
-    ):
-        raise RuntimeGraphContractError("Checkpoint last_applied_command_ids must contain non-empty strings")
-    command_ids = [command_id for command_id in existing_command_ids if command_id != context.command_id]
-    command_ids.append(context.command_id)
+    update_command_ids = lifecycle_update.get(
+        "last_applied_command_ids",
+        existing_command_ids,
+    )
+    for values in (existing_command_ids, update_command_ids):
+        if not isinstance(values, list) or any(
+            not isinstance(command_id, str) or not command_id for command_id in values
+        ):
+            raise RuntimeGraphContractError("Checkpoint last_applied_command_ids must contain non-empty strings")
+    command_ids: list[str] = []
+    for command_id in [*existing_command_ids, *update_command_ids, context.command_id]:
+        if command_id in command_ids:
+            command_ids.remove(command_id)
+        command_ids.append(command_id)
     lifecycle = {
         **state["lifecycle"],
         **lifecycle_update,

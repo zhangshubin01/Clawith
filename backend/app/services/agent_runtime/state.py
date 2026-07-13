@@ -83,6 +83,8 @@ class RuntimeLifecycle(TypedDict):
     next_route: ControlRoute
     reason: NotRequired[str | None]
     last_applied_command_ids: NotRequired[list[str]]
+    model_step_count: NotRequired[int]
+    verification_attempt_count: NotRequired[int]
     run_messages: NotRequired[list[JsonObject]]
     run_summary: NotRequired[JsonObject | None]
     covered_through_run_message_id: NotRequired[str | None]
