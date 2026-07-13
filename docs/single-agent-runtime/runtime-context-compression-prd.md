@@ -219,11 +219,14 @@ Runtime DB 只保存摘要和引用。大段工具结果、大文档正文或大
 | `projected_waiting_type` | waiting 类型查询投影，可为空。 |
 | `projected_waiting_reason` | 等待原因投影。 |
 | `projected_result_summary` | 最终结果摘要投影。 |
+| `projected_error_code` | 最近错误的稳定错误码投影。 |
 | `projected_last_error` | 最近错误投影。 |
 | `projected_checkpoint_id` | Projector 已处理的 checkpoint watermark。 |
 | `projection_updated_at` | 投影最近更新时间。 |
+| `delivery_target` | 小型交付目标结构，可为空。 |
 | `created_at` | 创建时间。 |
 | `updated_at` | 更新时间。 |
+| `projected_started_at` | 开始时间投影。 |
 | `projected_completed_at` | 完成时间投影。 |
 
 LangGraph State 中的权威 `lifecycle_status` 枚举：

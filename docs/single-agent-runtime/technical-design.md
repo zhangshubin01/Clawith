@@ -424,6 +424,8 @@ index (source_type, source_id)
 unique (runtime_thread_id)
 unique (source_type, source_execution_id) where source_execution_id is not null
 unique (scheduling_lane_key) where scheduling_lane_key is not null and lane_held
+index (scheduling_lane_key, scheduling_position_created_at, scheduling_position_id, created_at, id)
+  where scheduling_lane_key is not null
 ```
 
 Planning Run 约束：
@@ -435,6 +437,8 @@ CHECK (
   (run_kind <> 'orchestration' AND agent_id IS NOT NULL AND system_role IS NULL)
 )
 ```
+
+所有 `runtime_type = 'langgraph'` 的 Run 必须固化 `model_id`。调度字段必须成组出现：`scheduling_lane_key` 为空时两个 position 字段都为空且 `lane_held = false`；lane key 非空时两个 position 字段都非空。`agent_run_commands.attempt_count >= 0`，`session_context_states.version >= 1`。
 
 v1 的 orchestration Run 只允许 `system_role = 'group_planning'`。它不对应 `participants` 或 `group_members`。Planning 模型配置变化只影响新建 Run；已有 Planning Run 的恢复、重试和结构修复必须继续使用该 Run 固化的 `model_id`。
 
@@ -472,7 +476,7 @@ agent_run_events:
 agent_run_commands:
   unique (run_id, idempotency_key)
   index (status, claim_expires_at, created_at)
-  index (run_id, created_at)
+  index (run_id, created_at, id)
 
 session_context_states:
   unique (session_id)
@@ -889,7 +893,7 @@ capability_checked_at
 
 解析优先级：
 
-1. 管理员显式 `max_input_tokens_override`。
+1. 管理员按限制语义显式配置 override：`max_input_tokens_override` 只覆盖独立输入上限，`context_window_tokens_override` 只覆盖输入输出共享总窗口；两种限制同时存在时仍共同参与取最小值，不能用一种 override 抹掉另一种有效硬限制。
 2. Provider 官方能力接口。
 3. Clawith 内置 Model Capability Registry。
 4. 部署运行时配置，例如 Ollama `num_ctx`。
@@ -910,14 +914,20 @@ Provider 适配：
 Resolver 必须记录限制的真实语义，不能把共享总窗口提前扣除固定输出额度后伪装成 `max_input_tokens`。如果 Provider 返回独立输入上限，原样写入 `max_input_tokens`；如果返回输入输出共享总窗口，写入 `context_window_tokens`。语义不明确时按共享总窗口保守记录。每次模型调用统一按本次实际输出额度计算：
 
 ```text
+effective_max_input_tokens =
+  max_input_tokens_override ?? max_input_tokens
+
+effective_context_window_tokens =
+  context_window_tokens_override ?? context_window_tokens
+
 requested_max_output_tokens = min(
   request.max_output_tokens,
   model.max_output_tokens
 )
 
 request_input_limit = min_defined(
-  max_input_tokens,
-  context_window_tokens - requested_max_output_tokens
+  effective_max_input_tokens,
+  effective_context_window_tokens - requested_max_output_tokens
 )
 
 effective_runtime_budget =

@@ -33,6 +33,11 @@ from app.models.tool import Tool  # noqa: F401
 from app.models.trigger import AgentTrigger  # noqa: F401
 from app.models.agent_credential import AgentCredential  # noqa: F401
 from app.models.onboarding import UserTenantOnboarding  # noqa: F401
+from app.models.agent_run import AgentRun  # noqa: F401
+from app.models.agent_run_command import AgentRunCommand  # noqa: F401
+from app.models.agent_run_event import AgentRunEvent  # noqa: F401
+from app.models.agent_tool_execution import AgentToolExecution  # noqa: F401
+from app.models.session_context_state import SessionContextState  # noqa: F401
 
 config = context.config
 settings = get_settings()
