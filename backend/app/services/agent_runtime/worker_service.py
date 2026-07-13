@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings, get_settings
+from app.services.agent_runtime.a2a_completion import A2ARuntimeCompletionHandler
 from app.services.agent_runtime.a2a_runtime import RuntimeA2AService
 from app.services.agent_runtime.cancel_source import DatabaseRuntimeCancelSource
 from app.services.agent_runtime.checkpoint_side_effects import RuntimeCheckpointSideEffects
@@ -212,6 +213,7 @@ def build_runtime_worker_components(
             TaskRuntimeCompletionHandler(session_factory=session_factory),
             TriggerRuntimeCompletionHandler(session_factory=session_factory),
             HeartbeatRuntimeCompletionHandler(session_factory=session_factory),
+            A2ARuntimeCompletionHandler(session_factory=session_factory),
         ),
     )
     worker = RuntimeCommandWorker(
