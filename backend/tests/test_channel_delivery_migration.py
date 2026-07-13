@@ -3,6 +3,9 @@
 from importlib import util
 from pathlib import Path
 
+from sqlalchemy import CheckConstraint
+
+from app.models.agent_run_event import AgentRunEvent
 from app.models.channel_delivery import ChannelDelivery
 
 
@@ -61,3 +64,15 @@ def test_channel_delivery_model_has_retry_and_idempotency_constraints() -> None:
     assert "ck_channel_deliveries_attempt_count" in names
     assert "ix_channel_deliveries_pending_due" in indexes
 
+
+def test_event_model_allows_channel_delivery_outcomes() -> None:
+    constraint = next(
+        item
+        for item in AgentRunEvent.__table__.constraints
+        if isinstance(item, CheckConstraint)
+        and item.name == "ck_agent_run_events_event_type"
+    )
+    model_sql = str(constraint.sqltext)
+
+    assert "channel_delivery_delivered" in model_sql
+    assert "channel_delivery_failed" in model_sql

@@ -149,4 +149,3 @@ def downgrade() -> None:
         table_name="channel_deliveries",
     )
     op.drop_table("channel_deliveries")
-
