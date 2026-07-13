@@ -17,6 +17,10 @@ from app.services.agent_runtime.command_worker import CommandWorkResult, Runtime
 from app.services.agent_runtime.heartbeat_completion import (
     HeartbeatRuntimeCompletionHandler,
 )
+from app.services.agent_runtime.group_acknowledgement import (
+    RuntimeGroupStartAcknowledgementHandler,
+)
+from app.services.agent_runtime.scheduling_lane import SchedulingLaneCompletionHandler
 from app.services.agent_runtime.session_context_completion import (
     SessionContextCompletionHandler,
 )
@@ -158,6 +162,10 @@ def test_component_builder_installs_one_pinned_graph_and_shared_driver() -> None
     assert components.graph_registry.resolve(run) is components.graph
     assert components.worker._checkpoint_reader is components.driver
     assert components.worker._command_executor is components.driver
+    assert isinstance(
+        components.worker._pre_command_handler,
+        RuntimeGroupStartAcknowledgementHandler,
+    )
     terminal_handlers = components.worker._post_checkpoint_handler._terminal_handlers
     assert [type(handler) for handler in terminal_handlers] == [
         SessionContextCompletionHandler,
@@ -165,6 +173,7 @@ def test_component_builder_installs_one_pinned_graph_and_shared_driver() -> None
         TriggerRuntimeCompletionHandler,
         HeartbeatRuntimeCompletionHandler,
         A2ARuntimeCompletionHandler,
+        SchedulingLaneCompletionHandler,
     ]
 
 

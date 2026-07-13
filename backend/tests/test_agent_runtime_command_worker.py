@@ -162,6 +162,19 @@ class _PostCheckpointHandler:
             raise self.error
 
 
+class _PreCommandHandler:
+    def __init__(self, timeline: list[str], *, error: Exception | None = None) -> None:
+        self.timeline = timeline
+        self.error = error
+        self.calls = []
+
+    async def handle(self, *, run, command, checkpoint) -> None:
+        self.timeline.append("pre_command")
+        self.calls.append((run, command, checkpoint))
+        if self.error is not None:
+            raise self.error
+
+
 def _run(*, tenant_id: uuid.UUID | None = None) -> AgentRun:
     run_id = uuid.uuid4()
     return AgentRun(
@@ -247,6 +260,7 @@ def _worker(
     reader: _Reader,
     executor: _Executor,
     post_checkpoint_handler: _PostCheckpointHandler | None = None,
+    pre_command_handler: _PreCommandHandler | None = None,
     acquired: bool = True,
     claim_renew_seconds: float = 10,
 ) -> RuntimeCommandWorker:
@@ -255,12 +269,50 @@ def _worker(
         lock_engine=_Engine(_Connection(timeline, acquired=acquired)),  # type: ignore[arg-type]
         checkpoint_reader=reader,
         command_executor=executor,
+        pre_command_handler=pre_command_handler,
         post_checkpoint_handler=post_checkpoint_handler or _PostCheckpointHandler(timeline),
         claimant="worker-1",
         claim_ttl_seconds=60,
         claim_renew_seconds=claim_renew_seconds,
         max_attempts=5,
     )
+
+
+@pytest.mark.asyncio
+async def test_pre_command_side_effect_runs_after_claim_commit_and_before_graph() -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    observed = _checkpoint(run, status="running", command_ids=[str(command.id)])
+    reader = _Reader(None, observed)
+    executor = _Executor(timeline)
+    pre_handler = _PreCommandHandler(timeline)
+    worker = _worker(
+        timeline=timeline,
+        run=run,
+        reader=reader,
+        executor=executor,
+        pre_command_handler=pre_handler,
+    )
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_applied",
+            new=AsyncMock(),
+        ),
+    ):
+        result = await worker.run_once()
+
+    assert result.status == "applied"
+    assert pre_handler.calls == [(pre_handler.calls[0][0], pre_handler.calls[0][1], None)]
+    assert pre_handler.calls[0][0].run_id == run.id
+    assert pre_handler.calls[0][1].id == command.id
+    assert timeline.index("transaction_exit") < timeline.index("pre_command")
+    assert timeline.index("pre_command") < timeline.index("executor_start")
 
 
 @pytest.mark.asyncio

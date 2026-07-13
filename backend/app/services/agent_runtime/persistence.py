@@ -485,6 +485,10 @@ async def enqueue_cancel(
 
 def _claim_statement(now: datetime, *, max_attempts: int):
     previous = aliased(AgentRunCommand, name="previous_command")
+    candidate_run = aliased(AgentRun, name="candidate_run")
+    lane_holder = aliased(AgentRun, name="lane_holder")
+    earlier_lane_run = aliased(AgentRun, name="earlier_lane_run")
+    earlier_lane_command = aliased(AgentRunCommand, name="earlier_lane_command")
     earlier_unfinished = exists(
         select(1).where(
             previous.run_id == AgentRunCommand.run_id,
@@ -492,8 +496,38 @@ def _claim_statement(now: datetime, *, max_attempts: int):
             tuple_(previous.created_at, previous.id) < tuple_(AgentRunCommand.created_at, AgentRunCommand.id),
         )
     )
+    active_lane_holder = exists(
+        select(1).where(
+            lane_holder.scheduling_lane_key == candidate_run.scheduling_lane_key,
+            lane_holder.id != candidate_run.id,
+            lane_holder.lane_held.is_(True),
+        )
+    )
+    earlier_lane_start = exists(
+        select(1)
+        .select_from(earlier_lane_command)
+        .join(earlier_lane_run, earlier_lane_run.id == earlier_lane_command.run_id)
+        .where(
+            earlier_lane_run.scheduling_lane_key == candidate_run.scheduling_lane_key,
+            earlier_lane_command.command_type == "start",
+            earlier_lane_command.status.in_(("pending", "claimed")),
+            tuple_(
+                earlier_lane_run.scheduling_position_created_at,
+                earlier_lane_run.scheduling_position_id,
+                earlier_lane_run.created_at,
+                earlier_lane_run.id,
+            )
+            < tuple_(
+                candidate_run.scheduling_position_created_at,
+                candidate_run.scheduling_position_id,
+                candidate_run.created_at,
+                candidate_run.id,
+            ),
+        )
+    )
     return (
         select(AgentRunCommand)
+        .join(candidate_run, candidate_run.id == AgentRunCommand.run_id)
         .where(
             or_(
                 AgentRunCommand.status == "pending",
@@ -504,11 +538,53 @@ def _claim_statement(now: datetime, *, max_attempts: int):
             ),
             AgentRunCommand.attempt_count < max_attempts,
             ~earlier_unfinished,
+            or_(
+                candidate_run.scheduling_lane_key.is_(None),
+                AgentRunCommand.command_type != "start",
+                candidate_run.lane_held.is_(True),
+                and_(~active_lane_holder, ~earlier_lane_start),
+            ),
         )
         .order_by(AgentRunCommand.created_at, AgentRunCommand.id)
         .with_for_update(skip_locked=True)
         .limit(1)
     )
+
+
+async def _acquire_start_lane(
+    db: AsyncSession,
+    *,
+    command: AgentRunCommand,
+    now: datetime,
+) -> bool:
+    """Claim one queued mention lane without consulting lifecycle projections."""
+    run_result = await db.execute(
+        select(AgentRun).where(AgentRun.id == command.run_id).with_for_update()
+    )
+    run = run_result.scalar_one_or_none()
+    if run is None or run.tenant_id != command.tenant_id:
+        raise RuntimePersistenceError(
+            "run_not_found",
+            "start command Run does not exist in its tenant",
+        )
+    if run.scheduling_lane_key is None or run.lane_held:
+        return True
+
+    holder_result = await db.execute(
+        select(AgentRun.id)
+        .where(
+            AgentRun.scheduling_lane_key == run.scheduling_lane_key,
+            AgentRun.id != run.id,
+            AgentRun.lane_held.is_(True),
+        )
+        .limit(1)
+        .with_for_update()
+    )
+    if holder_result.scalar_one_or_none() is not None:
+        return False
+    run.lane_held = True
+    run.lane_claimed_at = now
+    return True
 
 
 async def claim_next_command(
@@ -537,6 +613,13 @@ async def claim_next_command(
             "command_reconciliation_required",
             "command reached its attempt limit and must be reconciled with its checkpoint",
         )
+
+    if command.command_type == "start" and not await _acquire_start_lane(
+        db,
+        command=command,
+        now=now,
+    ):
+        return None
 
     command.claimed_by = claimant
     command.status = "claimed"

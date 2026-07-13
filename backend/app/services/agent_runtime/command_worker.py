@@ -124,6 +124,18 @@ class RuntimePostCheckpointHandler(Protocol):
     ) -> None: ...
 
 
+class RuntimePreCommandHandler(Protocol):
+    """Apply idempotent product work after intake commit and before Graph execution."""
+
+    async def handle(
+        self,
+        *,
+        run: RuntimeRunRecord,
+        command: RuntimeCommandRecord,
+        checkpoint: CheckpointObservation | None,
+    ) -> None: ...
+
+
 class CommandWorkerError(RuntimeError):
     """Command processing failed with a stable, non-sensitive code."""
 
@@ -190,6 +202,7 @@ class RuntimeCommandWorker:
         checkpoint_reader: RuntimeCheckpointReader,
         command_executor: RuntimeCommandExecutor,
         post_checkpoint_handler: RuntimePostCheckpointHandler,
+        pre_command_handler: RuntimePreCommandHandler | None = None,
         claimant: str,
         settings: Settings | None = None,
         claim_ttl_seconds: int | None = None,
@@ -201,6 +214,7 @@ class RuntimeCommandWorker:
         self._lock_engine = lock_engine
         self._checkpoint_reader = checkpoint_reader
         self._command_executor = command_executor
+        self._pre_command_handler = pre_command_handler
         self._post_checkpoint_handler = post_checkpoint_handler
         self._claimant = claimant
         self._claim_ttl_seconds = (
@@ -462,6 +476,29 @@ class RuntimeCommandWorker:
                 "post-checkpoint side effects did not complete",
             ) from exc
 
+    async def _handle_pre_command(
+        self,
+        *,
+        run: RuntimeRunRecord,
+        command: RuntimeCommandRecord,
+        checkpoint: CheckpointObservation | None,
+    ) -> None:
+        if self._pre_command_handler is None:
+            return
+        try:
+            await self._pre_command_handler.handle(
+                run=run,
+                command=command,
+                checkpoint=checkpoint,
+            )
+        except RetryableCommandError:
+            raise
+        except Exception as exc:
+            raise RetryableCommandError(
+                "pre_command_handler_failed",
+                "pre-command side effects did not complete",
+            ) from exc
+
     async def _process_locked(
         self,
         connection: AsyncConnection,
@@ -477,6 +514,11 @@ class RuntimeCommandWorker:
             run=run,
         )
         if checkpoint is not None and self._command_is_observed(run, checkpoint, command):
+            await self._handle_pre_command(
+                run=run,
+                command=command,
+                checkpoint=checkpoint,
+            )
             await self._handle_observed_checkpoint(
                 run=run,
                 command=command,
@@ -505,6 +547,11 @@ class RuntimeCommandWorker:
                 terminal_code = "terminal_cancel" if command.command_type == "cancel" else "terminal_resume"
                 return await self._reject(command, terminal_code)
 
+        await self._handle_pre_command(
+            run=run,
+            command=command,
+            checkpoint=checkpoint,
+        )
         try:
             await self._command_executor.execute(
                 connection=connection,

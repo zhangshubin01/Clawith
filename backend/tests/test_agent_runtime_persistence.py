@@ -432,6 +432,95 @@ async def test_claim_uses_skip_locked_fifo_and_increments_attempts():
 
 
 @pytest.mark.asyncio
+async def test_start_claim_acquires_only_the_earliest_free_scheduling_lane():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    position_id = uuid.uuid4()
+    run = _existing_run(
+        _registration(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            scheduling_lane_key=f"group_mention:{tenant_id}:{agent_id}",
+            scheduling_position_created_at=now,
+            scheduling_position_id=position_id,
+        )
+    )
+    command = _command(
+        tenant_id=tenant_id,
+        run_id=run.id,
+        command_type="start",
+    )
+    db = _FakeSession(command, run, None)
+
+    claimed = await persistence.claim_next_command(
+        db,
+        claimant="worker-1",
+        claim_ttl_seconds=60,
+        max_attempts=5,
+        clock=lambda: now,
+    )
+
+    assert claimed is command
+    assert run.lane_held is True
+    assert run.lane_claimed_at == now
+    assert command.status == "claimed"
+    assert db.flush_count == 1
+
+    sql = str(
+        db.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "candidate_run.scheduling_lane_key" in sql
+    assert "lane_holder.lane_held IS true" in sql
+    assert "earlier_lane_command.command_type = 'start'" in sql
+    assert (
+        "earlier_lane_run.scheduling_position_created_at, "
+        "earlier_lane_run.scheduling_position_id" in sql
+    )
+    assert "earlier_lane_run.created_at, earlier_lane_run.id" in sql
+
+
+@pytest.mark.asyncio
+async def test_start_claim_leaves_command_pending_when_lane_becomes_busy():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    run = _existing_run(
+        _registration(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            scheduling_lane_key=f"group_mention:{tenant_id}:{agent_id}",
+            scheduling_position_created_at=now,
+            scheduling_position_id=uuid.uuid4(),
+        )
+    )
+    command = _command(
+        tenant_id=tenant_id,
+        run_id=run.id,
+        command_type="start",
+    )
+    db = _FakeSession(command, run, uuid.uuid4())
+
+    claimed = await persistence.claim_next_command(
+        db,
+        claimant="worker-1",
+        claim_ttl_seconds=60,
+        max_attempts=5,
+        clock=lambda: now,
+    )
+
+    assert claimed is None
+    assert run.lane_held is False
+    assert command.status == "pending"
+    assert command.claimed_by is None
+    assert command.attempt_count == 0
+    assert db.flush_count == 0
+
+
+@pytest.mark.asyncio
 async def test_claim_requires_reconciliation_if_query_returns_exhausted_command():
     now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     command = _command(

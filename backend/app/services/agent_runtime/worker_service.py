@@ -33,6 +33,9 @@ from app.services.agent_runtime.command_worker import (
 )
 from app.services.agent_runtime.context_builder import ContextBuilder
 from app.services.agent_runtime.graph import AgentRuntimeGraph, build_agent_runtime_graph
+from app.services.agent_runtime.group_acknowledgement import (
+    RuntimeGroupStartAcknowledgementHandler,
+)
 from app.services.agent_runtime.heartbeat_completion import (
     HeartbeatRuntimeCompletionHandler,
 )
@@ -45,6 +48,7 @@ from app.services.agent_runtime.model_step_service import RuntimeModelStepServic
 from app.services.agent_runtime.node_executor import DeterministicRuntimeNodeExecutor
 from app.services.agent_runtime.projector import RuntimeProjector
 from app.services.agent_runtime.run_compactor import RuntimeRunCompactorService
+from app.services.agent_runtime.scheduling_lane import SchedulingLaneCompletionHandler
 from app.services.agent_runtime.session_context_service import SessionContextService
 from app.services.agent_runtime.session_context_compactor import LLMSessionContextCompactor
 from app.services.agent_runtime.session_context_completion import (
@@ -214,6 +218,7 @@ def build_runtime_worker_components(
             TriggerRuntimeCompletionHandler(session_factory=session_factory),
             HeartbeatRuntimeCompletionHandler(session_factory=session_factory),
             A2ARuntimeCompletionHandler(session_factory=session_factory),
+            SchedulingLaneCompletionHandler(session_factory=session_factory),
         ),
     )
     worker = RuntimeCommandWorker(
@@ -221,6 +226,9 @@ def build_runtime_worker_components(
         lock_engine=lock_engine,
         checkpoint_reader=driver,
         command_executor=driver,
+        pre_command_handler=RuntimeGroupStartAcknowledgementHandler(
+            session_factory=session_factory,
+        ),
         post_checkpoint_handler=post_checkpoint_handler,
         claimant=claimant or runtime_worker_claimant(),
         settings=runtime_settings,
