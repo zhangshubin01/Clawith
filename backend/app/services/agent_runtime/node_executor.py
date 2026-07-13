@@ -85,6 +85,17 @@ class FinalizationResult:
     delivery_request: JsonObject | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RunCompactResult:
+    """One optional replacement of the checkpoint's active Run history."""
+
+    compacted: bool = False
+    run_summary: JsonObject | None = None
+    run_messages: tuple[JsonObject, ...] | None = None
+    covered_through_run_message_id: str | None = None
+    error: JsonObject | None = None
+
+
 class RuntimeCancelSource(Protocol):
     """Read a durable cancel without deriving it from a product projection."""
 
@@ -103,6 +114,32 @@ class RuntimeModelStepService(Protocol):
         state: RuntimeGraphState,
         context: RuntimeContext,
     ) -> ModelStepResult: ...
+
+
+class RuntimeRunCompactor(Protocol):
+    """Compact only safely covered Run messages into checkpoint state."""
+
+    async def compact_if_needed(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        *,
+        forced: bool,
+    ) -> RunCompactResult: ...
+
+
+class NoopRuntimeRunCompactor:
+    """Default used by isolated node tests and non-production composition."""
+
+    async def compact_if_needed(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        *,
+        forced: bool,
+    ) -> RunCompactResult:
+        del state, context, forced
+        return RunCompactResult()
 
 
 class RuntimeToolStepService(Protocol):
@@ -253,6 +290,21 @@ def _runtime_message_id(state: RuntimeGraphState, position: str) -> str:
     return str(uuid.uuid5(uuid.UUID(state["registry"].run_id), position))
 
 
+def _schedule_compact(
+    lifecycle: dict,
+    *,
+    return_route: Literal["model", "wait"],
+    forced: bool = False,
+) -> None:
+    lifecycle.update(
+        {
+            "next_route": "compact",
+            "compact_return_route": return_route,
+            "compact_forced": forced,
+        }
+    )
+
+
 def _validate_waiting_request(request: JsonObject | None) -> JsonObject:
     if request is None:
         raise RuntimeNodeTransitionError(
@@ -283,6 +335,7 @@ class DeterministicRuntimeNodeExecutor:
         cancel_source: RuntimeCancelSource,
         model_service: RuntimeModelStepService,
         tool_service: RuntimeToolStepService,
+        run_compactor: RuntimeRunCompactor | None = None,
         verifier: RuntimeVerifier | None = None,
         finalizer: RuntimeFinalizer | None = None,
         max_model_steps: int = 50,
@@ -293,6 +346,7 @@ class DeterministicRuntimeNodeExecutor:
         self._cancel_source = cancel_source
         self._model_service = model_service
         self._tool_service = tool_service
+        self._run_compactor = run_compactor or NoopRuntimeRunCompactor()
         self._verifier = verifier or DeterministicRuntimeVerifier()
         self._finalizer = finalizer or DefaultRuntimeFinalizer()
         self._max_model_steps = max_model_steps
@@ -325,6 +379,55 @@ class DeterministicRuntimeNodeExecutor:
                     "pending_tool_calls": [],
                 }
             )
+        return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
+
+    async def _compact(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+    ) -> RuntimeStateUpdate:
+        lifecycle = dict(state["lifecycle"])
+        return_route = lifecycle.get("compact_return_route")
+        if return_route not in {"model", "wait"}:
+            raise RuntimeNodeTransitionError(
+                "invalid_compact_return_route",
+                "compact node requires a model or wait return route",
+            )
+        forced = lifecycle.get("compact_forced", False)
+        if not isinstance(forced, bool):
+            raise RuntimeNodeTransitionError(
+                "invalid_compact_trigger",
+                "compact_forced must be a boolean",
+            )
+        result = await self._run_compactor.compact_if_needed(
+            state,
+            context,
+            forced=forced,
+        )
+        if result.compacted:
+            if (
+                result.run_summary is None
+                or result.run_messages is None
+                or not isinstance(result.covered_through_run_message_id, str)
+                or not result.covered_through_run_message_id
+            ):
+                raise RuntimeNodeTransitionError(
+                    "invalid_run_compact_result",
+                    "successful Run Compact requires summary, messages, and watermark",
+                )
+            lifecycle.update(
+                {
+                    "run_summary": dict(result.run_summary),
+                    "run_messages": [dict(message) for message in result.run_messages],
+                    "covered_through_run_message_id": result.covered_through_run_message_id,
+                    "run_compact_error": None,
+                }
+            )
+        elif result.error is not None:
+            lifecycle["run_compact_error"] = dict(result.error)
+        lifecycle["next_route"] = return_route
+        lifecycle["compact_return_route"] = None
+        lifecycle["compact_forced"] = False
         return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
 
     async def _model(
@@ -374,11 +477,11 @@ class DeterministicRuntimeNodeExecutor:
             lifecycle.update(
                 {
                     "status": f"waiting_{waiting_type}",
-                    "next_route": "wait",
                     "waiting_request": request,
                     "pending_tool_calls": [],
                 }
             )
+            _schedule_compact(lifecycle, return_route="wait", forced=True)
         elif result.intent == "finish":
             if not isinstance(result.finish_content, str) or not result.finish_content.strip():
                 raise RuntimeNodeTransitionError(
@@ -407,11 +510,11 @@ class DeterministicRuntimeNodeExecutor:
             lifecycle.update(
                 {
                     "status": "running",
-                    "next_route": "model",
                     "run_messages": messages,
                     "pending_tool_calls": [],
                 }
             )
+            _schedule_compact(lifecycle, return_route="model")
         elif result.intent == "error":
             error = result.error or _error("model_call_failed", "The model call failed.")
             lifecycle.update(
@@ -480,11 +583,11 @@ class DeterministicRuntimeNodeExecutor:
             lifecycle.update(
                 {
                     "status": f"waiting_{waiting_type}",
-                    "next_route": "wait",
                     "waiting_request": request,
                     "error": dict(result.error) if result.error is not None else None,
                 }
             )
+            _schedule_compact(lifecycle, return_route="wait", forced=True)
         elif result.error is not None:
             lifecycle.update(
                 {
@@ -498,11 +601,11 @@ class DeterministicRuntimeNodeExecutor:
             lifecycle.update(
                 {
                     "status": "running",
-                    "next_route": "model",
                     "waiting_request": None,
                     "error": None,
                 }
             )
+            _schedule_compact(lifecycle, return_route="model")
         return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
 
     async def _verify(
@@ -573,11 +676,11 @@ class DeterministicRuntimeNodeExecutor:
                 lifecycle.update(
                     {
                         "status": "running",
-                        "next_route": "model",
                         "run_messages": messages,
                         "final_answer": None,
                     }
                 )
+                _schedule_compact(lifecycle, return_route="model")
         elif verification.outcome == "fail":
             lifecycle.update(
                 {
@@ -629,12 +732,12 @@ class DeterministicRuntimeNodeExecutor:
         lifecycle.update(
             {
                 "status": "running",
-                "next_route": "model",
                 "reason": None,
                 "waiting_request": None,
                 "run_messages": messages,
             }
         )
+        _schedule_compact(lifecycle, return_route="model", forced=True)
         return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
 
     async def execute(
@@ -647,6 +750,8 @@ class DeterministicRuntimeNodeExecutor:
     ) -> RuntimeStateUpdate:
         if node == "control_guard":
             return await self._control_guard(state, context)
+        if node == "compact":
+            return await self._compact(state, context)
         if node == "model":
             return await self._model(state, context)
         if node == "tool":
@@ -675,9 +780,12 @@ __all__ = [
     "DeterministicRuntimeVerifier",
     "FinalizationResult",
     "ModelStepResult",
+    "NoopRuntimeRunCompactor",
+    "RunCompactResult",
     "RuntimeCancelSource",
     "RuntimeFinalizer",
     "RuntimeModelStepService",
+    "RuntimeRunCompactor",
     "RuntimeNodeTransitionError",
     "RuntimeToolStepService",
     "RuntimeVerifier",

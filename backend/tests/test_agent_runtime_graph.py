@@ -163,9 +163,11 @@ def test_registry_and_input_snapshots_are_frozen() -> None:
     ("status", "route"),
     [
         ("running", "model"),
+        ("running", "compact"),
         ("running", "tool"),
         ("verifying", "verify"),
         ("waiting_user", "wait"),
+        ("waiting_user", "compact"),
         ("waiting_external", "wait"),
         ("waiting_agent", "wait"),
         ("completed", "terminal"),

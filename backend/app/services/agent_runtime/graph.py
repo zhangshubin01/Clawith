@@ -23,6 +23,7 @@ from app.services.agent_runtime.state import (
 
 
 CONTROL_GUARD_NODE = "control_guard"
+COMPACT_NODE = "compact_run_if_needed"
 MODEL_NODE = "model"
 TOOL_NODE = "tool"
 VERIFY_NODE = "verify"
@@ -33,6 +34,7 @@ _WAITING_STATUSES = frozenset({"waiting_user", "waiting_external", "waiting_agen
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _MAX_APPLIED_COMMAND_IDS = 64
 _ROUTE_STATUSES = {
+    "compact": frozenset({"running", *_WAITING_STATUSES}),
     "model": frozenset({"running"}),
     "tool": frozenset({"running"}),
     "verify": frozenset({"verifying"}),
@@ -197,6 +199,7 @@ def build_agent_runtime_graph(
     builder = StateGraph(RuntimeGraphState, context_schema=RuntimeContext)
 
     builder.add_node(CONTROL_GUARD_NODE, _make_node("control_guard", identity))
+    builder.add_node(COMPACT_NODE, _make_node("compact", identity))
     builder.add_node(MODEL_NODE, _make_node("model", identity))
     builder.add_node(TOOL_NODE, _make_node("tool", identity))
     builder.add_node(VERIFY_NODE, _make_node("verify", identity))
@@ -208,6 +211,7 @@ def build_agent_runtime_graph(
         CONTROL_GUARD_NODE,
         route_after_control,
         {
+            "compact": COMPACT_NODE,
             "model": MODEL_NODE,
             "tool": TOOL_NODE,
             "verify": VERIFY_NODE,
@@ -215,6 +219,7 @@ def build_agent_runtime_graph(
             "terminal": TERMINAL_NODE,
         },
     )
+    builder.add_edge(COMPACT_NODE, CONTROL_GUARD_NODE)
     builder.add_edge(MODEL_NODE, CONTROL_GUARD_NODE)
     builder.add_edge(TOOL_NODE, CONTROL_GUARD_NODE)
     builder.add_edge(VERIFY_NODE, CONTROL_GUARD_NODE)

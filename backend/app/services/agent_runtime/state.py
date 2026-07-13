@@ -22,9 +22,17 @@ LifecycleStatus: TypeAlias = Literal[
     "failed",
     "cancelled",
 ]
-ControlRoute: TypeAlias = Literal["model", "tool", "verify", "wait", "terminal"]
+ControlRoute: TypeAlias = Literal[
+    "compact",
+    "model",
+    "tool",
+    "verify",
+    "wait",
+    "terminal",
+]
 RuntimeNodeName: TypeAlias = Literal[
     "control_guard",
+    "compact",
     "model",
     "tool",
     "verify",
@@ -88,6 +96,9 @@ class RuntimeLifecycle(TypedDict):
     run_messages: NotRequired[list[JsonObject]]
     run_summary: NotRequired[JsonObject | None]
     covered_through_run_message_id: NotRequired[str | None]
+    compact_return_route: NotRequired[Literal["model", "wait"] | None]
+    compact_forced: NotRequired[bool]
+    run_compact_error: NotRequired[JsonObject | None]
     pending_tool_calls: NotRequired[list[JsonObject]]
     waiting_request: NotRequired[JsonObject | None]
     verification_result: NotRequired[JsonObject | None]

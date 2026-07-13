@@ -19,6 +19,7 @@ from app.services.agent_runtime.node_executor import (
     DeterministicRuntimeNodeExecutor,
     FinalizationResult,
     ModelStepResult,
+    RunCompactResult,
     ToolStepResult,
     VerificationResult,
 )
@@ -118,6 +119,23 @@ class ToolService:
         return self.result
 
 
+class RunCompactor:
+    def __init__(self, result: RunCompactResult | None = None) -> None:
+        self.result = result or RunCompactResult()
+        self.calls: list[bool] = []
+
+    async def compact_if_needed(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        *,
+        forced: bool,
+    ) -> RunCompactResult:
+        del state, context
+        self.calls.append(forced)
+        return self.result
+
+
 class Verifier:
     def __init__(self, *results: VerificationResult) -> None:
         self.results = deque(results)
@@ -177,6 +195,7 @@ def _executor(
     *,
     cancel: CancelSource | None = None,
     tools: ToolService | None = None,
+    run_compactor: RunCompactor | None = None,
     verifier: Verifier | None = None,
     max_model_steps: int = 50,
     max_verification_repairs: int = 2,
@@ -185,11 +204,84 @@ def _executor(
         cancel_source=cancel or CancelSource(),
         model_service=model,
         tool_service=tools or ToolService(),
+        run_compactor=run_compactor,
         verifier=verifier,
         finalizer=Finalizer(),
         max_model_steps=max_model_steps,
         max_verification_repairs=max_verification_repairs,
     )
+
+
+@pytest.mark.asyncio
+async def test_compact_replaces_only_run_summary_and_covered_messages() -> None:
+    run_id = uuid.uuid4()
+    retained = {"id": "recent-1", "role": "user", "content": "recent"}
+    compactor = RunCompactor(
+        RunCompactResult(
+            compacted=True,
+            run_summary={"goal": "done", "next_step": "continue"},
+            run_messages=(retained,),
+            covered_through_run_message_id="old-20",
+        )
+    )
+    executor = _executor(ModelService(), run_compactor=compactor)
+    state = _state(run_id)
+    state["lifecycle"].update(
+        {
+            "next_route": "compact",
+            "compact_return_route": "model",
+            "compact_forced": True,
+            "pending_tool_calls": [{"id": "pending-exact"}],
+            "waiting_request": {"correlation_id": "wait-exact"},
+            "verification_result": {"outcome": "repair"},
+        }
+    )
+
+    update = await executor.execute(
+        "compact",
+        state,
+        _context(run_id, executor, "command-compact"),
+    )
+
+    lifecycle = update["lifecycle"]
+    assert compactor.calls == [True]
+    assert lifecycle["next_route"] == "model"
+    assert lifecycle["run_summary"] == {"goal": "done", "next_step": "continue"}
+    assert lifecycle["run_messages"] == [retained]
+    assert lifecycle["covered_through_run_message_id"] == "old-20"
+    assert lifecycle["pending_tool_calls"] == [{"id": "pending-exact"}]
+    assert lifecycle["waiting_request"] == {"correlation_id": "wait-exact"}
+    assert lifecycle["verification_result"] == {"outcome": "repair"}
+
+
+@pytest.mark.asyncio
+async def test_compact_failure_records_diagnostic_and_continues_wait_route() -> None:
+    run_id = uuid.uuid4()
+    compactor = RunCompactor(
+        RunCompactResult(error={"code": "compact_failed", "message": "keep old"})
+    )
+    executor = _executor(ModelService(), run_compactor=compactor)
+    state = _state(run_id)
+    state["lifecycle"].update(
+        {
+            "status": "waiting_user",
+            "next_route": "compact",
+            "compact_return_route": "wait",
+            "compact_forced": True,
+        }
+    )
+
+    update = await executor.execute(
+        "compact",
+        state,
+        _context(run_id, executor, "command-compact"),
+    )
+
+    assert update["lifecycle"]["next_route"] == "wait"
+    assert update["lifecycle"]["run_compact_error"] == {
+        "code": "compact_failed",
+        "message": "keep old",
+    }
 
 
 def _context(
