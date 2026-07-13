@@ -62,6 +62,8 @@ class ToolStepResult:
 
     messages: tuple[JsonObject, ...] = ()
     waiting_request: JsonObject | None = None
+    pending_tool_calls: tuple[JsonObject, ...] = ()
+    cancel_signal: CancelSignal | None = None
     error: JsonObject | None = None
 
 
@@ -451,10 +453,30 @@ class DeterministicRuntimeNodeExecutor:
         lifecycle.update(
             {
                 "run_messages": messages,
-                "pending_tool_calls": [],
+                "pending_tool_calls": [dict(call) for call in result.pending_tool_calls],
             }
         )
-        if result.waiting_request is not None:
+        if result.cancel_signal is not None:
+            cancel = result.cancel_signal
+            if not cancel.command_id:
+                raise RuntimeNodeTransitionError(
+                    "invalid_cancel_command",
+                    "cancel command ID must not be blank",
+                )
+            lifecycle.update(
+                {
+                    "status": "cancelled",
+                    "next_route": "terminal",
+                    "reason": cancel.reason or "cancelled_by_command",
+                    "last_applied_command_ids": _append_command_id(
+                        state["lifecycle"],
+                        cancel.command_id,
+                    ),
+                    "waiting_request": None,
+                    "error": None,
+                }
+            )
+        elif result.waiting_request is not None:
             request = _validate_waiting_request(result.waiting_request)
             waiting_type = cast(str, request["waiting_type"])
             lifecycle.update(
