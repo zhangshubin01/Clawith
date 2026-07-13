@@ -45,6 +45,17 @@ class RuntimeTerminalProductHandler(Protocol):
     ) -> None: ...
 
 
+class RuntimeCheckpointProductHandler(Protocol):
+    """Apply source-specific work for any committed checkpoint status."""
+
+    async def handle(
+        self,
+        *,
+        run: RuntimeRunRecord,
+        checkpoint: CheckpointObservation,
+    ) -> None: ...
+
+
 def _validate_scope(
     run: RuntimeRunRecord,
     command: RuntimeCommandRecord,
@@ -134,6 +145,8 @@ def delivery_from_checkpoint(
 ) -> DeliveryRequest | None:
     """Derive a user-visible request without consulting a product projection."""
     status = checkpoint.state["lifecycle"]["status"]
+    if run.registry.system_role == "group_planning" and status == "completed":
+        return None
     if status == "waiting_user":
         return _waiting_delivery(run, checkpoint)
     if status not in _TERMINAL_STATUSES:
@@ -156,10 +169,12 @@ class RuntimeCheckpointSideEffects:
         *,
         session_factory: RuntimeSessionFactory,
         projector: RuntimeProjector,
+        checkpoint_handlers: Sequence[RuntimeCheckpointProductHandler] = (),
         terminal_handlers: Sequence[RuntimeTerminalProductHandler] = (),
     ) -> None:
         self._session_factory = session_factory
         self._projector = projector
+        self._checkpoint_handlers = tuple(checkpoint_handlers)
         self._terminal_handlers = tuple(terminal_handlers)
 
     async def handle(
@@ -216,6 +231,15 @@ class RuntimeCheckpointSideEffects:
             except Exception as exc:
                 errors.append(exc)
 
+        for checkpoint_handler in self._checkpoint_handlers:
+            try:
+                await checkpoint_handler.handle(
+                    run=run,
+                    checkpoint=checkpoint,
+                )
+            except Exception as exc:
+                errors.append(exc)
+
         if authoritative_status in _TERMINAL_STATUSES:
             for terminal_handler in self._terminal_handlers:
                 try:
@@ -232,6 +256,7 @@ class RuntimeCheckpointSideEffects:
 
 __all__ = [
     "RuntimeCheckpointSideEffectError",
+    "RuntimeCheckpointProductHandler",
     "RuntimeCheckpointSideEffects",
     "delivery_from_checkpoint",
 ]

@@ -32,7 +32,11 @@ from app.services.agent_runtime.command_worker import (
     RuntimeSessionFactory,
 )
 from app.services.agent_runtime.context_builder import ContextBuilder
-from app.services.agent_runtime.graph import AgentRuntimeGraph, build_agent_runtime_graph
+from app.services.agent_runtime.graph import (
+    AgentRuntimeGraph,
+    RuntimeGraphIdentity,
+    build_agent_runtime_graph,
+)
 from app.services.agent_runtime.group_acknowledgement import (
     RuntimeGroupStartAcknowledgementHandler,
 )
@@ -46,6 +50,15 @@ from app.services.agent_runtime.langgraph_driver import (
 )
 from app.services.agent_runtime.model_step_service import RuntimeModelStepService
 from app.services.agent_runtime.node_executor import DeterministicRuntimeNodeExecutor
+from app.services.agent_runtime.planning import (
+    PlanningModelService,
+    PlanningRuntimeNodeExecutor,
+    RuntimeNodeExecutorRouter,
+)
+from app.services.agent_runtime.planning_scheduler import (
+    PlanningCheckpointScheduler,
+    PlanningChildCompletionHandler,
+)
 from app.services.agent_runtime.projector import RuntimeProjector
 from app.services.agent_runtime.run_compactor import RuntimeRunCompactorService
 from app.services.agent_runtime.scheduling_lane import SchedulingLaneCompletionHandler
@@ -84,6 +97,7 @@ class RuntimeWorkerComponents:
     """Long-lived Runtime objects sharing one installed Checkpointer."""
 
     graph: AgentRuntimeGraph
+    planning_graph: AgentRuntimeGraph
     graph_registry: RuntimeGraphRegistry
     driver: LangGraphRuntimeDriver
     worker: RuntimeCommandWorker
@@ -184,7 +198,7 @@ def build_runtime_worker_components(
         session_factory=session_factory,
         settings=runtime_settings,
     )
-    node_executor = DeterministicRuntimeNodeExecutor(
+    agent_node_executor = DeterministicRuntimeNodeExecutor(
         cancel_source=cancel_source,
         model_service=model_service,
         tool_service=tool_service,
@@ -194,13 +208,31 @@ def build_runtime_worker_components(
         checkpointer=checkpointer,
         settings=runtime_settings,
     )
-    graph_registry = RuntimeGraphRegistry([graph])
+    planning_graph = build_agent_runtime_graph(
+        checkpointer=checkpointer,
+        settings=runtime_settings,
+        identity=RuntimeGraphIdentity.planning_from_settings(runtime_settings),
+    )
+    planning_node_executor = PlanningRuntimeNodeExecutor(
+        cancel_source=cancel_source,
+        model_service=PlanningModelService(session_factory=session_factory),
+    )
+    node_executor = RuntimeNodeExecutorRouter(
+        agent_executor=agent_node_executor,
+        planning_executor=planning_node_executor,
+    )
+    graph_registry = RuntimeGraphRegistry([graph, planning_graph])
     driver = LangGraphRuntimeDriver(
         graph_registry=graph_registry,
         snapshot_factory=RuntimeInputSnapshotFactory(context_builder),
         node_executor=node_executor,
     )
-    projector = RuntimeProjector(graph.compiled)
+    projector = RuntimeProjector(
+        state_source_resolver=lambda run: graph_registry.resolve_identity(
+            run.graph_name,
+            run.graph_version,
+        ).compiled
+    )
     session_context_compactor = LLMSessionContextCompactor(
         session_factory=session_factory,
         settings=runtime_settings,
@@ -208,6 +240,12 @@ def build_runtime_worker_components(
     post_checkpoint_handler = RuntimeCheckpointSideEffects(
         session_factory=session_factory,
         projector=projector,
+        checkpoint_handlers=(
+            PlanningCheckpointScheduler(
+                session_factory=session_factory,
+                settings=runtime_settings,
+            ),
+        ),
         terminal_handlers=(
             SessionContextCompletionHandler(
                 session_factory=session_factory,
@@ -218,6 +256,7 @@ def build_runtime_worker_components(
             TriggerRuntimeCompletionHandler(session_factory=session_factory),
             HeartbeatRuntimeCompletionHandler(session_factory=session_factory),
             A2ARuntimeCompletionHandler(session_factory=session_factory),
+            PlanningChildCompletionHandler(session_factory=session_factory),
             SchedulingLaneCompletionHandler(session_factory=session_factory),
         ),
     )
@@ -235,6 +274,7 @@ def build_runtime_worker_components(
     )
     return RuntimeWorkerComponents(
         graph=graph,
+        planning_graph=planning_graph,
         graph_registry=graph_registry,
         driver=driver,
         worker=worker,

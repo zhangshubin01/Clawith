@@ -18,8 +18,10 @@ from app.models.llm import LLMModel
 from app.models.participant import Participant
 from app.models.user import User
 from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
+from app.services.agent_runtime.model_capabilities import (
+    PlatformModelConfigurationError,
+)
 from app.services.group_message_service import (
-    GroupMessageServiceError,
     ResolvedGroupMention,
     _SenderScope,
     _dedupe_mentions,
@@ -313,7 +315,7 @@ async def test_public_message_and_single_mention_start_share_one_session() -> No
 
 
 @pytest.mark.asyncio
-async def test_multi_agent_message_fails_before_persisting_partial_work() -> None:
+async def test_multi_agent_message_creates_one_planning_root_in_the_same_transaction() -> None:
     tenant_id, _, scope, target, mention = _records()
     other_agent = Agent(
         id=uuid.uuid4(),
@@ -337,6 +339,7 @@ async def test_multi_agent_message_fails_before_persisting_partial_work() -> Non
         model=mention.model,
     )
     db = _Session()
+    handle = _handle(tenant_id)
 
     with (
         patch(
@@ -347,22 +350,129 @@ async def test_multi_agent_message_fails_before_persisting_partial_work() -> Non
             "app.services.group_message_service._resolve_mentions",
             new=AsyncMock(return_value=(mention, other)),
         ),
+        patch(
+            "app.services.group_message_service.resolve_multi_agent_planning_model",
+            new=AsyncMock(return_value=mention.model),
+        ),
+        patch(
+            "app.services.group_message_service.TransactionalAgentRuntimeAdapter.start_run",
+            new=AsyncMock(return_value=handle),
+        ) as start_run,
     ):
-        with pytest.raises(GroupMessageServiceError) as exc_info:
-            await enqueue_group_message(
-                db,  # type: ignore[arg-type]
-                tenant_id=tenant_id,
-                group_id=scope.group.id,
-                session_id=scope.session.id,
-                sender_participant_id=scope.participant.id,
-                content="Work together",
-                mention_participant_ids=[target.id, other_target_id],
-                settings_override=_settings(),
-            )
+        intake = await enqueue_group_message(
+            db,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            group_id=scope.group.id,
+            session_id=scope.session.id,
+            sender_participant_id=scope.participant.id,
+            content="Work together",
+            mention_participant_ids=[target.id, other_target_id],
+            settings_override=_settings(),
+            clock=NOW,
+        )
 
-    assert exc_info.value.code == "group_planning_not_available"
-    assert db.added == []
-    assert db.flushes == 0
+    assert intake.dispatch_kind == "planning"
+    assert intake.run_handles == (handle,)
+    assert intake.error_code is None
+    assert len(db.added) == 1
+    command = start_run.await_args.args[0]
+    assert command.run_kind == "orchestration"
+    assert command.system_role == "group_planning"
+    assert command.agent_id is None
+    assert command.source_execution_id == f"group_mention:{intake.message.id}:plan"
+    assert command.scheduling_lane_key is None
+    assert command.payload["candidate_agents"] == [
+        {
+            "agent_id": str(mention.agent.id),
+            "participant_id": str(mention.participant_id),
+            "name": mention.agent.name,
+            "role_description": mention.agent.role_description or "",
+        },
+        {
+            "agent_id": str(other.agent.id),
+            "participant_id": str(other.participant_id),
+            "name": other.agent.name,
+            "role_description": other.agent.role_description or "",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_missing_planning_model_persists_one_visible_idempotent_failure() -> None:
+    tenant_id, _, scope, target, mention = _records()
+    other_agent = Agent(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        creator_id=uuid.uuid4(),
+        name="Writer",
+        primary_model_id=mention.model.id,
+        status="idle",
+        is_expired=False,
+        access_mode="company",
+    )
+    other = ResolvedGroupMention(
+        participant_id=uuid.uuid4(),
+        participant_type="agent",
+        participant_ref_id=other_agent.id,
+        display_name=other_agent.name,
+        valid=True,
+        triggers_agent=True,
+        agent=other_agent,
+        model=mention.model,
+    )
+    db = _Session()
+
+    with (
+        patch(
+            "app.services.group_message_service._load_sender_scope",
+            new=AsyncMock(return_value=scope),
+        ),
+        patch(
+            "app.services.group_message_service._resolve_mentions",
+            new=AsyncMock(return_value=(mention, other)),
+        ),
+        patch(
+            "app.services.group_message_service.resolve_multi_agent_planning_model",
+            new=AsyncMock(
+                side_effect=PlatformModelConfigurationError(
+                    "MULTI_AGENT_PLANNING_MODEL_ID",
+                    "is not configured",
+                )
+            ),
+        ),
+        patch(
+            "app.services.group_message_service.TransactionalAgentRuntimeAdapter.start_run",
+            new=AsyncMock(),
+        ) as start_run,
+    ):
+        intake = await enqueue_group_message(
+            db,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            group_id=scope.group.id,
+            session_id=scope.session.id,
+            sender_participant_id=scope.participant.id,
+            content="Work together",
+            mention_participant_ids=[target.id, other.participant_id],
+            settings_override=_settings(),
+            clock=NOW,
+        )
+
+    assert intake.dispatch_kind == "planning"
+    assert intake.run_handles == ()
+    assert intake.error_code == "planning_model_unavailable"
+    start_run.assert_not_awaited()
+    assert len(db.added) == 2
+    public_message, failure_message = db.added
+    assert isinstance(public_message, ChatMessage)
+    assert isinstance(failure_message, ChatMessage)
+    assert failure_message.id == uuid.uuid5(
+        public_message.id,
+        "planning-configuration-failure",
+    )
+    assert failure_message.role == "system"
+    assert failure_message.participant_id is None
+    assert failure_message.content == "任务规划未完成，请重试或改为单 Agent 处理。"
+    assert failure_message.created_at == NOW.replace(microsecond=1)
 
 
 @pytest.mark.asyncio

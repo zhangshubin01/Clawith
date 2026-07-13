@@ -20,6 +20,10 @@ from app.services.agent_runtime.heartbeat_completion import (
 from app.services.agent_runtime.group_acknowledgement import (
     RuntimeGroupStartAcknowledgementHandler,
 )
+from app.services.agent_runtime.planning_scheduler import (
+    PlanningCheckpointScheduler,
+    PlanningChildCompletionHandler,
+)
 from app.services.agent_runtime.scheduling_lane import SchedulingLaneCompletionHandler
 from app.services.agent_runtime.session_context_completion import (
     SessionContextCompletionHandler,
@@ -129,7 +133,7 @@ async def test_daemon_continues_after_iteration_error_until_stopped() -> None:
     assert worker.calls == 2
 
 
-def test_component_builder_installs_one_pinned_graph_and_shared_driver() -> None:
+def test_component_builder_installs_pinned_agent_and_planning_graphs() -> None:
     components = build_runtime_worker_components(
         checkpointer=InMemorySaver(),
         session_factory=_SessionFactory(),  # type: ignore[arg-type]
@@ -140,6 +144,8 @@ def test_component_builder_installs_one_pinned_graph_and_shared_driver() -> None
 
     assert components.graph.identity.name == "worker_service_test"
     assert components.graph.identity.version == "v1"
+    assert components.planning_graph.identity.name == "worker_service_test_group_planning"
+    assert components.planning_graph.identity.version == "v1"
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
     registry = RunRegistrySnapshot(
@@ -160,6 +166,13 @@ def test_component_builder_installs_one_pinned_graph_and_shared_driver() -> None
         registry=registry,
     )
     assert components.graph_registry.resolve(run) is components.graph
+    assert (
+        components.graph_registry.resolve_identity(
+            "worker_service_test_group_planning",
+            "v1",
+        )
+        is components.planning_graph
+    )
     assert components.worker._checkpoint_reader is components.driver
     assert components.worker._command_executor is components.driver
     assert isinstance(
@@ -173,7 +186,12 @@ def test_component_builder_installs_one_pinned_graph_and_shared_driver() -> None
         TriggerRuntimeCompletionHandler,
         HeartbeatRuntimeCompletionHandler,
         A2ARuntimeCompletionHandler,
+        PlanningChildCompletionHandler,
         SchedulingLaneCompletionHandler,
+    ]
+    checkpoint_handlers = components.worker._post_checkpoint_handler._checkpoint_handlers
+    assert [type(handler) for handler in checkpoint_handlers] == [
+        PlanningCheckpointScheduler,
     ]
 
 

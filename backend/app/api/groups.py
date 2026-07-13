@@ -123,6 +123,7 @@ class GroupMessageIntakeOut(BaseModel):
     dispatch_kind: str
     run_ids: list[uuid.UUID]
     created: bool
+    error_code: str | None = None
 
 
 _NOT_FOUND_CODES = {
@@ -784,4 +785,5 @@ async def create_group_message(
         dispatch_kind=intake.dispatch_kind,
         run_ids=[handle.run_id for handle in intake.run_handles],
         created=intake.created,
+        error_code=intake.error_code,
     )

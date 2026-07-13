@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 import uuid
 
@@ -24,6 +24,10 @@ from app.services.agent_runtime.adapter import (
 )
 from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
 from app.services.agent_runtime.persistence import RuntimePersistenceError
+from app.services.agent_runtime.model_capabilities import (
+    PlatformModelConfigurationError,
+    resolve_multi_agent_planning_model,
+)
 
 
 _ACTIVE_AGENT_STATUSES = frozenset({"creating", "running", "idle"})
@@ -76,6 +80,7 @@ class GroupMessageIntake:
     dispatch_kind: Literal["none", "single", "planning"]
     run_handles: tuple[RunHandle, ...]
     created: bool
+    error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +469,88 @@ def _single_mention_command(
     )
 
 
+def _planning_command(
+    *,
+    tenant_id: uuid.UUID,
+    scope: _SenderScope,
+    message: ChatMessage,
+    mentions: tuple[ResolvedGroupMention, ...],
+    targets: tuple[ResolvedGroupMention, ...],
+    model: LLMModel,
+) -> StartRunCommand:
+    source_execution_id = f"group_mention:{message.id}:plan"
+    return StartRunCommand(
+        tenant_id=tenant_id,
+        agent_id=None,
+        session_id=scope.session.id,
+        source_type="chat",
+        source_id=str(message.id),
+        source_execution_id=source_execution_id,
+        goal=message.content,
+        run_kind="orchestration",
+        system_role="group_planning",
+        model_id=model.id,
+        delivery_status="pending",
+        delivery_target={
+            "kind": "group",
+            "session_id": str(scope.session.id),
+            "group_id": str(scope.group.id),
+        },
+        idempotency_key=f"start:{source_execution_id}",
+        payload={
+            "message_id": str(message.id),
+            "group_id": str(scope.group.id),
+            "session_id": str(scope.session.id),
+            "sender_participant_id": str(scope.participant.id),
+            "mention_targets": [mention.payload() for mention in mentions],
+            "candidate_agents": [
+                {
+                    "agent_id": str(target.agent.id),
+                    "participant_id": str(target.participant_id),
+                    "name": target.agent.name,
+                    "role_description": target.agent.role_description or "",
+                }
+                for target in targets
+                if target.agent is not None
+            ],
+            "source_channel": scope.session.source_channel,
+        },
+        origin_user_id=scope.user_id,
+        origin_agent_id=scope.agent_id,
+        actor_user_id=scope.user_id,
+        actor_agent_id=scope.agent_id,
+    )
+
+
+async def _persist_planning_configuration_failure(
+    db: AsyncSession,
+    *,
+    scope: _SenderScope,
+    trigger_message: ChatMessage,
+    clock: datetime,
+) -> None:
+    message_id = uuid.uuid5(trigger_message.id, "planning-configuration-failure")
+    existing = await db.get(ChatMessage, message_id)
+    if existing is None:
+        created_at = clock + timedelta(microseconds=1)
+        db.add(
+            ChatMessage(
+                id=message_id,
+                agent_id=None,
+                user_id=None,
+                role="system",
+                content="任务规划未完成，请重试或改为单 Agent 处理。",
+                conversation_id=str(scope.session.id),
+                participant_id=None,
+                mentions=[],
+                created_at=created_at,
+            )
+        )
+        scope.session.last_message_at = created_at
+        scope.session.updated_at = created_at
+        await db.flush()
+
+
 async def enqueue_group_message(
     db: AsyncSession,
     *,
@@ -494,11 +581,6 @@ async def enqueue_group_message(
         participant_ids=mention_ids,
     )
     agent_mentions = tuple(mention for mention in mentions if mention.triggers_agent)
-    if len(agent_mentions) > 1:
-        raise GroupMessageServiceError(
-            "group_planning_not_available",
-            "Multi-Agent mentions require the Planning Graph",
-        )
 
     resolved_message_id = message_id or uuid.uuid4()
     message, created = await _persist_message(
@@ -520,6 +602,49 @@ async def enqueue_group_message(
 
     runtime_settings = settings_override or get_settings()
     adapter = TransactionalAgentRuntimeAdapter(db, settings=runtime_settings)
+    if len(agent_mentions) > 1:
+        try:
+            planning_model = await resolve_multi_agent_planning_model(
+                db,
+                runtime_settings,
+            )
+            handle = await adapter.start_run(
+                _planning_command(
+                    tenant_id=tenant_id,
+                    scope=scope,
+                    message=message,
+                    mentions=mentions,
+                    targets=agent_mentions,
+                    model=planning_model,
+                )
+            )
+        except (
+            PlatformModelConfigurationError,
+            RuntimeAdapterError,
+            RuntimePersistenceError,
+        ) as exc:
+            await _persist_planning_configuration_failure(
+                db,
+                scope=scope,
+                trigger_message=message,
+                clock=message.created_at or datetime.now(UTC),
+            )
+            return GroupMessageIntake(
+                message=message,
+                mentions=mentions,
+                dispatch_kind="planning",
+                run_handles=(),
+                created=created,
+                error_code=(exc.code if hasattr(exc, "code") else "planning_model_unavailable"),
+            )
+        return GroupMessageIntake(
+            message=message,
+            mentions=mentions,
+            dispatch_kind="planning",
+            run_handles=(handle,),
+            created=created,
+        )
+
     try:
         handle = await adapter.start_run(
             _single_mention_command(

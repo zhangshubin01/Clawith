@@ -111,6 +111,20 @@ class _TerminalHandler:
             raise self.error
 
 
+class _CheckpointHandler:
+    def __init__(self, timeline: list[str], *, error: Exception | None = None) -> None:
+        self.timeline = timeline
+        self.error = error
+        self.calls = 0
+
+    async def handle(self, *, run, checkpoint) -> None:
+        del run, checkpoint
+        self.calls += 1
+        self.timeline.append("checkpoint_handler")
+        if self.error is not None:
+            raise self.error
+
+
 def _records(
     *,
     status: str = "completed",
@@ -194,6 +208,44 @@ async def test_projects_then_delivers_completed_checkpoint() -> None:
 
     assert timeline.index("project") < timeline.index("deliver")
     deliver.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_product_handler_runs_only_after_projection_commit() -> None:
+    timeline: list[str] = []
+    run, command, checkpoint = _records(status="waiting_agent")
+    product = _CheckpointHandler(timeline)
+    handler = RuntimeCheckpointSideEffects(
+        session_factory=_SessionFactory(timeline),  # type: ignore[arg-type]
+        projector=_Projector(
+            timeline,
+            status="waiting_agent",
+            checkpoint_id=checkpoint.checkpoint_id,
+        ),  # type: ignore[arg-type]
+        checkpoint_handlers=(product,),
+    )
+
+    await handler.handle(run=run, command=command, checkpoint=checkpoint)
+
+    assert product.calls == 1
+    assert timeline.index("transaction_exit") < timeline.index("checkpoint_handler")
+
+
+def test_completed_planning_root_has_no_public_terminal_delivery() -> None:
+    run, _, checkpoint = _records(lifecycle={"final_answer": "internal"})
+    registry = replace(
+        run.registry,
+        run_kind="orchestration",
+        agent_id=None,
+        system_role="group_planning",
+    )
+    planning_run = replace(run, registry=registry)
+    planning_checkpoint = replace(
+        checkpoint,
+        state={**checkpoint.state, "registry": registry},
+    )
+
+    assert delivery_from_checkpoint(planning_run, planning_checkpoint) is None
 
 
 @pytest.mark.asyncio
