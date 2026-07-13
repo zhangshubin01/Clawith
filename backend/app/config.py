@@ -119,6 +119,12 @@ class Settings(BaseSettings):
     # Process role
     PROCESS_ROLE: str = "all"
 
+    # Agent Runtime model capabilities
+    AGENT_RUNTIME_SUMMARY_THRESHOLD_RATIO: float = 0.85
+    AGENT_RUNTIME_MODEL_CAPABILITY_REFRESH_SECONDS: int = 86400
+    MULTI_AGENT_COMPACT_MODEL_ID: uuid.UUID | None = None
+    MULTI_AGENT_PLANNING_MODEL_ID: uuid.UUID | None = None
+
     # Docker (for Agent containers)
     DOCKER_NETWORK: str = "clawith_network"
     OPENCLAW_IMAGE: str = "openclaw:local"
