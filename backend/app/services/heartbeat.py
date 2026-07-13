@@ -16,6 +16,10 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from app.core.logging_config import new_trace_id
+from app.services.heartbeat_runtime import (
+    HeartbeatRuntimeIntakeError,
+    enqueue_oneshot_runtime,
+)
 from sqlalchemy import select, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.storage import agent_storage_key, get_storage_backend
@@ -715,250 +719,48 @@ async def run_agent_oneshot(
     triggered_by_user_id: uuid.UUID | None = None,
     max_rounds: int = 40,
 ) -> str:
-    """Run an agent with a specific one-shot task prompt.
-
-    Reuses the same LLM + tools infrastructure as the heartbeat, but:
-    - Accepts an arbitrary task prompt instead of the HEARTBEAT.md instruction
-    - Does NOT update last_heartbeat_at
-    - Does NOT check active hours
-    - Configurable max_rounds to handle multi-member outreach tasks
-    - Sends a platform notification to the triggering user on failure
-
-    Returns the final reply string (for logging purposes).
-    """
+    """Register one explicit background Run and return its durable identity."""
     new_trace_id()
     try:
         from app.database import async_session
         from app.models.agent import Agent
-        from app.models.llm import LLMModel
-        from app.services.llm import get_model_api_key
-
-        # ── Phase 1: Read agent + model config (short DB transaction) ──────────
-        agent_name = ""
-        agent_role = ""
-        agent_creator_id = None
-        model_provider = ""
-        model_api_key = ""
-        model_model = ""
-        model_base_url = None
-        model_temperature = None
-        model_max_output_tokens = None
-        model_request_timeout = None
-
         async with async_session() as db:
             result = await db.execute(select(Agent).where(Agent.id == agent_id))
             agent = result.scalar_one_or_none()
             if not agent:
                 logger.warning(f"[Oneshot] Agent {agent_id} not found — aborting")
                 return ""
-
-            model_id = agent.primary_model_id or agent.fallback_model_id
-            if not model_id:
-                msg = "Agent has no LLM model configured. Please assign a model in Agent Settings."
-                logger.warning(f"[Oneshot] Agent {agent_id} has no model configured — aborting")
-                await _notify_oneshot_error(triggered_by_user_id, agent_id, agent_name or str(agent_id), msg)
-                return ""
-
-            model_result = await db.execute(select(LLMModel).where(LLMModel.id == model_id))
-            model = model_result.scalar_one_or_none()
-            if not model:
-                msg = f"The configured LLM model ({model_id}) was not found. Please check Agent Settings."
-                logger.warning(f"[Oneshot] Model {model_id} not found — aborting")
-                await _notify_oneshot_error(triggered_by_user_id, agent_id, agent_name or str(agent_id), msg)
-                return ""
-
-            agent_name = agent.name
-            agent_role = agent.role_description or ""
-            agent_creator_id = agent.creator_id
-            model_provider = model.provider
-            model_api_key = get_model_api_key(model)
-            model_model = model.model
-            model_base_url = model.base_url
-            model_temperature = model.temperature
-            model_max_output_tokens = getattr(model, "max_output_tokens", None)
-            model_request_timeout = getattr(model, "request_timeout", None)
-
-            # Build agent identity context (system prompt + dynamic context)
-            from app.services.agent_context import build_agent_context
-            static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, agent_role)
-
-            await db.commit()
-        # DB session is now closed — connection returned to pool
-
-        # ── Phase 2: LLM tool-call loop (no DB connection held) ────────────────
-        from app.services.llm import (
-            create_llm_client,
-            get_max_tokens,
-            LLMMessage,
-            LLMError,
-        )
-        from app.services.agent_tools import execute_tool, get_agent_tools_for_llm
-        from app.services.token_tracker import (
-            TokenUsage,
-            record_token_usage,
-            extract_token_usage,
-            estimate_token_usage_from_chars,
-        )
-
-        try:
-            client = create_llm_client(
-                provider=model_provider,
-                api_key=model_api_key,
-                model=model_model,
-                base_url=model_base_url,
-                timeout=float(model_request_timeout or 120.0),
+            handle = await enqueue_oneshot_runtime(
+                db,
+                agent=agent,
+                prompt=prompt,
+                occurrence_id=uuid.uuid4(),
+                triggered_by_user_id=triggered_by_user_id,
+                requested_max_steps=max_rounds,
             )
-        except Exception as e:
-            msg = f"Failed to initialise the LLM client: {e}"
-            logger.error(f"[Oneshot] Failed to create LLM client for {agent_name}: {e}")
-            await _notify_oneshot_error(triggered_by_user_id, agent_id, agent_name, msg)
-            return ""
-
-        tools_for_llm = await get_agent_tools_for_llm(agent_id)
-        llm_messages = [
-            LLMMessage(role="system", content=static_prompt, dynamic_content=dynamic_prompt),
-            LLMMessage(role="user", content=prompt),
-        ]
-
-        reply = ""
-        accumulated_usage = TokenUsage()
-        unsaved_usage = TokenUsage()
-
-        for round_i in range(max_rounds):
-            # Check token usage limit mid-loop (every 3 rounds)
-            if round_i > 0 and round_i % 3 == 0:
-                if agent_id and unsaved_usage.total_tokens > 0:
-                    try:
-                        await record_token_usage(agent_id, unsaved_usage)
-                    except Exception as e:
-                        logger.warning(f"[Oneshot] Failed to record token usage mid-loop: {e}")
-                    unsaved_usage = TokenUsage()
-                    from app.services.llm.caller import _get_agent_config
-                    _, _token_limit_msg = await _get_agent_config(agent_id)
-                    if _token_limit_msg:
-                        logger.warning(f"[Oneshot] Token limit exceeded mid-loop: {_token_limit_msg}")
-                        await client.close()
-                        reply = _token_limit_msg
-                        break
-
-            try:
-                response = await client.complete(
-                    messages=llm_messages,
-                    tools=tools_for_llm,
-                    temperature=model_temperature,
-                    max_tokens=get_max_tokens(model_provider, model_model, model_max_output_tokens),
-                )
-            except LLMError as e:
-                logger.error(f"[Oneshot] LLM error (round {round_i}): {e}")
+            if handle is None:
+                message = "统一 Runtime 当前未对 oneshot 入口启用；未回退旧执行循环"
                 await _notify_oneshot_error(
-                    triggered_by_user_id, agent_id, agent_name,
-                    f"LLM call failed (round {round_i}): {e}",
+                    triggered_by_user_id,
+                    agent_id,
+                    agent.name,
+                    message,
                 )
-                break
-            except Exception as e:
-                logger.error(f"[Oneshot] Unexpected LLM error (round {round_i}): {e}")
-                await _notify_oneshot_error(
-                    triggered_by_user_id, agent_id, agent_name,
-                    f"Unexpected error during LLM call (round {round_i}): {e}",
-                )
-                break
+                logger.error(f"[Oneshot] {message}")
+                return ""
+            await db.commit()
+        logger.info(f"[Oneshot] Queued Run {handle.run_id} for {agent.name}")
+        return str(handle.run_id)
 
-            # Track token usage
-            usage = extract_token_usage(response.usage)
-            if not usage:
-                round_chars = sum(len(m.content or "") for m in llm_messages) + len(response.content or "")
-                usage = estimate_token_usage_from_chars(round_chars)
-            accumulated_usage.add(usage)
-            unsaved_usage.add(usage)
-
-            if response.tool_calls:
-                llm_messages.append(LLMMessage(
-                    role="assistant",
-                    content=response.content or None,
-                    tool_calls=[{
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": tc["function"],
-                    } for tc in response.tool_calls],
-                    reasoning_content=response.reasoning_content,
-                ))
-
-                finish_call = find_finish_call(response.tool_calls)
-                if finish_call:
-                    if finish_call.valid:
-                        reply = finish_call.content
-                        break
-                    llm_messages.append(LLMMessage(
-                        role="tool",
-                        tool_call_id=finish_call.call_id,
-                        content=finish_call.error or "`finish` was invalid.",
-                    ))
-                    continue
-
-                for tc in response.tool_calls:
-                    fn = tc["function"]
-                    tool_name = fn["name"]
-                    raw_args = fn.get("arguments", "{}")
-                    try:
-                        args = parse_tool_arguments(raw_args)
-                    except json.JSONDecodeError:
-                        args = {}
-
-                    logger.info(f"[Oneshot:{agent_name}] Tool call: {tool_name}({list(args.keys())})")
-                    tool_result = await execute_tool(tool_name, args, agent_id, agent_creator_id)
-
-                    llm_messages.append(LLMMessage(
-                        role="tool",
-                        tool_call_id=tc["id"],
-                        content=str(tool_result),
-                    ))
-            else:
-                if response.content:
-                    llm_messages.append(LLMMessage(role="assistant", content=response.content))
-                llm_messages.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
-                continue
-
-        await client.close()
-
-        # ── Phase 3: Record token usage (best-effort) ───────────────────────────
-        if unsaved_usage.total_tokens > 0:
-            try:
-                await record_token_usage(agent_id, unsaved_usage)
-            except Exception as e:
-                logger.warning(f"[Oneshot] Failed to record token usage: {e}")
-
-        # Log activity
-        if reply:
-            try:
-                from app.services.activity_logger import log_activity
-                await log_activity(
-                    agent_id, "oneshot_task",
-                    f"Oneshot task completed: {reply[:80]}",
-                    detail={"reply": reply[:500], "triggered_by": str(triggered_by_user_id)},
-                )
-            except Exception:
-                pass
-
-        # ── Phase 4: Clear any previous error notifications ──────────
-        if triggered_by_user_id:
-            try:
-                from sqlalchemy import delete
-                from app.models.notification import Notification
-                async with async_session() as db:
-                    await db.execute(
-                        delete(Notification).where(
-                            Notification.user_id == triggered_by_user_id,
-                            Notification.ref_id == agent_id,
-                            Notification.type == "system",
-                            Notification.title.contains("task failed")
-                        )
-                    )
-                    await db.commit()
-            except Exception as e:
-                logger.warning(f"[Oneshot] Failed to clear error notifications: {e}")
-
-        logger.info(f"[Oneshot] {agent_name} completed ({round_i + 1} rounds, {accumulated_usage.total_tokens} tokens)")
-        return reply
+    except HeartbeatRuntimeIntakeError as exc:
+        logger.error(f"[Oneshot] Runtime intake failed ({exc.code}): {exc}")
+        await _notify_oneshot_error(
+            triggered_by_user_id,
+            agent_id,
+            str(agent_id),
+            f"{exc.code}: {exc}",
+        )
+        return ""
 
     except Exception as e:
         logger.exception(f"[Oneshot] Unexpected error for agent {agent_id}: {e}")

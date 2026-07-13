@@ -40,6 +40,43 @@ def heartbeat_source_execution_id(
     return f"heartbeat:{agent_id}:{timestamp}"
 
 
+def schedule_occurrence_id(
+    schedule_id: uuid.UUID,
+    occurrence_at: datetime,
+) -> uuid.UUID:
+    """Derive one stable identity for an automatically claimed cron slot."""
+    if occurrence_at.tzinfo is None or occurrence_at.utcoffset() is None:
+        raise HeartbeatRuntimeIntakeError(
+            "invalid_schedule_occurrence",
+            "Schedule occurrence timestamp must be timezone-aware",
+        )
+    timestamp = (
+        occurrence_at.astimezone(UTC)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+    return uuid.uuid5(schedule_id, f"schedule-occurrence:{timestamp}")
+
+
+def _require_background_agent(agent: Agent, *, mode: str) -> uuid.UUID:
+    if agent.tenant_id is None:
+        raise HeartbeatRuntimeIntakeError(
+            "agent_tenant_missing",
+            f"Runtime {mode} Agent has no tenant",
+        )
+    if agent.primary_model_id is None:
+        raise HeartbeatRuntimeIntakeError(
+            "agent_model_missing",
+            f"Runtime {mode} Agent has no primary model",
+        )
+    if agent.is_expired or agent.status not in {"creating", "running", "idle"}:
+        raise HeartbeatRuntimeIntakeError(
+            "agent_unavailable",
+            f"Runtime {mode} Agent is unavailable",
+        )
+    return agent.tenant_id
+
+
 async def enqueue_heartbeat_runtime(
     db: AsyncSession,
     *,
@@ -57,21 +94,7 @@ async def enqueue_heartbeat_runtime(
     )
     if not decision.use_v2:
         return None
-    if agent.tenant_id is None:
-        raise HeartbeatRuntimeIntakeError(
-            "agent_tenant_missing",
-            "Runtime Heartbeat Agent has no tenant",
-        )
-    if agent.primary_model_id is None:
-        raise HeartbeatRuntimeIntakeError(
-            "agent_model_missing",
-            "Runtime Heartbeat Agent has no primary model",
-        )
-    if agent.is_expired or agent.status not in {"running", "idle"}:
-        raise HeartbeatRuntimeIntakeError(
-            "agent_unavailable",
-            "Runtime Heartbeat Agent is unavailable",
-        )
+    tenant_id = _require_background_agent(agent, mode="Heartbeat")
     normalized_instruction = instruction.strip()
     if not normalized_instruction:
         raise HeartbeatRuntimeIntakeError(
@@ -85,7 +108,7 @@ async def enqueue_heartbeat_runtime(
         settings=runtime_settings,
     ).start_run(
         StartRunCommand(
-            tenant_id=agent.tenant_id,
+            tenant_id=tenant_id,
             agent_id=agent.id,
             source_type="heartbeat",
             source_id=str(agent.id),
@@ -96,8 +119,130 @@ async def enqueue_heartbeat_runtime(
             delivery_status="not_required",
             idempotency_key=f"start:{source_execution_id}",
             payload={
+                "background_mode": "heartbeat",
                 "heartbeat_occurrence_at": occurrence_at.astimezone(UTC).isoformat(),
                 "heartbeat_instruction": normalized_instruction,
+            },
+            origin_user_id=agent.creator_id,
+        )
+    )
+
+
+async def enqueue_oneshot_runtime(
+    db: AsyncSession,
+    *,
+    agent: Agent,
+    prompt: str,
+    occurrence_id: uuid.UUID,
+    triggered_by_user_id: uuid.UUID | None,
+    requested_max_steps: int,
+    settings_override: Settings | None = None,
+) -> RunHandle | None:
+    """Register one explicit background task without an entrypoint tool loop."""
+    runtime_settings = settings_override or get_settings()
+    decision = decide_runtime_v2(
+        agent_id=agent.id,
+        source_type="heartbeat",
+        settings=runtime_settings,
+    )
+    if not decision.use_v2:
+        return None
+    tenant_id = _require_background_agent(agent, mode="oneshot")
+    normalized_prompt = prompt.strip()
+    if not normalized_prompt:
+        raise HeartbeatRuntimeIntakeError(
+            "oneshot_prompt_missing",
+            "Runtime oneshot prompt is empty",
+        )
+    if (
+        isinstance(requested_max_steps, bool)
+        or not isinstance(requested_max_steps, int)
+        or requested_max_steps <= 0
+    ):
+        raise HeartbeatRuntimeIntakeError(
+            "oneshot_step_limit_invalid",
+            "Runtime oneshot requested step limit must be positive",
+        )
+    source_execution_id = f"oneshot:{agent.id}:{occurrence_id}"
+    return await TransactionalAgentRuntimeAdapter(
+        db,
+        settings=runtime_settings,
+    ).start_run(
+        StartRunCommand(
+            tenant_id=tenant_id,
+            agent_id=agent.id,
+            source_type="heartbeat",
+            source_id=str(agent.id),
+            source_execution_id=source_execution_id,
+            goal=normalized_prompt,
+            run_kind="background",
+            model_id=agent.primary_model_id,
+            delivery_status="not_required",
+            idempotency_key=f"start:{source_execution_id}",
+            payload={
+                "background_mode": "oneshot",
+                "oneshot_occurrence_id": str(occurrence_id),
+                "oneshot_prompt": normalized_prompt,
+                "triggered_by_user_id": (
+                    str(triggered_by_user_id)
+                    if triggered_by_user_id is not None
+                    else None
+                ),
+                "requested_max_steps": requested_max_steps,
+                "agent_name": agent.name,
+            },
+            origin_user_id=triggered_by_user_id or agent.creator_id,
+            actor_user_id=triggered_by_user_id,
+        )
+    )
+
+
+async def enqueue_schedule_runtime(
+    db: AsyncSession,
+    *,
+    agent: Agent,
+    schedule_id: uuid.UUID,
+    occurrence_id: uuid.UUID,
+    instruction: str,
+    settings_override: Settings | None = None,
+) -> RunHandle | None:
+    """Register one cron schedule occurrence on the shared background Runtime."""
+    runtime_settings = settings_override or get_settings()
+    decision = decide_runtime_v2(
+        agent_id=agent.id,
+        source_type="heartbeat",
+        settings=runtime_settings,
+    )
+    if not decision.use_v2:
+        return None
+    tenant_id = _require_background_agent(agent, mode="schedule")
+    normalized_instruction = instruction.strip()
+    if not normalized_instruction:
+        raise HeartbeatRuntimeIntakeError(
+            "schedule_instruction_missing",
+            "Runtime schedule instruction is empty",
+        )
+    source_execution_id = f"schedule:{schedule_id}:{occurrence_id}"
+    return await TransactionalAgentRuntimeAdapter(
+        db,
+        settings=runtime_settings,
+    ).start_run(
+        StartRunCommand(
+            tenant_id=tenant_id,
+            agent_id=agent.id,
+            source_type="heartbeat",
+            source_id=str(schedule_id),
+            source_execution_id=source_execution_id,
+            goal=f"[自动调度任务] {normalized_instruction}",
+            run_kind="background",
+            model_id=agent.primary_model_id,
+            delivery_status="not_required",
+            idempotency_key=f"start:{source_execution_id}",
+            payload={
+                "background_mode": "schedule",
+                "schedule_id": str(schedule_id),
+                "schedule_occurrence_id": str(occurrence_id),
+                "schedule_instruction": normalized_instruction,
             },
             origin_user_id=agent.creator_id,
         )
@@ -107,5 +252,8 @@ async def enqueue_heartbeat_runtime(
 __all__ = [
     "HeartbeatRuntimeIntakeError",
     "enqueue_heartbeat_runtime",
+    "enqueue_oneshot_runtime",
+    "enqueue_schedule_runtime",
     "heartbeat_source_execution_id",
+    "schedule_occurrence_id",
 ]

@@ -10,6 +10,7 @@ import pytest
 
 from app.models.activity_log import AgentActivityLog
 from app.models.agent_run import AgentRun
+from app.models.notification import Notification
 from app.services.agent_runtime.command_worker import (
     CheckpointObservation,
     RuntimeRunRecord,
@@ -81,6 +82,7 @@ def _records(
     source_type: str = "heartbeat",
     status: str = "completed",
     answer: str | None = "Reviewed two notifications",
+    mode: str = "heartbeat",
 ) -> tuple[RuntimeRunRecord, CheckpointObservation, AgentRun]:
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -103,6 +105,31 @@ def _records(
         runtime_type="langgraph",
         registry=registry,
     )
+    initial_input: dict = {"background_mode": mode}
+    if mode == "schedule":
+        schedule_id = uuid.uuid4()
+        initial_input.update(
+            {
+                "schedule_id": str(schedule_id),
+                "schedule_instruction": "Review the weekly pipeline",
+            }
+        )
+        source_id = str(schedule_id)
+        source_execution_id = f"schedule:{schedule_id}:{uuid.uuid4()}"
+    elif mode == "oneshot":
+        initial_input.update(
+            {
+                "triggered_by_user_id": str(uuid.uuid4()),
+                "agent_name": "OKR Agent",
+            }
+        )
+        source_id = str(agent_id)
+        source_execution_id = f"oneshot:{agent_id}:{uuid.uuid4()}"
+    else:
+        source_id = str(agent_id)
+        source_execution_id = (
+            f"heartbeat:{agent_id}:2026-07-13T18:45:00.000000Z"
+        )
     state: RuntimeGraphState = {
         "registry": registry,
         "snapshots": RunInputSnapshots(
@@ -110,12 +137,15 @@ def _records(
             session_context_version=0,
             recent_session_messages=(),
             related_run_summaries=(),
-            initial_input={},
+            initial_input=initial_input,
         ),
         "lifecycle": {
             "status": status,
             "next_route": "terminal",
             "final_answer": answer,
+            "error": (
+                {"code": "model_call_failed"} if status == "failed" else None
+            ),
         },  # type: ignore[typeddict-item]
     }
     checkpoint = CheckpointObservation(
@@ -127,8 +157,8 @@ def _records(
         tenant_id=tenant_id,
         agent_id=agent_id,
         source_type="heartbeat",
-        source_id=str(agent_id),
-        source_execution_id=f"heartbeat:{agent_id}:2026-07-13T18:45:00.000000Z",
+        source_id=source_id,
+        source_execution_id=source_execution_id,
         goal="review the environment",
         run_kind="background",
         model_id=uuid.uuid4(),
@@ -223,3 +253,51 @@ async def test_completed_heartbeat_rejects_mismatched_source_identity() -> None:
         await handler.handle(run=run, checkpoint=checkpoint)
 
     assert raised.value.code == "heartbeat_source_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_schedule_result_creates_schedule_activity_from_checkpoint_input() -> None:
+    run, checkpoint, stored_run = _records(mode="schedule")
+    db = _Session(stored_run, None)
+    handler = HeartbeatRuntimeCompletionHandler(
+        session_factory=_SessionFactory(db),  # type: ignore[arg-type]
+    )
+
+    await handler.handle(run=run, checkpoint=checkpoint)
+
+    activity = db.added[0]
+    assert isinstance(activity, AgentActivityLog)
+    assert activity.id == uuid.uuid5(
+        run.run_id,
+        "schedule-terminal:checkpoint-terminal",
+    )
+    assert activity.action_type == "schedule_run"
+    assert activity.summary == "定时任务执行: Review the weekly pipeline"
+    assert activity.related_id == uuid.UUID(stored_run.source_id)
+
+
+@pytest.mark.asyncio
+async def test_failed_oneshot_notifies_the_triggering_user_exactly_once() -> None:
+    run, checkpoint, stored_run = _records(
+        mode="oneshot",
+        status="failed",
+        answer=None,
+    )
+    db = _Session(stored_run, None)
+    handler = HeartbeatRuntimeCompletionHandler(
+        session_factory=_SessionFactory(db),  # type: ignore[arg-type]
+    )
+
+    await handler.handle(run=run, checkpoint=checkpoint)
+
+    notification = db.added[0]
+    assert isinstance(notification, Notification)
+    assert notification.id == uuid.uuid5(
+        run.run_id,
+        "oneshot-terminal:checkpoint-terminal",
+    )
+    assert notification.user_id == uuid.UUID(
+        checkpoint.state["snapshots"].initial_input["triggered_by_user_id"]
+    )
+    assert notification.title == "OKR Agent task failed"
+    assert notification.body == "任务执行未完成（model_call_failed）"

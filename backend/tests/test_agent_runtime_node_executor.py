@@ -468,6 +468,36 @@ async def test_plain_text_repair_stops_at_the_model_step_limit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_product_owned_step_limit_can_narrow_the_global_runtime_limit() -> None:
+    run_id = uuid.uuid4()
+    state = _state(run_id)
+    state["snapshots"].initial_input["requested_max_steps"] = 1
+    model = ModelService(
+        ModelStepResult(
+            intent="text",
+            assistant_message={"role": "assistant", "content": "plain text"},
+        )
+    )
+    executor = _executor(model, max_model_steps=50)
+
+    first = await executor.execute(
+        "model",
+        state,
+        cast(RuntimeContext, object()),
+    )
+    state["lifecycle"] = first["lifecycle"]
+    second = await executor.execute(
+        "model",
+        state,
+        cast(RuntimeContext, object()),
+    )
+
+    assert second["lifecycle"]["status"] == "failed"
+    assert second["lifecycle"]["reason"] == "model_step_limit_reached"
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_verification_repairs_are_bounded() -> None:
     run_id = uuid.uuid4()
     model = ModelService(

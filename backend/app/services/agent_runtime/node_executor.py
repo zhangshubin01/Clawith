@@ -437,7 +437,23 @@ class DeterministicRuntimeNodeExecutor:
     ) -> RuntimeStateUpdate:
         lifecycle = dict(state["lifecycle"])
         step_count = _counter(state["lifecycle"], "model_step_count") + 1
-        if step_count > self._max_model_steps:
+        requested_limit = state["snapshots"].initial_input.get(
+            "requested_max_steps"
+        )
+        if requested_limit is None:
+            model_step_limit = self._max_model_steps
+        elif (
+            isinstance(requested_limit, bool)
+            or not isinstance(requested_limit, int)
+            or requested_limit <= 0
+        ):
+            raise RuntimeNodeTransitionError(
+                "invalid_model_step_limit",
+                "checkpoint requested_max_steps must be a positive integer",
+            )
+        else:
+            model_step_limit = min(requested_limit, self._max_model_steps)
+        if step_count > model_step_limit:
             lifecycle.update(
                 {
                     "status": "failed",

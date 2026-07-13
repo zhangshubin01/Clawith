@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 import uuid
 
@@ -14,7 +14,10 @@ from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
 from app.services.heartbeat_runtime import (
     HeartbeatRuntimeIntakeError,
     enqueue_heartbeat_runtime,
+    enqueue_oneshot_runtime,
+    enqueue_schedule_runtime,
     heartbeat_source_execution_id,
+    schedule_occurrence_id,
 )
 
 
@@ -128,3 +131,89 @@ def test_heartbeat_occurrence_rejects_naive_timestamp() -> None:
         )
 
     assert raised.value.code == "invalid_heartbeat_occurrence"
+
+
+def test_schedule_occurrence_identity_is_stable_across_timezone_views() -> None:
+    schedule_id = uuid.uuid4()
+    utc_occurrence = datetime(2026, 7, 14, 3, 30, tzinfo=UTC)
+    local_occurrence = utc_occurrence.astimezone(timezone(timedelta(hours=8)))
+
+    assert schedule_occurrence_id(
+        schedule_id,
+        utc_occurrence,
+    ) == schedule_occurrence_id(schedule_id, local_occurrence)
+
+
+@pytest.mark.asyncio
+async def test_oneshot_registration_uses_a_unique_background_occurrence() -> None:
+    agent = _agent()
+    occurrence_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    handle = RunHandle(
+        tenant_id=agent.tenant_id,
+        run_id=uuid.uuid4(),
+        thread_id=str(uuid.uuid4()),
+        command_id=uuid.uuid4(),
+        runtime_type="langgraph",
+        created=True,
+    )
+
+    with patch(
+        "app.services.heartbeat_runtime.TransactionalAgentRuntimeAdapter.start_run",
+        new=AsyncMock(return_value=handle),
+    ) as start_run:
+        result = await enqueue_oneshot_runtime(
+            _Session(),  # type: ignore[arg-type]
+            agent=agent,
+            prompt="  Prepare the OKR report  ",
+            occurrence_id=occurrence_id,
+            triggered_by_user_id=user_id,
+            requested_max_steps=40,
+            settings_override=_settings(enabled=True),
+        )
+
+    assert result == handle
+    command = start_run.await_args.args[0]
+    assert command.source_type == "heartbeat"
+    assert command.source_id == str(agent.id)
+    assert command.source_execution_id == f"oneshot:{agent.id}:{occurrence_id}"
+    assert command.goal == "Prepare the OKR report"
+    assert command.payload["background_mode"] == "oneshot"
+    assert command.payload["triggered_by_user_id"] == str(user_id)
+    assert command.payload["requested_max_steps"] == 40
+
+
+@pytest.mark.asyncio
+async def test_schedule_registration_pins_the_schedule_occurrence() -> None:
+    agent = _agent()
+    schedule_id = uuid.uuid4()
+    occurrence_id = uuid.uuid4()
+    handle = RunHandle(
+        tenant_id=agent.tenant_id,
+        run_id=uuid.uuid4(),
+        thread_id=str(uuid.uuid4()),
+        command_id=uuid.uuid4(),
+        runtime_type="langgraph",
+        created=True,
+    )
+
+    with patch(
+        "app.services.heartbeat_runtime.TransactionalAgentRuntimeAdapter.start_run",
+        new=AsyncMock(return_value=handle),
+    ) as start_run:
+        result = await enqueue_schedule_runtime(
+            _Session(),  # type: ignore[arg-type]
+            agent=agent,
+            schedule_id=schedule_id,
+            occurrence_id=occurrence_id,
+            instruction="  Review the weekly pipeline  ",
+            settings_override=_settings(enabled=True),
+        )
+
+    assert result == handle
+    command = start_run.await_args.args[0]
+    assert command.source_type == "heartbeat"
+    assert command.source_id == str(schedule_id)
+    assert command.source_execution_id == f"schedule:{schedule_id}:{occurrence_id}"
+    assert command.goal == "[自动调度任务] Review the weekly pipeline"
+    assert command.payload["background_mode"] == "schedule"
