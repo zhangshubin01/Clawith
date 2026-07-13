@@ -13,7 +13,11 @@ import pytest
 
 from app.config import Settings
 from app.services.agent_runtime.command_worker import CommandWorkResult, RuntimeRunRecord
+from app.services.agent_runtime.session_context_completion import (
+    SessionContextCompletionHandler,
+)
 from app.services.agent_runtime.state import RunRegistrySnapshot
+from app.services.agent_runtime.task_completion import TaskRuntimeCompletionHandler
 from app.services.agent_runtime.worker_service import (
     RuntimeCommandDaemon,
     RuntimeSchemaNotReady,
@@ -149,6 +153,11 @@ def test_component_builder_installs_one_pinned_graph_and_shared_driver() -> None
     assert components.graph_registry.resolve(run) is components.graph
     assert components.worker._checkpoint_reader is components.driver
     assert components.worker._command_executor is components.driver
+    terminal_handlers = components.worker._post_checkpoint_handler._terminal_handlers
+    assert [type(handler) for handler in terminal_handlers] == [
+        SessionContextCompletionHandler,
+        TaskRuntimeCompletionHandler,
+    ]
 
 
 @pytest.mark.asyncio
