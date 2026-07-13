@@ -309,7 +309,7 @@ DELETE /groups/{group_id}/workspace/file?path=...
 6. 依赖前置失败而从未启动的步骤不发送伪造 Agent ACK，由 Planning Run 的最终协作失败消息统一说明。
 7. 前台 Run 的群、原 Session 已删除或 Agent 已移出群时，不向 replacement primary 或其他 Session 改写消息；记录 `delivery_status = failed` 和稳定 `error_code`。独立后台 Run 的 primary fallback 按 4.4 执行。
 8. ACK、每次 `waiting_user` 请求和 terminal 交付分别使用 `run:{run_id}:ack`、`run:{run_id}:waiting:{interrupt_id}`、`run:{run_id}:terminal:{lifecycle_status}` 作为幂等键。
-9. ChatMessage、`delivery_status` 与对应 delivery event 必须在同一 PostgreSQL 事务写入；执行生命周期事件由 Runtime Projector 从 checkpoint 派生。
+9. ChatMessage、产品 delivery event 与可选 `channel_deliveries` 必须在同一 PostgreSQL 事务写入；内部 Web 群聊直接完成交付，外部渠道由独立 Delivery Worker 更新 `delivery_status`。执行生命周期事件由 Runtime Projector 从 checkpoint 派生。
 
 群消息持久化和首次 Run 派发必须满足以下一致性规则：
 
@@ -322,7 +322,7 @@ DELETE /groups/{group_id}/workspace/file?path=...
 7. 数据库提交后 Command Worker 领取 pending Command。即时通知失败不回滚已经提交的消息、Run Registry 和 Command，由 Command 扫描及 reconciliation 继续调度。
 8. reconciliation 必须检查已经生成计划但应运行的目标 Run 未齐全的 Planning Run，并使用同一幂等键补建当前依赖已经满足的目标 Run。
 
-这里使用专用 `agent_run_commands` 作为 Runtime Command Inbox，可靠承载 start / resume / cancel；它不保存 Run 生命周期，也不扩展成通用业务 Outbox。只有未来出现跨数据库或跨消息系统的其他原子投递需求时，才另行引入 Transactional Outbox。
+这里使用专用 `agent_run_commands` 作为 Runtime Command Inbox，可靠承载 start / resume / cancel；它不保存 Run 生命周期，也不扩展成通用业务 Outbox。外部渠道 Provider 发送已经满足“产品消息事务提交后仍需跨系统可靠投递”的条件，因此使用独立窄表 `channel_deliveries`：它只发送已持久化 ChatMessage，失败只重试 delivery，绝不推进或恢复 LangGraph。两张表不能合并，也不能成为第二套执行状态机。
 
 历史消息中的 @ 只是上下文文本，不会重新触发 Agent。
 
@@ -369,7 +369,7 @@ Planning 模型规则：
 3. 配置缺失、模型不存在、租户不可用或 Model Capability 校验失败时，Planning Run 直接失败，不创建业务子 Run。
 4. 模型调用失败或结构化计划校验失败时可以按无副作用调用策略重试；结构修复最多两次，仍失败则 Planning Graph State 进入 `failed`。
 5. 失败后在原 `chat_session_id` 写入一条显式、脱敏的系统消息：`participant_id = null`、`role = system`。消息说明任务规划未完成并提示用户重试或改单 Agent 处理，不展示模型配置、Provider 错误或内部堆栈。
-6. 规划失败 ChatMessage、`delivery_status` 与 `delivery_failed / delivery_succeeded` 事件在同一交付事务写入，使用 `run:{planning_run_id}:terminal:failed` 作为幂等键，重复恢复不得重复提醒；生命周期 `run_failed` 仍由 Projector 从 terminal checkpoint 派生，不在交付事务双写。
+6. 规划失败 ChatMessage、产品 `delivery_failed / delivery_succeeded` 事件与可选 `channel_deliveries` 在同一交付事务写入，使用 `run:{planning_run_id}:terminal:failed` 作为幂等键，重复恢复不得重复提醒；外部 Provider 结果由 Delivery Worker 更新 `delivery_status`，生命周期 `run_failed` 仍由 Projector 从 terminal checkpoint 派生，不在交付事务双写。
 7. 原群或原 Session 已删除时不改写到 replacement primary，只记录 `delivery_status = failed`。
 8. Planning Run 使用 `run_kind = orchestration`、`agent_id = null`、`system_role = group_planning`，不创建或伪造业务 Agent、Participant 或 GroupMember。
 9. 创建 Planning Run 时把 `MULTI_AGENT_PLANNING_MODEL_ID` 解析为真实 `llm_models.id` 并固化到 `agent_runs.model_id`；配置切换只影响新 Run，已有 Run 的恢复和结构修复继续使用固化模型。
