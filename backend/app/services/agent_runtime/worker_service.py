@@ -40,6 +40,7 @@ from app.services.agent_runtime.model_step_service import RuntimeModelStepServic
 from app.services.agent_runtime.node_executor import DeterministicRuntimeNodeExecutor
 from app.services.agent_runtime.projector import RuntimeProjector
 from app.services.agent_runtime.session_context_service import SessionContextService
+from app.services.agent_runtime.task_completion import TaskRuntimeCompletionHandler
 from app.services.agent_runtime.tool_step_service import RuntimeToolStepService
 
 
@@ -179,6 +180,9 @@ def build_runtime_worker_components(
     post_checkpoint_handler = RuntimeCheckpointSideEffects(
         session_factory=session_factory,
         projector=projector,
+        terminal_handlers=(
+            TaskRuntimeCompletionHandler(session_factory=session_factory),
+        ),
     )
     worker = RuntimeCommandWorker(
         session_factory=session_factory,

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import cast
+from collections.abc import Mapping, Sequence
+from typing import Protocol, cast
 
 from sqlalchemy import select
 
@@ -32,6 +32,17 @@ class RuntimeCheckpointSideEffectError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class RuntimeTerminalProductHandler(Protocol):
+    """Apply one source-specific product result without driving the Graph."""
+
+    async def handle(
+        self,
+        *,
+        run: RuntimeRunRecord,
+        checkpoint: CheckpointObservation,
+    ) -> None: ...
 
 
 def _validate_scope(
@@ -145,9 +156,11 @@ class RuntimeCheckpointSideEffects:
         *,
         session_factory: RuntimeSessionFactory,
         projector: RuntimeProjector,
+        terminal_handlers: Sequence[RuntimeTerminalProductHandler] = (),
     ) -> None:
         self._session_factory = session_factory
         self._projector = projector
+        self._terminal_handlers = tuple(terminal_handlers)
 
     async def handle(
         self,
@@ -179,6 +192,13 @@ class RuntimeCheckpointSideEffects:
                         "projection_checkpoint_mismatch",
                         "projector did not apply the observed checkpoint",
                     )
+
+        if authoritative_status in _TERMINAL_STATUSES:
+            for terminal_handler in self._terminal_handlers:
+                await terminal_handler.handle(
+                    run=run,
+                    checkpoint=checkpoint,
+                )
 
         delivery = delivery_from_checkpoint(run, checkpoint)
         if delivery is None:
