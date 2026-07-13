@@ -66,6 +66,24 @@ PHASE_CUSTOM_BOUNDARIES = "custom_boundaries"
 PHASE_TEMPLATE_FOCUS = "template_focus"
 PHASE_COMPLETED = "completed"
 
+_PHASE_ALLOWED_CURRENT = {
+    PHASE_GREETED: (PHASE_GREETED,),
+    PHASE_CUSTOM_STYLE: (PHASE_GREETED, PHASE_CUSTOM_STYLE),
+    PHASE_CUSTOM_BOUNDARIES: (
+        PHASE_GREETED,
+        PHASE_CUSTOM_STYLE,
+        PHASE_CUSTOM_BOUNDARIES,
+    ),
+    PHASE_TEMPLATE_FOCUS: (PHASE_GREETED, PHASE_TEMPLATE_FOCUS),
+    PHASE_COMPLETED: (
+        PHASE_GREETED,
+        PHASE_CUSTOM_STYLE,
+        PHASE_CUSTOM_BOUNDARIES,
+        PHASE_TEMPLATE_FOCUS,
+        PHASE_COMPLETED,
+    ),
+}
+
 
 _CUSTOM_GREETING_PROMPT = """\
 {user_name} is meeting you for the first time. You are a newly created custom \
@@ -361,13 +379,18 @@ async def mark_onboarding_phase(
         PHASE_COMPLETED,
     }:
         phase = PHASE_COMPLETED
-    stmt = pg_insert(AgentUserOnboarding).values(
-        agent_id=agent_id,
-        user_id=user_id,
-        phase=phase,
-    ).on_conflict_do_update(
-        index_elements=["agent_id", "user_id"],
-        set_={"phase": phase},
+    stmt = (
+        pg_insert(AgentUserOnboarding)
+        .values(
+            agent_id=agent_id,
+            user_id=user_id,
+            phase=phase,
+        )
+        .on_conflict_do_update(
+            index_elements=["agent_id", "user_id"],
+            set_={"phase": phase},
+            where=AgentUserOnboarding.phase.in_(_PHASE_ALLOWED_CURRENT[phase]),
+        )
     )
     await db.execute(stmt)
     await db.commit()

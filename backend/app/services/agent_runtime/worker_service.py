@@ -50,6 +50,9 @@ from app.services.agent_runtime.langgraph_driver import (
 )
 from app.services.agent_runtime.model_step_service import RuntimeModelStepService
 from app.services.agent_runtime.node_executor import DeterministicRuntimeNodeExecutor
+from app.services.agent_runtime.onboarding_completion import (
+    OnboardingRuntimeCompletionHandler,
+)
 from app.services.agent_runtime.planning import (
     PlanningModelService,
     PlanningRuntimeNodeExecutor,
@@ -273,6 +276,7 @@ def build_runtime_worker_components(
             TaskRuntimeCompletionHandler(session_factory=session_factory),
             TriggerRuntimeCompletionHandler(session_factory=session_factory),
             HeartbeatRuntimeCompletionHandler(session_factory=session_factory),
+            OnboardingRuntimeCompletionHandler(session_factory=session_factory),
             A2ARuntimeCompletionHandler(session_factory=session_factory),
             PlanningChildCompletionHandler(session_factory=session_factory),
             SchedulingLaneCompletionHandler(session_factory=session_factory),

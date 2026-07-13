@@ -390,6 +390,63 @@ async def test_user_resume_envelope_is_rendered_as_plain_user_input() -> None:
 
 
 @pytest.mark.asyncio
+async def test_synthetic_input_is_injected_without_enabling_agent_tools() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    state["snapshots"] = RunInputSnapshots(
+        session_context=state["snapshots"].session_context,
+        session_context_version=state["snapshots"].session_context_version,
+        recent_session_messages=(),
+        related_run_summaries=(),
+        initial_input={
+            "message_id": "synthetic-message-1",
+            "input_content": "Please begin onboarding.",
+            "application_tools_enabled": False,
+        },
+    )
+    builder = _ContextBuilder(
+        _build(
+            recent_session_messages_snapshot=(),
+            initial_input=state["snapshots"].initial_input,
+        )
+    )
+    calls = []
+
+    async def complete(_model, messages, **kwargs):
+        calls.append((messages, kwargs))
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(
+                {
+                    "id": "finish-1",
+                    "type": "function",
+                    "function": {
+                        "name": "finish",
+                        "arguments": '{"content":"Welcome"}',
+                    },
+                },
+            ),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=10),
+        )
+
+    result = await _service(model, agent, builder, complete).complete_once(
+        state,
+        _context(state),
+    )
+
+    assert result.intent == "finish"
+    assert calls[0][0][1].content == "Please begin onboarding."
+    assert {tool["function"]["name"] for tool in calls[0][1]["tools"]} == {
+        "finish",
+        "wait",
+    }
+
+
+@pytest.mark.asyncio
 async def test_group_snapshot_adds_only_current_group_tools_and_platform_rules() -> None:
     tenant_id = uuid.uuid4()
     model = _model(tenant_id)

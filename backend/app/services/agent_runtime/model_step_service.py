@@ -156,6 +156,16 @@ def _with_group_instruction(
     return f"{dynamic_prompt}\n\n{_GROUP_RUNTIME_INSTRUCTION}"
 
 
+def _application_tools_enabled(state: RuntimeGraphState) -> bool:
+    value = state["snapshots"].initial_input.get("application_tools_enabled", True)
+    if not isinstance(value, bool):
+        raise ContextBuildError(
+            "invalid_runtime_input",
+            "application_tools_enabled must be a boolean",
+        )
+    return value
+
+
 def _ledger_metadata(execution: AgentToolExecution) -> tuple[str, str]:
     stored = execution.sanitized_arguments
     metadata = stored.get(_LEDGER_METADATA_KEY) if isinstance(stored, dict) else None
@@ -253,10 +263,32 @@ def _prompt_messages(
             ),
         )
     ]
-    for raw in (
-        *build.recent_session_messages_snapshot,
-        *build.recent_run_messages,
-    ):
+    initial_message_id = build.initial_input.get("message_id")
+    initial_message_seen = False
+    for raw in build.recent_session_messages_snapshot:
+        role = raw.get("role")
+        if role not in {"user", "assistant", "tool"}:
+            continue
+        initial_message_seen = initial_message_seen or (
+            role == "user" and isinstance(initial_message_id, str) and raw.get("id") == initial_message_id
+        )
+        messages.append(
+            LLMMessage(
+                role=cast(str, role),  # type: ignore[arg-type]
+                content=_model_message_content(raw, build),
+                tool_calls=(
+                    cast(list[dict], raw.get("tool_calls")) if isinstance(raw.get("tool_calls"), list) else None
+                ),
+                tool_call_id=(cast(str, raw.get("tool_call_id")) if isinstance(raw.get("tool_call_id"), str) else None),
+                reasoning_content=(
+                    cast(str, raw.get("reasoning_content")) if isinstance(raw.get("reasoning_content"), str) else None
+                ),
+            )
+        )
+    input_content = build.initial_input.get("input_content")
+    if not initial_message_seen and isinstance(input_content, str):
+        messages.append(LLMMessage(role="user", content=input_content))
+    for raw in build.recent_run_messages:
         role = raw.get("role")
         if role not in {"user", "assistant", "tool"}:
             continue
@@ -598,12 +630,15 @@ class RuntimeModelStepService:
         del context
         try:
             model, agent, ledger = await self._load(state)
-            tools = _with_runtime_tools(
+            application_tools = (
                 with_group_runtime_tools(
                     await self._tool_provider(agent.id),
                     state,
                 )
+                if _application_tools_enabled(state)
+                else []
             )
+            tools = _with_runtime_tools(application_tools)
             static_prompt, dynamic_prompt = await self._prompt_builder(
                 agent.id,
                 agent.name,

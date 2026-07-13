@@ -259,6 +259,8 @@ async def enqueue_chat_runtime(
     resume_correlation_id: str | None = None,
     source_channel: str = "web",
     runtime_instruction: str = "",
+    persist_user_message: bool = True,
+    application_tools_enabled: bool = True,
     settings_override: Settings | None = None,
 ) -> ChatRuntimeIntake | None:
     """Persist one chat message and its start/resume Command atomically.
@@ -311,14 +313,15 @@ async def enqueue_chat_runtime(
         display_content=display_content,
         file_name=file_name,
     )
-    await _persist_user_message(
-        db,
-        message_id=resolved_message_id,
-        agent=agent,
-        user=user,
-        session=session,
-        content=saved_content,
-    )
+    if persist_user_message:
+        await _persist_user_message(
+            db,
+            message_id=resolved_message_id,
+            agent=agent,
+            user=user,
+            session=session,
+            content=saved_content,
+        )
 
     adapter = TransactionalAgentRuntimeAdapter(db, settings=runtime_settings)
     if resume_run_id is not None:
@@ -391,6 +394,7 @@ async def enqueue_chat_runtime(
                 "input_content": content,
                 "source_channel": normalized_channel,
                 "user_id": str(user.id),
+                "application_tools_enabled": application_tools_enabled,
                 **(
                     {"runtime_instruction": normalized_runtime_instruction}
                     if normalized_runtime_instruction

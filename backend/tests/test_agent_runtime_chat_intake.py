@@ -377,3 +377,33 @@ def test_image_input_keeps_executable_content_in_the_durable_message() -> None:
         display_content="[image]",
         file_name="chart.png",
     ) == f"[file:chart.png]\n{content}"
+
+
+@pytest.mark.asyncio
+async def test_synthetic_input_starts_without_persisting_a_human_message() -> None:
+    agent, user, session, model = _records()
+    db = _Session()
+    handle = _handle(agent.tenant_id)
+
+    with patch(
+        "app.services.agent_runtime.chat_intake.TransactionalAgentRuntimeAdapter.start_run",
+        new=AsyncMock(return_value=handle),
+    ) as start_run:
+        result = await enqueue_chat_runtime(
+            db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="Please begin onboarding.",
+            persist_user_message=False,
+            application_tools_enabled=False,
+            settings_override=_settings(enabled=True),
+        )
+
+    assert result is not None
+    assert db.added == []
+    assert db.flushes == 0
+    command = start_run.await_args.args[0]
+    assert command.payload["input_content"] == "Please begin onboarding."
+    assert command.payload["application_tools_enabled"] is False

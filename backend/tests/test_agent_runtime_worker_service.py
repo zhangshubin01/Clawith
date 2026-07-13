@@ -20,6 +20,9 @@ from app.services.agent_runtime.heartbeat_completion import (
 from app.services.agent_runtime.group_acknowledgement import (
     RuntimeGroupStartAcknowledgementHandler,
 )
+from app.services.agent_runtime.onboarding_completion import (
+    OnboardingRuntimeCompletionHandler,
+)
 from app.services.agent_runtime.planning_scheduler import (
     PlanningCheckpointScheduler,
     PlanningChildCompletionHandler,
@@ -185,6 +188,7 @@ def test_component_builder_installs_pinned_agent_and_planning_graphs() -> None:
         TaskRuntimeCompletionHandler,
         TriggerRuntimeCompletionHandler,
         HeartbeatRuntimeCompletionHandler,
+        OnboardingRuntimeCompletionHandler,
         A2ARuntimeCompletionHandler,
         PlanningChildCompletionHandler,
         SchedulingLaneCompletionHandler,
