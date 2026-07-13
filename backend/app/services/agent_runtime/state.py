@@ -62,6 +62,19 @@ class RunInputSnapshots:
     related_run_summaries: tuple[JsonObject, ...]
     initial_input: JsonObject
 
+    def __post_init__(self) -> None:
+        """Restore tuple boundaries after msgpack decodes arrays as lists."""
+        object.__setattr__(
+            self,
+            "recent_session_messages",
+            tuple(self.recent_session_messages),
+        )
+        object.__setattr__(
+            self,
+            "related_run_summaries",
+            tuple(self.related_run_summaries),
+        )
+
 
 class RuntimeLifecycle(TypedDict):
     """Authoritative, checkpointed lifecycle and resumable execution data."""

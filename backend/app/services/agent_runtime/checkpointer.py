@@ -10,6 +10,7 @@ import uuid
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.base import SerializerProtocol
 from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from app.config import Settings, get_settings
 
@@ -19,6 +20,10 @@ class CheckpointerConfigurationError(ValueError):
 
 
 _CHECKPOINT_SCHEMA = "langgraph_checkpoint"
+_ALLOWED_RUNTIME_MSGPACK_TYPES = (
+    ("app.services.agent_runtime.state", "RunRegistrySnapshot"),
+    ("app.services.agent_runtime.state", "RunInputSnapshots"),
+)
 
 
 def runtime_thread_config(run_id: uuid.UUID) -> dict[str, dict[str, str]]:
@@ -72,18 +77,24 @@ def checkpoint_database_url(settings: Settings | None = None) -> str:
 
 def checkpoint_serializer(
     settings: Settings | None = None,
-) -> SerializerProtocol | None:
-    """Build the installed LangGraph AES serializer when a key is configured."""
+) -> SerializerProtocol:
+    """Build an allowlisted serializer, optionally wrapped in AES encryption."""
     runtime_settings = settings or get_settings()
+    serde = JsonPlusSerializer(
+        allowed_msgpack_modules=_ALLOWED_RUNTIME_MSGPACK_TYPES,
+    )
     key = runtime_settings.LANGGRAPH_AES_KEY
     if key is None:
-        return None
+        return serde
 
     key_bytes = key.encode("utf-8")
     if len(key_bytes) not in (16, 24, 32):
         raise CheckpointerConfigurationError("LANGGRAPH_AES_KEY must encode to 16, 24, or 32 bytes")
     try:
-        return EncryptedSerializer.from_pycryptodome_aes(key=key_bytes)
+        return EncryptedSerializer.from_pycryptodome_aes(
+            serde=serde,
+            key=key_bytes,
+        )
     except ImportError as exc:
         raise CheckpointerConfigurationError("Checkpoint AES encryption requires pycryptodome") from exc
 

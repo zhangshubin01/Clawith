@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 import uuid
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
@@ -15,6 +16,7 @@ from app.services.agent_runtime.checkpointer import (
     create_checkpointer,
     runtime_thread_config,
 )
+from app.services.agent_runtime.state import RunInputSnapshots, RunRegistrySnapshot
 
 
 def _settings(**overrides: object) -> Settings:
@@ -100,6 +102,35 @@ def test_aes_serializer_round_trips_checkpoint_values() -> None:
     assert serializer.loads_typed(encoded) == {"secret": "checkpoint-value"}
 
 
+def test_runtime_dataclasses_are_explicitly_allowlisted_and_restore_tuples() -> None:
+    serializer = checkpoint_serializer(_settings())
+    registry = RunRegistrySnapshot(
+        tenant_id="tenant-1",
+        run_id="run-1",
+        goal="finish",
+        run_kind="foreground",
+        source_type="chat",
+        model_id="model-1",
+        graph_name="runtime",
+        graph_version="v1",
+    )
+    snapshots = RunInputSnapshots(
+        session_context={"version": 1},
+        session_context_version=1,
+        recent_session_messages=({"role": "user", "content": "go"},),
+        related_run_summaries=({"run_id": "parent-1"},),
+        initial_input={"message_id": "message-1"},
+    )
+
+    restored_registry = serializer.loads_typed(serializer.dumps_typed(registry))
+    restored_snapshots = serializer.loads_typed(serializer.dumps_typed(snapshots))
+
+    assert restored_registry == registry
+    assert restored_snapshots == snapshots
+    assert isinstance(restored_snapshots.recent_session_messages, tuple)
+    assert isinstance(restored_snapshots.related_run_summaries, tuple)
+
+
 def test_aes_key_length_is_validated_as_encoded_bytes() -> None:
     with pytest.raises(CheckpointerConfigurationError, match="16, 24, or 32 bytes"):
         checkpoint_serializer(_settings(LANGGRAPH_AES_KEY="too-short"))
@@ -125,8 +156,8 @@ async def test_factory_is_lazy_and_never_runs_checkpointer_setup() -> None:
         async with created as yielded:
             assert yielded is saver
 
-    factory.assert_called_once_with(
-        "postgresql://app:secret@db.example/clawith?options=-csearch_path%3Dlanggraph_checkpoint",
-        serde=None,
-    )
+    factory.assert_called_once()
+    call = factory.call_args
+    assert call.args == ("postgresql://app:secret@db.example/clawith?options=-csearch_path%3Dlanggraph_checkpoint",)
+    assert isinstance(call.kwargs["serde"], JsonPlusSerializer)
     saver.setup.assert_not_awaited()
