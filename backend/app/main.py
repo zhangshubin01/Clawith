@@ -171,6 +171,7 @@ async def lifespan(app: FastAPI):
             import app.models.tenant_setting  # noqa
             import app.models.participant    # noqa
             import app.models.chat_session   # noqa
+            import app.models.group          # noqa
             import app.models.trigger        # noqa
             import app.models.trigger_execution  # noqa
             import app.models.focus          # noqa
@@ -386,6 +387,7 @@ from app.api.plaza import router as plaza_router
 from app.api.skills import router as skills_router
 from app.api.users import router as users_router
 from app.api.chat_sessions import router as chat_sessions_router
+from app.api.groups import router as groups_router
 from app.api.slack import router as slack_router
 from app.api.discord_bot import router as discord_router
 from app.api.dingtalk import router as dingtalk_router
@@ -441,6 +443,7 @@ app.include_router(atlassian_router, prefix=settings.API_PREFIX)
 app.include_router(triggers_router)
 app.include_router(focus_router, prefix=settings.API_PREFIX)
 app.include_router(chat_sessions_router)
+app.include_router(groups_router)
 app.include_router(plaza_router)
 app.include_router(notification_router, prefix=settings.API_PREFIX)
 app.include_router(webhooks_router)  # Public endpoint, no API prefix
