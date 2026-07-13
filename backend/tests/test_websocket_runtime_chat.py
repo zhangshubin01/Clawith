@@ -130,7 +130,6 @@ async def test_native_message_uses_runtime_without_entering_legacy_tool_loop() -
             new=AsyncMock(return_value=(outcome, [])),
         ) as run_runtime,
         patch.object(handler, "_save_user_message", new=AsyncMock()) as legacy_save,
-        patch.object(handler, "_run_llm_and_stream", new=AsyncMock()) as legacy_llm,
     ):
         with pytest.raises(WebSocketDisconnect):
             await handler.message_loop()
@@ -144,7 +143,7 @@ async def test_native_message_uses_runtime_without_entering_legacy_tool_loop() -
         user_content="Investigate the issue",
     )
     legacy_save.assert_not_awaited()
-    legacy_llm.assert_not_awaited()
+    assert not hasattr(handler, "_run_llm_and_stream")
     assert handler.conversation == [
         {"role": "user", "content": "Investigate the issue"},
         {"role": "assistant", "content": "Investigation complete"},
@@ -196,7 +195,6 @@ async def test_disabled_runtime_fails_closed_without_legacy_execution() -> None:
         patch.object(handler, "_check_quotas", new=AsyncMock(return_value=True)),
         patch.object(handler, "_enqueue_runtime_chat", new=AsyncMock(return_value=None)),
         patch.object(handler, "_save_user_message", new=AsyncMock()) as legacy_save,
-        patch.object(handler, "_run_llm_and_stream", new=AsyncMock()) as legacy_llm,
     ):
         with pytest.raises(WebSocketDisconnect):
             await handler.message_loop()
@@ -209,7 +207,7 @@ async def test_disabled_runtime_fails_closed_without_legacy_execution() -> None:
         }
     ]
     legacy_save.assert_not_awaited()
-    legacy_llm.assert_not_awaited()
+    assert not hasattr(handler, "_run_llm_and_stream")
 
 
 @pytest.mark.asyncio
@@ -251,7 +249,6 @@ async def test_onboarding_trigger_uses_runtime_and_advances_after_completion() -
             new=AsyncMock(return_value=(outcome, [])),
         ) as run_runtime,
         patch.object(handler, "_mark_onboarding_runtime_phase", new=AsyncMock()) as mark,
-        patch.object(handler, "_run_llm_and_stream", new=AsyncMock()) as legacy_llm,
     ):
         with pytest.raises(WebSocketDisconnect):
             await handler.message_loop()
@@ -263,7 +260,7 @@ async def test_onboarding_trigger_uses_runtime_and_advances_after_completion() -
         user_content="Please begin the onboarding.",
     )
     mark.assert_awaited_once_with("greeted")
-    legacy_llm.assert_not_awaited()
+    assert not hasattr(handler, "_run_llm_and_stream")
     assert handler.conversation == [{"role": "assistant", "content": "Welcome"}]
 
 
