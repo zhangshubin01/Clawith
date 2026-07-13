@@ -8,9 +8,10 @@ import json
 from typing import Protocol, cast
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.agent import Agent
+from app.models.agent_tool_execution import AgentToolExecution
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.node_executor import (
     RuntimeCancelSource,
@@ -64,6 +65,13 @@ _READ_TOOL_NAMES = frozenset(
     }
 )
 _CONTROL_TOOL_NAMES = frozenset({"finish", "wait"})
+_HEARTBEAT_PRIVATE_PLAZA_TOOLS = frozenset(
+    {"plaza_get_new_posts", "plaza_create_post", "plaza_add_comment"}
+)
+_HEARTBEAT_PLAZA_LIMITS = {
+    "plaza_create_post": 1,
+    "plaza_add_comment": 2,
+}
 
 
 class ToolExecutor(Protocol):
@@ -224,6 +232,33 @@ def _waiting_request(
     }
 
 
+def _heartbeat_tool_limit(
+    state: RuntimeGraphState,
+    agent: Agent,
+    tool_name: str,
+) -> int | None:
+    if state["registry"].source_type != "heartbeat":
+        return None
+    is_private = (getattr(agent, "access_mode", None) or "company") != "company"
+    if is_private and tool_name in _HEARTBEAT_PRIVATE_PLAZA_TOOLS:
+        return 0
+    return _HEARTBEAT_PLAZA_LIMITS.get(tool_name)
+
+
+def _heartbeat_blocked_summary(
+    agent: Agent,
+    tool_name: str,
+    limit: int,
+) -> str:
+    is_private = (getattr(agent, "access_mode", None) or "company") != "company"
+    if is_private and tool_name in _HEARTBEAT_PRIVATE_PLAZA_TOOLS:
+        return "[BLOCKED] Private heartbeat Agents cannot use Agent Plaza."
+    return (
+        f"[BLOCKED] Heartbeat limit reached for {tool_name} "
+        f"(maximum {limit})."
+    )
+
+
 class RuntimeToolStepService:
     """Reserve, execute, and settle one model-proposed tool batch in order."""
 
@@ -359,6 +394,47 @@ class RuntimeToolStepService:
             result_ref=execution.result_ref,
         )
 
+    async def _successful_tool_count(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        run_id: uuid.UUID,
+        tool_name: str,
+    ) -> int:
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(func.count(AgentToolExecution.id)).where(
+                    AgentToolExecution.tenant_id == tenant_id,
+                    AgentToolExecution.run_id == run_id,
+                    AgentToolExecution.tool_name == tool_name,
+                    AgentToolExecution.status == "succeeded",
+                )
+            )
+            return int(result.scalar_one())
+
+    async def _mark_policy_blocked(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        reservation: ToolExecutionReservation,
+        lease_owner: str,
+        result_summary: str,
+    ) -> ToolExecutionOutcome:
+        async with self._session_factory() as db:
+            async with db.begin():
+                execution = await mark_tool_execution_failed(
+                    db,
+                    tenant_id=tenant_id,
+                    execution_id=reservation.execution.id,
+                    lease_owner=lease_owner,
+                    result_summary=result_summary,
+                )
+        return ToolExecutionOutcome(
+            status="failed",
+            result_summary=execution.result_summary,
+            result_ref=execution.result_ref,
+        )
+
     async def execute_pending(
         self,
         state: RuntimeGraphState,
@@ -428,6 +504,38 @@ class RuntimeToolStepService:
                         ),
                         pending_tool_calls=tool_calls[index:],
                     )
+
+                heartbeat_limit = _heartbeat_tool_limit(state, agent, tool_name)
+                if heartbeat_limit is not None:
+                    successful_count = (
+                        0
+                        if heartbeat_limit == 0
+                        else await self._successful_tool_count(
+                            tenant_id=tenant_id,
+                            run_id=run_id,
+                            tool_name=tool_name,
+                        )
+                    )
+                    if successful_count >= heartbeat_limit:
+                        outcome = await self._mark_policy_blocked(
+                            tenant_id=tenant_id,
+                            reservation=reservation,
+                            lease_owner=lease_owner,
+                            result_summary=_heartbeat_blocked_summary(
+                                agent,
+                                tool_name,
+                                heartbeat_limit,
+                            ),
+                        )
+                        messages.append(
+                            _result_message(
+                                run_id=run_id,
+                                call_id=call_id,
+                                tool_name=tool_name,
+                                outcome=outcome,
+                            )
+                        )
+                        continue
 
                 try:
                     raw_result = await self._tool_executor(

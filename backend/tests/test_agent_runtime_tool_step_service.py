@@ -67,7 +67,7 @@ class _CancelSource:
         return self.signals.popleft() if self.signals else None
 
 
-def _agent(tenant_id: uuid.UUID) -> Agent:
+def _agent(tenant_id: uuid.UUID, *, access_mode: str = "company") -> Agent:
     return Agent(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
@@ -75,6 +75,7 @@ def _agent(tenant_id: uuid.UUID) -> Agent:
         name="Tool Agent",
         status="idle",
         is_expired=False,
+        access_mode=access_mode,
     )
 
 
@@ -90,6 +91,8 @@ def _state(
     tenant_id: uuid.UUID,
     agent: Agent,
     calls: tuple[dict, ...],
+    *,
+    source_type: str = "chat",
 ) -> RuntimeGraphState:
     run_id = uuid.uuid4()
     return {
@@ -98,7 +101,7 @@ def _state(
             run_id=str(run_id),
             goal="Use tools",
             run_kind="foreground",
-            source_type="chat",
+            source_type=source_type,
             model_id=str(uuid.uuid4()),
             graph_name="runtime",
             graph_version="v1",
@@ -143,6 +146,9 @@ async def _tools(agent_id: uuid.UUID) -> list[dict]:
     return [
         {"type": "function", "function": {"name": "read_file"}},
         {"type": "function", "function": {"name": "write_file"}},
+        {"type": "function", "function": {"name": "plaza_get_new_posts"}},
+        {"type": "function", "function": {"name": "plaza_create_post"}},
+        {"type": "function", "function": {"name": "plaza_add_comment"}},
     ]
 
 
@@ -511,3 +517,170 @@ async def test_duplicate_call_ids_fail_before_any_reservation_or_execution() -> 
     assert result.error is not None
     assert result.error["code"] == "invalid_tool_call"
     assert result.messages == ()
+
+
+@pytest.mark.asyncio
+async def test_private_heartbeat_plaza_call_is_receipted_without_execution(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id, access_mode="private")
+    call = _call("private-plaza", "plaza_get_new_posts")
+    state = _state(tenant_id, agent, (call,), source_type="heartbeat")
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "private-plaza",
+        "plaza_get_new_posts",
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def mark_failed(db, **kwargs):
+        del db
+        execution.status = "failed"
+        execution.result_summary = kwargs["result_summary"]
+        return execution
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"private Plaza tool executed: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_failed",
+        mark_failed,
+    )
+
+    result = await _service(agent, _CancelSource(None), forbidden).execute_pending(
+        state,
+        _context(state),
+        (call,),
+    )
+
+    assert result.error is None
+    assert result.messages[0]["execution_status"] == "failed"
+    assert result.messages[0]["content"] == (
+        "[BLOCKED] Private heartbeat Agents cannot use Agent Plaza."
+    )
+
+
+@pytest.mark.asyncio
+async def test_public_heartbeat_comment_limit_counts_successful_receipts(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    calls = tuple(
+        _call(f"comment-{index}", "plaza_add_comment")
+        for index in range(1, 4)
+    )
+    state = _state(tenant_id, agent, calls, source_type="heartbeat")
+    run_id = uuid.UUID(state["registry"].run_id)
+    executions: dict[uuid.UUID, AgentToolExecution] = {}
+    successful_counts = deque([0, 1, 2])
+    executed: list[str] = []
+
+    async def reserve(db, **kwargs):
+        del db
+        execution = _execution(
+            tenant_id,
+            run_id,
+            kwargs["tool_call_id"],
+            kwargs["tool_name"],
+        )
+        executions[execution.id] = execution
+        return _reservation(execution)
+
+    async def successful_count(**kwargs):
+        assert kwargs["tenant_id"] == tenant_id
+        assert kwargs["run_id"] == run_id
+        assert kwargs["tool_name"] == "plaza_add_comment"
+        return successful_counts.popleft()
+
+    async def execute(name, arguments, agent_id, user_id, session_id="", on_output=None):
+        del arguments, agent_id, user_id, session_id, on_output
+        executed.append(name)
+        return "comment added"
+
+    async def mark_succeeded(db, **kwargs):
+        del db
+        execution = executions[kwargs["execution_id"]]
+        execution.status = "succeeded"
+        execution.result_summary = kwargs["result_summary"]
+        return execution
+
+    async def mark_failed(db, **kwargs):
+        del db
+        execution = executions[kwargs["execution_id"]]
+        execution.status = "failed"
+        execution.result_summary = kwargs["result_summary"]
+        return execution
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_succeeded",
+        mark_succeeded,
+    )
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_failed",
+        mark_failed,
+    )
+    service = _service(agent, _CancelSource(None, None, None), execute)
+    monkeypatch.setattr(service, "_successful_tool_count", successful_count)
+
+    result = await service.execute_pending(state, _context(state), calls)
+
+    assert executed == ["plaza_add_comment", "plaza_add_comment"]
+    assert [message["execution_status"] for message in result.messages] == [
+        "succeeded",
+        "succeeded",
+        "failed",
+    ]
+    assert result.messages[2]["content"] == (
+        "[BLOCKED] Heartbeat limit reached for plaza_add_comment (maximum 2)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_replayed_heartbeat_plaza_call_reuses_receipt_before_limit_check(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("replayed-post", "plaza_create_post")
+    state = _state(tenant_id, agent, (call,), source_type="heartbeat")
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "replayed-post",
+        "plaza_create_post",
+    )
+    reusable = ToolExecutionOutcome(
+        status="succeeded",
+        result_summary="original post",
+        result_ref=None,
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution, reusable=reusable)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"replayed Plaza tool executed: {args}, {kwargs}")
+
+    async def forbidden_count(**kwargs):
+        raise AssertionError(f"replayed receipt was counted again: {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    service = _service(agent, _CancelSource(None), forbidden)
+    monkeypatch.setattr(service, "_successful_tool_count", forbidden_count)
+
+    result = await service.execute_pending(state, _context(state), (call,))
+
+    assert result.messages[0]["execution_status"] == "succeeded"
+    assert result.messages[0]["content"] == "original post"
