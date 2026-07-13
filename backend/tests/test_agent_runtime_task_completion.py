@@ -213,6 +213,23 @@ async def test_unsuccessful_terminal_checkpoint_returns_task_to_pending(
 
 
 @pytest.mark.asyncio
+async def test_completed_supervision_returns_to_pending_and_logs_result() -> None:
+    run, checkpoint, stored_run, task = _records()
+    task.type = "supervision"
+    session = _Session(stored_run, None, task)
+    handler = TaskRuntimeCompletionHandler(
+        session_factory=_SessionFactory(session),  # type: ignore[arg-type]
+    )
+
+    await handler.handle(run=run, checkpoint=checkpoint)
+
+    assert task.status == "pending"
+    assert task.completed_at is None
+    assert isinstance(session.added[0], TaskLog)
+    assert session.added[0].content == "✅ 督办执行完成\n\nReport completed"
+
+
+@pytest.mark.asyncio
 async def test_non_task_run_is_ignored_without_opening_a_session() -> None:
     run, checkpoint, _, _ = _records(source_type="chat")
     factory = _SessionFactory()

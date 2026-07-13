@@ -11,7 +11,11 @@ from app.config import Settings
 from app.models.agent import Agent
 from app.models.task import Task, TaskLog
 from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
-from app.services.task_executor import TaskRuntimeIntakeError, enqueue_task_runtime
+from app.services.task_executor import (
+    TaskRuntimeIntakeError,
+    enqueue_task_runtime,
+    execute_task,
+)
 
 
 class _Session:
@@ -122,32 +126,79 @@ async def test_idempotent_task_retry_does_not_duplicate_queue_log() -> None:
 
 
 @pytest.mark.asyncio
-async def test_supervision_and_disabled_rollout_stay_on_legacy_path() -> None:
+async def test_supervision_uses_a_distinct_runtime_occurrence() -> None:
     supervision, agent = _records(task_type="supervision")
-    todo, _ = _records()
-    todo.agent_id = agent.id
+    supervision.supervision_target_name = "Alice"
     session = _Session()
+    execution_id = uuid.uuid4()
+    handle = RunHandle(
+        tenant_id=agent.tenant_id,
+        run_id=uuid.uuid4(),
+        thread_id=str(uuid.uuid4()),
+        command_id=uuid.uuid4(),
+        runtime_type="langgraph",
+        created=True,
+    )
 
     with patch(
         "app.services.task_executor.TransactionalAgentRuntimeAdapter.start_run",
-        new=AsyncMock(),
+        new=AsyncMock(return_value=handle),
     ) as start_run:
         supervision_result = await enqueue_task_runtime(
             session,  # type: ignore[arg-type]
             task=supervision,
             agent=agent,
+            execution_id=execution_id,
             settings_override=_settings(enabled=True),
         )
-        disabled_result = await enqueue_task_runtime(
-            session,  # type: ignore[arg-type]
-            task=todo,
+
+    assert supervision_result == handle
+    command = start_run.await_args.args[0]
+    assert command.source_execution_id == (
+        f"task:{supervision.id}:supervision:{execution_id}"
+    )
+    assert command.payload["task_type"] == "supervision"
+    assert "督办对象: Alice" in command.goal
+
+
+@pytest.mark.asyncio
+async def test_disabled_rollout_does_not_silently_start_runtime() -> None:
+    task, agent = _records()
+
+    with patch(
+        "app.services.task_executor.TransactionalAgentRuntimeAdapter.start_run",
+        new=AsyncMock(),
+    ) as start_run:
+        result = await enqueue_task_runtime(
+            _Session(),  # type: ignore[arg-type]
+            task=task,
             agent=agent,
             settings_override=_settings(enabled=False),
         )
 
-    assert supervision_result is None
-    assert disabled_result is None
+    assert result is None
     start_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_task_entrypoint_never_falls_back_to_the_legacy_tool_loop() -> None:
+    task_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+
+    with (
+        patch(
+            "app.services.task_executor._try_enqueue_runtime_task",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.task_executor._log_error",
+            new=AsyncMock(),
+        ) as log_error,
+    ):
+        await execute_task(task_id, agent_id)
+
+    log_error.assert_awaited_once()
+    assert "未回退旧执行循环" in log_error.await_args.args[1]
 
 
 @pytest.mark.asyncio

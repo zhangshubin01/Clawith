@@ -133,18 +133,25 @@ class TaskRuntimeCompletionHandler:
                     )
 
                 detail = _terminal_detail(checkpoint)
-                if status == "completed":
+                is_supervision = task.type == "supervision"
+                if status == "completed" and not is_supervision:
                     task.status = "done"
                     task.completed_at = self._clock()
                     content = f"✅ 任务完成\n\n{detail}"
+                elif status == "completed":
+                    task.status = "pending"
+                    task.completed_at = None
+                    content = f"✅ 督办执行完成\n\n{detail}"
                 elif status == "cancelled":
                     task.status = "pending"
                     task.completed_at = None
-                    content = f"⏹️ 任务执行已取消：{detail}"
+                    label = "督办" if is_supervision else "任务"
+                    content = f"⏹️ {label}执行已取消：{detail}"
                 else:
                     task.status = "pending"
                     task.completed_at = None
-                    content = f"❌ 任务执行失败：{detail}"
+                    label = "督办" if is_supervision else "任务"
+                    content = f"❌ {label}执行失败：{detail}"
                 db.add(
                     TaskLog(
                         id=receipt_id,
