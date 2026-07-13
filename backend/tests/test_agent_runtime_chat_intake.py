@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 import uuid
@@ -12,6 +13,7 @@ import pytest
 from app.config import Settings
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
+from app.models.agent_run_event import AgentRunEvent
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.llm import LLMModel
@@ -207,7 +209,19 @@ async def test_chat_resume_persists_explicit_correlation_with_the_user_message()
         delivery_status="delivered",
         origin_user_id=user.id,
     )
-    db = _Session(results=(waiting_run,))
+    waiting_event = AgentRunEvent(
+        id=uuid.uuid4(),
+        tenant_id=agent.tenant_id,
+        run_id=run_id,
+        agent_id=agent.id,
+        event_type="waiting_started",
+        summary="Waiting for user",
+        payload={"correlation_id": "confirm-7"},
+        artifact_refs=[],
+        idempotency_key="waiting-1",
+        created_at=datetime(2026, 7, 14, 8, 0, tzinfo=UTC),
+    )
+    db = _Session(results=(waiting_run, waiting_event))
     participant = SimpleNamespace(id=uuid.uuid4())
     handle = _handle(agent.tenant_id)
     message_id = uuid.uuid4()
@@ -236,6 +250,9 @@ async def test_chat_resume_persists_explicit_correlation_with_the_user_message()
         )
 
     assert result is not None and result.resumed is True
+    assert result.stream_after is not None
+    assert result.stream_after.event_id == waiting_event.id
+    assert result.stream_after.created_at == waiting_event.created_at
     command = resume_run.await_args.args[0]
     assert isinstance(command, ResumeRunCommand)
     assert command.run_id == run_id

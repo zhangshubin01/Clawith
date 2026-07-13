@@ -654,6 +654,8 @@ def _add_event(
     clock: Callable[[], datetime],
 ) -> None:
     payload = _receipt_payload(receipt)
+    payload["lifecycle_status"] = request.lifecycle_status
+    payload["correlation_id"] = request.interrupt_id
     payload["requested_target"] = requested_target.payload() if requested_target is not None else None
     payload["actual_target"] = _actual_target_payload(actual_session) if actual_session is not None else None
     db.add(

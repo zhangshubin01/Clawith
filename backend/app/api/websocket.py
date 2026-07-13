@@ -1,6 +1,7 @@
 """WebSocket chat endpoint for real-time agent conversations."""
 
 import asyncio
+from collections import deque
 import json
 import re
 import uuid
@@ -25,6 +26,17 @@ from app.models.task import Task
 from app.models.user import User
 from app.services.activity_logger import log_activity
 from app.services.agentbay_live import detect_agentbay_env, get_browser_snapshot, get_desktop_screenshot
+from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
+from app.services.agent_runtime.chat_intake import (
+    ChatRuntimeIntake,
+    ChatRuntimeIntakeError,
+    enqueue_chat_runtime,
+)
+from app.services.agent_runtime.chat_stream import (
+    ChatRuntimeStreamOutcome,
+    stream_web_chat_run,
+)
+from app.services.agent_runtime.contracts import CancelRunCommand, RunHandle
 from app.services.chat_session_service import ensure_primary_platform_session
 from app.services.llm import call_llm_with_failover
 from app.services.llm.utils import convert_chat_messages_to_llm_format, truncate_messages_with_pair_integrity
@@ -268,6 +280,8 @@ class WebSocketChatHandler:
         self.history_messages: list[ChatMessage] = []
         self.conversation: list[dict] = []
         self.current_user_text: str = ""
+        self.waiting_runtime_run_id: uuid.UUID | None = None
+        self.waiting_runtime_correlation_id: str | None = None
 
     async def run(self):
         """Main entry point for handling the lifecycle of the WebSocket connection."""
@@ -459,8 +473,11 @@ class WebSocketChatHandler:
         if self.welcome_message and not self.history_messages:
             await self.websocket.send_json({"type": "done", "role": "assistant", "content": self.welcome_message})
 
+        pending_messages: deque[dict] = deque()
         while True:
-            data = await self.websocket.receive_json()
+            data = pending_messages.popleft() if pending_messages else await self.websocket.receive_json()
+            if data.get("type") == "abort":
+                continue
 
             # Set a unique trace ID for this specific message processing.
             trace_id = str(uuid.uuid4())[:12]
@@ -481,12 +498,90 @@ class WebSocketChatHandler:
                     continue
                 content = "Please begin the onboarding."
 
+            try:
+                message_id = self._optional_client_uuid(data.get("message_id"), field="message_id")
+                resume_run_id = self._optional_client_uuid(data.get("run_id"), field="run_id")
+            except ChatRuntimeIntakeError as exc:
+                await self.websocket.send_json(
+                    {"type": "error", "content": str(exc), "code": exc.code}
+                )
+                continue
+            resume_correlation_id = data.get("correlation_id")
+            if resume_correlation_id is not None and not isinstance(resume_correlation_id, str):
+                await self.websocket.send_json(
+                    {
+                        "type": "error",
+                        "content": "correlation_id must be a string",
+                        "code": "invalid_chat_resume_correlation",
+                    }
+                )
+                continue
+            if (
+                resume_run_id is None
+                and resume_correlation_id is None
+                and self.waiting_runtime_run_id is not None
+                and self.waiting_runtime_correlation_id is not None
+            ):
+                resume_run_id = self.waiting_runtime_run_id
+                resume_correlation_id = self.waiting_runtime_correlation_id
+
             self.current_user_text = content
             effective_llm_model = await self._resolve_effective_model(override_model_id)
 
             # Quota Checks
             if not await self._check_quotas():
                 continue
+
+            # Runtime v2 owns native Web Chat execution when selected. The
+            # invisible onboarding kickoff and remote OpenClaw gateway retain
+            # their compatibility paths until their channel-specific cutover.
+            if (
+                self.agent_type != "openclaw"
+                and not is_onboarding_trigger
+                and effective_llm_model is not None
+            ):
+                try:
+                    intake = await self._enqueue_runtime_chat(
+                        content=content,
+                        display_content=display_content,
+                        file_name=file_name,
+                        model_id=effective_llm_model.id,
+                        message_id=message_id,
+                        resume_run_id=resume_run_id,
+                        resume_correlation_id=resume_correlation_id,
+                    )
+                except ChatRuntimeIntakeError as exc:
+                    logger.warning(f"[WS] Runtime chat intake rejected ({exc.code}): {exc}")
+                    await self.websocket.send_json(
+                        {"type": "error", "content": str(exc), "code": exc.code}
+                    )
+                    continue
+                except Exception as exc:
+                    error_code = getattr(exc, "code", "runtime_intake_failed")
+                    logger.exception(f"[WS] Runtime chat intake failed ({error_code}): {exc}")
+                    await self.websocket.send_json(
+                        {
+                            "type": "error",
+                            "content": "Message could not be accepted by the durable Runtime.",
+                            "code": error_code,
+                        }
+                    )
+                    continue
+
+                if intake is not None:
+                    outcome, queued_messages = await self._run_runtime_and_stream(
+                        intake,
+                        user_content=content,
+                    )
+                    pending_messages.extend(queued_messages)
+                    if outcome is not None:
+                        self.conversation.extend(
+                            [
+                                {"role": "user", "content": content},
+                                {"role": "assistant", "content": outcome.content},
+                            ]
+                        )
+                    continue
 
             # Add user message to in-memory context
             self.conversation.append({"role": "user", "content": content})
@@ -533,8 +628,191 @@ class WebSocketChatHandler:
             await self.websocket.send_json({"type": "done", "role": "assistant", "content": assistant_response})
 
             # Re-process any queued messages (if user sent something during generation)
-            for qm in queued_messages:
+            pending_messages.extend(queued_messages)
+
+    @staticmethod
+    def _optional_client_uuid(value: object, *, field: str) -> uuid.UUID | None:
+        if value is None or value == "":
+            return None
+        try:
+            return uuid.UUID(str(value))
+        except (TypeError, ValueError) as exc:
+            raise ChatRuntimeIntakeError(
+                f"invalid_{field}",
+                f"{field} must be a UUID",
+            ) from exc
+
+    async def _enqueue_runtime_chat(
+        self,
+        *,
+        content: str,
+        display_content: str,
+        file_name: str,
+        model_id: uuid.UUID,
+        message_id: uuid.UUID | None,
+        resume_run_id: uuid.UUID | None,
+        resume_correlation_id: str | None,
+    ) -> ChatRuntimeIntake | None:
+        """Revalidate mutable ingress scope and commit one durable input."""
+        if self.user is None or self.conv_id is None:
+            raise ChatRuntimeIntakeError(
+                "chat_connection_not_ready",
+                "Web Chat connection has no authenticated session",
+            )
+        try:
+            session_id = uuid.UUID(self.conv_id)
+        except ValueError as exc:
+            raise ChatRuntimeIntakeError(
+                "invalid_chat_session",
+                "Web Chat session ID is invalid",
+            ) from exc
+
+        async with async_session() as db:
+            async with db.begin():
+                user = await db.get(User, self.user.id)
+                if user is None or not user.is_active:
+                    raise ChatRuntimeIntakeError(
+                        "chat_user_unavailable",
+                        "Authenticated Chat user is unavailable",
+                    )
+                agent, _ = await check_agent_access(db, user, self.agent_id)
+                session = await db.get(ChatSession, session_id)
+                model = await db.get(LLMModel, model_id)
+                if session is None:
+                    raise ChatRuntimeIntakeError(
+                        "chat_session_not_found",
+                        "Web Chat session no longer exists",
+                    )
+                if model is None:
+                    raise ChatRuntimeIntakeError(
+                        "model_unavailable",
+                        "Selected Chat model no longer exists",
+                    )
+                return await enqueue_chat_runtime(
+                    db,
+                    agent=agent,
+                    user=user,
+                    session=session,
+                    model=model,
+                    content=content,
+                    display_content=display_content,
+                    file_name=file_name,
+                    message_id=message_id,
+                    resume_run_id=resume_run_id,
+                    resume_correlation_id=resume_correlation_id,
+                )
+
+    async def _cancel_runtime_run(self, handle: RunHandle) -> None:
+        if self.user is None:
+            return
+        async with async_session() as db:
+            async with db.begin():
+                await TransactionalAgentRuntimeAdapter(db).cancel_run(
+                    CancelRunCommand(
+                        tenant_id=handle.tenant_id,
+                        run_id=handle.run_id,
+                        idempotency_key=f"cancel:web:{handle.run_id}",
+                        reason="cancelled_by_user",
+                        actor_user_id=self.user.id,
+                    )
+                )
+
+    async def _run_runtime_and_stream(
+        self,
+        intake: ChatRuntimeIntake,
+        *,
+        user_content: str,
+    ) -> tuple[ChatRuntimeStreamOutcome | None, list[dict]]:
+        """Keep the socket responsive while durable work continues off-request."""
+        if self.user is None or self.conv_id is None:
+            raise ChatRuntimeIntakeError(
+                "chat_connection_not_ready",
+                "Web Chat connection has no authenticated session",
+            )
+        session_id = uuid.UUID(self.conv_id)
+        stream_task = asyncio.create_task(
+            stream_web_chat_run(
+                handle=intake.handle,
+                session_factory=async_session,
+                send_packet=self.websocket.send_json,
+                agent_id=self.agent_id,
+                session_id=session_id,
+                user_id=self.user.id,
+                after=intake.stream_after,
+            ),
+            name=f"web-chat-runtime-{intake.handle.run_id}",
+        )
+        queued_messages: list[dict] = []
+        cancel_requested = False
+        try:
+            while not stream_task.done():
+                try:
+                    message = await asyncio.wait_for(
+                        self.websocket.receive_json(),
+                        timeout=0.25,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                if message.get("type") == "abort":
+                    if not cancel_requested:
+                        cancel_requested = True
+                        try:
+                            await self._cancel_runtime_run(intake.handle)
+                        except Exception as exc:
+                            logger.warning(f"[WS] Runtime cancel enqueue failed: {exc}")
+                            await self.websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "content": "Cancellation could not be accepted.",
+                                    "code": getattr(exc, "code", "runtime_cancel_failed"),
+                                }
+                            )
+                    continue
+                queued_messages.append(message)
+            outcome = await stream_task
+        except WebSocketDisconnect:
+            stream_task.cancel()
+            try:
+                await stream_task
+            except (asyncio.CancelledError, Exception):
                 pass
+            raise
+        except Exception as exc:
+            logger.exception(f"[WS] Runtime event stream failed: {exc}")
+            if not stream_task.done():
+                stream_task.cancel()
+                try:
+                    await stream_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            await self.websocket.send_json(
+                {
+                    "type": "error",
+                    "content": "Runtime execution continues, but its live event stream was interrupted.",
+                    "code": getattr(exc, "code", "runtime_stream_failed"),
+                    "run_id": str(intake.handle.run_id),
+                }
+            )
+            return None, queued_messages
+
+        if outcome.status == "waiting_user":
+            self.waiting_runtime_run_id = intake.handle.run_id
+            self.waiting_runtime_correlation_id = outcome.correlation_id
+        elif self.waiting_runtime_run_id == intake.handle.run_id:
+            self.waiting_runtime_run_id = None
+            self.waiting_runtime_correlation_id = None
+
+        self.current_user_text = user_content
+        await self._update_activity_and_quota(outcome.content)
+        async with async_session() as db:
+            await maybe_mark_session_read_for_active_viewer(
+                db,
+                agent_id=self.agent_id,
+                session_id=self.conv_id,
+                user_id=self.user.id,
+            )
+            await db.commit()
+        return outcome, queued_messages
 
     async def _handle_onboarding_trigger_guard(self) -> bool:
         """Returns True if the onboarding trigger was ignored (already onboarded)."""
@@ -584,8 +862,8 @@ class WebSocketChatHandler:
                     if (
                         _ovr
                         and _ovr.enabled
-                        and _ovr.tenant_id
-                        and (not self.llm_model or _ovr.tenant_id == self.llm_model.tenant_id)
+                        and self.user is not None
+                        and _ovr.tenant_id in {None, self.user.tenant_id}
                     ):
                         effective_llm_model = _ovr
                     else:

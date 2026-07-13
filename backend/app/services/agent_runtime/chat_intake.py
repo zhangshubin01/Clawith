@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
+from app.models.agent_run_event import AgentRunEvent
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.llm import LLMModel
@@ -21,6 +22,7 @@ from app.services.agent_runtime.config import decide_runtime_v2
 from app.services.agent_runtime.contracts import (
     ResumeRunCommand,
     RunHandle,
+    RuntimeEventCursor,
     StartRunCommand,
 )
 from app.services.participant_identity import get_or_create_user_participant
@@ -44,6 +46,7 @@ class ChatRuntimeIntake:
     handle: RunHandle
     message_id: uuid.UUID
     resumed: bool
+    stream_after: RuntimeEventCursor | None = None
 
 
 def stored_user_content(
@@ -150,6 +153,32 @@ async def _require_resume_run(
             "Requested Run is not a resumable Web Chat Run for this session",
         )
     return run
+
+
+async def _latest_event_cursor(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+) -> RuntimeEventCursor | None:
+    result = await db.execute(
+        select(AgentRunEvent)
+        .where(
+            AgentRunEvent.tenant_id == tenant_id,
+            AgentRunEvent.run_id == run_id,
+        )
+        .order_by(AgentRunEvent.created_at.desc(), AgentRunEvent.id.desc())
+        .limit(1)
+    )
+    event = result.scalar_one_or_none()
+    if event is None:
+        return None
+    if event.created_at is None:
+        raise ChatRuntimeIntakeError(
+            "invalid_runtime_event_position",
+            "Existing Runtime event has no reconnect position",
+        )
+    return RuntimeEventCursor(event.created_at, event.id)
 
 
 async def _persist_user_message(
@@ -278,7 +307,13 @@ async def enqueue_chat_runtime(
             session_id=session.id,
             user_id=user.id,
         )
-        correlation_id = resume_correlation_id.strip()  # type: ignore[union-attr]
+        stream_after = await _latest_event_cursor(
+            db,
+            tenant_id=tenant_id,
+            run_id=resume_run_id,
+        )
+        assert resume_correlation_id is not None
+        correlation_id = resume_correlation_id.strip()
         handle = await adapter.resume_run(
             ResumeRunCommand(
                 tenant_id=tenant_id,
@@ -299,6 +334,7 @@ async def enqueue_chat_runtime(
             handle=handle,
             message_id=resolved_message_id,
             resumed=True,
+            stream_after=stream_after,
         )
 
     source_execution_id = f"chat:{resolved_message_id}"
