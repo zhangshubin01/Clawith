@@ -66,7 +66,7 @@ async def enqueue_trigger_execution(
     payload_text: str = "",
     payload_obj: dict | None = None,
 ) -> tuple[TriggerExecution | None, bool]:
-    """Atomically insert an occurrence and its Runtime command when v2 is selected."""
+    """Atomically insert an occurrence and its required Runtime command."""
     normalized_key = idempotency_key[:255]
     now = datetime.now(timezone.utc)
     execution = TriggerExecution(
@@ -118,19 +118,14 @@ async def enqueue_trigger_execution(
         return execution, True
     agent: Agent | None = await load_trigger_agent(db, trigger=stored_trigger)
     if agent is None:
-        decision = decide_runtime_v2(
-            agent_id=stored_trigger.agent_id,
-            source_type="trigger",
+        _fail_runtime_execution(
+            execution,
+            TriggerRuntimeIntakeError(
+                "agent_not_found",
+                "Runtime Trigger Agent does not exist",
+            ),
+            now,
         )
-        if decision.use_v2:
-            _fail_runtime_execution(
-                execution,
-                TriggerRuntimeIntakeError(
-                    "agent_not_found",
-                    "Runtime Trigger Agent does not exist",
-                ),
-                now,
-            )
     else:
         try:
             async with db.begin_nested():
@@ -140,8 +135,16 @@ async def enqueue_trigger_execution(
                     trigger=stored_trigger,
                     agent=agent,
                 )
-                if handle is not None:
-                    _mark_trigger_fired(stored_trigger, now)
+                if handle is None:
+                    decision = decide_runtime_v2(
+                        agent_id=stored_trigger.agent_id,
+                        source_type="trigger",
+                    )
+                    raise TriggerRuntimeIntakeError(
+                        "runtime_v2_disabled",
+                        f"Unified Runtime is required for Trigger execution ({decision.reason})",
+                    )
+                _mark_trigger_fired(stored_trigger, now)
                 await db.flush()
         except TriggerRuntimeIntakeError as error:
             _fail_runtime_execution(execution, error, now)

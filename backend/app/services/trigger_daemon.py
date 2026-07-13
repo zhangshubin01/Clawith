@@ -23,12 +23,7 @@ from app.services.trigger_runtime.evaluator import (
     should_skip_non_workday as should_skip_non_workday_runtime,
 )
 from app.services.trigger_runtime.invoker import invoke_agent_for_triggers as invoke_agent_for_triggers_runtime
-from app.services.trigger_runtime import (
-    claim_ready_trigger_invocations,
-    enqueue_due_trigger,
-    mark_trigger_executions_completed,
-    mark_trigger_executions_failed,
-)
+from app.services.trigger_runtime import enqueue_due_trigger
 
 TICK_INTERVAL = 15  # seconds
 DEDUP_WINDOW = 30   # seconds — same agent won't be invoked twice within this window
@@ -98,7 +93,7 @@ async def _tick():
 
     async with async_session() as db:
         result = await db.execute(
-            select(AgentTrigger).where(AgentTrigger.is_enabled == True)
+            select(AgentTrigger).where(AgentTrigger.is_enabled.is_(True))
         )
         all_triggers = result.scalars().all()
         # Expunge each object before session.close() is called.
@@ -157,57 +152,6 @@ async def _tick():
         except Exception as e:
             logger.warning(f"Error evaluating trigger {trigger.name}: {e}")
 
-    # Claim queued executions with a DB lease so only one worker handles each event.
-    try:
-        fired_by_agent, force_invoke_agents = await claim_ready_trigger_invocations(now)
-    except Exception as e:
-        logger.warning(f"Failed to claim trigger executions: {e}")
-        fired_by_agent = {}
-        force_invoke_agents = set()
-
-    # Invoke each agent (with dedup window)
-    for agent_id, agent_triggers in fired_by_agent.items():
-        last = _last_invoke.get(agent_id)
-        if agent_id not in force_invoke_agents and last and (now - last).total_seconds() < DEDUP_WINDOW:
-            continue  # Skip — invoked too recently
-        _last_invoke[agent_id] = now
-
-        # ── Immediately update trigger state BEFORE launching async task ──
-        # This prevents the next tick from re-evaluating the same trigger as
-        # "should fire" while the LLM call is still running (which can take
-        # minutes). Without this, the 15s tick interval + 30s dedup window
-        # would cause repeated invocations for long-running triggers.
-        try:
-            async with async_session() as db:
-                for t in agent_triggers:
-                    cfg = t.config or {}
-                    if isinstance(cfg, str):
-                        import json
-                        try:
-                            cfg = json.loads(cfg)
-                        except (json.JSONDecodeError, TypeError):
-                            cfg = {}
-                    if cfg.get("_execution_id"):
-                        continue
-                    result = await db.execute(
-                        select(AgentTrigger).where(AgentTrigger.id == t.id)
-                    )
-                    trigger = result.scalar_one_or_none()
-                    if trigger:
-                        trigger.last_fired_at = now
-                        trigger.fire_count += 1
-                        # Auto-disable single-shot types only
-                        if trigger.type == "once":
-                            trigger.is_enabled = False
-                        if trigger.max_fires and trigger.fire_count >= trigger.max_fires:
-                            trigger.is_enabled = False
-                await db.commit()
-        except Exception as e:
-            logger.warning(f"Failed to pre-update trigger state: {e}")
-
-        asyncio.create_task(_invoke_agent_for_triggers(agent_id, agent_triggers))
-
-
 async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, from_agent_id: uuid.UUID | None = None, skip_dedup: bool = False, a2a_session_id: str | None = None) -> None:
     """Public API: wake an agent asynchronously with a message context.
 
@@ -224,8 +168,6 @@ async def wake_agent_with_context(agent_id: uuid.UUID, message_context: str, *, 
         skip_dedup: If True, bypass the dedup window check.
         a2a_session_id: Optional A2A chat session ID to mirror the reply into.
     """
-    import time as _time
-
     now = datetime.now(timezone.utc)
 
     if from_agent_id:
