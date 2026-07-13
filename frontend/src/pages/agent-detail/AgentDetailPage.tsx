@@ -10,6 +10,7 @@ import type { FileBrowserApi } from '../../components/FileBrowser';
 import FileBrowser from '../../components/FileBrowser';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
 import { DraftEditor as ExperienceDraftEditor, type Draft as ExperienceDraft } from '../../components/ExperienceDraftEditor';
+import { EntryDrawer } from '../../components/ExperienceDetailDrawer';
 import PromptModal from '../../components/PromptModal';
 import { appendLiveCodeOutput, type LivePreviewState } from '../../components/AgentBayLivePanel';
 import AgentSidePanel, { SidePanelTab } from '../../components/AgentSidePanel';
@@ -389,19 +390,28 @@ function DistillButton({ text, sessionId }: { text: string; sessionId?: string |
         <>
             <button
                 onClick={handle}
-                title="沉淀为经验"
+                title={busy ? '正在提炼草稿…' : '沉淀为经验'}
                 disabled={busy}
                 style={{
-                    background: 'none', border: 'none', cursor: busy ? 'wait' : 'pointer', padding: '2px',
-                    color: 'var(--text-tertiary)', opacity: 0.5, transition: 'opacity .15s, color .15s',
+                    // No cursor:wait — that only rendered a spinner while the pointer happened to
+                    // rest on the button, so moving away made a running distill look dead.
+                    background: 'none', border: 'none', cursor: busy ? 'default' : 'pointer', padding: '2px',
+                    color: 'var(--text-tertiary)', opacity: busy ? 1 : 0.5, transition: 'opacity .15s, color .15s',
                     display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle', marginLeft: '6px', flexShrink: 0,
                 }}
-                onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
-                onMouseLeave={e => (e.currentTarget.style.opacity = '0.5')}
+                onMouseEnter={e => { if (!busy) e.currentTarget.style.opacity = '1'; }}
+                onMouseLeave={e => { if (!busy) e.currentTarget.style.opacity = '0.5'; }}
             >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /><path d="M9 7h6M9 11h4" />
-                </svg>
+                {busy ? (
+                    // Same 13px footprint as the icon it replaces, so the message row doesn't shift.
+                    <svg className="distill-spinner" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                        <path d="M12 3a9 9 0 1 0 9 9" />
+                    </svg>
+                ) : (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /><path d="M9 7h6M9 11h4" />
+                    </svg>
+                )}
             </button>
             {draft && (
                 <ExperienceDraftEditor
@@ -418,20 +428,48 @@ function DistillButton({ text, sessionId }: { text: string; sessionId?: string |
 
 /** Renders a [[exp:<uuid>]] citation as a green inline pill: 「经验:<title 8>…」→ /plaza detail. */
 function ExperienceCitation({ id }: { id: string }) {
-    const navigate = useNavigate();
+    const qc = useQueryClient();
     const { data } = useQuery({ queryKey: ['exp-cite', id], queryFn: () => experienceApi.get(id), staleTime: 300000, retry: false });
+    // Opens the entry in a docked drawer over the conversation. Navigating to /plaza would
+    // tear the user out of the chat they're reading — the citation is a footnote, not an exit.
+    const [detail, setDetail] = React.useState(false);
+    const [editing, setEditing] = React.useState<ExperienceDraft | null>(null);
     const title = data?.title || '';
     const label = title ? `经验:${title.slice(0, 8)}${title.length > 8 ? '…' : ''}` : '经验';
+    const refresh = () => {
+        qc.invalidateQueries({ queryKey: ['experience'] });
+        qc.invalidateQueries({ queryKey: ['exp-cite', id] });
+    };
     return (
-        <button
-            onClick={(e) => { e.stopPropagation(); navigate(`/plaza?entry=${id}`); }}
-            title={title || '团队经验库条目'}
-            style={{
-                display: 'inline-flex', alignItems: 'center', gap: 4, padding: '1px 8px', borderRadius: 999,
-                fontSize: 12, lineHeight: '18px', border: '1px solid var(--success)', color: 'var(--success)',
-                background: 'var(--success-subtle)', cursor: 'pointer', verticalAlign: 'middle',
-            }}
-        >📚 {label}</button>
+        <>
+            <button
+                onClick={(e) => { e.stopPropagation(); setDetail(true); }}
+                title={title || '团队经验库条目'}
+                style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4, padding: '1px 8px', borderRadius: 999,
+                    fontSize: 12, lineHeight: '18px', border: '1px solid var(--success)', color: 'var(--success)',
+                    background: 'var(--success-subtle)', cursor: 'pointer', verticalAlign: 'middle',
+                }}
+            >{label}</button>
+            {detail && (
+                <EntryDrawer
+                    entryId={id}
+                    docked
+                    onClose={() => setDetail(false)}
+                    onEdit={(entry) => { setDetail(false); setEditing(entry); }}
+                    onChanged={refresh}
+                />
+            )}
+            {editing && (
+                <ExperienceDraftEditor
+                    draft={editing}
+                    docked
+                    onClose={() => setEditing(null)}
+                    onSaved={() => { setEditing(null); refresh(); }}
+                    onDeleted={() => { setEditing(null); refresh(); }}
+                />
+            )}
+        </>
     );
 }
 
@@ -466,27 +504,44 @@ function ExperienceDraftCard({ args, sessionId }: { args: any; sessionId?: strin
         visibility_scope: 'company',
         origin_agent_id: agentId, origin_session_id: sessionId || null,
     };
-    const parts: [string, string][] = [
-        ['场景', a.scenario], ['遇到的问题', a.problem], ['解决方式', a.solution], ['适用条件与失效信号', a.applicability],
+    // Short labels — the card is a summary; the drawer shows the full schema names.
+    // `key` marks 适用与失效: required, and the part a reader's eye slides off.
+    const parts: { label: string; val: string; key?: boolean }[] = [
+        { label: '场景', val: a.scenario },
+        { label: '问题', val: a.problem },
+        { label: '解决', val: a.solution },
+        { label: '适用与失效', val: a.applicability, key: true },
     ];
+    const tags = toArr(a.tags);
     return (
-        <div style={{
-            border: '1px solid var(--success)', borderRadius: 'var(--radius-lg, 8px)', padding: 14,
-            background: 'var(--success-subtle)', marginTop: 6,
-        }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-                <span>📝</span>
-                <strong style={{ fontSize: 13, color: 'var(--text-primary)' }}>{a.title || '经验草稿'}</strong>
-                <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>· 待你确认（AI 不会自动入库）</span>
-            </div>
-            {parts.map(([label, val]) => (val ? (
-                <div key={label} style={{ fontSize: 12, marginBottom: 4, lineHeight: 1.5 }}>
-                    <span style={{ color: 'var(--text-tertiary)' }}>{label}：</span>
-                    <span style={{ color: 'var(--text-secondary)' }}>{String(val).length > 80 ? String(val).slice(0, 80) + '…' : val}</span>
+        <div className="exp-draft">
+            <div className="exp-draft-head">
+                <div className="exp-draft-head-l">
+                    <div className="exp-draft-tagrow">
+                        <span className="exp-draft-state">草稿</span>
+                    </div>
+                    <div className="exp-draft-title">{a.title || '未命名经验'}</div>
                 </div>
-            ) : null))}
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                <button className="btn btn-primary" style={{ height: 28, fontSize: 12 }} onClick={() => setOpen(true)}>编辑后沉淀为经验</button>
+                <div className="exp-draft-pending">待你确认 · 不自动入库</div>
+            </div>
+            <div className="exp-draft-divider" />
+            <div className="exp-draft-fields">
+                <div className="exp-draft-grid">
+                    {parts.map(p => (p.val ? (
+                        <React.Fragment key={p.label}>
+                            <div className={p.key ? 'exp-draft-lab-key' : 'exp-draft-lab'}>{p.label}</div>
+                            <div className="exp-draft-val">{p.val}</div>
+                        </React.Fragment>
+                    ) : null))}
+                </div>
+            </div>
+            {tags.length > 0 && (
+                <div className="exp-draft-tags">
+                    {tags.map((tg: string) => <span key={tg} className="exp-draft-tag">{tg}</span>)}
+                </div>
+            )}
+            <div className="exp-draft-foot">
+                <button className="exp-draft-btn" onClick={() => setOpen(true)}>编辑后沉淀为经验</button>
             </div>
             {open && (
                 <ExperienceDraftEditor
