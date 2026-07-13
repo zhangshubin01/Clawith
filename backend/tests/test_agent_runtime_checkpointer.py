@@ -128,6 +128,7 @@ def test_runtime_dataclasses_are_explicitly_allowlisted_and_restore_tuples() -> 
     assert restored_registry == registry
     assert restored_snapshots == snapshots
     assert isinstance(restored_snapshots.recent_session_messages, tuple)
+    assert isinstance(restored_snapshots.pending_session_messages, tuple)
     assert isinstance(restored_snapshots.related_run_summaries, tuple)
 
 

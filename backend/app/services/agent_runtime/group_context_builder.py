@@ -44,6 +44,7 @@ class GroupContextCapture:
     """Validated group input and enriched recent message snapshots."""
 
     initial_input: JsonObject
+    pending_messages: tuple[JsonObject, ...]
     recent_messages: tuple[JsonObject, ...]
 
 
@@ -132,6 +133,7 @@ class GroupContextBuilder:
         session_id: uuid.UUID,
         agent_id: uuid.UUID | None,
         initial_input: Mapping[str, object],
+        pending_messages: Sequence[Mapping[str, object]] = (),
         recent_messages: Sequence[Mapping[str, object]],
     ) -> GroupContextCapture:
         """Add group context only to concrete Agent Runs, never Planning roots."""
@@ -140,6 +142,9 @@ class GroupContextBuilder:
         if raw_group_id is None or raw_target_participant_id is None:
             return GroupContextCapture(
                 initial_input=deepcopy(dict(initial_input)),
+                pending_messages=tuple(
+                    deepcopy(dict(message)) for message in pending_messages
+                ),
                 recent_messages=tuple(deepcopy(dict(message)) for message in recent_messages),
             )
         if agent_id is None:
@@ -383,6 +388,7 @@ class GroupContextBuilder:
         captured_input["group_context"] = group_context
         return GroupContextCapture(
             initial_input=captured_input,
+            pending_messages=await self._enrich_recent_messages(db, pending_messages),
             recent_messages=await self._enrich_recent_messages(db, recent_messages),
         )
 

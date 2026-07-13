@@ -18,6 +18,7 @@ import uuid
 from sqlalchemy import String, and_, cast as sa_cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.config import Settings, get_settings
 from app.models.audit import ChatMessage
@@ -191,10 +192,11 @@ class SessionContextDelta:
 
 @dataclass(frozen=True, slots=True)
 class SessionContextPack:
-    """Session snapshot plus the fixed recent user-visible message window."""
+    """Session snapshot, pending old messages, and the fixed recent window."""
 
     snapshot: SessionContextSnapshot
     recent_messages: tuple[JsonObject, ...]
+    pending_messages: tuple[JsonObject, ...] = ()
 
 
 def _copy_json_value(value: object, field: str) -> JsonValue:
@@ -363,6 +365,100 @@ def _incremental_messages_statement(
     return statement.order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
 
 
+def _recent_message_ids_statement(
+    tenant_id: uuid.UUID,
+    session_id: uuid.UUID,
+    *,
+    recent_limit: int,
+):
+    recent_message = aliased(ChatMessage)
+    recent_session = aliased(ChatSession)
+    return (
+        select(recent_message.id)
+        .join(
+            recent_session,
+            recent_message.conversation_id == sa_cast(recent_session.id, String),
+        )
+        .where(
+            recent_session.tenant_id == tenant_id,
+            recent_session.id == session_id,
+            recent_session.deleted_at.is_(None),
+            recent_message.conversation_id == sa_cast(recent_session.id, String),
+            recent_message.role.in_(_USER_VISIBLE_ROLES),
+            recent_message.created_at.is_not(None),
+        )
+        .order_by(recent_message.created_at.desc(), recent_message.id.desc())
+        .limit(recent_limit)
+    )
+
+
+def _after_watermark(message, watermark: MessagePosition):
+    return or_(
+        message.created_at > watermark.created_at,
+        and_(
+            message.created_at == watermark.created_at,
+            message.id > watermark.message_id,
+        ),
+    )
+
+
+def _compactable_messages_statement(
+    tenant_id: uuid.UUID,
+    session_id: uuid.UUID,
+    watermark: MessagePosition | None,
+    *,
+    recent_limit: int,
+):
+    recent_ids = _recent_message_ids_statement(
+        tenant_id,
+        session_id,
+        recent_limit=recent_limit,
+    )
+    statement = (
+        select(ChatMessage)
+        .join(
+            ChatSession,
+            ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
+        )
+        .where(
+            *_message_scope(tenant_id, session_id),
+            ChatMessage.id.not_in(recent_ids),
+        )
+    )
+    if watermark is not None:
+        statement = statement.where(_after_watermark(ChatMessage, watermark))
+    return statement.order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+
+
+def _context_pack_messages_statement(
+    tenant_id: uuid.UUID,
+    session_id: uuid.UUID,
+    watermark: MessagePosition | None,
+    *,
+    recent_limit: int,
+):
+    """Select the pending zone and recent window from one database snapshot."""
+    recent_ids = _recent_message_ids_statement(
+        tenant_id,
+        session_id,
+        recent_limit=recent_limit,
+    )
+    is_recent = ChatMessage.id.in_(recent_ids)
+    statement = (
+        select(ChatMessage, is_recent.label("is_recent"))
+        .join(
+            ChatSession,
+            ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
+        )
+        .where(*_message_scope(tenant_id, session_id))
+    )
+    if watermark is not None:
+        statement = statement.where(
+            or_(is_recent, _after_watermark(ChatMessage, watermark))
+        )
+    return statement.order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+
+
 def _candidate_values(candidate: SessionContextCandidate) -> dict[str, Any]:
     if not isinstance(candidate.summary, str):
         raise SessionContextError(
@@ -508,15 +604,31 @@ class SessionContextService:
             tenant_id=tenant_id,
             session=session,
         )
-        recent_messages = await self._load_recent_for_session(
-            db,
-            tenant_id=tenant_id,
-            session=session,
-            limit=self.recent_message_limit,
+        watermark = None
+        if snapshot.covered_through_message_id is not None:
+            watermark = await self._resolve_position(
+                db,
+                tenant_id=tenant_id,
+                session_id=session.id,
+                message_id=snapshot.covered_through_message_id,
+            )
+        messages_result = await db.execute(
+            _context_pack_messages_statement(
+                tenant_id,
+                session.id,
+                watermark,
+                recent_limit=self.recent_message_limit,
+            )
         )
+        pending_messages = []
+        recent_messages = []
+        for message, is_recent in messages_result.all():
+            serialized = _message_to_json(message)
+            (recent_messages if is_recent else pending_messages).append(serialized)
         return SessionContextPack(
             snapshot=snapshot,
-            recent_messages=recent_messages,
+            recent_messages=tuple(recent_messages),
+            pending_messages=tuple(pending_messages),
         )
 
     async def _resolve_position(
@@ -562,6 +674,42 @@ class SessionContextService:
                 message_id=covered_through_message_id,
             )
         result = await db.execute(_incremental_messages_statement(tenant_id, session_id, watermark))
+        return tuple(_message_to_json(message) for message in result.scalars().all())
+
+    async def load_compactable_messages_after_watermark(
+        self,
+        db: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        session_id: uuid.UUID,
+        covered_through_message_id: uuid.UUID | None,
+        recent_limit: int | None = None,
+    ) -> tuple[JsonObject, ...]:
+        """Read watermark-newer messages while always preserving the recent raw window."""
+        selected_limit = self.recent_message_limit if recent_limit is None else recent_limit
+        if selected_limit <= 0:
+            raise ValueError("recent_limit must be greater than zero")
+        await self._require_active_session(
+            db,
+            tenant_id=tenant_id,
+            session_id=session_id,
+        )
+        watermark = None
+        if covered_through_message_id is not None:
+            watermark = await self._resolve_position(
+                db,
+                tenant_id=tenant_id,
+                session_id=session_id,
+                message_id=covered_through_message_id,
+            )
+        result = await db.execute(
+            _compactable_messages_statement(
+                tenant_id,
+                session_id,
+                watermark,
+                recent_limit=selected_limit,
+            )
+        )
         return tuple(_message_to_json(message) for message in result.scalars().all())
 
     async def _validate_watermark_transition(

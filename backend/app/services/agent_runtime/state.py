@@ -69,6 +69,7 @@ class RunInputSnapshots:
     recent_session_messages: tuple[JsonObject, ...]
     related_run_summaries: tuple[JsonObject, ...]
     initial_input: JsonObject
+    pending_session_messages: tuple[JsonObject, ...] = ()
 
     def __post_init__(self) -> None:
         """Restore tuple boundaries after msgpack decodes arrays as lists."""
@@ -81,6 +82,11 @@ class RunInputSnapshots:
             self,
             "related_run_summaries",
             tuple(self.related_run_summaries),
+        )
+        object.__setattr__(
+            self,
+            "pending_session_messages",
+            tuple(self.pending_session_messages),
         )
 
 

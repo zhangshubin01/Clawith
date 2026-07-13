@@ -161,15 +161,32 @@ async def test_context_pack_uses_latest_state_and_recent_20_user_visible_message
         )
         for index in reversed(range(20))
     ]
+    covered = _message(
+        uuid.uuid4(),
+        session_id=session.id,
+        created_at=base - timedelta(seconds=2),
+    )
+    pending = _message(
+        uuid.uuid4(),
+        session_id=session.id,
+        created_at=base - timedelta(seconds=1),
+        role="assistant",
+    )
     state = _state(
         session,
         version=4,
-        watermark=newest_first[-1].id,
+        watermark=covered.id,
     )
     db = _FakeSession(
         _Result(scalar=session),
         _Result(scalar=state),
-        _Result(rows=newest_first),
+        _Result(scalar=covered),
+        _Result(
+            rows=[
+                (pending, False),
+                *((message, True) for message in reversed(newest_first)),
+            ]
+        ),
     )
 
     pack = await service.SessionContextService().load_context_pack(
@@ -181,14 +198,17 @@ async def test_context_pack_uses_latest_state_and_recent_20_user_visible_message
     assert pack.snapshot.version == 4
     assert pack.snapshot.summary == "summary"
     assert len(pack.recent_messages) == 20
+    assert [message["id"] for message in pack.pending_messages] == [str(pending.id)]
     assert [message["created_at"] for message in pack.recent_messages] == sorted(
         message["created_at"] for message in pack.recent_messages
     )
     recent_sql = _sql(db.statements[-1])
     assert "chat_sessions.deleted_at IS NULL" in recent_sql
     assert "chat_messages.role IN ('user', 'assistant')" in recent_sql
-    assert "ORDER BY chat_messages.created_at DESC, chat_messages.id DESC" in recent_sql
+    assert "ORDER BY chat_messages_1.created_at DESC, chat_messages_1.id DESC" in recent_sql
     assert "LIMIT 20" in recent_sql
+    assert "chat_messages.created_at >" in recent_sql
+    assert "ORDER BY chat_messages.created_at ASC" in recent_sql
 
 
 @pytest.mark.asyncio
@@ -232,6 +252,34 @@ async def test_incremental_read_resolves_watermark_position_before_ordered_query
     assert "chat_messages.created_at =" in incremental_sql
     assert "chat_messages.id >" in incremental_sql
     assert "ORDER BY chat_messages.created_at ASC, chat_messages.id ASC" in incremental_sql
+
+
+@pytest.mark.asyncio
+async def test_compactable_read_excludes_the_latest_20_message_positions():
+    session = _session(session_type="group")
+    old_message = _message(
+        uuid.uuid4(),
+        session_id=session.id,
+        created_at=datetime(2026, 7, 13, 9, 0, tzinfo=UTC),
+    )
+    db = _FakeSession(
+        _Result(scalar=session),
+        _Result(rows=[old_message]),
+    )
+
+    messages = await service.SessionContextService().load_compactable_messages_after_watermark(
+        db,
+        tenant_id=session.tenant_id,
+        session_id=session.id,
+        covered_through_message_id=None,
+    )
+
+    assert [message["id"] for message in messages] == [str(old_message.id)]
+    compactable_sql = _sql(db.statements[-1])
+    assert "chat_messages.id NOT IN" in compactable_sql
+    assert "ORDER BY chat_messages_1.created_at DESC" in compactable_sql
+    assert "LIMIT 20" in compactable_sql
+    assert "ORDER BY chat_messages.created_at ASC, chat_messages.id ASC" in compactable_sql
 
 
 @pytest.mark.asyncio

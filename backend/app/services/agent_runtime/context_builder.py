@@ -61,6 +61,7 @@ class RuntimeContextBuild:
     retry_model: bool
     blocked: bool
     requires_confirmation: bool
+    pending_session_messages_snapshot: tuple[JsonObject, ...] = ()
 
     def to_json(self) -> JsonObject:
         """Return the serializable prompt sections without control metadata loss."""
@@ -68,6 +69,9 @@ class RuntimeContextBuild:
             "session_context_snapshot": deepcopy(self.session_context_snapshot),
             "current_run": deepcopy(self.current_run),
             "related_run_summaries": [deepcopy(summary) for summary in self.related_run_summaries],
+            "pending_session_messages_snapshot": [
+                deepcopy(message) for message in self.pending_session_messages_snapshot
+            ],
             "recent_session_messages_snapshot": [
                 deepcopy(message) for message in self.recent_session_messages_snapshot
             ],
@@ -228,6 +232,7 @@ class ContextBuilder:
         if session_id is None:
             session_context = _empty_session_snapshot()
             session_context_version = 0
+            pending_messages: tuple[JsonObject, ...] = ()
             recent_messages: tuple[JsonObject, ...] = ()
         else:
             pack = await self.session_context_service.load_context_pack(
@@ -237,6 +242,11 @@ class ContextBuilder:
             )
             session_context = pack.snapshot.to_json()
             session_context_version = pack.snapshot.version
+            pending_messages = _json_objects(
+                pack.pending_messages,
+                field="pending_session_messages",
+            )
+            _validate_session_messages(pending_messages)
             recent_messages = _json_objects(
                 pack.recent_messages,
                 field="recent_session_messages",
@@ -248,12 +258,18 @@ class ContextBuilder:
                 session_id=session_id,
                 agent_id=agent_id,
                 initial_input=normalized_input,
+                pending_messages=pending_messages,
                 recent_messages=recent_messages,
             )
             normalized_input = _json_object(
                 group_capture.initial_input,
                 field="initial_input",
             )
+            pending_messages = _json_objects(
+                group_capture.pending_messages,
+                field="pending_session_messages",
+            )
+            _validate_session_messages(pending_messages)
             recent_messages = _json_objects(
                 group_capture.recent_messages,
                 field="recent_session_messages",
@@ -266,6 +282,7 @@ class ContextBuilder:
             recent_session_messages=recent_messages,
             related_run_summaries=normalized_related,
             initial_input=normalized_input,
+            pending_session_messages=pending_messages,
         )
 
     async def build(
@@ -298,6 +315,11 @@ class ContextBuilder:
             snapshots.related_run_summaries,
             field="related_run_summaries",
         )
+        pending_session_messages = _json_objects(
+            snapshots.pending_session_messages,
+            field="pending_session_messages_snapshot",
+        )
+        _validate_session_messages(pending_session_messages)
 
         lifecycle = state["lifecycle"]
         run_messages = _json_objects(
@@ -320,6 +342,7 @@ class ContextBuilder:
             session_context_snapshot=session_context,
             current_run=_current_run_section(state),
             related_run_summaries=related_run_summaries,
+            pending_session_messages_snapshot=pending_session_messages,
             recent_session_messages_snapshot=recent_session_messages,
             recent_run_messages=selected_run_messages,
             initial_input=_json_object(

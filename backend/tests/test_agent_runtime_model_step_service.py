@@ -160,6 +160,13 @@ def _build(**overrides) -> RuntimeContextBuild:
         "session_context_snapshot": {"version": 1, "summary": "shared"},
         "current_run": {"goal": "Answer the request"},
         "related_run_summaries": (),
+        "pending_session_messages_snapshot": (
+            {
+                "id": "pending-session-message-1",
+                "role": "assistant",
+                "content": "Earlier decision from the pending compact zone",
+            },
+        ),
         "recent_session_messages_snapshot": (
             {
                 "id": "session-message-1",
@@ -281,6 +288,7 @@ async def test_normal_tool_proposal_is_stable_and_does_not_execute_in_model_step
     tool_names = {tool["function"]["name"] for tool in calls[0][2]["tools"]}
     assert tool_names == {"read_file", "finish", "wait"}
     assert calls[0][1][0].role == "system"
+    assert "Earlier decision from the pending compact zone" in calls[0][1][0].dynamic_content
     assert calls[0][1][1].role == "user"
     assert calls[0][1][1].content == "Please inspect the file"
     assert len(builder.calls) == 2

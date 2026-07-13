@@ -148,6 +148,7 @@ async def test_group_context_freezes_authoritative_scope_files_and_sender_metada
         _Result([user]),
         _Result([org_member]),
         _Result([sender]),
+        _Result([sender]),
     )
 
     async def authorize_session(_db, **_kwargs):
@@ -230,6 +231,16 @@ async def test_group_context_freezes_authoritative_scope_files_and_sender_metada
             "planning_step_id": "research",
             "planning_instruction": "Prepare the risk plan",
         },
+        pending_messages=(
+            {
+                "id": str(uuid.uuid4()),
+                "role": "assistant",
+                "content": "Earlier group context",
+                "created_at": NOW.isoformat(),
+                "participant_id": str(sender.id),
+                "mentions": [],
+            },
+        ),
         recent_messages=(
             {
                 "id": str(trigger.id),
@@ -257,6 +268,7 @@ async def test_group_context_freezes_authoritative_scope_files_and_sender_metada
     assert context["agent_group_memory"]["content"] == "abcdef"
     assert context["workspace_index"][0]["path"] == "reports/final.md"
     assert context["planning_hint"]["planning_step_id"] == "research"
+    assert captured.pending_messages[0]["sender_name"] == "Alice"
     assert captured.recent_messages[0]["sender_name"] == "Alice"
     assert captured.recent_messages[0]["sender_type"] == "user"
 

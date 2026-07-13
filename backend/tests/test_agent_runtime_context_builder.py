@@ -119,6 +119,7 @@ async def test_capture_new_run_freezes_latest_session_context_and_recent_message
         recent_messages=tuple(
             _session_message(f"session-{index}", "user" if index % 2 == 0 else "assistant") for index in range(20)
         ),
+        pending_messages=(_session_message("pending-session-message"),),
     )
     session_service = _SessionContextService(pack)
     builder = context_builder.ContextBuilder(session_service)
@@ -134,6 +135,9 @@ async def test_capture_new_run_freezes_latest_session_context_and_recent_message
 
     assert snapshots.session_context_version == 3
     assert snapshots.session_context["summary"] == "session summary"
+    assert [message["id"] for message in snapshots.pending_session_messages] == [
+        "pending-session-message"
+    ]
     assert len(snapshots.recent_session_messages) == 20
     assert snapshots.related_run_summaries[0]["run_id"] == "dependency"
     assert session_service.calls == [(db, tenant_id, session_id)]
@@ -144,6 +148,7 @@ async def test_resume_build_reuses_checkpoint_snapshot_without_refreshing_sessio
     original_pack = SessionContextPack(
         snapshot=_snapshot(version=2, summary="original"),
         recent_messages=(_session_message("original-message"),),
+        pending_messages=(_session_message("original-pending"),),
     )
     session_service = _SessionContextService(original_pack)
     builder = context_builder.ContextBuilder(session_service)
@@ -158,6 +163,7 @@ async def test_resume_build_reuses_checkpoint_snapshot_without_refreshing_sessio
     session_service.pack = SessionContextPack(
         snapshot=_snapshot(version=9, summary="new parallel work"),
         recent_messages=(_session_message("parallel-message"),),
+        pending_messages=(_session_message("parallel-pending"),),
     )
 
     built = await builder.build(
@@ -168,6 +174,9 @@ async def test_resume_build_reuses_checkpoint_snapshot_without_refreshing_sessio
     assert len(session_service.calls) == 1
     assert built.session_context_snapshot["version"] == 2
     assert built.session_context_snapshot["summary"] == "original"
+    assert [message["id"] for message in built.pending_session_messages_snapshot] == [
+        "original-pending"
+    ]
     assert [message["id"] for message in built.recent_session_messages_snapshot] == ["original-message"]
     assert built.resume_input == {"content": "continue"}
 
