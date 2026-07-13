@@ -5,10 +5,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import String, cast, exists, or_, select
 
 from app.config import get_settings
 from app.database import async_session
+from app.models.agent_run import AgentRun
 from app.models.trigger import AgentTrigger
 from app.models.trigger_execution import TriggerExecution
 
@@ -62,11 +63,19 @@ async def claim_pending_trigger_executions(
             .join(AgentTrigger, AgentTrigger.id == TriggerExecution.trigger_id)
             .where(
                 TriggerExecution.source.in_(sources),
-                AgentTrigger.is_enabled == True,
+                AgentTrigger.is_enabled.is_(True),
+                ~exists(
+                    select(AgentRun.id).where(
+                        AgentRun.source_type == "trigger",
+                        AgentRun.source_execution_id
+                        == cast(TriggerExecution.id, String),
+                    )
+                ),
                 or_(
                     TriggerExecution.status == "pending",
                     (TriggerExecution.status == "processing") & (
-                        (TriggerExecution.lease_expires_at == None) | (TriggerExecution.lease_expires_at < now)
+                        TriggerExecution.lease_expires_at.is_(None)
+                        | (TriggerExecution.lease_expires_at < now)
                     ),
                 ),
             )
@@ -92,8 +101,9 @@ async def claim_pending_trigger_executions(
 
 
 def build_execution_runtime_trigger(trigger: AgentTrigger, execution: TriggerExecution) -> AgentTrigger:
+    stored_config = trigger.config if isinstance(trigger.config, dict) else {}
     runtime_cfg = {
-        **(trigger.config or {}),
+        **stored_config,
         "_execution_id": str(execution.id),
     }
     if execution.payload:

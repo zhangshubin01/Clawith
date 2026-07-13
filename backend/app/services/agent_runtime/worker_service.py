@@ -47,6 +47,7 @@ from app.services.agent_runtime.session_context_completion import (
 )
 from app.services.agent_runtime.task_completion import TaskRuntimeCompletionHandler
 from app.services.agent_runtime.tool_step_service import RuntimeToolStepService
+from app.services.agent_runtime.trigger_completion import TriggerRuntimeCompletionHandler
 
 
 logger = logging.getLogger(__name__)
@@ -201,6 +202,7 @@ def build_runtime_worker_components(
                 compactor=session_context_compactor,
             ),
             TaskRuntimeCompletionHandler(session_factory=session_factory),
+            TriggerRuntimeCompletionHandler(session_factory=session_factory),
         ),
     )
     worker = RuntimeCommandWorker(

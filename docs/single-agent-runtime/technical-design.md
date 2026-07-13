@@ -235,7 +235,7 @@ backend/app/
 
 - Web 用户继续 `waiting_user`：客户端显式携带 `run_id`；没有 `run_id` 时，只能在 session 内唯一存在一个 `waiting_user` run 的情况下自动关联。
 - A2A 返回：使用 `correlation_id + source_run_id` 定位，不按最近 run 猜测。
-- Trigger：使用 `TriggerExecution.id` 作为稳定 `source_id`，重复投递命中同一 run。
+- Trigger：`source_id` 保存 `AgentTrigger.id`，`source_execution_id` 使用稳定的 `TriggerExecution.id`；重复投递命中同一 run。
 - Task：每次实际执行生成独立 run；`Task.id` 是业务来源，执行批次需要独立 `source_execution_id` 或 `attempt_no`。
 - 新任务：即使同一 session 还有 waiting run，也创建新 thread，不覆盖旧 checkpoint。
 

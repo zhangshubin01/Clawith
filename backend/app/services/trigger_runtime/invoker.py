@@ -16,6 +16,7 @@ from app.services.trigger_runtime import (
     mark_trigger_executions_completed,
     mark_trigger_executions_failed,
 )
+from app.services.trigger_runtime.intake import build_trigger_context
 
 
 async def resolve_trigger_delivery_target(agent: Agent, triggers: list[AgentTrigger]) -> dict | None:
@@ -120,57 +121,8 @@ async def invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTri
                     await mark_trigger_executions_failed(execution_ids, "Agent primary model is unavailable or disabled")
                 return
 
-            context_parts = []
-            trigger_names = []
-            for t in triggers:
-                part = f"触发器：{t.name} ({t.type})\n原因：{t.reason}"
-                if t.name == "daily_okr_collection":
-                    part += (
-                        "\n执行要求：先调用 get_okr_settings 确认日报收集是否开启。"
-                        "如果开启，只能联系你关系网络中的成员和数字员工来收集今天的最终日报，"
-                        "并整理成不超过 2000 字的正式日报；"
-                        "如果未开启，则说明本次无需执行并停止。"
-                    )
-                elif t.name in ("daily_okr_report", "weekly_okr_report", "monthly_okr_report"):
-                    part += (
-                        "\n执行要求：本次公司级报表由系统自动汇总生成。"
-                        "如果你被唤醒，仅补充必要说明，不要再次向成员发起收集。"
-                    )
-                elif t.name == "biweekly_okr_checkin":
-                    part += (
-                        "\n执行要求：先调用 get_okr_settings 确认 OKR 是否开启。"
-                        "如果开启，检查当前周期公司和成员 OKR，主动提醒尚未设置或进展滞后的相关成员；"
-                        "如果未开启，则说明本次无需执行并停止。"
-                    )
-                if t.focus_ref:
-                    part += f"\n关联 Focus：{t.focus_ref}"
-                cfg = t.config or {}
-                if t.type == "on_message" and cfg.get("_matched_message"):
-                    part += f"\n收到来自 {cfg.get('_matched_from', '?')} 的消息：\n\"{cfg['_matched_message'][:500]}\""
-                if t.type == "on_message" and cfg.get("okr_member_id") and cfg.get("okr_report_date"):
-                    part += (
-                        "\n执行要求：这是一次日报回复入库事件。"
-                        f"\n1. 将对方回复整理成一段不超过 2000 字的最终日报。"
-                        f"\n2. 立即调用 upsert_member_daily_report(report_date=\"{cfg['okr_report_date']}\", "
-                        f"member_type=\"{cfg.get('okr_member_type', 'user')}\", "
-                        f"member_id=\"{cfg['okr_member_id']}\", content=\"<整理后的日报>\")。"
-                        "\n3. 工具调用成功后，再发送一句简短确认，明确你已收到并已记录。"
-                        "\n4. 不要只回复确认而不调用工具，也不要把原始长对话原样存入日报。"
-                    )
-                if t.type == "webhook" and cfg.get("_webhook_payload"):
-                    payload_str = cfg["_webhook_payload"]
-                    if len(payload_str) > 2000:
-                        payload_str = payload_str[:2000] + "... (truncated)"
-                    part += f"\nWebhook Payload:\n{payload_str}"
-                context_parts.append(part)
-                trigger_names.append(t.name)
-
-            trigger_context = (
-                "===== 本次唤醒上下文 =====\n"
-                f"唤醒来源：trigger（{'多个触发器同时触发' if len(triggers) > 1 else '触发器触发'}）\n\n"
-                + "\n---\n".join(context_parts)
-                + "\n==========================="
-            )
+            trigger_names = [trigger.name for trigger in triggers]
+            trigger_context = build_trigger_context(triggers)
 
             title = f"🤖 内心独白：{', '.join(trigger_names)}"
             result = await db.execute(

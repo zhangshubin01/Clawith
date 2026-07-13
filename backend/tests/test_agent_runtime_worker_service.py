@@ -18,6 +18,7 @@ from app.services.agent_runtime.session_context_completion import (
 )
 from app.services.agent_runtime.state import RunRegistrySnapshot
 from app.services.agent_runtime.task_completion import TaskRuntimeCompletionHandler
+from app.services.agent_runtime.trigger_completion import TriggerRuntimeCompletionHandler
 from app.services.agent_runtime.worker_service import (
     RuntimeCommandDaemon,
     RuntimeSchemaNotReady,
@@ -157,6 +158,7 @@ def test_component_builder_installs_one_pinned_graph_and_shared_driver() -> None
     assert [type(handler) for handler in terminal_handlers] == [
         SessionContextCompletionHandler,
         TaskRuntimeCompletionHandler,
+        TriggerRuntimeCompletionHandler,
     ]
 
 
