@@ -766,13 +766,24 @@ async def soft_delete_group(
 ) -> Group:
     """Disband a group, hide every session, and remove every active member."""
     group = await _active_group(db, tenant_id=tenant_id, group_id=group_id, lock=True)
-    await _human_actor(
+    _, actor = await _human_actor(
         db,
         tenant_id=tenant_id,
         group_id=group_id,
         participant_id=actor_participant_id,
         manager_only=True,
     )
+    session_result = await db.execute(
+        select(ChatSession.id)
+        .where(
+            ChatSession.tenant_id == tenant_id,
+            ChatSession.session_type == _GROUP_SESSION_TYPE,
+            ChatSession.group_id == group_id,
+            ChatSession.deleted_at.is_(None),
+        )
+        .order_by(ChatSession.created_at, ChatSession.id)
+    )
+    session_ids = tuple(session_result.scalars().all())
     now = _now()
     group.deleted_at = now
     group.updated_at = now
@@ -794,6 +805,13 @@ async def soft_delete_group(
         )
         .values(removed_at=now)
     )
+    for session_id in session_ids:
+        await enqueue_session_deletion_cancels(
+            db,
+            tenant_id=tenant_id,
+            session_id=session_id,
+            actor_user_id=actor.ref_id,
+        )
     await db.flush()
     return group
 

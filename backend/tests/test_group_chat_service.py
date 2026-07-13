@@ -402,6 +402,64 @@ async def test_deleting_primary_promotes_the_most_recent_remaining_session(
 
 
 @pytest.mark.asyncio
+async def test_disbanding_group_cancels_foreground_collaboration_in_every_session(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    actor = _participant("user", user_id)
+    group = _group(tenant_id, actor.id)
+    first_session = _session(tenant_id, group.id, actor.id, primary=True)
+    second_session = _session(tenant_id, group.id, actor.id, primary=False)
+    db = _RecordingDB(
+        _Result([group]),
+        _Result([_membership(group.id, actor.id, role="manager")]),
+        _Result([actor]),
+        _Result([user_id]),
+        _Result([first_session.id, second_session.id]),
+        _Result(),
+        _Result(),
+    )
+    cancel_calls = []
+
+    async def fake_cancel(_db, **kwargs):
+        cancel_calls.append(kwargs)
+        return ()
+
+    monkeypatch.setattr(
+        group_chat_service,
+        "enqueue_session_deletion_cancels",
+        fake_cancel,
+    )
+
+    deleted = await group_chat_service.soft_delete_group(
+        db,
+        tenant_id=tenant_id,
+        group_id=group.id,
+        actor_participant_id=actor.id,
+    )
+
+    assert deleted is group
+    assert group.deleted_at is not None
+    assert cancel_calls == [
+        {
+            "tenant_id": tenant_id,
+            "session_id": first_session.id,
+            "actor_user_id": user_id,
+        },
+        {
+            "tenant_id": tenant_id,
+            "session_id": second_session.id,
+            "actor_user_id": user_id,
+        },
+    ]
+    session_select_sql = _sql(db.statements[4])
+    assert "chat_sessions.deleted_at IS NULL" in session_select_sql
+    assert "chat_sessions.created_at" in session_select_sql
+    assert db.flush_count == 1
+
+
+@pytest.mark.asyncio
 async def test_delayed_read_request_cannot_move_a_session_watermark_backwards() -> None:
     tenant_id = uuid.uuid4()
     user_id = uuid.uuid4()
