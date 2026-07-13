@@ -257,6 +257,7 @@ async def test_waiting_projection_skips_an_existing_idempotent_event():
                     "waiting_request": {
                         "waiting_type": "user",
                         "reason": "Confirm the plan",
+                        "correlation_id": "confirm-plan-1",
                     }
                 },
             ),
@@ -285,6 +286,7 @@ async def test_waiting_projection_skips_an_existing_idempotent_event():
     assert run.projected_waiting_type == "user"
     assert run.projected_waiting_reason == "Confirm the plan"
     assert [event.event_type for event in db.added] == ["waiting_started"]
+    assert db.added[0].payload["correlation_id"] == "confirm-plan-1"
 
 
 @pytest.mark.asyncio

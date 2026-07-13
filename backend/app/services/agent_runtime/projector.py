@@ -335,6 +335,25 @@ def _waiting_projection(
     return expected_type, _json_text(reason, field="waiting reason")
 
 
+def _waiting_event_fields(checkpoint: _CheckpointView) -> dict[str, str]:
+    """Expose only stable resume metadata required by product clients."""
+    if checkpoint.status not in _WAITING_STATUSES:
+        return {}
+    request = checkpoint.lifecycle.get("waiting_request")
+    if not isinstance(request, Mapping):
+        return {}
+    correlation_id = request.get("correlation_id")
+    if correlation_id is None:
+        return {}
+    return {
+        "correlation_id": _require_text(
+            correlation_id,
+            field="waiting_request.correlation_id",
+            max_length=200,
+        )
+    }
+
+
 def _result_projection(
     checkpoint: _CheckpointView,
 ) -> tuple[str | None, list[Any]]:
@@ -404,6 +423,7 @@ def _checkpoint_payload(
         payload["waiting_type"] = waiting_type
     if waiting_reason is not None:
         payload["waiting_reason"] = waiting_reason
+    payload.update(_waiting_event_fields(checkpoint))
     error_code, _ = _error_projection(checkpoint)
     if error_code is not None:
         payload["error_code"] = error_code
