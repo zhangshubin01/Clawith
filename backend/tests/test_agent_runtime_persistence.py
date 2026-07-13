@@ -425,8 +425,7 @@ async def test_claim_uses_skip_locked_fifo_and_increments_attempts():
     assert "ORDER BY agent_run_commands.created_at, agent_run_commands.id" in sql
     assert "previous_command.run_id = agent_run_commands.run_id" in sql
     assert (
-        "(previous_command.created_at, previous_command.id) < "
-        "(agent_run_commands.created_at, agent_run_commands.id)"
+        "(previous_command.created_at, previous_command.id) < (agent_run_commands.created_at, agent_run_commands.id)"
     ) in sql
     assert "previous_command.status IN ('pending', 'claimed')" in sql
     assert "agent_run_commands.attempt_count < 5" in sql
@@ -507,6 +506,63 @@ async def test_applied_and_rejected_transitions_require_the_current_claimant():
         )
     assert exc_info.value.code == "command_claim_lost"
     assert wrong_claimant_db.flush_count == 0
+
+
+@pytest.mark.asyncio
+async def test_claim_renewal_and_retry_release_require_the_current_claimant():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    tenant_id = uuid.uuid4()
+    command = _command(
+        tenant_id=tenant_id,
+        run_id=uuid.uuid4(),
+        status="claimed",
+        claimant="worker-1",
+        attempt_count=2,
+    )
+    db = _FakeSession(command, command)
+
+    renewed = await persistence.renew_command_claim(
+        db,
+        tenant_id=tenant_id,
+        command_id=command.id,
+        claimant="worker-1",
+        claim_ttl_seconds=60,
+        clock=lambda: now,
+    )
+    assert renewed.claim_expires_at == datetime(2026, 7, 13, 12, 1, tzinfo=UTC)
+    assert renewed.status == "claimed"
+    assert renewed.attempt_count == 2
+
+    released = await persistence.release_command_claim(
+        db,
+        tenant_id=tenant_id,
+        command_id=command.id,
+        claimant="worker-1",
+        error_code="thread_lock_busy",
+    )
+    assert released.status == "pending"
+    assert released.claimed_by is None
+    assert released.claim_expires_at is None
+    assert released.error_code == "thread_lock_busy"
+    assert released.attempt_count == 2
+    assert db.flush_count == 2
+
+    lost = _command(
+        tenant_id=tenant_id,
+        run_id=uuid.uuid4(),
+        status="claimed",
+        claimant="other-worker",
+    )
+    with pytest.raises(persistence.RuntimePersistenceError) as exc_info:
+        await persistence.renew_command_claim(
+            _FakeSession(lost),
+            tenant_id=tenant_id,
+            command_id=lost.id,
+            claimant="worker-1",
+            claim_ttl_seconds=60,
+            clock=lambda: now,
+        )
+    assert exc_info.value.code == "command_claim_lost"
 
 
 @pytest.mark.asyncio

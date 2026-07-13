@@ -203,17 +203,14 @@ def _registration_values(registration: RunRegistration) -> dict[str, Any]:
 
 def _require_exact_source_retry(existing: AgentRun, registration: RunRegistration) -> None:
     mismatched = [
-        field
-        for field, expected in _registration_values(registration).items()
-        if getattr(existing, field) != expected
+        field for field, expected in _registration_values(registration).items() if getattr(existing, field) != expected
     ]
     if existing.runtime_thread_id != str(existing.id):
         mismatched.append("runtime_thread_id")
     if mismatched:
         raise RuntimePersistenceError(
             "source_idempotency_mismatch",
-            "source execution already exists with different immutable inputs: "
-            + ", ".join(sorted(mismatched)),
+            "source execution already exists with different immutable inputs: " + ", ".join(sorted(mismatched)),
         )
 
 
@@ -296,8 +293,7 @@ def _require_exact_command_retry(
     if mismatched:
         raise RuntimePersistenceError(
             "command_idempotency_mismatch",
-            "command idempotency key already exists with different inputs: "
-            + ", ".join(sorted(mismatched)),
+            "command idempotency key already exists with different inputs: " + ", ".join(sorted(mismatched)),
         )
 
 
@@ -380,9 +376,7 @@ async def _enqueue_command(
     _validate_command_input(idempotency_key, payload)
     payload_copy = dict(payload)
 
-    run_result = await db.execute(
-        select(AgentRun).where(AgentRun.tenant_id == tenant_id, AgentRun.id == run_id)
-    )
+    run_result = await db.execute(select(AgentRun).where(AgentRun.tenant_id == tenant_id, AgentRun.id == run_id))
     if run_result.scalar_one_or_none() is None:
         raise RuntimePersistenceError("run_not_found", f"run {run_id} does not exist in tenant {tenant_id}")
 
@@ -495,8 +489,7 @@ def _claim_statement(now: datetime, *, max_attempts: int):
         select(1).where(
             previous.run_id == AgentRunCommand.run_id,
             previous.status.in_(("pending", "claimed")),
-            tuple_(previous.created_at, previous.id)
-            < tuple_(AgentRunCommand.created_at, AgentRunCommand.id),
+            tuple_(previous.created_at, previous.id) < tuple_(AgentRunCommand.created_at, AgentRunCommand.id),
         )
     )
     return (
@@ -627,11 +620,7 @@ async def mark_command_rejected(
     """Reject a claimed command with a stable, non-sensitive error code."""
     _require_text(error_code, field="error_code", max_length=100)
     command = await _get_locked_command(db, tenant_id=tenant_id, command_id=command_id)
-    if (
-        command.status == "rejected"
-        and command.claimed_by == claimant
-        and command.error_code == error_code
-    ):
+    if command.status == "rejected" and command.claimed_by == claimant and command.error_code == error_code:
         return command
     _require_claimant(command, claimant)
     command.status = "rejected"
@@ -639,5 +628,46 @@ async def mark_command_rejected(
     command.error_code = error_code
     command.claim_expires_at = None
     command.applied_at = (clock or (lambda: datetime.now(UTC)))()
+    await db.flush()
+    return command
+
+
+async def renew_command_claim(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    command_id: uuid.UUID,
+    claimant: str,
+    claim_ttl_seconds: int,
+    clock: Callable[[], datetime] | None = None,
+) -> AgentRunCommand:
+    """Extend one active claim from a short, independently committed transaction."""
+    if claim_ttl_seconds <= 0:
+        raise RuntimePersistenceError("invalid_runtime_input", "claim_ttl_seconds must be positive")
+    command = await _get_locked_command(db, tenant_id=tenant_id, command_id=command_id)
+    _require_claimant(command, claimant)
+    command.claim_expires_at = (clock or (lambda: datetime.now(UTC)))() + timedelta(seconds=claim_ttl_seconds)
+    await db.flush()
+    return command
+
+
+async def release_command_claim(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    command_id: uuid.UUID,
+    claimant: str,
+    error_code: str,
+) -> AgentRunCommand:
+    """Return retryable work to pending without changing its attempt counter."""
+    _require_text(error_code, field="error_code", max_length=100)
+    command = await _get_locked_command(db, tenant_id=tenant_id, command_id=command_id)
+    _require_claimant(command, claimant)
+    command.status = "pending"
+    command.claimed_by = None
+    command.claim_expires_at = None
+    command.applied_checkpoint_id = None
+    command.error_code = error_code
+    command.applied_at = None
     await db.flush()
     return command
