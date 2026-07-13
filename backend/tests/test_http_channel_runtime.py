@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 import json
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ import pytest
 
 from app import database
 from app.api import feishu as feishu_api
-from app.api import dingtalk, slack, teams, whatsapp
+from app.api import dingtalk, discord_bot, slack, teams, wecom, whatsapp
 from app.services import activity_logger, channel_session
 from app.services.agent_runtime.channel_chat import ChannelChatOutcome
 from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
@@ -446,3 +447,157 @@ async def test_dingtalk_message_uses_runtime_and_group_scope(monkeypatch) -> Non
     posts = calls["posts"]
     assert isinstance(posts, list)
     assert posts[0][1]["json"]["markdown"]["text"] == "DingTalk Runtime reply"
+
+
+@pytest.mark.asyncio
+async def test_discord_interaction_commits_runtime_before_deferred_ack(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    interaction_id = f"discord-interaction-{uuid.uuid4()}"
+    config = SimpleNamespace(encrypt_key="", app_id="app-1", app_secret="bot-token-1")
+    agent = SimpleNamespace(id=agent_id, tenant_id=tenant_id, creator_id=uuid.uuid4())
+    user = SimpleNamespace(id=user_id, display_name="Discord User sender-1")
+    session = SimpleNamespace(id=session_id)
+    model = SimpleNamespace(id=uuid.uuid4())
+    db = _Session(config, agent)
+    intake, cursor = _runtime(tenant_id)
+    calls: dict[str, object] = {"tasks": []}
+
+    async def resolve_user(**_kwargs):
+        return user
+
+    async def find_session(**kwargs):
+        calls["session"] = kwargs
+        return session
+
+    async def load_model(_db, _agent_id):
+        return agent, model, None
+
+    async def enqueue(_db, **kwargs):
+        calls["intake"] = kwargs
+        return intake
+
+    async def wait(**kwargs):
+        calls["wait"] = kwargs
+        return ChannelChatOutcome("completed", "Discord Runtime reply", uuid.uuid4())
+
+    async def send_followup(*args):
+        calls["send"] = args
+
+    def create_task(coro):
+        assert db.commits == 1
+        calls["tasks"].append(coro)  # type: ignore[union-attr]
+        return SimpleNamespace()
+
+    monkeypatch.setattr(channel_user_service, "resolve_channel_user", resolve_user)
+    monkeypatch.setattr(channel_session, "find_or_create_channel_session", find_session)
+    monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_model)
+    monkeypatch.setattr(discord_bot, "enqueue_channel_chat_runtime", enqueue)
+    monkeypatch.setattr(discord_bot, "wait_for_channel_chat", wait)
+    monkeypatch.setattr(discord_bot, "_send_discord_followup", send_followup)
+    monkeypatch.setattr(asyncio, "create_task", create_task)
+
+    result = await discord_bot.discord_interaction_webhook(
+        agent_id,
+        _Request(
+            {
+                "id": interaction_id,
+                "type": 2,
+                "token": "interaction-token-1",
+                "channel_id": "channel-1",
+                "guild_id": "guild-1",
+                "member": {"user": {"id": "sender-1", "username": "Alice"}},
+                "data": {
+                    "name": "ask",
+                    "options": [{"name": "message", "value": "Hello Discord"}],
+                },
+            }
+        ),  # type: ignore[arg-type]
+        db,  # type: ignore[arg-type]
+    )
+
+    assert result == {"type": 5}
+    intake_call = calls["intake"]
+    assert isinstance(intake_call, dict)
+    assert intake_call["message_id"] == discord_bot.channel_message_id(
+        agent_id,
+        "discord",
+        interaction_id,
+    )
+    tasks = calls["tasks"]
+    assert isinstance(tasks, list)
+    await tasks[0]
+    assert calls["wait"] == {
+        "handle": intake.handle,
+        "session_id": session_id,
+        "session_factory": discord_bot._async_session,
+        "after": cursor,
+    }
+    assert calls["send"] == (
+        "app-1",
+        "bot-token-1",
+        "interaction-token-1",
+        "Discord Runtime reply",
+    )
+
+
+@pytest.mark.asyncio
+async def test_wecom_accepts_runtime_before_async_delivery(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    provider_message_id = f"wecom-message-{uuid.uuid4()}"
+    agent = SimpleNamespace(id=agent_id, tenant_id=tenant_id, creator_id=uuid.uuid4())
+    user = SimpleNamespace(id=user_id)
+    session = SimpleNamespace(id=session_id)
+    model = SimpleNamespace(id=uuid.uuid4())
+    db = _Session(agent)
+    session_factory = _SessionFactory(db)
+    intake, _cursor = _runtime(tenant_id)
+    calls: dict[str, object] = {}
+
+    async def resolve_user(**_kwargs):
+        return user
+
+    async def find_session(**kwargs):
+        calls["session"] = kwargs
+        return session
+
+    async def load_model(_db, _agent_id):
+        return agent, model, None
+
+    async def enqueue(_db, **kwargs):
+        calls["intake"] = kwargs
+        return intake
+
+    monkeypatch.setattr(wecom, "async_session", session_factory)
+    monkeypatch.setattr(channel_user_service, "resolve_channel_user", resolve_user)
+    monkeypatch.setattr(wecom, "find_or_create_channel_session", find_session)
+    monkeypatch.setattr(feishu_api, "_load_agent_and_model", load_model)
+    monkeypatch.setattr(wecom, "enqueue_channel_chat_runtime", enqueue)
+
+    attachment = await wecom._accept_wecom_text(
+        agent_id=agent_id,
+        from_user="wecom-user-1",
+        user_text="Hello WeCom",
+        chat_id="wecom-group-1",
+        external_event_id=provider_message_id,
+    )
+
+    assert db.commits == 1
+    assert attachment.intake is intake
+    assert attachment.session_id == session_id
+    session_call = calls["session"]
+    assert isinstance(session_call, dict)
+    assert session_call["is_group"] is True
+    assert session_call["created_by_user_id"] == user_id
+    intake_call = calls["intake"]
+    assert isinstance(intake_call, dict)
+    assert intake_call["message_id"] == wecom.channel_message_id(
+        agent_id,
+        "wecom",
+        provider_message_id,
+    )
