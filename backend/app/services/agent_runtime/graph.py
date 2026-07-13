@@ -66,6 +66,18 @@ class RuntimeGraphIdentity:
             version=runtime_settings.AGENT_RUNTIME_GRAPH_VERSION,
         )
 
+    @classmethod
+    def planning_from_settings(
+        cls,
+        settings: Settings | None = None,
+    ) -> "RuntimeGraphIdentity":
+        """Use a separate pinned identity on the shared Checkpointer substrate."""
+        runtime_settings = settings or get_settings()
+        return cls(
+            name=f"{runtime_settings.AGENT_RUNTIME_GRAPH_NAME}_group_planning",
+            version=runtime_settings.AGENT_RUNTIME_GRAPH_VERSION,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class AgentRuntimeGraph:
@@ -193,9 +205,10 @@ def build_agent_runtime_graph(
     *,
     checkpointer: BaseCheckpointSaver[Any],
     settings: Settings | None = None,
+    identity: RuntimeGraphIdentity | None = None,
 ) -> AgentRuntimeGraph:
     """Compile one reusable graph; callers select the pinned version per Run."""
-    identity = RuntimeGraphIdentity.from_settings(settings)
+    identity = identity or RuntimeGraphIdentity.from_settings(settings)
     builder = StateGraph(RuntimeGraphState, context_schema=RuntimeContext)
 
     builder.add_node(CONTROL_GUARD_NODE, _make_node("control_guard", identity))

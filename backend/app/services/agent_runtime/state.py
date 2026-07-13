@@ -107,6 +107,8 @@ class RuntimeLifecycle(TypedDict):
     session_context_delta: NotRequired[JsonObject | None]
     delivery_request: NotRequired[JsonObject | None]
     error: NotRequired[JsonObject | None]
+    planning: NotRequired[JsonObject | None]
+    planning_attempt_count: NotRequired[int]
 
 
 class RuntimeGraphState(TypedDict):

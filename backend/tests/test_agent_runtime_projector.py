@@ -68,6 +68,24 @@ class _SnapshotSource:
             yield snapshot
 
 
+def test_projector_requires_exactly_one_checkpoint_source_strategy():
+    source = _SnapshotSource([])
+
+    with pytest.raises(ValueError, match="exactly one"):
+        RuntimeProjector()
+    with pytest.raises(ValueError, match="exactly one"):
+        RuntimeProjector(source, state_source_resolver=lambda _run: source)
+
+    run = _run()
+    resolved = []
+    projector = RuntimeProjector(
+        state_source_resolver=lambda value: resolved.append(value) or source
+    )
+
+    assert projector._source_for_run(run) is source
+    assert resolved == [run]
+
+
 def _run(
     *,
     tenant_id: uuid.UUID | None = None,

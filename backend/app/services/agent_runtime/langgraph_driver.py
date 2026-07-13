@@ -56,7 +56,13 @@ class RuntimeGraphRegistry:
         self._graphs = resolved
 
     def resolve(self, run: RuntimeRunRecord) -> AgentRuntimeGraph:
-        key = (run.registry.graph_name, run.registry.graph_version)
+        return self.resolve_identity(
+            run.registry.graph_name,
+            run.registry.graph_version,
+        )
+
+    def resolve_identity(self, graph_name: str, graph_version: str) -> AgentRuntimeGraph:
+        key = (graph_name, graph_version)
         graph = self._graphs.get(key)
         if graph is None:
             raise RetryableCommandError(

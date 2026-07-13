@@ -89,6 +89,12 @@ class CheckpointStateSource(Protocol):
     ) -> AsyncIterator[StateSnapshot]: ...
 
 
+class CheckpointStateSourceResolver(Protocol):
+    """Resolve the compiled checkpoint reader pinned on one Run Registry row."""
+
+    def __call__(self, run: AgentRun) -> CheckpointStateSource: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeProjectionTrigger:
     """Untrusted stream/event hint used only to wake checkpoint projection.
@@ -658,12 +664,22 @@ class RuntimeProjector:
 
     def __init__(
         self,
-        state_source: CheckpointStateSource,
+        state_source: CheckpointStateSource | None = None,
         *,
+        state_source_resolver: CheckpointStateSourceResolver | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        if (state_source is None) == (state_source_resolver is None):
+            raise ValueError("provide exactly one checkpoint state source or resolver")
         self._state_source = state_source
+        self._state_source_resolver = state_source_resolver
         self._clock = clock or (lambda: datetime.now(UTC))
+
+    def _source_for_run(self, run: AgentRun) -> CheckpointStateSource:
+        if self._state_source_resolver is not None:
+            return self._state_source_resolver(run)
+        assert self._state_source is not None
+        return self._state_source
 
     async def _lock_run(
         self,
@@ -732,7 +748,7 @@ class RuntimeProjector:
             tenant_id=tenant_id,
             run_id=run_id,
         )
-        history = await _read_history(self._state_source, run=run)
+        history = await _read_history(self._source_for_run(run), run=run)
         watermark = run.projected_checkpoint_id
         stale_trigger = _validate_trigger(
             trigger,

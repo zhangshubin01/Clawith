@@ -63,6 +63,7 @@ class TransactionalAgentRuntimeAdapter:
         self._db = db
         self._rollout = RuntimeRolloutPolicy.from_settings(runtime_settings)
         self._current_graph = RuntimeGraphIdentity.from_settings(runtime_settings)
+        self._planning_graph = RuntimeGraphIdentity.planning_from_settings(runtime_settings)
         self._event_stream = event_stream
 
     @staticmethod
@@ -155,7 +156,12 @@ class TransactionalAgentRuntimeAdapter:
                 source_type=command.source_type,
             )
             runtime_type = "langgraph"
-            graph_identity = self._current_graph
+            graph_identity = (
+                self._planning_graph
+                if command.run_kind == "orchestration"
+                and command.system_role == "group_planning"
+                else self._current_graph
+            )
         else:
             decision = self._rollout.decide(
                 agent_id=existing.agent_id,

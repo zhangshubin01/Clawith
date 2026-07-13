@@ -157,6 +157,49 @@ async def test_start_persists_registry_and_command_without_committing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_planning_start_pins_the_dedicated_graph_identity() -> None:
+    tenant_id = uuid.uuid4()
+    command = StartRunCommand(
+        tenant_id=tenant_id,
+        agent_id=None,
+        session_id=uuid.uuid4(),
+        source_type="chat",
+        source_id=str(uuid.uuid4()),
+        source_execution_id=f"group_mention:{uuid.uuid4()}:plan",
+        goal="Coordinate the mentioned Agents",
+        run_kind="orchestration",
+        system_role="group_planning",
+        model_id=uuid.uuid4(),
+        idempotency_key="start:planning:1",
+        payload={"candidate_agents": []},
+        delivery_status="pending",
+    )
+    run = _run(tenant_id=tenant_id)
+    run.agent_id = None
+    run.run_kind = "orchestration"
+    run.system_role = "group_planning"
+    start_command = _command(run, command_type="start")
+    db = _session()
+
+    with patch(
+        "app.services.agent_runtime.adapter.register_run_with_start",
+        new=AsyncMock(return_value=RegisteredRun(run, start_command, True)),
+    ) as persist:
+        await TransactionalAgentRuntimeAdapter(
+            db,
+            settings=_settings(enabled=True),
+        ).start_run(command)
+
+    registration = persist.await_args.args[1]
+    assert (registration.graph_name, registration.graph_version) == (
+        "runtime_graph_group_planning",
+        "v2",
+    )
+    assert registration.agent_id is None
+    assert registration.system_role == "group_planning"
+
+
+@pytest.mark.asyncio
 async def test_new_start_fails_closed_when_v2_gate_is_disabled() -> None:
     db = _session()
     with patch(

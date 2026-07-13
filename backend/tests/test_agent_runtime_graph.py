@@ -12,6 +12,7 @@ from app.config import Settings
 from app.services.agent_runtime.checkpointer import runtime_thread_config
 from app.services.agent_runtime.graph import (
     RuntimeGraphContractError,
+    RuntimeGraphIdentity,
     build_agent_runtime_graph,
     route_after_control,
 )
@@ -157,6 +158,19 @@ def test_registry_and_input_snapshots_are_frozen() -> None:
         state["registry"].goal = "changed"  # type: ignore[misc]
     with pytest.raises(FrozenInstanceError):
         state["snapshots"].session_context_version = 4  # type: ignore[misc]
+
+
+def test_planning_identity_is_separate_but_uses_the_same_version_contract() -> None:
+    identity = RuntimeGraphIdentity.planning_from_settings(_settings())
+    graph = build_agent_runtime_graph(
+        checkpointer=InMemorySaver(),
+        settings=_settings(),
+        identity=identity,
+    )
+
+    assert identity.name == "test_agent_runtime_group_planning"
+    assert identity.version == "v-test"
+    assert graph.compiled.name == "test_agent_runtime_group_planning@v-test"
 
 
 @pytest.mark.parametrize(
