@@ -12,6 +12,10 @@ from sqlalchemy import func, select
 
 from app.models.agent import Agent
 from app.models.agent_tool_execution import AgentToolExecution
+from app.services.agent_runtime.a2a_runtime import (
+    RuntimeA2AService,
+    a2a_waiting_request,
+)
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.node_executor import (
     RuntimeCancelSource,
@@ -269,6 +273,7 @@ class RuntimeToolStepService:
         cancel_source: RuntimeCancelSource,
         tool_provider: ToolProvider = get_agent_tools_for_llm,
         tool_executor: ToolExecutor = execute_tool,
+        a2a_service: RuntimeA2AService | None = None,
         lease_ttl_seconds: int = 300,
     ) -> None:
         if lease_ttl_seconds <= 0:
@@ -277,6 +282,7 @@ class RuntimeToolStepService:
         self._cancel_source = cancel_source
         self._tool_provider = tool_provider
         self._tool_executor = tool_executor
+        self._a2a_service = a2a_service
         self._lease_ttl_seconds = lease_ttl_seconds
 
     async def _agent(
@@ -482,6 +488,19 @@ class RuntimeToolStepService:
                             outcome=reservation.reusable_result,
                         )
                     )
+                    if tool_name == "send_message_to_agent" and self._a2a_service:
+                        waiting_request = a2a_waiting_request(
+                            source_run_id=run_id,
+                            tool_call_id=call_id,
+                            arguments=arguments,
+                            result_ref=reservation.reusable_result.result_ref,
+                        )
+                        if waiting_request is not None:
+                            return ToolStepResult(
+                                messages=tuple(messages),
+                                waiting_request=waiting_request,
+                                pending_tool_calls=tool_calls[index + 1 :],
+                            )
                     continue
                 if reservation.blocked:
                     if reservation.prior_failure is not None:
@@ -504,6 +523,60 @@ class RuntimeToolStepService:
                         ),
                         pending_tool_calls=tool_calls[index:],
                     )
+
+                if tool_name == "send_message_to_agent" and self._a2a_service:
+                    try:
+                        actor_user_id = (
+                            uuid.UUID(context.actor_user_id)
+                            if context.actor_user_id
+                            else None
+                        )
+                        a2a_result = await self._a2a_service.execute(
+                            tenant_id=tenant_id,
+                            source_run_id=run_id,
+                            source_agent_id=agent.id,
+                            tool_call_id=call_id,
+                            arguments=arguments,
+                            reservation=reservation,
+                            lease_owner=lease_owner,
+                            actor_user_id=actor_user_id,
+                        )
+                    except Exception as exc:
+                        outcome = await self._mark_exception(
+                            tenant_id=tenant_id,
+                            reservation=reservation,
+                            lease_owner=lease_owner,
+                            policy=policy,
+                            exc=exc,
+                        )
+                        if outcome.status == "unknown":
+                            return ToolStepResult(
+                                messages=tuple(messages),
+                                waiting_request=_waiting_request(
+                                    run_id=run_id,
+                                    call_id=call_id,
+                                    requires_confirmation=True,
+                                    error_code="tool_outcome_unknown",
+                                ),
+                                pending_tool_calls=tool_calls[index:],
+                            )
+                    else:
+                        if a2a_result is not None:
+                            messages.append(
+                                _result_message(
+                                    run_id=run_id,
+                                    call_id=call_id,
+                                    tool_name=tool_name,
+                                    outcome=a2a_result.outcome,
+                                )
+                            )
+                            if a2a_result.waiting_request is not None:
+                                return ToolStepResult(
+                                    messages=tuple(messages),
+                                    waiting_request=a2a_result.waiting_request,
+                                    pending_tool_calls=tool_calls[index + 1 :],
+                                )
+                            continue
 
                 heartbeat_limit = _heartbeat_tool_limit(state, agent, tool_name)
                 if heartbeat_limit is not None:

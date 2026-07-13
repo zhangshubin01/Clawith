@@ -1,0 +1,587 @@
+"""Transactional Agent-to-Agent delegation behind Runtime tool receipts."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Literal
+import uuid
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import Settings, get_settings
+from app.core.permissions import evaluate_agent_relationship_status
+from app.models.agent import Agent
+from app.models.agent_run import AgentRun
+from app.models.audit import ChatMessage
+from app.models.chat_session import ChatSession
+from app.models.org import AgentAgentRelationship
+from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
+from app.services.agent_runtime.command_worker import RuntimeSessionFactory
+from app.services.agent_runtime.config import decide_runtime_v2
+from app.services.agent_runtime.contracts import StartRunCommand
+from app.services.agent_runtime.cycle_guard import (
+    AgentCycleGuard,
+    AgentCycleGuardError,
+)
+from app.services.agent_runtime.tool_execution import (
+    ToolExecutionOutcome,
+    ToolExecutionReservation,
+    mark_tool_execution_failed,
+    mark_tool_execution_succeeded,
+)
+from app.services.participant_identity import get_or_create_agent_participant
+
+
+A2AMode = Literal["notify", "consult", "task_delegate"]
+_RESPONSE_MODES = frozenset({"consult", "task_delegate"})
+
+
+class A2ARuntimeError(RuntimeError):
+    """A model-proposed A2A request is invalid before any side effect commits."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class _A2ARuntimeFallback(RuntimeError):
+    """The target must remain on the legacy/OpenClaw path during rollout."""
+
+
+@dataclass(frozen=True, slots=True)
+class A2ARuntimeToolResult:
+    """Durable tool result plus an optional source-Run interrupt."""
+
+    outcome: ToolExecutionOutcome
+    target_run_id: uuid.UUID | None
+    waiting_request: dict | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _A2ARequest:
+    target_name: str
+    message: str
+    mode: A2AMode
+
+
+def _request(arguments: dict) -> _A2ARequest:
+    target_name = str(arguments.get("agent_name") or "").strip()
+    message = str(arguments.get("message") or "").strip()
+    raw_mode = str(arguments.get("msg_type") or "notify").strip().lower()
+    if not target_name or not message:
+        raise A2ARuntimeError(
+            "a2a_input_missing",
+            "A2A requires both agent_name and message",
+        )
+    if raw_mode not in {"notify", "consult", "task_delegate"}:
+        raise A2ARuntimeError(
+            "a2a_mode_invalid",
+            "A2A msg_type must be notify, consult, or task_delegate",
+        )
+    return _A2ARequest(
+        target_name=target_name,
+        message=message,
+        mode=raw_mode,  # type: ignore[arg-type]
+    )
+
+
+def _source_execution_id(source_run_id: uuid.UUID, tool_call_id: str) -> str:
+    occurrence_id = uuid.uuid5(source_run_id, f"a2a-target:{tool_call_id}")
+    return f"a2a:{occurrence_id}"
+
+
+def _correlation_id(
+    source_run_id: uuid.UUID,
+    tool_call_id: str,
+    mode: A2AMode,
+) -> str:
+    correlation = uuid.uuid5(source_run_id, f"a2a-result:{tool_call_id}")
+    return f"a2a:{mode}:{correlation}"
+
+
+def a2a_mode_from_correlation(correlation_id: str) -> A2AMode:
+    parts = correlation_id.split(":", 2)
+    if len(parts) != 3 or parts[0] != "a2a":
+        raise A2ARuntimeError(
+            "a2a_correlation_invalid",
+            "A2A correlation ID has an invalid format",
+        )
+    mode = parts[1]
+    if mode not in {"notify", "consult", "task_delegate"}:
+        raise A2ARuntimeError(
+            "a2a_correlation_invalid",
+            "A2A correlation ID has an unsupported mode",
+        )
+    try:
+        uuid.UUID(parts[2])
+    except ValueError as exc:
+        raise A2ARuntimeError(
+            "a2a_correlation_invalid",
+            "A2A correlation ID has an invalid occurrence UUID",
+        ) from exc
+    return mode  # type: ignore[return-value]
+
+
+def a2a_waiting_request(
+    *,
+    source_run_id: uuid.UUID,
+    tool_call_id: str,
+    arguments: dict,
+    result_ref: str | None,
+) -> dict | None:
+    """Rebuild the same interrupt from a reusable A2A tool receipt."""
+    request = _request(arguments)
+    if request.mode not in _RESPONSE_MODES or result_ref is None:
+        return None
+    prefix = "agent-run:"
+    if not result_ref.startswith(prefix):
+        return None
+    try:
+        target_run_id = uuid.UUID(result_ref.removeprefix(prefix))
+    except ValueError as exc:
+        raise A2ARuntimeError(
+            "a2a_result_ref_invalid",
+            "A2A tool receipt has an invalid target Run reference",
+        ) from exc
+    return {
+        "waiting_type": "agent",
+        "correlation_id": _correlation_id(
+            source_run_id,
+            tool_call_id,
+            request.mode,
+        ),
+        "reason": f"waiting_for_{request.mode}",
+        "target_run_id": str(target_run_id),
+    }
+
+
+def _session_id(tenant_id: uuid.UUID, first: uuid.UUID, second: uuid.UUID) -> uuid.UUID:
+    ordered = sorted((first, second), key=str)
+    return uuid.uuid5(
+        tenant_id,
+        f"a2a-session:{ordered[0]}:{ordered[1]}",
+    )
+
+
+def _input_message_id(source_run_id: uuid.UUID, tool_call_id: str) -> uuid.UUID:
+    return uuid.uuid5(source_run_id, f"a2a-input:{tool_call_id}")
+
+
+async def _load_source_run(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    source_run_id: uuid.UUID,
+    source_agent_id: uuid.UUID,
+) -> AgentRun:
+    result = await db.execute(
+        select(AgentRun)
+        .where(
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.id == source_run_id,
+        )
+        .with_for_update()
+    )
+    source_run = result.scalar_one_or_none()
+    if (
+        source_run is None
+        or source_run.agent_id != source_agent_id
+        or source_run.runtime_type != "langgraph"
+    ):
+        raise A2ARuntimeError(
+            "a2a_source_run_invalid",
+            "A2A source Run does not match the executing Agent",
+        )
+    return source_run
+
+
+async def _resolve_target(
+    db: AsyncSession,
+    *,
+    source_agent: Agent,
+    target_name: str,
+    actor_user_id: uuid.UUID | None,
+) -> Agent:
+    exact_result = await db.execute(
+        select(Agent).where(
+            Agent.tenant_id == source_agent.tenant_id,
+            Agent.id != source_agent.id,
+            Agent.name == target_name,
+        )
+    )
+    target = exact_result.scalars().first()
+    if target is None:
+        safe_name = target_name.replace("%", "").replace("_", r"\_")
+        fuzzy_result = await db.execute(
+            select(Agent)
+            .where(
+                Agent.tenant_id == source_agent.tenant_id,
+                Agent.id != source_agent.id,
+                Agent.name.ilike(f"%{safe_name}%"),
+            )
+            .limit(2)
+        )
+        matches = fuzzy_result.scalars().all()
+        if len(matches) > 1:
+            raise A2ARuntimeError(
+                "a2a_target_ambiguous",
+                f"More than one Agent matches {target_name!r}",
+            )
+        target = matches[0] if matches else None
+    if target is None:
+        raise A2ARuntimeError(
+            "a2a_target_not_found",
+            f"No related Agent matches {target_name!r}",
+        )
+    if target.is_expired or target.status not in {"creating", "running", "idle"}:
+        raise A2ARuntimeError(
+            "a2a_target_unavailable",
+            f"Agent {target.name} is unavailable",
+        )
+
+    relationship_result = await db.execute(
+        select(AgentAgentRelationship).where(
+            AgentAgentRelationship.agent_id == source_agent.id,
+            AgentAgentRelationship.target_agent_id == target.id,
+        )
+    )
+    relationship = relationship_result.scalar_one_or_none()
+    if relationship is None:
+        raise A2ARuntimeError(
+            "a2a_relationship_missing",
+            f"Agent {source_agent.name} has no relationship with {target.name}",
+        )
+    relationship.__dict__["target_agent"] = target
+    relationship_status = await evaluate_agent_relationship_status(
+        db,
+        relationship,
+        current_user_id=actor_user_id,
+    )
+    if relationship_status["access_status"] != "active":
+        reason = relationship_status.get("access_status_reason") or "restricted"
+        raise A2ARuntimeError(
+            "a2a_relationship_restricted",
+            f"Relationship with {target.name} is not active ({reason})",
+        )
+    return target
+
+
+async def _ensure_a2a_session(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    source_agent: Agent,
+    target_agent: Agent,
+    owner_user_id: uuid.UUID,
+) -> tuple[ChatSession, uuid.UUID, uuid.UUID]:
+    source_participant = await get_or_create_agent_participant(
+        db,
+        source_agent.id,
+        source_agent.name,
+        source_agent.avatar_url,
+    )
+    target_participant = await get_or_create_agent_participant(
+        db,
+        target_agent.id,
+        target_agent.name,
+        target_agent.avatar_url,
+    )
+    ordered = sorted((source_agent.id, target_agent.id), key=str)
+    result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.tenant_id == tenant_id,
+            ChatSession.session_type == "a2a",
+            ChatSession.agent_id == ordered[0],
+            ChatSession.peer_agent_id == ordered[1],
+            ChatSession.deleted_at.is_(None),
+        )
+    )
+    session = result.scalar_one_or_none()
+    if session is None:
+        deterministic_id = _session_id(
+            tenant_id,
+            source_agent.id,
+            target_agent.id,
+        )
+        stored = await db.get(ChatSession, deterministic_id)
+        session_id = deterministic_id if stored is None else uuid.uuid4()
+        session = ChatSession(
+            id=session_id,
+            tenant_id=tenant_id,
+            session_type="a2a",
+            group_id=None,
+            agent_id=ordered[0],
+            peer_agent_id=ordered[1],
+            user_id=owner_user_id,
+            created_by_participant_id=source_participant.id,
+            title=f"{source_agent.name} ↔ {target_agent.name}"[:200],
+            source_channel="agent",
+            is_group=False,
+            participant_id=source_participant.id,
+            is_primary=False,
+            deleted_at=None,
+        )
+        db.add(session)
+        await db.flush()
+    elif session.tenant_id != tenant_id or session.session_type != "a2a":
+        raise A2ARuntimeError(
+            "a2a_session_scope_mismatch",
+            "A2A session exists outside the requested tenant scope",
+        )
+    return session, source_participant.id, target_participant.id
+
+
+def _target_goal(source_agent: Agent, request: _A2ARequest) -> str:
+    if request.mode == "notify":
+        prefix = "Process this one-way notification; take useful internal action if needed"
+    elif request.mode == "consult":
+        prefix = "Answer this concise consultation from another Agent"
+    else:
+        prefix = "Complete this delegated task and return a usable result"
+    return f"{prefix}. Source Agent: {source_agent.name}. Request: {request.message}"
+
+
+def _accepted_summary(target: Agent, mode: A2AMode) -> str:
+    if mode == "notify":
+        return f"✅ Notification delivered to {target.name} for asynchronous processing."
+    if mode == "consult":
+        return f"✅ Consultation sent to {target.name}; this Run will resume with the answer."
+    return f"✅ Task delegated to {target.name}; this Run will resume with the result."
+
+
+class RuntimeA2AService:
+    """Create target Runs and settle the source tool receipt in one transaction."""
+
+    def __init__(
+        self,
+        *,
+        session_factory: RuntimeSessionFactory,
+        settings: Settings | None = None,
+        cycle_guard: AgentCycleGuard | None = None,
+    ) -> None:
+        self._session_factory = session_factory
+        self._settings = settings or get_settings()
+        self._cycle_guard = cycle_guard or AgentCycleGuard()
+
+    async def _mark_rejected(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        reservation: ToolExecutionReservation,
+        lease_owner: str,
+        error: A2ARuntimeError,
+    ) -> A2ARuntimeToolResult:
+        summary = f"[A2A:{error.code}] {error}"
+        async with self._session_factory() as db:
+            async with db.begin():
+                execution = await mark_tool_execution_failed(
+                    db,
+                    tenant_id=tenant_id,
+                    execution_id=reservation.execution.id,
+                    lease_owner=lease_owner,
+                    result_summary=summary,
+                )
+        return A2ARuntimeToolResult(
+            outcome=ToolExecutionOutcome(
+                status="failed",
+                result_summary=execution.result_summary,
+                result_ref=execution.result_ref,
+            ),
+            target_run_id=None,
+        )
+
+    async def execute(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        source_run_id: uuid.UUID,
+        source_agent_id: uuid.UUID,
+        tool_call_id: str,
+        arguments: dict,
+        reservation: ToolExecutionReservation,
+        lease_owner: str,
+        actor_user_id: uuid.UUID | None,
+    ) -> A2ARuntimeToolResult | None:
+        """Return None only when rollout or a remote target requires legacy handling."""
+        try:
+            request = _request(arguments)
+            async with self._session_factory() as db:
+                async with db.begin():
+                    source_run = await _load_source_run(
+                        db,
+                        tenant_id=tenant_id,
+                        source_run_id=source_run_id,
+                        source_agent_id=source_agent_id,
+                    )
+                    source_result = await db.execute(
+                        select(Agent).where(
+                            Agent.tenant_id == tenant_id,
+                            Agent.id == source_agent_id,
+                        )
+                    )
+                    source_agent = source_result.scalar_one_or_none()
+                    if source_agent is None:
+                        raise A2ARuntimeError(
+                            "a2a_source_agent_missing",
+                            "A2A source Agent is unavailable",
+                        )
+                    owner_user_id = (
+                        source_run.origin_user_id
+                        or actor_user_id
+                        or source_agent.creator_id
+                    )
+                    target = await _resolve_target(
+                        db,
+                        source_agent=source_agent,
+                        target_name=request.target_name,
+                        actor_user_id=owner_user_id,
+                    )
+                    if target.agent_type == "openclaw":
+                        raise _A2ARuntimeFallback
+                    decision = decide_runtime_v2(
+                        agent_id=target.id,
+                        source_type="a2a",
+                        settings=self._settings,
+                    )
+                    if not decision.use_v2:
+                        raise _A2ARuntimeFallback
+                    if target.primary_model_id is None:
+                        raise A2ARuntimeError(
+                            "a2a_target_model_missing",
+                            f"Agent {target.name} has no primary model",
+                        )
+
+                    await self._cycle_guard.ensure_delegation_allowed(
+                        db,
+                        tenant_id=tenant_id,
+                        source_run_id=source_run_id,
+                        source_agent_id=source_agent.id,
+                        target_agent_id=target.id,
+                    )
+                    session, source_participant_id, _ = await _ensure_a2a_session(
+                        db,
+                        tenant_id=tenant_id,
+                        source_agent=source_agent,
+                        target_agent=target,
+                        owner_user_id=owner_user_id,
+                    )
+                    message_id = _input_message_id(source_run_id, tool_call_id)
+                    message = await db.get(ChatMessage, message_id)
+                    if message is None:
+                        db.add(
+                            ChatMessage(
+                                id=message_id,
+                                agent_id=session.agent_id,
+                                user_id=owner_user_id,
+                                role="user",
+                                content=request.message,
+                                conversation_id=str(session.id),
+                                participant_id=source_participant_id,
+                                mentions=[],
+                            )
+                        )
+                    elif (
+                        message.conversation_id != str(session.id)
+                        or message.content != request.message
+                        or message.participant_id != source_participant_id
+                    ):
+                        raise A2ARuntimeError(
+                            "a2a_input_mismatch",
+                            "Deterministic A2A input message has different content",
+                        )
+
+                    correlation_id = _correlation_id(
+                        source_run_id,
+                        tool_call_id,
+                        request.mode,
+                    )
+                    source_execution_id = _source_execution_id(
+                        source_run_id,
+                        tool_call_id,
+                    )
+                    handle = await TransactionalAgentRuntimeAdapter(
+                        db,
+                        settings=self._settings,
+                    ).start_run(
+                        StartRunCommand(
+                            tenant_id=tenant_id,
+                            agent_id=target.id,
+                            session_id=session.id,
+                            source_type="a2a",
+                            source_id=str(session.id),
+                            source_execution_id=source_execution_id,
+                            correlation_id=correlation_id,
+                            goal=_target_goal(source_agent, request),
+                            run_kind="delegated",
+                            model_id=target.primary_model_id,
+                            origin_user_id=owner_user_id,
+                            origin_agent_id=source_agent.id,
+                            parent_run_id=source_run.id,
+                            root_run_id=source_run.root_run_id or source_run.id,
+                            delivery_status="not_required",
+                            idempotency_key=f"start:{source_execution_id}",
+                            payload={
+                                "a2a_mode": request.mode,
+                                "a2a_message": request.message,
+                                "source_agent_id": str(source_agent.id),
+                                "source_agent_name": source_agent.name,
+                                "source_run_id": str(source_run.id),
+                                "correlation_id": correlation_id,
+                            },
+                            actor_user_id=owner_user_id,
+                            actor_agent_id=source_agent.id,
+                        )
+                    )
+                    summary = _accepted_summary(target, request.mode)
+                    execution = await mark_tool_execution_succeeded(
+                        db,
+                        tenant_id=tenant_id,
+                        execution_id=reservation.execution.id,
+                        lease_owner=lease_owner,
+                        result_summary=summary,
+                        result_ref=f"agent-run:{handle.run_id}",
+                    )
+                    session.last_message_at = datetime.now(UTC)
+
+            waiting_request = a2a_waiting_request(
+                source_run_id=source_run_id,
+                tool_call_id=tool_call_id,
+                arguments=arguments,
+                result_ref=execution.result_ref,
+            )
+            return A2ARuntimeToolResult(
+                outcome=ToolExecutionOutcome(
+                    status="succeeded",
+                    result_summary=execution.result_summary,
+                    result_ref=execution.result_ref,
+                ),
+                target_run_id=handle.run_id,
+                waiting_request=waiting_request,
+            )
+        except _A2ARuntimeFallback:
+            return None
+        except AgentCycleGuardError as exc:
+            return await self._mark_rejected(
+                tenant_id=tenant_id,
+                reservation=reservation,
+                lease_owner=lease_owner,
+                error=A2ARuntimeError(exc.code, str(exc)),
+            )
+        except A2ARuntimeError as exc:
+            return await self._mark_rejected(
+                tenant_id=tenant_id,
+                reservation=reservation,
+                lease_owner=lease_owner,
+                error=exc,
+            )
+
+
+__all__ = [
+    "A2ARuntimeError",
+    "A2ARuntimeToolResult",
+    "RuntimeA2AService",
+    "a2a_mode_from_correlation",
+    "a2a_waiting_request",
+]

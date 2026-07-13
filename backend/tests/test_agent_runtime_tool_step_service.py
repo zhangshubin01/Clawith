@@ -9,6 +9,7 @@ import pytest
 from app.models.agent import Agent
 from app.models.agent_tool_execution import AgentToolExecution
 from app.services.agent_runtime import tool_step_service
+from app.services.agent_runtime.a2a_runtime import A2ARuntimeToolResult
 from app.services.agent_runtime.node_executor import CancelSignal
 from app.services.agent_runtime.state import (
     RunInputSnapshots,
@@ -67,6 +68,16 @@ class _CancelSource:
         return self.signals.popleft() if self.signals else None
 
 
+class _A2AService:
+    def __init__(self, result: A2ARuntimeToolResult) -> None:
+        self.result = result
+        self.calls: list[dict] = []
+
+    async def execute(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.result
+
+
 def _agent(tenant_id: uuid.UUID, *, access_mode: str = "company") -> Agent:
     return Agent(
         id=uuid.uuid4(),
@@ -84,6 +95,20 @@ def _call(call_id: str, name: str) -> dict:
         "id": call_id,
         "type": "function",
         "function": {"name": name, "arguments": "{}"},
+    }
+
+
+def _a2a_call(call_id: str, *, mode: str) -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": "send_message_to_agent",
+            "arguments": (
+                '{"agent_name":"Researcher","message":"Check the facts",'
+                f'"msg_type":"{mode}"}}'
+            ),
+        },
     }
 
 
@@ -149,6 +174,7 @@ async def _tools(agent_id: uuid.UUID) -> list[dict]:
         {"type": "function", "function": {"name": "plaza_get_new_posts"}},
         {"type": "function", "function": {"name": "plaza_create_post"}},
         {"type": "function", "function": {"name": "plaza_add_comment"}},
+        {"type": "function", "function": {"name": "send_message_to_agent"}},
     ]
 
 
@@ -194,12 +220,19 @@ def _reservation(
     )
 
 
-def _service(agent: Agent, cancel_source: _CancelSource, executor) -> tool_step_service.RuntimeToolStepService:
+def _service(
+    agent: Agent,
+    cancel_source: _CancelSource,
+    executor,
+    *,
+    a2a_service=None,
+) -> tool_step_service.RuntimeToolStepService:
     return tool_step_service.RuntimeToolStepService(
         session_factory=_session_factory(agent),
         cancel_source=cancel_source,
         tool_provider=_tools,
         tool_executor=executor,
+        a2a_service=a2a_service,
     )
 
 
@@ -684,3 +717,162 @@ async def test_replayed_heartbeat_plaza_call_reuses_receipt_before_limit_check(
 
     assert result.messages[0]["execution_status"] == "succeeded"
     assert result.messages[0]["content"] == "original post"
+
+
+@pytest.mark.asyncio
+async def test_runtime_a2a_request_interrupts_source_after_durable_target_acceptance(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _a2a_call("delegate-1", mode="task_delegate")
+    state = _state(tenant_id, agent, (call,))
+    run_id = uuid.UUID(state["registry"].run_id)
+    execution = _execution(
+        tenant_id,
+        run_id,
+        "delegate-1",
+        "send_message_to_agent",
+    )
+    target_run_id = uuid.uuid4()
+    correlation_id = f"a2a:task_delegate:{uuid.uuid4()}"
+    a2a_service = _A2AService(
+        A2ARuntimeToolResult(
+            outcome=ToolExecutionOutcome(
+                status="succeeded",
+                result_summary="delegation accepted",
+                result_ref=f"agent-run:{target_run_id}",
+            ),
+            target_run_id=target_run_id,
+            waiting_request={
+                "waiting_type": "agent",
+                "correlation_id": correlation_id,
+                "reason": "waiting_for_task_delegate",
+                "target_run_id": str(target_run_id),
+            },
+        )
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"legacy A2A executor called: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    result = await _service(
+        agent,
+        _CancelSource(None),
+        forbidden,
+        a2a_service=a2a_service,
+    ).execute_pending(state, _context(state), (call,))
+
+    assert len(a2a_service.calls) == 1
+    assert a2a_service.calls[0]["source_run_id"] == run_id
+    assert result.error is None
+    assert result.waiting_request is not None
+    assert result.waiting_request["waiting_type"] == "agent"
+    assert result.waiting_request["correlation_id"] == correlation_id
+    assert result.pending_tool_calls == ()
+    assert result.messages[0]["execution_status"] == "succeeded"
+    assert result.messages[0]["result_ref"] == f"agent-run:{target_run_id}"
+
+
+@pytest.mark.asyncio
+async def test_replayed_runtime_a2a_request_rebuilds_same_interrupt_from_receipt(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _a2a_call("consult-1", mode="consult")
+    state = _state(tenant_id, agent, (call,))
+    run_id = uuid.UUID(state["registry"].run_id)
+    target_run_id = uuid.uuid4()
+    execution = _execution(
+        tenant_id,
+        run_id,
+        "consult-1",
+        "send_message_to_agent",
+    )
+    reusable = ToolExecutionOutcome(
+        status="succeeded",
+        result_summary="consultation accepted",
+        result_ref=f"agent-run:{target_run_id}",
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution, reusable=reusable)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"replayed A2A executed: {args}, {kwargs}")
+
+    a2a_service = _A2AService(
+        A2ARuntimeToolResult(
+            outcome=reusable,
+            target_run_id=target_run_id,
+        )
+    )
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    result = await _service(
+        agent,
+        _CancelSource(None),
+        forbidden,
+        a2a_service=a2a_service,
+    ).execute_pending(state, _context(state), (call,))
+
+    assert a2a_service.calls == []
+    assert result.waiting_request == {
+        "waiting_type": "agent",
+        "correlation_id": (
+            f"a2a:consult:{uuid.uuid5(run_id, 'a2a-result:consult-1')}"
+        ),
+        "reason": "waiting_for_consult",
+        "target_run_id": str(target_run_id),
+    }
+    assert result.messages[0]["content"] == "consultation accepted"
+
+
+@pytest.mark.asyncio
+async def test_runtime_a2a_notify_continues_without_waiting(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _a2a_call("notify-1", mode="notify")
+    state = _state(tenant_id, agent, (call,))
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "notify-1",
+        "send_message_to_agent",
+    )
+    target_run_id = uuid.uuid4()
+    a2a_service = _A2AService(
+        A2ARuntimeToolResult(
+            outcome=ToolExecutionOutcome(
+                status="succeeded",
+                result_summary="notification accepted",
+                result_ref=f"agent-run:{target_run_id}",
+            ),
+            target_run_id=target_run_id,
+        )
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"legacy notify executor called: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    result = await _service(
+        agent,
+        _CancelSource(None),
+        forbidden,
+        a2a_service=a2a_service,
+    ).execute_pending(state, _context(state), (call,))
+
+    assert result.waiting_request is None
+    assert result.pending_tool_calls == ()
+    assert result.messages[0]["content"] == "notification accepted"

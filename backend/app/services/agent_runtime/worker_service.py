@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.config import Settings, get_settings
+from app.services.agent_runtime.a2a_runtime import RuntimeA2AService
 from app.services.agent_runtime.cancel_source import DatabaseRuntimeCancelSource
 from app.services.agent_runtime.checkpoint_side_effects import RuntimeCheckpointSideEffects
 from app.services.agent_runtime.checkpointer import (
@@ -169,6 +170,10 @@ def build_runtime_worker_components(
     tool_service = RuntimeToolStepService(
         session_factory=session_factory,
         cancel_source=cancel_source,
+        a2a_service=RuntimeA2AService(
+            session_factory=session_factory,
+            settings=runtime_settings,
+        ),
     )
     run_compactor = RuntimeRunCompactorService(
         session_factory=session_factory,

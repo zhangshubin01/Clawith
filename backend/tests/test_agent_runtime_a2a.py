@@ -1,0 +1,390 @@
+"""Transactional Runtime A2A intake and replay contract tests."""
+
+from __future__ import annotations
+
+from collections import deque
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+import uuid
+
+import pytest
+
+from app.config import Settings
+from app.models.agent import Agent
+from app.models.agent_run import AgentRun
+from app.models.agent_tool_execution import AgentToolExecution
+from app.models.audit import ChatMessage
+from app.services.agent_runtime.a2a_runtime import (
+    A2ARuntimeError,
+    RuntimeA2AService,
+    a2a_mode_from_correlation,
+    a2a_waiting_request,
+)
+from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
+from app.services.agent_runtime.cycle_guard import AgentCycleGuardError
+from app.services.agent_runtime.tool_execution import ToolExecutionReservation
+
+
+class _ScalarResult:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class _Transaction:
+    def __init__(self, db: "_Session") -> None:
+        self.db = db
+
+    async def __aenter__(self):
+        assert not self.db.in_transaction
+        self.db.in_transaction = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        self.db.in_transaction = False
+        return False
+
+
+class _Session:
+    def __init__(self, *results: object) -> None:
+        self.results = deque(results)
+        self.added: list[object] = []
+        self.in_transaction = False
+        self.flushes = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    def begin(self) -> _Transaction:
+        return _Transaction(self)
+
+    async def execute(self, _statement) -> _ScalarResult:
+        return _ScalarResult(self.results.popleft())
+
+    async def get(self, _model, _identity):
+        return None
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def flush(self) -> None:
+        self.flushes += 1
+
+
+class _SessionFactory:
+    def __init__(self, *sessions: _Session) -> None:
+        self.sessions = deque(sessions)
+
+    def __call__(self) -> _Session:
+        return self.sessions.popleft()
+
+
+class _CycleGuard:
+    def __init__(self, error: AgentCycleGuardError | None = None) -> None:
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def ensure_delegation_allowed(self, db, **kwargs):
+        assert db.in_transaction
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(cycle_count=0)
+
+
+def _settings(*, enabled: bool) -> Settings:
+    return Settings(
+        _env_file=None,
+        AGENT_RUNTIME_V2_ENABLED=False,
+        AGENT_RUNTIME_V2_SOURCE_TYPES="a2a" if enabled else "",
+    )
+
+
+def _records() -> tuple[uuid.UUID, Agent, Agent, AgentRun, ToolExecutionReservation]:
+    tenant_id = uuid.uuid4()
+    source = Agent(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        creator_id=uuid.uuid4(),
+        name="Coordinator",
+        primary_model_id=uuid.uuid4(),
+        status="idle",
+        is_expired=False,
+        agent_type="native",
+    )
+    target = Agent(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        creator_id=uuid.uuid4(),
+        name="Researcher",
+        primary_model_id=uuid.uuid4(),
+        status="idle",
+        is_expired=False,
+        agent_type="native",
+    )
+    source_run = AgentRun(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        agent_id=source.id,
+        source_type="chat",
+        source_id=str(uuid.uuid4()),
+        goal="Coordinate the answer",
+        run_kind="foreground",
+        model_id=source.primary_model_id,
+        runtime_type="langgraph",
+        runtime_thread_id="source-thread",
+        graph_name="runtime",
+        graph_version="v1",
+        lane_held=False,
+        delivery_status="pending",
+        origin_user_id=source.creator_id,
+    )
+    execution = AgentToolExecution(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        run_id=source_run.id,
+        tool_call_id="delegate-call",
+        tool_name="send_message_to_agent",
+        assistant_message_id="assistant-message",
+        arguments_hash="hash",
+        sanitized_arguments={},
+        status="started",
+        lease_owner="runtime:command:delegate-call",
+    )
+    reservation = ToolExecutionReservation(
+        execution=execution,
+        created=True,
+        retrying=False,
+        reusable_result=None,
+        prior_failure=None,
+        blocked=False,
+        reconciliation_required=False,
+        requires_confirmation=False,
+        error_code=None,
+    )
+    return tenant_id, source, target, source_run, reservation
+
+
+@pytest.mark.asyncio
+async def test_delegate_creates_target_run_and_receipt_in_one_transaction() -> None:
+    tenant_id, source, target, source_run, reservation = _records()
+    db = _Session(source_run, source)
+    cycle_guard = _CycleGuard()
+    session = SimpleNamespace(
+        id=uuid.uuid4(),
+        agent_id=min((source.id, target.id), key=str),
+        last_message_at=None,
+    )
+    source_participant_id = uuid.uuid4()
+    target_run_id = uuid.uuid4()
+    handle = RunHandle(
+        tenant_id=tenant_id,
+        run_id=target_run_id,
+        thread_id=str(target_run_id),
+        command_id=uuid.uuid4(),
+        runtime_type="langgraph",
+        created=True,
+    )
+
+    async def mark_succeeded(mark_db, **kwargs):
+        assert mark_db is db
+        assert db.in_transaction
+        reservation.execution.status = "succeeded"
+        reservation.execution.result_summary = kwargs["result_summary"]
+        reservation.execution.result_ref = kwargs["result_ref"]
+        return reservation.execution
+
+    with (
+        patch(
+            "app.services.agent_runtime.a2a_runtime._resolve_target",
+            new=AsyncMock(return_value=target),
+        ),
+        patch(
+            "app.services.agent_runtime.a2a_runtime._ensure_a2a_session",
+            new=AsyncMock(
+                return_value=(session, source_participant_id, uuid.uuid4())
+            ),
+        ),
+        patch(
+            "app.services.agent_runtime.a2a_runtime.TransactionalAgentRuntimeAdapter.start_run",
+            new=AsyncMock(return_value=handle),
+        ) as start_run,
+        patch(
+            "app.services.agent_runtime.a2a_runtime.mark_tool_execution_succeeded",
+            new=AsyncMock(side_effect=mark_succeeded),
+        ),
+    ):
+        result = await RuntimeA2AService(
+            session_factory=_SessionFactory(db),  # type: ignore[arg-type]
+            settings=_settings(enabled=True),
+            cycle_guard=cycle_guard,  # type: ignore[arg-type]
+        ).execute(
+            tenant_id=tenant_id,
+            source_run_id=source_run.id,
+            source_agent_id=source.id,
+            tool_call_id="delegate-call",
+            arguments={
+                "agent_name": target.name,
+                "message": "Research the latest facts",
+                "msg_type": "task_delegate",
+            },
+            reservation=reservation,
+            lease_owner="runtime:command:delegate-call",
+            actor_user_id=source.creator_id,
+        )
+
+    assert result is not None
+    assert result.target_run_id == target_run_id
+    assert result.outcome.status == "succeeded"
+    assert result.outcome.result_ref == f"agent-run:{target_run_id}"
+    assert result.waiting_request == {
+        "waiting_type": "agent",
+        "correlation_id": (
+            f"a2a:task_delegate:"
+            f"{uuid.uuid5(source_run.id, 'a2a-result:delegate-call')}"
+        ),
+        "reason": "waiting_for_task_delegate",
+        "target_run_id": str(target_run_id),
+    }
+    command = start_run.await_args.args[0]
+    assert isinstance(command, StartRunCommand)
+    assert command.agent_id == target.id
+    assert command.parent_run_id == source_run.id
+    assert command.root_run_id == source_run.id
+    assert command.origin_agent_id == source.id
+    assert command.run_kind == "delegated"
+    assert command.source_type == "a2a"
+    assert command.session_id == session.id
+    assert command.model_id == target.primary_model_id
+    assert cycle_guard.calls[0]["source_run_id"] == source_run.id
+    messages = [value for value in db.added if isinstance(value, ChatMessage)]
+    assert len(messages) == 1
+    assert messages[0].content == "Research the latest facts"
+    assert messages[0].participant_id == source_participant_id
+    assert db.in_transaction is False
+
+
+@pytest.mark.asyncio
+async def test_disabled_target_rollout_falls_back_without_settling_receipt() -> None:
+    tenant_id, source, target, source_run, reservation = _records()
+    db = _Session(source_run, source)
+
+    with (
+        patch(
+            "app.services.agent_runtime.a2a_runtime._resolve_target",
+            new=AsyncMock(return_value=target),
+        ),
+        patch(
+            "app.services.agent_runtime.a2a_runtime.mark_tool_execution_succeeded",
+            new=AsyncMock(),
+        ) as mark_succeeded,
+        patch(
+            "app.services.agent_runtime.a2a_runtime.mark_tool_execution_failed",
+            new=AsyncMock(),
+        ) as mark_failed,
+    ):
+        result = await RuntimeA2AService(
+            session_factory=_SessionFactory(db),  # type: ignore[arg-type]
+            settings=_settings(enabled=False),
+        ).execute(
+            tenant_id=tenant_id,
+            source_run_id=source_run.id,
+            source_agent_id=source.id,
+            tool_call_id="delegate-call",
+            arguments={
+                "agent_name": target.name,
+                "message": "Research the latest facts",
+                "msg_type": "task_delegate",
+            },
+            reservation=reservation,
+            lease_owner="runtime:command:delegate-call",
+            actor_user_id=source.creator_id,
+        )
+
+    assert result is None
+    mark_succeeded.assert_not_awaited()
+    mark_failed.assert_not_awaited()
+    assert reservation.execution.status == "started"
+
+
+@pytest.mark.asyncio
+async def test_cycle_limit_becomes_known_failed_tool_result() -> None:
+    tenant_id, source, target, source_run, reservation = _records()
+    intake_db = _Session(source_run, source)
+    rejection_db = _Session()
+    cycle_guard = _CycleGuard(
+        AgentCycleGuardError(
+            "agent_cycle_limit_reached",
+            "candidate delegation reaches the Agent cycle limit",
+        )
+    )
+
+    async def mark_failed(mark_db, **kwargs):
+        assert mark_db is rejection_db
+        assert rejection_db.in_transaction
+        reservation.execution.status = "failed"
+        reservation.execution.result_summary = kwargs["result_summary"]
+        return reservation.execution
+
+    with (
+        patch(
+            "app.services.agent_runtime.a2a_runtime._resolve_target",
+            new=AsyncMock(return_value=target),
+        ),
+        patch(
+            "app.services.agent_runtime.a2a_runtime.mark_tool_execution_failed",
+            new=AsyncMock(side_effect=mark_failed),
+        ),
+    ):
+        result = await RuntimeA2AService(
+            session_factory=_SessionFactory(intake_db, rejection_db),  # type: ignore[arg-type]
+            settings=_settings(enabled=True),
+            cycle_guard=cycle_guard,  # type: ignore[arg-type]
+        ).execute(
+            tenant_id=tenant_id,
+            source_run_id=source_run.id,
+            source_agent_id=source.id,
+            tool_call_id="delegate-call",
+            arguments={
+                "agent_name": target.name,
+                "message": "Research the latest facts",
+                "msg_type": "task_delegate",
+            },
+            reservation=reservation,
+            lease_owner="runtime:command:delegate-call",
+            actor_user_id=source.creator_id,
+        )
+
+    assert result is not None
+    assert result.target_run_id is None
+    assert result.outcome.status == "failed"
+    assert result.outcome.result_summary is not None
+    assert "agent_cycle_limit_reached" in result.outcome.result_summary
+
+
+def test_a2a_receipt_rebuilds_wait_and_validates_correlation() -> None:
+    source_run_id = uuid.uuid4()
+    target_run_id = uuid.uuid4()
+    waiting = a2a_waiting_request(
+        source_run_id=source_run_id,
+        tool_call_id="consult-call",
+        arguments={
+            "agent_name": "Researcher",
+            "message": "Check one fact",
+            "msg_type": "consult",
+        },
+        result_ref=f"agent-run:{target_run_id}",
+    )
+
+    assert waiting is not None
+    correlation_id = waiting["correlation_id"]
+    assert isinstance(correlation_id, str)
+    assert a2a_mode_from_correlation(correlation_id) == "consult"
+    with pytest.raises(A2ARuntimeError) as raised:
+        a2a_mode_from_correlation("a2a:consult:not-a-uuid")
+    assert raised.value.code == "a2a_correlation_invalid"
