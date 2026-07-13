@@ -265,9 +265,9 @@ GET /groups/{group_id}/sessions
 
 ## 7. 数据迁移方案
 
-Phase 1 使用一次 Alembic 迁移完成群领域表创建和现有聊天表扩展，不在群聊开发中同时治理 `conversation_id`、历史 `participant_id` 或通用 read state。
+Phase 1 使用一次维护窗口内的强制 Alembic 迁移批次完成群领域表创建和现有聊天表扩展。批次可以由多个连续 revision 组成，以保持每个 revision 的职责单一；这不代表采用长期 Expand / Dual-write / Contract，也不在群聊开发中同时治理 `conversation_id`、历史 `participant_id` 或通用 read state。
 
-当前 Alembic 只有一个 head：`add_agent_directory_indexes`。新增迁移从该 head 继续，并遵循仓库的时间戳文件命名规则。
+当前分支 Alembic 只有一个 head：`add_title_to_agent_focus_items`。新增迁移从该 head 继续，并遵循 `backend/ALEMBIC_GUIDELINES.md` 的时间戳文件命名规则。
 
 ### 7.1 强制迁移与发布边界
 
@@ -279,16 +279,18 @@ Phase 1 使用一次 Alembic 迁移完成群领域表创建和现有聊天表扩
 
 1. 停止所有可能写入聊天和 Runtime 业务表的进程，包括 API、WebSocket、渠道 Consumer、Trigger、Heartbeat 和后台 Worker。
 2. 执行迁移前检查并完成数据库备份，确认当前 Alembic head、历史数据回填条件和约束冲突数量。
-3. 运行本章定义的单次 Alembic 迁移：先创建群领域表和 nullable 新字段，再完成历史回填，最后增加 `NOT NULL` / `CHECK` / 新索引并删除旧 primary 索引。
+3. 运行本章定义的强制迁移批次：先创建群领域表和 nullable 新字段，再完成历史回填，最后增加 `NOT NULL` / `CHECK` / 新索引并删除旧 primary 索引。
 4. 在服务仍关闭的状态下执行迁移后校验，确认行数、外键、`session_type` 分类、primary session 唯一性和关键查询结果正确。
 5. 在同一维护窗口发布只使用新 Schema 的后端，完成 Single Chat 后端冒烟后再开放写流量；Group Chat 后端能力可按后续开发阶段启用。
 6. Single 与 Group 后端完成后先执行整体验证和旧循环清理，再统一更新前端；前端发布时间不改变数据库强制迁移边界。
+
+强制切换前必须移除或严格关闭生产启动路径中的 `Base.metadata.create_all()`；生产 Schema 只能由经过评审的 Alembic revision 推进，不能由当前 ORM metadata 在应用启动时隐式补表或补列。
 
 迁移或校验失败时必须保持服务关闭并回滚迁移或从备份恢复，不允许在半迁移状态重新开放流量。迁移完成后可以暂时保留 `is_group`、`group_name`、`participant_id`、`peer_agent_id` 等兼容字段，但新代码必须以 `session_type` 及本方案定义的新字段为准；这些兼容字段不构成双写 Schema。
 
 ### 7.2 创建群领域表
 
-同一个迁移文件中先创建：
+迁移批次的第一个 revision 先创建：
 
 ```text
 groups
@@ -364,6 +366,8 @@ WHERE cs.agent_id = a.id
 
 新建原生群 session 直接写入 `groups.tenant_id`。
 
+由于历史 `agents.tenant_id` 和 `users.tenant_id` 都可能为空，迁移前必须统计 Agent tenant 缺失、User tenant 缺失以及双方 tenant 不一致的 direct session。只有来源唯一且一致时才允许回填；仍为空或存在冲突时迁移必须 fail fast，禁止写入任意默认 tenant。
+
 `created_by_participant_id` 的历史数据只做能够可靠确定的回填：
 
 1. direct 和普通外部渠道会话使用 `user_id` 对应的 user participant。
@@ -378,7 +382,7 @@ WHERE cs.agent_id = a.id
 direct primary：
 
 ```text
-unique(agent_id, user_id)
+unique(tenant_id, agent_id, user_id)
 where session_type = direct
   and is_primary = true
   and deleted_at is null
@@ -449,7 +453,7 @@ mentions = 结构化 mention 列表
 2. 保留 `groups` 和 `group_members` 作为群领域模型。
 3. workspace 暂不做 session 级上下文隔离。
 4. Phase 1 暂不新增通用 session member 表和 read state 表。
-5. Phase 1 使用一次 Alembic 迁移完成群领域表创建、聊天表扩展和必要历史 session 回填。
+5. Phase 1 使用一次维护窗口内的强制 Alembic 迁移批次完成群领域表创建、聊天表扩展和必要历史 session 回填；批次内允许多个连续 revision，不引入长期双写。
 6. Phase 1 继续使用 `chat_messages.conversation_id` 和 `participant_id`，不引入双写迁移。
 7. 历史消息模型清债作为后续独立任务，不阻塞原生群聊。
 8. direct、group、A2A 和 trigger session 复用统一 `session_context_states`；group session 的共享 Context State 使用 `session_id = chat_sessions.id` 且 `agent_id = null`。

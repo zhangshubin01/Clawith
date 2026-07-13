@@ -364,7 +364,7 @@ DELETE /groups/{group_id}/workspace/file?path=...
 
 Planning 模型规则：
 
-1. 使用独立配置 `MULTI_AGENT_PLANNING_MODEL_ID`，不复用任意群成员 Agent 的模型，也不复用 `MULTI_AGENT_COMPACT_MODEL_ID`。
+1. 使用独立配置 `MULTI_AGENT_PLANNING_MODEL_ID`，不复用任意群成员 Agent 的模型，也不复用 `MULTI_AGENT_COMPACT_MODEL_ID`。该全局配置必须指向启用的平台注册模型（`llm_models.tenant_id IS NULL`），供所有租户按系统能力使用。
 2. Planning 模型只接收规划所需上下文并输出结构化计划，不挂载业务工具，不允许产生外部副作用。
 3. 配置缺失、模型不存在、租户不可用或 Model Capability 校验失败时，Planning Run 直接失败，不创建业务子 Run。
 4. 模型调用失败或结构化计划校验失败时可以按无副作用调用策略重试；结构修复最多两次，仍失败则 Planning Graph State 进入 `failed`。
@@ -419,12 +419,14 @@ Planning 模型规则：
 10. Agent 最终公开回复分别写回当前 `chat_session_id`。
 11. 某个 Agent 失败时，彼此无依赖的步骤继续执行；直接或间接依赖该失败步骤的后续步骤不启动，并由 Planning Run 记录失败原因。
 
-同一个 Agent 同时被多条群消息 @ 时，按群消息写入顺序串行执行；该规则只约束群 mention 队列，不把该 Agent 的 Direct、Task、Trigger、Heartbeat 等所有 Run 全局限制为一个：
+同一个 Agent 同时存在多条已经创建的群 mention 业务 Run 时按队列顺序串行执行；该规则只约束群 mention 队列，不把该 Agent 的 Direct、Task、Trigger、Heartbeat 等所有 Run 全局限制为一个：
 
-1. 顺序以统一 Message Position 为准，固定使用 `created_at ASC, id ASC`；禁止比较 UUID 大小或只按时间戳排序。
+1. 队列顺序以触发消息的统一 Message Position 为准，固定使用 `created_at ASC, id ASC`；同一消息为同一 Agent 生成多个 step 时，再按 Run 的 `created_at ASC, id ASC` 稳定排序。禁止只比较 UUID 大小或只按时间戳排序。
 2. 如果该 Agent 当前没有正在处理的消息，系统立即调用该 Agent。
 3. 如果该 Agent 正在处理上一条 @，新的 @ 等待上一条处理完成后再执行。
 4. v1 不并发执行同一个 Agent 的多个 @ 请求。
+
+多 Agent 消息在 Planning Graph 创建具体业务子 Run 前不占用目标 Agent lane。极端并发下，Planning 期间后到但已经创建的单 Agent Run 可以先执行；v1 接受该边界，只保证已经进入 lane 的业务 Run 串行且不并发。
 
 可靠实现固定复用统一 Runtime 的 scheduling lane：业务 Run 写入 `scheduling_lane_key = group_mention:{tenant_id}:{agent_id}` 和触发消息 Message Position，只有同 lane 最早的未终态 Run 可以原子取得 `lane_held`。Run 在 waiting 时继续占有 lane，到 checkpoint terminal 后释放；进程崩溃时由 reconciliation 根据 checkpoint 修复。生命周期和终态判断不得读取 `projected_*`。Planning Run、Direct、Task、Trigger、Heartbeat 与普通 A2A 不写该 lane key，因此不会被群 mention 队列全局串行。字段、partial unique index 和恢复算法以 `../single-agent-runtime/technical-design.md` 5.6、12.4 节为准。
 
@@ -725,7 +727,7 @@ topic 规则：
 群聊属于多 Agent 场景，共享 Session Compact 必须显式配置独立 `compact_model_id`：
 
 1. 不使用任一群成员 Agent 的当前模型临时执行共享压缩。
-2. `compact_model_id` 由 `MULTI_AGENT_COMPACT_MODEL_ID` 配置解析，未配置时不得启动群共享上下文压缩任务。
+2. `compact_model_id` 由 `MULTI_AGENT_COMPACT_MODEL_ID` 配置解析，且必须指向启用的平台注册模型（`llm_models.tenant_id IS NULL`）；未配置或模型不可用时不得启动群共享上下文压缩任务。
 3. 压缩触发预算按统一 `request_input_limit` 公式计算群内每个有效 Agent 模型的 `effective_runtime_budget`，再取其中最小值的 85%，保证共享 Session Context 能被任一群内 Agent 使用。
 4. 独立 Compact 模型只负责生成摘要，不改变共享上下文的预算上限。
 5. Compact 模型窗口不足以一次处理待压缩区时，按消息边界分批压缩；不得截断消息或跳过 watermark。

@@ -248,7 +248,7 @@ backend/app/
 
 ```text
 id, tenant_id, agent_id?, session_id,
-source_type, source_id, source_execution_id,
+source_type, source_id, source_execution_id, correlation_id,
 origin_user_id, origin_agent_id,
 parent_run_id, root_run_id,
 goal, run_kind, system_role, model_id,
@@ -299,7 +299,7 @@ payload, actor_user_id, actor_agent_id,
 idempotency_key,
 status: pending / claimed / applied / rejected,
 claimed_by, claim_expires_at,
-applied_checkpoint_id, error_code,
+attempt_count, applied_checkpoint_id, error_code,
 created_at, applied_at
 ```
 
@@ -355,7 +355,8 @@ assistant_message_id, arguments_hash,
 sanitized_arguments, request_ref,
 status: started / succeeded / failed / unknown,
 result_summary, result_ref,
-started_at, completed_at
+lease_owner, lease_expires_at,
+started_at, completed_at, updated_at
 ```
 
 唯一约束：`unique(run_id, tool_call_id)`。
@@ -383,6 +384,9 @@ started_at, completed_at
 | `source_type` | `varchar(32)` | NOT NULL、check constraint |
 | `source_id` | `varchar(200)` | nullable |
 | `source_execution_id` | `varchar(200)` | nullable |
+| `correlation_id` | `varchar(200)` | nullable；跨 Run 等待与回调的稳定关联 ID |
+| `origin_user_id` | `uuid` | nullable、FK `users.id` |
+| `origin_agent_id` | `uuid` | nullable、FK `agents.id` |
 | `parent_run_id` / `root_run_id` | `uuid` | nullable、self FK |
 | `run_kind` | `varchar(24)` | `foreground/background/delegated/orchestration` |
 | `system_role` | `varchar(32)` | nullable；v1 orchestration 使用 `group_planning` |
@@ -399,6 +403,7 @@ started_at, completed_at
 | `projected_execution_status` | `varchar(32)` | nullable、check constraint；只读投影 |
 | `projected_waiting_type` | `varchar(24)` | nullable；只读投影 |
 | `projected_checkpoint_id` | `varchar(255)` | nullable；Projector watermark |
+| `projected_error_code` | `varchar(100)` | nullable；只读投影 |
 | `projection_updated_at` | `timestamptz` | nullable |
 | `projected_started_at` / `projected_completed_at` | `timestamptz` | nullable；只读投影 |
 | `delivery_status` | `varchar(24)` | NOT NULL、check constraint |
@@ -406,6 +411,7 @@ started_at, completed_at
 | `projected_waiting_reason` | `text` | nullable；只读投影 |
 | `projected_result_summary` / `projected_last_error` | `text` | nullable；只读投影 |
 | `delivery_target` | `jsonb` | nullable、小型结构 |
+| `created_at` / `updated_at` | `timestamptz` | NOT NULL |
 
 建议索引：
 
@@ -440,7 +446,7 @@ Run 间调度直接复用 Planning Agent 已确认的统一策略：
 2. `sequential`：每一步依赖前一步，只在前置步骤完成后推进下一步。
 3. `dependency`：按 `depends_on_step_ids` 表达的 DAG，仅推进依赖已经完成的 ready steps。
 4. 多个待启动 Run 可以在同一 Session 中共存；Planning Graph 根据上述依赖关系写入 ready 子 Run 的 start Command。
-5. 同一 Agent 收到多条群消息时的串行消费属于调度器规则，按 Message Position 排序，不通过 Session 唯一索引实现。
+5. 同一 Agent 已经创建的多条群 mention 业务 Run 的串行消费属于调度器规则，按 Message Position 排序，不通过 Session 唯一索引实现。
 
 群 mention 的业务串行使用 `agent_runs` 上的窄调度字段，不新增第二套执行状态机：
 
@@ -450,6 +456,8 @@ Run 间调度直接复用 Planning Agent 已确认的统一策略：
 4. Run 在 `waiting_user`、`waiting_external` 或 `waiting_agent` 时仍占有 lane；到 `completed / failed / cancelled` 后释放。这样“上一条处理完成后再处理下一条”的产品规则在服务重启后仍成立。
 5. 进程崩溃不会直接释放业务 lane；Reconciliation 读取 checkpoint，发现持有者已终态后幂等释放。checkpoint 仍 active 时禁止根据超时猜测完成。
 6. `lane_held` 只决定一个业务 Run 何时可以开始或恢复，不决定 Graph 内节点、waiting、取消或最终结果；Projector 不写这些协调字段。
+
+Planning Run 不进入目标 Agent lane。多 Agent 消息只有在 Planning 完成并创建具体业务 Run 后才参与上述排序；v1 接受 Planning 期间后到的单 Agent Run 先进入 lane，只保证已经创建的同 lane 业务 Run 串行且不并发。
 
 数据库唯一约束只负责 Run 来源幂等与重复创建防护，例如 `runtime_thread_id`、`(source_type, source_execution_id)`。Command claim 只防止同一输入被多个 Worker 同时消费；它不承担任务间并发策略。
 
@@ -589,7 +597,10 @@ class RuntimeContext:
     tenant_id: str
     run_id: str
     command_id: str
-    agent_id: str
+    agent_id: str | None
+    model_id: str
+    run_kind: str
+    system_role: str | None
     user_id: str | None
     session_id: str | None
     source_type: str
@@ -1151,16 +1162,25 @@ source 与 target 使用不同 `thread_id`，不共享完整 checkpoint，只交
 领取 Command 使用数据库短事务：
 
 ```sql
-SELECT id
-FROM agent_run_commands
-WHERE status = 'pending'
-   OR (status = 'claimed' AND claim_expires_at < now())
-ORDER BY created_at
+SELECT command.id
+FROM agent_run_commands AS command
+WHERE (
+    command.status = 'pending'
+    OR (command.status = 'claimed' AND command.claim_expires_at < now())
+)
+AND NOT EXISTS (
+    SELECT 1
+    FROM agent_run_commands AS previous
+    WHERE previous.run_id = command.run_id
+      AND previous.status IN ('pending', 'claimed')
+      AND (previous.created_at, previous.id) < (command.created_at, command.id)
+)
+ORDER BY command.created_at, command.id
 FOR UPDATE SKIP LOCKED
 LIMIT 1;
 ```
 
-领取后写入 `claimed_by` 与 `claim_expires_at`。同一 Run 的 Command 必须按创建顺序消费；若已有未完成调用，后续 Command 保持 pending。
+领取后写入 `claimed_by` 与 `claim_expires_at`，并原子增加 `attempt_count`。同一 Run 的 Command 固定按 `(created_at, id)` 消费；若已有未完成调用，后续 Command 保持 pending。达到最大领取次数前必须先与 checkpoint 中的 Command ID 对账，已经应用的 Command 只补写 `applied`，不得重复 invoke。
 
 Thread 推进互斥固定使用 PostgreSQL session-level advisory lock，不再保留“租约或 advisory lock”二选一：
 
@@ -1287,6 +1307,8 @@ AGENT_RUNTIME_CHECKPOINT_RETENTION_DAYS=30
 AGENT_RUNTIME_EVENT_PAYLOAD_MAX_BYTES=16384
 AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES=8192
 ```
+
+`MULTI_AGENT_COMPACT_MODEL_ID` 和 `MULTI_AGENT_PLANNING_MODEL_ID` 都是平台级配置，只允许解析到启用且 `tenant_id IS NULL` 的 `llm_models` 记录；配置缺失、模型停用或指向租户私有模型时显式失败，不回退到任意业务 Agent 模型。
 
 灰度优先级：显式 Agent allowlist > source type > 全局开关。关闭 v2 时走 legacy；但已由 v2 创建且产生 checkpoint 的 run 必须继续由 v2 恢复，不能中途回退 legacy。
 
@@ -1416,7 +1438,7 @@ AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES=8192
 - Task 重启恢复后不重复发送。
 - Trigger 重复投递幂等。
 - A2A target 完成后 source 正确恢复。
-- 同一 Agent 的两条群 mention 严格按 Message Position 执行，同时 Direct/Task Run 不被该 lane 阻塞。
+- 同一 Agent 已经创建的两条群 mention 业务 Run 严格按 Message Position 执行，同时 Direct/Task Run 不被该 lane 阻塞；另有用例确认 Planning 创建子 Run 前不占 lane。
 - waiting_user 收到回复后继续原 run。
 - soft delete session 不再注入旧摘要。
 - completed 与 delivered 可独立失败和重试。
