@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,12 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent
-from app.models.audit import AuditLog
+from app.models.audit import AuditLog, ChatMessage
 from app.models.group import GroupMember
 from app.models.participant import Participant
 from app.models.user import User
 from app.services import group_chat_service
+from app.services import group_message_service
 from app.services.group_chat_service import GroupChatServiceError
+from app.services.group_message_service import GroupMessageServiceError
 from app.services.participant_identity import get_or_create_user_participant
 
 
@@ -94,6 +97,34 @@ class GroupReadStateOut(BaseModel):
     advanced: bool
 
 
+class GroupMentionTokenIn(BaseModel):
+    participant_id: uuid.UUID
+
+
+class CreateGroupMessageIn(BaseModel):
+    content: str = Field(min_length=1, max_length=1_000_000)
+    mentions: list[GroupMentionTokenIn] = Field(default_factory=list, max_length=100)
+    message_id: uuid.UUID | None = None
+
+
+class GroupMessageOut(BaseModel):
+    id: uuid.UUID
+    role: str
+    content: str
+    participant_id: uuid.UUID | None = None
+    sender_name: str | None = None
+    mentions: list[dict]
+    created_at: datetime
+    cursor: str
+
+
+class GroupMessageIntakeOut(BaseModel):
+    message: GroupMessageOut
+    dispatch_kind: str
+    run_ids: list[uuid.UUID]
+    created: bool
+
+
 _NOT_FOUND_CODES = {
     "group_not_found",
     "group_member_not_found",
@@ -137,6 +168,27 @@ def _translate_domain_error(exc: GroupChatServiceError) -> HTTPException:
         status_code = status.HTTP_403_FORBIDDEN
     elif exc.code in _CONFLICT_CODES:
         status_code = status.HTTP_409_CONFLICT
+    else:
+        status_code = status.HTTP_400_BAD_REQUEST
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": exc.code, "message": str(exc)},
+    )
+
+
+def _translate_message_error(exc: GroupMessageServiceError) -> HTTPException:
+    if exc.code in {"group_not_found", "group_session_not_found"}:
+        status_code = status.HTTP_404_NOT_FOUND
+    elif exc.code in {"group_access_denied", "group_sender_invalid"}:
+        status_code = status.HTTP_403_FORBIDDEN
+    elif exc.code in {
+        "group_message_idempotency_mismatch",
+        "source_idempotency_mismatch",
+        "command_idempotency_mismatch",
+    }:
+        status_code = status.HTTP_409_CONFLICT
+    elif exc.code in {"group_planning_not_available", "runtime_v2_disabled"}:
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     else:
         status_code = status.HTTP_400_BAD_REQUEST
     return HTTPException(
@@ -227,6 +279,64 @@ async def _member_outputs(
                 role_description=agent.role_description if agent is not None else None,
                 title=user.title if user is not None else None,
                 joined_at=membership.joined_at,
+            )
+        )
+    return output
+
+
+def _parse_message_cursor(value: str | None) -> tuple[datetime, uuid.UUID] | None:
+    if value is None:
+        return None
+    timestamp_text, separator, message_id_text = value.rpartition("|")
+    if not separator:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid `before` cursor. Use '<ISO 8601>|<message UUID>'.",
+        )
+    try:
+        created_at = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00"))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        message_id = uuid.UUID(message_id_text)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid `before` cursor. Use '<ISO 8601>|<message UUID>'.",
+        ) from None
+    return created_at, message_id
+
+
+async def _message_outputs(
+    db: AsyncSession,
+    messages: list[ChatMessage],
+) -> list[GroupMessageOut]:
+    participant_ids = {message.participant_id for message in messages if message.participant_id}
+    sender_names: dict[uuid.UUID, str] = {}
+    if participant_ids:
+        result = await db.execute(
+            select(Participant).where(Participant.id.in_(participant_ids))
+        )
+        sender_names = {
+            participant.id: participant.display_name for participant in result.scalars().all()
+        }
+    output = []
+    for message in messages:
+        if message.created_at is None:
+            continue
+        output.append(
+            GroupMessageOut(
+                id=message.id,
+                role=message.role,
+                content=message.content,
+                participant_id=message.participant_id,
+                sender_name=(
+                    sender_names.get(message.participant_id)
+                    if message.participant_id is not None
+                    else None
+                ),
+                mentions=list(message.mentions or []),
+                created_at=message.created_at,
+                cursor=f"{message.created_at.isoformat()}|{message.id}",
             )
         )
     return output
@@ -604,4 +714,74 @@ async def mark_group_session_read(
         session_id=result.session_id,
         last_read_message_id=result.last_read_message_id,
         advanced=result.advanced,
+    )
+
+
+@router.get(
+    "/{group_id}/sessions/{session_id}/messages",
+    response_model=list[GroupMessageOut],
+)
+async def list_group_messages(
+    group_id: uuid.UUID,
+    session_id: uuid.UUID,
+    limit: Annotated[int, Query(ge=1, le=500)] = 20,
+    before: Annotated[
+        str | None,
+        Query(description="Cursor '<created_at>|<id>' for the first excluded position"),
+    ] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    tenant_id = _tenant_id(current_user)
+    participant = await _current_participant(db, current_user)
+    try:
+        messages = await group_message_service.list_group_messages(
+            db,
+            tenant_id=tenant_id,
+            group_id=group_id,
+            session_id=session_id,
+            viewer_participant_id=participant.id,
+            limit=limit,
+            before=_parse_message_cursor(before),
+        )
+    except GroupMessageServiceError as exc:
+        raise _translate_message_error(exc) from exc
+    return await _message_outputs(db, messages)
+
+
+@router.post(
+    "/{group_id}/sessions/{session_id}/messages",
+    response_model=GroupMessageIntakeOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_group_message(
+    group_id: uuid.UUID,
+    session_id: uuid.UUID,
+    body: CreateGroupMessageIn,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    tenant_id = _tenant_id(current_user)
+    participant = await _current_participant(db, current_user)
+    try:
+        intake = await group_message_service.enqueue_group_message(
+            db,
+            tenant_id=tenant_id,
+            group_id=group_id,
+            session_id=session_id,
+            sender_participant_id=participant.id,
+            content=body.content,
+            mention_participant_ids=[mention.participant_id for mention in body.mentions],
+            message_id=body.message_id,
+        )
+    except GroupMessageServiceError as exc:
+        raise _translate_message_error(exc) from exc
+    messages = await _message_outputs(db, [intake.message])
+    if not messages:
+        raise HTTPException(status_code=500, detail="Stored group message has no position")
+    return GroupMessageIntakeOut(
+        message=messages[0],
+        dispatch_kind=intake.dispatch_kind,
+        run_ids=[handle.run_id for handle in intake.run_handles],
+        created=intake.created,
     )
