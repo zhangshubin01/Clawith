@@ -1,0 +1,276 @@
+"""Committed-checkpoint projection and delivery tests."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from unittest.mock import AsyncMock, patch
+import uuid
+
+import pytest
+
+from app.services.agent_runtime.checkpoint_side_effects import (
+    RuntimeCheckpointSideEffectError,
+    RuntimeCheckpointSideEffects,
+    delivery_from_checkpoint,
+)
+from app.services.agent_runtime.command_worker import (
+    CheckpointObservation,
+    RuntimeCommandRecord,
+    RuntimeRunRecord,
+)
+from app.services.agent_runtime.projector import ProjectionResult
+from app.services.agent_runtime.state import (
+    RunInputSnapshots,
+    RunRegistrySnapshot,
+    RuntimeGraphState,
+)
+
+
+class _ScalarResult:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def scalar_one_or_none(self) -> object:
+        return self.value
+
+
+class _Transaction:
+    def __init__(self, timeline: list[str]) -> None:
+        self.timeline = timeline
+
+    async def __aenter__(self) -> "_Transaction":
+        self.timeline.append("transaction_enter")
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> bool:
+        self.timeline.append("transaction_exit")
+        return False
+
+
+class _Session:
+    def __init__(self, timeline: list[str], delivery_status: str) -> None:
+        self.timeline = timeline
+        self.delivery_status = delivery_status
+
+    async def __aenter__(self) -> "_Session":
+        self.timeline.append("session_enter")
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> bool:
+        self.timeline.append("session_exit")
+        return False
+
+    def begin(self) -> _Transaction:
+        return _Transaction(self.timeline)
+
+    async def execute(self, _statement) -> _ScalarResult:
+        self.timeline.append("load_delivery_status")
+        return _ScalarResult(self.delivery_status)
+
+
+class _SessionFactory:
+    def __init__(self, timeline: list[str], delivery_status: str = "pending") -> None:
+        self.timeline = timeline
+        self.delivery_status = delivery_status
+
+    def __call__(self) -> _Session:
+        return _Session(self.timeline, self.delivery_status)
+
+
+class _Projector:
+    def __init__(self, timeline: list[str], *, status: str, checkpoint_id: str) -> None:
+        self.timeline = timeline
+        self.status = status
+        self.checkpoint_id = checkpoint_id
+        self.calls: list[tuple[object, uuid.UUID, uuid.UUID]] = []
+
+    async def project_run(self, db, *, tenant_id, run_id):
+        self.timeline.append("project")
+        self.calls.append((db, tenant_id, run_id))
+        return ProjectionResult(
+            tenant_id=tenant_id,
+            run_id=run_id,
+            applied_checkpoint_ids=(self.checkpoint_id,),
+            added_event_types=(),
+            authoritative_status=self.status,
+            authoritative_terminal=self.status in {"completed", "failed", "cancelled"},
+        )
+
+
+def _records(
+    *,
+    status: str = "completed",
+    checkpoint_id: str = "checkpoint-1",
+    lifecycle: dict | None = None,
+) -> tuple[RuntimeRunRecord, RuntimeCommandRecord, CheckpointObservation]:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    registry = RunRegistrySnapshot(
+        tenant_id=str(tenant_id),
+        run_id=str(run_id),
+        goal="answer",
+        run_kind="foreground",
+        source_type="chat",
+        model_id=str(uuid.uuid4()),
+        graph_name="runtime_graph",
+        graph_version="v1",
+        agent_id=str(uuid.uuid4()),
+        session_id=str(uuid.uuid4()),
+    )
+    state: RuntimeGraphState = {
+        "registry": registry,
+        "snapshots": RunInputSnapshots(
+            session_context={},
+            session_context_version=0,
+            recent_session_messages=(),
+            related_run_summaries=(),
+            initial_input={},
+        ),
+        "lifecycle": {
+            "status": status,  # type: ignore[typeddict-item]
+            "next_route": "terminal" if status in {"completed", "failed", "cancelled"} else "wait",
+            **(lifecycle or {}),
+        },
+    }
+    run = RuntimeRunRecord(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        thread_id=str(run_id),
+        runtime_type="langgraph",
+        registry=registry,
+    )
+    command = RuntimeCommandRecord(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        run_id=run_id,
+        command_type="start",
+        payload={},
+        actor_user_id=uuid.uuid4(),
+        actor_agent_id=None,
+    )
+    return run, command, CheckpointObservation(checkpoint_id=checkpoint_id, state=state)
+
+
+@pytest.mark.asyncio
+async def test_projects_then_delivers_completed_checkpoint() -> None:
+    timeline: list[str] = []
+    run, command, checkpoint = _records(
+        lifecycle={
+            "final_answer": "fallback answer",
+            "delivery_request": {"content": "verified answer"},
+        }
+    )
+    projector = _Projector(timeline, status="completed", checkpoint_id=checkpoint.checkpoint_id)
+    handler = RuntimeCheckpointSideEffects(
+        session_factory=_SessionFactory(timeline),  # type: ignore[arg-type]
+        projector=projector,  # type: ignore[arg-type]
+    )
+
+    async def delivered(_db, request):
+        timeline.append("deliver")
+        assert request.content == "verified answer"
+        assert request.checkpoint_id == checkpoint.checkpoint_id
+        assert request.lifecycle_status == "completed"
+
+    with patch(
+        "app.services.agent_runtime.checkpoint_side_effects.deliver_runtime_message",
+        new=AsyncMock(side_effect=delivered),
+    ) as deliver:
+        await handler.handle(run=run, command=command, checkpoint=checkpoint)
+
+    assert timeline.index("project") < timeline.index("deliver")
+    deliver.assert_awaited_once()
+
+
+def test_waiting_delivery_uses_correlation_id_and_prompt() -> None:
+    run, _, checkpoint = _records(
+        status="waiting_user",
+        lifecycle={
+            "waiting_request": {
+                "waiting_type": "user",
+                "correlation_id": "confirm-1",
+                "question": "Continue?",
+            }
+        },
+    )
+
+    delivery = delivery_from_checkpoint(run, checkpoint)
+
+    assert delivery is not None
+    assert delivery.kind == "waiting"
+    assert delivery.content == "Continue?"
+    assert delivery.interrupt_id == "confirm-1"
+    assert delivery.lifecycle_status == "waiting_user"
+
+
+@pytest.mark.asyncio
+async def test_not_required_run_projects_without_delivery() -> None:
+    timeline: list[str] = []
+    run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
+    handler = RuntimeCheckpointSideEffects(
+        session_factory=_SessionFactory(timeline, delivery_status="not_required"),  # type: ignore[arg-type]
+        projector=_Projector(
+            timeline,
+            status="completed",
+            checkpoint_id=checkpoint.checkpoint_id,
+        ),  # type: ignore[arg-type]
+    )
+
+    with patch(
+        "app.services.agent_runtime.checkpoint_side_effects.deliver_runtime_message",
+        new=AsyncMock(),
+    ) as deliver:
+        await handler.handle(run=run, command=command, checkpoint=checkpoint)
+
+    assert "project" in timeline
+    deliver.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_projection_mismatch_stops_before_delivery() -> None:
+    timeline: list[str] = []
+    run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
+    handler = RuntimeCheckpointSideEffects(
+        session_factory=_SessionFactory(timeline),  # type: ignore[arg-type]
+        projector=_Projector(
+            timeline,
+            status="running",
+            checkpoint_id=checkpoint.checkpoint_id,
+        ),  # type: ignore[arg-type]
+    )
+
+    with (
+        patch(
+            "app.services.agent_runtime.checkpoint_side_effects.deliver_runtime_message",
+            new=AsyncMock(),
+        ) as deliver,
+        pytest.raises(RuntimeCheckpointSideEffectError, match="differs") as raised,
+    ):
+        await handler.handle(run=run, command=command, checkpoint=checkpoint)
+
+    assert raised.value.code == "projection_checkpoint_mismatch"
+    deliver.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rejects_checkpoint_outside_run_scope() -> None:
+    timeline: list[str] = []
+    run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
+    checkpoint = replace(
+        checkpoint,
+        state={
+            **checkpoint.state,
+            "registry": replace(checkpoint.state["registry"], tenant_id=str(uuid.uuid4())),
+        },
+    )
+    projector = _Projector(timeline, status="completed", checkpoint_id=checkpoint.checkpoint_id)
+    handler = RuntimeCheckpointSideEffects(
+        session_factory=_SessionFactory(timeline),  # type: ignore[arg-type]
+        projector=projector,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeCheckpointSideEffectError, match="Run Registry") as raised:
+        await handler.handle(run=run, command=command, checkpoint=checkpoint)
+
+    assert raised.value.code == "checkpoint_identity_mismatch"
+    assert projector.calls == []
