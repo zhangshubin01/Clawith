@@ -537,18 +537,80 @@ export const skillApi = {
         request<any>('/skills/import-from-url/preview', { method: 'POST', body: JSON.stringify({ url }) }),
     // Tenant-level settings
     settings: {
-        getToken: () => request<{ configured: boolean; source: string; masked: string; clawhub_configured: boolean; clawhub_masked: string }>('/skills/settings/token'),
+        getToken: () => request<{
+            configured: boolean; source: string; masked: string;
+            clawhub_configured: boolean; clawhub_masked: string;
+            gitlab_configured: boolean; gitlab_masked: string; gitlab_username: string;
+        }>('/skills/settings/token'),
         setToken: (github_token: string) =>
             request<any>('/skills/settings/token', { method: 'PUT', body: JSON.stringify({ github_token }) }),
         setClawhubKey: (clawhub_key: string) =>
             request<any>('/skills/settings/token', { method: 'PUT', body: JSON.stringify({ clawhub_key }) }),
+        setGitlabToken: (gitlab_token: string) =>
+            request<any>('/skills/settings/token', { method: 'PUT', body: JSON.stringify({ gitlab_token }) }),
+        setGitlabCredentials: (gitlab_username: string, gitlab_password: string) =>
+            request<any>('/skills/settings/token', { method: 'PUT', body: JSON.stringify({ gitlab_username, gitlab_password }) }),
+        // User-level GitLab settings
+        getMyGitlab: () => request<{ configured: boolean; masked: string; username: string }>('/skills/settings/my-gitlab'),
+        setMyGitlabToken: (gitlab_token: string) =>
+            request<any>('/skills/settings/my-gitlab', { method: 'PUT', body: JSON.stringify({ gitlab_token }) }),
+        setMyGitlabCredentials: (gitlab_username: string, gitlab_password: string) =>
+            request<any>('/skills/settings/my-gitlab', { method: 'PUT', body: JSON.stringify({ gitlab_username, gitlab_password }) }),
     },
     // Agent-level import (writes to agent workspace)
     agentImport: {
         fromClawhub: (agentId: string, slug: string) =>
             request<any>(`/agents/${agentId}/files/import-from-clawhub`, { method: 'POST', body: JSON.stringify({ slug }) }),
-        fromUrl: (agentId: string, url: string) =>
-            request<any>(`/agents/${agentId}/files/import-from-url`, { method: 'POST', body: JSON.stringify({ url }) }),
+        fromUrl: (agentId: string, url: string, targetPath?: string, onProgress?: (current: number, total: number, file: string) => void) => {
+            const token = localStorage.getItem('token');
+            const fullUrl = `${API_BASE}/agents/${agentId}/files/import-from-url`;
+            return fetch(fullUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+                body: JSON.stringify({ url, target_path: targetPath || 'skills' }),
+            }).then(async (resp) => {
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({ detail: 'Import failed' }));
+                    throw new Error(err.detail || `HTTP ${resp.status}`);
+                }
+                // Try streaming, fallback to plain JSON
+                const contentType = resp.headers.get('content-type') || '';
+                if (contentType.includes('application/x-ndjson') && resp.body) {
+                    const reader = resp.body.getReader();
+                    const decoder = new TextDecoder();
+                    let result: any = null;
+                    let buffer = '';
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || '';
+                        for (const line of lines) {
+                            if (!line.trim()) continue;
+                            try {
+                                const evt = JSON.parse(line);
+                                if (evt.type === 'status' && onProgress) {
+                                    onProgress(evt.current || 0, evt.total || 0, evt.message || '');
+                                } else if (evt.type === 'progress' && onProgress) {
+                                    onProgress(evt.current, evt.total, evt.file);
+                                    // Yield to React so the progress bar renders between updates
+                                    await new Promise(r => setTimeout(r, 0));
+                                } else if (evt.type === 'error') {
+                                    throw new Error(evt.message || 'Import failed');
+                                } else if (evt.type === 'complete') result = evt;
+                            } catch (e) {
+                                if (e instanceof SyntaxError) continue;
+                                throw e;
+                            }
+                        }
+                    }
+                    return result;
+                }
+                // Fallback: plain JSON response
+                return resp.json();
+            });
+        },
     },
 };
 

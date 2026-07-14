@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -25,7 +26,33 @@ CLAWHUB_BASE = os.getenv("CLAWHUB_BASE", "https://clawhub.ai/api").rstrip("/")
 CLAWHUB_MIRROR_BASE = os.getenv("CLAWHUB_MIRROR_BASE", "https://cn.clawhub-mirror.com/api").rstrip("/")
 GITHUB_API = "https://api.github.com"
 
-MAX_SKILL_SIZE = 512_000  # 500 KB total limit per skill
+MAX_SKILL_SIZE = 5_242_880  # 5 MB total limit per import (supports multi-skill repos)
+
+
+async def _get_user_setting(user_id: str | None, key: str) -> str:
+    """Resolve a user setting value: user_settings DB > empty."""
+    if user_id:
+        try:
+            from app.models.user_setting import UserSetting
+            import uuid as _uid
+            async with async_session() as db:
+                result = await db.execute(
+                    select(UserSetting).where(
+                        UserSetting.user_id == _uid.UUID(user_id),
+                        UserSetting.key == key,
+                    )
+                )
+                setting = result.scalar_one_or_none()
+                if setting and setting.value:
+                    v = setting.value
+                    if key.endswith("_password"):
+                        return v.get("password", "")
+                    if key.endswith("_username"):
+                        return v.get("username", "")
+                    return v.get("token", "")
+        except Exception:
+            logger.debug("[Skills] Failed to get user setting")
+    return ""
 
 
 async def _get_tenant_setting(tenant_id: str | None, key: str) -> str:
@@ -42,10 +69,15 @@ async def _get_tenant_setting(tenant_id: str | None, key: str) -> str:
                     )
                 )
                 setting = result.scalar_one_or_none()
-                if setting and setting.value.get("token"):
-                    return setting.value["token"]
+                if setting and setting.value:
+                    v = setting.value
+                    if key.endswith("_password"):
+                        return v.get("password", "")
+                    if key.endswith("_username"):
+                        return v.get("username", "")
+                    return v.get("token", "")
         except Exception:
-            logger.debug("[Skills] Failed to get tenant setting token")
+            logger.debug("[Skills] Failed to get tenant setting")
     return ""
 
 
@@ -57,6 +89,42 @@ async def _get_github_token(tenant_id: str | None = None) -> str:
 async def _get_clawhub_key(tenant_id: str | None = None) -> str:
     """Resolve ClawHub API key from tenant settings DB."""
     return await _get_tenant_setting(tenant_id, "clawhub_key")
+
+
+async def _resolve_gitlab_auth(user_id: str | None, tenant_id: str | None) -> dict:
+    """Resolve GitLab credentials with user-level priority over tenant-level.
+    Returns {"type": "pat"|"basic", ...} or {} for anonymous."""
+    # User-level PAT
+    token = await _get_user_setting(user_id, "gitlab_token")
+    if token:
+        return {"type": "pat", "token": token}
+    # User-level basic auth
+    u = await _get_user_setting(user_id, "gitlab_username")
+    p = await _get_user_setting(user_id, "gitlab_password")
+    if u and p:
+        return {"type": "basic", "username": u, "password": p}
+    # Tenant-level PAT
+    token = await _get_tenant_setting(tenant_id, "gitlab_token")
+    if token:
+        return {"type": "pat", "token": token}
+    # Tenant-level basic auth
+    u = await _get_tenant_setting(tenant_id, "gitlab_username")
+    p = await _get_tenant_setting(tenant_id, "gitlab_password")
+    if u and p:
+        return {"type": "basic", "username": u, "password": p}
+    return {}
+
+
+def _build_gitlab_auth_headers(auth: dict) -> dict:
+    """Build HTTP headers from resolved GitLab credentials."""
+    if not auth:
+        return {}
+    if auth["type"] == "pat":
+        return {"PRIVATE-TOKEN": auth["token"]}
+    if auth["type"] == "basic":
+        creds = base64.b64encode(f"{auth['username']}:{auth['password']}".encode()).decode()
+        return {"Authorization": f"Basic {creds}"}
+    return {}
 
 
 def _clawhub_headers(api_key: str) -> dict:
@@ -316,6 +384,37 @@ def _parse_github_url(url: str) -> dict | None:
     return None
 
 
+def _parse_repo_url(url: str) -> dict | None:
+    """Parse a GitHub or GitLab URL into provider/owner/repo/branch/path components."""
+    # ── GitLab: https://{host}/{owner}/{repo}/-/tree/{branch}/{path} ──
+    m = re.match(
+        r"(https?)://([^/]+)/([^/]+)/([^/]+)/-/tree/([^/]+)/(.*?)/?$", url
+    )
+    if m:
+        return {
+            "provider": "gitlab",
+            "base_url": f"{m.group(1)}://{m.group(2)}",
+            "owner": m.group(3), "repo": m.group(4),
+            "branch": m.group(5), "path": m.group(6),
+        }
+    # ── GitLab root / GitHub root ──
+    m = re.match(
+        r"(https?)://([^/]+)/([^/]+)/([^/]+?)(?:\.git)?/?$", url
+    )
+    if m:
+        scheme, host, owner, repo = m.group(1), m.group(2), m.group(3), m.group(4)
+        if "github.com" in host:
+            return {"provider": "github", "owner": owner, "repo": repo, "branch": "main", "path": ""}
+        return {"provider": "gitlab", "base_url": f"{scheme}://{host}", "owner": owner, "repo": repo, "branch": "main", "path": ""}
+    # ── GitHub tree ──
+    m = re.match(
+        r"https?://github\.com/([^/]+)/([^/]+)/tree/([^/]+)/(.*?)/?$", url
+    )
+    if m:
+        return {"provider": "github", "owner": m.group(1), "repo": m.group(2), "branch": m.group(3), "path": m.group(4)}
+    return None
+
+
 def _apply_skill_scope(query, current_user: User):
     """Scope skill queries for tenant admins while leaving platform admins unrestricted."""
     from sqlalchemy import or_ as _or
@@ -372,20 +471,50 @@ async def _fetch_github_directory(
             # Single file (not a directory)
             items = [items]
 
-        # Early guard: if at top level, check that SKILL.md exists
+        # Early guard: if at top level, scan subdirs for SKILL.md
         if depth == 0:
             has_skill_md = any(
                 i["name"].upper() == "SKILL.MD" and i["type"] == "file"
                 for i in items
             )
-            dir_count = sum(1 for i in items if i["type"] == "dir")
             if not has_skill_md:
-                if dir_count > 5:
-                    raise HTTPException(
-                        400, f"This directory contains {dir_count} subdirectories but no SKILL.md. "
-                             "Please provide the URL to a specific skill directory."
-                    )
-                raise HTTPException(400, "No SKILL.md found at the root of this directory — not a valid skill package.")
+                # Discover which subdirectories contain SKILL.md (like GitLab logic)
+                skill_dirs: set[str] = set()
+                for item in items:
+                    if item["type"] == "dir":
+                        try:
+                            sub_url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{item['path']}?ref={branch}"
+                            _sub_headers = {"Authorization": f"Bearer {_token}"} if _token else {}
+                            async with httpx.AsyncClient(timeout=10, headers=_sub_headers) as _client:
+                                _resp = await _client.get(sub_url)
+                                if _resp.status_code == 200:
+                                    _sub_items = _resp.json()
+                                    if isinstance(_sub_items, list) and any(
+                                        i["name"].upper() == "SKILL.MD" and i["type"] == "file"
+                                        for i in _sub_items
+                                    ):
+                                        skill_dirs.add(item["name"])
+                        except Exception:
+                            pass
+                if skill_dirs:
+                    # Only recurse into skill directories
+                    for item in items:
+                        if item["type"] == "dir" and item["name"] in skill_dirs:
+                            await _recurse(item["path"], f"{rel_prefix}{item['name']}/" if rel_prefix else f"{item['name']}/", depth + 1)
+                        elif item["type"] == "file":
+                            size = item.get("size", 0)
+                            total_size += size
+                            if total_size > MAX_SKILL_SIZE:
+                                raise HTTPException(413, f"Skill exceeds size limit ({MAX_SKILL_SIZE // 1024}KB)")
+                            async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+                                dl_resp = await client.get(item["url"])
+                                if dl_resp.status_code == 200:
+                                    data = dl_resp.json()
+                                    content = base64.b64decode(data.get("content", "")).decode("utf-8", errors="replace")
+                                    files.append({"path": item['name'], "content": content})
+                    return
+                # If no token and all probes failed (likely rate-limited), error out clearly
+                raise HTTPException(400, "No SKILL.md found. Configure a GitHub token in Enterprise Settings → Skills for private repos, or use a URL pointing directly to a skill directory.")
 
         for item in items:
             name = item["name"]
@@ -413,6 +542,121 @@ async def _fetch_github_directory(
     except Exception as e:
         raise HTTPException(502, f"Failed to fetch files from GitHub: {e}")
     return files
+
+
+async def _fetch_gitlab_directory(
+    owner: str, repo: str, path: str, branch: str = "main",
+    auth: dict | None = None, base_url: str = "https://gitlab.com",
+    on_progress: callable = None,
+) -> list[dict]:
+    """Fetch all files from a GitLab repository directory via API.
+    Uses recursive tree listing (paginated). Calls on_progress(msg, current, total) for status.
+    Returns [{"path": relative_path, "content": text}].
+    """
+    from urllib.parse import quote
+    api_base = f"{base_url}/api/v4"
+    project_id = quote(f"{owner}/{repo}", safe="")
+    headers = _build_gitlab_auth_headers(auth or {})
+    _report = on_progress or (lambda msg, cur=0, tot=0: None)
+
+    async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+        # Step 1: recursive tree (paginated — loop all pages)
+        tree_url = f"{api_base}/projects/{project_id}/repository/tree"
+        items: list[dict] = []
+        page = 1
+        while True:
+            params: dict = {"ref": branch, "recursive": "true", "per_page": 100, "page": page}
+            if path:
+                params["path"] = path
+            resp = await client.get(tree_url, params=params)
+            if resp.status_code == 404:
+                raise HTTPException(404, f"GitLab project or path not found: {owner}/{repo}")
+            if resp.status_code in (401, 403):
+                raise HTTPException(401, "GitLab authentication failed. Check your credentials.")
+            if resp.status_code != 200:
+                raise HTTPException(502, f"GitLab API error: {resp.status_code}")
+            page_items = resp.json()
+            if not page_items:
+                break
+            items.extend(page_items)
+            _report(f"Fetching tree: {len(items)} entries found so far", 0, 0)
+            if len(page_items) < 100:
+                break
+            page += 1
+
+    # Filter blobs
+    blobs = [i for i in items if i.get("type") == "blob"]
+    if not blobs:
+        raise HTTPException(404, "No files found at the specified path")
+
+    # Validate SKILL.md exists at root level, or discover skill subdirectories
+    path_prefix = (path + "/") if path else ""
+    has_skill_md = any(
+        b["name"].upper() == "SKILL.MD" and b.get("path", "").upper() == f"{path_prefix}SKILL.MD".upper()
+        for b in blobs
+    )
+    if not has_skill_md:
+        # No SKILL.md at root — discover all skill subdirectories and import only those
+        skill_dirs: set[str] = set()
+        for b in blobs:
+            if b["name"].upper() == "SKILL.MD" and "/" in b.get("path", ""):
+                rel = b["path"]
+                if path_prefix and rel.startswith(path_prefix):
+                    rel = rel[len(path_prefix):]
+                parts = rel.rsplit("/", 1)
+                if parts and len(parts) > 1:
+                    skill_dirs.add(parts[0])
+        if not skill_dirs:
+            raise HTTPException(400, "No SKILL.md found — not a valid skill package.")
+        # Filter blobs: only keep files inside discovered skill directories
+        blobs = [b for b in blobs if any(
+            b.get("path", "").startswith(d + "/") or b.get("path", "") == d
+            for d in skill_dirs
+        )]
+        path_prefix = ""
+
+    # Step 2: download each file
+    files: list[dict] = []
+    total_size = 0
+    total_blobs = len(blobs)
+    async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+        for i, blob in enumerate(blobs):
+            raw_path = blob["path"]
+            rel = raw_path[len(path_prefix):] if path_prefix and raw_path.startswith(path_prefix) else raw_path
+
+            encoded = quote(raw_path, safe="")
+            raw_url = f"{api_base}/projects/{project_id}/repository/files/{encoded}/raw?ref={branch}"
+            dl_resp = await client.get(raw_url)
+            if dl_resp.status_code != 200:
+                continue
+            content = dl_resp.text
+
+            total_size += len(content.encode("utf-8"))
+            if total_size > MAX_SKILL_SIZE:
+                raise HTTPException(413, f"Skill exceeds size limit ({MAX_SKILL_SIZE // 1024}KB)")
+            files.append({"path": rel, "content": content})
+            if (i + 1) % 20 == 0 or i == total_blobs - 1:
+                _report(f"Downloading {i + 1}/{total_blobs} files", i + 1, total_blobs)
+
+    return files
+
+
+async def _fetch_repo_directory(parsed: dict, user_id: str | None = None, tenant_id: str | None = None,
+                               on_progress: callable = None) -> list[dict]:
+    """Fetch files from a repo directory (GitHub or GitLab), dispatching by provider."""
+    if parsed["provider"] == "gitlab":
+        auth = await _resolve_gitlab_auth(user_id, tenant_id)
+        return await _fetch_gitlab_directory(
+            parsed["owner"], parsed["repo"], parsed["path"],
+            parsed["branch"], auth, parsed.get("base_url", "https://gitlab.com"),
+            on_progress=on_progress,
+        )
+    else:
+        token = await _get_github_token(tenant_id)
+        return await _fetch_github_directory(
+            parsed["owner"], parsed["repo"], parsed["path"],
+            parsed["branch"], token,
+        )
 
 
 async def _save_skill_to_db(
@@ -577,17 +821,16 @@ async def install_from_clawhub(body: ClawhubInstallIn, current_user: User = Depe
 
 @router.post("/import-from-url")
 async def import_from_url(body: UrlImportIn, current_user: User = Depends(get_current_user)):
-    """Import a skill from any GitHub URL into the global registry."""
+    """Import a skill from a GitHub or GitLab URL into the global registry."""
     tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
-    token = await _get_github_token(tenant_id)
-    parsed = _parse_github_url(body.url)
+    parsed = _parse_repo_url(body.url)
     if not parsed:
-        raise HTTPException(400, "Invalid GitHub URL. Expected format: https://github.com/{owner}/{repo}/tree/{branch}/{path}")
+        raise HTTPException(400, "Invalid URL. Expected GitHub or GitLab repository URL.")
 
     owner, repo, branch, path = parsed["owner"], parsed["repo"], parsed["branch"], parsed["path"]
 
-    # Fetch files
-    files = await _fetch_github_directory(owner, repo, path, branch, token=token)
+    # Fetch files (GitHub or GitLab)
+    files = await _fetch_repo_directory(parsed, str(current_user.id), tenant_id)
     if not files:
         raise HTTPException(404, "No files found at the specified path")
 
@@ -625,16 +868,15 @@ async def import_from_url(body: UrlImportIn, current_user: User = Depends(get_cu
 
 @router.post("/import-from-url/preview")
 async def preview_url_import(body: UrlImportIn, current_user: User = Depends(get_current_user)):
-    """Preview what will be imported from a GitHub URL without saving."""
+    """Preview what will be imported from a GitHub or GitLab URL without saving."""
     tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
-    token = await _get_github_token(tenant_id)
-    parsed = _parse_github_url(body.url)
+    parsed = _parse_repo_url(body.url)
     if not parsed:
-        raise HTTPException(400, "Invalid GitHub URL format")
+        raise HTTPException(400, "Invalid URL. Expected GitHub or GitLab repository URL.")
 
     owner, repo, branch, path = parsed["owner"], parsed["repo"], parsed["branch"], parsed["path"]
 
-    files = await _fetch_github_directory(owner, repo, path, branch, token=token)
+    files = await _fetch_repo_directory(parsed, str(current_user.id), tenant_id)
     if not files:
         raise HTTPException(404, "No files found at the specified path")
 
@@ -803,6 +1045,24 @@ async def delete_skill(skill_id: str, current_user: User = Depends(get_current_a
 class SkillSettingsIn(BaseModel):
     github_token: str | None = None
     clawhub_key: str | None = None
+    gitlab_token: str | None = None
+    gitlab_username: str | None = None
+    gitlab_password: str | None = None
+
+
+class MyGitLabSettingsIn(BaseModel):
+    gitlab_token: str | None = None
+    gitlab_username: str | None = None
+    gitlab_password: str | None = None
+
+
+def _setting_value(key: str, raw: str) -> dict:
+    """Build the JSONB value dict for a setting key."""
+    if key.endswith("_password"):
+        return {"password": raw}
+    if key.endswith("_username"):
+        return {"username": raw}
+    return {"token": raw}
 
 
 async def _upsert_tenant_setting(tenant_id, key: str, value: str):
@@ -817,12 +1077,34 @@ async def _upsert_tenant_setting(tenant_id, key: str, value: str):
         )
         existing = result.scalar_one_or_none()
         if existing:
-            existing.value = {"token": value}
+            existing.value = _setting_value(key, value)
         else:
             db.add(TenantSetting(
                 tenant_id=tenant_id,
                 key=key,
-                value={"token": value},
+                value=_setting_value(key, value),
+            ))
+        await db.commit()
+
+
+async def _upsert_user_setting(user_id, key: str, value: str):
+    """Helper to upsert a user setting."""
+    from app.models.user_setting import UserSetting
+    async with async_session() as db:
+        result = await db.execute(
+            select(UserSetting).where(
+                UserSetting.user_id == user_id,
+                UserSetting.key == key,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            existing.value = _setting_value(key, value)
+        else:
+            db.add(UserSetting(
+                user_id=user_id,
+                key=key,
+                value=_setting_value(key, value),
             ))
         await db.commit()
 
@@ -837,16 +1119,22 @@ def _mask_token(token: str) -> str:
 async def get_skill_token_status(
     current_user=Depends(require_role("org_admin", "platform_admin")),
 ):
-    """Check if GitHub token and ClawHub key are configured for this tenant."""
+    """Check if GitHub/GitLab tokens and ClawHub key are configured for this tenant."""
     tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
     gh_token = await _get_github_token(tenant_id)
     ch_key = await _get_clawhub_key(tenant_id)
+    gl_token = await _get_tenant_setting(tenant_id, "gitlab_token")
+    gl_user = await _get_tenant_setting(tenant_id, "gitlab_username")
+    gl_pass = await _get_tenant_setting(tenant_id, "gitlab_password")
     return {
         "configured": bool(gh_token),
         "source": "tenant" if tenant_id else "env",
         "masked": _mask_token(gh_token),
         "clawhub_configured": bool(ch_key),
         "clawhub_masked": _mask_token(ch_key),
+        "gitlab_configured": bool(gl_token or (gl_user and gl_pass)),
+        "gitlab_masked": _mask_token(gl_token),
+        "gitlab_username": gl_user or "",
     }
 
 
@@ -855,12 +1143,7 @@ async def set_skill_token(
     body: SkillSettingsIn,
     current_user=Depends(require_role("org_admin", "platform_admin")),
 ):
-    """Save GitHub token and/or ClawHub key for this tenant.
-
-    Accessible by org_admin (to manage their own company's credentials) and
-    platform_admin. require_role performs exact-match checks, so both roles
-    must be listed explicitly.
-    """
+    """Save token settings for this tenant."""
     if not current_user.tenant_id:
         raise HTTPException(400, "No tenant associated")
 
@@ -868,6 +1151,43 @@ async def set_skill_token(
         await _upsert_tenant_setting(current_user.tenant_id, "github_token", body.github_token)
     if body.clawhub_key is not None:
         await _upsert_tenant_setting(current_user.tenant_id, "clawhub_key", body.clawhub_key)
+    if body.gitlab_token is not None:
+        await _upsert_tenant_setting(current_user.tenant_id, "gitlab_token", body.gitlab_token)
+    if body.gitlab_username is not None:
+        await _upsert_tenant_setting(current_user.tenant_id, "gitlab_username", body.gitlab_username)
+    if body.gitlab_password is not None:
+        await _upsert_tenant_setting(current_user.tenant_id, "gitlab_password", body.gitlab_password)
+    return {"ok": True}
+
+
+@router.get("/settings/my-gitlab")
+async def get_my_gitlab_settings(
+    current_user=Depends(get_current_user),
+):
+    """Get the current user's personal GitLab credentials."""
+    user_id = str(current_user.id)
+    token = await _get_user_setting(user_id, "gitlab_token")
+    username = await _get_user_setting(user_id, "gitlab_username")
+    return {
+        "configured": bool(token or username),
+        "masked": _mask_token(token),
+        "username": username or "",
+    }
+
+
+@router.put("/settings/my-gitlab")
+async def set_my_gitlab_settings(
+    body: MyGitLabSettingsIn,
+    current_user=Depends(get_current_user),
+):
+    """Save the current user's personal GitLab credentials."""
+    user_id = str(current_user.id)
+    if body.gitlab_token is not None:
+        await _upsert_user_setting(user_id, "gitlab_token", body.gitlab_token)
+    if body.gitlab_username is not None:
+        await _upsert_user_setting(user_id, "gitlab_username", body.gitlab_username)
+    if body.gitlab_password is not None:
+        await _upsert_user_setting(user_id, "gitlab_password", body.gitlab_password)
     return {"ok": True}
 
 

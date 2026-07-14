@@ -12310,16 +12310,15 @@ async def _install_skill(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
     try:
         if is_url:
             # ── GitHub URL path ──
-            from app.api.skills import _parse_github_url, _fetch_github_directory, _get_github_token
+            from app.api.skills import _parse_repo_url, _fetch_repo_directory
 
-            parsed = _parse_github_url(source)
+            parsed = _parse_repo_url(source)
             if not parsed:
-                return "❌ Invalid GitHub URL. Expected format: https://github.com/{owner}/{repo} or https://github.com/{owner}/{repo}/tree/{branch}/{path}"
+                return "❌ Invalid URL. Expected GitHub or GitLab repository URL."
 
             owner, repo, branch, path = parsed["owner"], parsed["repo"], parsed["branch"], parsed["path"]
             tenant_id = await _get_agent_tenant_id(agent_id)
-            token = await _get_github_token(tenant_id)
-            files = await _fetch_github_directory(owner, repo, path, branch, token)
+            files = await _fetch_repo_directory(parsed, str(agent_id), tenant_id)
             if not files:
                 return "❌ No files found at the specified URL."
 

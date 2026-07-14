@@ -29,10 +29,15 @@ export default function SkillsTab() {
     const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
     const [showSettings, setShowSettings] = useState(false);
     const [tokenInput, setTokenInput] = useState('');
-    const [tokenStatus, setTokenStatus] = useState<{ configured: boolean; source: string; masked: string; clawhub_configured?: boolean; clawhub_masked?: string } | null>(null);
+    const [tokenStatus, setTokenStatus] = useState<{ configured: boolean; source: string; masked: string; clawhub_configured?: boolean; clawhub_masked?: string; gitlab_configured?: boolean; gitlab_masked?: string; gitlab_username?: string } | null>(null);
     const [savingToken, setSavingToken] = useState(false);
     const [clawhubKeyInput, setClawhubKeyInput] = useState('');
     const [savingClawhubKey, setSavingClawhubKey] = useState(false);
+    const [gitlabTokenInput, setGitlabTokenInput] = useState('');
+    const [savingGitlabToken, setSavingGitlabToken] = useState(false);
+    const [gitlabUserInput, setGitlabUserInput] = useState('');
+    const [gitlabPassInput, setGitlabPassInput] = useState('');
+    const [savingGitlabCreds, setSavingGitlabCreds] = useState(false);
 
     const showToast = (message: string, type: 'success' | 'error' = 'success') => {
         setToast({ message, type });
@@ -323,6 +328,152 @@ export default function SkillsTab() {
                             )}
                         </div>
                     </div>
+
+                    {/* GitLab Token (PAT) */}
+                    <div style={{ marginTop: '16px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            GitLab Token
+                            <span className="metric-tooltip-trigger" style={{ display: 'inline-flex', alignItems: 'center', cursor: 'help', color: 'var(--text-tertiary)' }}>
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6.5" /><path d="M8 7v4M8 5.5v0" /></svg>
+                                <span className="metric-tooltip" style={{ width: '280px', bottom: 'auto', top: 'calc(100% + 6px)', left: '-8px', fontWeight: 400 }}>
+                                    Create a Personal Access Token in GitLab (Settings → Access Tokens) with read_api scope.
+                                </span>
+                            </span>
+                        </div>
+                        <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                            Company-wide GitLab PAT. Used as fallback when no personal token is configured.
+                        </p>
+                        {tokenStatus?.gitlab_masked && (
+                            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                                Current token: <code style={{ padding: '2px 6px', borderRadius: '4px', background: 'var(--bg-tertiary)', fontSize: '11px' }}>{tokenStatus.gitlab_masked}</code>
+                            </div>
+                        )}
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <input type="text" name="prevent_autofill_gl_user" style={{ display: 'none' }} tabIndex={-1} />
+                            <input type="password" name="prevent_autofill_gl_pass" style={{ display: 'none' }} tabIndex={-1} />
+                            <input
+                                type="text"
+                                className="input"
+                                autoComplete="off"
+                                data-form-type="other"
+                                placeholder="glpat-xxxxxxxxxxxx"
+                                value={gitlabTokenInput}
+                                onChange={e => setGitlabTokenInput(e.target.value)}
+                                style={{ flex: 1, fontSize: '13px', fontFamily: 'monospace', WebkitTextSecurity: 'disc' } as React.CSSProperties}
+                            />
+                            <button
+                                className="btn btn-primary"
+                                style={{ fontSize: '13px' }}
+                                disabled={!gitlabTokenInput.trim() || savingGitlabToken}
+                                onClick={async () => {
+                                    setSavingGitlabToken(true);
+                                    try {
+                                        await skillApi.settings.setGitlabToken(gitlabTokenInput.trim());
+                                        const status = await skillApi.settings.getToken();
+                                        setTokenStatus(status);
+                                        setGitlabTokenInput('');
+                                        showToast('GitLab token saved');
+                                    } catch (e: any) {
+                                        showToast(e.message || 'Failed to save', 'error');
+                                    }
+                                    setSavingGitlabToken(false);
+                                }}
+                            >
+                                {savingGitlabToken ? 'Saving...' : 'Save'}
+                            </button>
+                            {tokenStatus?.gitlab_configured && (
+                                <button className="btn btn-secondary" style={{ fontSize: '13px' }}
+                                    onClick={async () => {
+                                        try {
+                                            await skillApi.settings.setGitlabToken('');
+                                            const status = await skillApi.settings.getToken();
+                                            setTokenStatus(status);
+                                            showToast('Token cleared');
+                                        } catch (e: any) {
+                                            showToast(e.message || 'Failed', 'error');
+                                        }
+                                    }}>
+                                    Clear
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* GitLab Username + Password (Basic Auth) */}
+                    <div style={{ marginTop: '16px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>
+                            GitLab Username & Password
+                        </div>
+                        <p style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '12px' }}>
+                            For self-hosted GitLab instances using Basic Auth. Leave blank if using PAT above.
+                        </p>
+                        {tokenStatus?.gitlab_username && (
+                            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                                Current user: <code style={{ padding: '2px 6px', borderRadius: '4px', background: 'var(--bg-tertiary)', fontSize: '11px' }}>{tokenStatus.gitlab_username}</code>
+                            </div>
+                        )}
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                            <input type="text" name="prevent_autofill_gluser" style={{ display: 'none' }} tabIndex={-1} />
+                            <input type="password" name="prevent_autofill_glpass2" style={{ display: 'none' }} tabIndex={-1} />
+                            <input
+                                type="text"
+                                className="input"
+                                autoComplete="off"
+                                data-form-type="other"
+                                placeholder="Username"
+                                value={gitlabUserInput}
+                                onChange={e => setGitlabUserInput(e.target.value)}
+                                style={{ flex: 1, fontSize: '13px' }}
+                            />
+                            <input
+                                type="password"
+                                className="input"
+                                autoComplete="off"
+                                data-form-type="other"
+                                placeholder="Password"
+                                value={gitlabPassInput}
+                                onChange={e => setGitlabPassInput(e.target.value)}
+                                style={{ flex: 1, fontSize: '13px' }}
+                            />
+                            <button
+                                className="btn btn-primary"
+                                style={{ fontSize: '13px' }}
+                                disabled={!gitlabUserInput.trim() || !gitlabPassInput.trim() || savingGitlabCreds}
+                                onClick={async () => {
+                                    setSavingGitlabCreds(true);
+                                    try {
+                                        await skillApi.settings.setGitlabCredentials(gitlabUserInput.trim(), gitlabPassInput.trim());
+                                        const status = await skillApi.settings.getToken();
+                                        setTokenStatus(status);
+                                        setGitlabUserInput('');
+                                        setGitlabPassInput('');
+                                        showToast('GitLab credentials saved');
+                                    } catch (e: any) {
+                                        showToast(e.message || 'Failed to save', 'error');
+                                    }
+                                    setSavingGitlabCreds(false);
+                                }}
+                            >
+                                {savingGitlabCreds ? 'Saving...' : 'Save'}
+                            </button>
+                            {tokenStatus?.gitlab_username && (
+                                <button className="btn btn-secondary" style={{ fontSize: '13px' }}
+                                    onClick={async () => {
+                                        try {
+                                            await skillApi.settings.setGitlabCredentials('', '');
+                                            const status = await skillApi.settings.getToken();
+                                            setTokenStatus(status);
+                                            showToast('Credentials cleared');
+                                        } catch (e: any) {
+                                            showToast(e.message || 'Failed', 'error');
+                                        }
+                                    }}>
+                                    Clear
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
                 </div>
             )}
 

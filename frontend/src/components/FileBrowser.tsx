@@ -118,6 +118,18 @@ export default function FileBrowser({
 
     // ─── Helpers ───────────────────────────────────────
 
+    /** Match a filename against an accept string (same semantics as <input accept>). */
+    const fileMatchesAccept = (name: string, accept: string): boolean => {
+        if (!accept || accept === '*') return true;
+        const ext = '.' + (name.split('.').pop() || '').toLowerCase();
+        const tokens = accept.split(',').map(t => t.trim().toLowerCase());
+        return tokens.some(t => {
+            if (t === '*') return true;
+            if (t.startsWith('.')) return ext === t;
+            return true; // MIME wildcards (image/*) — can't resolve from name alone, allow
+        });
+    };
+
     const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
         setToast({ message, type });
         setTimeout(() => setToast(null), 3000);
@@ -230,7 +242,39 @@ export default function FileBrowser({
         input.onchange = async () => {
             if (!input.files || input.files.length === 0) return;
             try {
-                const fileList = Array.from(input.files);
+                const fileList = Array.from(input.files).filter(f => fileMatchesAccept(f.name, uploadAccept));
+                for (const file of fileList) {
+                    setUploadProgress({ fileName: file.name, percent: 0 });
+                    await api.upload!(file, currentPath, (pct) => {
+                        setUploadProgress({ fileName: file.name, percent: pct });
+                    });
+                }
+                setUploadProgress(null);
+                reload();
+                onRefresh?.();
+                showToast('Upload successful');
+            } catch (err: any) {
+                setUploadProgress(null);
+                showToast('Upload failed: ' + (err.message || ''), 'error');
+            }
+        };
+        input.click();
+    };
+
+    const handleUploadFolder = () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        (input as any).webkitdirectory = true;
+        input.multiple = true;
+        input.onchange = async () => {
+            if (!input.files || input.files.length === 0) return;
+            try {
+                const fileList = Array.from(input.files)
+                    .filter(f => fileMatchesAccept(f.name, uploadAccept))
+                    .map(f => {
+                        const relPath = (f as any).webkitRelativePath || f.name;
+                        return new File([f], relPath, { type: f.type });
+                    });
                 for (const file of fileList) {
                     setUploadProgress({ fileName: file.name, percent: 0 });
                     await api.upload!(file, currentPath, (pct) => {
@@ -513,7 +557,10 @@ export default function FileBrowser({
                 {renderBreadcrumbs()}
                 <div style={{ display: 'flex', gap: '6px', marginLeft: 'auto' }}>
                     {upload && api.upload && (
-                        <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={handleUpload}><IconUpload size={13} stroke={1.8} /> Upload</button>
+                        <>
+                            <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={handleUpload}><IconUpload size={13} stroke={1.8} /> Files</button>
+                            <button className="btn btn-secondary" style={{ fontSize: '12px' }} onClick={handleUploadFolder}><IconFolder size={13} stroke={1.8} /> Folder</button>
+                        </>
                     )}
                     {newFolder && (
                         <button className="btn btn-secondary" style={{ fontSize: '12px' }}
@@ -553,7 +600,7 @@ export default function FileBrowser({
             ) : files.length === 0 ? (
                 <div className="card" style={{ textAlign: 'center', padding: '40px', color: 'var(--text-tertiary)' }}>
                     {upload && api.upload
-                        ? t('agent.workspace.dragOrClick', 'Drop files here or click Upload')
+                        ? t('agent.workspace.dragOrClick', 'Drop files or folders here, or click Upload for files')
                         : t('common.noData')}
                 </div>
             ) : (
