@@ -9,6 +9,7 @@ import React from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { experienceApi, type ExperienceEntry } from '../services/api';
 import { Drawer, EXP_FIELDS, secondaryBtn } from './ExperienceDraftEditor';
+import MarkdownRenderer from './MarkdownRenderer';
 
 export const SCOPE_LABELS: Record<string, string> = { company: '全公司', department: '本部门', user: '指定人' };
 
@@ -127,14 +128,21 @@ export function EntryDrawer({ entryId, onClose, onEdit, onChanged, docked }: {
                 {(entry.tags || []).map(tg => <Badge key={tg}>#{tg}</Badge>)}
             </div>
             <div style={{ marginBottom: 16 }}><CreatorLine entry={entry} /></div>
-            {EXP_FIELDS.map(fl => (
-                <section key={fl.key} style={{ marginBottom: 14 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>{fl.label}</div>
-                    <div style={{ fontSize: 14, color: 'var(--text-primary)', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
-                        {(entry[fl.key] as string) || '—'}
-                    </div>
-                </section>
-            ))}
+            {EXP_FIELDS.map(fl => {
+                const value = (entry[fl.key] as string) || '';
+                return (
+                    <section key={fl.key} style={{ marginBottom: 14 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>{fl.label}</div>
+                        {fl.markdown && value ? (
+                            <MarkdownRenderer content={value} style={{ fontSize: 14, lineHeight: 1.6 }} />
+                        ) : (
+                            <div style={{ fontSize: 14, color: 'var(--text-primary)', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+                                {value || '—'}
+                            </div>
+                        )}
+                    </section>
+                );
+            })}
             {refs && (
                 <div style={{ margin: '8px 0 16px', fontSize: 13, color: 'var(--text-tertiary)' }}>
                     被 AI 阅读 {refs.read_count} 次 · <strong style={{ color: 'var(--text-secondary)' }}>实际采纳（引用） {refs.cited_count} 次</strong>

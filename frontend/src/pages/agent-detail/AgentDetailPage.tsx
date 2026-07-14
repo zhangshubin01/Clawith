@@ -9,7 +9,7 @@ import { useToast } from '../../components/Toast/ToastProvider';
 import type { FileBrowserApi } from '../../components/FileBrowser';
 import FileBrowser from '../../components/FileBrowser';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
-import { DraftEditor as ExperienceDraftEditor, type Draft as ExperienceDraft } from '../../components/ExperienceDraftEditor';
+import { DraftEditor as ExperienceDraftEditor, bodyExcerpt, type Draft as ExperienceDraft } from '../../components/ExperienceDraftEditor';
 import { EntryDrawer } from '../../components/ExperienceDetailDrawer';
 import PromptModal from '../../components/PromptModal';
 import { appendLiveCodeOutput, type LivePreviewState } from '../../components/AgentBayLivePanel';
@@ -499,17 +499,15 @@ function ExperienceDraftCard({ args, sessionId }: { args: any; sessionId?: strin
     }, [args]);
     const toArr = (v: any) => Array.isArray(v) ? v : (typeof v === 'string' && v ? v.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean) : []);
     const prefill: ExperienceDraft = {
-        title: a.title || '', scenario: a.scenario || '', problem: a.problem || '',
-        solution: a.solution || '', applicability: a.applicability || '', tags: toArr(a.tags),
+        title: a.title || '', body: a.body || '', applicability: a.applicability || '', tags: toArr(a.tags),
         visibility_scope: 'company',
         origin_agent_id: agentId, origin_session_id: sessionId || null,
     };
-    // Short labels — the card is a summary; the drawer shows the full schema names.
-    // `key` marks 适用与失效: required, and the part a reader's eye slides off.
+    // The card is a summary — flatten the markdown body so section markers don't show up
+    // literally; the drawer renders it properly. `key` marks 适用与失效: required, and the
+    // part a reader's eye slides off.
     const parts: { label: string; val: string; key?: boolean }[] = [
-        { label: '场景', val: a.scenario },
-        { label: '问题', val: a.problem },
-        { label: '解决', val: a.solution },
+        { label: '正文', val: bodyExcerpt(a.body) },
         { label: '适用与失效', val: a.applicability, key: true },
     ];
     const tags = toArr(a.tags);

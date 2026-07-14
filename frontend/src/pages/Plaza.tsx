@@ -12,7 +12,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { IconBuildingMonument } from '@tabler/icons-react';
 import { experienceApi, type ExperienceEntry } from '../services/api';
-import { DraftEditor, Drawer, EXP_FIELDS, secondaryBtn, type Draft } from '../components/ExperienceDraftEditor';
+import { DraftEditor, Drawer, bodyExcerpt, secondaryBtn, type Draft } from '../components/ExperienceDraftEditor';
 import { EntryDrawer, Badge, CreatorLine, freshness, retiredDaysLeft, SCOPE_LABELS } from '../components/ExperienceDetailDrawer';
 
 const sicon = (d: string) => (
@@ -344,10 +344,10 @@ function EntryCard({ entry, onOpen }: { entry: ExperienceEntry; onOpen: () => vo
                     {f.label && <Badge tone={f.stale ? 'warn' : 'ok'}>{f.label}</Badge>}
                 </div>
             </div>
-            {entry.scenario && (
+            {bodyExcerpt(entry.body) && (
                 <div style={{ fontSize: 13, color: 'var(--text-secondary)', margin: '8px 0', lineHeight: 1.5,
                     display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                    {entry.scenario}
+                    {bodyExcerpt(entry.body)}
                 </div>
             )}
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>

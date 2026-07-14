@@ -54,8 +54,8 @@ _HINT = (
     "marker is the machine record of adoption, the sentence is for the human. "
     "If nothing matches, ignore this and do not invent experiences.\n"
     "你无权写入团队经验库。当用户要求你把某条经验『记成经验 / 沉淀』时，"
-    "不要写进 memory 或 workspace，而是调用 `propose_experience_draft`，把它整理成四段"
-    "（场景 / 遇到的问题 / 解决方式 / 适用条件与失效信号，其中适用条件与失效信号必填），"
+    "不要写进 memory 或 workspace，而是调用 `propose_experience_draft`，整理出标题、"
+    "markdown 正文，以及必填的『适用条件与失效信号』，"
     "并如实回执：例如「我不能直接帮你记成经验，但我已把相关内容整理成结构化草稿，"
     "点击下方『沉淀为经验』确认后即可入库」。"
 )
@@ -247,9 +247,9 @@ async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
                 tokens = tokens[:24]
 
             # Candidate pool: entries visible to this agent (published, non-legacy).
-            # Tokenized scoring across all four parts + title + JSON tags is done in Python —
-            # tags aren't portably matchable in SQL, and per-token scoring drives ranking.
-            # For a curated private library this pool is small.
+            # Tokenized scoring across title + body + applicability + JSON tags is done in
+            # Python — tags aren't portably matchable in SQL, and per-token scoring drives
+            # ranking. For a curated private library this pool is small.
             pool_q = (
                 select(ExperienceEntry)
                 .where(
@@ -269,7 +269,7 @@ async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
                 )
                 pool = pool[:_SEARCH_POOL_CAP]
 
-            # Score each entry by how many query tokens appear across title + 场景/问题/解决/适用 + tags.
+            # Score each entry by how many query tokens appear across title + 正文 + 适用条件 + tags.
             # A CJK compound token (e.g. "合同条款") that doesn't appear verbatim also matches on any of
             # its 2-char slices ("合同"/"条款") — approximates Chinese segmentation without a tokenizer.
             token_needles = [_token_needles(tok) for tok in tokens]
@@ -279,7 +279,7 @@ async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
             for e in pool:
                 blob = " ".join(
                     filter(None, [
-                        e.title, e.scenario, e.problem, e.solution, e.applicability,
+                        e.title, e.body, e.applicability,
                         " ".join(str(t) for t in (e.tags or [])),
                     ])
                 ).lower()
@@ -321,7 +321,7 @@ async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
 
 
 async def read_experience(agent_id: uuid.UUID, arguments: dict) -> str:
-    """Return the full four-part entry and record a `read` reference."""
+    """Return the entry's full markdown body + applicability, and record a `read`."""
     raw_id = str(arguments.get("entry_id") or "").strip()
     # Tolerate the agent pasting the full "[[exp:<uuid>]]" citation marker.
     m = re.search(r"[0-9a-fA-F-]{36}", raw_id)
@@ -363,9 +363,7 @@ async def read_experience(agent_id: uuid.UUID, arguments: dict) -> str:
             return (
                 f"📚 Experience [[exp:{entry.id}]] — {entry.title}\n"
                 f"标签: {tags} · 复核: {_freshness_marker(entry)}\n\n"
-                f"## 场景\n{entry.scenario}\n\n"
-                f"## 遇到的问题\n{entry.problem}\n\n"
-                f"## 解决方式\n{entry.solution}\n\n"
+                f"{entry.body}\n\n"
                 f"## 适用条件与失效信号\n{entry.applicability}\n\n"
                 f"If this informs your answer: (1) tell the user in plain language you referenced the "
                 f"team experience library and what you took from it, and (2) append [[exp:{entry.id}]] "

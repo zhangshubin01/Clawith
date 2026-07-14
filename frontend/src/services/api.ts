@@ -597,10 +597,8 @@ export interface ExperienceEntry {
     id: string;
     tenant_id: string | null;
     title: string;
-    scenario: string;
-    problem: string;
-    solution: string;
-    applicability: string;
+    body: string;           // 正文 — free-form markdown
+    applicability: string;  // 适用条件与失效信号 — the agent's read-or-skip preview; required to publish
     status: 'draft' | 'published' | 'retired';
     tags: string[];
     visibility_scope: 'company' | 'department' | 'user';
@@ -635,9 +633,9 @@ export const experienceApi = {
     get: (id: string) => request<ExperienceEntry>(`/experience/entries/${id}`),
     createDraftFromContent: (data: { agent_id: string; content: string; session_id?: string }) =>
         request<ExperienceEntry>('/experience/drafts', { method: 'POST', body: JSON.stringify(data) }),
-    // Distill chat content into the four-part fields WITHOUT persisting (human confirms in the editor).
+    // Distill chat content into title / body / applicability WITHOUT persisting (human confirms in the editor).
     distill: (data: { agent_id: string; content: string; session_id?: string }) =>
-        request<{ title: string; scenario: string; problem: string; solution: string; applicability: string; tags: string[]; extracted: boolean }>(
+        request<{ title: string; body: string; applicability: string; tags: string[]; extracted: boolean }>(
             '/experience/distill', { method: 'POST', body: JSON.stringify(data) }),
     create: (data: Partial<ExperienceEntry>) =>
         request<ExperienceEntry>('/experience/entries', { method: 'POST', body: JSON.stringify(data) }),

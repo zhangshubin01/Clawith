@@ -1,8 +1,16 @@
 """Experience Library models.
 
 The team experience library replaces the old Plaza social feed: human-curated,
-AI-consumed private knowledge. Each entry is a fixed four-part structure and only
-becomes retrievable once a human publishes it.
+AI-consumed private knowledge. An entry only becomes retrievable once a human
+publishes it.
+
+Structure is exactly as deep as the retrieval contract needs, and no deeper:
+`title` + `applicability` are the *only* fields `search_experience` returns as a
+candidate preview, so the agent can decide read-or-skip without paying for the
+full text — they stay first-class columns. Everything else the agent only ever
+sees verbatim, so the narrative is one free-form markdown `body` (editor seeds a
+场景/问题/解决 template, but does not enforce it — not all internal knowledge is a
+problem→solution story).
 """
 
 import uuid
@@ -29,12 +37,10 @@ class ExperienceEntry(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
 
-    # ── P0-3: fixed four-part structure (all four required to publish) ──
-    title: Mapped[str] = mapped_column(String(200), nullable=False, default="")  # shown in the directory
-    scenario: Mapped[str] = mapped_column(Text, nullable=False, default="")        # 场景
-    problem: Mapped[str] = mapped_column(Text, nullable=False, default="")         # 遇到的问题
-    solution: Mapped[str] = mapped_column(Text, nullable=False, default="")        # 解决方式
-    applicability: Mapped[str] = mapped_column(Text, nullable=False, default="")   # 适用条件与失效信号 (required)
+    # ── P0-3: all three required to publish ──
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="")  # search preview line 1
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")          # 正文 (markdown, free-form)
+    applicability: Mapped[str] = mapped_column(Text, nullable=False, default="")  # 适用条件与失效信号 — search preview line 2
 
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft", index=True)
     tags: Mapped[list] = mapped_column(JSON, default=list)  # P1-2

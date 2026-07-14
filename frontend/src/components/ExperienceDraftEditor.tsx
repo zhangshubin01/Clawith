@@ -12,13 +12,37 @@ import { experienceApi, orgApi, type ExperienceEntry } from '../services/api';
 
 export type Draft = Partial<ExperienceEntry>;
 
-// The library's fixed four-part schema (P0-3). applicability is mandatory to publish.
-export const EXP_FIELDS: { key: keyof ExperienceEntry; label: string; hint?: string }[] = [
-    { key: 'scenario', label: '场景' },
-    { key: 'problem', label: '遇到的问题' },
-    { key: 'solution', label: '解决方式' },
+// The body is free-form markdown; only `applicability` keeps a fixed shape, because it is
+// the one field `search_experience` shows the agent as a candidate preview — it must be
+// readable on its own for the agent to decide read-or-skip without fetching the full text.
+export const EXP_FIELDS: { key: keyof ExperienceEntry; label: string; hint?: string; markdown?: boolean }[] = [
+    { key: 'body', label: '正文', markdown: true },
     { key: 'applicability', label: '适用条件与失效信号', hint: '必填：此经验何时成立、出现什么信号说明已失效' },
 ];
+
+// Seeded into an empty editor: a suggestion, not a schema. Knowledge that isn't a
+// problem→solution story (a config reference, a hidden process rule) should overwrite it.
+export const BODY_TEMPLATE = '## 场景\n\n## 遇到的问题\n\n## 解决方式\n';
+
+// The seeded template is non-empty, so a plain trim() check would green-light publishing an
+// empty scaffold. Strip heading lines and see whether any prose actually remains.
+const hasProse = (md?: string | null): boolean =>
+    (md || '').replace(/^\s*#{1,6}\s.*$/gm, '').trim().length > 0;
+
+// Past this the entry starts costing real tokens on every read_experience call. Advisory only.
+const BODY_SOFT_LIMIT = 2000;
+
+// Flatten the markdown body to plain text for compact previews (cards, summary rows),
+// where raw markers would otherwise show up literally as "## 场景".
+export function bodyExcerpt(md?: string | null): string {
+    return (md || '')
+        .replace(/```[\s\S]*?```/g, ' ')   // code blocks read as noise at this size
+        .replace(/^\s*#{1,6}\s+/gm, '')    // heading markers
+        .replace(/^\s*[-*+]\s+/gm, '')     // list bullets
+        .replace(/[*_`]/g, '')             // inline emphasis
+        .replace(/\s+/g, ' ')
+        .trim();
+}
 
 export const primaryBtn: React.CSSProperties = {
     padding: '8px 14px', borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 14,
@@ -85,12 +109,14 @@ export function Drawer({ header, children, footer, onClose, docked = false }: {
 
 export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoExtractFailed }: {
     draft: Draft; onClose: () => void; onSaved: () => void; onDeleted?: () => void; docked?: boolean;
-    // Set when a chat distill produced none of the four parts — shows a manual-fill hint.
+    // Set when a chat distill produced nothing usable — shows a manual-fill hint.
     autoExtractFailed?: boolean;
 }) {
     const [form, setForm] = useState<Draft>({
-        title: '', scenario: '', problem: '', solution: '', applicability: '',
+        title: '', applicability: '',
         tags: [], visibility_scope: 'company', visibility_scope_id: null, ...draft,
+        // Seed the section scaffold only when there's nothing to show yet.
+        body: hasProse(draft.body) ? draft.body : BODY_TEMPLATE,
     });
     const [err, setErr] = useState('');
     const isNew = !draft.id;
@@ -104,8 +130,7 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
     const hasDepartments = (deptData?.items?.length ?? 0) > 0;
 
     const buildPayload = (): Draft => ({
-        title: form.title, scenario: form.scenario, problem: form.problem,
-        solution: form.solution, applicability: form.applicability, tags: form.tags,
+        title: form.title, body: form.body, applicability: form.applicability, tags: form.tags,
         visibility_scope: form.visibility_scope, visibility_scope_id: form.visibility_scope_id || null,
         // Provenance (chat-sourced drafts): records the source agent + conversation.
         origin_agent_id: form.origin_agent_id, origin_session_id: form.origin_session_id,
@@ -142,7 +167,9 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
         if (window.confirm('确定删除这条草稿？此操作不可撤销。')) del.mutate();
     };
 
-    const fourFilled = EXP_FIELDS.every(f => ((form[f.key] as string) || '').trim());
+    // Publish gate (P0-3): a title, a body with actual prose, and applicability filled in.
+    const canPublish = !!(form.title || '').trim() && hasProse(form.body) && !!(form.applicability || '').trim();
+    const bodyLen = (form.body || '').length;
     const set = (k: keyof ExperienceEntry, v: any) => setForm(p => ({ ...p, [k]: v }));
 
     const header = (
@@ -159,8 +186,9 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
             {err && <div style={{ color: 'var(--error)', fontSize: 13, margin: '0 0 10px' }}>{err}</div>}
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <button onClick={() => save.mutate()} style={secondaryBtn} disabled={save.isPending}>保存草稿</button>
-                <button onClick={() => publish.mutate()} style={{ ...primaryBtn, opacity: fourFilled ? 1 : .5 }}
-                    disabled={!fourFilled || publish.isPending} title={fourFilled ? '' : '四段缺一不可发布'}>
+                <button onClick={() => publish.mutate()} style={{ ...primaryBtn, opacity: canPublish ? 1 : .5 }}
+                    disabled={!canPublish || publish.isPending}
+                    title={canPublish ? '' : '标题、正文、适用条件与失效信号均须填写'}>
                     确认入库（发布）
                 </button>
                 {!isNew && onDeleted && (
@@ -176,7 +204,7 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
     return (
         <Drawer onClose={onClose} docked={docked} header={header} footer={footer}>
             <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '0 0 16px' }}>
-                四段齐全（尤其“适用条件与失效信号”）方可发布；发布前均可修改。
+                标题、正文、“适用条件与失效信号”齐全方可发布；发布前均可修改。
             </p>
 
             {autoExtractFailed && (
@@ -199,13 +227,31 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
             <label style={labelStyle}>标题</label>
             <input value={form.title || ''} onChange={e => set('title', e.target.value)} style={inputStyle} maxLength={200} />
 
-            {EXP_FIELDS.map(f => (
-                <div key={f.key}>
-                    <label style={labelStyle}>{f.label}{f.hint && <span style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}> — {f.hint}</span>}</label>
-                    <textarea value={(form[f.key] as string) || ''} onChange={e => set(f.key, e.target.value)}
-                        style={{ ...inputStyle, minHeight: 72, resize: 'vertical' }} />
-                </div>
-            ))}
+            <label style={labelStyle}>
+                正文<span style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}> — markdown；小节标题是建议，不是必须</span>
+            </label>
+            <textarea value={form.body || ''} onChange={e => set('body', e.target.value)}
+                style={{
+                    ...inputStyle, minHeight: 240, resize: 'vertical', lineHeight: 1.6,
+                    fontFamily: 'var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)', fontSize: 13,
+                }} />
+            <div style={{
+                fontSize: 12, textAlign: 'right', marginTop: 4,
+                color: bodyLen > BODY_SOFT_LIMIT ? 'var(--warning, #b45309)' : 'var(--text-tertiary)',
+            }}>
+                {bodyLen} 字
+                {bodyLen > BODY_SOFT_LIMIT && ` · 偏长，AI 每次读取都要吃掉全文，建议精简到 ${BODY_SOFT_LIMIT} 字内`}
+            </div>
+
+            <label style={labelStyle}>
+                适用条件与失效信号
+                <span style={{ color: 'var(--text-tertiary)', fontWeight: 400 }}> — 必填：此经验何时成立、出现什么信号说明已失效</span>
+            </label>
+            <textarea value={form.applicability || ''} onChange={e => set('applicability', e.target.value)}
+                style={{ ...inputStyle, minHeight: 72, resize: 'vertical' }} />
+            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '4px 0 0' }}>
+                AI 检索时只先看到标题和这一栏，据此判断要不要读全文——请写成脱离正文也能读懂的一两句话。
+            </p>
 
             <label style={labelStyle}>标签（逗号分隔）</label>
             <input value={(form.tags || []).join(', ')} onChange={e => set('tags', e.target.value.split(',').map(s => s.trim()).filter(Boolean))} style={inputStyle} />

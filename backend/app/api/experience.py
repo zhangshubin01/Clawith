@@ -26,7 +26,10 @@ from app.models.user import User
 
 router = APIRouter(prefix="/api/experience", tags=["experience"])
 
-FOUR_PARTS = ("scenario", "problem", "solution", "applicability")
+# Required to publish. `applicability` is the hard one: it is the candidate preview
+# `search_experience` shows the agent, so an entry without it can never be skipped
+# cheaply — it would have to be read in full to find out it doesn't apply.
+REQUIRED_PARTS = (("title", "标题"), ("body", "正文"), ("applicability", "适用条件与失效信号"))
 VISIBILITY_SCOPES = ("company", "department", "user")
 
 
@@ -34,9 +37,7 @@ VISIBILITY_SCOPES = ("company", "department", "user")
 
 class EntryCreate(BaseModel):
     title: str = Field("", max_length=200)
-    scenario: str = ""
-    problem: str = ""
-    solution: str = ""
+    body: str = ""
     applicability: str = ""
     tags: list[str] = Field(default_factory=list)
     visibility_scope: str = "company"
@@ -53,9 +54,7 @@ class DraftFromContent(BaseModel):
 
 class EntryUpdate(BaseModel):
     title: str | None = Field(None, max_length=200)
-    scenario: str | None = None
-    problem: str | None = None
-    solution: str | None = None
+    body: str | None = None
     applicability: str | None = None
     tags: list[str] | None = None
     visibility_scope: str | None = None
@@ -66,9 +65,7 @@ class EntryOut(BaseModel):
     id: uuid.UUID
     tenant_id: uuid.UUID | None
     title: str
-    scenario: str
-    problem: str
-    solution: str
+    body: str
     applicability: str
     status: str
     tags: list[str]
@@ -283,7 +280,7 @@ async def list_entries(
             query = query.where(ExperienceEntry.status == status)
         if q:
             like = f"%{q}%"
-            query = query.where(or_(ExperienceEntry.title.ilike(like), ExperienceEntry.scenario.ilike(like)))
+            query = query.where(or_(ExperienceEntry.title.ilike(like), ExperienceEntry.body.ilike(like)))
         query = query.offset(offset).limit(limit)
         entries = (await db.execute(query)).scalars().all()
         # tag filter is applied in Python to stay portable across JSON backends
@@ -308,56 +305,54 @@ def _norm_tags(tags) -> list[str]:
     return out
 
 
-def _signature(title, scenario, problem, solution, applicability) -> tuple:
-    return tuple(_norm(x) for x in (title, scenario, problem, solution, applicability))
+def _signature(title, body, applicability) -> tuple:
+    return tuple(_norm(x) for x in (title, body, applicability))
 
 
-async def _find_identical(db, eff: str | None, body: "EntryCreate"):
-    """Return an existing non-retired entry in this tenant with identical title + four parts.
+async def _find_identical(db, eff: str | None, payload: "EntryCreate"):
+    """Return an existing non-retired entry in this tenant with identical content.
 
     Guards against accidental duplicate sedimentation (double-click, re-opening the same
     card). Any edit to the content changes the signature, so genuine variants still pass.
     """
-    sig = _signature(body.title, body.scenario, body.problem, body.solution, body.applicability)
-    if not any(sig[1:]):  # all four parts blank → don't dedupe (allow starting blank drafts)
+    sig = _signature(payload.title, payload.body, payload.applicability)
+    if not any(sig[1:]):  # body + applicability both blank → don't dedupe (allow blank drafts)
         return None
     q = select(ExperienceEntry).where(ExperienceEntry.status != "retired")
     if eff:
         q = q.where(ExperienceEntry.tenant_id == eff)
     q = q.limit(500)
     for e in (await db.execute(q)).scalars().all():
-        if _signature(e.title, e.scenario, e.problem, e.solution, e.applicability) == sig:
+        if _signature(e.title, e.body, e.applicability) == sig:
             return e
     return None
 
 
 @router.post("/entries", response_model=EntryOut)
-async def create_entry(body: EntryCreate, current_user: User = Depends(get_current_user)):
+async def create_entry(payload: EntryCreate, current_user: User = Depends(get_current_user)):
     """Create a draft entry. Publishing (making it retrievable) is a separate, explicit step.
 
-    Rejects an exact duplicate (same title + four parts) that already exists — prevents
-    accidental repeated sedimentation while still allowing edited variants.
+    Rejects an exact duplicate (same title + body + applicability) that already exists —
+    prevents accidental repeated sedimentation while still allowing edited variants.
     """
     eff = _effective_tenant_id(current_user)
-    scope = body.visibility_scope if body.visibility_scope in VISIBILITY_SCOPES else "company"
+    scope = payload.visibility_scope if payload.visibility_scope in VISIBILITY_SCOPES else "company"
     async with async_session() as db:
-        dupe = await _find_identical(db, eff, body)
+        dupe = await _find_identical(db, eff, payload)
         if dupe:
             raise HTTPException(409, f"内容完全相同的经验已存在（“{dupe.title or '未命名'}”），无需重复沉淀。")
         entry = ExperienceEntry(
             tenant_id=eff,
-            title=body.title[:200],
-            scenario=body.scenario,
-            problem=body.problem,
-            solution=body.solution,
-            applicability=body.applicability,
-            tags=_norm_tags(body.tags),
+            title=payload.title[:200],
+            body=payload.body,
+            applicability=payload.applicability,
+            tags=_norm_tags(payload.tags),
             status="draft",
             visibility_scope=scope,
-            visibility_scope_id=body.visibility_scope_id if scope != "company" else None,
+            visibility_scope_id=payload.visibility_scope_id if scope != "company" else None,
             origin="chat",
-            origin_session_id=body.origin_session_id,
-            origin_agent_id=body.origin_agent_id,
+            origin_session_id=payload.origin_session_id,
+            origin_agent_id=payload.origin_agent_id,
             created_by=current_user.id,
         )
         db.add(entry)
@@ -366,46 +361,86 @@ async def create_entry(body: EntryCreate, current_user: User = Depends(get_curre
         return EntryOut.model_validate(entry)
 
 
+# Seeded into an empty editor and suggested to the distiller — a default, not a schema.
+BODY_TEMPLATE = "## 场景\n\n## 遇到的问题\n\n## 解决方式\n"
+
 _DISTILL_SYSTEM = (
     "你是经验沉淀助手。基于用户选中的一段工作内容，把它抽取成一条可复用的团队经验。"
     "严格只输出一个 JSON 对象，不要任何解释或 markdown 代码块，字段如下：\n"
-    '{"title": "", "scenario": "", "problem": "", "solution": "", "applicability": "", "tags": []}\n'
-    "- scenario 场景、problem 遇到的问题、solution 解决方式。\n"
-    "- applicability（适用条件与失效信号）必须写明：此经验在什么前提下成立、出现什么信号说明它已过时失效。\n"
+    '{"title": "", "body": "", "applicability": "", "tags": []}\n'
+    "- body 是经验正文，markdown 格式。默认用「## 场景 / ## 遇到的问题 / ## 解决方式」三个小节；"
+    "但若内容本就不是「问题—解决」型（例如一份配置说明、一条参考事实），就按内容自然组织小节，不要硬套。"
+    "正文中的换行必须转义为 \\n，确保整个 JSON 合法。\n"
+    "- applicability（适用条件与失效信号）必填：此经验在什么前提下成立、出现什么信号说明它已过时失效。"
+    "它会脱离正文单独展示给检索方，用来判断该不该读全文，因此必须能独立读懂，写成一两句话。\n"
     "- 信息不足的字段留空字符串，不要编造；tags 给 1-3 个简短标签。"
 )
 
+_CTRL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _escape_raw_control_chars(s: str) -> str:
+    """Escape literal newlines/tabs occurring *inside* JSON string literals.
+
+    The markdown body is multi-line, and models sometimes emit those newlines raw
+    instead of as `\\n`, which makes the object invalid JSON. Repairing beats losing
+    the whole draft — the human still reviews everything before it is published.
+    """
+    out: list[str] = []
+    in_str = esc = False
+    for ch in s:
+        if esc:
+            out.append(ch)
+            esc = False
+        elif in_str and ch == "\\":
+            out.append(ch)
+            esc = True
+        elif ch == '"':
+            in_str = not in_str
+            out.append(ch)
+        elif in_str and ch in _CTRL_ESCAPES:
+            out.append(_CTRL_ESCAPES[ch])
+        else:
+            out.append(ch)
+    return "".join(out)
+
 
 def _parse_draft_json(text: str) -> dict:
-    """Extract the JSON object from the LLM reply; tolerate code fences / prose."""
+    """Extract the JSON object from the LLM reply; tolerate code fences / prose.
+
+    No retry against the model: on failure the caller returns empty fields and the
+    editor asks the human to fill them in. The human review step is the retry.
+    """
     if not text:
         return {}
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if not m:
         return {}
-    try:
-        data = json.loads(m.group(0))
-        return data if isinstance(data, dict) else {}
-    except json.JSONDecodeError:
-        return {}
+    raw = m.group(0)
+    for candidate in (raw, _escape_raw_control_chars(raw)):
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            continue
+    return {}
 
 
 class DistillResult(BaseModel):
     title: str = ""
-    scenario: str = ""
-    problem: str = ""
-    solution: str = ""
+    body: str = ""
     applicability: str = ""
     tags: list[str] = Field(default_factory=list)
-    # False when the LLM produced none of the four parts — the UI then shows a
+    # False when the LLM produced nothing usable — the UI then shows a
     # "未能自动抽取，请手动填写" hint instead of seeding any field with raw text.
     extracted: bool = True
 
 
 async def _distill_fields(db, agent, content: str) -> dict:
-    """Run the LLM distillation and normalize to the four-part fields. Persists nothing.
+    """Run the LLM distillation and normalize the fields. Persists nothing.
 
-    On LLM/parse failure the four parts are left empty and `extracted=False` is
+    On LLM/parse failure the fields are left empty and `extracted=False` is
     returned, so the editor prompts the human to fill them in manually. We never
     seed a field with the raw text — a wrong auto-fill is worse than an empty one.
     """
@@ -438,12 +473,10 @@ async def _distill_fields(db, agent, content: str) -> dict:
     tags = fields.get("tags") or []
     if not isinstance(tags, list):
         tags = []
-    extracted = any((fields.get(k) or "").strip() for k in FOUR_PARTS)
+    extracted = any((fields.get(k) or "").strip() for k, _ in REQUIRED_PARTS)
     return {
         "title": (fields.get("title") or "")[:200],
-        "scenario": fields.get("scenario") or "",
-        "problem": fields.get("problem") or "",
-        "solution": fields.get("solution") or "",
+        "body": fields.get("body") or "",
         "applicability": fields.get("applicability") or "",
         "tags": [str(t)[:40] for t in tags][:5],
         "extracted": extracted,
@@ -451,39 +484,39 @@ async def _distill_fields(db, agent, content: str) -> dict:
 
 
 @router.post("/distill", response_model=DistillResult)
-async def distill_content(body: DraftFromContent, current_user: User = Depends(get_current_user)):
-    """Distill selected chat content into the four-part fields WITHOUT persisting.
+async def distill_content(payload: DraftFromContent, current_user: User = Depends(get_current_user)):
+    """Distill selected chat content into title / body / applicability WITHOUT persisting.
 
     The human reviews/confirms in the editor; a row is created only then (via /entries).
     Keeps the human-gate: clicking 沉淀 creates no library row until the user confirms.
     """
-    if not body.content.strip():
+    if not payload.content.strip():
         raise HTTPException(400, "Content cannot be empty")
     eff = _effective_tenant_id(current_user)
     async with async_session() as db:
-        agent = (await db.execute(select(Agent).where(Agent.id == body.agent_id))).scalar_one_or_none()
+        agent = (await db.execute(select(Agent).where(Agent.id == payload.agent_id))).scalar_one_or_none()
         if not agent or (eff and str(agent.tenant_id) != eff):
             raise HTTPException(404, "Agent not found")
-        return DistillResult(**await _distill_fields(db, agent, body.content))
+        return DistillResult(**await _distill_fields(db, agent, payload.content))
 
 
 @router.post("/drafts", response_model=EntryOut)
-async def create_draft_from_content(body: DraftFromContent, current_user: User = Depends(get_current_user)):
+async def create_draft_from_content(payload: DraftFromContent, current_user: User = Depends(get_current_user)):
     """Distill + persist a draft in one step (kept for compatibility). Prefer /distill
     then /entries so nothing persists until the human confirms."""
-    if not body.content.strip():
+    if not payload.content.strip():
         raise HTTPException(400, "Content cannot be empty")
     eff = _effective_tenant_id(current_user)
     async with async_session() as db:
-        agent = (await db.execute(select(Agent).where(Agent.id == body.agent_id))).scalar_one_or_none()
+        agent = (await db.execute(select(Agent).where(Agent.id == payload.agent_id))).scalar_one_or_none()
         if not agent or (eff and str(agent.tenant_id) != eff):
             raise HTTPException(404, "Agent not found")
-        f = await _distill_fields(db, agent, body.content)
+        f = await _distill_fields(db, agent, payload.content)
         entry = ExperienceEntry(
-            tenant_id=eff, title=f["title"], scenario=f["scenario"], problem=f["problem"],
-            solution=f["solution"], applicability=f["applicability"], tags=f["tags"],
-            status="draft", visibility_scope="company", origin="chat",
-            origin_session_id=body.session_id, origin_agent_id=body.agent_id, created_by=current_user.id,
+            tenant_id=eff, title=f["title"], body=f["body"], applicability=f["applicability"],
+            tags=f["tags"], status="draft", visibility_scope="company", origin="chat",
+            origin_session_id=payload.session_id, origin_agent_id=payload.agent_id,
+            created_by=current_user.id,
         )
         db.add(entry)
         await db.commit()
@@ -527,7 +560,7 @@ async def update_entry(entry_id: uuid.UUID, body: EntryUpdate, current_user: Use
 
 @router.post("/entries/{entry_id}/publish", response_model=EntryOut)
 async def publish_entry(entry_id: uuid.UUID, current_user: User = Depends(get_current_user)):
-    """Publish a draft. Enforces the P0-3 hard constraint: all four parts must be present."""
+    """Publish a draft. Enforces the P0-3 hard constraint: title + body + applicability."""
     async with async_session() as db:
         entry = await _get_entry_scoped(db, entry_id, current_user)
         # Re-publishing a retired entry is also allowed to the source agent's creator
@@ -541,11 +574,11 @@ async def publish_entry(entry_id: uuid.UUID, current_user: User = Depends(get_cu
         if not allowed:
             raise HTTPException(403, "Not allowed to publish this entry")
         if entry.origin == "legacy_plaza":
-            # History imports must be triaged (four parts filled) before entering the live library.
+            # History imports must be triaged into a normal draft before entering the live library.
             raise HTTPException(409, "Legacy entries must be edited into a normal draft before publishing")
-        missing = [f for f in FOUR_PARTS if not (getattr(entry, f) or "").strip()]
+        missing = [label for field, label in REQUIRED_PARTS if not (getattr(entry, field) or "").strip()]
         if missing:
-            raise HTTPException(422, f"Cannot publish — required parts are empty: {', '.join(missing)}")
+            raise HTTPException(422, f"无法发布 — 以下必填项为空：{'、'.join(missing)}")
         # P0-6 degrade rule applied at publish time.
         entry.visibility_scope, entry.visibility_scope_id = await _resolve_publish_visibility(db, entry)
         entry.status = "published"

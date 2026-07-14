@@ -3114,7 +3114,7 @@ async def execute_tool(
             # No-op by design: writes nothing. The structured args are rendered as a
             # human-gated review card in the UI; a row is created only if the human confirms.
             result = (
-                "[已呈现草稿] 已把这条经验的四段草稿展示给用户，等待其点击『沉淀为经验』人工确认后入库。"
+                "[已呈现草稿] 已把这条经验的结构化草稿展示给用户，等待其点击『沉淀为经验』人工确认后入库。"
                 "本工具未写入任何存储；请如实告诉用户你无法直接入库、需要他确认。"
             )
         elif tool_name in ("execute_code", "execute_code_e2b"):
