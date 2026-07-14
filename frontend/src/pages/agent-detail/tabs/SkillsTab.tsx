@@ -1,4 +1,4 @@
-import type { Dispatch, ReactNode, SetStateAction } from 'react';
+import { useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { IconDownload, IconFolder, IconTools } from '@tabler/icons-react';
 import { useTranslation } from 'react-i18next';
@@ -65,12 +65,20 @@ export default function SkillsTab(props: Props) {
         importingSkillId,
         setImportingSkillId,
     } = props;
+    const [showGitlabSettings, setShowGitlabSettings] = useState(false);
+    const [myGitlabStatus, setMyGitlabStatus] = useState<{ configured: boolean; masked: string; username: string } | null>(null);
+    const [myGitlabToken, setMyGitlabToken] = useState('');
+    const [myGitlabUser, setMyGitlabUser] = useState('');
+    const [myGitlabPass, setMyGitlabPass] = useState('');
+    const [savingMyGitlab, setSavingMyGitlab] = useState(false);
+    const [importProgress, setImportProgress] = useState<{ current?: number; total?: number; file?: string; message?: string } | null>(null);
     const { t } = useTranslation();
     const dialog = useDialog();
     const toast = useToast();
     const queryClient = useQueryClient();
+    const [skillsCurrentPath, setSkillsCurrentPath] = useState('skills');
     const adapter: FileBrowserApi = {
-        list: (path) => fileApi.list(agentId, path),
+        list: (path) => { setSkillsCurrentPath(path || 'skills'); return fileApi.list(agentId, path); },
         read: (path) => fileApi.read(agentId, path),
         write: (path, content) => fileApi.write(agentId, path, content),
         delete: (path) => fileApi.delete(agentId, path),
@@ -97,6 +105,17 @@ export default function SkillsTab(props: Props) {
                         <p style={{ fontSize: '13px', color: 'var(--text-tertiary)' }}>{t('agent.skills.description')}</p>
                     </div>
                     {canManage && <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+                        <button
+                            className="btn btn-ghost"
+                            style={{ fontSize: '13px', padding: '6px 8px', minWidth: 'auto' }}
+                            title="GitLab Settings"
+                            onClick={async () => {
+                                setShowGitlabSettings(true);
+                                if (!myGitlabStatus) {
+                                    try { setMyGitlabStatus(await skillApi.settings.getMyGitlab()); } catch { /* */ }
+                                }
+                            }}
+                        >⚙</button>
                         <button
                             className="btn btn-secondary"
                             style={{ fontSize: '13px' }}
@@ -203,33 +222,69 @@ export default function SkillsTab(props: Props) {
                 <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowAgentUrlImport(false)}>
                     <div onClick={(e) => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', maxWidth: '500px', width: '90%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                            <h3>Import from GitHub URL</h3>
+                            <h3>Import from URL</h3>
                             <button onClick={() => setShowAgentUrlImport(false)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px 8px' }}>x</button>
                         </div>
                         <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 12px' }}>
-                            Paste a GitHub URL pointing to a skill directory (must contain SKILL.md).
+                            Paste a GitHub or GitLab URL pointing to a skill repository or directory.
                         </p>
                         <input
                             className="input"
-                            placeholder="https://github.com/owner/repo/tree/main/path/to/skill"
+                            placeholder="https://github.com/owner/repo or https://gitlab.com/owner/repo/-/tree/main/path"
                             value={agentUrlInput}
                             onChange={(e) => setAgentUrlInput(e.target.value)}
                             style={{ width: '100%', fontSize: '13px', marginBottom: '12px', boxSizing: 'border-box' }}
                         />
+                        {importProgress && (
+                            <div style={{ marginBottom: '12px', padding: '10px 14px', background: 'var(--bg-secondary)', borderRadius: '8px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px', fontSize: '12px' }}>
+                                    <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, marginRight: '8px' }}>
+                                        {importProgress.message || importProgress.file}
+                                    </span>
+                                    {(importProgress.current != null && importProgress.total != null && importProgress.total > 0) && (
+                                        <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>{importProgress.current}/{importProgress.total}</span>
+                                    )}
+                                </div>
+                                <div style={{ height: '4px', borderRadius: '2px', background: 'var(--bg-tertiary)', overflow: 'hidden' }}>
+                                    {importProgress.message && !importProgress.file ? (
+                                        <div style={{
+                                            height: '100%', width: '30%', borderRadius: '2px',
+                                            background: 'linear-gradient(90deg, transparent, var(--accent-primary), transparent)',
+                                            animation: 'indeterminateProgress 1.2s ease-in-out infinite',
+                                        }} />
+                                    ) : (
+                                        <div style={{ height: '100%', borderRadius: '2px', background: 'var(--accent-primary)', width: `${Math.round((importProgress.current || 0) / Math.max(importProgress.total || 1, 1) * 100)}%`, transition: 'width 0.15s ease' }} />
+                                    )}
+                                </div>
+                            </div>
+                        )}
                         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                            <button className="btn btn-secondary" onClick={() => setShowAgentUrlImport(false)}>Cancel</button>
+                            <button className="btn btn-secondary" onClick={() => { setShowAgentUrlImport(false); setImportProgress(null); }}>Cancel</button>
                             <button
                                 className="btn btn-primary"
                                 disabled={!agentUrlInput.trim() || agentUrlImporting}
+                                style={{ minWidth: '80px' }}
                                 onClick={async () => {
                                     if (!canManage) return;
                                     setAgentUrlImporting(true);
+                                    setImportProgress(null);
                                     try {
-                                        const response = await skillApi.agentImport.fromUrl(agentId, agentUrlInput.trim());
+                                        const response = await skillApi.agentImport.fromUrl(
+                                            agentId, agentUrlInput.trim(), skillsCurrentPath,
+                                            (current, total, file) => setImportProgress(
+                                                current === 0 && total === 0
+                                                    ? { message: file }
+                                                    : { current, total, file, message: undefined }
+                                            )
+                                        );
                                         toast.success(t('common.file.filesImported', { count: response.files_written }));
                                         queryClient.invalidateQueries({ queryKey: ['files', agentId, 'skills'] });
+                                        // Brief delay so user sees the completed bar
+                                        await new Promise(r => setTimeout(r, 600));
                                         setShowAgentUrlImport(false);
+                                        setImportProgress(null);
                                     } catch (err: any) {
+                                        setImportProgress(null);
                                         await dialog.alert(t('common.error.importFailed'), { type: 'error', details: String(err?.message || err) });
                                     } finally {
                                         setAgentUrlImporting(false);
@@ -310,6 +365,82 @@ export default function SkillsTab(props: Props) {
                                     </div>
                                 ))
                             )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── GitLab Credentials Modal ── */}
+            {showGitlabSettings && (
+                <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick={() => setShowGitlabSettings(false)}>
+                    <div onClick={(e) => e.stopPropagation()} style={{ background: 'var(--bg-primary)', borderRadius: '12px', padding: '24px', maxWidth: '480px', width: '90%', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                            <h3 style={{ margin: 0 }}>My GitLab Credentials</h3>
+                            <button onClick={() => setShowGitlabSettings(false)} style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px 8px' }}>✕</button>
+                        </div>
+                        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px' }}>
+                            Personal credentials for importing skills from your own GitLab repositories.
+                        </p>
+
+                        {/* PAT */}
+                        <div style={{ marginBottom: '14px' }}>
+                            <div style={{ fontSize: '12px', fontWeight: 500, marginBottom: '4px' }}>Personal Access Token</div>
+                            {myGitlabStatus?.masked && <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px' }}>Current: <code style={{ fontSize: '11px', background: 'var(--bg-tertiary)', padding: '1px 6px', borderRadius: '4px' }}>{myGitlabStatus.masked}</code></div>}
+                            <input className="input" autoComplete="off" data-form-type="other" placeholder="glpat-xxxxxxxxxxxx"
+                                value={myGitlabToken} onChange={e => setMyGitlabToken(e.target.value)}
+                                style={{ width: '100%', fontSize: '13px', fontFamily: 'monospace', marginBottom: '6px', boxSizing: 'border-box', WebkitTextSecurity: 'disc' } as React.CSSProperties} />
+                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                                {myGitlabStatus?.masked && <button className="btn btn-secondary" style={{ fontSize: '12px' }}
+                                    onClick={async () => {
+                                        await skillApi.settings.setMyGitlabToken('');
+                                        setMyGitlabStatus(await skillApi.settings.getMyGitlab());
+                                        toast.success('Token cleared');
+                                    }}>Clear</button>}
+                                <button className="btn btn-primary" style={{ fontSize: '12px' }}
+                                    disabled={!myGitlabToken.trim() || savingMyGitlab}
+                                    onClick={async () => {
+                                        setSavingMyGitlab(true);
+                                        try {
+                                            await skillApi.settings.setMyGitlabToken(myGitlabToken.trim());
+                                            setMyGitlabStatus(await skillApi.settings.getMyGitlab());
+                                            setMyGitlabToken('');
+                                            toast.success('Token saved');
+                                        } catch (e: any) { toast.error(e.message || 'Failed'); }
+                                        setSavingMyGitlab(false);
+                                    }}>Save</button>
+                            </div>
+                        </div>
+
+                        {/* Username + Password */}
+                        <div>
+                            <div style={{ fontSize: '12px', fontWeight: 500, marginBottom: '4px' }}>Username & Password</div>
+                            {myGitlabStatus?.username && <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px' }}>Current user: <code style={{ fontSize: '11px', background: 'var(--bg-tertiary)', padding: '1px 6px', borderRadius: '4px' }}>{myGitlabStatus.username}</code></div>}
+                            <input className="input" autoComplete="off" data-form-type="other" placeholder="Username"
+                                value={myGitlabUser} onChange={e => setMyGitlabUser(e.target.value)}
+                                style={{ width: '100%', fontSize: '13px', marginBottom: '6px', boxSizing: 'border-box' }} />
+                            <input className="input" type="password" autoComplete="off" data-form-type="other" placeholder="Password"
+                                value={myGitlabPass} onChange={e => setMyGitlabPass(e.target.value)}
+                                style={{ width: '100%', fontSize: '13px', marginBottom: '6px', boxSizing: 'border-box' }} />
+                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'flex-end' }}>
+                                {myGitlabStatus?.username && <button className="btn btn-secondary" style={{ fontSize: '12px' }}
+                                    onClick={async () => {
+                                        await skillApi.settings.setMyGitlabCredentials('', '');
+                                        setMyGitlabStatus(await skillApi.settings.getMyGitlab());
+                                        toast.success('Credentials cleared');
+                                    }}>Clear</button>}
+                                <button className="btn btn-primary" style={{ fontSize: '12px' }}
+                                    disabled={!myGitlabUser.trim() || !myGitlabPass.trim() || savingMyGitlab}
+                                    onClick={async () => {
+                                        setSavingMyGitlab(true);
+                                        try {
+                                            await skillApi.settings.setMyGitlabCredentials(myGitlabUser.trim(), myGitlabPass.trim());
+                                            setMyGitlabStatus(await skillApi.settings.getMyGitlab());
+                                            setMyGitlabUser(''); setMyGitlabPass('');
+                                            toast.success('Credentials saved');
+                                        } catch (e: any) { toast.error(e.message || 'Failed'); }
+                                        setSavingMyGitlab(false);
+                                    }}>Save</button>
+                            </div>
                         </div>
                     </div>
                 </div>

@@ -8053,3 +8053,8 @@ select:focus {
 .enterprise-tool-source-tabs {
   margin-bottom: 16px;
 }
+
+@keyframes indeterminateProgress {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}

@@ -862,8 +862,9 @@ async def upload_file_to_workspace(
         raise HTTPException(status_code=400, detail="右侧根目录视图是 agent 根目录；上传文件时请放到 workspace/ 或 skills/ 目录下")
 
     filename = file.filename or "unnamed"
-    # Sanitize filename
-    filename = filename.replace("/", "_").replace("\\", "_")
+    # Validate filename: block traversal, allow subdirectory paths
+    if ".." in filename or filename.startswith("/") or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
     logger.info("[API] 上传文件 agent_id={} filename={} size={}", agent_id, filename, file.size if hasattr(file, 'size') else 0)
     storage = get_storage_backend()
     file_key = _agent_storage_key(agent_id, f"{normalized_path}/{filename}")
@@ -1056,6 +1057,7 @@ class ClawhubImportBody(BaseModel):
 
 class UrlImportBody(BaseModel):
     url: str
+    target_path: str | None = None
 
 
 @router.post("/import-from-clawhub")
@@ -1120,42 +1122,84 @@ async def agent_import_from_url(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Import a skill from a GitHub URL directly into this agent's skills/ workspace."""
+    """Import skills from a GitHub/GitLab URL into this agent's skills/ workspace.
+    Streams NDJSON progress events: {"type":"progress","current":N,"total":N,"file":"..."}
+    then {"type":"complete","files_written":N,"files":[...]}."""
     await check_agent_access(db, current_user, agent_id)
 
-    from app.api.skills import _parse_github_url, _fetch_github_directory, _get_github_token
+    from app.api.skills import _parse_repo_url, _fetch_repo_directory
+    import json as _json
+    from fastapi.responses import StreamingResponse
 
-    parsed = _parse_github_url(body.url)
+    parsed = _parse_repo_url(body.url)
     if not parsed:
-        raise HTTPException(400, "Invalid GitHub URL")
+        raise HTTPException(400, "Invalid URL. Use the full tree URL:\n"
+            "GitHub: https://github.com/owner/repo/tree/branch/path\n"
+            "GitLab: https://gitlab.com/owner/repo/-/tree/branch/path")
 
-    owner, repo, branch, path = parsed["owner"], parsed["repo"], parsed["branch"], parsed["path"]
+    # Accept optional target path (e.g. "skills/my-subfolder")
+    target_path = (body.target_path or "skills").strip().strip("/") or "skills"
+    folder_name = parsed.get("path", "").rstrip("/").split("/")[-1] if parsed.get("path") else parsed["repo"]
     tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
-    token = await _get_github_token(tenant_id)
-    files = await _fetch_github_directory(owner, repo, path, branch, token)
-    if not files:
-        raise HTTPException(404, "No files found")
 
-    # Derive folder name
-    folder_name = path.rstrip("/").split("/")[-1] if path else repo
-
-    # Write to agent workspace
     base = _agent_base_dir(agent_id)
-    skill_dir = base / "skills" / folder_name
-    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_dir = base / target_path
+    if parsed.get("path"):
+        skill_dir = skill_dir / folder_name
 
-    written = []
-    for f in files:
-        file_path = (skill_dir / f["path"]).resolve()
-        if not str(file_path).startswith(str(base.resolve())):
-            continue
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(f["content"], encoding="utf-8")
-        written.append(f["path"])
+    async def _stream():
+        import asyncio as _aio
+        from app.api.skills import _fetch_repo_directory as _fetch
 
-    return {
-        "status": "ok",
-        "folder_name": folder_name,
-        "files_written": len(written),
-        "files": written,
-    }
+        # Use a queue to bridge async callback → generator yield
+        progress_queue: _aio.Queue = _aio.Queue()
+
+        async def _fetch_task():
+            try:
+                result = await _fetch(parsed, str(current_user.id), tenant_id,
+                    on_progress=lambda msg, cur=0, tot=0: progress_queue.put_nowait(("progress", {"message": msg, "current": cur, "total": tot})))
+                await progress_queue.put(("done", result))
+            except Exception as e:
+                await progress_queue.put(("error", e))
+
+        task = _aio.create_task(_fetch_task())
+
+        files: list[dict] = []
+        while True:
+            msg_type, payload = await progress_queue.get()
+            if msg_type == "progress":
+                if isinstance(payload, dict):
+                    yield _json.dumps({"type": "status", "message": payload["message"],
+                                        "current": payload.get("current", 0),
+                                        "total": payload.get("total", 0)}) + "\n"
+                else:
+                    yield _json.dumps({"type": "status", "message": str(payload), "current": 0, "total": 0}) + "\n"
+            elif msg_type == "error":
+                detail = payload.detail if isinstance(payload, HTTPException) else str(payload)
+                yield _json.dumps({"type": "error", "message": detail}) + "\n"
+                return
+            elif msg_type == "done":
+                files = payload or []
+                break
+
+        if not files:
+            yield _json.dumps({"type": "error", "message": "No files found"}) + "\n"
+            return
+
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        total = len(files)
+        yield _json.dumps({"type": "status", "message": f"Writing {total} files..."}) + "\n"
+
+        # Phase 2: write files with per-file progress
+        written: list[str] = []
+        for i, f in enumerate(files):
+            file_path = (skill_dir / f["path"]).resolve()
+            if not str(file_path).startswith(str(base.resolve())):
+                continue
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(f["content"], encoding="utf-8")
+            written.append(f["path"])
+            yield _json.dumps({"type": "progress", "current": i + 1, "total": total, "file": f["path"]}) + "\n"
+        yield _json.dumps({"type": "complete", "files_written": len(written), "files": written}) + "\n"
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson")

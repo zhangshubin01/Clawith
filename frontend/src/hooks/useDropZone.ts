@@ -44,7 +44,7 @@ function hasFiles(e: DragEvent): boolean {
 }
 
 /** Filter a FileList by an accept string (same format as <input accept>). */
-function filterFiles(files: FileList, accept?: string): File[] {
+function filterFiles(files: File[] | FileList, accept?: string): File[] {
     const list = Array.from(files);
     if (!accept) return list;
 
@@ -61,6 +61,62 @@ function filterFiles(files: FileList, accept?: string): File[] {
         });
     });
 }
+
+/** Recursively traverse a file-system entry (file or directory), returning
+ *  all files with their directory path baked into File.name ("sub/f.txt"). */
+async function traverseEntry(entry: FileSystemEntry, prefix: string = ""): Promise<File[]> {
+    if (entry.isFile) {
+        const file = await new Promise<File>((resolve, reject) => {
+            (entry as FileSystemFileEntry).file(resolve, reject);
+        });
+        const pathFile = new File([file], prefix + file.name, { type: file.type });
+        return [pathFile];
+    }
+    if (entry.isDirectory) {
+        const reader = (entry as FileSystemDirectoryEntry).createReader();
+        // readEntries may return the listing in batches — loop until empty
+        const allEntries: FileSystemEntry[] = [];
+        let batch: FileSystemEntry[];
+        do {
+            batch = await new Promise<FileSystemEntry[]>((resolve) => {
+                reader.readEntries(resolve);
+            });
+            allEntries.push(...batch);
+        } while (batch.length > 0);
+        const results: File[] = [];
+        for (const child of allEntries) {
+            const children = await traverseEntry(child, prefix + entry.name + "/");
+            results.push(...children);
+        }
+        return results;
+    }
+    return [];
+}
+
+/** Extract all files from a DataTransfer, traversing directory entries
+ *  when the browser supports it (webkitGetAsEntry). Falls back to the
+ *  flat dataTransfer.files list in unsupported environments. */
+async function getAllFilesFromDrop(dt: DataTransfer): Promise<File[]> {
+    if (dt.items && dt.items.length > 0) {
+        const entries: FileSystemEntry[] = [];
+        for (let i = 0; i < dt.items.length; i++) {
+            const entry = dt.items[i].webkitGetAsEntry?.();
+            if (entry) entries.push(entry);
+        }
+        if (entries.length > 0) {
+            const files: File[] = [];
+            for (const entry of entries) {
+                const subFiles = await traverseEntry(entry);
+                files.push(...subFiles);
+            }
+            return files;
+        }
+    }
+    // Fallback: flat file list (no directory traversal)
+    return Array.from(dt.files || []);
+}
+
+export async function traverseEntryForTest(entry: FileSystemEntry, prefix?: string) { return traverseEntry(entry, prefix); }
 
 export function useDropZone({ onDrop, disabled = false, accept }: UseDropZoneOptions): UseDropZoneReturn {
     const [isDragging, setIsDragging] = useState(false);
@@ -98,15 +154,15 @@ export function useDropZone({ onDrop, disabled = false, accept }: UseDropZoneOpt
         e.stopPropagation();
         counterRef.current = 0;
         setIsDragging(false);
-        if (disabled) return;
+        if (disabled || !e.dataTransfer) return;
 
-        const rawFiles = e.dataTransfer?.files;
-        if (!rawFiles || rawFiles.length === 0) return;
-
-        const filtered = filterFiles(rawFiles, accept);
-        if (filtered.length > 0) {
-            onDrop(filtered);
-        }
+        getAllFilesFromDrop(e.dataTransfer).then(rawFiles => {
+            if (rawFiles.length === 0) return;
+            const filtered = filterFiles(rawFiles, accept);
+            if (filtered.length > 0) {
+                onDrop(filtered);
+            }
+        });
     }, [disabled, accept, onDrop]);
 
     return {
