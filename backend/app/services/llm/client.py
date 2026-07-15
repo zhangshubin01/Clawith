@@ -35,6 +35,28 @@ def _create_ssl_context() -> ssl.SSLContext:
     return ctx
 
 
+def _build_socket_options() -> list[tuple[int, int, int]]:
+    """按平台构造 TCP keepalive socket 选项。
+
+    TCP_USER_TIMEOUT 等选项为 Linux 专属,Windows/macOS 缺失时跳过,
+    避免 AttributeError(表现为连通性测试失败)。
+    """
+    options: list[tuple[int, int, int]] = [
+        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+    ]
+    _optional = [
+        ("TCP_KEEPIDLE", 60),
+        ("TCP_KEEPINTVL", 10),
+        ("TCP_KEEPCNT", 3),
+        ("TCP_USER_TIMEOUT", 90000),
+    ]
+    for name, value in _optional:
+        opt = getattr(socket, name, None)
+        if opt is not None:
+            options.append((socket.IPPROTO_TCP, opt, value))
+    return options
+
+
 # ============================================================================
 # Data Models
 # ============================================================================
@@ -333,13 +355,7 @@ class OpenAICompatibleClient(LLMClient):
                 ),
                 transport=httpx.AsyncHTTPTransport(
                     retries=3,
-                    socket_options=[
-                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
-                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
-                    ],
+                    socket_options=_build_socket_options(),
                 ),
                 http2=False,
             )
@@ -803,13 +819,7 @@ class OpenAIResponsesClient(LLMClient):
                 ),
                 transport=httpx.AsyncHTTPTransport(
                     retries=3,
-                    socket_options=[
-                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
-                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
-                    ],
+                    socket_options=_build_socket_options(),
                 ),
                 http2=False,
             )
@@ -1201,13 +1211,7 @@ class GeminiClient(LLMClient):
                 ),
                 transport=httpx.AsyncHTTPTransport(
                     retries=3,
-                    socket_options=[
-                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
-                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
-                    ],
+                    socket_options=_build_socket_options(),
                 ),
                 http2=False,
             )
@@ -1732,13 +1736,7 @@ class AnthropicClient(LLMClient):
                 ),
                 transport=httpx.AsyncHTTPTransport(
                     retries=3,
-                    socket_options=[
-                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
-                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
-                    ],
+                    socket_options=_build_socket_options(),
                 ),
                 http2=False,
             )

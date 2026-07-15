@@ -880,6 +880,38 @@ _ACP_IDE_TOOLS = [
             }
         }
     },
+    # ── download_image: 下载图片到项目目录 ──
+    {
+        "type": "function",
+        "function": {
+            "name": "download_image",
+            "description": (
+                "把图片资源下载到当前 IDE 项目目录。用于绕开只读 MCP 容器限制。\n"
+                "参数: items=[{url, targetPath}]，url 支持 http/https/data URL，\n"
+                "targetPath 为项目内相对路径，如 app/src/main/res/mipmap-xhdpi/ic_foo.png。\n"
+                "overwrite 默认 true（目标已存在时覆盖）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string", "description": "图片 http/https/data URL"},
+                                "targetPath": {"type": "string", "description": "项目内相对路径，如 app/src/main/res/mipmap-xhdpi/ic_foo.png"},
+                            },
+                            "required": ["url", "targetPath"],
+                        },
+                        "description": "下载项列表，每项含 url 和 targetPath",
+                    },
+                    "overwrite": {"type": "boolean", "default": True, "description": "目标已存在时是否覆盖（默认 true）"},
+                },
+                "required": ["items"],
+            },
+        },
+    },
 ]
 
 # ACP 活跃时过滤基础工具中与 ACP 代理工具重名的（见 acp_routes.ACP_OVERLAP_BASE_TOOL_NAMES）
@@ -959,6 +991,14 @@ def install_acp_tool_hooks() -> None:
 
         route_t0 = time.perf_counter()
 
+        # 插件会话下：figma MCP 无法写入用户 IDE 项目（只读容器/远端），
+        # 强制返回图片直链，交给宿主 download_image 落盘（走 acp-plugin）。
+        # tool_name 可能带 mcp_<server>_ 前缀（DB Tool.name），也可能被 LLM 省略前缀，
+        # 故用后缀匹配。仅 mutate args、不 return，让链继续由 base handler 执行 MCP。
+        if tool_name.endswith("download_figma_images") and args.get("returnUrls") is not True:
+            args["returnUrls"] = True
+            logger.info("[ACP] 插件会话强制 returnUrls=true tool={}", tool_name)
+
         # 文件工具 → ACP
         if tool_name in _ACP_TOOL_MAP:
             from .tool_bridge import _try_acp_execute as _acp_file_exec
@@ -1024,15 +1064,29 @@ def install_acp_tool_hooks() -> None:
         handler = current_acp_handler.get()
         if handler is not None:
             tools = await _base_get_tools(agent_id)
-            # 过滤重名基础工具
-            tools = [t for t in tools
-                     if t.get("function", {}).get("name", "") not in _ACP_OVERLAP_BASE_TOOL_NAMES]
-            # 过滤无关工具
-            tools = [t for t in tools
-                     if t.get("function", {}).get("name", "") not in _ACP_IRRELEVANT_TOOL_NAMES]
             ide_names = [t["function"]["name"] for t in _ACP_IDE_TOOLS]
-            logger.info("[ACP] 注册工具: base_count={} acp_tools={}", len(tools), ide_names)
-            return tools + _ACP_IDE_TOOLS
+            ide_name_set = frozenset(ide_names)
+            # 过滤基础工具：显式重名集合 ∪ 所有 IDE 代理工具名（保证 IDE 版必然挤掉同名基础版），
+            # 以及 IDE 编辑场景无关的工具
+            drop_names = _ACP_OVERLAP_BASE_TOOL_NAMES | ide_name_set
+            tools = [t for t in tools
+                     if t.get("function", {}).get("name", "") not in drop_names
+                     and t.get("function", {}).get("name", "") not in _ACP_IRRELEVANT_TOOL_NAMES]
+            merged = tools + _ACP_IDE_TOOLS
+            # 最终按 function.name 去重兜底：任何来源的重名都不会流到 LLM
+            # （避免 provider 报 "Tool names must be unique"）
+            seen: set[str] = set()
+            deduped: list[dict] = []
+            for t in merged:
+                name = t.get("function", {}).get("name", "")
+                if name in seen:
+                    logger.warning("[ACP] 丢弃重名工具: {}", name)
+                    continue
+                seen.add(name)
+                deduped.append(t)
+            logger.info("[ACP] 注册工具: base_count={} acp_tools={} total={}",
+                        len(tools), ide_names, len(deduped))
+            return deduped
         return await _base_get_tools(agent_id)
 
     # 注册到链式 handler 列表

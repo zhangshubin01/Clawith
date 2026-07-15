@@ -3161,6 +3161,37 @@ AGENTBAY_TOOLS = [
         "config": {},
         "config_schema": {},
     },
+    {
+        "name": "download_image",
+        "display_name": "Download Image",
+        "description": (
+            "把图片资源下载到当前 IDE 项目目录。用于绕开只读 MCP 容器限制。"
+            "items 数组每项含 url（支持 http/https/data URL）和 targetPath（项目内相对路径）。"
+        ),
+        "category": "file",
+        "icon": "🖼️",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "required": ["items"],
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["url", "targetPath"],
+                        "properties": {
+                            "url": {"type": "string", "description": "图片 http/https/data URL"},
+                            "targetPath": {"type": "string", "description": "项目内相对路径，如 app/src/main/res/mipmap-xhdpi/ic_foo.png"},
+                        },
+                    },
+                },
+                "overwrite": {"type": "boolean", "default": True, "description": "目标已存在时是否覆盖"},
+            },
+        },
+        "config": {},
+        "config_schema": {},
+    },
 ]
 
 BUILTIN_TOOLS = [

@@ -443,6 +443,20 @@ async def _build_ide_screenshot_params(
     return {"sessionId": session_id}
 
 
+async def _build_download_image_params(
+    tool_name: str, args: dict, handler, session_id: str, path: str,
+) -> dict | str:
+    """构建 download_image 参数 — 下载图片到项目目录。"""
+    items = args.get("items", [])
+    if not items:
+        return "❌ download_image: items 不能为空"
+    return {
+        "sessionId": session_id,
+        "items": items,
+        "overwrite": args.get("overwrite", True),
+    }
+
+
 async def _build_read_text_file_params(
     tool_name: str, args: dict, handler, session_id: str, path: str,
 ) -> dict | str:
@@ -930,6 +944,7 @@ _ACP_PARAM_BUILDERS: dict[str, Any] = {
     "git/stage": _build_git_stage_params,
     "git/commit": _build_git_commit_params,
     "ide/screenshot": _build_ide_screenshot_params,
+    "fs/download_image": _build_download_image_params,
 }
 
 
@@ -1870,6 +1885,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                     lines.append(f"- `{f.get('path', '?')}` ({f.get('language', '?')})")
                 return "\n".join(lines)
             return str(result)
+        if method == "fs/download_image":
+            return json.dumps(result) if isinstance(result, dict) else str(result)
         return "文件操作成功"
     except TimeoutError:
         logger.warning(f"[ACP] timeout: {tool_name} {path}, 尝试本地读取")
