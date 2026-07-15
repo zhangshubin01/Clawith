@@ -309,7 +309,7 @@ DELETE /groups/{group_id}/workspace/file?path=...
 6. 依赖前置失败而从未启动的步骤不发送伪造 Agent ACK，由 Planning Run 的最终协作失败消息统一说明。
 7. 前台 Run 的群、原 Session 已删除或 Agent 已移出群时，不向 replacement primary 或其他 Session 改写消息；记录 `delivery_status = failed` 和稳定 `error_code`。独立后台 Run 的 primary fallback 按 4.4 执行。
 8. ACK、每次 `waiting_user` 请求和 terminal 交付分别使用 `run:{run_id}:ack`、`run:{run_id}:waiting:{interrupt_id}`、`run:{run_id}:terminal:{lifecycle_status}` 作为幂等键。
-9. ChatMessage、产品 delivery event 与可选 `channel_deliveries` 必须在同一 PostgreSQL 事务写入；内部 Web 群聊直接完成交付，外部渠道由独立 Delivery Worker 更新 `delivery_status`。执行生命周期事件由 Runtime Projector 从 checkpoint 派生。
+9. ChatMessage、`delivery_status` 与对应 delivery event 必须在同一 PostgreSQL 事务写入；执行生命周期事件由 Runtime Projector 从 checkpoint 派生。
 
 群消息持久化和首次 Run 派发必须满足以下一致性规则：
 
@@ -322,7 +322,7 @@ DELETE /groups/{group_id}/workspace/file?path=...
 7. 数据库提交后 Command Worker 领取 pending Command。即时通知失败不回滚已经提交的消息、Run Registry 和 Command，由 Command 扫描及 reconciliation 继续调度。
 8. reconciliation 必须检查已经生成计划但应运行的目标 Run 未齐全的 Planning Run，并使用同一幂等键补建当前依赖已经满足的目标 Run。
 
-这里使用专用 `agent_run_commands` 作为 Runtime Command Inbox，可靠承载 start / resume / cancel；它不保存 Run 生命周期，也不扩展成通用业务 Outbox。外部渠道 Provider 发送已经满足“产品消息事务提交后仍需跨系统可靠投递”的条件，因此使用独立窄表 `channel_deliveries`：它只发送已持久化 ChatMessage，失败只重试 delivery，绝不推进或恢复 LangGraph。两张表不能合并，也不能成为第二套执行状态机。
+这里使用专用 `agent_run_commands` 作为 Runtime Command Inbox，可靠承载 start / resume / cancel；它不保存 Run 生命周期，也不扩展成通用业务 Outbox。只有未来出现跨数据库或跨消息系统的其他原子投递需求时，才另行引入 Transactional Outbox。
 
 历史消息中的 @ 只是上下文文本，不会重新触发 Agent。
 
@@ -364,12 +364,12 @@ DELETE /groups/{group_id}/workspace/file?path=...
 
 Planning 模型规则：
 
-1. 使用独立配置 `MULTI_AGENT_PLANNING_MODEL_ID`，不复用任意群成员 Agent 的模型，也不复用 `MULTI_AGENT_COMPACT_MODEL_ID`。该全局配置必须指向启用的平台注册模型（`llm_models.tenant_id IS NULL`），供所有租户按系统能力使用。
+1. 使用独立配置 `MULTI_AGENT_PLANNING_MODEL_ID`，不复用任意群成员 Agent 的模型，也不复用 `MULTI_AGENT_COMPACT_MODEL_ID`。
 2. Planning 模型只接收规划所需上下文并输出结构化计划，不挂载业务工具，不允许产生外部副作用。
 3. 配置缺失、模型不存在、租户不可用或 Model Capability 校验失败时，Planning Run 直接失败，不创建业务子 Run。
 4. 模型调用失败或结构化计划校验失败时可以按无副作用调用策略重试；结构修复最多两次，仍失败则 Planning Graph State 进入 `failed`。
 5. 失败后在原 `chat_session_id` 写入一条显式、脱敏的系统消息：`participant_id = null`、`role = system`。消息说明任务规划未完成并提示用户重试或改单 Agent 处理，不展示模型配置、Provider 错误或内部堆栈。
-6. 规划失败 ChatMessage、产品 `delivery_failed / delivery_succeeded` 事件与可选 `channel_deliveries` 在同一交付事务写入，使用 `run:{planning_run_id}:terminal:failed` 作为幂等键，重复恢复不得重复提醒；外部 Provider 结果由 Delivery Worker 更新 `delivery_status`，生命周期 `run_failed` 仍由 Projector 从 terminal checkpoint 派生，不在交付事务双写。
+6. 规划失败 ChatMessage、`delivery_status` 与 `delivery_failed / delivery_succeeded` 事件在同一交付事务写入，使用 `run:{planning_run_id}:terminal:failed` 作为幂等键，重复恢复不得重复提醒；生命周期 `run_failed` 仍由 Projector 从 terminal checkpoint 派生，不在交付事务双写。
 7. 原群或原 Session 已删除时不改写到 replacement primary，只记录 `delivery_status = failed`。
 8. Planning Run 使用 `run_kind = orchestration`、`agent_id = null`、`system_role = group_planning`，不创建或伪造业务 Agent、Participant 或 GroupMember。
 9. 创建 Planning Run 时把 `MULTI_AGENT_PLANNING_MODEL_ID` 解析为真实 `llm_models.id` 并固化到 `agent_runs.model_id`；配置切换只影响新 Run，已有 Run 的恢复和结构修复继续使用固化模型。
@@ -419,14 +419,12 @@ Planning 模型规则：
 10. Agent 最终公开回复分别写回当前 `chat_session_id`。
 11. 某个 Agent 失败时，彼此无依赖的步骤继续执行；直接或间接依赖该失败步骤的后续步骤不启动，并由 Planning Run 记录失败原因。
 
-同一个 Agent 同时存在多条已经创建的群 mention 业务 Run 时按队列顺序串行执行；该规则只约束群 mention 队列，不把该 Agent 的 Direct、Task、Trigger、Heartbeat 等所有 Run 全局限制为一个：
+同一个 Agent 同时被多条群消息 @ 时，按群消息写入顺序串行执行；该规则只约束群 mention 队列，不把该 Agent 的 Direct、Task、Trigger、Heartbeat 等所有 Run 全局限制为一个：
 
-1. 队列顺序以触发消息的统一 Message Position 为准，固定使用 `created_at ASC, id ASC`；同一消息为同一 Agent 生成多个 step 时，再按 Run 的 `created_at ASC, id ASC` 稳定排序。禁止只比较 UUID 大小或只按时间戳排序。
+1. 顺序以统一 Message Position 为准，固定使用 `created_at ASC, id ASC`；禁止比较 UUID 大小或只按时间戳排序。
 2. 如果该 Agent 当前没有正在处理的消息，系统立即调用该 Agent。
 3. 如果该 Agent 正在处理上一条 @，新的 @ 等待上一条处理完成后再执行。
 4. v1 不并发执行同一个 Agent 的多个 @ 请求。
-
-多 Agent 消息在 Planning Graph 创建具体业务子 Run 前不占用目标 Agent lane。极端并发下，Planning 期间后到但已经创建的单 Agent Run 可以先执行；v1 接受该边界，只保证已经进入 lane 的业务 Run 串行且不并发。
 
 可靠实现固定复用统一 Runtime 的 scheduling lane：业务 Run 写入 `scheduling_lane_key = group_mention:{tenant_id}:{agent_id}` 和触发消息 Message Position，只有同 lane 最早的未终态 Run 可以原子取得 `lane_held`。Run 在 waiting 时继续占有 lane，到 checkpoint terminal 后释放；进程崩溃时由 reconciliation 根据 checkpoint 修复。生命周期和终态判断不得读取 `projected_*`。Planning Run、Direct、Task、Trigger、Heartbeat 与普通 A2A 不写该 lane key，因此不会被群 mention 队列全局串行。字段、partial unique index 和恢复算法以 `../single-agent-runtime/technical-design.md` 5.6、12.4 节为准。
 
@@ -727,7 +725,7 @@ topic 规则：
 群聊属于多 Agent 场景，共享 Session Compact 必须显式配置独立 `compact_model_id`：
 
 1. 不使用任一群成员 Agent 的当前模型临时执行共享压缩。
-2. `compact_model_id` 由 `MULTI_AGENT_COMPACT_MODEL_ID` 配置解析，且必须指向启用的平台注册模型（`llm_models.tenant_id IS NULL`）；未配置或模型不可用时不得启动群共享上下文压缩任务。
+2. `compact_model_id` 由 `MULTI_AGENT_COMPACT_MODEL_ID` 配置解析，未配置时不得启动群共享上下文压缩任务。
 3. 压缩触发预算按统一 `request_input_limit` 公式计算群内每个有效 Agent 模型的 `effective_runtime_budget`，再取其中最小值的 85%，保证共享 Session Context 能被任一群内 Agent 使用。
 4. 独立 Compact 模型只负责生成摘要，不改变共享上下文的预算上限。
 5. Compact 模型窗口不足以一次处理待压缩区时，按消息边界分批压缩；不得截断消息或跳过 watermark。
