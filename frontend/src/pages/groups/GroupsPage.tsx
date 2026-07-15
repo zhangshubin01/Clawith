@@ -9,6 +9,7 @@ import {
     IconLayoutSidebarLeftCollapse,
     IconLayoutSidebarLeftExpand,
     IconMessage2,
+    IconPencil,
     IconPlus,
     IconSettings,
     IconTrash,
@@ -26,8 +27,13 @@ import MessageComposer from './MessageComposer';
 import GroupSidePanel from './GroupSidePanel';
 import GroupSettingsModal from './GroupSettingsModal';
 import InviteMemberModal from './InviteMemberModal';
+import InlineEdit from './InlineEdit';
 import type { GroupMessage, GroupSession } from '../../types/group';
 import './groups.css';
+
+// A session whose title is being edited in place — the only inline edit; creating a group or
+// session uses a modal.
+type RenameTarget = { groupId: string; sessionId: string; current: string };
 
 const HISTORY_PAGE_SIZE = 30;
 
@@ -80,9 +86,10 @@ export default function GroupsPage() {
     const [showPanel, setShowPanel] = useState(() => readFlag('groups.showPanel', false));
     const [showInvite, setShowInvite] = useState(false);
     const [creatingGroup, setCreatingGroup] = useState(false);
-    // The group a "new session" prompt targets, or null when closed — lets the prompt create a
-    // session in any group in the tree, not only the active one.
+    // The group a "new session" prompt targets, or null when closed.
     const [creatingSession, setCreatingSession] = useState<string | null>(null);
+    // The session whose title is being renamed inline, or null.
+    const [renaming, setRenaming] = useState<RenameTarget | null>(null);
     const [deletingSession, setDeletingSession] = useState<GroupSession | null>(null);
     const [deletingGroup, setDeletingGroup] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
@@ -317,12 +324,24 @@ export default function GroupsPage() {
                 targetGroupId,
                 title.trim() ? { title: title.trim() } : {},
             );
-            // Invalidate the target group specifically — it may not be the active one.
             await queryClient.invalidateQueries({ queryKey: ['group-sessions', targetGroupId] });
             setExpandedGroups((current) => new Set(current).add(targetGroupId));
             navigate(`/groups/${targetGroupId}/${session.id}`);
         } catch (error: any) {
             toast.error(error?.message ?? t('groups.createSessionFailed', '创建会话失败'));
+        }
+    };
+
+    // Inline rename — an empty or unchanged value keeps the current title.
+    const commitRename = async (value: string) => {
+        const target = renaming;
+        setRenaming(null);
+        if (!target || !value || value === target.current) return;
+        try {
+            await groupApi.renameSession(target.groupId, target.sessionId, value);
+            await queryClient.invalidateQueries({ queryKey: ['group-sessions', target.groupId] });
+        } catch (error: any) {
+            toast.error(error?.message ?? t('groups.renameSessionFailed', '重命名失败'));
         }
     };
 
@@ -475,34 +494,65 @@ export default function GroupsPage() {
                                                         {t('groups.newSession', '新建会话')}
                                                     </button>
                                                 ) : (
-                                                    groupSessions.map((session) => (
-                                                        <div
-                                                            key={session.id}
-                                                            className={`group-row session ${session.id === sessionId ? 'active' : ''}`}
-                                                        >
-                                                            <button
-                                                                type="button"
-                                                                className="group-row-main"
-                                                                onClick={() => navigate(`/groups/${group.id}/${session.id}`)}
+                                                    groupSessions.map((session) => {
+                                                        const isRenaming = renaming?.sessionId === session.id;
+                                                        return (
+                                                            <div
+                                                                key={session.id}
+                                                                className={`group-row session ${session.id === sessionId ? 'active' : ''}`}
                                                             >
-                                                                <IconMessage2 size={14} stroke={1.6} />
-                                                                <span className="group-row-name">{session.title}</span>
-                                                                {session.unread_count > 0 && session.id !== sessionId && (
-                                                                    <span className="group-unread">{session.unread_count}</span>
+                                                                {isRenaming ? (
+                                                                    <span className="group-row-main">
+                                                                        <IconMessage2 size={14} stroke={1.6} />
+                                                                        <InlineEdit
+                                                                            className="group-inline-input"
+                                                                            initialValue={session.title}
+                                                                            placeholder={t('groups.sessionNamePlaceholder', '会话名称')}
+                                                                            onCommit={commitRename}
+                                                                            onCancel={() => setRenaming(null)}
+                                                                        />
+                                                                    </span>
+                                                                ) : (
+                                                                    <button
+                                                                        type="button"
+                                                                        className="group-row-main"
+                                                                        onClick={() => navigate(`/groups/${group.id}/${session.id}`)}
+                                                                    >
+                                                                        <IconMessage2 size={14} stroke={1.6} />
+                                                                        <span className="group-row-name">{session.title}</span>
+                                                                        {session.unread_count > 0 && session.id !== sessionId && (
+                                                                            <span className="group-unread">{session.unread_count}</span>
+                                                                        )}
+                                                                    </button>
                                                                 )}
-                                                            </button>
-                                                            {isManager && isActiveGroup && (
-                                                                <button
-                                                                    type="button"
-                                                                    className="group-icon-btn subtle danger"
-                                                                    title={t('groups.deleteSession', '删除会话')}
-                                                                    onClick={() => setDeletingSession(session)}
-                                                                >
-                                                                    <IconTrash size={14} stroke={1.7} />
-                                                                </button>
-                                                            )}
-                                                        </div>
-                                                    ))
+                                                                {/* Any member can rename a session; only managers can delete it. */}
+                                                                {isActiveGroup && me && !isRenaming && (
+                                                                    <button
+                                                                        type="button"
+                                                                        className="group-icon-btn subtle"
+                                                                        title={t('groups.renameSession', '重命名会话')}
+                                                                        onClick={() => setRenaming({
+                                                                            groupId: group.id,
+                                                                            sessionId: session.id,
+                                                                            current: session.title,
+                                                                        })}
+                                                                    >
+                                                                        <IconPencil size={13} stroke={1.7} />
+                                                                    </button>
+                                                                )}
+                                                                {isManager && isActiveGroup && !isRenaming && (
+                                                                    <button
+                                                                        type="button"
+                                                                        className="group-icon-btn subtle danger"
+                                                                        title={t('groups.deleteSession', '删除会话')}
+                                                                        onClick={() => setDeletingSession(session)}
+                                                                    >
+                                                                        <IconTrash size={14} stroke={1.7} />
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })
                                                 )}
                                             </div>
                                         )}

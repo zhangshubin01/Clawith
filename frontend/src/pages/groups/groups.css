@@ -66,7 +66,7 @@
     width: 6px;
     height: 6px;
     border-radius: var(--radius-full);
-    background: var(--accent-primary);
+    background: var(--text-primary);
 }
 
 .group-column-actions {
@@ -156,17 +156,40 @@
     white-space: nowrap;
 }
 
+/* Match the app's existing unread badge (.sidebar-agent-unread): a filled badge needs a color that
+   contrasts the fill, and --accent-text is an accent-toned text, not an on-accent color. */
 .group-unread {
     flex: 0 0 auto;
     min-width: 16px;
     padding: 0 5px;
     border-radius: var(--radius-full);
-    background: var(--accent-primary);
-    color: var(--accent-text);
+    background: var(--text-primary);
+    color: var(--bg-primary);
     font-size: 10px;
     font-weight: 600;
     line-height: 16px;
     text-align: center;
+}
+
+/* Inline rename sits where the session name was — a soft, neutral field, not a hard rule. */
+.group-inline-input {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    font: inherit;
+    padding: 1px 5px;
+    outline: none;
+}
+
+.group-inline-input:focus {
+    border-color: var(--border-strong);
+}
+
+.group-inline-input::placeholder {
+    color: var(--text-tertiary);
 }
 
 /* ─── Group tree ──────────────────────────────────────── */

@@ -2207,7 +2207,6 @@
     "noGroups": "还没有群聊。创建一个，把人和智能体拉进来。",
     "sessions": "会话",
     "newSession": "新建会话",
-    "sessionTitlePlaceholder": "会话名称，可留空",
     "noSessions": "这个群还没有会话，新建一个开始协作。",
     "createSessionFailed": "创建会话失败",
     "deleteSession": "删除会话",
@@ -2266,6 +2265,10 @@
     "collapseSessions": "折叠会话栏",
     "expandSessions": "展开会话栏",
     "collapseGroup": "折叠",
-    "expandGroup": "展开"
+    "expandGroup": "展开",
+    "renameSession": "重命名会话",
+    "renameSessionFailed": "重命名失败",
+    "sessionNamePlaceholder": "会话名称",
+    "sessionTitlePlaceholder": "会话名称，可留空"
   }
 }

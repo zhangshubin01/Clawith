@@ -2082,7 +2082,6 @@
     "noGroups": "No groups yet. Create one and bring people and agents together.",
     "sessions": "Sessions",
     "newSession": "New session",
-    "sessionTitlePlaceholder": "Session name (optional)",
     "noSessions": "This group has no sessions yet. Create one to start.",
     "createSessionFailed": "Could not create the session",
     "deleteSession": "Delete session",
@@ -2141,6 +2140,10 @@
     "collapseSessions": "Collapse sessions",
     "expandSessions": "Expand sessions",
     "collapseGroup": "Collapse",
-    "expandGroup": "Expand"
+    "expandGroup": "Expand",
+    "renameSession": "Rename session",
+    "renameSessionFailed": "Rename failed",
+    "sessionNamePlaceholder": "Session name",
+    "sessionTitlePlaceholder": "Session name (optional)"
   }
 }

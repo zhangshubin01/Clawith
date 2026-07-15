@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuthStore } from '../stores';
 import { agentApi, tenantApi, authApi, onboardingApi } from '../services/api';
+import { useGroupUnread } from '../hooks/useGroupUnread';
 import { useToast } from '../components/Toast/ToastProvider';
 
 import {
@@ -477,6 +478,8 @@ export default function Layout() {
         queryFn: () => fetchJson<any[]>(`/notifications?limit=50${notifCategory !== 'all' ? `&category=${notifCategory}` : ''}`),
         enabled: !!user && showNotifications,
     });
+    // Total unread across all group sessions, for the Groups nav badge.
+    const groupUnread = useGroupUnread();
     const markAllRead = async () => {
         const token = localStorage.getItem('token');
         await fetch('/api/notifications/read-all', { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {} });
@@ -1054,6 +1057,9 @@ export default function Layout() {
                                 <IconUsersGroup size={14} stroke={1.5} />
                             </span>
                             <span className="sidebar-item-text">{t('nav.groups', 'Groups')}</span>
+                            {groupUnread > 0 && (
+                                <span className="sidebar-item-badge">{groupUnread > 99 ? '99+' : groupUnread}</span>
+                            )}
                         </NavLink>
                         <NavLink to="/dashboard" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
                             <span className="sidebar-item-icon" style={{ display: 'flex' }}>{SidebarIcons.home}</span>

@@ -1177,6 +1177,7 @@ select:focus {
 }
 
 .sidebar-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -1188,6 +1189,35 @@ select:focus {
   cursor: pointer;
   text-decoration: none;
   white-space: nowrap;
+}
+
+.sidebar-item-badge {
+  margin-left: auto;
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--text-primary);
+  color: var(--bg-primary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* Collapsed sidebar hides the text and the number; keep just a dot so the signal survives. */
+.sidebar.collapsed .sidebar-item-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  margin: 0;
+  min-width: 8px;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  font-size: 0;
+  line-height: 0;
 }
 
 .sidebar-item:hover {
