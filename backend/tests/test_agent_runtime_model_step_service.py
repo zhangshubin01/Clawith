@@ -623,7 +623,7 @@ async def test_mixed_finish_and_tool_calls_are_repaired_before_any_tool_runs() -
 
 
 @pytest.mark.asyncio
-async def test_unknown_model_budget_fails_closed_before_provider_call() -> None:
+async def test_unknown_model_budget_uses_runtime_fallback_and_calls_provider() -> None:
     tenant_id = uuid.uuid4()
     model = _model(tenant_id, capable=False)
     agent = _agent(tenant_id)
@@ -634,7 +634,22 @@ async def test_unknown_model_budget_fails_closed_before_provider_call() -> None:
         nonlocal called
         del args, kwargs
         called = True
-        raise AssertionError("provider must not be called")
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(
+                {
+                    "id": "finish-with-runtime-fallback",
+                    "type": "function",
+                    "function": {
+                        "name": "finish",
+                        "arguments": '{"content":"Fallback budget answer"}',
+                    },
+                },
+            ),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=12),
+        )
 
     result = await _service(
         model,
@@ -643,10 +658,9 @@ async def test_unknown_model_budget_fails_closed_before_provider_call() -> None:
         complete,
     ).complete_once(state, _context(state))
 
-    assert result.intent == "error"
-    assert result.error is not None
-    assert result.error["code"] == "unknown_input_limit"
-    assert called is False
+    assert result.intent == "finish"
+    assert result.finish_content == "Fallback budget answer"
+    assert called is True
 
 
 @pytest.mark.asyncio

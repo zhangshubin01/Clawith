@@ -1,8 +1,9 @@
-"""Normalize cached model limits and calculate per-request token budgets.
+"""Normalize model limits and calculate per-request token budgets.
 
 Provider discovery belongs outside this module. The request path consumes only
-the semantic fields cached on :class:`LLMModel`; it never guesses a limit from
-the provider or model name.
+the semantic fields cached on :class:`LLMModel`. When both input capabilities
+are unknown, it uses the configured shared-context fallback instead of blocking
+otherwise valid model requests.
 """
 
 from dataclasses import dataclass
@@ -72,11 +73,15 @@ def _legacy_output_limit(value: int | None) -> int | None:
 
 
 class ModelCapabilityResolver:
-    """Resolve cached model semantics without performing provider I/O."""
+    """Resolve model semantics without performing provider I/O."""
 
     @staticmethod
-    def capabilities(model: LLMModel) -> ResolvedModelCapabilities:
-        """Apply overrides only to the capability with the same meaning."""
+    def capabilities(
+        model: LLMModel,
+        *,
+        settings: Settings | None = None,
+    ) -> ResolvedModelCapabilities:
+        """Apply same-semantic overrides, then the unknown-model fallback."""
         context_window_tokens = _positive_optional(
             model.context_window_tokens_override
             if model.context_window_tokens_override is not None
@@ -90,11 +95,16 @@ class ModelCapabilityResolver:
             "max_input_tokens",
         )
         max_output_tokens = _legacy_output_limit(model.max_output_tokens)
+        capability_source = model.capability_source
+        if context_window_tokens is None and max_input_tokens is None:
+            runtime_settings = settings or get_settings()
+            context_window_tokens = runtime_settings.AGENT_RUNTIME_FALLBACK_CONTEXT_WINDOW_TOKENS
+            capability_source = "runtime_config"
         return ResolvedModelCapabilities(
             context_window_tokens=context_window_tokens,
             max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
-            capability_source=model.capability_source,
+            capability_source=capability_source,
         )
 
     @classmethod
@@ -103,6 +113,7 @@ class ModelCapabilityResolver:
         model: LLMModel,
         *,
         requested_max_output_tokens: int | None,
+        settings: Settings | None = None,
     ) -> tuple[int, int | None]:
         """Return the safe input limit and effective output reservation.
 
@@ -111,7 +122,7 @@ class ModelCapabilityResolver:
         shared window is the only available input capability, an unknown output
         reservation is unsafe and therefore rejected.
         """
-        capabilities = cls.capabilities(model)
+        capabilities = cls.capabilities(model, settings=settings)
         request_output = _positive_optional(
             requested_max_output_tokens,
             "requested_max_output_tokens",
@@ -151,6 +162,7 @@ class ModelCapabilityResolver:
         reserved_runtime_tokens: int = 0,
         safety_margin_tokens: int = 0,
         compact_threshold_ratio: float = 0.85,
+        settings: Settings | None = None,
     ) -> RuntimeTokenBudget:
         """Calculate the remaining Runtime budget for one model request."""
         components = {
@@ -174,6 +186,7 @@ class ModelCapabilityResolver:
         input_limit, effective_output = cls.request_input_limit(
             model,
             requested_max_output_tokens=requested_max_output_tokens,
+            settings=settings,
         )
         effective_budget = input_limit - sum(components.values())
         if effective_budget <= 0:

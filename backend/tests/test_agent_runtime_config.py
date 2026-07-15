@@ -37,6 +37,7 @@ def test_runtime_settings_have_safe_confirmed_defaults() -> None:
     assert settings.AGENT_RUNTIME_RUN_COMPACT_TOOL_RESULT_BYTES is None
     assert settings.AGENT_RUNTIME_VERIFY_REPAIR_COMPACT_ROUNDS is None
     assert settings.AGENT_RUNTIME_MODEL_CAPABILITY_REFRESH_SECONDS == 86400
+    assert settings.AGENT_RUNTIME_FALLBACK_CONTEXT_WINDOW_TOKENS == 131072
     assert settings.MULTI_AGENT_COMPACT_MODEL_ID is None
     assert settings.MULTI_AGENT_PLANNING_MODEL_ID is None
     assert settings.AGENT_RUNTIME_CHECKPOINT_RETENTION_DAYS == 30
@@ -86,6 +87,7 @@ def test_runtime_graph_identifiers_are_trimmed() -> None:
             "AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS": 20,
         },
         {"AGENT_RUNTIME_SUMMARY_THRESHOLD_RATIO": 1.1},
+        {"AGENT_RUNTIME_FALLBACK_CONTEXT_WINDOW_TOKENS": 0},
         {"AGENT_RUNTIME_EVENT_PAYLOAD_MAX_BYTES": -1},
         {"AGENT_RUNTIME_GRAPH_NAME": " "},
     ],
