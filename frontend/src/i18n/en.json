@@ -2088,6 +2088,10 @@
     "deleteSession": "Delete session",
     "deleteSessionConfirm": "Its messages become invisible and cannot be restored.",
     "deleteSessionFailed": "Could not delete the session",
+    "deleteGroup": "Delete group",
+    "deleteGroupConfirm": "All of this group's sessions, messages and files will be unrecoverable.",
+    "deleteGroupFailed": "Could not delete the group",
+    "deleteGroupDone": "Group deleted",
     "pickSession": "Pick or create a session to start.",
     "members": "Members",
     "manager": "Manager",
@@ -2135,6 +2139,8 @@
     "collapseGroups": "Collapse groups",
     "expandGroups": "Expand groups",
     "collapseSessions": "Collapse sessions",
-    "expandSessions": "Expand sessions"
+    "expandSessions": "Expand sessions",
+    "collapseGroup": "Collapse",
+    "expandGroup": "Expand"
   }
 }

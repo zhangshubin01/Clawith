@@ -1,9 +1,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { IconPlus, IconRobot, IconUser, IconX } from '@tabler/icons-react';
+import { IconPlus, IconRobot, IconSettings, IconUser, IconX } from '@tabler/icons-react';
 import { groupApi } from '../../services/groupApi';
-import { useToast } from '../../components/Toast/ToastProvider';
-import ConfirmModal from '../../components/ConfirmModal';
 import GroupTextFileEditor from './GroupTextFileEditor';
 import GroupWorkspaceTab from './GroupWorkspaceTab';
 import GroupMemoryTab from './GroupMemoryTab';
@@ -13,41 +11,32 @@ type PanelTab = 'members' | 'announcement' | 'workspace' | 'memory';
 
 interface GroupSidePanelProps {
     groupId: string;
+    groupName: string;
     members: GroupMember[];
-    isManager: boolean;
     onInvite: () => void;
-    onMembersChanged: () => void;
+    onOpenSettings: () => void;
     onClose: () => void;
 }
 
+/**
+ * The group-level side panel: a fixed header naming the group (so it reads as group-scoped and does
+ * not change when the session switches), then tabs for members, announcement, files and memory. It
+ * is view-and-invite only — renaming, removing members and dissolving live in the settings modal
+ * behind the gear.
+ */
 export default function GroupSidePanel({
     groupId,
+    groupName,
     members,
-    isManager,
     onInvite,
-    onMembersChanged,
+    onOpenSettings,
     onClose,
 }: GroupSidePanelProps) {
     const { t } = useTranslation();
-    const toast = useToast();
     const [tab, setTab] = useState<PanelTab>('members');
-    const [removing, setRemoving] = useState<GroupMember | null>(null);
 
     const people = members.filter((member) => member.participant_type === 'user');
     const agents = members.filter((member) => member.participant_type === 'agent');
-
-    const removeMember = async () => {
-        if (!removing) return;
-        try {
-            await groupApi.removeMember(groupId, removing.id);
-            toast.success(t('groups.removed', '已移出 {{name}}', { name: removing.display_name }));
-            onMembersChanged();
-        } catch (error: any) {
-            toast.error(error?.message ?? t('groups.removeFailed', '移出成员失败'));
-        } finally {
-            setRemoving(null);
-        }
-    };
 
     const renderMember = (member: GroupMember) => (
         <div key={member.id} className="group-member-row">
@@ -67,16 +56,6 @@ export default function GroupSidePanel({
                     <div className="group-member-hint">{member.role_description || member.title}</div>
                 )}
             </div>
-            {isManager && member.role !== 'manager' && (
-                <button
-                    type="button"
-                    className="group-icon-btn subtle"
-                    title={t('groups.remove', '移出群聊')}
-                    onClick={() => setRemoving(member)}
-                >
-                    <IconX size={14} stroke={1.7} />
-                </button>
-            )}
         </div>
     );
 
@@ -89,6 +68,23 @@ export default function GroupSidePanel({
 
     return (
         <aside className="group-side-panel">
+            <div className="group-panel-topbar">
+                <span className="group-panel-groupname" title={groupName}>{groupName}</span>
+                <div className="group-column-actions">
+                    <button
+                        type="button"
+                        className="group-icon-btn"
+                        title={t('groups.settings', '群设置')}
+                        onClick={onOpenSettings}
+                    >
+                        <IconSettings size={16} stroke={1.7} />
+                    </button>
+                    <button type="button" className="group-icon-btn" onClick={onClose}>
+                        <IconX size={16} stroke={1.7} />
+                    </button>
+                </div>
+            </div>
+
             <div className="group-panel-header">
                 <div className="group-tabs scrollable">
                     {TABS.map(({ key, label }) => (
@@ -102,9 +98,6 @@ export default function GroupSidePanel({
                         </button>
                     ))}
                 </div>
-                <button type="button" className="group-icon-btn" onClick={onClose}>
-                    <IconX size={16} stroke={1.7} />
-                </button>
             </div>
 
             <div className="group-panel-body">
@@ -147,17 +140,6 @@ export default function GroupSidePanel({
 
                 {tab === 'memory' && <GroupMemoryTab groupId={groupId} members={members} />}
             </div>
-
-            <ConfirmModal
-                open={Boolean(removing)}
-                title={t('groups.remove', '移出群聊')}
-                message={t('groups.removeConfirm', '确定将 {{name}} 移出群聊？', {
-                    name: removing?.display_name ?? '',
-                })}
-                danger
-                onConfirm={() => void removeMember()}
-                onCancel={() => setRemoving(null)}
-            />
         </aside>
     );
 }

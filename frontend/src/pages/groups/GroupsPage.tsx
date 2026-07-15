@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-    IconDotsVertical,
+    IconChevronDown,
+    IconChevronRight,
+    IconDots,
     IconLayoutSidebarLeftCollapse,
     IconLayoutSidebarLeftExpand,
     IconMessage2,
     IconPlus,
+    IconSettings,
+    IconTrash,
+    IconUserPlus,
     IconUsers,
 } from '@tabler/icons-react';
 import { groupApi } from '../../services/groupApi';
@@ -19,6 +24,7 @@ import ConfirmModal from '../../components/ConfirmModal';
 import MessageStream from './MessageStream';
 import MessageComposer from './MessageComposer';
 import GroupSidePanel from './GroupSidePanel';
+import GroupSettingsModal from './GroupSettingsModal';
 import InviteMemberModal from './InviteMemberModal';
 import type { GroupMessage, GroupSession } from '../../types/group';
 import './groups.css';
@@ -28,6 +34,21 @@ const HISTORY_PAGE_SIZE = 30;
 const readFlag = (key: string, fallback: boolean) => {
     const stored = localStorage.getItem(key);
     return stored === null ? fallback : stored === '1';
+};
+
+const timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
+const dateFormat = new Intl.DateTimeFormat(undefined, { month: '2-digit', day: '2-digit' });
+
+// Compact "last activity" for a group row: clock for today, month-day otherwise. Locale-driven so
+// it needs no translation string of its own.
+const formatLastActivity = (iso: string | null | undefined): string => {
+    if (!iso) return '';
+    const then = new Date(iso);
+    const now = new Date();
+    const sameDay = then.getFullYear() === now.getFullYear()
+        && then.getMonth() === now.getMonth()
+        && then.getDate() === now.getDate();
+    return sameDay ? timeFormat.format(then) : dateFormat.format(then);
 };
 
 const mergeMessages = (previous: GroupMessage[], incoming: GroupMessage[]): GroupMessage[] => {
@@ -48,19 +69,25 @@ export default function GroupsPage() {
     const [messages, setMessages] = useState<GroupMessage[]>([]);
     const [hasMore, setHasMore] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
-    // Each rail collapses on its own, and the side panel stays out of the way until asked for —
-    // on a 1440px screen all three open at once leave the conversation only ~420px.
+    // One nav rail now: a tree of groups with their sessions nested underneath. It collapses to a
+    // stub, and the side panel stays out of the way until asked for.
     const [groupsCollapsed, setGroupsCollapsed] = useState(
         () => readFlag('groups.groupsCollapsed', false),
     );
-    const [sessionsCollapsed, setSessionsCollapsed] = useState(
-        () => readFlag('groups.sessionsCollapsed', false),
-    );
+    // Which groups are expanded in the tree. The active group is expanded on navigation (effect
+    // below); others start collapsed.
+    const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
     const [showPanel, setShowPanel] = useState(() => readFlag('groups.showPanel', false));
     const [showInvite, setShowInvite] = useState(false);
     const [creatingGroup, setCreatingGroup] = useState(false);
-    const [creatingSession, setCreatingSession] = useState(false);
+    // The group a "new session" prompt targets, or null when closed — lets the prompt create a
+    // session in any group in the tree, not only the active one.
+    const [creatingSession, setCreatingSession] = useState<string | null>(null);
     const [deletingSession, setDeletingSession] = useState<GroupSession | null>(null);
+    const [deletingGroup, setDeletingGroup] = useState(false);
+    const [showSettings, setShowSettings] = useState(false);
+    // The ⋯ menu on the breadcrumb group name.
+    const [groupMenuOpen, setGroupMenuOpen] = useState(false);
 
     const { data: groups = [], refetch: refetchGroups } = useQuery({
         queryKey: ['groups'],
@@ -78,6 +105,39 @@ export default function GroupsPage() {
         queryFn: () => groupApi.members(groupId!),
         enabled: Boolean(groupId),
     });
+
+    // The tree shows every group's sessions and a per-group unread + last-activity roll-up, but the
+    // list endpoint carries neither — so pull each group's sessions and aggregate on the client. The
+    // active group's entry shares the ['group-sessions', groupId] key with the query above, so it is
+    // fetched once and both observers read the same cache.
+    const groupSessionQueries = useQueries({
+        queries: groups.map((group) => ({
+            queryKey: ['group-sessions', group.id],
+            queryFn: () => groupApi.sessions(group.id),
+        })),
+    });
+
+    const sessionsByGroup = useMemo(() => {
+        const map: Record<string, GroupSession[]> = {};
+        groups.forEach((group, index) => {
+            map[group.id] = groupSessionQueries[index]?.data ?? [];
+        });
+        return map;
+    }, [groups, groupSessionQueries]);
+
+    const groupRollups = useMemo(() => {
+        const map: Record<string, { unread: number; lastActivity: string | null }> = {};
+        for (const group of groups) {
+            const groupSessions = sessionsByGroup[group.id] ?? [];
+            const unread = groupSessions.reduce((sum, session) => sum + session.unread_count, 0);
+            const lastActivity = groupSessions.reduce<string | null>((latest, session) => {
+                if (!session.last_message_at) return latest;
+                return !latest || session.last_message_at > latest ? session.last_message_at : latest;
+            }, null);
+            map[group.id] = { unread, lastActivity };
+        }
+        return map;
+    }, [groups, sessionsByGroup]);
 
     const activeGroup = groups.find((group) => group.id === groupId);
     const activeSession = sessions.find((session) => session.id === sessionId);
@@ -103,6 +163,17 @@ export default function GroupsPage() {
         const landing = sessions.find((session) => session.is_primary) ?? sessions[0];
         navigate(`/groups/${groupId}/${landing.id}`, { replace: true });
     }, [groupId, sessionId, sessions, navigate]);
+
+    // The active group is always expanded in the tree; the user can still collapse it by hand.
+    useEffect(() => {
+        if (!groupId) return;
+        setExpandedGroups((current) => {
+            if (current.has(groupId)) return current;
+            const next = new Set(current);
+            next.add(groupId);
+            return next;
+        });
+    }, [groupId]);
 
     // Load the newest page whenever the session changes.
     useEffect(() => {
@@ -177,8 +248,14 @@ export default function GroupsPage() {
     });
 
     const toggleGroups = persistToggle('groups.groupsCollapsed', setGroupsCollapsed);
-    const toggleSessions = persistToggle('groups.sessionsCollapsed', setSessionsCollapsed);
     const togglePanel = persistToggle('groups.showPanel', setShowPanel);
+
+    const toggleGroupExpand = (id: string) => setExpandedGroups((current) => {
+        const next = new Set(current);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+    });
 
     const loadMore = async () => {
         if (!groupId || !sessionId || loadingMore || messages.length === 0) return;
@@ -232,15 +309,18 @@ export default function GroupsPage() {
     };
 
     const createSession = async (title: string) => {
-        setCreatingSession(false);
-        if (!groupId) return;
+        const targetGroupId = creatingSession;
+        setCreatingSession(null);
+        if (!targetGroupId) return;
         try {
             const session = await groupApi.createSession(
-                groupId,
+                targetGroupId,
                 title.trim() ? { title: title.trim() } : {},
             );
-            await refetchSessions();
-            navigate(`/groups/${groupId}/${session.id}`);
+            // Invalidate the target group specifically — it may not be the active one.
+            await queryClient.invalidateQueries({ queryKey: ['group-sessions', targetGroupId] });
+            setExpandedGroups((current) => new Set(current).add(targetGroupId));
+            navigate(`/groups/${targetGroupId}/${session.id}`);
         } catch (error: any) {
             toast.error(error?.message ?? t('groups.createSessionFailed', '创建会话失败'));
         }
@@ -262,11 +342,29 @@ export default function GroupsPage() {
         }
     };
 
-    const totalUnread = sessions.reduce((sum, session) => sum + session.unread_count, 0);
+    const deleteGroup = async () => {
+        if (!groupId) return;
+        try {
+            await groupApi.remove(groupId);
+            setDeletingGroup(false);
+            setShowPanel(false);
+            const remaining = await refetchGroups();
+            const next = remaining.data?.find((group) => group.id !== groupId);
+            navigate(next ? `/groups/${next.id}` : '/groups', { replace: true });
+            toast.success(t('groups.deleteGroupDone', '群聊已删除'));
+        } catch (error: any) {
+            toast.error(error?.message ?? t('groups.deleteGroupFailed', '删除群聊失败'));
+        }
+    };
+
+    const totalUnread = groups.reduce(
+        (sum, group) => sum + (groupRollups[group.id]?.unread ?? 0),
+        0,
+    );
 
     return (
         <div className="groups-page">
-            <div className={`group-column groups ${groupsCollapsed ? 'collapsed' : ''}`}>
+            <div className={`group-column tree ${groupsCollapsed ? 'collapsed' : ''}`}>
                 {groupsCollapsed ? (
                     <button
                         type="button"
@@ -275,7 +373,10 @@ export default function GroupsPage() {
                         onClick={toggleGroups}
                     >
                         <IconLayoutSidebarLeftExpand size={16} stroke={1.7} />
-                        <IconUsers size={15} stroke={1.6} />
+                        <span className="group-rail-stub-icon">
+                            <IconUsers size={15} stroke={1.6} />
+                            {totalUnread > 0 && <span className="group-rail-dot" />}
+                        </span>
                     </button>
                 ) : (
                     <>
@@ -306,113 +407,167 @@ export default function GroupsPage() {
                                     {t('groups.noGroups', '还没有群聊。创建一个，把人和智能体拉进来。')}
                                 </div>
                             )}
-                            {groups.map((group) => (
-                                <button
-                                    key={group.id}
-                                    type="button"
-                                    className={`group-row ${group.id === groupId ? 'active' : ''}`}
-                                    onClick={() => navigate(`/groups/${group.id}`)}
-                                >
-                                    <span className="group-row-avatar">
-                                        <IconUsers size={15} stroke={1.6} />
-                                    </span>
-                                    <span className="group-row-name">{group.name}</span>
-                                </button>
-                            ))}
+                            {groups.map((group) => {
+                                const expanded = expandedGroups.has(group.id);
+                                const groupSessions = sessionsByGroup[group.id] ?? [];
+                                const rollup = groupRollups[group.id];
+                                const isActiveGroup = group.id === groupId;
+                                return (
+                                    <div className="group-node" key={group.id}>
+                                        <div className={`group-row group ${isActiveGroup ? 'active' : ''}`}>
+                                            <button
+                                                type="button"
+                                                className="group-row-caret"
+                                                title={expanded
+                                                    ? t('groups.collapseGroup', '折叠')
+                                                    : t('groups.expandGroup', '展开')}
+                                                onClick={() => toggleGroupExpand(group.id)}
+                                            >
+                                                {expanded
+                                                    ? <IconChevronDown size={14} stroke={1.8} />
+                                                    : <IconChevronRight size={14} stroke={1.8} />}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="group-row-main"
+                                                onClick={() => navigate(`/groups/${group.id}`)}
+                                            >
+                                                <span className="group-row-name">{group.name}</span>
+                                                {rollup && rollup.unread > 0 && (
+                                                    <span className="group-unread">{rollup.unread}</span>
+                                                )}
+                                                {rollup?.lastActivity && (
+                                                    <span className="group-row-time">
+                                                        {formatLastActivity(rollup.lastActivity)}
+                                                    </span>
+                                                )}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="group-icon-btn subtle"
+                                                title={t('groups.newSession', '新建会话')}
+                                                onClick={() => setCreatingSession(group.id)}
+                                            >
+                                                <IconPlus size={14} stroke={1.8} />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                className="group-icon-btn subtle"
+                                                title={t('groups.settings', '群设置')}
+                                                onClick={() => {
+                                                    if (!isActiveGroup) navigate(`/groups/${group.id}`);
+                                                    setShowSettings(true);
+                                                }}
+                                            >
+                                                <IconDots size={14} stroke={1.8} />
+                                            </button>
+                                        </div>
+
+                                        {expanded && (
+                                            <div className="group-node-children">
+                                                {groupSessions.length === 0 ? (
+                                                    <button
+                                                        type="button"
+                                                        className="group-session-empty"
+                                                        onClick={() => setCreatingSession(group.id)}
+                                                    >
+                                                        <IconPlus size={13} stroke={1.8} />
+                                                        {t('groups.newSession', '新建会话')}
+                                                    </button>
+                                                ) : (
+                                                    groupSessions.map((session) => (
+                                                        <div
+                                                            key={session.id}
+                                                            className={`group-row session ${session.id === sessionId ? 'active' : ''}`}
+                                                        >
+                                                            <button
+                                                                type="button"
+                                                                className="group-row-main"
+                                                                onClick={() => navigate(`/groups/${group.id}/${session.id}`)}
+                                                            >
+                                                                <IconMessage2 size={14} stroke={1.6} />
+                                                                <span className="group-row-name">{session.title}</span>
+                                                                {session.unread_count > 0 && session.id !== sessionId && (
+                                                                    <span className="group-unread">{session.unread_count}</span>
+                                                                )}
+                                                            </button>
+                                                            {isManager && isActiveGroup && (
+                                                                <button
+                                                                    type="button"
+                                                                    className="group-icon-btn subtle danger"
+                                                                    title={t('groups.deleteSession', '删除会话')}
+                                                                    onClick={() => setDeletingSession(session)}
+                                                                >
+                                                                    <IconTrash size={14} stroke={1.7} />
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    ))
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
                         </div>
                     </>
                 )}
             </div>
-
-            {groupId && (
-                <div className={`group-column sessions ${sessionsCollapsed ? 'collapsed' : ''}`}>
-                    {sessionsCollapsed ? (
-                        <button
-                            type="button"
-                            className="group-rail-stub"
-                            title={t('groups.expandSessions', '展开会话栏')}
-                            onClick={toggleSessions}
-                        >
-                            <IconLayoutSidebarLeftExpand size={16} stroke={1.7} />
-                            <span className="group-rail-stub-icon">
-                                <IconMessage2 size={15} stroke={1.6} />
-                                {totalUnread > 0 && <span className="group-rail-dot" />}
-                            </span>
-                        </button>
-                    ) : (
-                        <>
-                            <div className="group-column-header">
-                                <span>{t('groups.sessions', '会话')}</span>
-                                <div className="group-column-actions">
-                                    <button
-                                        type="button"
-                                        className="group-icon-btn"
-                                        title={t('groups.newSession', '新建会话')}
-                                        onClick={() => setCreatingSession(true)}
-                                    >
-                                        <IconPlus size={15} stroke={1.8} />
-                                    </button>
-                                    <button
-                                        type="button"
-                                        className="group-icon-btn"
-                                        title={t('groups.collapseSessions', '折叠会话栏')}
-                                        onClick={toggleSessions}
-                                    >
-                                        <IconLayoutSidebarLeftCollapse size={15} stroke={1.7} />
-                                    </button>
-                                </div>
-                            </div>
-                            <div className="group-column-body">
-                                {sessions.length === 0 && (
-                                    <div className="group-empty-hint">
-                                        {t('groups.noSessions', '这个群还没有会话，新建一个开始协作。')}
-                                    </div>
-                                )}
-                                {sessions.map((session) => (
-                                    <div
-                                        key={session.id}
-                                        className={`group-row session ${session.id === sessionId ? 'active' : ''}`}
-                                    >
-                                        <button
-                                            type="button"
-                                            className="group-row-main"
-                                            onClick={() => navigate(`/groups/${groupId}/${session.id}`)}
-                                        >
-                                            <IconMessage2 size={14} stroke={1.6} />
-                                            <span className="group-row-name">{session.title}</span>
-                                            {session.unread_count > 0 && session.id !== sessionId && (
-                                                <span className="group-unread">{session.unread_count}</span>
-                                            )}
-                                        </button>
-                                        {isManager && (
-                                            <button
-                                                type="button"
-                                                className="group-icon-btn subtle"
-                                                title={t('groups.deleteSession', '删除会话')}
-                                                onClick={() => setDeletingSession(session)}
-                                            >
-                                                <IconDotsVertical size={14} stroke={1.7} />
-                                            </button>
-                                        )}
-                                    </div>
-                                ))}
-                            </div>
-                        </>
-                    )}
-                </div>
-            )}
 
             <div className="group-main">
                 {activeGroup && activeSession ? (
                     <>
                         <header className="group-main-header">
                             <div className="group-main-heading">
-                                <div className="group-main-title">{activeSession.title}</div>
-                                <div className="group-main-subtitle">
-                                    {activeGroup.name}
-                                    {status === 'polling' && ` · ${t('groups.polling', '轮询中')}`}
-                                    {status === 'offline' && ` · ${t('groups.offline', '连接断开')}`}
+                                <div className="group-breadcrumb">
+                                    <button
+                                        type="button"
+                                        className="group-breadcrumb-group"
+                                        onClick={() => setGroupMenuOpen((open) => !open)}
+                                    >
+                                        <span className="group-breadcrumb-name">{activeGroup.name}</span>
+                                        <IconDots size={13} stroke={1.8} />
+                                    </button>
+                                    {status === 'polling' && (
+                                        <span className="group-breadcrumb-status">{t('groups.polling', '轮询中')}</span>
+                                    )}
+                                    {status === 'offline' && (
+                                        <span className="group-breadcrumb-status">{t('groups.offline', '连接断开')}</span>
+                                    )}
+                                    {groupMenuOpen && (
+                                        <>
+                                            <div
+                                                className="group-menu-overlay"
+                                                onClick={() => setGroupMenuOpen(false)}
+                                            />
+                                            <div className="group-menu">
+                                                <button
+                                                    type="button"
+                                                    className="group-menu-item"
+                                                    onClick={() => {
+                                                        setGroupMenuOpen(false);
+                                                        setShowSettings(true);
+                                                    }}
+                                                >
+                                                    <IconSettings size={15} stroke={1.7} />
+                                                    {t('groups.settings', '群设置')}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="group-menu-item"
+                                                    onClick={() => {
+                                                        setGroupMenuOpen(false);
+                                                        setShowInvite(true);
+                                                    }}
+                                                >
+                                                    <IconUserPlus size={15} stroke={1.7} />
+                                                    {t('groups.inviteTitle', '邀请成员')}
+                                                </button>
+                                            </div>
+                                        </>
+                                    )}
                                 </div>
+                                <div className="group-main-title">{activeSession.title}</div>
                             </div>
                             <button
                                 type="button"
@@ -448,11 +603,27 @@ export default function GroupsPage() {
             {showPanel && activeGroup && (
                 <GroupSidePanel
                     groupId={activeGroup.id}
+                    groupName={activeGroup.name}
+                    members={members}
+                    onInvite={() => setShowInvite(true)}
+                    onOpenSettings={() => setShowSettings(true)}
+                    onClose={() => setShowPanel(false)}
+                />
+            )}
+
+            {showSettings && activeGroup && (
+                <GroupSettingsModal
+                    group={activeGroup}
                     members={members}
                     isManager={isManager}
+                    onClose={() => setShowSettings(false)}
                     onInvite={() => setShowInvite(true)}
+                    onUpdated={() => void refetchGroups()}
                     onMembersChanged={() => void refetchMembers()}
-                    onClose={() => setShowPanel(false)}
+                    onRequestDissolve={() => {
+                        setShowSettings(false);
+                        setDeletingGroup(true);
+                    }}
                 />
             )}
 
@@ -474,11 +645,11 @@ export default function GroupsPage() {
             />
 
             <PromptModal
-                open={creatingSession}
+                open={Boolean(creatingSession)}
                 title={t('groups.newSession', '新建会话')}
                 placeholder={t('groups.sessionTitlePlaceholder', '会话名称，可留空')}
                 onConfirm={(value) => void createSession(value)}
-                onCancel={() => setCreatingSession(false)}
+                onCancel={() => setCreatingSession(null)}
             />
 
             <ConfirmModal
@@ -488,6 +659,15 @@ export default function GroupsPage() {
                 danger
                 onConfirm={() => void deleteSession()}
                 onCancel={() => setDeletingSession(null)}
+            />
+
+            <ConfirmModal
+                open={deletingGroup}
+                title={t('groups.deleteGroup', '删除群聊')}
+                message={t('groups.deleteGroupConfirm', '删除后该群的所有会话、消息和文件都将无法恢复。')}
+                danger
+                onConfirm={() => void deleteGroup()}
+                onCancel={() => setDeletingGroup(false)}
             />
         </div>
     );

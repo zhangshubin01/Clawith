@@ -50,6 +50,15 @@ export default function MessageComposer({ members, disabled, onSend }: MessageCo
 
     useEffect(() => setHighlighted(0), [query?.text]);
 
+    // Auto-grow the textarea to fit its content (capped by max-height in CSS). Runs for typing,
+    // mention insertion and the post-send clear alike, since they all flow through `value`.
+    useEffect(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.style.height = 'auto';
+        el.style.height = `${el.scrollHeight}px`;
+    }, [value]);
+
     const syncQuery = (nextValue: string, caret: number) => {
         setQuery(findMentionQuery(nextValue, caret));
     };
@@ -95,6 +104,10 @@ export default function MessageComposer({ members, disabled, onSend }: MessageCo
     };
 
     const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        // While an IME is composing (typing pinyin, etc.), Enter commits the candidate — it must
+        // reach the input method, not send the raw text or pick a mention. Bail before any handling.
+        if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+
         if (query && candidates.length > 0) {
             if (event.key === 'ArrowDown') {
                 event.preventDefault();
@@ -157,43 +170,47 @@ export default function MessageComposer({ members, disabled, onSend }: MessageCo
                 </div>
             )}
 
-            <div className="group-composer-box">
-                <textarea
-                    ref={textareaRef}
-                    className="group-composer-input"
-                    rows={2}
-                    value={value}
-                    disabled={disabled}
-                    placeholder={t('groups.composerPlaceholder', '发送消息，@ 唤醒智能体')}
-                    onChange={(event) => {
-                        setValue(event.target.value);
-                        syncQuery(event.target.value, event.target.selectionStart ?? 0);
-                    }}
-                    onKeyUp={(event) => {
-                        const target = event.target as HTMLTextAreaElement;
-                        syncQuery(target.value, target.selectionStart ?? 0);
-                    }}
-                    onClick={(event) => {
-                        const target = event.target as HTMLTextAreaElement;
-                        syncQuery(target.value, target.selectionStart ?? 0);
-                    }}
-                    onKeyDown={onKeyDown}
-                />
-                <button
-                    type="button"
-                    className="group-composer-send"
-                    disabled={disabled || sending || !value.trim()}
-                    onClick={() => void submit()}
-                    title={t('groups.send', '发送')}
-                >
-                    <IconSend size={16} stroke={1.7} />
-                </button>
-            </div>
-
-            <div className="group-composer-footer">
-                {agentCount > 1
-                    ? t('groups.planningHint', '@ 了多个智能体，系统会先做任务规划再分工执行')
-                    : t('groups.sendHint', 'Enter 发送，Shift + Enter 换行')}
+            <div className="chat-composer">
+                <div className="chat-composer-input-block">
+                    <textarea
+                        ref={textareaRef}
+                        className="chat-input"
+                        rows={1}
+                        value={value}
+                        disabled={disabled}
+                        placeholder={t('groups.composerPlaceholder', '发送消息，@ 唤醒智能体')}
+                        onChange={(event) => {
+                            setValue(event.target.value);
+                            syncQuery(event.target.value, event.target.selectionStart ?? 0);
+                        }}
+                        onKeyUp={(event) => {
+                            const target = event.target as HTMLTextAreaElement;
+                            syncQuery(target.value, target.selectionStart ?? 0);
+                        }}
+                        onClick={(event) => {
+                            const target = event.target as HTMLTextAreaElement;
+                            syncQuery(target.value, target.selectionStart ?? 0);
+                        }}
+                        onKeyDown={onKeyDown}
+                    />
+                </div>
+                <div className="chat-composer-toolbar">
+                    <span className="group-composer-hint">
+                        {agentCount > 1
+                            ? t('groups.planningHint', '@ 了多个智能体，系统会先做任务规划再分工执行')
+                            : t('groups.sendHint', 'Enter 发送，Shift + Enter 换行')}
+                    </span>
+                    <div style={{ flex: 1 }} />
+                    <button
+                        type="button"
+                        className="btn btn-primary chat-composer-send"
+                        disabled={disabled || sending || !value.trim()}
+                        onClick={() => void submit()}
+                        title={t('groups.send', '发送')}
+                    >
+                        <IconSend size={16} stroke={1.75} />
+                    </button>
+                </div>
             </div>
         </div>
     );

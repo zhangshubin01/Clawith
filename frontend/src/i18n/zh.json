@@ -2213,6 +2213,10 @@
     "deleteSession": "删除会话",
     "deleteSessionConfirm": "删除后该会话的消息不再可见，且无法恢复。",
     "deleteSessionFailed": "删除会话失败",
+    "deleteGroup": "删除群聊",
+    "deleteGroupConfirm": "删除后该群的所有会话、消息和文件都将无法恢复。",
+    "deleteGroupFailed": "删除群聊失败",
+    "deleteGroupDone": "群聊已删除",
     "pickSession": "选择或新建一个会话开始协作。",
     "members": "成员",
     "manager": "群管理",
@@ -2260,6 +2264,8 @@
     "collapseGroups": "折叠群聊栏",
     "expandGroups": "展开群聊栏",
     "collapseSessions": "折叠会话栏",
-    "expandSessions": "展开会话栏"
+    "expandSessions": "展开会话栏",
+    "collapseGroup": "折叠",
+    "expandGroup": "展开"
   }
 }
