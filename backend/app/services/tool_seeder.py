@@ -905,53 +905,83 @@ BUILTIN_TOOLS = [
             ]
         },
     },
+    # Plaza social tools (plaza_get_new_posts / plaza_create_post / plaza_add_comment)
+    # were removed in the Plaza → experience library改造 (P0-1: no AI auto-posting).
+    # Experience library — AI consumption side (hybrid pull, read-only).
     {
-        "name": "plaza_get_new_posts",
-        "display_name": "Plaza: Browse",
-        "description": "Get recent posts from the Agent Plaza (shared social feed). Returns posts and comments since a given timestamp.",
-        "category": "social",
-        "icon": "🏛️",
+        "name": "search_experience",
+        "display_name": "Experience: Search",
+        "description": (
+            "Search the team's private experience library by keyword before doing work that touches "
+            "internal systems, internal processes, or a private/self-hosted environment. Returns lightweight "
+            "candidates (title + applicability). Only entries visible to you are returned."
+        ),
+        "category": "knowledge",
+        "icon": "🔎",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "description": "Max number of posts to return (default 10)", "default": 10},
+                "keyword": {"type": "string", "description": "Keywords describing your current situation/problem."},
             },
+            "required": ["keyword"],
         },
         "config": {},
         "config_schema": {},
     },
     {
-        "name": "plaza_create_post",
-        "display_name": "Plaza: Post",
-        "description": "Publish a new post to the Agent Plaza. Share work insights, tips, or interesting discoveries. Do NOT share private information.",
-        "category": "social",
+        "name": "read_experience",
+        "display_name": "Experience: Read",
+        "description": (
+            "Read the full four-part text (场景/问题/解决/适用条件与失效信号) of one experience entry when its "
+            "applicability matches your situation. If it informs your answer, cite it with [[exp:<entry_id>]]."
+        ),
+        "category": "knowledge",
+        "icon": "📚",
+        "is_default": True,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "entry_id": {"type": "string", "description": "The entry id from search_experience results."},
+            },
+            "required": ["entry_id"],
+        },
+        "config": {},
+        "config_schema": {},
+    },
+    {
+        "name": "propose_experience_draft",
+        "display_name": "Experience: Propose Draft",
+        "description": (
+            "当用户要求你把某条经验『记成经验 / 沉淀』时调用本工具。**此工具不写入任何存储，"
+            "仅将结构化草稿呈现给用户确认**——用户点击『沉淀为经验』并人工确认后才会由人落库。"
+            "你无权直接写入团队经验库，也不要把它写进 memory 或 workspace。"
+            "title、body、applicability 三者必填，尤其 applicability（适用条件与失效信号）。"
+        ),
+        "category": "knowledge",
         "icon": "📝",
         "is_default": True,
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "Post content (max 500 chars). Must be public-safe."},
+                "title": {"type": "string", "description": "简短标题"},
+                "body": {
+                    "type": "string",
+                    "description": (
+                        "经验正文，markdown 格式。默认用「## 场景 / ## 遇到的问题 / ## 解决方式」三个小节；"
+                        "若内容不是「问题—解决」型（如一份配置说明、一条参考事实），按内容自然组织小节即可，不要硬套。"
+                    ),
+                },
+                "applicability": {
+                    "type": "string",
+                    "description": (
+                        "适用条件与失效信号（必填）：此经验在什么前提下成立、出现什么信号说明它已过时失效。"
+                        "它会脱离正文单独展示给检索方判断是否适用，必须能独立读懂。"
+                    ),
+                },
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "1-3 个简短标签"},
             },
-            "required": ["content"],
-        },
-        "config": {},
-        "config_schema": {},
-    },
-    {
-        "name": "plaza_add_comment",
-        "display_name": "Plaza: Comment",
-        "description": "Add a comment to an existing plaza post. Engage with colleagues' posts.",
-        "category": "social",
-        "icon": "💬",
-        "is_default": True,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "post_id": {"type": "string", "description": "The UUID of the post to comment on"},
-                "content": {"type": "string", "description": "Comment content (max 300 chars)"},
-            },
-            "required": ["post_id", "content"],
+            "required": ["title", "body", "applicability"],
         },
         "config": {},
         "config_schema": {},

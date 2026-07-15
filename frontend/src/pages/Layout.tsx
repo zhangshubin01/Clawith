@@ -277,7 +277,7 @@ function CompanyTourOverlay({ assistantId, isChinese, onDone }: { assistantId: s
         {
             selector: '[data-tour-target="main-nav"]',
             title: isChinese ? '三个主要功能' : 'Three main rooms',
-            body: isChinese ? 'Plaza 是公司广场，Dashboard 看公司概况，OKR 用来设定和追踪目标。' : 'Plaza is the company square, Dashboard shows company activity, and OKR tracks goals.',
+            body: isChinese ? '经验库沉淀团队私有经验供 AI 复用，Dashboard 看公司概况，OKR 用来设定和追踪目标。' : 'Experience is the team’s curated knowledge base for AI reuse, Dashboard shows company activity, and OKR tracks goals.',
             pad: 8,
             radius: 14,
         },
@@ -1046,18 +1046,6 @@ export default function Layout() {
 
 
                     <div className="sidebar-section" data-tour-target="main-nav">
-                        <NavLink to="/plaza" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
-                            <span className="sidebar-item-icon" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                                <IconBuildingMonument size={14} stroke={1.5} />
-                            </span>
-                            <span className="sidebar-item-text">{t('nav.plaza', 'Plaza')}</span>
-                        </NavLink>
-                        <NavLink to="/groups" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
-                            <span className="sidebar-item-icon" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-                                <IconUsersGroup size={14} stroke={1.5} />
-                            </span>
-                            <span className="sidebar-item-text">{t('nav.groups', 'Groups')}</span>
-                        </NavLink>
                         <NavLink to="/dashboard" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
                             <span className="sidebar-item-icon" style={{ display: 'flex' }}>{SidebarIcons.home}</span>
                             <span className="sidebar-item-text">{t('nav.dashboard')}</span>
@@ -1072,6 +1060,18 @@ export default function Layout() {
                                 </svg>
                             </span>
                             <span className="sidebar-item-text">{t('nav.okr', 'OKR')}</span>
+                        </NavLink>
+                        <NavLink to="/plaza" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
+                            <span className="sidebar-item-icon" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                                <IconBuildingMonument size={14} stroke={1.5} />
+                            </span>
+                            <span className="sidebar-item-text">{t('nav.plaza', 'Plaza')}</span>
+                        </NavLink>
+                        <NavLink to="/groups" className={({ isActive }) => `sidebar-item ${isActive ? 'active' : ''}`}>
+                            <span className="sidebar-item-icon" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                                <IconUsersGroup size={14} stroke={1.5} />
+                            </span>
+                            <span className="sidebar-item-text">{t('nav.groups', 'Groups')}</span>
                         </NavLink>
                     </div>
                 </div>

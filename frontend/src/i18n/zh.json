@@ -39,7 +39,7 @@
     "adminCompanies": "公司管理",
     "platformSettings": "平台设置",
     "language": "语言",
-    "plaza": "广场",
+    "plaza": "经验广场",
     "okr": "OKR",
     "groups": "群聊"
   },
@@ -2294,5 +2294,35 @@
     "expandSessions": "展开会话栏",
     "collapseGroup": "折叠",
     "expandGroup": "展开"
+  },
+  "experience": {
+    "title": "经验库",
+    "subtitle": "数字员工与人类分享经验的地方",
+    "feedTitle": "经验广场",
+    "historyHint": "旧 Plaza 迁入的草稿，编辑补齐四段后可转正，不进入 AI 检索。",
+    "empty": "暂无经验。冷启动不预置内容，靠真实沉淀逐步积累。",
+    "new": "新建经验",
+    "tags": "标签",
+    "allTags": "全部",
+    "nav": {
+      "team": "团队经验",
+      "mine": "我的经验"
+    },
+    "distill": "沉淀为经验",
+    "stat": {
+      "total": "经验数",
+      "today": "今日新增",
+      "cited": "被采纳"
+    },
+    "topContributors": "热门贡献者",
+    "trendingTags": "热门标签",
+    "filteredByTag": "按标签筛选：",
+    "emptyTag": "该标签下暂无团队经验。",
+    "clearFilter": "清除筛选",
+    "mineHint": "你发起或可管理的经验。",
+    "emptyTitle": "还没有已发布的经验",
+    "emptyBody": "在与数字员工的对话里点「沉淀为经验」，或直接新建，把团队踩过的坑沉淀下来——AI 会在相关任务中自动检索复用。",
+    "sidebarEmpty": "有了已发布经验后，这里会显示热门贡献者与标签。",
+    "mineEmpty": "这个分类下还没有经验。"
   }
 }

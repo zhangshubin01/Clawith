@@ -9,11 +9,13 @@ import { useToast } from '../../components/Toast/ToastProvider';
 import type { FileBrowserApi } from '../../components/FileBrowser';
 import FileBrowser from '../../components/FileBrowser';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
+import { DraftEditor as ExperienceDraftEditor, bodyExcerpt, type Draft as ExperienceDraft } from '../../components/ExperienceDraftEditor';
+import { EntryDrawer } from '../../components/ExperienceDetailDrawer';
 import PromptModal from '../../components/PromptModal';
 import { appendLiveCodeOutput, type LivePreviewState } from '../../components/AgentBayLivePanel';
 import AgentSidePanel, { SidePanelTab } from '../../components/AgentSidePanel';
 import type { WorkspaceActivity, WorkspaceLiveDraft } from '../../components/WorkspaceOperationPanel';
-import { activityApi, agentApi, channelApi, enterpriseApi, fileApi, focusApi, scheduleApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress } from '../../services/api';
+import { activityApi, agentApi, channelApi, enterpriseApi, experienceApi, fileApi, focusApi, scheduleApi, skillApi, taskApi, tenantApi, triggerApi, uploadFileWithProgress } from '../../services/api';
 import type { FocusApiItem } from '../../services/api';
 import ModelSwitcher from '../../components/ModelSwitcher';
 import { useAppStore } from '../../stores';
@@ -360,6 +362,195 @@ function CopyMessageButton({ text }: { text: string }) {
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
             )}
         </button>
+    );
+}
+
+/** "沉淀为经验" — distill this message into a structured draft, then open review (P0-2). */
+function DistillButton({ text, sessionId }: { text: string; sessionId?: string | null }) {
+    const { id: agentId } = useParams<{ id: string }>();
+    const qc = useQueryClient();
+    const toast = useToast();
+    const [busy, setBusy] = React.useState(false);
+    const [draft, setDraft] = React.useState<ExperienceDraft | null>(null);
+    const handle = async (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!agentId || busy) return;
+        setBusy(true);
+        try {
+            // Distill only — nothing persists until the human confirms in the drawer below.
+            const f = await experienceApi.distill({ agent_id: agentId, content: text, session_id: sessionId || undefined });
+            setDraft({ ...f, visibility_scope: 'company', origin_agent_id: agentId, origin_session_id: sessionId || null });
+        } catch (err) {
+            console.error('Distill failed', err);
+            toast.error('生成草稿失败，请重试');
+        } finally {
+            setBusy(false);
+        }
+    };
+    return (
+        <>
+            <button
+                onClick={handle}
+                title={busy ? '正在提炼草稿…' : '沉淀为经验'}
+                disabled={busy}
+                style={{
+                    // No cursor:wait — that only rendered a spinner while the pointer happened to
+                    // rest on the button, so moving away made a running distill look dead.
+                    background: 'none', border: 'none', cursor: busy ? 'default' : 'pointer', padding: '2px',
+                    color: 'var(--text-tertiary)', opacity: busy ? 1 : 0.5, transition: 'opacity .15s, color .15s',
+                    display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle', marginLeft: '6px', flexShrink: 0,
+                }}
+                onMouseEnter={e => { if (!busy) e.currentTarget.style.opacity = '1'; }}
+                onMouseLeave={e => { if (!busy) e.currentTarget.style.opacity = '0.5'; }}
+            >
+                {busy ? (
+                    // Same 13px footprint as the icon it replaces, so the message row doesn't shift.
+                    <svg className="distill-spinner" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                        <path d="M12 3a9 9 0 1 0 9 9" />
+                    </svg>
+                ) : (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" /><path d="M9 7h6M9 11h4" />
+                    </svg>
+                )}
+            </button>
+            {draft && (
+                <ExperienceDraftEditor
+                    draft={draft}
+                    docked
+                    autoExtractFailed={(draft as any).extracted === false}
+                    onClose={() => setDraft(null)}
+                    onSaved={() => { setDraft(null); qc.invalidateQueries({ queryKey: ['experience'] }); toast.success('沉淀成功'); }}
+                />
+            )}
+        </>
+    );
+}
+
+/** Renders a [[exp:<uuid>]] citation as a green inline pill: 「经验:<title 8>…」→ /plaza detail. */
+function ExperienceCitation({ id }: { id: string }) {
+    const qc = useQueryClient();
+    const { data } = useQuery({ queryKey: ['exp-cite', id], queryFn: () => experienceApi.get(id), staleTime: 300000, retry: false });
+    // Opens the entry in a docked drawer over the conversation. Navigating to /plaza would
+    // tear the user out of the chat they're reading — the citation is a footnote, not an exit.
+    const [detail, setDetail] = React.useState(false);
+    const [editing, setEditing] = React.useState<ExperienceDraft | null>(null);
+    const title = data?.title || '';
+    const label = title ? `经验:${title.slice(0, 8)}${title.length > 8 ? '…' : ''}` : '经验';
+    const refresh = () => {
+        qc.invalidateQueries({ queryKey: ['experience'] });
+        qc.invalidateQueries({ queryKey: ['exp-cite', id] });
+    };
+    return (
+        <>
+            <button
+                onClick={(e) => { e.stopPropagation(); setDetail(true); }}
+                title={title || '团队经验库条目'}
+                style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4, padding: '1px 8px', borderRadius: 999,
+                    fontSize: 12, lineHeight: '18px', border: '1px solid var(--success)', color: 'var(--success)',
+                    background: 'var(--success-subtle)', cursor: 'pointer', verticalAlign: 'middle',
+                }}
+            >{label}</button>
+            {detail && (
+                <EntryDrawer
+                    entryId={id}
+                    docked
+                    onClose={() => setDetail(false)}
+                    onEdit={(entry) => { setDetail(false); setEditing(entry); }}
+                    onChanged={refresh}
+                />
+            )}
+            {editing && (
+                <ExperienceDraftEditor
+                    draft={editing}
+                    docked
+                    onClose={() => setEditing(null)}
+                    onSaved={() => { setEditing(null); refresh(); }}
+                    onDeleted={() => { setEditing(null); refresh(); }}
+                />
+            )}
+        </>
+    );
+}
+
+function ExperienceCitations({ ids }: { ids: string[] }) {
+    if (!ids.length) return null;
+    return (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+            {ids.map(id => <ExperienceCitation key={id} id={id} />)}
+        </div>
+    );
+}
+
+/**
+ * Renders a propose_experience_draft tool call as a review card. The agent writes
+ * nothing — clicking 编辑后沉淀为经验 opens the shared human-gated DraftEditor prefilled;
+ * a row is created only when the human confirms there.
+ */
+function ExperienceDraftCard({ args, sessionId }: { args: any; sessionId?: string | null }) {
+    const { id: agentId } = useParams<{ id: string }>();
+    const qc = useQueryClient();
+    const toast = useToast();
+    const [open, setOpen] = React.useState(false);
+    // tool args may arrive as an object or a JSON string.
+    const a = React.useMemo(() => {
+        if (args && typeof args === 'object') return args;
+        try { return JSON.parse(args || '{}'); } catch { return {}; }
+    }, [args]);
+    const toArr = (v: any) => Array.isArray(v) ? v : (typeof v === 'string' && v ? v.split(/[,，]/).map((s: string) => s.trim()).filter(Boolean) : []);
+    const prefill: ExperienceDraft = {
+        title: a.title || '', body: a.body || '', applicability: a.applicability || '', tags: toArr(a.tags),
+        visibility_scope: 'company',
+        origin_agent_id: agentId, origin_session_id: sessionId || null,
+    };
+    // The card is a summary — flatten the markdown body so section markers don't show up
+    // literally; the drawer renders it properly. `key` marks 适用与失效: required, and the
+    // part a reader's eye slides off.
+    const parts: { label: string; val: string; key?: boolean }[] = [
+        { label: '正文', val: bodyExcerpt(a.body) },
+        { label: '适用与失效', val: a.applicability, key: true },
+    ];
+    const tags = toArr(a.tags);
+    return (
+        <div className="exp-draft">
+            <div className="exp-draft-head">
+                <div className="exp-draft-head-l">
+                    <div className="exp-draft-tagrow">
+                        <span className="exp-draft-state">草稿</span>
+                    </div>
+                    <div className="exp-draft-title">{a.title || '未命名经验'}</div>
+                </div>
+                <div className="exp-draft-pending">待你确认 · 不自动入库</div>
+            </div>
+            <div className="exp-draft-divider" />
+            <div className="exp-draft-fields">
+                <div className="exp-draft-grid">
+                    {parts.map(p => (p.val ? (
+                        <React.Fragment key={p.label}>
+                            <div className={p.key ? 'exp-draft-lab-key' : 'exp-draft-lab'}>{p.label}</div>
+                            <div className="exp-draft-val">{p.val}</div>
+                        </React.Fragment>
+                    ) : null))}
+                </div>
+            </div>
+            {tags.length > 0 && (
+                <div className="exp-draft-tags">
+                    {tags.map((tg: string) => <span key={tg} className="exp-draft-tag">{tg}</span>)}
+                </div>
+            )}
+            <div className="exp-draft-foot">
+                <button className="exp-draft-btn" onClick={() => setOpen(true)}>编辑后沉淀为经验</button>
+            </div>
+            {open && (
+                <ExperienceDraftEditor
+                    draft={prefill}
+                    docked
+                    onClose={() => setOpen(false)}
+                    onSaved={() => { setOpen(false); qc.invalidateQueries({ queryKey: ['experience'] }); toast.success('沉淀成功'); }}
+                />
+            )}
+        </div>
     );
 }
 
@@ -954,7 +1145,7 @@ function describeAnalysis(items: AnalysisItem[], t: (k: string, opts?: any) => s
 }
 
 function AnalysisCard({
-    items, t, expanded, onToggle, isGroupRunning,
+    items, t, expanded, onToggle, isGroupRunning, chatActive, sessionId,
 }: {
     items: AnalysisItem[];
     t: (k: string, opts?: any) => string;
@@ -962,16 +1153,26 @@ function AnalysisCard({
     onToggle: () => void;
     /** True when parent isWaiting/isStreaming AND this is the last active group */
     isGroupRunning: boolean;
+    /** True while the chat is actively streaming/waiting (any turn in flight) */
+    chatActive?: boolean;
+    sessionId?: string | null;
 }) {
+    // propose_experience_draft is a human-facing proposal, not a reasoning step —
+    // render it as an always-visible card outside the collapsible trace.
+    const proposeItems = items.filter(
+        (i): i is Extract<AnalysisItem, { type: 'tool' }> => i.type === 'tool' && (i as any).name === 'propose_experience_draft'
+    );
     const toolItems = items.filter(i => i.type === 'tool') as Extract<AnalysisItem, { type: 'tool' }>[];
     const hasTools = toolItems.length > 0;
     const hasRunningTool = toolItems.some(tc => tc.status === 'running');
-    const isRunning = hasRunningTool || (!hasTools && isGroupRunning);
+    // Stopped responding: a tool is still marked running but the chat is no longer streaming.
+    const stopped = hasRunningTool && chatActive === false;
+    const isRunning = !stopped && (hasRunningTool || (!hasTools && isGroupRunning));
     const runningTool = [...toolItems].reverse().find(tc => tc.status === 'running') ?? null;
     const headerTitle = isRunning && runningTool ? getToolMeta(runningTool).title : describeAnalysis(items, t);
 
     return (
-        <div className={`analysis-trace${expanded ? ' analysis-trace--open' : ''}${isRunning ? ' analysis-trace--running' : ''}`}>
+        <div className={`analysis-trace${expanded ? ' analysis-trace--open' : ''}${isRunning ? ' analysis-trace--running' : ''}${stopped ? ' analysis-trace--stopped' : ''}`}>
             <div className="analysis-trace-shell">
                 <button
                     className="analysis-trace-header"
@@ -991,10 +1192,14 @@ function AnalysisCard({
                         stroke={1.8}
                     />
                 </button>
+                {proposeItems.map((it, i) => (
+                    <ExperienceDraftCard key={`propose-${i}`} args={(it as any).args} sessionId={sessionId} />
+                ))}
                 {expanded && (
                     <div className="analysis-trace-body">
                         {items.map((item, idx) => {
                             const isLast = idx === items.length - 1;
+                            if (item.type === 'tool' && (item as any).name === 'propose_experience_draft') return null;
                             if (item.type === 'thinking') {
                                 const itemPreview = item.content.length > 360 ? item.content.slice(0, 360).trimEnd() + '...' : item.content;
                                 return (
@@ -3514,7 +3719,7 @@ export default function AgentDetailPage() {
     }, [historyMsgs, activeSession?.id, scheduleHistoryScrollToBottom]);
     // Memoized component for each chat message to avoid re-renders while typing
     const ChatMessageItem = React.useMemo(() => React.memo(({
-        msg, i, isLeft, t, senderLabel, avatarText, forceSenderLabel = false, hideAvatar = false,
+        msg, i, isLeft, t, senderLabel, avatarText, forceSenderLabel = false, hideAvatar = false, hideDistill = false,
     }: {
         msg: any;
         i: number;
@@ -3524,6 +3729,9 @@ export default function AgentDetailPage() {
         avatarText?: string;
         forceSenderLabel?: boolean;
         hideAvatar?: boolean;
+        // True when this message's turn already renders a propose_experience_draft card,
+        // which is itself the review entry point — the manual 沉淀 button would be redundant.
+        hideDistill?: boolean;
     }) => {
         const fe = msg.fileName?.split('.').pop()?.toLowerCase() ?? '';
         const isImage = msg.imageUrl && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(fe);
@@ -3548,6 +3756,15 @@ export default function AgentDetailPage() {
                 return ''; // always strip the marker from displayed text
             }).trim();
         }
+        // Experience-library citations: strip the raw [[exp:<uuid>]] markers from the shown text and
+        // collect the ids — they render as green pills below (storage/extraction logic unchanged).
+        const expCiteIds: string[] = [];
+        if (displayContent.includes('[[exp:')) {
+            displayContent = displayContent.replace(/\[\[exp:([0-9a-fA-F-]{36})\]\]/g, (_m: string, uuid: string) => {
+                if (!expCiteIds.includes(uuid)) expCiteIds.push(uuid);
+                return '';
+            }).replace(/[ \t]{2,}/g, ' ').trim();
+        }
 
         const timestampHtml = msg.timestamp ? (() => {
             const d = new Date(msg.timestamp);
@@ -3562,6 +3779,7 @@ export default function AgentDetailPage() {
                 <div className="chat-msg-timestamp">
                     {timeStr}
                     {msg.content && <CopyMessageButton text={msg.content} />}
+                    {msg.content && isLeft && !hideDistill && <DistillButton text={msg.content} sessionId={activeSessionIdRef.current} />}
                 </div>
             );
         })() : null;
@@ -3607,7 +3825,12 @@ export default function AgentDetailPage() {
                                         <div className="thinking-dots"><span /><span /><span /></div>
                                         <span style={{ color: 'var(--text-tertiary)', fontSize: '13px' }}>{t('agent.chat.thinking', 'Thinking...')}</span>
                                     </div>
-                                ) : <MarkdownRenderer content={displayContent} />
+                                ) : (
+                                    <>
+                                        <MarkdownRenderer content={displayContent} />
+                                        {expCiteIds.length > 0 && <ExperienceCitations ids={expCiteIds} />}
+                                    </>
+                                )
                             ) : <MarkdownRenderer content={displayContent} />}
                         </div>
                     </div>
@@ -5562,6 +5785,10 @@ export default function AgentDetailPage() {
                                                                             if (msg.role === 'tool_call') {
                                                                                 const tName = msg.toolName || (() => { try { return JSON.parse(msg.content || '{}').name; } catch { return ''; } })() || 'tool';
                                                                                 const tArgs = msg.toolArgs || (() => { try { return JSON.parse(msg.content || '{}').args; } catch { return {}; } })();
+                                                                                // Experience draft proposal renders as a human-gated review card, not a raw tool blob.
+                                                                                if (tName === 'propose_experience_draft') {
+                                                                                    return <ExperienceDraftCard key={mi} args={tArgs} sessionId={activeSessionIdRef.current} />;
+                                                                                }
                                                                                 const tResult = msg.toolResult || '';
                                                                                 const argsStr = typeof tArgs === 'string' ? tArgs : JSON.stringify(tArgs || {}, null, 2);
                                                                                 const resultStr = typeof tResult === 'string' ? tResult : JSON.stringify(tResult, null, 2);
@@ -6087,6 +6314,27 @@ export default function AgentDetailPage() {
                                                     const thisAgentPid = isA2A && thisAgentName
                                                         ? historyMsgs.find((m: any) => m.sender_name === thisAgentName)?.participant_id
                                                         : null;
+                                                    // Mark assistant messages whose turn already renders a propose_experience_draft
+                                                    // card (a turn = rows between user messages). Their 沉淀 button is redundant.
+                                                    const proposeTurnIdx = new Set<number>();
+                                                    {
+                                                        const toolNameOf = (mm: any) => mm.toolName || (() => { try { return JSON.parse(mm.content || '{}').name; } catch { return ''; } })();
+                                                        let s = 0;
+                                                        for (let k = 0; k <= historyMsgs.length; k++) {
+                                                            if (k === historyMsgs.length || historyMsgs[k].role === 'user') {
+                                                                let hasPropose = false;
+                                                                for (let j = s; j < k; j++) {
+                                                                    if (historyMsgs[j].role === 'tool_call' && toolNameOf(historyMsgs[j]) === 'propose_experience_draft') { hasPropose = true; break; }
+                                                                }
+                                                                if (hasPropose) {
+                                                                    for (let j = s; j < k; j++) {
+                                                                        if (historyMsgs[j].role === 'assistant' && historyMsgs[j].content?.trim()) proposeTurnIdx.add(j);
+                                                                    }
+                                                                }
+                                                                s = k + 1;
+                                                            }
+                                                        }
+                                                    }
                                                     return historyMsgs.map((m: any, i: number) => {
                                                         // Determine if this message is from "this agent" (left) or peer (right)
                                                         // Actually, "this agent" should be on the RIGHT (like 'me'), and peer on the LEFT
@@ -6096,6 +6344,9 @@ export default function AgentDetailPage() {
                                                         if (m.role === 'tool_call') {
                                                             const tName = m.toolName || (() => { try { return JSON.parse(m.content || '{}').name; } catch { return 'tool'; } })();
                                                             const tArgs = m.toolArgs || (() => { try { return JSON.parse(m.content || '{}').args; } catch { return {}; } })();
+                                                            if (tName === 'propose_experience_draft') {
+                                                                return <ExperienceDraftCard key={i} args={tArgs} sessionId={activeSessionIdRef.current} />;
+                                                            }
                                                             const tResult = m.toolResult ?? (() => { try { return JSON.parse(m.content || '{}').result; } catch { return ''; } })();
                                                             return (
                                                                 <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px', paddingLeft: '36px', minWidth: 0 }}>
@@ -6133,6 +6384,7 @@ export default function AgentDetailPage() {
                                                                     senderLabel={isHumanReadonly ? (isLeft ? ((agent as any)?.name || 'Agent') : (activeSession.username || 'User')) : undefined}
                                                                     avatarText={isHumanReadonly ? (isLeft ? (((agent as any)?.name || 'Agent')[0]) : ((activeSession.username || 'User')[0])) : undefined}
                                                                     forceSenderLabel={isHumanReadonly}
+                                                                    hideDistill={proposeTurnIdx.has(i)}
                                                                 />
                                                             </React.Fragment>
                                                         );
@@ -6301,6 +6553,10 @@ export default function AgentDetailPage() {
                                                         const hideAssistantAvatar = entry.type === 'msg'
                                                             && entry.msg.role === 'assistant'
                                                             && previousEntry?.type === 'analysis_group';
+                                                        // The assistant text that follows a propose_experience_draft group
+                                                        // already has the review card above it — suppress its 沉淀 button.
+                                                        const prevGroupHasPropose = previousEntry?.type === 'analysis_group'
+                                                            && previousEntry.items.some((it: any) => it.type === 'tool' && it.name === 'propose_experience_draft');
                                                         if (entry.type === 'analysis_group') {
                                                             // Group is considered running if it has a running tool,
                                                             // or if it's the very last entry and the agent is still active
@@ -6319,6 +6575,8 @@ export default function AgentDetailPage() {
                                                                         expanded={toolGroupExpandedRef.current.has(entry.key) ? !!toolGroupExpandedRef.current.get(entry.key) : false}
                                                                         onToggle={() => toggleToolGroup(entry.key)}
                                                                         isGroupRunning={groupIsRunning}
+                                                                        chatActive={isWaiting || isStreaming}
+                                                                        sessionId={activeSessionIdRef.current}
                                                                     />
                                                                 </div>
                                                             );
@@ -6343,6 +6601,7 @@ export default function AgentDetailPage() {
                                                                             senderLabel={(agent as any)?.name || 'Agent'}
                                                                             avatarText={((agent as any)?.name || 'Agent')[0]}
                                                                             hideAvatar={hideAssistantAvatar}
+                                                                            hideDistill={prevGroupHasPropose}
                                                                         />
                                                                     )}
                                                                 </React.Fragment>
@@ -6358,6 +6617,7 @@ export default function AgentDetailPage() {
                                                                 senderLabel={msg.role === 'assistant' ? ((agent as any)?.name || 'Agent') : (currentUser?.display_name || undefined)}
                                                                 avatarText={msg.role === 'assistant' ? (((agent as any)?.name || 'Agent')[0]) : (currentUser?.display_name?.[0] || undefined)}
                                                                 hideAvatar={hideAssistantAvatar}
+                                                                hideDistill={prevGroupHasPropose}
                                                             />
                                                         );
                                                     });

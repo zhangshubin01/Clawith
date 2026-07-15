@@ -187,6 +187,13 @@ async def execute_task(task_id: uuid.UUID, agent_id: uuid.UUID) -> None:
         "统一 Runtime 当前未对 task 入口启用；未回退旧执行循环",
     )
 
+    # Record experience-library citations ([[exp:<id>]]) as `cited` (adoption metric).
+    try:
+        from app.services.experience_retrieval import record_experience_citations
+        await record_experience_citations(reply, agent_id=agent_id, session_id=task_id)
+    except Exception as e:
+        logger.warning(f"[TaskExec] experience citation recording failed for agent {agent_id}: {e}")
+
 
 async def _log_error(task_id: uuid.UUID, message: str) -> None:
     """Add an error log to the task."""

@@ -3085,12 +3085,22 @@ async def execute_tool(
             result = await _jina_read(arguments)
         elif tool_name == "read_webpage":
             result = await _read_webpage(arguments)
-        elif tool_name == "plaza_get_new_posts":
-            result = await _plaza_get_new_posts(agent_id, arguments)
-        elif tool_name == "plaza_create_post":
-            result = await _plaza_create_post(agent_id, arguments)
-        elif tool_name == "plaza_add_comment":
-            result = await _plaza_add_comment(agent_id, arguments)
+        elif tool_name in ("plaza_get_new_posts", "plaza_create_post", "plaza_add_comment"):
+            # Deprecated: Plaza social feed replaced by the human-curated experience library.
+            result = "[DISABLED] Plaza is now a human-curated experience library. Agents no longer post; contribute via the human-led distillation flow instead."
+        elif tool_name == "search_experience":
+            from app.services.experience_retrieval import search_experience
+            result = await search_experience(agent_id, arguments)
+        elif tool_name == "read_experience":
+            from app.services.experience_retrieval import read_experience
+            result = await read_experience(agent_id, arguments)
+        elif tool_name == "propose_experience_draft":
+            # No-op by design: writes nothing. The structured args are rendered as a
+            # human-gated review card in the UI; a row is created only if the human confirms.
+            result = (
+                "[已呈现草稿] 已把这条经验的结构化草稿展示给用户，等待其点击『沉淀为经验』人工确认后入库。"
+                "本工具未写入任何存储；请如实告诉用户你无法直接入库、需要他确认。"
+            )
         elif tool_name in ("execute_code", "execute_code_e2b"):
             logger.info(f"[DirectTool] Executing code ({tool_name}) with arguments: {arguments}")
             result = await _run_with_temp_workspace(
