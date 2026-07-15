@@ -29,15 +29,22 @@ import re
 
 from loguru import logger
 from sqlalchemy import select, or_
-from sqlalchemy.orm import selectinload
 
+from app.core.permissions import (
+    evaluate_roster_agent_visibility,
+    evaluate_roster_human_visibility,
+)
 from app.database import async_session
-from app.models.task import Task
 from app.models.agent import Agent as AgentModel
-from app.models.org import AgentRelationship, OrgMember, AgentAgentRelationship
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.channel_config import ChannelConfig
+from app.models.identity import IdentityProvider
+from app.models.org import (
+    OrgDepartment,
+    OrgMember,
+)
+from app.models.task import Task
 from app.models.user import User as UserModel
 from app.services.channel_session import find_or_create_channel_session
 from app.services.channel_user_service import get_platform_user_by_org_member
@@ -62,7 +69,6 @@ from app.services.workspace_collaboration import (
 from app.services.storage import get_storage_backend, normalize_storage_key
 from app.services.storage_runtime.base import WriteCondition, content_hash_bytes
 from app.services.workspace_locking import workspace_locks
-from app.core.permissions import evaluate_agent_relationship_status, evaluate_human_relationship_status
 from app.config import get_settings
 from app.services.llm.finish import (
     FINISH_TOOL_DEFINITION,
@@ -2128,6 +2134,34 @@ async def _agent_has_any_channel(agent_id: uuid.UUID) -> bool:
 
 
 # ─── Dynamic Tool Loading from DB ──────────────────────────────
+
+
+_CANONICAL_LLM_TOOL_NAMES = {
+    "send_message_to_agent",
+    "send_file_to_agent",
+    "send_platform_message",
+    "send_channel_message",
+    "send_channel_file",
+    "query_directory",
+}
+
+
+def _canonicalize_llm_tool(tool_def: dict) -> dict:
+    """Replace stale DB schemas with the current model-facing contract."""
+    import copy
+
+    name = tool_def.get("function", {}).get("name")
+    if name not in _CANONICAL_LLM_TOOL_NAMES:
+        return tool_def
+    canonical = next(
+        (
+            tool
+            for tool in AGENT_TOOLS
+            if tool.get("function", {}).get("name") == name
+        ),
+        None,
+    )
+    return copy.deepcopy(canonical) if canonical else tool_def
 
 
 async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:

@@ -52,7 +52,7 @@ def _agent_collection_prompt(agent_member: Agent, report_day: date) -> str:
 Collect and store the final daily report from digital employee {agent_member.name}.
 
 1. Call send_message_to_agent with exactly:
-   - agent_name: {agent_member.name}
+   - target_agent_id: {agent_member.id}
    - msg_type: task_delegate
    - message: {request}
 2. Wait for the durable A2A result.

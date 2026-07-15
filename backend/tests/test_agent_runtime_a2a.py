@@ -18,6 +18,8 @@ from app.models.gateway_message import GatewayMessage
 from app.services.agent_runtime.a2a_runtime import (
     A2ARuntimeError,
     RuntimeA2AService,
+    _request,
+    _resolve_target,
     a2a_mode_from_correlation,
     a2a_waiting_request,
     complete_gateway_a2a_runtime,
@@ -177,6 +179,48 @@ def _records() -> tuple[uuid.UUID, Agent, Agent, AgentRun, ToolExecutionReservat
         error_code=None,
     )
     return tenant_id, source, target, source_run, reservation
+
+
+def test_directory_target_id_is_the_primary_runtime_a2a_contract() -> None:
+    target_id = uuid.uuid4()
+
+    request = _request(
+        {
+            "target_agent_id": str(target_id),
+            "message": "Check the facts",
+            "msg_type": "consult",
+        }
+    )
+
+    assert request.target_agent_id == target_id
+    assert request.target_name is None
+
+    with pytest.raises(A2ARuntimeError) as raised:
+        _request(
+            {
+                "target_agent_id": "not-a-uuid",
+                "message": "Check the facts",
+            }
+        )
+    assert raised.value.code == "a2a_target_id_invalid"
+
+
+@pytest.mark.asyncio
+async def test_directory_company_target_does_not_require_legacy_relationship() -> None:
+    _, source, target, _, _ = _records()
+    source.access_mode = "company"
+    target.access_mode = "company"
+    db = _Session(target)
+
+    resolved = await _resolve_target(
+        db,  # type: ignore[arg-type]
+        source_agent=source,
+        target_agent_id=target.id,
+        target_name=None,
+        actor_user_id=source.creator_id,
+    )
+
+    assert resolved is target
 
 
 @pytest.mark.asyncio
@@ -356,7 +400,7 @@ async def test_delegate_creates_target_run_and_receipt_in_one_transaction() -> N
             source_agent_id=source.id,
             tool_call_id="delegate-call",
             arguments={
-                "agent_name": target.name,
+                "target_agent_id": str(target.id),
                 "message": "Research the latest facts",
                 "msg_type": "task_delegate",
             },

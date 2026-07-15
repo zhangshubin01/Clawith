@@ -11,7 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.core.permissions import evaluate_agent_relationship_status
+from app.core.permissions import (
+    evaluate_agent_relationship_status,
+    evaluate_roster_agent_visibility,
+)
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.agent_tool_execution import AgentToolExecution
@@ -33,6 +36,7 @@ from app.services.agent_runtime.tool_execution import (
     mark_tool_execution_failed,
     mark_tool_execution_succeeded,
 )
+from app.services import agent_directory
 from app.services.participant_identity import get_or_create_agent_participant
 
 
@@ -76,19 +80,30 @@ class GatewayA2ARuntimeCompletion:
 
 @dataclass(frozen=True, slots=True)
 class _A2ARequest:
-    target_name: str
+    target_agent_id: uuid.UUID | None
+    target_name: str | None
     message: str
     mode: A2AMode
 
 
 def _request(arguments: dict) -> _A2ARequest:
+    raw_target_id = str(arguments.get("target_agent_id") or "").strip()
     target_name = str(arguments.get("agent_name") or "").strip()
     message = str(arguments.get("message") or "").strip()
     raw_mode = str(arguments.get("msg_type") or "notify").strip().lower()
-    if not target_name or not message:
+    target_agent_id: uuid.UUID | None = None
+    if raw_target_id:
+        try:
+            target_agent_id = uuid.UUID(raw_target_id)
+        except ValueError as exc:
+            raise A2ARuntimeError(
+                "a2a_target_id_invalid",
+                "A2A target_agent_id must be a valid UUID",
+            ) from exc
+    if (target_agent_id is None and not target_name) or not message:
         raise A2ARuntimeError(
             "a2a_input_missing",
-            "A2A requires both agent_name and message",
+            "A2A requires target_agent_id and message",
         )
     if raw_mode not in {"notify", "consult", "task_delegate"}:
         raise A2ARuntimeError(
@@ -96,7 +111,8 @@ def _request(arguments: dict) -> _A2ARequest:
             "A2A msg_type must be notify, consult, or task_delegate",
         )
     return _A2ARequest(
-        target_name=target_name,
+        target_agent_id=target_agent_id,
+        target_name=target_name or None,
         message=message,
         mode=raw_mode,  # type: ignore[arg-type]
     )
@@ -336,18 +352,31 @@ async def _resolve_target(
     db: AsyncSession,
     *,
     source_agent: Agent,
-    target_name: str,
+    target_agent_id: uuid.UUID | None,
+    target_name: str | None,
     actor_user_id: uuid.UUID | None,
 ) -> Agent:
-    exact_result = await db.execute(
-        select(Agent).where(
-            Agent.tenant_id == source_agent.tenant_id,
-            Agent.id != source_agent.id,
-            Agent.name == target_name,
+    if target_agent_id is not None:
+        target_result = await db.execute(
+            select(Agent).where(
+                Agent.tenant_id == source_agent.tenant_id,
+                Agent.id != source_agent.id,
+                Agent.id == target_agent_id,
+            )
         )
-    )
-    target = exact_result.scalars().first()
-    if target is None:
+        target = target_result.scalar_one_or_none()
+    else:
+        assert target_name is not None
+        exact_result = await db.execute(
+            select(Agent).where(
+                Agent.tenant_id == source_agent.tenant_id,
+                Agent.id != source_agent.id,
+                Agent.name == target_name,
+            )
+        )
+        target = exact_result.scalars().first()
+    if target is None and target_agent_id is None:
+        assert target_name is not None
         safe_name = target_name.replace("%", "").replace("_", r"\_")
         fuzzy_result = await db.execute(
             select(Agent)
@@ -366,10 +395,40 @@ async def _resolve_target(
             )
         target = matches[0] if matches else None
     if target is None:
+        target_label = str(target_agent_id) if target_agent_id else repr(target_name)
         raise A2ARuntimeError(
             "a2a_target_not_found",
-            f"No related Agent matches {target_name!r}",
+            f"No related Agent matches {target_label}",
         )
+
+    if target_agent_id is not None:
+        authorized_custom_target = False
+        if target.access_mode == "custom":
+            authorized_custom_target = (
+                await agent_directory.is_custom_agent_target_authorized(
+                    db,
+                    source_agent_id=source_agent.id,
+                    target_agent_id=target.id,
+                )
+            )
+        visibility = evaluate_roster_agent_visibility(
+            source_agent,
+            target,
+            authorized_custom_target=authorized_custom_target,
+        )
+        if not visibility.visible:
+            raise A2ARuntimeError(
+                "a2a_target_not_visible",
+                f"Agent {target.name} is not visible in the source Agent's Directory",
+            )
+        if not visibility.can_contact:
+            reason = visibility.unavailable_reason or "target_unavailable"
+            raise A2ARuntimeError(
+                "a2a_target_unavailable",
+                f"Agent {target.name} is unavailable ({reason})",
+            )
+        return target
+
     if target.is_expired or target.status not in {"creating", "running", "idle"}:
         raise A2ARuntimeError(
             "a2a_target_unavailable",
@@ -736,6 +795,7 @@ class RuntimeA2AService:
                     target = await _resolve_target(
                         db,
                         source_agent=source_agent,
+                        target_agent_id=request.target_agent_id,
                         target_name=request.target_name,
                         actor_user_id=owner_user_id,
                     )

@@ -50,6 +50,8 @@ async def test_agent_daily_collection_uses_oneshot_a2a_wait_resume() -> None:
     assert kwargs["agent_id"] == okr_agent.id
     assert kwargs["triggered_by_user_id"] == okr_agent.creator_id
     assert "send_message_to_agent" in kwargs["prompt"]
+    assert f"target_agent_id: {member.id}" in kwargs["prompt"]
+    assert "agent_name:" not in kwargs["prompt"]
     assert "msg_type: task_delegate" in kwargs["prompt"]
     assert "upsert_member_daily_report" in kwargs["prompt"]
     assert f"member_id: {member.id}" in kwargs["prompt"]

@@ -267,7 +267,6 @@ async def test_get_agent_tools_for_llm_filters_legacy_feishu_tool_from_db():
     )
     db = RecordingDB([
         DummyResult(scalar_value=source),
-        DummyResult(scalar_value=None),
         DummyResult(values=[]),
         DummyResult(values=[platform_tool, legacy_feishu_tool]),
     ])
@@ -312,7 +311,6 @@ async def test_get_agent_tools_for_llm_rewrites_stale_a2a_schema_from_db():
     )
     db = RecordingDB([
         DummyResult(scalar_value=source),
-        DummyResult(scalar_value=None),
         DummyResult(values=[]),
         DummyResult(values=[stale_a2a_tool]),
     ])
@@ -364,7 +362,6 @@ async def test_get_agent_tools_for_llm_hides_channel_message_without_configured_
     )
     db = RecordingDB([
         DummyResult(scalar_value=source),
-        DummyResult(scalar_value=None),
         DummyResult(values=[]),
         DummyResult(values=[platform_tool, stale_channel_tool]),
     ])

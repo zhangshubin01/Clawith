@@ -14,7 +14,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.core.permissions import evaluate_agent_relationship_status, evaluate_human_relationship_status
+from app.core.permissions import (
+    can_auto_contact_company_agent,
+    evaluate_agent_relationship_status,
+    evaluate_human_relationship_status,
+)
 from app.models.agent import Agent
 from app.models.gateway_message import GatewayMessage
 from app.models.user import User

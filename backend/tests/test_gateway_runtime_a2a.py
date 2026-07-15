@@ -27,6 +27,9 @@ class _Scalars:
     def all(self) -> list[object]:
         return self.values
 
+    def first(self):
+        return self.values[0] if self.values else None
+
 
 class _Result:
     def __init__(self, values: list[object]) -> None:
@@ -40,13 +43,14 @@ class _Result:
 
 
 class _Session:
-    def __init__(self, relationship: object) -> None:
-        self.relationship = relationship
+    def __init__(self, *results: object) -> None:
+        self.results = deque(results)
         self.commits = 0
         self.rollbacks = 0
 
     async def execute(self, _statement) -> _Result:
-        return _Result([self.relationship])
+        value = self.results.popleft()
+        return _Result([] if value is None else [value])
 
     async def commit(self) -> None:
         self.commits += 1
@@ -100,9 +104,10 @@ async def test_gateway_native_agent_message_commits_runtime_before_acceptance() 
         status="idle",
         is_expired=False,
         agent_type="native",
+        access_mode="company",
     )
     relationship = SimpleNamespace(target_agent=target)
-    db = _Session(relationship)
+    db = _Session(target, relationship)
     message_id = uuid.uuid4()
     run_id = uuid.uuid4()
     session_id = uuid.uuid4()
