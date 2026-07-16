@@ -74,7 +74,7 @@ services:
       CORS_ORIGINS: '["*"]'
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
-      DOCKER_NETWORK: clawith_yaojin_network
+      DOCKER_NETWORK: ${CLAWITH_DOCKER_NETWORK:-clawith_network}
       SS_CONFIG_FILE: /data/ss-nodes.json
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
@@ -133,7 +133,7 @@ services:
       CORS_ORIGINS: '["*"]'
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
-      DOCKER_NETWORK: clawith_yaojin_network
+      DOCKER_NETWORK: ${CLAWITH_DOCKER_NETWORK:-clawith_network}
       SS_CONFIG_FILE: /data/ss-nodes.json
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
@@ -185,4 +185,4 @@ volumes:
 
 networks:
   default:
-    name: clawith_network
+    name: ${CLAWITH_DOCKER_NETWORK:-clawith_network}

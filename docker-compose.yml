@@ -44,6 +44,7 @@ services:
       AGENT_TEMPLATE_DIR: /app/agent_template
       STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
       STORAGE_LOCAL_ROOT: /data/agents
+      DOCKER_NETWORK: ${CLAWITH_DOCKER_NETWORK:-clawith_network}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-jwt-secret}
       PROCESS_ROLE: all
@@ -106,4 +107,4 @@ volumes:
 
 networks:
   default:
-    name: clawith_network
+    name: ${CLAWITH_DOCKER_NETWORK:-clawith_network}

@@ -29,3 +29,14 @@ test('backend receives the configured Group planning and compact model ids', () 
     /MULTI_AGENT_COMPACT_MODEL_ID: \$\{MULTI_AGENT_COMPACT_MODEL_ID:-\}/,
   );
 });
+
+test('compose can isolate sibling deployments on the same Docker host', () => {
+  assert.match(
+    compose,
+    /DOCKER_NETWORK: \$\{CLAWITH_DOCKER_NETWORK:-clawith_network\}/,
+  );
+  assert.match(
+    compose,
+    /name: \$\{CLAWITH_DOCKER_NETWORK:-clawith_network\}/,
+  );
+});
