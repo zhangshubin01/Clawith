@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { IconPlus, IconRobot, IconSettings, IconUser, IconX } from '@tabler/icons-react';
 import { groupApi } from '../../services/groupApi';
@@ -8,6 +8,17 @@ import GroupMemoryTab from './GroupMemoryTab';
 import type { GroupMember } from '../../types/group';
 
 type PanelTab = 'members' | 'announcement' | 'workspace' | 'memory';
+
+const PANEL_WIDTH_KEY = 'groups.panelWidth';
+// Default sized by measurement, not taste: a long realistic member name — 12 CJK chars plus the
+// "Manager" badge — measures ~221px, and the row chrome (16*2 body padding + 24 avatar + 8 gap)
+// adds 64, so ~285px fits it on one line; 300 leaves a little slack. Min/max bound the drag.
+const PANEL_DEFAULT_WIDTH = 300;
+const PANEL_MIN_WIDTH = 240;
+const PANEL_MAX_WIDTH = 520;
+
+const clampWidth = (value: number) =>
+    Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, value));
 
 interface GroupSidePanelProps {
     groupId: string;
@@ -34,6 +45,33 @@ export default function GroupSidePanel({
 }: GroupSidePanelProps) {
     const { t } = useTranslation();
     const [tab, setTab] = useState<PanelTab>('members');
+
+    // The panel's left edge is a resize handle; the width is remembered across sessions.
+    const [width, setWidth] = useState(() => {
+        const stored = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+        return Number.isFinite(stored) && stored > 0 ? clampWidth(stored) : PANEL_DEFAULT_WIDTH;
+    });
+    useEffect(() => {
+        localStorage.setItem(PANEL_WIDTH_KEY, String(width));
+    }, [width]);
+
+    const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+    const onResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+        dragRef.current = { startX: event.clientX, startWidth: width };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        document.body.style.userSelect = 'none';
+    };
+    const onResizeMove = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (!dragRef.current) return;
+        // The panel is on the right, so dragging its left edge leftward widens it.
+        const delta = dragRef.current.startX - event.clientX;
+        setWidth(clampWidth(dragRef.current.startWidth + delta));
+    };
+    const onResizeEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+        dragRef.current = null;
+        event.currentTarget.releasePointerCapture(event.pointerId);
+        document.body.style.userSelect = '';
+    };
 
     const people = members.filter((member) => member.participant_type === 'user');
     const agents = members.filter((member) => member.participant_type === 'agent');
@@ -67,7 +105,15 @@ export default function GroupSidePanel({
     ];
 
     return (
-        <aside className="group-side-panel">
+        <aside className="group-side-panel" style={{ width, flexBasis: width }}>
+            <div
+                className="group-panel-resizer"
+                onPointerDown={onResizeStart}
+                onPointerMove={onResizeMove}
+                onPointerUp={onResizeEnd}
+                onPointerCancel={onResizeEnd}
+                title={t('groups.dragToResize', '拖动调整宽度')}
+            />
             <div className="group-panel-topbar">
                 <span className="group-panel-groupname" title={groupName}>{groupName}</span>
                 <div className="group-column-actions">
