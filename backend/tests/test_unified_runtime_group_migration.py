@@ -22,9 +22,13 @@ from app.models.channel_delivery import ChannelDelivery
 from app.models.chat_session import ChatSession
 from app.models.experience import ExperienceEntry
 from app.models.experience_reference import ExperienceReference
+from app.models.gateway_message import GatewayMessage
 from app.models.group import Group, GroupMember
 from app.models.llm import LLMModel
+from app.models.notification import Notification
 from app.models.session_context_state import SessionContextState
+from app.models.tenant_setting import TenantSetting
+from app.models.trigger_execution import TriggerExecution
 from app.models.workspace import WorkspaceEditLock, WorkspaceFileRevision
 
 
@@ -48,6 +52,7 @@ LEGACY_BRANCH_REVISIONS = {
 
 EXPECTED_UPGRADE_PHASES = (
     "directory_indexes",
+    "baseline_orm_tables",
     "experience_library",
     "group_domain",
     "unified_chat",
@@ -59,9 +64,17 @@ EXPECTED_UPGRADE_PHASES = (
     "remove_template_bootstrap",
 )
 
+BASELINE_MODEL_TABLES = (
+    GatewayMessage.__table__,
+    Notification.__table__,
+    TenantSetting.__table__,
+    TriggerExecution.__table__,
+)
+
 CREATED_MODEL_TABLES = {
     table.name: table
     for table in (
+        *BASELINE_MODEL_TABLES,
         ExperienceEntry.__table__,
         ExperienceReference.__table__,
         Group.__table__,
@@ -176,6 +189,8 @@ def _capture_created_schema(monkeypatch, migration):
     indexes: dict[str, set[tuple[object, ...]]] = {}
 
     monkeypatch.setattr(migration.op, "execute", lambda _statement: None)
+    monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+    monkeypatch.setattr(migration, "_schema_object_names", lambda _bind: set())
     monkeypatch.setattr(
         migration.op,
         "create_table",
@@ -203,6 +218,7 @@ def _capture_created_schema(monkeypatch, migration):
         )
 
     monkeypatch.setattr(migration.op, "create_index", record_index)
+    migration._upgrade_baseline_orm_tables()
     migration._upgrade_experience_library()
     migration._upgrade_group_domain()
     migration._upgrade_runtime_schema()
@@ -691,6 +707,250 @@ def test_fresh_metadata_precreation_is_all_or_nothing(phase: str) -> None:
 
     with pytest.raises(RuntimeError, match=f"partially precreated {phase}"):
         migration._precreated_phase_state(phase, {next(iter(expected))})
+
+
+@pytest.mark.parametrize(
+    ("table_name", "complete_action"),
+    (
+        ("gateway_messages", "keep"),
+        ("notifications", "normalize_notifications"),
+        ("tenant_settings", "keep"),
+        ("trigger_executions", "keep"),
+    ),
+)
+def test_baseline_orm_tables_are_classified_independently(
+    table_name: str,
+    complete_action: str,
+) -> None:
+    migration = _load_migration()
+    expected = migration._BASELINE_ORM_TABLE_OBJECTS[table_name]
+
+    assert migration._baseline_orm_table_plan(table_name, set()) == ("create", ())
+    assert migration._baseline_orm_table_plan(table_name, set(expected)) == (
+        complete_action,
+        (),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"unknown partial baseline ORM table {table_name}",
+    ):
+        migration._baseline_orm_table_plan(
+            table_name,
+            {f"table:{table_name}"},
+        )
+
+
+def test_baseline_orm_upgrade_keeps_complete_tables_and_creates_missing_ones(
+    monkeypatch,
+) -> None:
+    migration = _load_migration()
+    preserved = "tenant_settings"
+    actual = set(migration._BASELINE_ORM_TABLE_OBJECTS[preserved])
+    created: list[str] = []
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+    monkeypatch.setattr(migration, "_schema_object_names", lambda _bind: actual)
+    monkeypatch.setattr(
+        migration,
+        "_BASELINE_ORM_CREATE",
+        {
+            table_name: (lambda name=table_name: created.append(name))
+            for table_name in migration.BASELINE_ORM_TABLES
+        },
+    )
+
+    migration._upgrade_baseline_orm_tables()
+
+    assert created == [
+        table_name
+        for table_name in migration.BASELINE_ORM_TABLES
+        if table_name != preserved
+    ]
+
+
+def test_gateway_messages_known_legacy_shape_adds_conversation_id(
+    monkeypatch,
+) -> None:
+    migration = _load_migration()
+    actual = set(migration._GATEWAY_MESSAGES_LEGACY_OBJECTS)
+    for table_name in migration.BASELINE_ORM_TABLES:
+        if table_name != "gateway_messages":
+            actual.update(migration._BASELINE_ORM_TABLE_OBJECTS[table_name])
+    added: list[tuple[str, sa.Column]] = []
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+    monkeypatch.setattr(migration, "_schema_object_names", lambda _bind: actual)
+    monkeypatch.setattr(
+        migration.op,
+        "add_column",
+        lambda table_name, column: added.append((table_name, column)),
+    )
+    monkeypatch.setattr(migration.op, "alter_column", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        migration,
+        "_BASELINE_ORM_CREATE",
+        {
+            table_name: lambda: pytest.fail("known tables must not be recreated")
+            for table_name in migration.BASELINE_ORM_TABLES
+        },
+    )
+
+    migration._upgrade_baseline_orm_tables()
+
+    assert [(table_name, column.name) for table_name, column in added] == [
+        ("gateway_messages", "conversation_id")
+    ]
+    assert added[0][1].nullable is True
+    assert str(added[0][1].type) == "VARCHAR(100)"
+
+
+def test_notifications_original_shape_gets_lossless_016_repair(
+    monkeypatch,
+) -> None:
+    migration = _load_migration()
+    actual: set[str] = set()
+    for table_name in migration.BASELINE_ORM_TABLES:
+        actual.update(migration._BASELINE_ORM_TABLE_OBJECTS[table_name])
+    actual.difference_update(migration._NOTIFICATION_EXTENSION_OBJECTS)
+    added: list[tuple[str, sa.Column]] = []
+    altered: dict[tuple[str, str], dict[str, object]] = {}
+    foreign_keys: dict[str, tuple[object, ...]] = {}
+    indexes: dict[str, tuple[object, ...]] = {}
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+    monkeypatch.setattr(migration, "_schema_object_names", lambda _bind: actual)
+    monkeypatch.setattr(
+        migration.op,
+        "add_column",
+        lambda table_name, column: added.append((table_name, column)),
+    )
+    monkeypatch.setattr(
+        migration.op,
+        "alter_column",
+        lambda table_name, column_name, **kwargs: altered.setdefault(
+            (table_name, column_name), kwargs
+        ),
+    )
+    monkeypatch.setattr(
+        migration.op,
+        "create_foreign_key",
+        lambda name, source, target, local, remote, **kwargs: foreign_keys.setdefault(
+            name,
+            (source, target, tuple(local), tuple(remote), kwargs),
+        ),
+    )
+
+    def record_index(name, table_name, columns, unique=False, **kwargs):
+        indexes[name] = (
+            table_name,
+            tuple(columns),
+            bool(unique),
+            (
+                _canonical_sql(kwargs["postgresql_where"], table_name=table_name)
+                if kwargs.get("postgresql_where") is not None
+                else None
+            ),
+        )
+
+    monkeypatch.setattr(migration.op, "create_index", record_index)
+
+    migration._upgrade_baseline_orm_tables()
+
+    assert [(table_name, column.name) for table_name, column in added] == [
+        ("notifications", "agent_id"),
+        ("notifications", "sender_name"),
+    ]
+    assert altered[("notifications", "user_id")]["nullable"] is True
+    assert foreign_keys["notifications_agent_id_fkey"][:4] == (
+        "notifications",
+        "agents",
+        ("agent_id",),
+        ("id",),
+    )
+    assert indexes == {
+        "ix_notifications_agent_id": (
+            "notifications",
+            ("agent_id",),
+            False,
+            "agent_id is not null",
+        )
+    }
+
+
+def test_trigger_executions_missing_safe_index_is_repaired(monkeypatch) -> None:
+    migration = _load_migration()
+    actual: set[str] = set()
+    for table_name in migration.BASELINE_ORM_TABLES:
+        actual.update(migration._BASELINE_ORM_TABLE_OBJECTS[table_name])
+    missing_index = "ix_trigger_executions_status_scheduled"
+    actual.remove(f"index:{missing_index}")
+    indexes: list[tuple[str, str, tuple[str, ...]]] = []
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+    monkeypatch.setattr(migration, "_schema_object_names", lambda _bind: actual)
+    monkeypatch.setattr(migration.op, "alter_column", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        migration.op,
+        "create_index",
+        lambda name, table_name, columns, **_kwargs: indexes.append(
+            (name, table_name, tuple(columns))
+        ),
+    )
+
+    migration._upgrade_baseline_orm_tables()
+
+    assert indexes == [
+        (
+            missing_index,
+            "trigger_executions",
+            ("status", "scheduled_at"),
+        )
+    ]
+
+
+def test_baseline_orm_partial_table_fails_before_any_ddl(monkeypatch) -> None:
+    migration = _load_migration()
+    # Put the invalid table last so the assertion proves the first three
+    # create plans were classified, but no DDL ran before global preflight.
+    partial_table = "trigger_executions"
+    created: list[str] = []
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: object())
+    monkeypatch.setattr(
+        migration,
+        "_schema_object_names",
+        lambda _bind: {f"table:{partial_table}"},
+    )
+    monkeypatch.setattr(
+        migration,
+        "_BASELINE_ORM_CREATE",
+        {
+            table_name: (lambda name=table_name: created.append(name))
+            for table_name in migration.BASELINE_ORM_TABLES
+        },
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"unknown partial baseline ORM table {partial_table}",
+    ):
+        migration._upgrade_baseline_orm_tables()
+
+    assert created == []
+
+
+def test_baseline_orm_downgrade_never_deletes_historical_tables(
+    monkeypatch,
+) -> None:
+    migration = _load_migration()
+    monkeypatch.setattr(
+        migration.op,
+        "drop_table",
+        lambda _name: pytest.fail("baseline production tables must be preserved"),
+    )
+
+    migration._downgrade_baseline_orm_tables()
 
 
 def test_fresh_metadata_phase_skips_duplicate_ddl_and_runs_reconciliation(

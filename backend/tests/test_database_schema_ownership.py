@@ -23,3 +23,20 @@ def test_create_all_calls_are_guarded_by_the_explicit_legacy_setting():
     create_all_position = bootstrap_source.index("Base.metadata.create_all", bootstrap_guard)
     patches_position = bootstrap_source.index("for sql in PATCHES:", bootstrap_guard)
     assert bootstrap_guard < bootstrap_return < create_all_position < patches_position
+
+
+def test_alembic_and_legacy_bootstrap_register_historical_baseline_models():
+    env_source = (BACKEND_ROOT / "alembic/env.py").read_text(encoding="utf-8")
+    bootstrap_source = (BACKEND_ROOT / "app/scripts/bootstrap_db.py").read_text(
+        encoding="utf-8"
+    )
+
+    model_modules = (
+        "gateway_message",
+        "notification",
+        "tenant_setting",
+        "trigger_execution",
+    )
+    for module_name in model_modules:
+        assert f"app.models.{module_name}" in env_source
+        assert f"app.models.{module_name}" in bootstrap_source

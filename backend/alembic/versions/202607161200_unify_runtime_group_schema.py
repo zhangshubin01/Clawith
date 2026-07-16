@@ -6,7 +6,8 @@ Create Date: 2026-07-16 12:00:00
 
 This revision is intentionally based directly on upstream/main.  It replaces
 the feature branch's former Directory, Experience, Group, unified-chat, model
-capability, Runtime, Workspace, delivery, cursor, and merge revisions.
+capability, Runtime, Workspace, delivery, cursor, and merge revisions, and it
+brings four historical ORM baseline tables under explicit Alembic ownership.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ depends_on: str | Sequence[str] | None = None
 
 UPGRADE_PHASES = (
     "directory_indexes",
+    "baseline_orm_tables",
     "experience_library",
     "group_domain",
     "unified_chat",
@@ -299,6 +301,139 @@ RUNTIME_INDEXES = {
     ),
 }
 
+BASELINE_ORM_TABLES = (
+    "gateway_messages",
+    "notifications",
+    "tenant_settings",
+    "trigger_executions",
+)
+BASELINE_ORM_COLUMNS = {
+    "gateway_messages": (
+        "id",
+        "agent_id",
+        "sender_agent_id",
+        "sender_user_id",
+        "conversation_id",
+        "content",
+        "status",
+        "result",
+        "created_at",
+        "delivered_at",
+        "completed_at",
+    ),
+    "notifications": (
+        "id",
+        "user_id",
+        "agent_id",
+        "type",
+        "title",
+        "body",
+        "link",
+        "ref_id",
+        "sender_name",
+        "is_read",
+        "created_at",
+    ),
+    "tenant_settings": (
+        "tenant_id",
+        "key",
+        "value",
+        "updated_at",
+    ),
+    "trigger_executions": (
+        "id",
+        "trigger_id",
+        "agent_id",
+        "source",
+        "status",
+        "idempotency_key",
+        "payload",
+        "payload_text",
+        "lease_owner",
+        "lease_expires_at",
+        "scheduled_at",
+        "started_at",
+        "finished_at",
+        "last_error",
+        "created_at",
+    ),
+}
+BASELINE_ORM_INDEXES = {
+    "gateway_messages": (),
+    "notifications": (
+        "ix_notifications_user_id",
+        "ix_notifications_agent_id",
+        "ix_notifications_created_at",
+    ),
+    "tenant_settings": (),
+    "trigger_executions": (
+        "ix_trigger_executions_trigger_id",
+        "ix_trigger_executions_agent_id",
+        "ix_trigger_executions_status_scheduled",
+    ),
+}
+BASELINE_ORM_CONSTRAINTS = {
+    "gateway_messages": (
+        "gateway_messages_pkey",
+        "gateway_messages_agent_id_fkey",
+        "gateway_messages_sender_agent_id_fkey",
+        "gateway_messages_sender_user_id_fkey",
+    ),
+    "notifications": (
+        "notifications_pkey",
+        "notifications_user_id_fkey",
+        "notifications_agent_id_fkey",
+    ),
+    "tenant_settings": (
+        "tenant_settings_pkey",
+        "tenant_settings_tenant_id_fkey",
+    ),
+    "trigger_executions": (
+        "trigger_executions_pkey",
+        "trigger_executions_trigger_id_fkey",
+        "trigger_executions_agent_id_fkey",
+        "uq_trigger_execution_idempotency",
+    ),
+}
+
+_BASELINE_ORM_TABLE_OBJECTS = {
+    table_name: {
+        f"table:{table_name}",
+        *(f"column:{table_name}.{name}" for name in BASELINE_ORM_COLUMNS[table_name]),
+        *(f"index:{name}" for name in BASELINE_ORM_INDEXES[table_name]),
+        *(
+            f"constraint:{name}"
+            for name in BASELINE_ORM_CONSTRAINTS[table_name]
+        ),
+    }
+    for table_name in BASELINE_ORM_TABLES
+}
+
+_GATEWAY_MESSAGES_LEGACY_OBJECTS = (
+    _BASELINE_ORM_TABLE_OBJECTS["gateway_messages"]
+    - {"column:gateway_messages.conversation_id"}
+)
+_NOTIFICATION_EXTENSION_OBJECTS = {
+    "column:notifications.agent_id",
+    "column:notifications.sender_name",
+    "index:ix_notifications_agent_id",
+    "constraint:notifications_agent_id_fkey",
+}
+_NOTIFICATION_CORE_OBJECTS = (
+    _BASELINE_ORM_TABLE_OBJECTS["notifications"]
+    - {f"index:{name}" for name in BASELINE_ORM_INDEXES["notifications"]}
+)
+_NOTIFICATION_LEGACY_CORE_OBJECTS = (
+    _NOTIFICATION_CORE_OBJECTS - _NOTIFICATION_EXTENSION_OBJECTS
+)
+_TRIGGER_EXECUTION_CORE_OBJECTS = (
+    _BASELINE_ORM_TABLE_OBJECTS["trigger_executions"]
+    - {
+        f"index:{name}"
+        for name in BASELINE_ORM_INDEXES["trigger_executions"]
+    }
+)
+
 _PRECREATED_PHASE_OBJECTS = {
     "experience_library": {
         "table:experience_entries",
@@ -479,6 +614,56 @@ def _precreated_phase_state(phase: str, actual: set[str]) -> bool:
     )
 
 
+def _baseline_orm_table_plan(
+    table_name: str,
+    actual: set[str],
+) -> tuple[str, tuple[str, ...]]:
+    """Classify one historical baseline table without changing the schema."""
+    expected = _BASELINE_ORM_TABLE_OBJECTS[table_name]
+    present = expected.intersection(actual)
+    if not present:
+        return ("create", ())
+
+    if table_name == "gateway_messages":
+        if present == expected:
+            return ("keep", ())
+        if present == _GATEWAY_MESSAGES_LEGACY_OBJECTS:
+            return ("upgrade_gateway_messages", ())
+
+    elif table_name == "notifications":
+        missing_indexes = tuple(
+            name
+            for name in BASELINE_ORM_INDEXES[table_name]
+            if f"index:{name}" not in present
+        )
+        if _NOTIFICATION_CORE_OBJECTS.issubset(present):
+            return ("normalize_notifications", missing_indexes)
+        if (
+            _NOTIFICATION_LEGACY_CORE_OBJECTS.issubset(present)
+            and not _NOTIFICATION_EXTENSION_OBJECTS.intersection(present)
+        ):
+            return ("upgrade_legacy_notifications", missing_indexes)
+
+    elif table_name == "tenant_settings":
+        if present == expected:
+            return ("keep", ())
+
+    elif table_name == "trigger_executions":
+        if _TRIGGER_EXECUTION_CORE_OBJECTS.issubset(present):
+            missing_indexes = tuple(
+                name
+                for name in BASELINE_ORM_INDEXES[table_name]
+                if f"index:{name}" not in present
+            )
+            return ("keep", missing_indexes)
+
+    missing = sorted(expected - present)
+    raise RuntimeError(
+        f"Refusing unknown partial baseline ORM table {table_name}; "
+        f"missing: {', '.join(missing)}"
+    )
+
+
 def _finish_precreated_phase(phase: str, bind: sa.Connection) -> None:
     """Apply only non-metadata work when 001 already created the final shape."""
     if phase == "unified_chat":
@@ -547,6 +732,246 @@ def _downgrade_directory_indexes() -> None:
     for statement in reversed(_DIRECTORY_INDEX_SQL):
         index_name = statement.split(" ", 3)[2]
         op.execute(sa.text(f"DROP INDEX IF EXISTS {index_name}"))
+
+
+# ---------------------------------------------------------------------------
+# Historical baseline ORM tables omitted by the original Alembic bootstrap
+
+
+def _create_gateway_messages() -> None:
+    op.create_table(
+        "gateway_messages",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("agent_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("sender_agent_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("sender_user_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("conversation_id", sa.String(length=100), nullable=True),
+        sa.Column("content", sa.Text(), nullable=False),
+        sa.Column("status", sa.String(length=20), nullable=False),
+        sa.Column("result", sa.Text(), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column("delivered_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.ForeignKeyConstraint(["agent_id"], ["agents.id"]),
+        sa.ForeignKeyConstraint(["sender_agent_id"], ["agents.id"]),
+        sa.ForeignKeyConstraint(["sender_user_id"], ["users.id"]),
+        sa.PrimaryKeyConstraint("id"),
+    )
+
+
+def _create_notifications() -> None:
+    op.create_table(
+        "notifications",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("user_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("agent_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("type", sa.String(length=50), nullable=False),
+        sa.Column("title", sa.String(length=200), nullable=False),
+        sa.Column("body", sa.Text(), nullable=False),
+        sa.Column("link", sa.String(length=500), nullable=True),
+        sa.Column("ref_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("sender_name", sa.String(length=100), nullable=True),
+        sa.Column("is_read", sa.Boolean(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(["agent_id"], ["agents.id"]),
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"]),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    for name, columns in (
+        ("ix_notifications_user_id", ["user_id"]),
+        ("ix_notifications_agent_id", ["agent_id"]),
+        ("ix_notifications_created_at", ["created_at"]),
+    ):
+        op.create_index(name, "notifications", columns, unique=False)
+
+
+def _create_tenant_settings() -> None:
+    op.create_table(
+        "tenant_settings",
+        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("key", sa.String(length=100), nullable=False),
+        sa.Column(
+            "value",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("tenant_id", "key"),
+    )
+
+
+def _create_trigger_executions() -> None:
+    op.create_table(
+        "trigger_executions",
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("trigger_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("agent_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("source", sa.String(length=32), nullable=False),
+        sa.Column("status", sa.String(length=20), nullable=False),
+        sa.Column("idempotency_key", sa.String(length=255), nullable=False),
+        sa.Column(
+            "payload",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+        ),
+        sa.Column("payload_text", sa.Text(), nullable=False),
+        sa.Column("lease_owner", sa.String(length=128), nullable=True),
+        sa.Column("lease_expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "scheduled_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_error", sa.Text(), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["trigger_id"],
+            ["agent_triggers.id"],
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["agent_id"],
+            ["agents.id"],
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "trigger_id",
+            "idempotency_key",
+            name="uq_trigger_execution_idempotency",
+        ),
+    )
+    for name, columns in (
+        ("ix_trigger_executions_trigger_id", ["trigger_id"]),
+        ("ix_trigger_executions_agent_id", ["agent_id"]),
+        (
+            "ix_trigger_executions_status_scheduled",
+            ["status", "scheduled_at"],
+        ),
+    ):
+        op.create_index(name, "trigger_executions", columns, unique=False)
+
+
+_BASELINE_ORM_CREATE = {
+    "gateway_messages": _create_gateway_messages,
+    "notifications": _create_notifications,
+    "tenant_settings": _create_tenant_settings,
+    "trigger_executions": _create_trigger_executions,
+}
+
+
+def _create_missing_baseline_index(table_name: str, index_name: str) -> None:
+    columns = {
+        "ix_notifications_user_id": ("user_id",),
+        "ix_notifications_agent_id": ("agent_id",),
+        "ix_notifications_created_at": ("created_at",),
+        "ix_trigger_executions_trigger_id": ("trigger_id",),
+        "ix_trigger_executions_agent_id": ("agent_id",),
+        "ix_trigger_executions_status_scheduled": ("status", "scheduled_at"),
+    }[index_name]
+    kwargs: dict[str, object] = {}
+    if index_name == "ix_notifications_agent_id":
+        # Preserve the established 016 migration semantics for upgraded
+        # installations. Fresh databases use the current ORM's full index.
+        kwargs["postgresql_where"] = sa.text("agent_id IS NOT NULL")
+    op.create_index(
+        index_name,
+        table_name,
+        list(columns),
+        unique=False,
+        **kwargs,
+    )
+
+
+def _upgrade_gateway_messages_legacy_shape() -> None:
+    op.add_column(
+        "gateway_messages",
+        sa.Column("conversation_id", sa.String(length=100), nullable=True),
+    )
+
+
+def _normalize_notifications_legacy_shape(*, add_extension: bool) -> None:
+    if add_extension:
+        op.add_column(
+            "notifications",
+            sa.Column("agent_id", postgresql.UUID(as_uuid=True), nullable=True),
+        )
+        op.add_column(
+            "notifications",
+            sa.Column("sender_name", sa.String(length=100), nullable=True),
+        )
+        op.create_foreign_key(
+            "notifications_agent_id_fkey",
+            "notifications",
+            "agents",
+            ["agent_id"],
+            ["id"],
+        )
+    # Migration 016 made user_id optional. Repeating DROP NOT NULL is safe and
+    # also repairs databases where the columns were added outside Alembic.
+    op.alter_column(
+        "notifications",
+        "user_id",
+        existing_type=postgresql.UUID(as_uuid=True),
+        nullable=True,
+    )
+
+
+def _upgrade_baseline_orm_tables() -> None:
+    actual = _schema_object_names(op.get_bind())
+    # Classify every independent table before the first DDL statement. An
+    # unknown partial shape must not leave the other baseline tables half-made.
+    plans = {
+        table_name: _baseline_orm_table_plan(table_name, actual)
+        for table_name in BASELINE_ORM_TABLES
+    }
+    for table_name in BASELINE_ORM_TABLES:
+        action, missing_indexes = plans[table_name]
+        if action == "create":
+            _BASELINE_ORM_CREATE[table_name]()
+            continue
+        if action == "upgrade_gateway_messages":
+            _upgrade_gateway_messages_legacy_shape()
+        elif action == "upgrade_legacy_notifications":
+            _normalize_notifications_legacy_shape(add_extension=True)
+        elif action == "normalize_notifications":
+            _normalize_notifications_legacy_shape(add_extension=False)
+        for index_name in missing_indexes:
+            _create_missing_baseline_index(table_name, index_name)
+
+
+def _downgrade_baseline_orm_tables() -> None:
+    # These tables belong to the historical application baseline, not this
+    # feature revision. Never delete pre-existing production data on downgrade.
+    pass
 
 
 # ---------------------------------------------------------------------------
