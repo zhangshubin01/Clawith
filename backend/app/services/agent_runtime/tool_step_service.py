@@ -315,14 +315,17 @@ def _async_poll_schedule_metadata(
 def _async_pending_step_result(
     *,
     run_id: uuid.UUID,
-    execution: AgentToolExecution,
+    execution_id: uuid.UUID,
     call_id: str,
     tool_name: str,
     outcome: ToolExecutionOutcome,
     prior_messages: Sequence[JsonObject],
     tail_calls: Sequence[JsonObject],
 ) -> ToolStepResult:
-    metadata = execution.result_metadata
+    # Settlement can happen in a separate DB session, so the reservation's ORM
+    # instance may not contain the just-persisted poll schedule. The settled
+    # outcome is the canonical in-process copy of that same durable metadata.
+    metadata = outcome.metadata
     operation = metadata.get("async_operation") if isinstance(metadata, dict) else None
     poll = operation.get("poll") if isinstance(operation, Mapping) else None
     operation_key = (
@@ -364,7 +367,7 @@ def _async_pending_step_result(
         },
     }
     proposal: JsonObject = {
-        "id": str(uuid.uuid5(run_id, f"async-poll-proposal:{execution.id}")),
+        "id": str(uuid.uuid5(run_id, f"async-poll-proposal:{execution_id}")),
         "role": "assistant",
         "content": "",
         "tool_calls": [poll_call],
@@ -971,7 +974,7 @@ class RuntimeToolStepService:
                     if reservation.reusable_result.status == "pending":
                         return _async_pending_step_result(
                             run_id=run_id,
-                            execution=reservation.execution,
+                            execution_id=reservation.execution.id,
                             call_id=call_id,
                             tool_name=tool_name,
                             outcome=reservation.reusable_result,
@@ -1439,7 +1442,7 @@ class RuntimeToolStepService:
                 if outcome.status == "pending":
                     return _async_pending_step_result(
                         run_id=run_id,
-                        execution=reservation.execution,
+                        execution_id=reservation.execution.id,
                         call_id=call_id,
                         tool_name=tool_name,
                         outcome=outcome,

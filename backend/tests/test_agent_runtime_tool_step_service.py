@@ -410,10 +410,17 @@ async def test_async_pending_interrupts_with_a_deterministic_poll_call(
         del db
         assert kwargs["metadata"]["runtime_async_pending"] is True
         assert kwargs["metadata"]["async_poll_scheduled"] is False
-        execution.result_summary = kwargs["result_summary"]
-        execution.result_metadata = kwargs["metadata"]
-        execution.lease_owner = None
-        return execution
+        settled_execution = _execution(
+            tenant_id,
+            uuid.UUID(context.run_id),
+            "call-async",
+            "read_file",
+        )
+        settled_execution.id = execution.id
+        settled_execution.result_summary = kwargs["result_summary"]
+        settled_execution.result_metadata = kwargs["metadata"]
+        settled_execution.lease_owner = None
+        return settled_execution
 
     async def terminal_forbidden(*args, **kwargs):
         raise AssertionError(f"pending operation was closed: {args}, {kwargs}")
@@ -436,8 +443,11 @@ async def test_async_pending_interrupts_with_a_deterministic_poll_call(
         (call,),
     )
 
+    # The reservation object remains stale because settlement used another
+    # session; Runtime must build the poll interrupt from the settled outcome.
+    assert execution.result_metadata == {}
     assert execution.status == "started"
-    assert execution.lease_owner is None
+    assert execution.lease_owner == "runtime:command-1:call-async"
     assert result.waiting_request == {
         "waiting_type": "external",
         "correlation_id": str(
