@@ -48,6 +48,7 @@ from app.services.agent_runtime.tool_execution import (
     ToolExecutionReservation,
     execution_outcome,
     mark_expired_safe_read_result_unavailable,
+    mark_tool_execution_async_pending,
     mark_tool_execution_failed,
     mark_tool_execution_retry_pending,
     mark_tool_execution_succeeded,
@@ -55,6 +56,7 @@ from app.services.agent_runtime.tool_execution import (
     normalize_tool_outcome,
     reserve_tool_execution,
     sanitize_tool_arguments,
+    settle_async_operation_executions,
     takeover_tool_execution_for_reconciliation,
 )
 from app.services.agent_runtime.tool_result_store import (
@@ -221,6 +223,8 @@ def _result_message(
     content = outcome.result_summary or (
         "Tool completed without inline output."
         if outcome.status == "succeeded"
+        else "Tool operation is still pending."
+        if outcome.status == "pending"
         else "Tool execution failed without a reusable result."
     )
     message: JsonObject = {
@@ -533,6 +537,22 @@ class RuntimeToolStepService:
                 "runtime_attempt_count": attempt_count,
             },
         )
+        if normalized.status == "pending":
+            async with self._session_factory() as db:
+                async with db.begin():
+                    execution = await mark_tool_execution_async_pending(
+                        db,
+                        tenant_id=tenant_id,
+                        execution_id=reservation.execution.id,
+                        lease_owner=lease_owner,
+                        result_summary=normalized.result_summary,
+                        metadata=normalized.metadata,
+                    )
+            return replace(
+                normalized,
+                result_summary=execution.result_summary,
+                result_ref=execution.result_ref,
+            )
         if normalized.retryable and attempt_count < SAFE_READ_MAX_ATTEMPTS:
             async with self._session_factory() as db:
                 async with db.begin():
@@ -574,24 +594,53 @@ class RuntimeToolStepService:
 
         async with self._session_factory() as db:
             async with db.begin():
-                settle = {
-                    "succeeded": mark_tool_execution_succeeded,
-                    "failed": mark_tool_execution_failed,
-                    "unknown": mark_tool_execution_unknown,
-                }[normalized.status]
-                execution = await settle(
-                    db,
-                    tenant_id=tenant_id,
-                    execution_id=reservation.execution.id,
-                    lease_owner=lease_owner,
-                    result_summary=normalized.result_summary,
-                    result_ref=normalized.result_ref,
-                    error_code=normalized.error_code,
-                    retryable=normalized.retryable,
-                    artifact_refs=normalized.artifact_refs,
-                    evidence_refs=normalized.evidence_refs,
-                    metadata=normalized.metadata,
+                operation = normalized.metadata.get("async_operation")
+                terminal_async = (
+                    normalized.status in {"succeeded", "failed"}
+                    and normalized.metadata.get("runtime_async_pending") is False
+                    and isinstance(operation, Mapping)
+                    and isinstance(operation.get("operation_key"), str)
+                    and bool(operation.get("operation_key"))
                 )
+                if terminal_async:
+                    execution = await settle_async_operation_executions(
+                        db,
+                        tenant_id=tenant_id,
+                        run_id=reservation.execution.run_id,
+                        execution_id=reservation.execution.id,
+                        lease_owner=lease_owner,
+                        status=(
+                            "succeeded"
+                            if normalized.status == "succeeded"
+                            else "failed"
+                        ),
+                        result_summary=normalized.result_summary,
+                        result_ref=normalized.result_ref,
+                        error_code=normalized.error_code,
+                        retryable=normalized.retryable,
+                        artifact_refs=normalized.artifact_refs,
+                        evidence_refs=normalized.evidence_refs,
+                        metadata=normalized.metadata,
+                    )
+                else:
+                    settle = {
+                        "succeeded": mark_tool_execution_succeeded,
+                        "failed": mark_tool_execution_failed,
+                        "unknown": mark_tool_execution_unknown,
+                    }[normalized.status]
+                    execution = await settle(
+                        db,
+                        tenant_id=tenant_id,
+                        execution_id=reservation.execution.id,
+                        lease_owner=lease_owner,
+                        result_summary=normalized.result_summary,
+                        result_ref=normalized.result_ref,
+                        error_code=normalized.error_code,
+                        retryable=normalized.retryable,
+                        artifact_refs=normalized.artifact_refs,
+                        evidence_refs=normalized.evidence_refs,
+                        metadata=normalized.metadata,
+                    )
         return replace(
             normalized,
             result_summary=execution.result_summary,

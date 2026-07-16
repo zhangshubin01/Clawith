@@ -785,6 +785,43 @@ async def test_verifier_blocks_unsettled_facts_and_collects_only_succeeded_refs(
 
 
 @pytest.mark.asyncio
+async def test_verifier_repairs_declared_async_pending_with_exact_poll_action() -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    pending = _execution(tenant_id=tenant_id, run_id=run_id, status="started")
+    pending.result_metadata = {
+        "runtime_async_pending": True,
+        "async_operation": {
+            "version": 1,
+            "operation_key": "operation-key",
+            "operation_id": "2501.01234",
+            "state": "downloading",
+            "poll": {
+                "tool": "arxiv_local-download_paper",
+                "arguments": {"paper_id": "2501.01234", "check_status": True},
+                "interval_ms": 1000,
+            },
+        },
+    }
+    verifier = ToolLedgerRuntimeVerifier(
+        session_factory=_factory(_ManyResult([pending])),
+    )
+
+    blocked = await verifier.verify(
+        _state(tenant_id, run_id),
+        _context(tenant_id, run_id),
+        "done",
+    )
+
+    assert blocked.outcome == "repair"
+    assert blocked.details["code"] == "async_tool_pending"
+    assert blocked.details["operations"][0]["poll"]["tool"] == (
+        "arxiv_local-download_paper"
+    )
+    assert "check_status" in (blocked.reason or "")
+
+
+@pytest.mark.asyncio
 async def test_verifier_uses_invocation_context_without_checkpoint_registry() -> None:
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()

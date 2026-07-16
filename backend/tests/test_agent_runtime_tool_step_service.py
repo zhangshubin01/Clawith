@@ -365,6 +365,162 @@ async def test_success_is_reserved_before_execution_and_settled_afterwards(
 
 
 @pytest.mark.asyncio
+async def test_async_pending_is_recorded_as_started_and_returned_to_model(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-async", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    context = _context(state)
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(context.run_id),
+        "call-async",
+        "read_file",
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def execute(*args, **kwargs):
+        del args, kwargs
+        return ToolExecutionOutcome(
+            status="pending",
+            result_summary="Download is still pending; poll again.",
+            result_ref=None,
+            metadata={
+                "runtime_async_pending": True,
+                "async_operation": {
+                    "version": 1,
+                    "operation_key": "operation-key",
+                    "operation_id": "2501.01234",
+                    "state": "downloading",
+                    "poll": {
+                        "tool": "read_file",
+                        "arguments": {"paper_id": "2501.01234"},
+                        "interval_ms": 1000,
+                    },
+                },
+            },
+        )
+
+    async def mark_pending(db, **kwargs):
+        del db
+        assert kwargs["metadata"]["runtime_async_pending"] is True
+        execution.result_summary = kwargs["result_summary"]
+        execution.result_metadata = kwargs["metadata"]
+        execution.lease_owner = None
+        return execution
+
+    async def terminal_forbidden(*args, **kwargs):
+        raise AssertionError(f"pending operation was closed: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_async_pending",
+        mark_pending,
+    )
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_succeeded",
+        terminal_forbidden,
+    )
+
+    result = await _service(agent, _CancelSource(None), execute).execute_pending(
+        state,
+        context,
+        (call,),
+    )
+
+    assert execution.status == "started"
+    assert execution.lease_owner is None
+    assert result.waiting_request is None
+    assert result.pending_tool_calls == ()
+    assert result.messages[0]["execution_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_terminal_async_poll_settles_same_run_operation(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-poll", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    context = _context(state)
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(context.run_id),
+        "call-poll",
+        "read_file",
+    )
+    settle_calls: list[dict] = []
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def execute(*args, **kwargs):
+        del args, kwargs
+        return ToolExecutionOutcome(
+            status="succeeded",
+            result_summary="Download completed.",
+            result_ref=None,
+            metadata={
+                "runtime_async_pending": False,
+                "async_operation": {
+                    "version": 1,
+                    "operation_key": "operation-key",
+                    "operation_id": "2501.01234",
+                    "state": "success",
+                    "poll": {
+                        "tool": "read_file",
+                        "arguments": {"paper_id": "2501.01234"},
+                        "interval_ms": 1000,
+                    },
+                },
+            },
+        )
+
+    async def settle_async(db, **kwargs):
+        del db
+        settle_calls.append(kwargs)
+        execution.status = kwargs["status"]
+        execution.result_summary = kwargs["result_summary"]
+        execution.result_metadata = kwargs["metadata"]
+        return execution
+
+    async def ordinary_settle_forbidden(*args, **kwargs):
+        raise AssertionError(f"async poll used ordinary settlement: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service,
+        "settle_async_operation_executions",
+        settle_async,
+    )
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_succeeded",
+        ordinary_settle_forbidden,
+    )
+
+    result = await _service(agent, _CancelSource(None), execute).execute_pending(
+        state,
+        context,
+        (call,),
+    )
+
+    assert len(settle_calls) == 1
+    assert settle_calls[0]["run_id"] == uuid.UUID(context.run_id)
+    assert settle_calls[0]["metadata"]["runtime_async_pending"] is False
+    assert result.messages[0]["execution_status"] == "succeeded"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tool_name", "expected_status", "expects_wait"),
     [

@@ -26,6 +26,16 @@ class _ScalarResult:
     def scalar_one_or_none(self):
         return self.value
 
+    def scalars(self):
+        return self
+
+    def all(self):
+        return (
+            list(self.value)
+            if isinstance(self.value, (list, tuple))
+            else [self.value]
+        )
+
 
 class _NestedTransaction:
     def __init__(self, db: "_FakeSession"):
@@ -321,6 +331,153 @@ async def test_started_and_unknown_always_fail_closed_for_reconciliation(
     assert reservation.requires_confirmation is requires_confirmation
     assert reservation.error_code == error_code
     assert db.flush_count == 0
+
+
+@pytest.mark.asyncio
+async def test_declared_async_pending_receipt_is_reused_without_redispatch() -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    existing = _execution(tenant_id=tenant_id, run_id=run_id, status="started")
+    existing.result_summary = "Download is still in progress."
+    existing.result_metadata = {
+        "runtime_async_pending": True,
+        "async_operation": {
+            "version": 1,
+            "operation_key": "operation-key",
+            "operation_id": "2501.01234",
+            "state": "downloading",
+            "poll": {
+                "tool": "arxiv_local-download_paper",
+                "arguments": {"paper_id": "2501.01234", "check_status": True},
+                "interval_ms": 1000,
+            },
+        },
+    }
+    existing.lease_owner = None
+    existing.lease_expires_at = None
+    db = _FakeSession(run_id, existing)
+
+    reservation = await _reserve(db, tenant_id=tenant_id, run_id=run_id)
+
+    assert reservation.blocked is False
+    assert reservation.reconciliation_required is False
+    assert reservation.can_execute is False
+    assert reservation.reusable_result is not None
+    assert reservation.reusable_result.status == "pending"
+    assert reservation.reusable_result.metadata["runtime_async_pending"] is True
+
+
+@pytest.mark.asyncio
+async def test_async_pending_clears_lease_without_closing_receipt() -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(tenant_id=tenant_id, run_id=run_id, status="started")
+    metadata = {
+        "runtime_async_pending": True,
+        "async_operation": {
+            "version": 1,
+            "operation_key": "operation-key",
+            "operation_id": "2501.01234",
+            "state": "downloading",
+            "poll": {
+                "tool": "arxiv_local-download_paper",
+                "arguments": {"paper_id": "2501.01234", "check_status": True},
+                "interval_ms": 1000,
+            },
+        },
+    }
+    db = _FakeSession(execution)
+
+    marked = await tool_execution.mark_tool_execution_async_pending(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution.id,
+        lease_owner="worker-1",
+        result_summary="Still downloading.",
+        metadata=metadata,
+    )
+
+    assert marked.status == "started"
+    assert marked.completed_at is None
+    assert marked.lease_owner is None
+    assert marked.lease_expires_at is None
+    assert marked.result_metadata["runtime_async_pending"] is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_poll_settles_only_same_run_operation_receipts() -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    current = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="started",
+        tool_call_id="poll-call",
+    )
+    origin = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="started",
+        tool_call_id="launch-call",
+        lease_owner="",
+    )
+    other = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="started",
+        tool_call_id="other-call",
+        lease_owner="",
+    )
+    origin.result_metadata = {
+        "runtime_async_pending": True,
+        "async_operation": {
+            "version": 1,
+            "operation_key": "operation-key",
+            "operation_id": "2501.01234",
+        },
+    }
+    other.result_metadata = {
+        "runtime_async_pending": True,
+        "async_operation": {
+            "version": 1,
+            "operation_key": "different-key",
+            "operation_id": "2501.99999",
+        },
+    }
+    metadata = {
+        "runtime_async_pending": False,
+        "async_operation": {
+            "version": 1,
+            "operation_key": "operation-key",
+            "operation_id": "2501.01234",
+            "state": "success",
+        },
+    }
+    db = _FakeSession([current, origin, other], current)
+
+    settled = await tool_execution.settle_async_operation_executions(
+        db,
+        tenant_id=tenant_id,
+        run_id=run_id,
+        execution_id=current.id,
+        lease_owner="worker-1",
+        status="succeeded",
+        result_summary="Download completed.",
+        result_ref=None,
+        error_code=None,
+        retryable=False,
+        artifact_refs=(),
+        evidence_refs=(),
+        metadata=metadata,
+        clock=lambda: _NOW,
+    )
+
+    assert settled.status == "succeeded"
+    assert origin.status == "succeeded"
+    assert origin.completed_at == _NOW
+    assert origin.lease_owner is None
+    assert origin.result_metadata["runtime_async_pending"] is False
+    assert other.status == "started"
 
 
 @pytest.mark.asyncio

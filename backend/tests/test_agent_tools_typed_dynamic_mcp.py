@@ -24,6 +24,30 @@ def _tool(name: str) -> dict:
     }
 
 
+def _async_completion_contract() -> dict:
+    return {
+        "version": 1,
+        "result": {
+            "source": "content_text_json",
+            "content_index": 0,
+            "status_pointer": "/status",
+        },
+        "operation_id": {"source": "argument", "pointer": "/paper_id"},
+        "states": {
+            "pending": ["downloading", "converting", "running"],
+            "succeeded": ["success"],
+            "failed": ["error"],
+            "unknown": ["unknown"],
+        },
+        "poll": {
+            "tool": "$self",
+            "copy_arguments": ["/paper_id"],
+            "set_arguments": {"/check_status": True},
+            "interval_ms": 1000,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_runtime_resolver_exposes_only_enabled_assigned_non_reserved_mcp(
     monkeypatch,
@@ -317,6 +341,160 @@ def test_mcp_structured_content_is_preserved_and_secret_safe() -> None:
     )
     assert "super-secret" not in serialized
     assert "token-secret" not in serialized
+
+
+def test_configured_async_mcp_pending_returns_pollable_non_terminal_outcome() -> None:
+    outcome = agent_tools._mcp_call_response_outcome(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '{"status":"downloading","message":"queued"}',
+                    }
+                ]
+            },
+        },
+        full_tool_name="arxiv_local-download_paper",
+        arguments={"paper_id": "2501.01234"},
+        async_completion=_async_completion_contract(),
+    )
+
+    assert outcome.status == "pending"
+    assert outcome.error_code is None
+    assert outcome.metadata["runtime_async_pending"] is True
+    assert outcome.metadata["async_operation"]["operation_id"] == "2501.01234"
+    assert outcome.metadata["async_operation"]["state"] == "downloading"
+    assert outcome.metadata["async_operation"]["poll"] == {
+        "tool": "arxiv_local-download_paper",
+        "arguments": {"paper_id": "2501.01234", "check_status": True},
+        "interval_ms": 1000,
+    }
+    assert "check_status" in (outcome.result_summary or "")
+
+
+@pytest.mark.asyncio
+async def test_resolved_mcp_applies_trusted_async_completion_contract(
+    monkeypatch,
+) -> None:
+    async def raw_call(self, raw_name, arguments):
+        del self
+        assert raw_name == "download_paper"
+        assert arguments == {"paper_id": "2501.01234"}
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {"type": "text", "text": '{"status":"downloading"}'}
+                ]
+            },
+        }
+
+    monkeypatch.setattr(MCPClient, "call_tool_result", raw_call)
+    outcome = await agent_tools._execute_resolved_mcp_target_outcome(
+        {
+            "full_name": "arxiv_local-download_paper",
+            "raw_name": "download_paper",
+            "server_url": "https://arxiv.example/mcp",
+            "server_name": "arxiv-local",
+            "config": {},
+            "async_completion": _async_completion_contract(),
+        },
+        {"paper_id": "2501.01234"},
+        agent_id=uuid.uuid4(),
+    )
+
+    assert outcome.status == "pending"
+    assert outcome.metadata["runtime_async_pending"] is True
+
+
+@pytest.mark.parametrize(
+    ("provider_status", "expected_status", "expected_error"),
+    [
+        ("success", "succeeded", None),
+        ("error", "failed", "mcp_async_operation_failed"),
+        ("unknown", "unknown", "mcp_async_operation_unknown"),
+    ],
+)
+def test_configured_async_mcp_maps_declared_terminal_states(
+    provider_status: str,
+    expected_status: str,
+    expected_error: str | None,
+) -> None:
+    outcome = agent_tools._mcp_call_response_outcome(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({"status": provider_status}),
+                    }
+                ]
+            },
+        },
+        full_tool_name="arxiv_local-download_paper",
+        arguments={"paper_id": "2501.01234", "check_status": True},
+        async_completion=_async_completion_contract(),
+    )
+
+    assert outcome.status == expected_status
+    assert outcome.error_code == expected_error
+    assert outcome.metadata["runtime_async_pending"] is False
+    assert outcome.metadata["async_operation"]["state"] == provider_status
+
+
+def test_unconfigured_mcp_never_guesses_pending_state_from_text() -> None:
+    outcome = agent_tools._mcp_call_response_outcome(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [
+                    {"type": "text", "text": '{"status":"downloading"}'}
+                ]
+            },
+        },
+        full_tool_name="mcp_unconfigured",
+    )
+
+    assert outcome.status == "succeeded"
+    assert "runtime_async_pending" not in outcome.metadata
+
+
+@pytest.mark.parametrize(
+    ("arguments", "text"),
+    [
+        ({}, '{"status":"downloading"}'),
+        ({"paper_id": "2501.01234"}, "not json"),
+        ({"paper_id": "2501.01234"}, '{"message":"missing status"}'),
+        ({"paper_id": "2501.01234"}, '{"status":"surprise"}'),
+    ],
+)
+def test_configured_async_mcp_malformed_or_unclassified_fails_closed(
+    arguments: dict,
+    text: str,
+) -> None:
+    outcome = agent_tools._mcp_call_response_outcome(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"content": [{"type": "text", "text": text}]},
+        },
+        full_tool_name="arxiv_local-download_paper",
+        arguments=arguments,
+        async_completion=_async_completion_contract(),
+    )
+
+    assert outcome.status == "unknown"
+    assert outcome.error_code in {
+        "mcp_async_contract_invalid",
+        "mcp_async_operation_unknown",
+    }
 
 
 @pytest.mark.asyncio

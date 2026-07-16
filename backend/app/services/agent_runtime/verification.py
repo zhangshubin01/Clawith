@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+import json
 import re
 from urllib.parse import quote, unquote, urlsplit
 import uuid
@@ -42,6 +43,55 @@ def _refs(metadata: object, field: str) -> tuple[str, ...] | None:
     if any(not isinstance(item, str) or not item.strip() for item in value):
         return None
     return tuple(str(item).strip() for item in value)
+
+
+def _async_pending_operation(execution: AgentToolExecution) -> dict | None:
+    metadata = getattr(execution, "result_metadata", None)
+    if (
+        execution.status != "started"
+        or not isinstance(metadata, Mapping)
+        or metadata.get("runtime_async_pending") is not True
+    ):
+        return None
+    operation = metadata.get("async_operation")
+    if not isinstance(operation, Mapping) or operation.get("version") != 1:
+        return None
+    operation_key = operation.get("operation_key")
+    operation_id = operation.get("operation_id")
+    state = operation.get("state")
+    poll = operation.get("poll")
+    if (
+        not isinstance(operation_key, str)
+        or not operation_key
+        or not isinstance(operation_id, str)
+        or not operation_id
+        or not isinstance(state, str)
+        or not state
+        or not isinstance(poll, Mapping)
+    ):
+        return None
+    tool = poll.get("tool")
+    arguments = poll.get("arguments")
+    interval_ms = poll.get("interval_ms")
+    if (
+        not isinstance(tool, str)
+        or not tool
+        or not isinstance(arguments, Mapping)
+        or isinstance(interval_ms, bool)
+        or not isinstance(interval_ms, int)
+        or interval_ms < 0
+    ):
+        return None
+    return {
+        "operation_key": operation_key,
+        "operation_id": operation_id,
+        "state": state,
+        "poll": {
+            "tool": tool,
+            "arguments": dict(arguments),
+            "interval_ms": interval_ms,
+        },
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,10 +521,16 @@ class ToolLedgerRuntimeVerifier:
             )
             executions = list(result.scalars().all())
 
+        async_pending_by_key: dict[str, dict] = {}
+        for execution in executions:
+            operation = _async_pending_operation(execution)
+            if operation is not None:
+                async_pending_by_key[operation["operation_key"]] = operation
         unsettled = sorted(
             execution.tool_call_id
             for execution in executions
             if execution.status in {"started", "unknown"}
+            and _async_pending_operation(execution) is None
         )
         if unsettled:
             return VerificationResult(
@@ -483,6 +539,24 @@ class ToolLedgerRuntimeVerifier:
                 details={
                     "code": "unsettled_tool_execution",
                     "tool_call_ids": unsettled,
+                },
+            )
+        if async_pending_by_key:
+            operations = list(async_pending_by_key.values())
+            actions = "; ".join(
+                f"call {operation['poll']['tool']} with arguments "
+                f"{json.dumps(operation['poll']['arguments'], ensure_ascii=False, sort_keys=True)}"
+                for operation in operations
+            )
+            return VerificationResult(
+                outcome="repair",
+                reason=(
+                    "Async tool operations are still pending. Do not finish yet; "
+                    f"poll them to a declared terminal state: {actions}."
+                ),
+                details={
+                    "code": "async_tool_pending",
+                    "operations": operations,
                 },
             )
         invalid_statuses = sorted(

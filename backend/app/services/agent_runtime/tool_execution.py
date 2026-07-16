@@ -121,6 +121,8 @@ _RESULT_METADATA_KEYS = frozenset(
         "runtime_retry_pending",
         "runtime_retry_exhausted",
         "last_error_code",
+        "runtime_async_pending",
+        "async_operation",
     }
 )
 _SENSITIVE_KEYS = frozenset(
@@ -405,7 +407,7 @@ def normalize_tool_outcome(
             "invalid_tool_execution_input",
             "inline_max_bytes must be positive",
         )
-    if outcome.status not in {"succeeded", "failed", "unknown"}:
+    if outcome.status not in {"succeeded", "failed", "pending", "unknown"}:
         raise ToolExecutionError(
             "invalid_tool_outcome",
             f"unsupported tool outcome status: {outcome.status}",
@@ -553,9 +555,9 @@ def normalize_tool_outcome(
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionOutcome:
-    """The durable, safe-to-reuse portion of a completed tool outcome."""
+    """The durable, safe-to-reuse portion of a typed tool outcome."""
 
-    status: Literal["succeeded", "failed", "unknown"]
+    status: Literal["succeeded", "failed", "pending", "unknown"]
     result_summary: str | None
     result_ref: str | None
     error_code: str | None = None
@@ -863,8 +865,14 @@ def _outcome(execution: AgentToolExecution) -> ToolExecutionOutcome:
     metadata = _bounded_result_metadata(metadata if isinstance(metadata, dict) else {})
     artifact_refs = metadata.get("artifact_refs", [])
     evidence_refs = metadata.get("evidence_refs", [])
+    status = (
+        "pending"
+        if execution.status == "started"
+        and metadata.get("runtime_async_pending") is True
+        else execution.status
+    )
     return ToolExecutionOutcome(
-        status=execution.status,  # type: ignore[arg-type]
+        status=status,  # type: ignore[arg-type]
         result_summary=execution.result_summary,
         result_ref=execution.result_ref,
         error_code=(
@@ -916,6 +924,18 @@ def _decision_for_existing(
             else {}
         )
         retry_pending = metadata.get("runtime_retry_pending") is True
+        if metadata.get("runtime_async_pending") is True:
+            return ToolExecutionReservation(
+                execution=execution,
+                created=False,
+                retrying=False,
+                reusable_result=_outcome(execution),
+                prior_failure=None,
+                blocked=False,
+                reconciliation_required=False,
+                requires_confirmation=False,
+                error_code=None,
+            )
         lease_expired = (
             execution.lease_expires_at is None
             or execution.lease_expires_at <= now
@@ -1416,6 +1436,126 @@ async def mark_tool_execution_retry_pending(
     execution.lease_expires_at = None
     await db.flush()
     return execution
+
+
+def _async_operation_key(metadata: object) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    operation = metadata.get("async_operation")
+    if not isinstance(operation, dict) or operation.get("version") != 1:
+        return None
+    value = operation.get("operation_key")
+    return value if isinstance(value, str) and value else None
+
+
+async def mark_tool_execution_async_pending(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    lease_owner: str,
+    result_summary: str | None,
+    metadata: dict[str, Any],
+) -> AgentToolExecution:
+    """Persist a declared provider operation without closing or replaying it."""
+    execution = await _get_locked_execution(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution_id,
+    )
+    _require_lease_owner(execution, lease_owner)
+    if (
+        metadata.get("runtime_async_pending") is not True
+        or _async_operation_key(metadata) is None
+    ):
+        raise ToolExecutionError(
+            "invalid_async_tool_outcome",
+            "pending async outcome requires a stable operation key",
+        )
+    execution.result_summary = result_summary
+    execution.result_ref = None
+    execution.result_metadata = _bounded_result_metadata(metadata)
+    # The launch/poll request returned and no execution remains behind this
+    # lease. A later, separately identified poll call settles the operation.
+    execution.lease_owner = None
+    execution.lease_expires_at = None
+    execution.completed_at = None
+    await db.flush()
+    return execution
+
+
+async def settle_async_operation_executions(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    lease_owner: str,
+    status: Literal["succeeded", "failed"],
+    result_summary: str | None,
+    result_ref: str | None,
+    error_code: str | None,
+    retryable: bool,
+    artifact_refs: tuple[str, ...],
+    evidence_refs: tuple[str, ...],
+    metadata: dict[str, Any],
+    clock: Callable[[], datetime] | None = None,
+) -> AgentToolExecution:
+    """Atomically close this poll and same-Run pending receipts for its operation."""
+    operation_key = _async_operation_key(metadata)
+    if operation_key is None or metadata.get("runtime_async_pending") is not False:
+        raise ToolExecutionError(
+            "invalid_async_tool_outcome",
+            "terminal async outcome requires a stable completed operation key",
+        )
+    result = await db.execute(
+        select(AgentToolExecution)
+        .where(
+            AgentToolExecution.tenant_id == tenant_id,
+            AgentToolExecution.run_id == run_id,
+            AgentToolExecution.status == "started",
+        )
+        .with_for_update()
+    )
+    pending = list(result.scalars().all())
+    completed_at = (clock or (lambda: datetime.now(UTC)))()
+    current = await _mark_terminal(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution_id,
+        lease_owner=lease_owner,
+        status=status,
+        result_summary=result_summary,
+        result_ref=result_ref,
+        error_code=error_code,
+        retryable=retryable,
+        artifact_refs=artifact_refs,
+        evidence_refs=evidence_refs,
+        metadata=metadata,
+        clock=lambda: completed_at,
+    )
+    for execution in pending:
+        if execution.id == current.id:
+            continue
+        prior_metadata = (
+            execution.result_metadata
+            if isinstance(execution.result_metadata, dict)
+            else {}
+        )
+        if (
+            prior_metadata.get("runtime_async_pending") is not True
+            or _async_operation_key(prior_metadata) != operation_key
+        ):
+            continue
+        execution.status = status
+        execution.result_summary = current.result_summary
+        execution.result_ref = current.result_ref
+        execution.result_metadata = deepcopy(current.result_metadata)
+        execution.lease_owner = None
+        execution.lease_expires_at = None
+        execution.completed_at = completed_at
+    await db.flush()
+    return current
 
 
 async def mark_expired_safe_read_result_unavailable(

@@ -1810,6 +1810,15 @@ def _typed_unknown(
     )
 
 
+def _typed_pending(summary: str, *, metadata: dict) -> ToolExecutionOutcome:
+    return ToolExecutionOutcome(
+        status="pending",
+        result_summary=summary,
+        result_ref=None,
+        metadata=metadata,
+    )
+
+
 def _legacy_tool_outcome_text(
     outcome: ToolExecutionOutcome,
     *,
@@ -1819,6 +1828,7 @@ def _legacy_tool_outcome_text(
     prefix = {
         "succeeded": "✅",
         "failed": "❌",
+        "pending": "⏳",
         "unknown": "⚠️",
     }[outcome.status]
     return f"{prefix} {outcome.result_summary or fallback}"
@@ -5413,10 +5423,238 @@ def _mcp_result_summary(result: dict) -> tuple[str, dict]:
     return _bounded_mcp_text(summary), metadata
 
 
+class _MCPAsyncContractError(ValueError):
+    """A trusted async declaration or its provider result is malformed."""
+
+
+def _json_pointer_parts(pointer: object) -> tuple[str, ...]:
+    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        raise _MCPAsyncContractError("JSON pointer must start with '/'")
+    return tuple(
+        part.replace("~1", "/").replace("~0", "~")
+        for part in pointer[1:].split("/")
+    )
+
+
+def _json_pointer_get(document: object, pointer: object) -> object:
+    current = document
+    for part in _json_pointer_parts(pointer):
+        if isinstance(current, Mapping):
+            if part not in current:
+                raise _MCPAsyncContractError("JSON pointer does not exist")
+            current = current[part]
+            continue
+        if isinstance(current, list):
+            try:
+                index = int(part)
+            except (TypeError, ValueError) as exc:
+                raise _MCPAsyncContractError("JSON pointer index is invalid") from exc
+            if index < 0 or index >= len(current):
+                raise _MCPAsyncContractError("JSON pointer index is out of range")
+            current = current[index]
+            continue
+        raise _MCPAsyncContractError("JSON pointer traverses a scalar")
+    return current
+
+
+def _json_pointer_set(document: dict, pointer: object, value: object) -> None:
+    parts = _json_pointer_parts(pointer)
+    if not parts:
+        raise _MCPAsyncContractError("root replacement is not supported")
+    current = document
+    for part in parts[:-1]:
+        child = current.get(part)
+        if child is None:
+            child = {}
+            current[part] = child
+        if not isinstance(child, dict):
+            raise _MCPAsyncContractError("poll pointer traverses a scalar")
+        current = child
+    current[parts[-1]] = deepcopy(value)
+
+
+def _mcp_async_operation_outcome(
+    *,
+    result: dict,
+    summary: str,
+    metadata: dict,
+    full_tool_name: str,
+    arguments: Mapping[str, object],
+    contract: object,
+) -> ToolExecutionOutcome:
+    """Apply only an admin-owned structured async completion contract."""
+    try:
+        if not isinstance(contract, Mapping) or contract.get("version") != 1:
+            raise _MCPAsyncContractError("unsupported async contract version")
+        result_spec = contract.get("result")
+        if (
+            not isinstance(result_spec, Mapping)
+            or result_spec.get("source") != "content_text_json"
+        ):
+            raise _MCPAsyncContractError("unsupported async result source")
+        content_index = result_spec.get("content_index", 0)
+        if (
+            isinstance(content_index, bool)
+            or not isinstance(content_index, int)
+            or content_index < 0
+        ):
+            raise _MCPAsyncContractError("invalid async content index")
+        content = result.get("content")
+        if not isinstance(content, list) or content_index >= len(content):
+            raise _MCPAsyncContractError("async result content is missing")
+        block = content[content_index]
+        if (
+            not isinstance(block, Mapping)
+            or block.get("type") != "text"
+            or not isinstance(block.get("text"), str)
+        ):
+            raise _MCPAsyncContractError("async result must be a text block")
+        try:
+            payload = json.loads(cast(str, block["text"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise _MCPAsyncContractError("async result text is not JSON") from exc
+        if not isinstance(payload, Mapping):
+            raise _MCPAsyncContractError("async result JSON must be an object")
+        provider_state = _json_pointer_get(
+            payload,
+            result_spec.get("status_pointer"),
+        )
+        if not isinstance(provider_state, str) or not provider_state.strip():
+            raise _MCPAsyncContractError("async status must be a non-empty string")
+        provider_state = provider_state.strip()
+
+        operation_spec = contract.get("operation_id")
+        if not isinstance(operation_spec, Mapping):
+            raise _MCPAsyncContractError("async operation ID declaration is missing")
+        operation_source = operation_spec.get("source")
+        operation_document = (
+            arguments
+            if operation_source == "argument"
+            else payload
+            if operation_source == "result"
+            else None
+        )
+        if operation_document is None:
+            raise _MCPAsyncContractError("unsupported async operation ID source")
+        raw_operation_id = _json_pointer_get(
+            operation_document,
+            operation_spec.get("pointer"),
+        )
+        if isinstance(raw_operation_id, bool) or not isinstance(
+            raw_operation_id,
+            (str, int),
+        ):
+            raise _MCPAsyncContractError("async operation ID must be a scalar")
+        operation_id = str(raw_operation_id).strip()
+        if not operation_id:
+            raise _MCPAsyncContractError("async operation ID is empty")
+
+        states = contract.get("states")
+        if not isinstance(states, Mapping):
+            raise _MCPAsyncContractError("async states declaration is missing")
+        classified: dict[str, str] = {}
+        for classification in ("pending", "succeeded", "failed", "unknown"):
+            values = states.get(classification, [])
+            if not isinstance(values, list) or any(
+                not isinstance(value, str) or not value.strip() for value in values
+            ):
+                raise _MCPAsyncContractError("async state lists are invalid")
+            for value in values:
+                normalized = value.strip()
+                if normalized in classified:
+                    raise _MCPAsyncContractError("async states overlap")
+                classified[normalized] = classification
+        if not all(states.get(name) for name in ("pending", "succeeded", "failed")):
+            raise _MCPAsyncContractError("async terminal state lists are incomplete")
+
+        poll_spec = contract.get("poll")
+        if not isinstance(poll_spec, Mapping) or poll_spec.get("tool") != "$self":
+            raise _MCPAsyncContractError("async polling must target the same tool")
+        copy_arguments = poll_spec.get("copy_arguments", [])
+        set_arguments = poll_spec.get("set_arguments", {})
+        interval_ms = poll_spec.get("interval_ms", 1000)
+        if (
+            not isinstance(copy_arguments, list)
+            or not isinstance(set_arguments, Mapping)
+            or isinstance(interval_ms, bool)
+            or not isinstance(interval_ms, int)
+            or interval_ms < 0
+            or interval_ms > 600_000
+        ):
+            raise _MCPAsyncContractError("async poll declaration is invalid")
+        poll_arguments: dict = {}
+        for pointer in copy_arguments:
+            _json_pointer_set(
+                poll_arguments,
+                pointer,
+                _json_pointer_get(arguments, pointer),
+            )
+        for pointer, value in set_arguments.items():
+            _json_pointer_set(poll_arguments, pointer, value)
+
+        classification = classified.get(provider_state)
+        operation_key = hashlib.sha256(
+            json.dumps(
+                {"tool": full_tool_name, "operation_id": operation_id},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        operation = {
+            "version": 1,
+            "operation_key": operation_key,
+            "operation_id": operation_id,
+            "state": provider_state,
+            "poll": {
+                "tool": full_tool_name,
+                "arguments": poll_arguments,
+                "interval_ms": interval_ms,
+            },
+        }
+        async_metadata = {
+            **metadata,
+            "runtime_async_pending": classification == "pending",
+            "async_operation": operation,
+        }
+        if classification == "pending":
+            poll_json = json.dumps(poll_arguments, ensure_ascii=False, sort_keys=True)
+            return _typed_pending(
+                f"{summary}\n\nAsync operation is still {provider_state}. "
+                f"Do not finish yet. Poll {full_tool_name} with arguments "
+                f"{poll_json} until it reaches a terminal state.",
+                metadata=async_metadata,
+            )
+        if classification == "succeeded":
+            return _typed_success(summary, metadata=async_metadata)
+        if classification == "failed":
+            return _typed_failure(
+                summary,
+                "mcp_async_operation_failed",
+                metadata=async_metadata,
+            )
+        return _typed_unknown(
+            (
+                f"Async operation reported unclassified state {provider_state!r}; "
+                "reconcile it before retrying or finishing."
+            ),
+            "mcp_async_operation_unknown",
+            metadata=async_metadata,
+        )
+    except (TypeError, ValueError):
+        return _typed_unknown(
+            "MCP async completion facts did not match the configured contract; "
+            "reconcile before retrying or finishing.",
+            "mcp_async_contract_invalid",
+        )
+
+
 def _mcp_call_response_outcome(
     data: object,
     *,
     full_tool_name: str,
+    arguments: Mapping[str, object] | None = None,
+    async_completion: object | None = None,
 ) -> ToolExecutionOutcome:
     """Map protocol facts to a typed outcome without text-prefix inference."""
     if not isinstance(data, dict):
@@ -5459,6 +5697,15 @@ def _mcp_call_response_outcome(
     if is_error:
         return _typed_failure(summary, "mcp_tool_error")
     metadata["mcp_full_tool_name"] = full_tool_name
+    if async_completion is not None:
+        return _mcp_async_operation_outcome(
+            result=result,
+            summary=summary,
+            metadata=metadata,
+            full_tool_name=full_tool_name,
+            arguments=arguments or {},
+            contract=async_completion,
+        )
     return _typed_success(summary, metadata=metadata)
 
 
@@ -5543,6 +5790,9 @@ async def _resolve_mcp_execution_target(
                 "full_name": str(tool.name or tool_name),
                 "unavailable_error_code": "mcp_configuration_missing",
             }
+        trusted_async_completion = deepcopy(
+            (tool.config or {}).get("async_completion")
+        )
         merged_config = {
             **(tool.config or {}),
             **(assignment.config or {}),
@@ -5557,6 +5807,9 @@ async def _resolve_mcp_execution_target(
             "server_url": server_url,
             "server_name": str(tool.mcp_server_name or ""),
             "config": merged_config,
+            # Completion semantics are admin-owned Tool metadata. Per-Agent
+            # config may supply credentials but cannot redefine completion.
+            "async_completion": trusted_async_completion,
         }
 
 
@@ -5587,6 +5840,7 @@ async def _execute_resolved_mcp_target_outcome(
     server_url = str(target["server_url"])
     server_name = str(target.get("server_name") or "")
     config = dict(target.get("config") or {})
+    async_completion = target.get("async_completion")
 
     hostname = (urlparse(server_url).hostname or "").lower()
     if hostname.endswith(".run.tools"):
@@ -5597,6 +5851,7 @@ async def _execute_resolved_mcp_target_outcome(
             config,
             agent_id=agent_id,
             full_tool_name=full_name,
+            async_completion=async_completion,
         )
 
     direct_api_key = config.get("api_key") or config.get(
@@ -5628,7 +5883,12 @@ async def _execute_resolved_mcp_target_outcome(
             "MCP call outcome is unknown after dispatch; reconcile before retrying.",
             "mcp_call_outcome_unknown",
         )
-    return _mcp_call_response_outcome(data, full_tool_name=full_name)
+    return _mcp_call_response_outcome(
+        data,
+        full_tool_name=full_name,
+        arguments=arguments,
+        async_completion=async_completion,
+    )
 
 
 async def _execute_mcp_tool_outcome(
@@ -5718,6 +5978,7 @@ async def _execute_via_smithery_connect_outcome(
     agent_id=None,
     *,
     full_tool_name: str,
+    async_completion: object | None = None,
 ) -> ToolExecutionOutcome:
     """Execute one Smithery business call and preserve protocol status."""
     import httpx
@@ -5848,7 +6109,12 @@ async def _execute_via_smithery_connect_outcome(
             "Smithery authorization is required before this MCP tool can run.",
             "mcp_auth_required",
         )
-    return _mcp_call_response_outcome(data, full_tool_name=full_tool_name)
+    return _mcp_call_response_outcome(
+        data,
+        full_tool_name=full_tool_name,
+        arguments=arguments,
+        async_completion=async_completion,
+    )
 
 
 async def _execute_via_smithery_connect(
