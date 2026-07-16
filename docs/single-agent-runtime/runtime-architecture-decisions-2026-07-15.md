@@ -1084,6 +1084,18 @@ GET /api/agents/{agent_id}/sessions/{session_id}/runtime-state
 
 完整长任务回归必须等 Step budget、Compact 防风暴、Tool 事实和 Verifier 下限全部完成后再跑；否则只能证明某一道门被解除，不能证明单 Agent Runtime 已恢复。
 
+### D-024：2026-07-16 线上回归暴露的 Runtime 正确性补丁
+
+本条只修已稳定复现的正确性下限，不引入 DeepSeek `reasoning_content`、确定性 Skill 预载、Tool Search 或进一步模型专属 Prompt 调优。
+
+1. **非空原生纯文本是 finish candidate。** 部分 OpenAI-compatible 模型会返回正确、非空的 assistant text 而不调用 `finish`。Runtime 不再丢弃这段结果并制造 `finish_protocol_violation`，而是把它送入同一个确定性 Verifier/Finalizer；空白响应仍只允许一次有界 protocol repair。Group 纯文本中的 `@name` 不会被解析为 handoff，公开交接仍只接受结构化 `mention_participant_ids`。
+2. **共享 Direct Thread 不保留旧 Run 的未发布草稿和 repair。** 当前 Run 的 repair draft/instruction 保持 raw，供本 Run 下一轮修复使用；进入新 Run 后，Thread-only 的旧纯文本候选和 Runtime repair 不再注入模型，也不进入 Running Summary。已交付的历史 assistant 回复继续从产品 Session snapshot 进入上下文，工具调用和 Tool Result 事实继续保留。
+3. **Onboarding 按 tenant + Agent + User pair 持久去重。** 前端只有在空历史已成功加载、`runtime-state` 是权威响应、无 active Run 且 WebSocket 已连接时才发隐藏 trigger；本地 key 从 session 改为 Agent/User pair。后端使用带 attempt 的稳定 `source_execution_id` 收敛并发 socket 和 session remount；running/completed trigger 不重复创建 Run，failed/cancelled 后下一次明确 trigger 使用新 attempt。显式传入错 scope session 时 fail closed，绝不静默回退 primary session。
+4. **声明式异步 MCP 不能伪装成 succeeded。** 只有管理员拥有的 `Tool.config.async_completion` 能定义状态 JSON pointer、operation ID、pending/succeeded/failed states 和同 Tool poll 参数；Agent assignment config 不能覆盖。pending/downloading/running 保持同一 Run Tool Ledger `started` 并返回 typed `pending`，稳定 operation key 防止重放启动操作；终态 poll 结算同一 operation 的 pending receipts。存在未完成异步 operation 时 Verifier 返回精确 poll repair 并阻止 finish。未声明工具继续按结构化协议事实处理，不从任意文本猜异步状态。
+5. **本批不改表。** 异步 operation facts 复用 `agent_tool_executions.result_metadata`，Onboarding 复用现有 Run source uniqueness，Thread visibility 复用 LangGraph message metadata；没有新增 migration、投影表或第二套执行状态。
+
+回归门禁包括：非空/空白纯文本 finish、跨 Run draft/repair 过滤与当前 Run repair 保留、onboarding 并发/重挂载/失败重试/错 session、异步 MCP pending/replay/poll settle/finish block，以及 Chat、Group、Tool、Context 相邻路径。2026-07-16 合并后全量结果为 backend `1897 passed`、frontend `21 passed`，frontend `tsc && vite build` 通过。
+
 ## 4. 明确放弃或暂不采用的方案
 
 | 方案 | 结论 | 原因 |
