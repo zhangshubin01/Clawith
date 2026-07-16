@@ -43,6 +43,7 @@ def test_runtime_settings_have_safe_confirmed_defaults() -> None:
     assert settings.AGENT_RUNTIME_CHECKPOINT_RETENTION_DAYS == 30
     assert settings.AGENT_RUNTIME_EVENT_PAYLOAD_MAX_BYTES == 16384
     assert settings.AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES == 8192
+    assert settings.AGENT_RUNTIME_ASYNC_TOOL_POLL_SCAN_SECONDS == 0.25
     assert settings.MAX_AGENT_CYCLE_COUNT == 5
 
 

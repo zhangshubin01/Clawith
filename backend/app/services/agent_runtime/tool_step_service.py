@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from typing import Protocol, cast
@@ -260,6 +261,136 @@ def _waiting_request(
         "reason": error_code or "tool_reconciliation_required",
         "tool_call_id": call_id,
     }
+
+
+def _async_poll_schedule_metadata(
+    *,
+    run_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    metadata: Mapping[str, object],
+    clock: Callable[[], datetime] | None = None,
+) -> dict:
+    operation = metadata.get("async_operation")
+    if not isinstance(operation, Mapping):
+        raise ToolExecutionError(
+            "invalid_async_tool_outcome",
+            "pending async outcome requires poll instructions",
+        )
+    poll = operation.get("poll")
+    if not isinstance(poll, Mapping):
+        raise ToolExecutionError(
+            "invalid_async_tool_outcome",
+            "pending async outcome requires poll instructions",
+        )
+    tool_name = poll.get("tool")
+    arguments = poll.get("arguments")
+    interval_ms = poll.get("interval_ms")
+    if (
+        not isinstance(tool_name, str)
+        or not tool_name.strip()
+        or not isinstance(arguments, Mapping)
+        or isinstance(interval_ms, bool)
+        or not isinstance(interval_ms, int)
+        or interval_ms < 0
+        or interval_ms > 600_000
+    ):
+        raise ToolExecutionError(
+            "invalid_async_tool_outcome",
+            "pending async poll instructions are invalid",
+        )
+    due_at = (clock or (lambda: datetime.now(UTC)))() + timedelta(
+        milliseconds=interval_ms
+    )
+    return {
+        **metadata,
+        "async_poll_due_at": due_at.isoformat(),
+        "async_poll_correlation_id": str(
+            uuid.uuid5(run_id, f"async-poll:{execution_id}")
+        ),
+        "async_poll_call_id": f"async-poll:{execution_id}",
+        "async_poll_scheduled": False,
+    }
+
+
+def _async_pending_step_result(
+    *,
+    run_id: uuid.UUID,
+    execution: AgentToolExecution,
+    call_id: str,
+    tool_name: str,
+    outcome: ToolExecutionOutcome,
+    prior_messages: Sequence[JsonObject],
+    tail_calls: Sequence[JsonObject],
+) -> ToolStepResult:
+    metadata = execution.result_metadata
+    operation = metadata.get("async_operation") if isinstance(metadata, dict) else None
+    poll = operation.get("poll") if isinstance(operation, Mapping) else None
+    operation_key = (
+        operation.get("operation_key") if isinstance(operation, Mapping) else None
+    )
+    correlation_id = (
+        metadata.get("async_poll_correlation_id")
+        if isinstance(metadata, dict)
+        else None
+    )
+    poll_call_id = (
+        metadata.get("async_poll_call_id") if isinstance(metadata, dict) else None
+    )
+    if (
+        not isinstance(poll, Mapping)
+        or not isinstance(operation_key, str)
+        or not operation_key
+        or not isinstance(correlation_id, str)
+        or not correlation_id
+        or not isinstance(poll_call_id, str)
+        or not poll_call_id
+        or not isinstance(poll.get("tool"), str)
+        or not isinstance(poll.get("arguments"), Mapping)
+    ):
+        raise ToolExecutionError(
+            "invalid_async_poll_schedule",
+            "pending async receipt has no durable poll schedule",
+        )
+    poll_call: JsonObject = {
+        "id": poll_call_id,
+        "type": "function",
+        "function": {
+            "name": cast(str, poll["tool"]),
+            "arguments": json.dumps(
+                dict(cast(Mapping[str, object], poll["arguments"])),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        },
+    }
+    proposal: JsonObject = {
+        "id": str(uuid.uuid5(run_id, f"async-poll-proposal:{execution.id}")),
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [poll_call],
+        "runtime_intent": "async_poll",
+        "runtime_run_id": str(run_id),
+    }
+    return ToolStepResult(
+        messages=(
+            *prior_messages,
+            _result_message(
+                run_id=run_id,
+                call_id=call_id,
+                tool_name=tool_name,
+                outcome=outcome,
+            ),
+            proposal,
+        ),
+        waiting_request={
+            "waiting_type": "external",
+            "correlation_id": correlation_id,
+            "reason": "async_tool_poll_pending",
+            "tool_call_id": call_id,
+            "operation_key": operation_key,
+        },
+        pending_tool_calls=(poll_call, *tail_calls),
+    )
 
 
 def _heartbeat_tool_limit(
@@ -538,6 +669,14 @@ class RuntimeToolStepService:
             },
         )
         if normalized.status == "pending":
+            normalized = replace(
+                normalized,
+                metadata=_async_poll_schedule_metadata(
+                    run_id=reservation.execution.run_id,
+                    execution_id=reservation.execution.id,
+                    metadata=normalized.metadata,
+                ),
+            )
             async with self._session_factory() as db:
                 async with db.begin():
                     execution = await mark_tool_execution_async_pending(
@@ -552,6 +691,11 @@ class RuntimeToolStepService:
                 normalized,
                 result_summary=execution.result_summary,
                 result_ref=execution.result_ref,
+                metadata=(
+                    dict(execution.result_metadata)
+                    if isinstance(execution.result_metadata, dict)
+                    else normalized.metadata
+                ),
             )
         if normalized.retryable and attempt_count < SAFE_READ_MAX_ATTEMPTS:
             async with self._session_factory() as db:
@@ -596,7 +740,7 @@ class RuntimeToolStepService:
             async with db.begin():
                 operation = normalized.metadata.get("async_operation")
                 terminal_async = (
-                    normalized.status in {"succeeded", "failed"}
+                    normalized.status in {"succeeded", "failed", "unknown"}
                     and normalized.metadata.get("runtime_async_pending") is False
                     and isinstance(operation, Mapping)
                     and isinstance(operation.get("operation_key"), str)
@@ -609,11 +753,7 @@ class RuntimeToolStepService:
                         run_id=reservation.execution.run_id,
                         execution_id=reservation.execution.id,
                         lease_owner=lease_owner,
-                        status=(
-                            "succeeded"
-                            if normalized.status == "succeeded"
-                            else "failed"
-                        ),
+                        status=normalized.status,
                         result_summary=normalized.result_summary,
                         result_ref=normalized.result_ref,
                         error_code=normalized.error_code,
@@ -828,6 +968,16 @@ class RuntimeToolStepService:
                     lease_owner=lease_owner,
                 )
                 if reservation.reusable_result is not None:
+                    if reservation.reusable_result.status == "pending":
+                        return _async_pending_step_result(
+                            run_id=run_id,
+                            execution=reservation.execution,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            outcome=reservation.reusable_result,
+                            prior_messages=messages,
+                            tail_calls=tool_calls[index + 1 :],
+                        )
                     messages.append(
                         _result_message(
                             run_id=run_id,
@@ -1286,6 +1436,16 @@ class RuntimeToolStepService:
                                 "Group workspace ledger settlement requires reconciliation"
                             ) from exc
                         raise
+                if outcome.status == "pending":
+                    return _async_pending_step_result(
+                        run_id=run_id,
+                        execution=reservation.execution,
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        outcome=outcome,
+                        prior_messages=messages,
+                        tail_calls=tool_calls[index + 1 :],
+                    )
                 if outcome.status == "unknown":
                     if _is_group_agent_run(state):
                         return self._group_unknown_failure(

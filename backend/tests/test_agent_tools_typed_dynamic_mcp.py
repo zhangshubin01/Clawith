@@ -448,6 +448,32 @@ def test_configured_async_mcp_maps_declared_terminal_states(
     assert outcome.metadata["async_operation"]["state"] == provider_status
 
 
+def test_configured_async_mcp_parses_terminal_failure_before_generic_is_error() -> None:
+    outcome = agent_tools._mcp_call_response_outcome(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "isError": True,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": '{"status":"error","message":"conversion failed"}',
+                    }
+                ],
+            },
+        },
+        full_tool_name="arxiv_local-download_paper",
+        arguments={"paper_id": "2501.01234", "check_status": True},
+        async_completion=_async_completion_contract(),
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "mcp_async_operation_failed"
+    assert outcome.metadata["runtime_async_pending"] is False
+    assert outcome.metadata["async_operation"]["operation_id"] == "2501.01234"
+
+
 def test_unconfigured_mcp_never_guesses_pending_state_from_text() -> None:
     outcome = agent_tools._mcp_call_response_outcome(
         {

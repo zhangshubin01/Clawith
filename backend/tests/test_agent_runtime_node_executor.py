@@ -709,6 +709,176 @@ async def test_wait_interrupt_resumes_the_same_run_and_then_finishes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_external_timer_resume_executes_pending_poll_before_model() -> None:
+    run_id = uuid.uuid4()
+    poll_call: JsonObject = {
+        "id": "async-poll-1",
+        "type": "function",
+        "function": {
+            "name": "download_status",
+            "arguments": '{"operation_id":"op-1"}',
+        },
+    }
+
+    class AsyncPollTools:
+        def __init__(self) -> None:
+            self.calls: list[tuple[JsonObject, ...]] = []
+
+        async def execute_pending(self, state, context, tool_calls):
+            del state, context
+            self.calls.append(tool_calls)
+            return ToolStepResult(
+                messages=(
+                    {
+                        "id": "poll-result-1",
+                        "role": "tool",
+                        "tool_call_id": "async-poll-1",
+                        "name": "download_status",
+                        "content": "download completed",
+                        "execution_status": "succeeded",
+                        "result_ref": None,
+                    },
+                )
+            )
+
+    model = ModelService(ModelStepResult(intent="finish", finish_content="done"))
+    tools = AsyncPollTools()
+    executor = _executor(model, tools=tools)
+    graph = build_agent_runtime_graph(
+        checkpointer=InMemorySaver(),
+        settings=_settings(),
+    )
+    config = runtime_thread_config(run_id)
+    state = _state(run_id)
+    state["messages"] = [
+        {
+            "id": "poll-proposal-1",
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [poll_call],
+        }
+    ]
+    state["lifecycle"] = {
+        "status": "waiting_external",
+        "next_route": "wait",
+        "pending_tool_calls": [poll_call],
+        "waiting_request": {
+            "waiting_type": "external",
+            "correlation_id": "async-correlation-1",
+            "reason": "async_tool_poll_pending",
+        },
+    }
+
+    interrupted = await graph.compiled.ainvoke(
+        state,
+        config,
+        context=_context(run_id, executor, "command-start"),
+    )
+    assert interrupted["lifecycle"]["status"] == "waiting_external"
+    assert model.calls == 0
+
+    resumed = await graph.compiled.ainvoke(
+        Command(
+            resume={
+                "resume_type": "timer",
+                "correlation_id": "async-correlation-1",
+                "payload": {"operation_key": "op-1"},
+            }
+        ),
+        config,
+        context=_context(run_id, executor, "command-timer"),
+    )
+
+    assert tools.calls == [(poll_call,)]
+    assert model.calls == 1
+    assert resumed["lifecycle"]["status"] == "completed"
+    messages = runtime_messages_as_json(cast(RuntimeGraphState, resumed))
+    assert not any(message.get("runtime_input") == "resume" for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_external_timer_resume_recovers_legacy_wait_without_pending_call() -> None:
+    run_id = uuid.uuid4()
+    poll_call: JsonObject = {
+        "id": "async-poll-legacy",
+        "type": "function",
+        "function": {
+            "name": "download_status",
+            "arguments": '{"operation_id": "op-legacy"}',
+        },
+    }
+
+    class AsyncPollTools:
+        def __init__(self) -> None:
+            self.calls: list[tuple[JsonObject, ...]] = []
+
+        async def execute_pending(self, state, context, tool_calls):
+            del state, context
+            self.calls.append(tool_calls)
+            return ToolStepResult(
+                messages=(
+                    {
+                        "id": "poll-result-legacy",
+                        "role": "tool",
+                        "tool_call_id": "async-poll-legacy",
+                        "name": "download_status",
+                        "content": "download completed",
+                        "execution_status": "succeeded",
+                        "result_ref": None,
+                    },
+                )
+            )
+
+    model = ModelService(ModelStepResult(intent="finish", finish_content="done"))
+    tools = AsyncPollTools()
+    executor = _executor(model, tools=tools)
+    graph = build_agent_runtime_graph(
+        checkpointer=InMemorySaver(),
+        settings=_settings(),
+    )
+    config = runtime_thread_config(run_id)
+    state = _state(run_id)
+    state["lifecycle"] = {
+        "status": "waiting_external",
+        "next_route": "wait",
+        "pending_tool_calls": [],
+        "waiting_request": {
+            "waiting_type": "external",
+            "correlation_id": f"tool-reconcile:{run_id}",
+            "reason": "Tool execution reconciliation is required.",
+        },
+    }
+
+    await graph.compiled.ainvoke(
+        state,
+        config,
+        context=_context(run_id, executor, "command-start"),
+    )
+    resumed = await graph.compiled.ainvoke(
+        Command(
+            resume={
+                "resume_type": "timer",
+                "correlation_id": f"tool-reconcile:{run_id}",
+                "payload": {
+                    "operation_key": "op-legacy",
+                    "poll_call_id": "async-poll-legacy",
+                    "poll": {
+                        "tool": "download_status",
+                        "arguments": {"operation_id": "op-legacy"},
+                    },
+                },
+            }
+        ),
+        config,
+        context=_context(run_id, executor, "command-timer"),
+    )
+
+    assert tools.calls == [(poll_call,)]
+    assert model.calls == 1
+    assert resumed["lifecycle"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_cancel_is_observed_before_the_model_or_a_new_tool_can_start() -> None:
     run_id = uuid.uuid4()
     model = ModelService(ModelStepResult(intent="finish", finish_content="too late"))

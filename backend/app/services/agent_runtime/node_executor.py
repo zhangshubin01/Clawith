@@ -423,6 +423,41 @@ def _validate_waiting_request(request: JsonObject | None) -> JsonObject:
     return dict(request)
 
 
+def _async_poll_call_from_resume(resume_value: Mapping[str, object]) -> JsonObject | None:
+    """Recover a pre-scheduler async wait from its durable timer command."""
+    if resume_value.get("resume_type") != "timer":
+        return None
+    payload = resume_value.get("payload")
+    if not isinstance(payload, Mapping):
+        return None
+    poll_call_id = payload.get("poll_call_id")
+    poll = payload.get("poll")
+    if not isinstance(poll_call_id, str) or not poll_call_id:
+        return None
+    if not isinstance(poll, Mapping):
+        return None
+    tool_name = poll.get("tool")
+    arguments = poll.get("arguments")
+    if (
+        not isinstance(tool_name, str)
+        or not tool_name.strip()
+        or not isinstance(arguments, Mapping)
+    ):
+        return None
+    return {
+        "id": poll_call_id,
+        "type": "function",
+        "function": {
+            "name": tool_name,
+            "arguments": json.dumps(
+                dict(arguments),
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        },
+    }
+
+
 class DeterministicRuntimeNodeExecutor:
     """Own lifecycle transitions while delegating model, tools, and delivery."""
 
@@ -996,7 +1031,16 @@ class DeterministicRuntimeNodeExecutor:
             "runtime_run_id": context.run_id,
         })
         pending_calls = _tool_calls(cast(RuntimeLifecycle, lifecycle))
-        if waiting_status == "waiting_agent" and pending_calls:
+        if waiting_status == "waiting_external" and not pending_calls:
+            recovered_poll_call = _async_poll_call_from_resume(resume_value)
+            if recovered_poll_call is not None:
+                lifecycle["pending_tool_calls"] = [recovered_poll_call]
+                lifecycle["next_route"] = "tool"
+                return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
+        if waiting_status in {"waiting_agent", "waiting_external"} and pending_calls:
+            if waiting_status == "waiting_external":
+                lifecycle["next_route"] = "tool"
+                return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
             deferred = lifecycle.get("deferred_resume_messages", [])
             if not isinstance(deferred, list) or any(
                 not isinstance(message, Mapping) for message in deferred

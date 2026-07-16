@@ -5694,11 +5694,9 @@ def _mcp_call_response_outcome(
             "MCP returned a malformed response; reconcile before retrying.",
             "mcp_malformed_response",
         )
-    if is_error:
-        return _typed_failure(summary, "mcp_tool_error")
     metadata["mcp_full_tool_name"] = full_tool_name
     if async_completion is not None:
-        return _mcp_async_operation_outcome(
+        async_outcome = _mcp_async_operation_outcome(
             result=result,
             summary=summary,
             metadata=metadata,
@@ -5706,6 +5704,24 @@ def _mcp_call_response_outcome(
             arguments=arguments or {},
             contract=async_completion,
         )
+        if is_error and async_outcome.status in {"pending", "succeeded"}:
+            return replace(
+                async_outcome,
+                status="unknown",
+                result_summary=(
+                    "MCP reported isError=true while the declared async status "
+                    "reported a non-failure state; reconcile before continuing."
+                ),
+                error_code="mcp_async_protocol_conflict",
+                retryable=False,
+                metadata={
+                    **async_outcome.metadata,
+                    "runtime_async_pending": False,
+                },
+            )
+        return async_outcome
+    if is_error:
+        return _typed_failure(summary, "mcp_tool_error")
     return _typed_success(summary, metadata=metadata)
 
 

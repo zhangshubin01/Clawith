@@ -365,7 +365,7 @@ async def test_success_is_reserved_before_execution_and_settled_afterwards(
 
 
 @pytest.mark.asyncio
-async def test_async_pending_is_recorded_as_started_and_returned_to_model(
+async def test_async_pending_interrupts_with_a_deterministic_poll_call(
     monkeypatch,
 ) -> None:
     tenant_id = uuid.uuid4()
@@ -409,6 +409,7 @@ async def test_async_pending_is_recorded_as_started_and_returned_to_model(
     async def mark_pending(db, **kwargs):
         del db
         assert kwargs["metadata"]["runtime_async_pending"] is True
+        assert kwargs["metadata"]["async_poll_scheduled"] is False
         execution.result_summary = kwargs["result_summary"]
         execution.result_metadata = kwargs["metadata"]
         execution.lease_owner = None
@@ -437,9 +438,28 @@ async def test_async_pending_is_recorded_as_started_and_returned_to_model(
 
     assert execution.status == "started"
     assert execution.lease_owner is None
-    assert result.waiting_request is None
-    assert result.pending_tool_calls == ()
+    assert result.waiting_request == {
+        "waiting_type": "external",
+        "correlation_id": str(
+            uuid.uuid5(uuid.UUID(context.run_id), f"async-poll:{execution.id}")
+        ),
+        "reason": "async_tool_poll_pending",
+        "tool_call_id": "call-async",
+        "operation_key": "operation-key",
+    }
+    assert len(result.pending_tool_calls) == 1
+    poll_call = result.pending_tool_calls[0]
+    assert poll_call == {
+        "id": f"async-poll:{execution.id}",
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "arguments": '{"paper_id": "2501.01234"}',
+        },
+    }
     assert result.messages[0]["execution_status"] == "pending"
+    assert result.messages[1]["role"] == "assistant"
+    assert result.messages[1]["tool_calls"] == [poll_call]
 
 
 @pytest.mark.asyncio
@@ -518,6 +538,76 @@ async def test_terminal_async_poll_settles_same_run_operation(
     assert settle_calls[0]["run_id"] == uuid.UUID(context.run_id)
     assert settle_calls[0]["metadata"]["runtime_async_pending"] is False
     assert result.messages[0]["execution_status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_unknown_async_poll_settles_operation_before_waiting_for_reconciliation(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-poll-unknown", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    context = _context(state)
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(context.run_id),
+        "call-poll-unknown",
+        "read_file",
+    )
+    settle_calls: list[dict] = []
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def execute(*args, **kwargs):
+        del args, kwargs
+        return ToolExecutionOutcome(
+            status="unknown",
+            result_summary="Poll response was ambiguous.",
+            result_ref=None,
+            error_code="mcp_async_protocol_conflict",
+            metadata={
+                "runtime_async_pending": False,
+                "async_operation": {
+                    "version": 1,
+                    "operation_key": "operation-key",
+                    "operation_id": "2501.01234",
+                    "state": "unknown",
+                    "poll": {
+                        "tool": "read_file",
+                        "arguments": {"paper_id": "2501.01234"},
+                        "interval_ms": 1000,
+                    },
+                },
+            },
+        )
+
+    async def settle_async(db, **kwargs):
+        del db
+        settle_calls.append(kwargs)
+        execution.status = kwargs["status"]
+        execution.result_summary = kwargs["result_summary"]
+        execution.result_metadata = kwargs["metadata"]
+        return execution
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service,
+        "settle_async_operation_executions",
+        settle_async,
+    )
+
+    result = await _service(agent, _CancelSource(None), execute).execute_pending(
+        state,
+        context,
+        (call,),
+    )
+
+    assert settle_calls[0]["status"] == "unknown"
+    assert result.waiting_request is not None
+    assert result.waiting_request["waiting_type"] == "user"
 
 
 @pytest.mark.asyncio

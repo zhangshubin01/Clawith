@@ -123,6 +123,10 @@ _RESULT_METADATA_KEYS = frozenset(
         "last_error_code",
         "runtime_async_pending",
         "async_operation",
+        "async_poll_due_at",
+        "async_poll_correlation_id",
+        "async_poll_call_id",
+        "async_poll_scheduled",
     }
 )
 _SENSITIVE_KEYS = frozenset(
@@ -1491,7 +1495,7 @@ async def settle_async_operation_executions(
     run_id: uuid.UUID,
     execution_id: uuid.UUID,
     lease_owner: str,
-    status: Literal["succeeded", "failed"],
+    status: Literal["succeeded", "failed", "unknown"],
     result_summary: str | None,
     result_ref: str | None,
     error_code: str | None,

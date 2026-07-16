@@ -20,6 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.config import Settings, get_settings
 from app.services.agent_runtime.a2a_completion import A2ARuntimeCompletionHandler
 from app.services.agent_runtime.a2a_runtime import RuntimeA2AService
+from app.services.agent_runtime.async_tool_poll import (
+    AsyncToolPollResult,
+    AsyncToolPollScheduler,
+)
 from app.services.agent_runtime.cancel_source import DatabaseRuntimeCancelSource
 from app.services.agent_runtime.channel_delivery import (
     ChannelDeliveryWorkResult,
@@ -126,6 +130,7 @@ class RuntimeWorkerComponents:
     graph_registry: RuntimeGraphRegistry
     driver: LangGraphRuntimeDriver
     worker: RuntimeCommandWorker
+    async_tool_poll_scheduler: AsyncToolPollScheduler
     tool_result_reconciler: ToolResultReconciler
     product_reconciler: RuntimeProductReconciler
     channel_delivery_worker: ChannelDeliveryWorker
@@ -322,6 +327,9 @@ def build_runtime_worker_components(
         claimant=resolved_claimant,
         settings=runtime_settings,
     )
+    async_tool_poll_scheduler = AsyncToolPollScheduler(
+        session_factory=session_factory,
+    )
     product_reconciler = RuntimeProductReconciler(
         session_factory=session_factory,
         checkpoint_reader=driver,
@@ -339,6 +347,7 @@ def build_runtime_worker_components(
         graph_registry=graph_registry,
         driver=driver,
         worker=worker,
+        async_tool_poll_scheduler=async_tool_poll_scheduler,
         tool_result_reconciler=tool_result_reconciler,
         product_reconciler=product_reconciler,
         channel_delivery_worker=channel_delivery_worker,
@@ -428,6 +437,42 @@ class ChannelDeliveryDaemon:
 
     def _delay_after(self, result: ChannelDeliveryWorkResult) -> float:
         if result.status in {"idle", "retry", "failed"}:
+            return self._scan_delay_seconds
+        return 0.0
+
+
+class AsyncToolPollDaemon:
+    """Schedule timer resumes without executing Tools outside LangGraph."""
+
+    def __init__(
+        self,
+        scheduler: AsyncToolPollScheduler,
+        *,
+        scan_delay_seconds: float,
+        error_delay_seconds: float = 1.0,
+    ) -> None:
+        if scan_delay_seconds <= 0 or error_delay_seconds <= 0:
+            raise ValueError("async Tool poll daemon delays must be positive")
+        self._scheduler = scheduler
+        self._scan_delay_seconds = scan_delay_seconds
+        self._error_delay_seconds = error_delay_seconds
+
+    async def run(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                result = await self._scheduler.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Runtime async Tool poll scheduling iteration failed")
+                delay = self._error_delay_seconds
+            else:
+                delay = self._delay_after(result)
+            if delay:
+                await RuntimeCommandDaemon._wait(stop, delay)
+
+    def _delay_after(self, result: AsyncToolPollResult) -> float:
+        if result.status in {"idle", "deferred"}:
             return self._scan_delay_seconds
         return 0.0
 
@@ -573,6 +618,15 @@ async def running_runtime_worker_context(
             ).run(stop),
             name="agent-runtime-channel-delivery",
         )
+        async_tool_poll_task = asyncio.create_task(
+            AsyncToolPollDaemon(
+                components.async_tool_poll_scheduler,
+                scan_delay_seconds=(
+                    runtime_settings.AGENT_RUNTIME_ASYNC_TOOL_POLL_SCAN_SECONDS
+                ),
+            ).run(stop),
+            name="agent-runtime-async-tool-poll",
+        )
         product_reconcile_task = asyncio.create_task(
             ProductReconcileDaemon(components.product_reconciler).run(stop),
             name="agent-runtime-product-reconcile",
@@ -588,6 +642,7 @@ async def running_runtime_worker_context(
             task.cancel()
             compact_task.cancel()
             channel_delivery_task.cancel()
+            async_tool_poll_task.cancel()
             product_reconcile_task.cancel()
             tool_result_reconcile_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -597,6 +652,8 @@ async def running_runtime_worker_context(
             with suppress(asyncio.CancelledError):
                 await channel_delivery_task
             with suppress(asyncio.CancelledError):
+                await async_tool_poll_task
+            with suppress(asyncio.CancelledError):
                 await product_reconcile_task
             with suppress(asyncio.CancelledError):
                 await tool_result_reconcile_task
@@ -604,6 +661,7 @@ async def running_runtime_worker_context(
 
 __all__ = [
     "ChannelDeliveryDaemon",
+    "AsyncToolPollDaemon",
     "ProductReconcileDaemon",
     "ToolResultReconcileDaemon",
     "RuntimeCommandDaemon",
