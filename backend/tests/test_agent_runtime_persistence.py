@@ -82,6 +82,7 @@ def _registration(**overrides) -> persistence.RunRegistration:
         "run_kind": "foreground",
         "runtime_type": "langgraph",
         "model_id": uuid.uuid4(),
+        "model_turn_limit": 50,
         "graph_name": "clawith_agent_runtime",
         "graph_version": "v1",
         "delivery_status": "pending",
@@ -95,7 +96,7 @@ def _existing_run(registration: persistence.RunRegistration) -> AgentRun:
     run_id = uuid.uuid4()
     return AgentRun(
         id=run_id,
-        runtime_thread_id=str(run_id),
+        runtime_thread_id=registration.runtime_thread_id or str(run_id),
         lane_held=False,
         delivery_status=registration.delivery_status,
         **persistence._registration_values(registration),
@@ -146,12 +147,30 @@ async def test_register_run_and_start_command_share_the_caller_transaction():
     assert db.flush_count == 1
     assert result.run.id == result.start_command.run_id
     assert result.run.runtime_thread_id == str(result.run.id)
+    assert result.run.model_turn_limit == 50
     assert result.run.lane_held is False
     assert result.start_command.command_type == "start"
     assert result.start_command.status == "pending"
     assert result.start_command.attempt_count == 0
     assert db.nested_entries == 1
     assert db.nested_exit_exceptions == [None]
+
+
+@pytest.mark.asyncio
+async def test_registration_preserves_an_explicit_shared_thread_identity():
+    thread_id = str(uuid.uuid4())
+    registration = _registration(runtime_thread_id=thread_id)
+    db = _FakeSession(None)
+
+    result = await persistence.register_run_with_start(
+        db,
+        registration,
+        start_payload={"input_message_id": registration.source_id},
+        start_idempotency_key="start:shared-thread",
+    )
+
+    assert result.run.runtime_thread_id == thread_id
+    assert result.run.id != uuid.UUID(thread_id)
 
 
 @pytest.mark.asyncio
@@ -395,7 +414,7 @@ async def test_concurrent_command_insert_uses_savepoint_and_reuses_exact_winner(
 
 
 @pytest.mark.asyncio
-async def test_claim_uses_skip_locked_fifo_and_increments_attempts():
+async def test_claim_uses_skip_locked_fifo_without_consuming_execution_attempt():
     now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     command = _command(tenant_id=uuid.uuid4(), run_id=uuid.uuid4(), attempt_count=2)
     db = _FakeSession(command)
@@ -411,7 +430,7 @@ async def test_claim_uses_skip_locked_fifo_and_increments_attempts():
     assert claimed is command
     assert command.status == "claimed"
     assert command.claimed_by == "worker-1"
-    assert command.attempt_count == 3
+    assert command.attempt_count == 2
     assert command.claim_expires_at == datetime(2026, 7, 13, 12, 1, tzinfo=UTC)
     assert db.flush_count == 1
 
@@ -428,7 +447,7 @@ async def test_claim_uses_skip_locked_fifo_and_increments_attempts():
         "(previous_command.created_at, previous_command.id) < (agent_run_commands.created_at, agent_run_commands.id)"
     ) in sql
     assert "previous_command.status IN ('pending', 'claimed')" in sql
-    assert "agent_run_commands.attempt_count < 5" in sql
+    assert "agent_run_commands.attempt_count < 5" not in sql
 
 
 @pytest.mark.asyncio
@@ -521,7 +540,7 @@ async def test_start_claim_leaves_command_pending_when_lane_becomes_busy():
 
 
 @pytest.mark.asyncio
-async def test_claim_requires_reconciliation_if_query_returns_exhausted_command():
+async def test_claim_makes_exhausted_command_visible_for_explicit_quarantine():
     now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     command = _command(
         tenant_id=uuid.uuid4(),
@@ -530,26 +549,84 @@ async def test_claim_requires_reconciliation_if_query_returns_exhausted_command(
         claimant="dead-worker",
         attempt_count=5,
     )
-    original_claimed_by = command.claimed_by
     db = _FakeSession(command)
 
-    with pytest.raises(persistence.RuntimePersistenceError) as exc_info:
-        await persistence.claim_next_command(
-            db,
-            claimant="worker-2",
-            claim_ttl_seconds=60,
-            max_attempts=5,
-            clock=lambda: now,
-        )
+    claimed = await persistence.claim_next_command(
+        db,
+        claimant="worker-2",
+        claim_ttl_seconds=60,
+        max_attempts=5,
+        clock=lambda: now,
+    )
 
-    assert exc_info.value.code == "command_reconciliation_required"
+    assert claimed is command
     assert command.status == "claimed"
-    assert command.claimed_by == original_claimed_by
+    assert command.claimed_by == "worker-2"
     assert command.attempt_count == 5
     assert command.error_code is None
     assert command.applied_at is None
-    assert db.flush_count == 0
+    assert db.flush_count == 1
     assert len(db.statements) == 1
+
+
+@pytest.mark.asyncio
+async def test_begin_command_attempt_increments_only_after_thread_lock_boundary():
+    tenant_id = uuid.uuid4()
+    command = _command(
+        tenant_id=tenant_id,
+        run_id=uuid.uuid4(),
+        status="claimed",
+        claimant="worker-1",
+        attempt_count=2,
+    )
+    db = _FakeSession(command)
+
+    started = await persistence.begin_command_attempt(
+        db,
+        tenant_id=tenant_id,
+        command_id=command.id,
+        claimant="worker-1",
+        max_attempts=5,
+    )
+
+    assert started is command
+    assert command.attempt_count == 3
+    assert db.flush_count == 1
+
+
+@pytest.mark.asyncio
+async def test_exhausted_start_is_claimed_for_quarantine_without_holding_lane():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    run = _existing_run(
+        _registration(
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            scheduling_lane_key=f"group_mention:{tenant_id}:{agent_id}",
+            scheduling_position_created_at=now,
+            scheduling_position_id=uuid.uuid4(),
+        )
+    )
+    command = _command(
+        tenant_id=tenant_id,
+        run_id=run.id,
+        command_type="start",
+        attempt_count=5,
+    )
+    db = _FakeSession(command, run, None)
+
+    claimed = await persistence.claim_next_command(
+        db,
+        claimant="worker-1",
+        claim_ttl_seconds=60,
+        max_attempts=5,
+        clock=lambda: now,
+    )
+
+    assert claimed is command
+    assert run.lane_held is False
+    assert command.attempt_count == 5
 
 
 @pytest.mark.asyncio

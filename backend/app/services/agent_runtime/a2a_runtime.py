@@ -22,7 +22,7 @@ from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.gateway_message import GatewayMessage
 from app.models.org import AgentAgentRelationship
-from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
+from app.services.agent_runtime.adapter import RuntimeCommandIntake
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.config import decide_runtime_v2
 from app.services.agent_runtime.contracts import ResumeRunCommand, StartRunCommand
@@ -290,7 +290,7 @@ async def complete_gateway_a2a_runtime(
         receipt.tool_call_id,
         request.mode,
     )
-    await TransactionalAgentRuntimeAdapter(
+    await RuntimeCommandIntake(
         db,
         settings=settings or get_settings(),
     ).resume_run(
@@ -642,7 +642,7 @@ async def enqueue_gateway_a2a_runtime(
         )
 
     source_execution_id = f"gateway-a2a:{resolved_message_id}"
-    handle = await TransactionalAgentRuntimeAdapter(
+    handle = await RuntimeCommandIntake(
         db,
         settings=runtime_settings,
     ).start_run(
@@ -666,7 +666,7 @@ async def enqueue_gateway_a2a_runtime(
             idempotency_key=f"start:{source_execution_id}",
             payload={
                 "message_id": str(chat_message_id),
-                "input_content": f"[Message from Agent {source_agent.name}]\n{message}",
+                "input_content": message,
                 "runtime_instruction": (
                     "This Run was initiated by another digital employee through the "
                     "OpenClaw gateway. Reply naturally; the verified final answer is "
@@ -675,7 +675,6 @@ async def enqueue_gateway_a2a_runtime(
                 ),
                 "application_tools_enabled": True,
                 "a2a_mode": "consult",
-                "a2a_message": message,
                 "source_agent_id": str(source_agent.id),
                 "source_agent_name": source_agent.name,
                 "gateway_message_id": str(resolved_message_id),
@@ -701,6 +700,21 @@ def _target_goal(source_agent: Agent, request: _A2ARequest) -> str:
     else:
         prefix = "Complete this delegated task and return a usable result"
     return f"{prefix}. Source Agent: {source_agent.name}. Request: {request.message}"
+
+
+def _target_runtime_instruction(mode: A2AMode) -> str:
+    if mode in _RESPONSE_MODES:
+        return (
+            "This Run was initiated by another digital employee through Clawith "
+            "A2A. The verified final answer is returned to the source Run "
+            "automatically. Do not call send_message_to_agent merely to return "
+            "this answer."
+        )
+    return (
+        "This is a one-way Clawith A2A notification. Process it within the "
+        "authorized scope and do not call send_message_to_agent merely to "
+        "acknowledge receipt."
+    )
 
 
 def _accepted_summary(target: Agent, mode: A2AMode) -> str:
@@ -899,7 +913,7 @@ class RuntimeA2AService:
                             source_run_id,
                             tool_call_id,
                         )
-                        handle = await TransactionalAgentRuntimeAdapter(
+                        handle = await RuntimeCommandIntake(
                             db,
                             settings=self._settings,
                         ).start_run(
@@ -921,8 +935,12 @@ class RuntimeA2AService:
                                 delivery_status="not_required",
                                 idempotency_key=f"start:{source_execution_id}",
                                 payload={
+                                    "message_id": str(message_id),
+                                    "input_content": request.message,
                                     "a2a_mode": request.mode,
-                                    "a2a_message": request.message,
+                                    "runtime_instruction": _target_runtime_instruction(
+                                        request.mode
+                                    ),
                                     "source_agent_id": str(source_agent.id),
                                     "source_agent_name": source_agent.name,
                                     "source_run_id": str(source_run.id),

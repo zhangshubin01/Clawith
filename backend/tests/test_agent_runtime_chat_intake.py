@@ -14,6 +14,7 @@ from app.config import Settings
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.agent_run_event import AgentRunEvent
+from app.models.agent_run_command import AgentRunCommand
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.llm import LLMModel
@@ -37,6 +38,16 @@ class _ScalarResult:
     def scalar_one_or_none(self):
         return self.value
 
+    def scalars(self):
+        return self
+
+    def all(self):
+        if self.value is None:
+            return []
+        if isinstance(self.value, list):
+            return self.value
+        return [self.value]
+
 
 class _Session:
     def __init__(self, *, existing_message: ChatMessage | None = None, results=()) -> None:
@@ -52,7 +63,7 @@ class _Session:
         return None
 
     async def execute(self, _statement):
-        return _ScalarResult(self.results.popleft())
+        return _ScalarResult(self.results.popleft() if self.results else None)
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -138,7 +149,7 @@ async def test_chat_message_and_start_command_share_the_caller_session() -> None
             new=AsyncMock(return_value=participant),
         ),
         patch(
-            "app.services.agent_runtime.chat_intake.TransactionalAgentRuntimeAdapter.start_run",
+            "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.start_run",
             new=AsyncMock(return_value=handle),
         ) as start_run,
     ):
@@ -178,7 +189,14 @@ async def test_chat_message_and_start_command_share_the_caller_session() -> None
     assert command.source_id == str(message_id)
     assert command.source_execution_id == f"chat:{message_id}"
     assert command.session_id == session.id
+    assert command.runtime_thread_id == str(session.id)
     assert command.model_id == model.id
+    assert command.scheduling_lane_key == (
+        f"direct_chat_thread:{agent.tenant_id}:{session.id}"
+    )
+    assert command.scheduling_position_created_at == message.created_at
+    assert command.scheduling_position_created_at is not None
+    assert command.scheduling_position_id == message_id
     assert command.delivery_status == "pending"
     assert command.delivery_target == {
         "kind": "direct",
@@ -218,7 +236,7 @@ async def test_external_group_chat_uses_unified_session_without_native_group_sco
             new=AsyncMock(return_value=participant),
         ),
         patch(
-            "app.services.agent_runtime.chat_intake.TransactionalAgentRuntimeAdapter.start_run",
+            "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.start_run",
             new=AsyncMock(return_value=handle),
         ) as start_run,
     ):
@@ -244,6 +262,10 @@ async def test_external_group_chat_uses_unified_session_without_native_group_sco
     assert message.user_id is None
     assert message.participant_id == participant.id
     command = start_run.await_args.args[0]
+    assert command.runtime_thread_id is None
+    assert command.scheduling_lane_key is None
+    assert command.scheduling_position_created_at is None
+    assert command.scheduling_position_id is None
     assert command.delivery_target == {
         "kind": "session",
         "session_id": str(session.id),
@@ -318,7 +340,7 @@ async def test_chat_resume_persists_explicit_correlation_with_the_user_message()
             new=AsyncMock(return_value=participant),
         ),
         patch(
-            "app.services.agent_runtime.chat_intake.TransactionalAgentRuntimeAdapter.resume_run",
+            "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.resume_run",
             new=AsyncMock(return_value=handle),
         ) as resume_run,
     ):
@@ -425,7 +447,7 @@ async def test_synthetic_input_starts_without_persisting_a_human_message() -> No
     handle = _handle(agent.tenant_id)
 
     with patch(
-        "app.services.agent_runtime.chat_intake.TransactionalAgentRuntimeAdapter.start_run",
+        "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.start_run",
         new=AsyncMock(return_value=handle),
     ) as start_run:
         result = await enqueue_chat_runtime(
@@ -446,3 +468,379 @@ async def test_synthetic_input_starts_without_persisting_a_human_message() -> No
     command = start_run.await_args.args[0]
     assert command.payload["input_content"] == "Please begin onboarding."
     assert command.payload["application_tools_enabled"] is False
+
+
+def _active_direct_run(
+    agent: Agent,
+    user: User,
+    session: ChatSession,
+    model: LLMModel,
+) -> AgentRun:
+    return AgentRun(
+        id=uuid.uuid4(),
+        tenant_id=agent.tenant_id,
+        agent_id=agent.id,
+        session_id=session.id,
+        source_type="chat",
+        source_id=str(uuid.uuid4()),
+        goal="Answer",
+        run_kind="foreground",
+        model_id=model.id,
+        model_turn_limit=50,
+        runtime_type="langgraph",
+        runtime_thread_id=str(session.id),
+        graph_name="runtime_graph",
+        graph_version="v1",
+        scheduling_lane_key=f"direct_chat_thread:{agent.tenant_id}:{session.id}",
+        scheduling_position_created_at=datetime(2026, 7, 16, 18, 0, tzinfo=UTC),
+        scheduling_position_id=uuid.uuid4(),
+        lane_held=True,
+        delivery_status="delivered",
+        origin_user_id=user.id,
+    )
+
+
+def _run_view(
+    run: AgentRun,
+    status: str,
+    correlation_id: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        run_id=run.id,
+        thread_id=run.runtime_thread_id,
+        session_id=run.session_id,
+        source_type="chat",
+        execution_status=status,
+        waiting_correlation_id=correlation_id,
+    )
+
+
+def _run_state_reader(view: SimpleNamespace) -> SimpleNamespace:
+    return SimpleNamespace(get_run_state=AsyncMock(return_value=view))
+
+
+@pytest.mark.asyncio
+async def test_direct_start_fails_closed_while_lane_holder_waits_for_user() -> None:
+    agent, user, session, model = _records()
+    holder = _active_direct_run(agent, user, session, model)
+    db = _Session(results=([holder], None))
+    run_state_reader = _run_state_reader(
+        _run_view(holder, "waiting_user", "confirm-1")
+    )
+
+    with pytest.raises(ChatRuntimeIntakeError) as raised:
+        await enqueue_chat_runtime(
+            db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="Start something unrelated",
+            run_state_reader=run_state_reader,  # type: ignore[arg-type]
+            settings_override=_settings(enabled=True),
+        )
+
+    assert raised.value.code == "chat_waiting_reply_required"
+    assert db.added == []
+
+
+@pytest.mark.asyncio
+async def test_direct_start_is_fifo_enqueued_while_lane_holder_is_running() -> None:
+    agent, user, session, model = _records()
+    holder = _active_direct_run(agent, user, session, model)
+    db = _Session(results=([holder],))
+    run_state_reader = _run_state_reader(_run_view(holder, "running"))
+    participant = SimpleNamespace(id=uuid.uuid4())
+    handle = _handle(agent.tenant_id)
+
+    with (
+        patch(
+            "app.services.agent_runtime.chat_intake.get_or_create_user_participant",
+            new=AsyncMock(return_value=participant),
+        ),
+        patch(
+            "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.start_run",
+            new=AsyncMock(return_value=handle),
+        ) as start_run,
+    ):
+        result = await enqueue_chat_runtime(
+            db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="Queue this next",
+            run_state_reader=run_state_reader,  # type: ignore[arg-type]
+            settings_override=_settings(enabled=True),
+        )
+
+    assert result is not None and result.resumed is False
+    queued = start_run.await_args.args[0]
+    assert queued.scheduling_lane_key == holder.scheduling_lane_key
+    assert queued.runtime_thread_id == str(session.id)
+
+
+@pytest.mark.asyncio
+async def test_direct_start_is_fifo_enqueued_after_wait_reply_is_already_claimed() -> None:
+    agent, user, session, model = _records()
+    holder = _active_direct_run(agent, user, session, model)
+    claimed_resume = AgentRunCommand(
+        id=uuid.uuid4(),
+        tenant_id=holder.tenant_id,
+        run_id=holder.id,
+        command_type="resume",
+        payload={"correlation_id": "confirm-1"},
+        actor_user_id=user.id,
+        idempotency_key="resume:chat:reply-message",
+        status="claimed",
+        attempt_count=1,
+        created_at=datetime(2026, 7, 16, 18, 2, tzinfo=UTC),
+    )
+    db = _Session(results=([holder], claimed_resume))
+    run_state_reader = _run_state_reader(
+        _run_view(holder, "waiting_user", "confirm-1")
+    )
+    participant = SimpleNamespace(id=uuid.uuid4())
+    handle = _handle(agent.tenant_id)
+
+    with (
+        patch(
+            "app.services.agent_runtime.chat_intake.get_or_create_user_participant",
+            new=AsyncMock(return_value=participant),
+        ),
+        patch(
+            "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.start_run",
+            new=AsyncMock(return_value=handle),
+        ) as start_run,
+    ):
+        result = await enqueue_chat_runtime(
+            db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="Queue this after my answer",
+            run_state_reader=run_state_reader,  # type: ignore[arg-type]
+            settings_override=_settings(enabled=True),
+        )
+
+    assert result is not None and result.resumed is False
+    assert start_run.await_args.args[0].scheduling_lane_key == holder.scheduling_lane_key
+
+
+@pytest.mark.asyncio
+async def test_direct_resume_rejects_stale_correlation_before_enqueuing_command() -> None:
+    agent, user, session, model = _records()
+    holder = _active_direct_run(agent, user, session, model)
+    db = _Session(results=(holder, None, None))
+    run_state_reader = _run_state_reader(
+        _run_view(holder, "waiting_user", "current-correlation")
+    )
+
+    with patch(
+        "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.resume_run",
+        new=AsyncMock(),
+    ) as resume_run:
+        with pytest.raises(ChatRuntimeIntakeError) as raised:
+            await enqueue_chat_runtime(
+                db,  # type: ignore[arg-type]
+                agent=agent,
+                user=user,
+                session=session,
+                model=model,
+                content="Continue",
+                resume_run_id=holder.id,
+                resume_correlation_id="old-correlation",
+                run_state_reader=run_state_reader,  # type: ignore[arg-type]
+                settings_override=_settings(enabled=True),
+            )
+
+    assert raised.value.code == "chat_resume_correlation_mismatch"
+    resume_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direct_resume_rejects_waiting_run_that_no_longer_holds_lane() -> None:
+    agent, user, session, model = _records()
+    stale_run = _active_direct_run(agent, user, session, model)
+    stale_run.lane_held = False
+    db = _Session(results=(stale_run, None, [], None))
+    run_state_reader = _run_state_reader(
+        _run_view(stale_run, "waiting_user", "confirm-1")
+    )
+    participant = SimpleNamespace(id=uuid.uuid4())
+    handle = _handle(agent.tenant_id)
+
+    with (
+        patch(
+            "app.services.agent_runtime.chat_intake.get_or_create_user_participant",
+            new=AsyncMock(return_value=participant),
+        ),
+        patch(
+            "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.resume_run",
+            new=AsyncMock(return_value=handle),
+        ) as resume_run,
+    ):
+        with pytest.raises(ChatRuntimeIntakeError) as raised:
+            await enqueue_chat_runtime(
+                db,  # type: ignore[arg-type]
+                agent=agent,
+                user=user,
+                session=session,
+                model=model,
+                content="Continue stale Run",
+                resume_run_id=stale_run.id,
+                resume_correlation_id="confirm-1",
+                run_state_reader=run_state_reader,  # type: ignore[arg-type]
+                settings_override=_settings(enabled=True),
+            )
+
+    assert raised.value.code == "chat_resume_not_lane_holder"
+    resume_run.assert_not_awaited()
+    assert db.added == []
+
+
+@pytest.mark.asyncio
+async def test_direct_resume_rejects_second_distinct_inflight_resume() -> None:
+    agent, user, session, model = _records()
+    holder = _active_direct_run(agent, user, session, model)
+    existing = AgentRunCommand(
+        id=uuid.uuid4(),
+        tenant_id=holder.tenant_id,
+        run_id=holder.id,
+        command_type="resume",
+        payload={"correlation_id": "confirm-1"},
+        actor_user_id=user.id,
+        idempotency_key="resume:chat:another-message",
+        status="pending",
+        attempt_count=0,
+        created_at=datetime(2026, 7, 16, 18, 2, tzinfo=UTC),
+    )
+    db = _Session(results=(holder, None, existing))
+
+    with pytest.raises(ChatRuntimeIntakeError) as raised:
+        await enqueue_chat_runtime(
+            db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="Continue again",
+            message_id=uuid.uuid4(),
+            resume_run_id=holder.id,
+            resume_correlation_id="confirm-1",
+            settings_override=_settings(enabled=True),
+        )
+
+    assert raised.value.code == "chat_resume_already_pending"
+
+
+@pytest.mark.asyncio
+async def test_direct_resume_exact_retry_remains_idempotent_after_apply() -> None:
+    agent, user, session, model = _records()
+    holder = _active_direct_run(agent, user, session, model)
+    holder.lane_held = False
+    message_id = uuid.uuid4()
+    existing = AgentRunCommand(
+        id=uuid.uuid4(),
+        tenant_id=holder.tenant_id,
+        run_id=holder.id,
+        command_type="resume",
+        payload={
+            "resume_type": "user_input",
+            "correlation_id": "confirm-1",
+            "payload": {"message_id": str(message_id), "content": "Continue"},
+        },
+        actor_user_id=user.id,
+        idempotency_key=f"resume:chat:{message_id}",
+        status="applied",
+        attempt_count=1,
+        created_at=datetime(2026, 7, 16, 18, 2, tzinfo=UTC),
+        applied_at=datetime(2026, 7, 16, 18, 3, tzinfo=UTC),
+    )
+    db = _Session(results=(holder, existing))
+    handle = _handle(agent.tenant_id)
+
+    with patch(
+        "app.services.agent_runtime.chat_intake.RuntimeCommandIntake.resume_run",
+        new=AsyncMock(return_value=handle),
+    ) as resume_run:
+        result = await enqueue_chat_runtime(
+            db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="Continue",
+            message_id=message_id,
+            resume_run_id=holder.id,
+            resume_correlation_id="confirm-1",
+            persist_user_message=False,
+            settings_override=_settings(enabled=True),
+        )
+
+    assert result is not None and result.resumed is True
+    resume_run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_resume_rejects_when_cancel_is_already_inflight() -> None:
+    agent, user, session, model = _records()
+    holder = _active_direct_run(agent, user, session, model)
+    cancel = AgentRunCommand(
+        id=uuid.uuid4(),
+        tenant_id=holder.tenant_id,
+        run_id=holder.id,
+        command_type="cancel",
+        payload={"reason": "cancelled_by_user"},
+        actor_user_id=user.id,
+        idempotency_key=f"cancel:web:{holder.id}",
+        status="pending",
+        attempt_count=0,
+        created_at=datetime(2026, 7, 16, 18, 2, tzinfo=UTC),
+    )
+    db = _Session(results=(holder, None, cancel))
+
+    with pytest.raises(ChatRuntimeIntakeError) as raised:
+        await enqueue_chat_runtime(
+            db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="Continue after cancel",
+            resume_run_id=holder.id,
+            resume_correlation_id="confirm-1",
+            settings_override=_settings(enabled=True),
+        )
+
+    assert raised.value.code == "chat_cancel_already_pending"
+    assert db.added == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "wrong_field",
+    ("agent_id", "session_id", "origin_user_id", "scheduling_lane_key"),
+)
+async def test_direct_resume_rejects_cross_scope_run(wrong_field: str) -> None:
+    agent, user, session, model = _records()
+    holder = _active_direct_run(agent, user, session, model)
+    setattr(holder, wrong_field, uuid.uuid4())
+    db = _Session(results=(holder,))
+
+    with pytest.raises(ChatRuntimeIntakeError) as raised:
+        await enqueue_chat_runtime(
+            db,  # type: ignore[arg-type]
+            agent=agent,
+            user=user,
+            session=session,
+            model=model,
+            content="Continue",
+            resume_run_id=holder.id,
+            resume_correlation_id="confirm-1",
+            settings_override=_settings(enabled=True),
+        )
+
+    assert raised.value.code == "chat_resume_scope_mismatch"
+    assert db.added == []

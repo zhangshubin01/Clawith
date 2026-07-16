@@ -20,6 +20,11 @@ from app.models.participant import Participant
 from app.models.user import User
 from app.services.chat_session_service import get_primary_direct_session
 from app.services.agent_runtime.channel_delivery import stage_channel_delivery
+from app.services.agent_runtime.group_handoff import (
+    GroupAgentHandoffError,
+    apply_group_agent_handoff,
+)
+from app.services.agent_runtime.state import JsonObject
 from app.services.participant_identity import get_or_create_agent_participant
 
 
@@ -74,6 +79,7 @@ class DeliveryRequest:
     lifecycle_status: DeliveryLifecycleStatus | None = None
     interrupt_id: str | None = None
     original_target_outcome: OriginalTargetOutcome = "not_attempted"
+    group_handoff_intent: JsonObject | None = None
 
     @property
     def idempotency_key(self) -> str:
@@ -160,6 +166,7 @@ def _validate_request(request: DeliveryRequest) -> None:
             request.checkpoint_id is not None
             or request.lifecycle_status is not None
             or request.interrupt_id is not None
+            or request.group_handoff_intent is not None
         ):
             raise DeliveryServiceError(
                 "invalid_delivery_request",
@@ -176,6 +183,11 @@ def _validate_request(request: DeliveryRequest) -> None:
                 "only waiting_user checkpoints produce a waiting delivery",
             )
         _require_text(request.interrupt_id, field="interrupt_id", max_length=200)
+        if request.group_handoff_intent is not None:
+            raise DeliveryServiceError(
+                "invalid_delivery_request",
+                "waiting delivery cannot carry a Group handoff intent",
+            )
         return
 
     if request.lifecycle_status not in _TERMINAL_STATUSES:
@@ -190,6 +202,15 @@ def _validate_request(request: DeliveryRequest) -> None:
             "invalid_delivery_request",
             "terminal delivery cannot carry an interrupt_id",
         )
+    if request.group_handoff_intent is not None:
+        if request.lifecycle_status != "completed" or not isinstance(
+            request.group_handoff_intent,
+            dict,
+        ):
+            raise DeliveryServiceError(
+                "invalid_delivery_request",
+                "only completed terminal delivery can carry a Group handoff intent",
+            )
 
 
 def _uuid_value(
@@ -674,6 +695,11 @@ def _add_event(
     payload["correlation_id"] = request.interrupt_id
     payload["requested_target"] = requested_target.payload() if requested_target is not None else None
     payload["actual_target"] = _actual_target_payload(actual_session) if actual_session is not None else None
+    payload["group_handoff"] = (
+        dict(request.group_handoff_intent)
+        if request.group_handoff_intent is not None
+        else None
+    )
     db.add(
         AgentRunEvent(
             id=_event_id(run.id, request.idempotency_key),
@@ -798,8 +824,46 @@ async def deliver_runtime_message(
 
     message_id = _message_id(run.id, request.idempotency_key)
     session = resolved.session
-    db.add(
-        ChatMessage(
+    if request.group_handoff_intent is not None:
+        if (
+            session.session_type != "group"
+            or session.group_id is None
+            or participant is None
+        ):
+            return await _record_failure(
+                db,
+                run=run,
+                request=request,
+                error_code="group_handoff_scope_invalid",
+                requested_target=requested_target,
+                fallback_reason=resolved.fallback_reason,
+                clock=now,
+            )
+        try:
+            applied = await apply_group_agent_handoff(
+                db,
+                source_run=run,
+                content=_safe_message_content(run, request),
+                intent_payload=request.group_handoff_intent,
+                expected_idempotency_key=request.idempotency_key,
+                expected_message_id=message_id,
+                clock=now,
+            )
+        except GroupAgentHandoffError as exc:
+            if not exc.repairable:
+                raise
+            return await _record_failure(
+                db,
+                run=run,
+                request=request,
+                error_code=exc.code,
+                requested_target=requested_target,
+                fallback_reason=resolved.fallback_reason,
+                clock=now,
+            )
+        message = applied.message
+    else:
+        message = ChatMessage(
             id=message_id,
             agent_id=run.agent_id,
             user_id=session.user_id if session.session_type == "direct" else None,
@@ -810,13 +874,13 @@ async def deliver_runtime_message(
             mentions=[],
             created_at=now(),
         )
-    )
-    session.last_message_at = now()
+        db.add(message)
+        session.last_message_at = now()
     channel_delivery = stage_channel_delivery(
         db,
         run=run,
         session=session,
-        message_id=message_id,
+        message_id=message.id,
         idempotency_key=request.idempotency_key,
         clock=now,
     )
@@ -827,7 +891,7 @@ async def deliver_runtime_message(
         status="delivered",
         delivery_kind=request.kind,
         checkpoint_id=request.checkpoint_id,
-        message_id=message_id,
+        message_id=message.id,
         requested_session_id=requested_target.session_id,
         actual_session_id=session.id,
         fallback_reason=resolved.fallback_reason,

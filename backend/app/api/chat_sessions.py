@@ -17,6 +17,8 @@ from app.core.permissions import check_agent_access
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent
+from app.models.agent_run import AgentRun
+from app.models.agent_run_command import AgentRunCommand
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.participant import Participant
@@ -24,6 +26,10 @@ from app.models.user import Identity, User
 from app.services.chat_session_service import (
     create_direct_session,
     soft_delete_direct_session,
+)
+from app.services.agent_runtime.run_state_reader import (
+    RunStateReadError,
+    open_run_state_reader as _open_run_state_reader,
 )
 from app.services.participant_identity import get_or_create_user_participant
 
@@ -124,6 +130,25 @@ class CreateSessionIn(BaseModel):
 
 class PatchSessionIn(BaseModel):
     title: str
+
+
+class ActiveRunOut(BaseModel):
+    """Minimal persisted runtime identity needed to resume or cancel safely."""
+
+    run_id: str
+    thread_id: str
+    session_id: str
+    status: str
+    waiting_type: str | None = None
+    waiting_reason: str | None = None
+    correlation_id: str | None = None
+    model_step_count: int = 0
+    can_resume: bool = False
+    can_cancel: bool = False
+
+
+class SessionRuntimeStateOut(BaseModel):
+    active_run: ActiveRunOut | None = None
 
 
 def _session_out(
@@ -337,6 +362,139 @@ async def create_session(
     await db.commit()
     await db.refresh(session)
     return _session_out(session)
+
+
+@router.get(
+    "/{agent_id}/sessions/{session_id}/runtime-state",
+    response_model=SessionRuntimeStateOut,
+)
+async def get_session_runtime_state(
+    agent_id: uuid.UUID,
+    session_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SessionRuntimeStateOut:
+    """Return the one exact Direct Chat lane holder, if one exists."""
+    _agent, tenant_id = await _check_direct_agent_access(
+        db,
+        current_user,
+        agent_id,
+    )
+    session_result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.tenant_id == tenant_id,
+            ChatSession.agent_id == agent_id,
+            ChatSession.user_id == current_user.id,
+            ChatSession.session_type == "direct",
+            ChatSession.group_id.is_(None),
+            ChatSession.source_channel == "web",
+            ChatSession.deleted_at.is_(None),
+        )
+    )
+    session = session_result.scalar_one_or_none()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    lane_key = f"direct_chat_thread:{tenant_id}:{session.id}"
+    holders_result = await db.execute(
+        select(AgentRun)
+        .where(
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.agent_id == agent_id,
+            AgentRun.session_id == session.id,
+            AgentRun.origin_user_id == current_user.id,
+            AgentRun.source_type == "chat",
+            AgentRun.run_kind == "foreground",
+            AgentRun.runtime_type == "langgraph",
+            AgentRun.runtime_thread_id == str(session.id),
+            AgentRun.scheduling_lane_key == lane_key,
+            AgentRun.lane_held.is_(True),
+        )
+        .order_by(AgentRun.created_at, AgentRun.id)
+        .limit(2)
+    )
+    holders = list(holders_result.scalars().all())
+    if not holders:
+        return SessionRuntimeStateOut(active_run=None)
+    if len(holders) != 1:
+        raise HTTPException(
+            status_code=409,
+            detail="multiple_direct_session_lane_holders",
+        )
+    run = holders[0]
+
+    try:
+        async with _open_run_state_reader(db) as reader:
+            view = await reader.get_run_state(tenant_id, run.id)
+    except RunStateReadError as exc:
+        raise HTTPException(status_code=409, detail=exc.code) from exc
+
+    if (
+        view.tenant_id != tenant_id
+        or view.run_id != run.id
+        or view.thread_id != str(session.id)
+        or view.session_id != session.id
+        or view.source_type != "chat"
+        or view.run_kind != "foreground"
+        or view.runtime_type != "langgraph"
+        or view.execution_status is None
+    ):
+        raise HTTPException(status_code=409, detail="runtime_state_scope_mismatch")
+
+    waiting_type = view.waiting_type
+    correlation_id = view.waiting_correlation_id
+    if view.execution_status == "waiting_user":
+        if waiting_type not in {"user", "waiting_user"} or correlation_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="invalid_waiting_user_runtime_state",
+            )
+        inflight_resume_result = await db.execute(
+            select(AgentRunCommand.id)
+            .where(
+                AgentRunCommand.tenant_id == tenant_id,
+                AgentRunCommand.run_id == run.id,
+                AgentRunCommand.command_type == "resume",
+                AgentRunCommand.status.in_(("pending", "claimed")),
+            )
+            .limit(1)
+        )
+        resume_inflight = inflight_resume_result.scalar_one_or_none() is not None
+    else:
+        resume_inflight = False
+
+    inflight_cancel_result = await db.execute(
+        select(AgentRunCommand.id)
+        .where(
+            AgentRunCommand.tenant_id == tenant_id,
+            AgentRunCommand.run_id == run.id,
+            AgentRunCommand.command_type == "cancel",
+            AgentRunCommand.status.in_(("pending", "claimed")),
+        )
+        .limit(1)
+    )
+    cancel_inflight = inflight_cancel_result.scalar_one_or_none() is not None
+
+    terminal = view.execution_status in {"completed", "failed", "cancelled"}
+    return SessionRuntimeStateOut(
+        active_run=ActiveRunOut(
+            run_id=str(view.run_id),
+            thread_id=view.thread_id,
+            session_id=str(view.session_id),
+            status=view.execution_status,
+            waiting_type=waiting_type,
+            waiting_reason=view.waiting_reason,
+            correlation_id=correlation_id,
+            model_step_count=view.model_step_count,
+            can_resume=(
+                view.execution_status == "waiting_user"
+                and not resume_inflight
+                and not cancel_inflight
+            ),
+            can_cancel=not terminal and not cancel_inflight,
+        )
+    )
 
 
 @router.patch("/{agent_id}/sessions/{session_id}")

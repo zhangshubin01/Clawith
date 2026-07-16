@@ -27,10 +27,13 @@ def _settings(**overrides: object) -> Settings:
     return Settings(_env_file=None, **values)
 
 
-def test_runtime_thread_id_is_exactly_the_run_id() -> None:
+def test_runtime_thread_config_accepts_the_actual_thread_identity() -> None:
     run_id = uuid.uuid4()
 
     assert runtime_thread_config(run_id) == {"configurable": {"thread_id": str(run_id)}}
+    assert runtime_thread_config("session-thread") == {
+        "configurable": {"thread_id": "session-thread"}
+    }
 
 
 def test_dedicated_checkpoint_url_wins_and_is_normalized_for_psycopg() -> None:

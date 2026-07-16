@@ -33,7 +33,7 @@ class RuntimeGroupStartAcknowledgementHandler:
         checkpoint: CheckpointObservation | None,
     ) -> None:
         del checkpoint
-        if command.command_type != "start" or run.registry.run_kind == "orchestration":
+        if command.command_type != "start" or run.run_kind == "orchestration":
             return
 
         async with self._session_factory() as db:

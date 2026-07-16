@@ -77,6 +77,14 @@ class SessionContextCompletionHandler:
         run: RuntimeRunRecord,
         checkpoint: CheckpointObservation,
     ) -> SessionContextDelta | None:
+        if (
+            run.session_id is not None
+            and run.thread_id == run.session_id
+        ):
+            # D-015: a Direct Chat's LangGraph Thread is its only short-term
+            # context truth. Group and other run-scoped Threads may still merge
+            # their public Session delta here.
+            return None
         lifecycle = checkpoint.state["lifecycle"]
         if lifecycle["status"] not in _TERMINAL_STATUSES:
             return None

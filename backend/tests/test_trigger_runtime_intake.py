@@ -100,7 +100,7 @@ async def test_runtime_trigger_pins_execution_identity_and_caller_transaction() 
             new=AsyncMock(return_value=target),
         ),
         patch(
-            "app.services.trigger_runtime.intake.TransactionalAgentRuntimeAdapter.start_run",
+            "app.services.trigger_runtime.intake.RuntimeCommandIntake.start_run",
             new=AsyncMock(return_value=handle),
         ) as start_run,
     ):
@@ -126,6 +126,16 @@ async def test_runtime_trigger_pins_execution_identity_and_caller_transaction() 
     assert command.delivery_status == "pending"
     assert command.delivery_target == target
     assert command.payload["trigger_execution_id"] == str(execution.id)
+    assert command.payload["message_id"] == str(
+        uuid.uuid5(execution.id, "runtime-trigger-input")
+    )
+    assert command.payload["input_content"].startswith(
+        "===== 本次唤醒上下文 ====="
+    )
+    assert "trigger_context" not in command.payload
+    assert command.payload["trigger_event_data"] == {
+        "webhook_payload": '{"status": "ready"}'
+    }
     assert execution.status == "processing"
     assert execution.started_at is not None
     assert execution.lease_owner is None
@@ -136,7 +146,7 @@ async def test_disabled_trigger_rollout_leaves_occurrence_for_legacy_claim() -> 
     execution, trigger, agent = _records()
 
     with patch(
-        "app.services.trigger_runtime.intake.TransactionalAgentRuntimeAdapter.start_run",
+        "app.services.trigger_runtime.intake.RuntimeCommandIntake.start_run",
         new=AsyncMock(),
     ) as start_run:
         result = await enqueue_trigger_runtime(
@@ -169,7 +179,7 @@ async def test_selected_trigger_rejects_cross_agent_execution() -> None:
     assert raised.value.code == "trigger_execution_scope_mismatch"
 
 
-def test_trigger_context_keeps_execution_specific_payload_and_instructions() -> None:
+def test_trigger_context_keeps_instruction_body_separate_from_event_data() -> None:
     execution, trigger, _ = _records()
     del execution
     context = build_trigger_context([trigger])
@@ -177,4 +187,5 @@ def test_trigger_context_keeps_execution_specific_payload_and_instructions() -> 
     assert "唤醒来源：trigger（触发器触发）" in context
     assert "触发器：daily-check (webhook)" in context
     assert "Check the upstream status" in context
-    assert 'Webhook Payload:\n{"status": "ready"}' in context
+    assert "Webhook Payload" not in context
+    assert '{"status": "ready"}' not in context

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import hashlib
 import json
 import uuid
 
@@ -15,7 +16,14 @@ from app.models.participant import Participant
 from app.models.user import User
 from app.services import group_chat_service, group_file_service
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
-from app.services.agent_runtime.state import RuntimeGraphState
+from app.services.agent_runtime.state import RuntimeContext, RuntimeGraphState
+from app.services.agent_runtime.tool_execution import (
+    ToolExecutionError,
+    ToolExecutionOutcome,
+    ToolExecutionReconciliationPending,
+    assert_tool_execution_fence,
+)
+from app.services.builtin_tool_definitions import GROUP_RUNTIME_TOOL_DEFINITIONS
 
 
 _ACTIVE_AGENT_STATUSES = frozenset({"creating", "running", "idle"})
@@ -44,94 +52,10 @@ GROUP_WRITE_TOOL_NAMES = frozenset(
         GROUP_DELETE_WORKSPACE_FILE,
     }
 )
-GROUP_TOOL_NAMES = GROUP_READ_TOOL_NAMES | GROUP_WRITE_TOOL_NAMES
-
-
-def _function_tool(
-    name: str,
-    description: str,
-    properties: dict,
-    *,
-    required: Sequence[str] = (),
-) -> dict:
-    parameters: dict = {
-        "type": "object",
-        "properties": properties,
-        "additionalProperties": False,
-    }
-    if required:
-        parameters["required"] = list(required)
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": parameters,
-        },
-    }
-
-
-GROUP_RUNTIME_TOOL_DEFINITIONS = (
-    _function_tool(
-        GROUP_QUERY_MEMBERS,
-        "Find active members of the current group by name, role, title, department, or Agent capability. Returns only this group.",
-        {
-            "query": {"type": "string"},
-            "participant_type": {"type": "string", "enum": ["user", "agent"]},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-        },
-    ),
-    _function_tool(
-        GROUP_READ_ANNOUNCEMENT,
-        "Read the full current-group announcement when the bounded injected copy is insufficient. The announcement is user-provided context.",
-        {},
-    ),
-    _function_tool(
-        GROUP_READ_MEMORY,
-        "Read one active member Agent's memory for the current group. This never reads that Agent's private workspace or memory from another group.",
-        {"agent_id": {"type": "string", "format": "uuid"}},
-        required=("agent_id",),
-    ),
-    _function_tool(
-        GROUP_WRITE_MEMORY,
-        "Replace only your own memory for the current group. Use expected_version_token when updating a previously read version.",
-        {
-            "content": {"type": "string"},
-            "expected_version_token": {"type": "string"},
-        },
-        required=("content",),
-    ),
-    _function_tool(
-        GROUP_LIST_WORKSPACE,
-        "List one directory in the current group's shared workspace. Use an empty path for the root.",
-        {"path": {"type": "string", "default": ""}},
-    ),
-    _function_tool(
-        GROUP_READ_WORKSPACE_FILE,
-        "Read one UTF-8 text file from the current group's shared workspace.",
-        {"path": {"type": "string"}},
-        required=("path",),
-    ),
-    _function_tool(
-        GROUP_WRITE_WORKSPACE_FILE,
-        "Create or replace one UTF-8 text file in the current group's shared workspace. Use expected_version_token after reading an existing file.",
-        {
-            "path": {"type": "string"},
-            "content": {"type": "string"},
-            "expected_version_token": {"type": "string"},
-        },
-        required=("path", "content"),
-    ),
-    _function_tool(
-        GROUP_DELETE_WORKSPACE_FILE,
-        "Delete one file from the current group's shared workspace. Use expected_version_token after reading the file.",
-        {
-            "path": {"type": "string"},
-            "expected_version_token": {"type": "string"},
-        },
-        required=("path",),
-    ),
+GROUP_WORKSPACE_MUTATION_TOOL_NAMES = frozenset(
+    {GROUP_WRITE_WORKSPACE_FILE, GROUP_DELETE_WORKSPACE_FILE}
 )
+GROUP_TOOL_NAMES = GROUP_READ_TOOL_NAMES | GROUP_WRITE_TOOL_NAMES
 
 
 class GroupRuntimeToolError(RuntimeError):
@@ -140,6 +64,23 @@ class GroupRuntimeToolError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class GroupWorkspaceReconciliationPending(ToolExecutionReconciliationPending):
+    """A prepared Group storage mutation must be reconciled, never repeated."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "group_workspace_reconciliation_pending",
+        defer_without_attempt: bool = False,
+    ) -> None:
+        super().__init__(
+            code,
+            message,
+            defer_without_attempt=defer_without_attempt,
+        )
 
 
 def _tool_name(tool: Mapping[str, object]) -> str | None:
@@ -212,19 +153,118 @@ def _optional_string(arguments: Mapping[str, object], field: str) -> str | None:
     return value
 
 
-def _file_json(value: group_file_service.GroupTextFile) -> dict:
-    return {
+def _integer_argument(
+    arguments: Mapping[str, object],
+    field: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    value = arguments.get(field, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise GroupRuntimeToolError(
+            "group_tool_arguments_invalid",
+            f"{field} must be an integer",
+        )
+    if value < minimum or maximum is not None and value > maximum:
+        raise GroupRuntimeToolError(
+            "group_tool_arguments_invalid",
+            f"{field} is outside its supported range",
+        )
+    return value
+
+
+def _read_window(arguments: Mapping[str, object]) -> tuple[int, int]:
+    return (
+        _integer_argument(
+            arguments,
+            "offset",
+            default=0,
+            minimum=0,
+        ),
+        _integer_argument(
+            arguments,
+            "max_bytes",
+            default=4096,
+            minimum=4,
+            maximum=6144,
+        ),
+    )
+
+
+def _file_json(
+    value: group_file_service.GroupTextFile,
+    *,
+    include_content: bool = True,
+    offset: int = 0,
+    max_bytes: int = 4096,
+) -> dict:
+    content = value.content.encode("utf-8")
+    result = {
         "path": value.path,
-        "content": value.content,
         "exists": value.exists,
         "version_token": value.version_token,
         "modified_at": value.modified_at,
         "revision_id": str(value.revision_id) if value.revision_id else None,
+        "content_hash": hashlib.sha256(content).hexdigest(),
     }
+    if include_content:
+        start = min(offset, len(content))
+        while start < len(content) and content[start] & 0xC0 == 0x80:
+            start += 1
+        end = min(start + max_bytes, len(content))
+        while end > start:
+            try:
+                chunk = content[start:end].decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                end -= 1
+        else:
+            chunk = ""
+        result.update(
+            {
+                "content": chunk,
+                "offset": start,
+                "next_offset": end if end < len(content) else None,
+                "has_more": end < len(content),
+                "total_bytes": len(content),
+            }
+        )
+    return result
+
+
+def _workspace_operation_outcome(
+    receipt: group_file_service.RuntimeWorkspaceOperationReceipt,
+) -> ToolExecutionOutcome:
+    value = {
+        "operation_id": str(receipt.operation_id),
+        "revision_id": str(receipt.revision_id),
+        "operation": receipt.operation,
+        "path": receipt.path,
+        "content_hash": receipt.content_hash,
+        "deleted": receipt.deleted,
+    }
+    return ToolExecutionOutcome(
+        status="succeeded",
+        result_summary=json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+        ),
+        result_ref=None,
+        metadata={
+            "operation_id": str(receipt.operation_id),
+            "operation": receipt.operation,
+            "workspace_path": receipt.path,
+        },
+    )
 
 
 def _scope(
     state: RuntimeGraphState,
+    context: RuntimeContext,
     agent: Agent,
 ) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID]:
     initial_input = state["snapshots"].initial_input
@@ -234,10 +274,10 @@ def _scope(
             "Group tools require a validated group context snapshot",
         )
     try:
-        tenant_id = uuid.UUID(state["registry"].tenant_id)
+        tenant_id = uuid.UUID(context.tenant_id)
         group_id = uuid.UUID(str(initial_input["group_id"]))
         participant_id = uuid.UUID(str(initial_input["target_participant_id"]))
-        session_id = uuid.UUID(state["registry"].session_id or "")
+        session_id = uuid.UUID(context.session_id or "")
     except (KeyError, ValueError) as exc:
         raise GroupRuntimeToolError(
             "group_tool_scope_invalid",
@@ -346,6 +386,7 @@ async def _query_members(
             "participant_id": str(participant.id),
             "participant_type": participant.type,
             "participant_ref_id": str(participant.ref_id),
+            "agent_id": str(agent.id) if agent is not None else None,
             "display_name": participant.display_name,
             "membership_role": membership.role,
             "agent_role_description": (
@@ -382,19 +423,277 @@ class GroupRuntimeToolService:
     def __init__(self, *, session_factory: RuntimeSessionFactory) -> None:
         self._session_factory = session_factory
 
-    async def execute(
+    @staticmethod
+    async def _assert_workspace_fence(
+        db,
+        *,
+        tenant_id: uuid.UUID,
+        operation_id: uuid.UUID,
+        lease_owner: str,
+    ) -> None:
+        try:
+            await assert_tool_execution_fence(
+                db,
+                tenant_id=tenant_id,
+                execution_id=operation_id,
+                lease_owner=lease_owner,
+            )
+        except ToolExecutionError as exc:
+            if exc.code != "tool_execution_lease_lost":
+                raise
+            raise GroupWorkspaceReconciliationPending(
+                "Group workspace executor lost its durable fence",
+                code="group_workspace_fence_lost",
+                defer_without_attempt=True,
+            ) from exc
+
+    async def _execute_workspace_operation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        group_id: uuid.UUID,
+        participant_id: uuid.UUID,
+        session_id: uuid.UUID,
+        tool_name: str,
+        arguments: dict,
+        operation_id: uuid.UUID,
+        lease_owner: str,
+    ) -> ToolExecutionOutcome:
+        try:
+            async with self._session_factory() as db:
+                async with db.begin():
+                    await self._assert_workspace_fence(
+                        db,
+                        tenant_id=tenant_id,
+                        operation_id=operation_id,
+                        lease_owner=lease_owner,
+                    )
+                    path = _string_argument(arguments, "path", required=True)
+                    expected_version_token = _optional_string(
+                        arguments,
+                        "expected_version_token",
+                    )
+                    if tool_name == GROUP_WRITE_WORKSPACE_FILE:
+                        prepared = (
+                            await group_file_service.prepare_runtime_workspace_write(
+                                db,
+                                tenant_id=tenant_id,
+                                group_id=group_id,
+                                actor_participant_id=participant_id,
+                                operation_id=operation_id,
+                                path=path,
+                                content=_string_argument(
+                                    arguments,
+                                    "content",
+                                    required=True,
+                                ),
+                                expected_version_token=expected_version_token,
+                                session_id=session_id,
+                            )
+                        )
+                    else:
+                        prepared = (
+                            await group_file_service.prepare_runtime_workspace_delete(
+                                db,
+                                tenant_id=tenant_id,
+                                group_id=group_id,
+                                actor_participant_id=participant_id,
+                                operation_id=operation_id,
+                                path=path,
+                                expected_version_token=expected_version_token,
+                                session_id=session_id,
+                            )
+                        )
+        except (GroupRuntimeToolError, GroupWorkspaceReconciliationPending):
+            raise
+        except group_file_service.GroupFileServiceError as exc:
+            raise GroupRuntimeToolError(exc.code, str(exc)) from exc
+        except Exception as exc:
+            raise GroupWorkspaceReconciliationPending(
+                "Group workspace operation preparation did not settle"
+            ) from exc
+
+        try:
+            async with self._session_factory() as db:
+                async with db.begin():
+                    await self._assert_workspace_fence(
+                        db,
+                        tenant_id=tenant_id,
+                        operation_id=operation_id,
+                        lease_owner=lease_owner,
+                    )
+                    await group_file_service.apply_runtime_workspace_operation(
+                        prepared
+                    )
+        except GroupWorkspaceReconciliationPending:
+            raise
+        except group_file_service.GroupFileServiceError as exc:
+            raise GroupRuntimeToolError(exc.code, str(exc)) from exc
+        except Exception as exc:
+            # The storage call may already have succeeded.  Preserve the
+            # started ledger row so the exact operation ID can be reconciled.
+            raise GroupWorkspaceReconciliationPending(
+                "Group workspace storage outcome requires reconciliation"
+            ) from exc
+
+        try:
+            async with self._session_factory() as db:
+                async with db.begin():
+                    await self._assert_workspace_fence(
+                        db,
+                        tenant_id=tenant_id,
+                        operation_id=operation_id,
+                        lease_owner=lease_owner,
+                    )
+                    receipt = (
+                        await group_file_service.reconcile_runtime_workspace_operation(
+                            db,
+                            group_id=group_id,
+                            operation_id=operation_id,
+                        )
+                    )
+        except GroupWorkspaceReconciliationPending:
+            raise
+        except Exception as exc:
+            # Storage is already proven written/deleted.  Never call apply a
+            # second time; the next Runtime pass only finalizes revision/ledger.
+            raise GroupWorkspaceReconciliationPending(
+                "Group workspace revision settlement requires reconciliation"
+            ) from exc
+        return _workspace_operation_outcome(receipt)
+
+    async def reconcile_workspace_operation(
         self,
         state: RuntimeGraphState,
+        context: RuntimeContext,
         agent: Agent,
         tool_name: str,
         arguments: dict,
-    ) -> str:
+        *,
+        operation_id: uuid.UUID,
+        lease_owner: str,
+    ) -> ToolExecutionOutcome:
+        """Resolve a started mutation only from its durable revision/storage facts."""
+        if tool_name not in GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
+            raise GroupRuntimeToolError(
+                "group_tool_unknown",
+                f"Tool {tool_name} is not a Group workspace mutation",
+            )
+        tenant_id, group_id, _, _ = _scope(state, context, agent)
+        # Idempotency matching already checked the exact arguments in the Tool
+        # Ledger.  Parse the path here so malformed replay state still fails
+        # closed before reading a different operation.
+        _string_argument(arguments, "path", required=True)
+        return await self.reconcile_workspace_operation_by_scope(
+            tenant_id=tenant_id,
+            group_id=group_id,
+            tool_name=tool_name,
+            operation_id=operation_id,
+            lease_owner=lease_owner,
+        )
+
+    async def reconcile_workspace_operation_by_scope(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        group_id: uuid.UUID,
+        tool_name: str,
+        operation_id: uuid.UUID,
+        lease_owner: str,
+    ) -> ToolExecutionOutcome:
+        """Reconcile one fenced operation without reconstructing Graph state."""
+        if tool_name not in GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
+            raise GroupRuntimeToolError(
+                "group_tool_unknown",
+                f"Tool {tool_name} is not a Group workspace mutation",
+            )
+        try:
+            async with self._session_factory() as db:
+                async with db.begin():
+                    await self._assert_workspace_fence(
+                        db,
+                        tenant_id=tenant_id,
+                        operation_id=operation_id,
+                        lease_owner=lease_owner,
+                    )
+                    receipt = (
+                        await group_file_service.reconcile_runtime_workspace_operation(
+                            db,
+                            group_id=group_id,
+                            operation_id=operation_id,
+                        )
+                    )
+        except GroupWorkspaceReconciliationPending:
+            raise
+        except group_file_service.GroupFileServiceError as exc:
+            status = (
+                "failed"
+                if exc.code == "group_workspace_operation_not_prepared"
+                else "unknown"
+            )
+            return ToolExecutionOutcome(
+                status=status,
+                result_summary=str(exc),
+                result_ref=None,
+                error_code=exc.code,
+                retryable=False,
+                metadata={
+                    "operation_id": str(operation_id),
+                    "operation": (
+                        "write"
+                        if tool_name == GROUP_WRITE_WORKSPACE_FILE
+                        else "delete"
+                    ),
+                },
+            )
+        except Exception as exc:
+            raise GroupWorkspaceReconciliationPending(
+                "Group workspace reconciliation could not read durable facts"
+            ) from exc
+        return _workspace_operation_outcome(receipt)
+
+    async def execute(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        agent: Agent,
+        tool_name: str,
+        arguments: dict,
+        *,
+        operation_id: uuid.UUID | None = None,
+        lease_owner: str | None = None,
+    ) -> ToolExecutionOutcome:
         if tool_name not in GROUP_TOOL_NAMES:
             raise GroupRuntimeToolError(
                 "group_tool_unknown",
                 f"Unknown group tool: {tool_name}",
             )
-        tenant_id, group_id, participant_id, session_id = _scope(state, agent)
+        tenant_id, group_id, participant_id, session_id = _scope(
+            state,
+            context,
+            agent,
+        )
+        if tool_name in GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
+            if operation_id is None:
+                raise GroupRuntimeToolError(
+                    "group_workspace_operation_id_missing",
+                    "Group workspace mutations require a Tool Ledger operation ID",
+                )
+            if lease_owner is None or not lease_owner.strip():
+                raise GroupRuntimeToolError(
+                    "group_workspace_fence_missing",
+                    "Group workspace mutations require a durable fence owner",
+                )
+            return await self._execute_workspace_operation(
+                tenant_id=tenant_id,
+                group_id=group_id,
+                participant_id=participant_id,
+                session_id=session_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                operation_id=operation_id,
+                lease_owner=lease_owner,
+            )
         async with self._session_factory() as db:
             async with db.begin():
                 if tool_name == GROUP_QUERY_MEMBERS:
@@ -425,15 +724,19 @@ class GroupRuntimeToolService:
                         limit=limit,
                     )
                 elif tool_name == GROUP_READ_ANNOUNCEMENT:
+                    offset, max_bytes = _read_window(arguments)
                     value = _file_json(
                         await group_file_service.read_announcement(
                             db,
                             tenant_id=tenant_id,
                             group_id=group_id,
                             actor_participant_id=participant_id,
-                        )
+                        ),
+                        offset=offset,
+                        max_bytes=max_bytes,
                     )
                 elif tool_name == GROUP_READ_MEMORY:
+                    offset, max_bytes = _read_window(arguments)
                     value = _file_json(
                         await group_file_service.read_agent_memory(
                             db,
@@ -441,7 +744,9 @@ class GroupRuntimeToolService:
                             group_id=group_id,
                             actor_participant_id=participant_id,
                             agent_id=_uuid_argument(arguments, "agent_id"),
-                        )
+                        ),
+                        offset=offset,
+                        max_bytes=max_bytes,
                     )
                 elif tool_name == GROUP_WRITE_MEMORY:
                     value = _file_json(
@@ -461,7 +766,8 @@ class GroupRuntimeToolService:
                                 "expected_version_token",
                             ),
                             session_id=session_id,
-                        )
+                        ),
+                        include_content=False,
                     )
                 elif tool_name == GROUP_LIST_WORKSPACE:
                     entries = await group_file_service.list_workspace(
@@ -487,6 +793,7 @@ class GroupRuntimeToolService:
                         for entry in entries
                     ]
                 elif tool_name == GROUP_READ_WORKSPACE_FILE:
+                    offset, max_bytes = _read_window(arguments)
                     value = _file_json(
                         await group_file_service.read_workspace_file(
                             db,
@@ -498,56 +805,35 @@ class GroupRuntimeToolService:
                                 "path",
                                 required=True,
                             ),
-                        )
-                    )
-                elif tool_name == GROUP_WRITE_WORKSPACE_FILE:
-                    value = _file_json(
-                        await group_file_service.write_workspace_file(
-                            db,
-                            tenant_id=tenant_id,
-                            group_id=group_id,
-                            actor_participant_id=participant_id,
-                            path=_string_argument(
-                                arguments,
-                                "path",
-                                required=True,
-                            ),
-                            content=_string_argument(
-                                arguments,
-                                "content",
-                                required=True,
-                            ),
-                            expected_version_token=_optional_string(
-                                arguments,
-                                "expected_version_token",
-                            ),
-                            session_id=session_id,
-                        )
+                        ),
+                        offset=offset,
+                        max_bytes=max_bytes,
                     )
                 else:
-                    path = _string_argument(arguments, "path", required=True)
-                    await group_file_service.delete_workspace_file(
-                        db,
-                        tenant_id=tenant_id,
-                        group_id=group_id,
-                        actor_participant_id=participant_id,
-                        path=path,
-                        expected_version_token=_optional_string(
-                            arguments,
-                            "expected_version_token",
-                        ),
-                        session_id=session_id,
+                    raise GroupRuntimeToolError(
+                        "group_tool_unknown",
+                        f"Unknown group tool: {tool_name}",
                     )
-                    value = {"path": path, "deleted": True}
-        return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
+        return ToolExecutionOutcome(
+            status="succeeded",
+            result_summary=json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+            ),
+            result_ref=None,
+        )
 
 
 __all__ = [
     "GROUP_READ_TOOL_NAMES",
     "GROUP_RUNTIME_TOOL_DEFINITIONS",
     "GROUP_TOOL_NAMES",
+    "GROUP_WORKSPACE_MUTATION_TOOL_NAMES",
     "GROUP_WRITE_TOOL_NAMES",
     "GroupRuntimeToolError",
     "GroupRuntimeToolService",
+    "GroupWorkspaceReconciliationPending",
     "with_group_runtime_tools",
 ]

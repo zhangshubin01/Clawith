@@ -206,7 +206,6 @@ async def list_templates(
             "default_skills": t.default_skills,
             "default_autonomy_policy": t.default_autonomy_policy,
             "capability_bullets": t.capability_bullets or [],
-            "has_bootstrap": bool(t.bootstrap_content),
         }
         for t in templates
     ]

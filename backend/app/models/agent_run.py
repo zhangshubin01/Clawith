@@ -1,4 +1,4 @@
-"""Static registry and query projection for durable Agent runs."""
+"""Product-owned immutable registry and delivery facts for durable Agent runs."""
 
 import uuid
 from datetime import datetime
@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     PrimaryKeyConstraint,
     String,
     Text,
@@ -24,7 +25,7 @@ from app.database import Base
 
 
 class AgentRun(Base):
-    """Product-owned identity, delivery facts, and rebuildable projections for a run."""
+    """Product-owned identity and delivery facts; execution state stays in checkpoints."""
 
     __tablename__ = "agent_runs"
     __table_args__ = (
@@ -40,12 +41,6 @@ class AgentRun(Base):
         CheckConstraint(
             "runtime_type IN ('legacy', 'langgraph')",
             name="ck_agent_runs_runtime_type",
-        ),
-        CheckConstraint(
-            "projected_execution_status IS NULL OR projected_execution_status IN "
-            "('created', 'queued', 'running', 'waiting_user', 'waiting_external', "
-            "'waiting_agent', 'verifying', 'completed', 'failed', 'cancelled')",
-            name="ck_agent_runs_projected_execution_status",
         ),
         CheckConstraint(
             "delivery_status IN ('not_required', 'pending', 'delivered', 'failed')",
@@ -72,12 +67,16 @@ class AgentRun(Base):
             "(run_kind <> 'orchestration' AND agent_id IS NOT NULL AND system_role IS NULL)",
             name="ck_agent_runs_orchestration_identity",
         ),
+        CheckConstraint(
+            "(run_kind = 'orchestration' AND model_turn_limit IS NULL) OR "
+            "(run_kind <> 'orchestration' AND model_turn_limit > 0)",
+            name="ck_agent_runs_model_turn_limit",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "session_id"],
             ["chat_sessions.tenant_id", "chat_sessions.id"],
             name="fk_agent_runs_tenant_session_chat_sessions",
         ),
-        UniqueConstraint("runtime_thread_id", name="uq_agent_runs_runtime_thread_id"),
         UniqueConstraint("tenant_id", "id", name="uq_agent_runs_tenant_id_id"),
     )
 
@@ -133,6 +132,7 @@ class AgentRun(Base):
         ForeignKey("llm_models.id", name="fk_agent_runs_model_id_llm_models", ondelete="RESTRICT"),
         nullable=True,
     )
+    model_turn_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     runtime_type: Mapped[str] = mapped_column(String(24), nullable=False)
     runtime_thread_id: Mapped[str] = mapped_column(String(255), nullable=False)
     graph_name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -146,21 +146,11 @@ class AgentRun(Base):
         Boolean, nullable=False, default=False, server_default=text("false")
     )
     lane_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    projected_execution_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    projected_waiting_type: Mapped[str | None] = mapped_column(String(24), nullable=True)
-    projected_waiting_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    projected_result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    projected_error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    projected_last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    projected_checkpoint_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    projection_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     session_context_applied_checkpoint_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )
     delivery_status: Mapped[str] = mapped_column(String(24), nullable=False)
     delivery_target: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    projected_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    projected_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -170,10 +160,11 @@ class AgentRun(Base):
 
 
 Index(
-    "ix_agent_runs_tenant_agent_projected_status",
+    "ix_agent_runs_tenant_thread_created_at",
     AgentRun.tenant_id,
-    AgentRun.agent_id,
-    AgentRun.projected_execution_status,
+    AgentRun.runtime_thread_id,
+    AgentRun.created_at,
+    AgentRun.id,
 )
 Index("ix_agent_runs_session_created_at", AgentRun.session_id, AgentRun.created_at.desc())
 Index("ix_agent_runs_parent_run_id", AgentRun.parent_run_id)

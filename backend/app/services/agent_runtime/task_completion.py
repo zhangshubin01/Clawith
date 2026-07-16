@@ -71,13 +71,13 @@ class TaskRuntimeCompletionHandler:
         run: RuntimeRunRecord,
         checkpoint: CheckpointObservation,
     ) -> None:
-        if run.registry.source_type != "task":
+        if run.source_type != "task":
             return
         status = checkpoint.state["lifecycle"]["status"]
         if status not in _TERMINAL_STATUSES:
             return
         try:
-            agent_id = uuid.UUID(run.registry.agent_id or "")
+            agent_id = uuid.UUID(run.agent_id or "")
         except ValueError as exc:
             raise TaskRuntimeCompletionError(
                 "invalid_task_run_identity",

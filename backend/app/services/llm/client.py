@@ -1213,6 +1213,8 @@ class GeminiClient(LLMClient):
             if msg.role == "system":
                 parts = self._content_to_gemini_parts(msg.content)
                 text_chunks = [p.get("text", "") for p in parts if p.get("text")]
+                if msg.dynamic_content:
+                    text_chunks.append(msg.dynamic_content)
                 if text_chunks:
                     system_blocks.append("\n".join(text_chunks))
                 continue

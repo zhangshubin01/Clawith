@@ -9,7 +9,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
-from langgraph.types import interrupt
+from langgraph.types import RetryPolicy, interrupt
 
 from app.config import Settings, get_settings
 from app.services.agent_runtime.state import (
@@ -19,6 +19,7 @@ from app.services.agent_runtime.state import (
     RuntimeGraphState,
     RuntimeNodeName,
     RuntimeStateUpdate,
+    runtime_messages_as_json,
 )
 
 
@@ -32,7 +33,6 @@ TERMINAL_NODE = "terminal"
 
 _WAITING_STATUSES = frozenset({"waiting_user", "waiting_external", "waiting_agent"})
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
-_MAX_APPLIED_COMMAND_IDS = 64
 _ROUTE_STATUSES = {
     "compact": frozenset({"running", *_WAITING_STATUSES}),
     "model": frozenset({"running"}),
@@ -43,13 +43,24 @@ _ROUTE_STATUSES = {
 }
 
 
+def _retry_transient_compact_error(error: Exception) -> bool:
+    """Retry only errors explicitly classified as transient by Compact."""
+    return bool(getattr(error, "is_transient_compact_error", False))
+
+
+COMPACT_RETRY_POLICY = RetryPolicy(
+    max_attempts=3,
+    retry_on=_retry_transient_compact_error,
+)
+
+
 class RuntimeGraphContractError(RuntimeError):
     """Checkpoint state or invocation context violates the graph contract."""
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeGraphIdentity:
-    """Pinned graph identity stored on every Run Registry row."""
+    """Observational identity for the currently deployed Runtime graph."""
 
     name: str
     version: str
@@ -71,7 +82,7 @@ class RuntimeGraphIdentity:
         cls,
         settings: Settings | None = None,
     ) -> "RuntimeGraphIdentity":
-        """Use a separate pinned identity on the shared Checkpointer substrate."""
+        """Name the current Planning topology on the shared Checkpointer."""
         runtime_settings = settings or get_settings()
         return cls(
             name=f"{runtime_settings.AGENT_RUNTIME_GRAPH_NAME}_group_planning",
@@ -81,25 +92,22 @@ class RuntimeGraphIdentity:
 
 @dataclass(frozen=True, slots=True)
 class AgentRuntimeGraph:
-    """Compiled graph paired with the version needed to resume its checkpoints."""
+    """Currently deployed compiled graph plus its trace identity."""
 
     identity: RuntimeGraphIdentity
     compiled: CompiledStateGraph
 
 
 def _require_invocation_scope(
-    state: RuntimeGraphState,
     context: RuntimeContext | None,
-    identity: RuntimeGraphIdentity,
 ) -> RuntimeContext:
     if context is None:
         raise RuntimeGraphContractError("RuntimeContext is required")
 
-    registry = state["registry"]
-    if registry.tenant_id != context.tenant_id or registry.run_id != context.run_id:
-        raise RuntimeGraphContractError("RuntimeContext tenant_id and run_id must match the checkpoint registry")
-    if registry.graph_name != identity.name or registry.graph_version != identity.version:
-        raise RuntimeGraphContractError("Run graph identity does not match the compiled graph version")
+    if not context.tenant_id or not context.run_id or not context.command_id:
+        raise RuntimeGraphContractError(
+            "RuntimeContext must carry tenant, Run, and Command identity"
+        )
     return context
 
 
@@ -111,46 +119,60 @@ async def _execute_node(
     *,
     resume_value: JsonValue | None = None,
 ) -> RuntimeStateUpdate:
-    context = _require_invocation_scope(state, runtime.context, identity)
+    context = _require_invocation_scope(runtime.context)
     update = await context.executor.execute(
         node,
         state,
         context,
         resume_value=resume_value,
     )
-    unexpected_keys = set(update) - {"lifecycle"}
+    unexpected_keys = set(update) - {
+        "lifecycle",
+        "messages",
+        "thread_summary",
+        "summary_covered_through_message_id",
+    }
     if unexpected_keys:
         raise RuntimeGraphContractError(
-            "Runtime nodes may only update lifecycle state: " + ", ".join(sorted(unexpected_keys))
+            "Runtime nodes returned unsupported Thread state fields: "
+            + ", ".join(sorted(unexpected_keys))
         )
     lifecycle_update = update.get("lifecycle", {})
     if not isinstance(lifecycle_update, dict):
         raise RuntimeGraphContractError("Runtime node lifecycle update must be an object")
 
-    existing_command_ids = state["lifecycle"].get("last_applied_command_ids", [])
-    update_command_ids = lifecycle_update.get(
-        "last_applied_command_ids",
-        existing_command_ids,
-    )
-    for values in (existing_command_ids, update_command_ids):
-        if not isinstance(values, list) or any(
-            not isinstance(command_id, str) or not command_id for command_id in values
-        ):
-            raise RuntimeGraphContractError("Checkpoint last_applied_command_ids must contain non-empty strings")
-    command_ids: list[str] = []
-    for command_id in [*existing_command_ids, *update_command_ids, context.command_id]:
-        if command_id in command_ids:
-            command_ids.remove(command_id)
-        command_ids.append(command_id)
     lifecycle = {
         **state["lifecycle"],
         **lifecycle_update,
-        "last_applied_command_ids": command_ids[-_MAX_APPLIED_COMMAND_IDS:],
     }
+    # Older checkpoints carried a bounded Command-ID receipt list. Command
+    # ownership now lives in native checkpoint metadata and the durable inbox;
+    # drop the legacy field whenever an old checkpoint advances.
+    lifecycle.pop("last_applied_command_ids", None)
+    lifecycle.pop("run_messages", None)
+    lifecycle.pop("run_summary", None)
+    lifecycle.pop("covered_through_run_message_id", None)
+    lifecycle.pop("run_compact_error", None)
+    lifecycle.pop("compact_forced", None)
+    lifecycle.pop("compact_return_route", None)
     if node == "terminal":
         if lifecycle.get("status") not in _TERMINAL_STATUSES or lifecycle.get("next_route") != "terminal":
             raise RuntimeGraphContractError("terminal node must preserve a terminal lifecycle")
-    return {"lifecycle": lifecycle}
+    normalized_update = dict(update)
+    if not state.get("messages"):
+        legacy_messages = runtime_messages_as_json(state)
+        if legacy_messages:
+            normalized_update["messages"] = [
+                *legacy_messages,
+                *cast(list, update.get("messages", [])),
+            ]
+    return cast(
+        RuntimeStateUpdate,
+        {
+            **normalized_update,
+            "lifecycle": lifecycle,
+        },
+    )
 
 
 def _make_node(
@@ -173,7 +195,7 @@ def _make_wait_node(
         state: RuntimeGraphState,
         runtime: Runtime[RuntimeContext],
     ) -> RuntimeStateUpdate:
-        _require_invocation_scope(state, runtime.context, identity)
+        _require_invocation_scope(runtime.context)
         waiting_request = state["lifecycle"].get("waiting_request")
         if not isinstance(waiting_request, dict):
             raise RuntimeGraphContractError("wait route requires a serializable waiting_request")
@@ -207,12 +229,16 @@ def build_agent_runtime_graph(
     settings: Settings | None = None,
     identity: RuntimeGraphIdentity | None = None,
 ) -> AgentRuntimeGraph:
-    """Compile one reusable graph; callers select the pinned version per Run."""
+    """Compile the current reusable graph for new and compatible old checkpoints."""
     identity = identity or RuntimeGraphIdentity.from_settings(settings)
     builder = StateGraph(RuntimeGraphState, context_schema=RuntimeContext)
 
     builder.add_node(CONTROL_GUARD_NODE, _make_node("control_guard", identity))
-    builder.add_node(COMPACT_NODE, _make_node("compact", identity))
+    builder.add_node(
+        COMPACT_NODE,
+        _make_node("compact", identity),
+        retry_policy=COMPACT_RETRY_POLICY,
+    )
     builder.add_node(MODEL_NODE, _make_node("model", identity))
     builder.add_node(TOOL_NODE, _make_node("tool", identity))
     builder.add_node(VERIFY_NODE, _make_node("verify", identity))

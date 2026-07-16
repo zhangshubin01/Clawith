@@ -1,7 +1,7 @@
 """Focused tests for the Runtime Tool Execution Ledger service."""
 
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import inspect
 import math
 import uuid
@@ -113,6 +113,9 @@ def _execution(
             retry_policy=retry_policy,
         ),
         request_ref="request://1",
+        effect=effect,
+        retry_policy=retry_policy,
+        result_metadata={},
         status=status,
         result_summary=result_summary,
         result_ref=result_ref,
@@ -214,14 +217,10 @@ async def test_new_reservation_atomically_persists_started_and_execution_metadat
     assert db.nested_entries == 1
     assert db.nested_exit_exceptions == [None]
     assert reservation.execution.arguments_hash == tool_execution.fingerprint_arguments(_ARGUMENTS)
-    assert reservation.execution.sanitized_arguments == {
-        "arguments": _SANITIZED_ARGUMENTS,
-        "__clawith_tool_execution__": {
-            "version": 1,
-            "side_effect_classification": "external_write",
-            "retry_policy": "never",
-        },
-    }
+    assert reservation.execution.sanitized_arguments == _SANITIZED_ARGUMENTS
+    assert reservation.execution.effect == "external_write"
+    assert reservation.execution.retry_policy == "never"
+    assert reservation.execution.result_metadata == {}
     assert reservation.execution.request_ref == "request://1"
     assert reservation.execution.lease_owner == "worker-1"
     assert reservation.execution.lease_expires_at == datetime(2026, 7, 13, 13, 1, tzinfo=UTC)
@@ -255,6 +254,42 @@ async def test_succeeded_reservation_reuses_receipt_and_never_executes_again():
     )
     assert db.added == []
     assert db.flush_count == 0
+
+
+@pytest.mark.asyncio
+async def test_legacy_embedded_policy_metadata_remains_readable_during_backfill() -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    existing = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="succeeded",
+        effect="read",
+        retry_policy="safe",
+        result_summary="cached",
+    )
+    existing.effect = None  # type: ignore[assignment]
+    existing.retry_policy = None  # type: ignore[assignment]
+    existing.sanitized_arguments = {
+        "arguments": _SANITIZED_ARGUMENTS,
+        "__clawith_tool_execution__": {
+            "version": 1,
+            "side_effect_classification": "read",
+            "retry_policy": "safe",
+        },
+    }
+    db = _FakeSession(run_id, existing)
+
+    reservation = await _reserve(
+        db,
+        tenant_id=tenant_id,
+        run_id=run_id,
+        effect="read",
+        retry_policy="safe",
+    )
+
+    assert reservation.reusable_result is not None
+    assert reservation.reusable_result.result_summary == "cached"
 
 
 @pytest.mark.asyncio
@@ -314,7 +349,8 @@ async def test_idempotency_key_rejects_changed_arguments_or_execution_metadata()
             retry_policy="safe",
         )
     assert effect_error.value.code == "tool_call_idempotency_mismatch"
-    assert "sanitized_arguments" in str(effect_error.value)
+    assert "effect" in str(effect_error.value)
+    assert "retry_policy" in str(effect_error.value)
 
 
 @pytest.mark.asyncio
@@ -556,6 +592,133 @@ async def test_lease_renewal_never_changes_execution_ownership_or_status():
     assert renewed.status == "started"
     assert renewed.lease_owner == "worker-1"
     assert renewed.lease_expires_at == datetime(2026, 7, 13, 13, 2, tzinfo=UTC)
+    assert db.flush_count == 1
+
+
+@pytest.mark.asyncio
+async def test_active_lease_defers_reconciliation_without_changing_owner():
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(tenant_id=tenant_id, run_id=run_id, status="started")
+    execution.lease_expires_at = _NOW + timedelta(seconds=30)
+    db = _FakeSession(execution)
+
+    decision = await tool_execution.takeover_tool_execution_for_reconciliation(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution.id,
+        lease_owner="recovery-invocation-1",
+        lease_ttl_seconds=60,
+        clock=lambda: _NOW,
+    )
+
+    assert decision.acquired is False
+    assert decision.active is True
+    assert decision.terminal_outcome is None
+    assert execution.lease_owner == "worker-1"
+    assert db.flush_count == 0
+    assert "FOR UPDATE" in _sql(db.statements[0])
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_requires_atomic_takeover_before_reconciliation():
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(tenant_id=tenant_id, run_id=run_id, status="started")
+    execution.lease_expires_at = _NOW - timedelta(seconds=1)
+    db = _FakeSession(execution)
+
+    decision = await tool_execution.takeover_tool_execution_for_reconciliation(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution.id,
+        lease_owner="recovery-invocation-2",
+        lease_ttl_seconds=90,
+        clock=lambda: _NOW,
+    )
+
+    assert decision.acquired is True
+    assert decision.active is False
+    assert decision.execution is execution
+    assert execution.lease_owner == "recovery-invocation-2"
+    assert execution.lease_expires_at == _NOW + timedelta(seconds=90)
+    assert db.flush_count == 1
+
+
+@pytest.mark.asyncio
+async def test_side_effect_fence_rejects_expired_or_replaced_owner():
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+
+    expired = _execution(tenant_id=tenant_id, run_id=run_id, status="started")
+    expired.lease_expires_at = _NOW
+    with pytest.raises(tool_execution.ToolExecutionError) as expired_error:
+        await tool_execution.assert_tool_execution_fence(
+            _FakeSession(expired),
+            tenant_id=tenant_id,
+            execution_id=expired.id,
+            lease_owner="worker-1",
+            clock=lambda: _NOW,
+        )
+    assert expired_error.value.code == "tool_execution_lease_lost"
+
+    replaced = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="started",
+        lease_owner="recovery-invocation",
+    )
+    replaced.lease_expires_at = _NOW + timedelta(seconds=30)
+    with pytest.raises(tool_execution.ToolExecutionError) as replaced_error:
+        await tool_execution.assert_tool_execution_fence(
+            _FakeSession(replaced),
+            tenant_id=tenant_id,
+            execution_id=replaced.id,
+            lease_owner="worker-1",
+            clock=lambda: _NOW,
+        )
+    assert replaced_error.value.code == "tool_execution_lease_lost"
+
+
+@pytest.mark.asyncio
+async def test_unknown_can_only_be_reopened_by_explicit_reconciliation_claim():
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="unknown",
+        result_summary="storage state did not match yet",
+    )
+    execution.completed_at = _NOW
+
+    observed = await tool_execution.takeover_tool_execution_for_reconciliation(
+        _FakeSession(execution),
+        tenant_id=tenant_id,
+        execution_id=execution.id,
+        lease_owner="recovery-observer",
+        lease_ttl_seconds=60,
+        clock=lambda: _NOW,
+    )
+    assert observed.acquired is False
+    assert observed.terminal_outcome is not None
+    assert execution.status == "unknown"
+
+    db = _FakeSession(execution)
+    reopened = await tool_execution.takeover_tool_execution_for_reconciliation(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution.id,
+        lease_owner="group-recovery-invocation",
+        lease_ttl_seconds=60,
+        reopen_unknown=True,
+        clock=lambda: _NOW + timedelta(seconds=60),
+    )
+
+    assert reopened.acquired is True
+    assert execution.status == "started"
+    assert execution.lease_owner == "group-recovery-invocation"
+    assert execution.completed_at is None
     assert db.flush_count == 1
 
 

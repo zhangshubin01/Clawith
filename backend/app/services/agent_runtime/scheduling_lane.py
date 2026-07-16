@@ -38,10 +38,10 @@ class SchedulingLaneCompletionHandler:
         status = checkpoint.state["lifecycle"]["status"]
         if status not in _TERMINAL_STATUSES:
             return
-        if checkpoint.state["registry"] != run.registry:
+        if checkpoint.metadata.get("clawith_run_id") != str(run.run_id):
             raise SchedulingLaneError(
                 "checkpoint_identity_mismatch",
-                "lane release checkpoint does not match the Run Registry",
+                "lane release checkpoint metadata does not match the Run Registry",
             )
 
         async with self._session_factory() as db:

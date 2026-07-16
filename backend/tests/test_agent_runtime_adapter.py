@@ -1,24 +1,27 @@
-"""Transactional intake tests for the product-facing Runtime Adapter."""
+"""Transactional Runtime command-intake contract tests."""
+
+from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 import uuid
 
 import pytest
-from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.services.agent_runtime.adapter as runtime_adapter
 from app.config import Settings
+from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.agent_run_command import AgentRunCommand
 from app.services.agent_runtime.adapter import (
     RuntimeAdapterError,
-    TransactionalAgentRuntimeAdapter,
+    RuntimeCommandIntake,
 )
 from app.services.agent_runtime.contracts import (
     CancelRunCommand,
+    RUNTIME_COMMAND_METADATA_KEY,
     ResumeRunCommand,
-    RunHandle,
     StartRunCommand,
 )
 from app.services.agent_runtime.persistence import (
@@ -36,60 +39,81 @@ class _Result:
         return self._value
 
 
-def _settings(*, enabled: bool, source_types: str = "") -> Settings:
+def _settings(*, enabled: bool) -> Settings:
     return Settings(
         _env_file=None,
         AGENT_RUNTIME_V2_ENABLED=enabled,
         AGENT_RUNTIME_V2_AGENT_IDS="",
-        AGENT_RUNTIME_V2_SOURCE_TYPES=source_types,
+        AGENT_RUNTIME_V2_SOURCE_TYPES="",
         AGENT_RUNTIME_GRAPH_NAME="runtime_graph",
         AGENT_RUNTIME_GRAPH_VERSION="v2",
     )
 
 
-def _session(result: object | None = None) -> AsyncMock:
+def _session(*results: object | None) -> AsyncMock:
     db = AsyncMock(spec=AsyncSession)
-    db.execute.return_value = _Result(result)
+    db.execute.side_effect = [_Result(result) for result in results]
     return db
+
+
+def _agent(
+    tenant_id: uuid.UUID,
+    *,
+    agent_id: uuid.UUID | None = None,
+    model_turn_limit: object = 50,
+) -> Agent:
+    agent = Agent(
+        id=agent_id or uuid.uuid4(),
+        tenant_id=tenant_id,
+        creator_id=uuid.uuid4(),
+        name="Runtime Agent",
+        status="idle",
+        agent_type="native",
+    )
+    agent.max_tool_rounds = model_turn_limit  # type: ignore[assignment]
+    return agent
 
 
 def _run(
     *,
-    tenant_id: uuid.UUID | None = None,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID | None,
     run_id: uuid.UUID | None = None,
-    runtime_type: str = "langgraph",
-    projected_status: str | None = None,
+    thread_id: str | None = None,
+    model_turn_limit: int | None = 50,
+    run_kind: str = "foreground",
+    system_role: str | None = None,
     graph_name: str = "runtime_graph",
     graph_version: str = "v2",
     source_execution_id: str | None = None,
 ) -> AgentRun:
-    resolved_tenant_id = tenant_id or uuid.uuid4()
     resolved_run_id = run_id or uuid.uuid4()
-    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    now = datetime(2026, 7, 16, 9, 0, tzinfo=UTC)
     return AgentRun(
         id=resolved_run_id,
-        tenant_id=resolved_tenant_id,
-        agent_id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        agent_id=agent_id,
         source_type="chat",
         source_execution_id=source_execution_id,
         goal="Answer the user",
-        run_kind="foreground",
+        run_kind=run_kind,
+        system_role=system_role,
         model_id=uuid.uuid4(),
-        runtime_type=runtime_type,
-        runtime_thread_id=str(resolved_run_id),
+        model_turn_limit=model_turn_limit,
+        runtime_type="langgraph",
+        runtime_thread_id=thread_id or str(resolved_run_id),
         graph_name=graph_name,
         graph_version=graph_version,
         lane_held=False,
-        projected_execution_status=projected_status,
         delivery_status="pending",
         created_at=now,
         updated_at=now,
     )
 
 
-def _command(run: AgentRun, *, command_type: str, command_id: uuid.UUID | None = None) -> AgentRunCommand:
+def _stored_command(run: AgentRun, command_type: str) -> AgentRunCommand:
     return AgentRunCommand(
-        id=command_id or uuid.uuid4(),
+        id=uuid.uuid4(),
         tenant_id=run.tenant_id,
         run_id=run.id,
         command_type=command_type,
@@ -100,73 +124,184 @@ def _command(run: AgentRun, *, command_type: str, command_id: uuid.UUID | None =
     )
 
 
-def _start(tenant_id: uuid.UUID, *, source_execution_id: str | None = None) -> StartRunCommand:
+def _start(
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    *,
+    source_execution_id: str | None = None,
+    thread_id: str | None = None,
+    requested_model_turn_limit: int | None = None,
+) -> StartRunCommand:
     return StartRunCommand(
         tenant_id=tenant_id,
-        agent_id=uuid.uuid4(),
+        agent_id=agent_id,
         source_type="chat",
         source_execution_id=source_execution_id,
         goal="Answer the user",
         run_kind="foreground",
         model_id=uuid.uuid4(),
+        runtime_thread_id=thread_id,
+        requested_model_turn_limit=requested_model_turn_limit,
         idempotency_key="start:message:1",
         payload={"message_id": "message-1"},
         delivery_status="pending",
     )
 
 
-def _compiled_query(db: AsyncMock) -> str:
-    statement = db.execute.await_args.args[0]
-    return str(
-        statement.compile(
-            dialect=postgresql.dialect(),
-            compile_kwargs={"literal_binds": True},
-        )
-    )
-
-
 @pytest.mark.asyncio
-async def test_start_persists_registry_and_command_without_committing() -> None:
+async def test_start_pins_agent_budget_thread_and_internal_request_metadata() -> None:
     tenant_id = uuid.uuid4()
-    command = _start(tenant_id)
-    run = _run(tenant_id=tenant_id)
-    start_command = _command(run, command_type="start")
-    db = _session()
+    thread_id = str(uuid.uuid4())
+    agent = _agent(tenant_id, model_turn_limit=80)
+    command = _start(
+        tenant_id,
+        agent.id,
+        thread_id=thread_id,
+        requested_model_turn_limit=40,
+    )
+    run = _run(
+        tenant_id=tenant_id,
+        agent_id=agent.id,
+        thread_id=thread_id,
+        model_turn_limit=40,
+    )
+    start_command = _stored_command(run, "start")
+    db = _session(agent)
 
     with patch(
         "app.services.agent_runtime.adapter.register_run_with_start",
         new=AsyncMock(return_value=RegisteredRun(run, start_command, True)),
     ) as persist:
-        handle = await TransactionalAgentRuntimeAdapter(
+        handle = await RuntimeCommandIntake(
             db,
             settings=_settings(enabled=True),
         ).start_run(command)
 
-    assert handle.run_id == run.id
-    assert handle.thread_id == str(run.id)
-    assert handle.command_id == start_command.id
-    assert handle.runtime_type == "langgraph"
-    assert handle.created is True
     registration = persist.await_args.args[1]
     assert isinstance(registration, RunRegistration)
-    assert registration.tenant_id == tenant_id
-    assert registration.runtime_type == "langgraph"
-    assert (registration.graph_name, registration.graph_version) == ("runtime_graph", "v2")
-    assert persist.await_args.kwargs["start_payload"] == {"message_id": "message-1"}
+    assert registration.model_turn_limit == 40
+    assert registration.runtime_thread_id == thread_id
+    assert persist.await_args.kwargs["start_payload"] == {
+        "message_id": "message-1",
+        RUNTIME_COMMAND_METADATA_KEY: {"requested_model_turn_limit": 40},
+    }
+    assert (handle.run_id, handle.thread_id, handle.command_id) == (
+        run.id,
+        thread_id,
+        start_command.id,
+    )
     db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_planning_start_pins_the_dedicated_graph_identity() -> None:
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [(12, 12), (100, 50), (None, 50)],
+)
+async def test_oneshot_request_can_only_narrow_the_agent_hard_limit(
+    requested: int | None,
+    expected: int,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id, model_turn_limit=50)
+    command = _start(
+        tenant_id,
+        agent.id,
+        requested_model_turn_limit=requested,
+    )
+    run = _run(
+        tenant_id=tenant_id,
+        agent_id=agent.id,
+        model_turn_limit=expected,
+    )
+    db = _session(agent)
+
+    with patch(
+        "app.services.agent_runtime.adapter.register_run_with_start",
+        new=AsyncMock(
+            return_value=RegisteredRun(run, _stored_command(run, "start"), True)
+        ),
+    ) as persist:
+        await RuntimeCommandIntake(db, settings=_settings(enabled=True)).start_run(
+            command
+        )
+
+    assert persist.await_args.args[1].model_turn_limit == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [None, 0, -1, True])
+async def test_missing_or_invalid_agent_budget_fails_without_runtime_fallback(
+    invalid: object,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id, model_turn_limit=invalid)
+    db = _session(agent)
+
+    with patch(
+        "app.services.agent_runtime.adapter.register_run_with_start",
+        new=AsyncMock(),
+    ) as persist:
+        with pytest.raises(RuntimeAdapterError) as raised:
+            await RuntimeCommandIntake(
+                db,
+                settings=_settings(enabled=True),
+            ).start_run(_start(tenant_id, agent.id))
+
+    assert raised.value.code == "invalid_agent_model_turn_limit"
+    persist.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_idempotent_start_reuses_stored_budget_and_graph_without_agent_reload() -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    source_execution_id = "chat:message-1"
+    run = _run(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        thread_id=str(uuid.uuid4()),
+        model_turn_limit=12,
+        graph_version="v1",
+        source_execution_id=source_execution_id,
+    )
+    db = _session(run)
+    command = _start(
+        tenant_id,
+        agent_id,
+        source_execution_id=source_execution_id,
+        thread_id=run.runtime_thread_id,
+        requested_model_turn_limit=12,
+    )
+
+    with patch(
+        "app.services.agent_runtime.adapter.register_run_with_start",
+        new=AsyncMock(
+            return_value=RegisteredRun(run, _stored_command(run, "start"), False)
+        ),
+    ) as persist:
+        handle = await RuntimeCommandIntake(
+            db,
+            settings=_settings(enabled=False),
+        ).start_run(command)
+
+    registration = persist.await_args.args[1]
+    assert registration.model_turn_limit == 12
+    assert (registration.graph_name, registration.graph_version) == (
+        "runtime_graph",
+        "v1",
+    )
+    assert handle.created is False
+    assert db.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_planning_start_uses_dedicated_graph_and_no_agent_turn_limit() -> None:
     tenant_id = uuid.uuid4()
     command = StartRunCommand(
         tenant_id=tenant_id,
-        agent_id=None,
-        session_id=uuid.uuid4(),
         source_type="chat",
-        source_id=str(uuid.uuid4()),
-        source_execution_id=f"group_mention:{uuid.uuid4()}:plan",
-        goal="Coordinate the mentioned Agents",
+        goal="Coordinate the Group",
         run_kind="orchestration",
         system_role="group_planning",
         model_id=uuid.uuid4(),
@@ -174,268 +309,117 @@ async def test_planning_start_pins_the_dedicated_graph_identity() -> None:
         payload={"candidate_agents": []},
         delivery_status="pending",
     )
-    run = _run(tenant_id=tenant_id)
-    run.agent_id = None
-    run.run_kind = "orchestration"
-    run.system_role = "group_planning"
-    start_command = _command(run, command_type="start")
+    run = _run(
+        tenant_id=tenant_id,
+        agent_id=None,
+        model_turn_limit=None,
+        run_kind="orchestration",
+        system_role="group_planning",
+    )
     db = _session()
 
     with patch(
         "app.services.agent_runtime.adapter.register_run_with_start",
-        new=AsyncMock(return_value=RegisteredRun(run, start_command, True)),
+        new=AsyncMock(
+            return_value=RegisteredRun(run, _stored_command(run, "start"), True)
+        ),
     ) as persist:
-        await TransactionalAgentRuntimeAdapter(
-            db,
-            settings=_settings(enabled=True),
-        ).start_run(command)
+        await RuntimeCommandIntake(db, settings=_settings(enabled=True)).start_run(
+            command
+        )
 
     registration = persist.await_args.args[1]
+    assert registration.model_turn_limit is None
     assert (registration.graph_name, registration.graph_version) == (
         "runtime_graph_group_planning",
         "v2",
     )
-    assert registration.agent_id is None
-    assert registration.system_role == "group_planning"
+    assert persist.await_args.kwargs["start_payload"] == {
+        "candidate_agents": []
+    }
 
 
 @pytest.mark.asyncio
-async def test_new_start_fails_closed_when_v2_gate_is_disabled() -> None:
+async def test_new_start_checks_rollout_before_loading_agent_or_persisting() -> None:
+    tenant_id = uuid.uuid4()
     db = _session()
+
     with patch(
         "app.services.agent_runtime.adapter.register_run_with_start",
         new=AsyncMock(),
     ) as persist:
-        with pytest.raises(RuntimeAdapterError) as exc_info:
-            await TransactionalAgentRuntimeAdapter(
+        with pytest.raises(RuntimeAdapterError) as raised:
+            await RuntimeCommandIntake(
                 db,
                 settings=_settings(enabled=False),
-            ).start_run(_start(uuid.uuid4()))
+            ).start_run(_start(tenant_id, uuid.uuid4()))
 
-    assert exc_info.value.code == "runtime_v2_disabled"
+    assert raised.value.code == "runtime_v2_disabled"
+    assert db.execute.await_count == 0
     persist.assert_not_awaited()
-    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_start_retry_preserves_existing_runtime_and_graph_identity() -> None:
-    tenant_id = uuid.uuid4()
-    source_execution_id = "chat:message:1"
-    run = _run(
-        tenant_id=tenant_id,
-        graph_name="runtime_graph",
-        graph_version="v1",
-        source_execution_id=source_execution_id,
-    )
-    start_command = _command(run, command_type="start")
-    db = _session(run)
-
-    with patch(
-        "app.services.agent_runtime.adapter.register_run_with_start",
-        new=AsyncMock(return_value=RegisteredRun(run, start_command, False)),
-    ) as persist:
-        handle = await TransactionalAgentRuntimeAdapter(
-            db,
-            settings=_settings(enabled=False),
-        ).start_run(_start(tenant_id, source_execution_id=source_execution_id))
-
-    registration = persist.await_args.args[1]
-    assert registration.runtime_type == "langgraph"
-    assert (registration.graph_name, registration.graph_version) == ("runtime_graph", "v1")
-    assert handle.created is False
-    sql = _compiled_query(db)
-    assert "agent_runs.tenant_id" in sql
-    assert "agent_runs.source_type" in sql
-    assert "agent_runs.source_execution_id" in sql
-    db.commit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_resume_uses_runtime_type_not_a_conflicting_projection() -> None:
-    tenant_id = uuid.uuid4()
-    run = _run(tenant_id=tenant_id, projected_status="cancelled")
-    resume_command = _command(run, command_type="resume")
-    db = _session(run)
-    command = ResumeRunCommand(
-        tenant_id=tenant_id,
-        run_id=run.id,
-        idempotency_key="resume:message:2",
-        payload={"value": "continue"},
-    )
-
-    with patch(
-        "app.services.agent_runtime.adapter.enqueue_resume",
-        new=AsyncMock(return_value=EnqueuedCommand(resume_command, True)),
-    ) as enqueue:
-        handle = await TransactionalAgentRuntimeAdapter(
-            db,
-            settings=_settings(enabled=False),
-        ).resume_run(command)
-
-    assert handle.runtime_type == "langgraph"
-    assert handle.command_id == resume_command.id
-    assert enqueue.await_args.kwargs["tenant_id"] == tenant_id
-    assert enqueue.await_args.kwargs["run_id"] == run.id
-    assert "projected" not in repr(enqueue.await_args)
-    sql = _compiled_query(db)
-    assert "agent_runs.tenant_id" in sql
-    assert "agent_runs.id" in sql
-    db.commit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_existing_legacy_run_is_not_switched_by_enabled_v2_gate() -> None:
+async def test_resume_accepts_a_shared_thread_identity_and_cancel_is_scoped_to_run() -> None:
     tenant_id = uuid.uuid4()
     run = _run(
         tenant_id=tenant_id,
-        runtime_type="legacy",
-        projected_status="running",
+        agent_id=uuid.uuid4(),
+        thread_id=str(uuid.uuid4()),
     )
-    db = _session(run)
-    command = ResumeRunCommand(
-        tenant_id=tenant_id,
-        run_id=run.id,
-        idempotency_key="resume:1",
-        payload={"value": "continue"},
-    )
+    resume = _stored_command(run, "resume")
+    cancel = _stored_command(run, "cancel")
+    db = _session(run, run)
 
-    with patch(
-        "app.services.agent_runtime.adapter.enqueue_resume",
-        new=AsyncMock(),
-    ) as enqueue:
-        with pytest.raises(RuntimeAdapterError) as exc_info:
-            await TransactionalAgentRuntimeAdapter(
-                db,
-                settings=_settings(enabled=True),
-            ).resume_run(command)
+    with (
+        patch(
+            "app.services.agent_runtime.adapter.enqueue_resume",
+            new=AsyncMock(return_value=EnqueuedCommand(resume, True)),
+        ),
+        patch(
+            "app.services.agent_runtime.adapter.enqueue_cancel",
+            new=AsyncMock(return_value=EnqueuedCommand(cancel, True)),
+        ),
+    ):
+        intake = RuntimeCommandIntake(db, settings=_settings(enabled=True))
+        resumed = await intake.resume_run(
+            ResumeRunCommand(
+                tenant_id=tenant_id,
+                run_id=run.id,
+                idempotency_key="resume:1",
+                payload={"value": "continue"},
+            )
+        )
+        cancelled = await intake.cancel_run(
+            CancelRunCommand(
+                tenant_id=tenant_id,
+                run_id=run.id,
+                idempotency_key="cancel:1",
+            )
+        )
 
-    assert exc_info.value.code == "runtime_v2_disabled"
-    assert run.runtime_type == "legacy"
-    enqueue.assert_not_awaited()
-    db.commit.assert_not_awaited()
+    assert resumed.thread_id == run.runtime_thread_id
+    assert cancelled.run_id == run.id
+
+
+def test_command_intake_has_no_query_or_stream_facade() -> None:
+    intake = RuntimeCommandIntake(_session(), settings=_settings(enabled=True))
+
+    assert not hasattr(runtime_adapter, "TransactionalAgentRuntimeAdapter")
+    assert not hasattr(intake, "get_run_state")
+    assert not hasattr(intake, "stream_run")
 
 
 @pytest.mark.asyncio
-async def test_cancel_persists_command_and_returns_its_stable_identity() -> None:
+async def test_callers_cannot_override_reserved_runtime_metadata() -> None:
     tenant_id = uuid.uuid4()
-    run = _run(tenant_id=tenant_id)
-    cancel_command = _command(run, command_type="cancel")
-    db = _session(run)
-    command = CancelRunCommand(
-        tenant_id=tenant_id,
-        run_id=run.id,
-        idempotency_key="cancel:user:1",
-        reason="user_abort",
-    )
+    command = _start(tenant_id, uuid.uuid4())
+    command.payload[RUNTIME_COMMAND_METADATA_KEY] = {"forged": True}
 
-    with patch(
-        "app.services.agent_runtime.adapter.enqueue_cancel",
-        new=AsyncMock(return_value=EnqueuedCommand(cancel_command, True)),
-    ) as enqueue:
-        handle = await TransactionalAgentRuntimeAdapter(
-            db,
+    with pytest.raises(RuntimeAdapterError) as raised:
+        await RuntimeCommandIntake(
+            _session(),
             settings=_settings(enabled=True),
-        ).cancel_run(command)
+        ).start_run(command)
 
-    assert (handle.run_id, handle.thread_id, handle.command_id) == (
-        run.id,
-        str(run.id),
-        cancel_command.id,
-    )
-    assert enqueue.await_args.kwargs["reason"] == "user_abort"
-    db.commit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_get_run_state_maps_projection_for_queries_only() -> None:
-    tenant_id = uuid.uuid4()
-    run = _run(tenant_id=tenant_id, projected_status="waiting_user")
-    run.projected_waiting_type = "user_input"
-    run.projected_result_summary = "partial"
-    run.projected_error_code = "temporary"
-    run.projected_last_error = "retry later"
-    run.projected_checkpoint_id = "checkpoint-7"
-    run.projection_updated_at = datetime(2026, 7, 13, 12, 1, tzinfo=UTC)
-    db = _session(run)
-
-    view = await TransactionalAgentRuntimeAdapter(
-        db,
-        settings=_settings(enabled=False),
-    ).get_run_state(tenant_id, run.id)
-
-    assert view.tenant_id == tenant_id
-    assert view.run_id == run.id
-    assert view.execution_status == "waiting_user"
-    assert view.waiting_type == "user_input"
-    assert view.result_summary == "partial"
-    assert view.error_code == "temporary"
-    assert view.last_error == "retry later"
-    assert view.projection_checkpoint_id == "checkpoint-7"
-    assert view.projection_updated_at == run.projection_updated_at
-    sql = _compiled_query(db)
-    assert "agent_runs.tenant_id" in sql
-    assert "agent_runs.id" in sql
-    db.commit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_run_handle_rejects_a_thread_id_that_differs_from_run_id() -> None:
-    tenant_id = uuid.uuid4()
-    run = _run(tenant_id=tenant_id)
-    run.runtime_thread_id = "different-thread"
-    resume_command = _command(run, command_type="resume")
-    db = _session(run)
-    command = ResumeRunCommand(
-        tenant_id=tenant_id,
-        run_id=run.id,
-        idempotency_key="resume:1",
-        payload={"value": "continue"},
-    )
-
-    with patch(
-        "app.services.agent_runtime.adapter.enqueue_resume",
-        new=AsyncMock(return_value=EnqueuedCommand(resume_command, True)),
-    ) as enqueue:
-        with pytest.raises(RuntimeAdapterError) as exc_info:
-            await TransactionalAgentRuntimeAdapter(
-                db,
-                settings=_settings(enabled=True),
-            ).resume_run(command)
-
-    assert exc_info.value.code == "runtime_identity_mismatch"
-    enqueue.assert_not_awaited()
-    db.commit.assert_not_awaited()
-
-
-def test_stream_run_requires_and_delegates_to_a_dedicated_stream_service() -> None:
-    tenant_id = uuid.uuid4()
-    run_id = uuid.uuid4()
-    handle = RunHandle(
-        tenant_id=tenant_id,
-        run_id=run_id,
-        thread_id=str(run_id),
-        command_id=uuid.uuid4(),
-        runtime_type="langgraph",
-        created=True,
-    )
-    db = _session()
-    without_stream = TransactionalAgentRuntimeAdapter(
-        db,
-        settings=_settings(enabled=True),
-    )
-
-    with pytest.raises(RuntimeAdapterError) as exc_info:
-        without_stream.stream_run(handle)
-    assert exc_info.value.code == "runtime_event_stream_unavailable"
-
-    stream = MagicMock()
-    stream_iterator = object()
-    stream.stream_run.return_value = stream_iterator
-    adapter = TransactionalAgentRuntimeAdapter(
-        db,
-        settings=_settings(enabled=True),
-        event_stream=stream,
-    )
-
-    assert adapter.stream_run(handle) is stream_iterator
-    stream.stream_run.assert_called_once_with(handle, after=None)
+    assert raised.value.code == "reserved_runtime_metadata"

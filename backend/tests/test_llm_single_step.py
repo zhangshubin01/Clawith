@@ -5,7 +5,14 @@ import uuid
 
 import pytest
 
-from app.services.llm.client import LLMMessage, LLMResponse
+from app.services.llm.client import (
+    AnthropicClient,
+    GeminiClient,
+    LLMMessage,
+    LLMResponse,
+    OpenAICompatibleClient,
+    OpenAIResponsesClient,
+)
 from app.services.llm import single_step
 
 
@@ -40,6 +47,68 @@ def _patch_client(monkeypatch, client: _Client) -> None:
     monkeypatch.setattr(single_step, "create_llm_client", lambda **kwargs: client)
     monkeypatch.setattr(single_step, "get_model_api_key", lambda model: "secret")
     monkeypatch.setattr(single_step, "get_max_tokens", lambda *args: 1024)
+
+
+def test_native_gemini_preserves_dynamic_system_context_once() -> None:
+    client = GeminiClient(api_key="test", model="gemini-test")
+
+    payload = client._build_payload(
+        [
+            LLMMessage(
+                role="system",
+                content="Static Base Prompt",
+                dynamic_content="Dynamic Runtime Context",
+            ),
+            LLMMessage(role="user", content="Do the task"),
+        ],
+        tools=None,
+        temperature=0.2,
+        max_tokens=1024,
+    )
+
+    system_text = payload["systemInstruction"]["parts"][0]["text"]
+    assert system_text.count("Static Base Prompt") == 1
+    assert system_text.count("Dynamic Runtime Context") == 1
+    assert payload["contents"] == [
+        {"role": "user", "parts": [{"text": "Do the task"}]}
+    ]
+
+
+def test_provider_payloads_preserve_static_and_dynamic_system_context_once() -> None:
+    messages = [
+        LLMMessage(
+            role="system",
+            content="Static Base Prompt",
+            dynamic_content="Dynamic Runtime Context",
+        ),
+        LLMMessage(role="user", content="Do the task"),
+    ]
+    openai_payload = OpenAICompatibleClient(
+        api_key="test",
+        model="openai-test",
+    )._build_payload(messages, None, 0.2, 1024)
+    responses_payload = OpenAIResponsesClient(
+        api_key="test",
+        model="responses-test",
+    )._build_payload(messages, None, 0.2, 1024)
+    anthropic_payload = AnthropicClient(
+        api_key="test",
+        model="anthropic-test",
+    )._build_payload(messages, None, 0.2, 1024)
+    gemini_payload = GeminiClient(
+        api_key="test",
+        model="gemini-test",
+    )._build_payload(messages, None, 0.2, 1024)
+
+    serialized_systems = (
+        str(openai_payload["messages"][0]["content"]),
+        str(responses_payload["input"][0]["content"]),
+        "\n".join(block["text"] for block in anthropic_payload["system"]),
+        gemini_payload["systemInstruction"]["parts"][0]["text"],
+    )
+    for system_content in serialized_systems:
+        assert system_content.count("Static Base Prompt") == 1
+        assert system_content.count("Dynamic Runtime Context") == 1
 
 
 @pytest.mark.asyncio

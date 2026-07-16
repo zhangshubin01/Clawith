@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, NotRequired, Protocol, TypeAlias, TypedDict
+from typing import Annotated, Literal, NotRequired, Protocol, TypeAlias, TypedDict, cast
+
+from langchain_core.messages import AnyMessage, BaseMessage, convert_to_openai_messages
+from langgraph.graph.message import add_messages
 
 
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -43,7 +46,11 @@ RuntimeNodeName: TypeAlias = Literal[
 
 @dataclass(frozen=True, slots=True)
 class RunRegistrySnapshot:
-    """Immutable product-owned Run facts copied into the first checkpoint."""
+    """Compatibility shape for legacy checkpoint decoding only.
+
+    New Thread State does not persist this value. Invocation services receive
+    the required immutable Run facts as flattened ``RuntimeContext`` fields.
+    """
 
     tenant_id: str
     run_id: str
@@ -96,19 +103,13 @@ class RuntimeLifecycle(TypedDict):
     status: LifecycleStatus
     next_route: ControlRoute
     reason: NotRequired[str | None]
-    last_applied_command_ids: NotRequired[list[str]]
     model_step_count: NotRequired[int]
     verification_attempt_count: NotRequired[int]
-    run_messages: NotRequired[list[JsonObject]]
-    run_summary: NotRequired[JsonObject | None]
-    covered_through_run_message_id: NotRequired[str | None]
-    compact_return_route: NotRequired[Literal["model", "wait"] | None]
-    compact_forced: NotRequired[bool]
-    run_compact_error: NotRequired[JsonObject | None]
     pending_tool_calls: NotRequired[list[JsonObject]]
     waiting_request: NotRequired[JsonObject | None]
     verification_result: NotRequired[JsonObject | None]
     final_answer: NotRequired[str | None]
+    finish_delivery_intent: NotRequired[JsonObject | None]
     result_summary: NotRequired[JsonObject | None]
     session_context_delta: NotRequired[JsonObject | None]
     delivery_request: NotRequired[JsonObject | None]
@@ -118,17 +119,60 @@ class RuntimeLifecycle(TypedDict):
 
 
 class RuntimeGraphState(TypedDict):
-    """Checkpoint payload with immutable inputs isolated from mutable lifecycle."""
+    """LangGraph Thread state with one native, reducer-backed message history."""
 
-    registry: RunRegistrySnapshot
+    # Compatibility-only: older checkpoints may still contain this field.
+    # New invocations carry immutable Run identity in RuntimeContext instead.
+    registry: NotRequired[RunRegistrySnapshot]
     snapshots: RunInputSnapshots
+    messages: Annotated[list[AnyMessage], add_messages]
+    thread_summary: NotRequired[JsonObject | None]
+    summary_covered_through_message_id: NotRequired[str | None]
     lifecycle: RuntimeLifecycle
 
 
 class RuntimeStateUpdate(TypedDict, total=False):
-    """Node updates are intentionally limited to checkpoint lifecycle state."""
+    """Node updates use native message reduction plus narrow mutable state."""
 
     lifecycle: RuntimeLifecycle
+    messages: list[AnyMessage | JsonObject]
+    thread_summary: JsonObject | None
+    summary_covered_through_message_id: str | None
+
+
+def runtime_message_to_json(message: AnyMessage | MappingMessage) -> JsonObject:
+    """Normalize a LangChain message without inventing a second reducer."""
+    if isinstance(message, dict):
+        return cast(JsonObject, dict(message))
+    if not isinstance(message, BaseMessage):
+        raise TypeError("Runtime messages must be LangChain messages or objects")
+    converted = convert_to_openai_messages([message])
+    if len(converted) != 1 or not isinstance(converted[0], dict):
+        raise TypeError("Runtime message cannot be normalized")
+    result = cast(JsonObject, dict(converted[0]))
+    if message.id is not None:
+        result["id"] = message.id
+    for key, value in message.additional_kwargs.items():
+        if key not in result:
+            result[key] = cast(JsonValue, value)
+    return result
+
+
+MappingMessage: TypeAlias = dict[str, object]
+
+
+def runtime_messages_as_json(state: RuntimeGraphState) -> tuple[JsonObject, ...]:
+    """Read the reducer-backed Thread history through one canonical adapter."""
+    messages = state.get("messages", [])
+    if not isinstance(messages, list):
+        raise TypeError("Runtime State messages must be a list")
+    if not messages:
+        # Backward-compatible checkpoint upgrade path. The graph migrates this
+        # legacy value into the native channel on the first subsequent write.
+        legacy = state.get("lifecycle", {}).get("run_messages", [])  # type: ignore[typeddict-item]
+        if isinstance(legacy, list) and legacy:
+            return tuple(runtime_message_to_json(message) for message in legacy)
+    return tuple(runtime_message_to_json(message) for message in messages)
 
 
 class RuntimeNodeExecutor(Protocol):
@@ -152,5 +196,17 @@ class RuntimeContext:
     run_id: str
     command_id: str
     executor: RuntimeNodeExecutor
+    goal: str = ""
+    run_kind: str = ""
+    source_type: str = ""
+    model_id: str = ""
+    graph_name: str = ""
+    graph_version: str = ""
+    agent_id: str | None = None
+    session_id: str | None = None
+    system_role: str | None = None
+    parent_run_id: str | None = None
+    root_run_id: str | None = None
+    model_turn_limit: int | None = None
     actor_user_id: str | None = None
     actor_agent_id: str | None = None

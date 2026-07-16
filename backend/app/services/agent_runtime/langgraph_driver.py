@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import cast
 import uuid
 
 from langgraph.types import Command
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
-from app.services.agent_runtime.checkpointer import runtime_thread_config
+from app.services.agent_runtime.checkpointer import (
+    runtime_command_config,
+    runtime_thread_config,
+)
 from app.services.agent_runtime.command_worker import (
     CheckpointObservation,
     CommandExecutionRejected,
@@ -18,11 +22,9 @@ from app.services.agent_runtime.command_worker import (
     RuntimeCommandRecord,
     RuntimeRunRecord,
 )
+from app.services.agent_runtime.contracts import RUNTIME_COMMAND_METADATA_KEY
 from app.services.agent_runtime.context_builder import ContextBuilder
-from app.services.agent_runtime.graph import (
-    CONTROL_GUARD_NODE,
-    AgentRuntimeGraph,
-)
+from app.services.agent_runtime.graph import AgentRuntimeGraph
 from app.services.agent_runtime.state import (
     JsonObject,
     RunInputSnapshots,
@@ -38,38 +40,42 @@ _WAITING_RESUME_TYPES = {
     "waiting_agent": frozenset({"agent_result"}),
     "waiting_external": frozenset({"external_event", "timer"}),
 }
-_MAX_APPLIED_COMMAND_IDS = 64
 
 
 class RuntimeGraphRegistry:
-    """Resolve only explicitly installed, version-pinned Runtime graphs."""
+    """Resolve the currently deployed graph for each stable Runtime topology."""
 
     def __init__(self, graphs: Sequence[AgentRuntimeGraph]) -> None:
-        resolved: dict[tuple[str, str], AgentRuntimeGraph] = {}
-        for graph in graphs:
-            key = (graph.identity.name, graph.identity.version)
-            if key in resolved:
-                raise ValueError(f"duplicate Runtime graph identity {key[0]}@{key[1]}")
-            resolved[key] = graph
-        if not resolved:
+        installed = tuple(graphs)
+        if not installed:
             raise ValueError("at least one Runtime graph must be installed")
-        self._graphs = resolved
-
-    def resolve(self, run: RuntimeRunRecord) -> AgentRuntimeGraph:
-        return self.resolve_identity(
-            run.registry.graph_name,
-            run.registry.graph_version,
+        agent_graphs = tuple(
+            graph
+            for graph in installed
+            if not graph.identity.name.endswith("_group_planning")
+        )
+        planning_graphs = tuple(
+            graph
+            for graph in installed
+            if graph.identity.name.endswith("_group_planning")
+        )
+        if len(agent_graphs) > 1 or len(planning_graphs) > 1:
+            raise ValueError(
+                "install only the current graph for each Runtime topology"
+            )
+        self._agent_graph = agent_graphs[0] if agent_graphs else installed[0]
+        self._planning_graph = (
+            planning_graphs[0] if planning_graphs else self._agent_graph
         )
 
-    def resolve_identity(self, graph_name: str, graph_version: str) -> AgentRuntimeGraph:
-        key = (graph_name, graph_version)
-        graph = self._graphs.get(key)
-        if graph is None:
-            raise RetryableCommandError(
-                "graph_version_unavailable",
-                f"Runtime graph {key[0]}@{key[1]} is not installed",
-            )
-        return graph
+    def resolve(self, run: RuntimeRunRecord) -> AgentRuntimeGraph:
+        # graph_name/version on AgentRun remain trace metadata. Compatible old
+        # checkpoints always resume with the current deployed graph code.
+        return (
+            self._planning_graph
+            if run.system_role == "group_planning"
+            else self._agent_graph
+        )
 
 
 class RuntimeInputSnapshotFactory:
@@ -87,8 +93,13 @@ class RuntimeInputSnapshotFactory:
     ) -> RunInputSnapshots:
         if command.command_type != "start":
             raise ValueError("Runtime input snapshots can only be captured for start")
-        session_id = uuid.UUID(run.registry.session_id) if run.registry.session_id is not None else None
-        related = command.payload.get("related_run_summaries", [])
+        session_id = uuid.UUID(run.session_id) if run.session_id is not None else None
+        initial_input = {
+            key: value
+            for key, value in command.payload.items()
+            if key != RUNTIME_COMMAND_METADATA_KEY
+        }
+        related = initial_input.get("related_run_summaries", [])
         if not isinstance(related, Sequence) or isinstance(related, (str, bytes, bytearray)):
             raise CommandExecutionRejected(
                 "invalid_related_run_summaries",
@@ -105,11 +116,17 @@ class RuntimeInputSnapshotFactory:
                 tenant_id=run.tenant_id,
                 session_id=session_id,
                 agent_id=(
-                    uuid.UUID(run.registry.agent_id)
-                    if run.registry.agent_id is not None
+                    uuid.UUID(run.agent_id)
+                    if run.agent_id is not None
                     else None
                 ),
-                initial_input=command.payload,
+                source_type=run.source_type,
+                source_id=run.source_id,
+                scheduling_position_created_at=(
+                    run.scheduling_position_created_at
+                ),
+                scheduling_position_id=run.scheduling_position_id,
+                initial_input=initial_input,
                 related_run_summaries=cast(Sequence[Mapping[str, object]], related),
             )
 
@@ -161,10 +178,10 @@ def _require_scope(run: RuntimeRunRecord, command: RuntimeCommandRecord) -> None
             "command_scope_mismatch",
             "Runtime command does not belong to the locked Run",
         )
-    if run.thread_id != str(run.run_id):
+    if not run.thread_id.strip():
         raise RetryableCommandError(
             "runtime_identity_mismatch",
-            "Runtime thread_id must equal run_id",
+            "Runtime thread_id must not be blank",
         )
 
 
@@ -178,6 +195,18 @@ def _runtime_context(
         run_id=str(run.run_id),
         command_id=str(command.id),
         executor=executor,
+        goal=run.goal,
+        run_kind=run.run_kind,
+        source_type=run.source_type,
+        model_id=run.model_id,
+        graph_name=run.graph_name,
+        graph_version=run.graph_version,
+        agent_id=run.agent_id,
+        session_id=run.session_id,
+        system_role=run.system_role,
+        parent_run_id=run.parent_run_id,
+        root_run_id=run.root_run_id,
+        model_turn_limit=run.model_turn_limit,
         actor_user_id=(str(command.actor_user_id) if command.actor_user_id is not None else None),
         actor_agent_id=(str(command.actor_agent_id) if command.actor_agent_id is not None else None),
     )
@@ -226,43 +255,71 @@ def _resume_value(checkpoint: CheckpointObservation, command: RuntimeCommandReco
     return dict(command.payload)
 
 
-def _cancelled_lifecycle(
-    checkpoint: CheckpointObservation,
-    command: RuntimeCommandRecord,
-) -> dict[str, object]:
-    lifecycle = dict(checkpoint.state["lifecycle"])
-    command_ids = lifecycle.get("last_applied_command_ids", [])
-    if not isinstance(command_ids, list) or any(
-        not isinstance(command_id, str) or not command_id for command_id in command_ids
-    ):
+def _initial_thread_message(
+    run: RuntimeRunRecord,
+    snapshots: RunInputSnapshots,
+) -> JsonObject:
+    """Create the one exact current input appended for this logical Run."""
+    initial_input = snapshots.initial_input
+    content = initial_input.get("input_content")
+    if not isinstance(content, str) or not content:
+        content = initial_input.get("content")
+    if not isinstance(content, str) or not content:
+        content = initial_input.get("message")
+    if not isinstance(content, str) or not content:
+        content = f"Current Run Directive:\n{run.goal}"
+    message_id = initial_input.get("message_id")
+    if not isinstance(message_id, str) or not message_id:
+        message_id = str(
+            uuid.uuid5(
+                run.run_id,
+                "current-thread-input",
+            )
+        )
+    return {
+        "id": message_id,
+        "role": "user",
+        "content": content,
+        "runtime_input": "current",
+        "runtime_run_id": str(run.run_id),
+    }
+
+
+def observation_from_snapshot(snapshot: object) -> CheckpointObservation | None:
+    values = getattr(snapshot, "values", None)
+    if not values:
+        return None
+    if not isinstance(values, dict):
         raise RetryableCommandError(
-            "invalid_checkpoint_command_ids",
-            "checkpoint command reconciliation IDs are malformed",
+            "invalid_checkpoint_state",
+            "LangGraph checkpoint values must be an object",
         )
-    current_command_id = str(command.id)
-    command_ids = [command_id for command_id in command_ids if command_id != current_command_id]
-    command_ids.append(current_command_id)
-    reason = command.payload.get("reason")
-    if reason is not None and not isinstance(reason, str):
-        raise CommandExecutionRejected(
-            "invalid_cancel_reason",
-            "cancel reason must be a string when provided",
+    metadata = getattr(snapshot, "metadata", None)
+    if not isinstance(metadata, Mapping):
+        raise RetryableCommandError(
+            "invalid_checkpoint_metadata",
+            "LangGraph checkpoint metadata must be an object",
         )
-    lifecycle.update(
-        {
-            "status": "cancelled",
-            "next_route": "terminal",
-            "reason": reason or "cancelled_by_command",
-            "last_applied_command_ids": command_ids[-_MAX_APPLIED_COMMAND_IDS:],
-            "waiting_request": None,
-            "pending_tool_calls": [],
-        }
+    raw_created_at = getattr(snapshot, "created_at", None)
+    created_at: datetime | None = None
+    if isinstance(raw_created_at, str):
+        try:
+            created_at = datetime.fromisoformat(raw_created_at.replace("Z", "+00:00"))
+        except ValueError:
+            created_at = None
+    return CheckpointObservation(
+        checkpoint_id=_checkpoint_id(snapshot),
+        state=cast(RuntimeGraphState, dict(values)),
+        next_nodes=tuple(str(node) for node in getattr(snapshot, "next", ())),
+        tasks=tuple(getattr(snapshot, "tasks", ())),
+        interrupts=tuple(getattr(snapshot, "interrupts", ())),
+        metadata=dict(metadata),
+        created_at=created_at,
     )
-    return lifecycle
 
 
 class LangGraphRuntimeDriver:
-    """Read and advance only the graph version pinned by the Run Registry."""
+    """Read checkpoints and advance them with the current compatible graph."""
 
     def __init__(
         self,
@@ -282,26 +339,56 @@ class LangGraphRuntimeDriver:
         run: RuntimeRunRecord,
     ) -> CheckpointObservation | None:
         del connection
-        if run.thread_id != str(run.run_id):
+        if not run.thread_id.strip():
             raise RetryableCommandError(
                 "runtime_identity_mismatch",
-                "Runtime thread_id must equal run_id",
+                "Runtime thread_id must not be blank",
             )
         graph = self._graph_registry.resolve(run)
-        snapshot = await graph.compiled.aget_state(runtime_thread_config(run.run_id))
-        values = snapshot.values
-        if not values:
-            return None
-        if not isinstance(values, dict):
-            raise RetryableCommandError(
-                "invalid_checkpoint_state",
-                "LangGraph checkpoint values must be an object",
-            )
-        state = cast(RuntimeGraphState, dict(values))
-        return CheckpointObservation(
-            checkpoint_id=_checkpoint_id(snapshot),
-            state=state,
+        async for snapshot in graph.compiled.aget_state_history(
+            runtime_thread_config(run.thread_id),
+            filter={"clawith_run_id": str(run.run_id)},
+            limit=1,
+        ):
+            return observation_from_snapshot(snapshot)
+        return None
+
+    async def read_for_command(
+        self,
+        *,
+        connection: AsyncConnection,
+        run: RuntimeRunRecord,
+        command: RuntimeCommandRecord,
+    ) -> CheckpointObservation | None:
+        del connection
+        _require_scope(run, command)
+        graph = self._graph_registry.resolve(run)
+        async for snapshot in graph.compiled.aget_state_history(
+            runtime_thread_config(run.thread_id),
+            filter={
+                "clawith_run_id": str(run.run_id),
+                "clawith_command_id": str(command.id),
+            },
+            limit=1,
+        ):
+            return observation_from_snapshot(snapshot)
+        return None
+
+    async def read_checkpoint(
+        self,
+        *,
+        run: RuntimeRunRecord,
+        checkpoint_id: str,
+    ) -> CheckpointObservation | None:
+        """Read one stable checkpoint by Thread + checkpoint identity."""
+        graph = self._graph_registry.resolve(run)
+        snapshot = await graph.compiled.aget_state(
+            runtime_thread_config(run.thread_id, checkpoint_id=checkpoint_id)
         )
+        observation = observation_from_snapshot(snapshot)
+        if observation is None or observation.checkpoint_id != checkpoint_id:
+            return None
+        return observation
 
     async def execute(
         self,
@@ -313,8 +400,26 @@ class LangGraphRuntimeDriver:
     ) -> None:
         _require_scope(run, command)
         graph = self._graph_registry.resolve(run)
-        config = runtime_thread_config(run.run_id)
+        config = runtime_command_config(
+            run.thread_id,
+            run_id=run.run_id,
+            command_id=command.id,
+            checkpoint_id=(checkpoint.checkpoint_id if checkpoint is not None else None),
+        )
         context = _runtime_context(run, command, self._node_executor)
+
+        if (
+            checkpoint is not None
+            and checkpoint.metadata.get("clawith_run_id") == str(run.run_id)
+            and checkpoint.metadata.get("clawith_command_id") == str(command.id)
+        ):
+            await graph.compiled.ainvoke(
+                None,
+                config,
+                context=context,
+                durability="sync",
+            )
+            return
 
         if command.command_type == "start":
             if checkpoint is not None:
@@ -328,13 +433,17 @@ class LangGraphRuntimeDriver:
                 command=command,
             )
             initial_state: RuntimeGraphState = {
-                "registry": run.registry,
                 "snapshots": snapshots,
+                "messages": [_initial_thread_message(run, snapshots)],
                 "lifecycle": {
                     "status": "running",
-                    "next_route": "model",
-                    "last_applied_command_ids": [str(command.id)],
-                    "run_messages": [],
+                    "next_route": (
+                        "model"
+                        if run.system_role == "group_planning"
+                        else "compact"
+                    ),
+                    "model_step_count": 0,
+                    "verification_attempt_count": 0,
                     "pending_tool_calls": [],
                 },
             }
@@ -369,18 +478,10 @@ class LangGraphRuntimeDriver:
             return
 
         if command.command_type == "cancel":
-            await graph.compiled.aupdate_state(
-                config,
-                {"lifecycle": _cancelled_lifecycle(checkpoint, command)},
-                as_node=CONTROL_GUARD_NODE,
+            raise CommandExecutionRejected(
+                "cancel_is_control_plane",
+                "cancel preserves the last checkpoint and is settled by the Command Worker",
             )
-            await graph.compiled.ainvoke(
-                None,
-                config,
-                context=context,
-                durability="sync",
-            )
-            return
 
         raise CommandExecutionRejected(
             "unsupported_command",
@@ -393,4 +494,5 @@ __all__ = [
     "RuntimeGraphRegistry",
     "RuntimeInputSnapshotFactory",
     "StaticRuntimeInputSnapshotFactory",
+    "observation_from_snapshot",
 ]

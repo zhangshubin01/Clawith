@@ -261,7 +261,7 @@ async def test_public_message_and_single_mention_start_share_one_session() -> No
             new=AsyncMock(return_value=(mention,)),
         ),
         patch(
-            "app.services.group_message_service.TransactionalAgentRuntimeAdapter.start_run",
+            "app.services.group_message_service.RuntimeCommandIntake.start_run",
             new=AsyncMock(return_value=handle),
         ) as start_run,
     ):
@@ -312,6 +312,10 @@ async def test_public_message_and_single_mention_start_share_one_session() -> No
     }
     assert command.origin_user_id == user.id
     assert command.payload["target_participant_id"] == str(target.id)
+    assert command.payload["context_cutoff"] == {
+        "message_id": str(message_id),
+        "created_at": NOW.isoformat(),
+    }
 
 
 @pytest.mark.asyncio
@@ -355,7 +359,7 @@ async def test_multi_agent_message_creates_one_planning_root_in_the_same_transac
             new=AsyncMock(return_value=mention.model),
         ),
         patch(
-            "app.services.group_message_service.TransactionalAgentRuntimeAdapter.start_run",
+            "app.services.group_message_service.RuntimeCommandIntake.start_run",
             new=AsyncMock(return_value=handle),
         ) as start_run,
     ):
@@ -381,6 +385,10 @@ async def test_multi_agent_message_creates_one_planning_root_in_the_same_transac
     assert command.agent_id is None
     assert command.source_execution_id == f"group_mention:{intake.message.id}:plan"
     assert command.scheduling_lane_key is None
+    assert command.payload["context_cutoff"] == {
+        "message_id": str(intake.message.id),
+        "created_at": NOW.isoformat(),
+    }
     assert command.payload["candidate_agents"] == [
         {
             "agent_id": str(mention.agent.id),
@@ -441,7 +449,7 @@ async def test_missing_planning_model_persists_one_visible_idempotent_failure() 
             ),
         ),
         patch(
-            "app.services.group_message_service.TransactionalAgentRuntimeAdapter.start_run",
+            "app.services.group_message_service.RuntimeCommandIntake.start_run",
             new=AsyncMock(),
         ) as start_run,
     ):
@@ -507,7 +515,7 @@ async def test_invalid_or_human_mentions_remain_public_without_starting_runtime(
             new=AsyncMock(return_value=(human, invalid)),
         ),
         patch(
-            "app.services.group_message_service.TransactionalAgentRuntimeAdapter.start_run",
+            "app.services.group_message_service.RuntimeCommandIntake.start_run",
             new=AsyncMock(),
         ) as start_run,
     ):

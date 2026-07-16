@@ -195,7 +195,7 @@ def test_human_send_tool_schemas_are_id_first():
     assert "target_member_id" in channel_schema["properties"]
     assert "provider_user_id" not in channel_schema["properties"]
     assert "member_name" not in channel_schema["properties"]
-    assert channel_schema["required"] == ["message"]
+    assert channel_schema["required"] == ["target_member_id", "message"]
     assert "teams" in channel_schema["properties"]["channel"]["enum"]
 
     assert "target_member_id" in file_schema["properties"]
@@ -228,7 +228,7 @@ def test_seeded_human_send_tool_schemas_are_id_first():
     assert "target_member_id" in channel_schema["properties"]
     assert "provider_user_id" not in channel_schema["properties"]
     assert "member_name" not in channel_schema["properties"]
-    assert channel_schema["required"] == ["message"]
+    assert channel_schema["required"] == ["target_member_id", "message"]
     assert channel_tool["is_default"] is False
     assert "teams" in channel_schema["properties"]["channel"]["enum"]
 
@@ -238,8 +238,12 @@ def test_seeded_human_send_tool_schemas_are_id_first():
 
     assert "hidden legacy compatibility" in feishu_tool["description"].lower()
     assert feishu_tool["is_default"] is False
-    assert "target_member_id" not in feishu_schema["properties"]
-    assert feishu_schema["required"] == ["message"]
+    assert set(feishu_schema["properties"]) == {
+        "target_member_id",
+        "message",
+    }
+    assert feishu_schema["required"] == ["target_member_id", "message"]
+    assert feishu_schema["additionalProperties"] is False
 
 
 @pytest.mark.asyncio

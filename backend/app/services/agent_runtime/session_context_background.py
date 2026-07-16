@@ -106,7 +106,7 @@ def _usable_model(
 
 
 class SessionCompactPolicyResolver:
-    """Calculate direct or group trigger budgets from current configured models."""
+    """Calculate the public Group Session trigger budget."""
 
     def __init__(self, *, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
@@ -133,42 +133,9 @@ class SessionCompactPolicyResolver:
             )
 
         if session.session_type != "group":
-            if session.agent_id is None:
-                raise SessionContextBackgroundError(
-                    "session_compact_budget_unavailable",
-                    "Session has no current Agent model for compact budgeting",
-                )
-            agent_result = await db.execute(
-                select(Agent).where(
-                    Agent.id == session.agent_id,
-                    Agent.tenant_id == tenant_id,
-                    Agent.status.in_(_ACTIVE_AGENT_STATUSES),
-                    Agent.is_expired.is_(False),
-                )
-            )
-            agent = agent_result.scalar_one_or_none()
-            if agent is None or agent.primary_model_id is None:
-                raise SessionContextBackgroundError(
-                    "session_compact_budget_unavailable",
-                    "Session Agent has no current primary model",
-                )
-            model_result = await db.execute(
-                select(LLMModel).where(LLMModel.id == agent.primary_model_id)
-            )
-            model = model_result.scalar_one_or_none()
-            if not _usable_model(model, tenant_id=tenant_id):
-                raise SessionContextBackgroundError(
-                    "session_compact_budget_unavailable",
-                    "Session Agent primary model is not usable",
-                )
-            try:
-                threshold_tokens = _model_threshold(model, self._settings)
-            except ModelCapabilityError as exc:
-                raise SessionContextBackgroundError(exc.code, str(exc)) from exc
-            return SessionCompactPolicy(
-                source_agent_id=agent.id,
-                threshold_tokens=threshold_tokens,
-                contributing_model_ids=(model.id,),
+            raise SessionContextBackgroundError(
+                "direct_thread_owns_context",
+                "Direct Chat context is owned only by its LangGraph Thread",
             )
 
         if session.group_id is None:
@@ -463,6 +430,7 @@ class SessionContextCompactionScanner:
                 .where(
                     ChatSession.deleted_at.is_(None),
                     ChatSession.last_message_at.is_not(None),
+                    ChatSession.session_type == "group",
                 )
                 .order_by(ChatSession.id)
                 .limit(self._settings.AGENT_RUNTIME_SESSION_COMPACT_SCAN_BATCH_SIZE)

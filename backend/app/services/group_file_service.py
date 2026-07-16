@@ -19,7 +19,11 @@ from app.services import group_chat_service
 from app.services.storage import get_storage_backend, normalize_storage_key
 from app.services.storage_runtime.base import StorageEntry, WriteCondition
 from app.services.workspace_collaboration import (
+    content_hash,
+    finalize_group_runtime_revision,
+    get_group_runtime_revision,
     normalize_workspace_path,
+    prepare_group_runtime_revision,
     record_group_revision,
 )
 
@@ -54,6 +58,35 @@ class GroupWorkspaceEntry:
     size: int
     modified_at: str
     version_token: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRuntimeWorkspaceOperation:
+    """One committed intent that permits exactly one storage mutation."""
+
+    group_id: uuid.UUID
+    operation_id: uuid.UUID
+    revision_id: uuid.UUID
+    operation: str
+    path: str
+    storage_key: str
+    before_content: str | None
+    after_content: str | None
+    condition: WriteCondition
+    content_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeWorkspaceOperationReceipt:
+    """Stable bounded facts returned after mutation settlement or replay."""
+
+    group_id: uuid.UUID
+    operation_id: uuid.UUID
+    revision_id: uuid.UUID
+    operation: str
+    path: str
+    content_hash: str
+    deleted: bool
 
 
 def _group_root(group_id: uuid.UUID) -> str:
@@ -116,6 +149,264 @@ def _validate_text(content: str) -> str:
             "Group text files cannot contain NUL bytes",
         )
     return content
+
+
+def _runtime_revision_path(path: str) -> str:
+    return _revision_path("workspace", path)
+
+
+def _runtime_receipt(
+    revision,
+    *,
+    operation_id: uuid.UUID,
+) -> RuntimeWorkspaceOperationReceipt:
+    prefix = "workspace/"
+    if (
+        revision.scope_type != "group"
+        or not revision.path.startswith(prefix)
+        or revision.id is None
+        or revision.operation not in {"write", "delete"}
+    ):
+        raise GroupFileServiceError(
+            "group_workspace_reconciliation_conflict",
+            "Group workspace operation revision is not a committed file mutation",
+        )
+    return RuntimeWorkspaceOperationReceipt(
+        group_id=revision.scope_id,
+        operation_id=operation_id,
+        revision_id=revision.id,
+        operation=revision.operation,
+        path=revision.path.removeprefix(prefix),
+        content_hash=revision.content_hash,
+        deleted=revision.operation == "delete",
+    )
+
+
+async def _prepare_runtime_workspace_operation(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    group_id: uuid.UUID,
+    actor_participant_id: uuid.UUID,
+    operation_id: uuid.UUID,
+    path: str,
+    operation: str,
+    content: str | None,
+    expected_version_token: str | None,
+    session_id: uuid.UUID | None,
+) -> PreparedRuntimeWorkspaceOperation:
+    actor = await _authorize_actor(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor_participant_id,
+    )
+    normalized, key = _workspace_key(group_id, path, allow_empty=False)
+    storage = get_storage_backend()
+    current = await storage.get_version(key)
+    if current.is_dir:
+        raise GroupFileServiceError(
+            "group_file_not_readable",
+            "Group workspace mutation path is a directory",
+        )
+    if operation == "delete" and not current.exists:
+        raise GroupFileServiceError("group_file_not_found", "Group file not found")
+    if (
+        expected_version_token is not None
+        and current.token != expected_version_token
+    ):
+        raise GroupFileServiceError(
+            "group_file_conflict",
+            "Group file changed before this operation was prepared",
+        )
+    before = (
+        await storage.read_text(key, encoding="utf-8", errors="replace")
+        if current.exists
+        else None
+    )
+    after = _validate_text(content) if operation == "write" and content is not None else None
+    revision = await prepare_group_runtime_revision(
+        db,
+        group_id=group_id,
+        operation_id=operation_id,
+        path=_runtime_revision_path(normalized),
+        operation=operation,
+        actor_type=actor.type,
+        actor_id=actor.ref_id,
+        before_content=before,
+        after_content=after,
+        session_id=str(session_id) if session_id is not None else None,
+    )
+    if revision.id is None:  # pragma: no cover - explicit IDs are assigned above
+        raise GroupFileServiceError(
+            "group_workspace_operation_not_prepared",
+            "Group workspace operation has no stable revision identity",
+        )
+    condition = (
+        WriteCondition(version_token=current.token)
+        if current.exists
+        else WriteCondition(require_absent=True)
+    )
+    return PreparedRuntimeWorkspaceOperation(
+        group_id=group_id,
+        operation_id=operation_id,
+        revision_id=revision.id,
+        operation=operation,
+        path=normalized,
+        storage_key=key,
+        before_content=before,
+        after_content=after,
+        condition=condition,
+        content_hash=revision.content_hash,
+    )
+
+
+async def prepare_runtime_workspace_write(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    group_id: uuid.UUID,
+    actor_participant_id: uuid.UUID,
+    operation_id: uuid.UUID,
+    path: str,
+    content: str,
+    expected_version_token: str | None = None,
+    session_id: uuid.UUID | None = None,
+) -> PreparedRuntimeWorkspaceOperation:
+    """Commit a write intent before its one permitted storage CAS."""
+    return await _prepare_runtime_workspace_operation(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor_participant_id,
+        operation_id=operation_id,
+        path=path,
+        operation="write",
+        content=content,
+        expected_version_token=expected_version_token,
+        session_id=session_id,
+    )
+
+
+async def prepare_runtime_workspace_delete(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    group_id: uuid.UUID,
+    actor_participant_id: uuid.UUID,
+    operation_id: uuid.UUID,
+    path: str,
+    expected_version_token: str | None = None,
+    session_id: uuid.UUID | None = None,
+) -> PreparedRuntimeWorkspaceOperation:
+    """Commit a delete intent before its one permitted storage CAS."""
+    return await _prepare_runtime_workspace_operation(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor_participant_id,
+        operation_id=operation_id,
+        path=path,
+        operation="delete",
+        content=None,
+        expected_version_token=expected_version_token,
+        session_id=session_id,
+    )
+
+
+async def apply_runtime_workspace_operation(
+    prepared: PreparedRuntimeWorkspaceOperation,
+) -> None:
+    """Perform the sole CAS authorized by a committed prepared revision."""
+    storage = get_storage_backend()
+    if prepared.operation == "write":
+        if prepared.after_content is None:
+            raise GroupFileServiceError(
+                "group_workspace_reconciliation_conflict",
+                "Prepared Group write has no after-content",
+            )
+        result = await storage.write_bytes_if_match(
+            prepared.storage_key,
+            prepared.after_content.encode("utf-8"),
+            condition=prepared.condition,
+            content_type="text/plain; charset=utf-8",
+        )
+    elif prepared.operation == "delete":
+        result = await storage.delete_if_match(
+            prepared.storage_key,
+            condition=prepared.condition,
+        )
+    else:  # pragma: no cover - constructed only by the helpers above
+        raise GroupFileServiceError(
+            "group_workspace_reconciliation_conflict",
+            "Prepared Group workspace operation is unsupported",
+        )
+    if not result.ok:
+        raise GroupFileServiceError(
+            "group_file_conflict",
+            "Group file changed before this operation completed",
+        )
+
+
+async def reconcile_runtime_workspace_operation(
+    db: AsyncSession,
+    *,
+    group_id: uuid.UUID,
+    operation_id: uuid.UUID,
+) -> RuntimeWorkspaceOperationReceipt:
+    """Forward-finalize proven storage state without repeating the mutation."""
+    revision = await get_group_runtime_revision(
+        db,
+        group_id=group_id,
+        operation_id=operation_id,
+        lock=True,
+    )
+    if revision is None:
+        raise GroupFileServiceError(
+            "group_workspace_operation_not_prepared",
+            "No prepared Group workspace operation exists for this Tool receipt",
+        )
+    if revision.operation in {"write", "delete"}:
+        return _runtime_receipt(revision, operation_id=operation_id)
+    if revision.operation not in {"prepared_write", "prepared_delete"}:
+        raise GroupFileServiceError(
+            "group_workspace_reconciliation_conflict",
+            "Group workspace operation revision has a conflicting state",
+        )
+    if not revision.path.startswith("workspace/"):
+        raise GroupFileServiceError(
+            "group_workspace_reconciliation_conflict",
+            "Group workspace operation revision has an invalid path",
+        )
+
+    operation = revision.operation.removeprefix("prepared_")
+    relative_path = revision.path.removeprefix("workspace/")
+    _, key = _workspace_key(group_id, relative_path, allow_empty=False)
+    storage = get_storage_backend()
+    current = await storage.get_version(key)
+    proven = False
+    if operation == "write" and current.exists and not current.is_dir:
+        current_content = await storage.read_text(
+            key,
+            encoding="utf-8",
+            errors="replace",
+        )
+        proven = content_hash(current_content) == revision.content_hash
+    elif operation == "delete":
+        proven = not current.exists
+    if not proven:
+        raise GroupFileServiceError(
+            "group_workspace_reconciliation_conflict",
+            "Current Group storage is neither the proven operation result nor a committed revision",
+        )
+
+    finalized = await finalize_group_runtime_revision(
+        db,
+        group_id=group_id,
+        operation_id=operation_id,
+        operation=operation,
+    )
+    return _runtime_receipt(finalized, operation_id=operation_id)
 
 
 async def _authorize_actor(

@@ -15,7 +15,7 @@ from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.trigger import AgentTrigger
 from app.models.trigger_execution import TriggerExecution
-from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
+from app.services.agent_runtime.adapter import RuntimeCommandIntake
 from app.services.agent_runtime.config import decide_runtime_v2
 from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
 from app.services.chat_session_service import ensure_primary_platform_session
@@ -42,6 +42,21 @@ def _trigger_config(trigger: AgentTrigger) -> dict:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _trigger_event_data(trigger: AgentTrigger) -> dict[str, str]:
+    """Extract bounded low-trust event facts from the executable instruction."""
+    config = _trigger_config(trigger)
+    event_data: dict[str, str] = {}
+    if trigger.type == "on_message" and config.get("_matched_message"):
+        event_data["matched_message"] = str(config["_matched_message"])[:500]
+        event_data["matched_from"] = str(config.get("_matched_from", "?"))[:200]
+    if trigger.type == "webhook" and config.get("_webhook_payload"):
+        payload = str(config["_webhook_payload"])
+        event_data["webhook_payload"] = (
+            payload if len(payload) <= 2_000 else payload[:2_000] + "... (truncated)"
+        )
+    return event_data
 
 
 def build_trigger_context(triggers: list[AgentTrigger]) -> str:
@@ -75,12 +90,6 @@ def build_trigger_context(triggers: list[AgentTrigger]) -> str:
             part += f"\n关联 Focus：{trigger.focus_ref}"
 
         config = _trigger_config(trigger)
-        if trigger.type == "on_message" and config.get("_matched_message"):
-            message = str(config["_matched_message"])
-            part += (
-                f"\n收到来自 {config.get('_matched_from', '?')} 的消息："
-                f'\n"{message[:500]}"'
-            )
         if (
             trigger.type == "on_message"
             and config.get("okr_member_id")
@@ -96,11 +105,6 @@ def build_trigger_context(triggers: list[AgentTrigger]) -> str:
                 "\n3. 工具调用成功后，再发送一句简短确认，明确你已收到并已记录。"
                 "\n4. 不要只回复确认而不调用工具，也不要把原始长对话原样存入日报。"
             )
-        if trigger.type == "webhook" and config.get("_webhook_payload"):
-            payload = str(config["_webhook_payload"])
-            if len(payload) > 2000:
-                payload = payload[:2000] + "... (truncated)"
-            part += f"\nWebhook Payload:\n{payload}"
         context_parts.append(part)
 
     source = "多个触发器同时触发" if len(triggers) > 1 else "触发器触发"
@@ -269,6 +273,8 @@ async def enqueue_trigger_runtime(
 
     runtime_trigger = build_execution_runtime_trigger(trigger, execution)
     context = build_trigger_context([runtime_trigger])
+    event_data = _trigger_event_data(runtime_trigger)
+    message_id = _trigger_input_message_id(execution.id)
     session = await _ensure_trigger_session(
         db,
         agent=agent,
@@ -287,7 +293,7 @@ async def enqueue_trigger_runtime(
         else agent.creator_id
     )
     execution_id = str(execution.id)
-    handle = await TransactionalAgentRuntimeAdapter(
+    handle = await RuntimeCommandIntake(
         db,
         settings=runtime_settings,
     ).start_run(
@@ -309,7 +315,13 @@ async def enqueue_trigger_runtime(
                 "trigger_id": str(trigger.id),
                 "trigger_name": trigger.name,
                 "trigger_type": trigger.type,
-                "trigger_context": context,
+                "message_id": str(message_id),
+                "input_content": context,
+                **(
+                    {"trigger_event_data": event_data}
+                    if event_data
+                    else {}
+                ),
             },
             origin_user_id=origin_user_id,
         )

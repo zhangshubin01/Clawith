@@ -20,7 +20,7 @@ from app.models.participant import Participant
 from app.models.user import User
 from app.services.agent_runtime.adapter import (
     RuntimeAdapterError,
-    TransactionalAgentRuntimeAdapter,
+    RuntimeCommandIntake,
 )
 from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
 from app.services.agent_runtime.persistence import RuntimePersistenceError
@@ -460,6 +460,10 @@ def _single_mention_command(
             "sender_participant_id": str(scope.participant.id),
             "mention_targets": [mention.payload() for mention in mentions],
             "target_participant_id": str(target.participant_id),
+            "context_cutoff": {
+                "message_id": str(message.id),
+                "created_at": message.created_at.isoformat(),
+            },
             "source_channel": scope.session.source_channel,
         },
         origin_user_id=origin_user_id,
@@ -478,6 +482,11 @@ def _planning_command(
     targets: tuple[ResolvedGroupMention, ...],
     model: LLMModel,
 ) -> StartRunCommand:
+    if message.created_at is None:
+        raise GroupMessageServiceError(
+            "group_mention_dispatch_invalid",
+            "Planning trigger message has no Message Position",
+        )
     source_execution_id = f"group_mention:{message.id}:plan"
     return StartRunCommand(
         tenant_id=tenant_id,
@@ -503,6 +512,10 @@ def _planning_command(
             "session_id": str(scope.session.id),
             "sender_participant_id": str(scope.participant.id),
             "mention_targets": [mention.payload() for mention in mentions],
+            "context_cutoff": {
+                "message_id": str(message.id),
+                "created_at": message.created_at.isoformat(),
+            },
             "candidate_agents": [
                 {
                     "agent_id": str(target.agent.id),
@@ -601,7 +614,7 @@ async def enqueue_group_message(
         )
 
     runtime_settings = settings_override or get_settings()
-    adapter = TransactionalAgentRuntimeAdapter(db, settings=runtime_settings)
+    adapter = RuntimeCommandIntake(db, settings=runtime_settings)
     if len(agent_mentions) > 1:
         try:
             planning_model = await resolve_multi_agent_planning_model(

@@ -228,8 +228,9 @@ async def test_group_context_freezes_authoritative_scope_files_and_sender_metada
             "sender_participant_id": str(sender.id),
             "target_participant_id": str(target.id),
             "mention_targets": [{"participant_id": str(uuid.uuid4())}],
-            "planning_step_id": "research",
-            "planning_instruction": "Prepare the risk plan",
+            "current_responsibility": "Prepare the risk plan",
+            "mode": "enforced",
+            "plan_prompt": "Research, then hand off to review.",
         },
         pending_messages=(
             {
@@ -267,7 +268,17 @@ async def test_group_context_freezes_authoritative_scope_files_and_sender_metada
     }
     assert context["agent_group_memory"]["content"] == "abcdef"
     assert context["workspace_index"][0]["path"] == "reports/final.md"
-    assert context["planning_hint"]["planning_step_id"] == "research"
+    assert "scope_rules" not in context
+    assert "role_description" not in context["agent"]
+    assert "tool_permissions" not in context["agent"]
+    assert context["planning_hint"] == {
+        "mode": "enforced",
+        "plan_prompt": "Research, then hand off to review.",
+        "current_responsibility": "Prepare the risk plan",
+    }
+    assert "planning_step_id" not in captured.initial_input
+    assert "planning_instruction" not in captured.initial_input
+    assert "related_run_summaries" not in context
     assert captured.pending_messages[0]["sender_name"] == "Alice"
     assert captured.recent_messages[0]["sender_name"] == "Alice"
     assert captured.recent_messages[0]["sender_type"] == "user"

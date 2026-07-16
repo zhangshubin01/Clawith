@@ -10,7 +10,7 @@ from app.config import Settings, get_settings
 from app.database import async_session
 from app.models.agent import Agent
 from app.models.task import Task, TaskLog
-from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
+from app.services.agent_runtime.adapter import RuntimeCommandIntake
 from app.services.agent_runtime.config import decide_runtime_v2
 from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
 
@@ -84,7 +84,7 @@ async def enqueue_task_runtime(
     else:
         source_execution_id = f"task:{task.id}"
 
-    handle = await TransactionalAgentRuntimeAdapter(
+    handle = await RuntimeCommandIntake(
         db,
         settings=runtime_settings,
     ).start_run(

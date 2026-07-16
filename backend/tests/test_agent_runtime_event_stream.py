@@ -86,6 +86,20 @@ def _run() -> tuple[AgentRun, RunHandle]:
     return run, handle
 
 
+def _direct_thread_run() -> tuple[AgentRun, RunHandle]:
+    run, handle = _run()
+    session_thread_id = str(uuid.uuid4())
+    run.runtime_thread_id = session_thread_id
+    return run, RunHandle(
+        tenant_id=handle.tenant_id,
+        run_id=handle.run_id,
+        thread_id=session_thread_id,
+        command_id=handle.command_id,
+        runtime_type="langgraph",
+        created=handle.created,
+    )
+
+
 def _event(
     run: AgentRun,
     event_type: str,
@@ -208,7 +222,7 @@ async def test_invalid_handle_is_rejected_before_database_access() -> None:
     invalid = RunHandle(
         tenant_id=handle.tenant_id,
         run_id=handle.run_id,
-        thread_id="wrong-thread",
+        thread_id="",
         command_id=handle.command_id,
         runtime_type="langgraph",
         created=handle.created,
@@ -222,3 +236,83 @@ async def test_invalid_handle_is_rejected_before_database_access() -> None:
         await anext(stream.stream_run(invalid))
 
     assert exc_info.value.code == "runtime_identity_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_direct_session_thread_handle_is_valid_even_when_thread_differs_from_run_id() -> None:
+    run, handle = _direct_thread_run()
+    base = datetime(2026, 7, 16, 18, 0, tzinfo=UTC)
+    terminal = _event(run, "run_completed", created_at=base)
+    delivered = _event(
+        run,
+        "delivery_succeeded",
+        created_at=base + timedelta(microseconds=1),
+        checkpoint_id=None,
+    )
+    factory = _SessionFactory(
+        _Session(_Result(scalar=run)),
+        _Session(
+            _Result(rows=[terminal, delivered]),
+            _Result(scalar="delivered"),
+        ),
+    )
+
+    events = [
+        event
+        async for event in DatabaseRuntimeEventStream(
+            session_factory=factory,  # type: ignore[arg-type]
+            poll_interval_seconds=0.001,
+        ).stream_run(handle)
+    ]
+
+    assert [event.event_type for event in events] == [
+        "run_completed",
+        "delivery_succeeded",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_event_stream_rejects_handle_thread_that_disagrees_with_stored_run() -> None:
+    run, handle = _direct_thread_run()
+    wrong = RunHandle(
+        tenant_id=handle.tenant_id,
+        run_id=handle.run_id,
+        thread_id="wrong-thread",
+        command_id=handle.command_id,
+        runtime_type="langgraph",
+        created=handle.created,
+    )
+    stream = DatabaseRuntimeEventStream(
+        session_factory=_SessionFactory(_Session(_Result(scalar=run))),  # type: ignore[arg-type]
+        poll_interval_seconds=0.001,
+    )
+
+    with pytest.raises(RuntimeEventStreamError) as exc_info:
+        await anext(stream.stream_run(wrong))
+
+    assert exc_info.value.code == "runtime_identity_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrong_identity", ("tenant", "run"))
+async def test_event_stream_rejects_handle_outside_stored_tenant_run_scope(
+    wrong_identity: str,
+) -> None:
+    _run_record, handle = _direct_thread_run()
+    invalid = RunHandle(
+        tenant_id=(uuid.uuid4() if wrong_identity == "tenant" else handle.tenant_id),
+        run_id=(uuid.uuid4() if wrong_identity == "run" else handle.run_id),
+        thread_id=handle.thread_id,
+        command_id=handle.command_id,
+        runtime_type="langgraph",
+        created=handle.created,
+    )
+    stream = DatabaseRuntimeEventStream(
+        session_factory=_SessionFactory(_Session(_Result(scalar=None))),  # type: ignore[arg-type]
+        poll_interval_seconds=0.001,
+    )
+
+    with pytest.raises(RuntimeEventStreamError) as exc_info:
+        await anext(stream.stream_run(invalid))
+
+    assert exc_info.value.code == "run_not_found"

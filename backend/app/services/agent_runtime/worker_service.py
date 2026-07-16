@@ -65,11 +65,11 @@ from app.services.agent_runtime.planning import (
     PlanningRuntimeNodeExecutor,
     RuntimeNodeExecutorRouter,
 )
-from app.services.agent_runtime.planning_scheduler import (
-    PlanningCheckpointScheduler,
-    PlanningChildCompletionHandler,
+from app.services.agent_runtime.planning_scheduler import PlanningCheckpointScheduler
+from app.services.agent_runtime.product_reconciler import (
+    ProductReconcileResult,
+    RuntimeProductReconciler,
 )
-from app.services.agent_runtime.projector import RuntimeProjector
 from app.services.agent_runtime.run_compactor import RuntimeRunCompactorService
 from app.services.agent_runtime.scheduling_lane import SchedulingLaneCompletionHandler
 from app.services.agent_runtime.session_context_service import SessionContextService
@@ -84,7 +84,16 @@ from app.services.agent_runtime.session_context_completion import (
 )
 from app.services.agent_runtime.task_completion import TaskRuntimeCompletionHandler
 from app.services.agent_runtime.tool_step_service import RuntimeToolStepService
+from app.services.agent_runtime.tool_result_store import (
+    ToolResultReconcileResult,
+    ToolResultReconciler,
+    ToolResultStore,
+)
 from app.services.agent_runtime.trigger_completion import TriggerRuntimeCompletionHandler
+from app.services.agent_runtime.verification import (
+    RuntimeToolReferenceReader,
+    ToolLedgerRuntimeVerifier,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -117,6 +126,8 @@ class RuntimeWorkerComponents:
     graph_registry: RuntimeGraphRegistry
     driver: LangGraphRuntimeDriver
     worker: RuntimeCommandWorker
+    tool_result_reconciler: ToolResultReconciler
+    product_reconciler: RuntimeProductReconciler
     channel_delivery_worker: ChannelDeliveryWorker
     session_context_scanner: SessionContextCompactionScanner
 
@@ -195,14 +206,23 @@ def build_runtime_worker_components(
     """Compose one Graph and Worker without opening connections or starting tasks."""
     runtime_settings = settings or get_settings()
     session_context_service = SessionContextService(settings=runtime_settings)
+    session_context_compactor = LLMSessionContextCompactor(
+        session_factory=session_factory,
+        settings=runtime_settings,
+    )
     context_builder = ContextBuilder(
         session_context_service,
         settings=runtime_settings,
+        session_context_compactor=session_context_compactor,
     )
     cancel_source = DatabaseRuntimeCancelSource(session_factory=session_factory)
     model_service = RuntimeModelStepService(
         session_factory=session_factory,
         context_builder=context_builder,
+    )
+    tool_result_store = ToolResultStore(session_factory=session_factory)
+    reference_reader = RuntimeToolReferenceReader(
+        session_factory=session_factory,
     )
     tool_service = RuntimeToolStepService(
         session_factory=session_factory,
@@ -211,16 +231,22 @@ def build_runtime_worker_components(
             session_factory=session_factory,
             settings=runtime_settings,
         ),
+        tool_result_store=tool_result_store,
     )
     run_compactor = RuntimeRunCompactorService(
-        session_factory=session_factory,
         settings=runtime_settings,
+        input_loader=model_service.compact_inputs,
     )
     agent_node_executor = DeterministicRuntimeNodeExecutor(
         cancel_source=cancel_source,
         model_service=model_service,
         tool_service=tool_service,
         run_compactor=run_compactor,
+        verifier=ToolLedgerRuntimeVerifier(
+            session_factory=session_factory,
+            result_store=tool_result_store,
+            reference_exists=reference_reader.reference_exists,
+        ),
     )
     graph = build_agent_runtime_graph(
         checkpointer=checkpointer,
@@ -245,16 +271,6 @@ def build_runtime_worker_components(
         snapshot_factory=RuntimeInputSnapshotFactory(context_builder),
         node_executor=node_executor,
     )
-    projector = RuntimeProjector(
-        state_source_resolver=lambda run: graph_registry.resolve_identity(
-            run.graph_name,
-            run.graph_version,
-        ).compiled
-    )
-    session_context_compactor = LLMSessionContextCompactor(
-        session_factory=session_factory,
-        settings=runtime_settings,
-    )
     session_context_scanner = SessionContextCompactionScanner(
         session_factory=session_factory,
         service=SessionContextMessageCompactionService(
@@ -269,7 +285,6 @@ def build_runtime_worker_components(
     )
     post_checkpoint_handler = RuntimeCheckpointSideEffects(
         session_factory=session_factory,
-        projector=projector,
         checkpoint_handlers=(
             PlanningCheckpointScheduler(
                 session_factory=session_factory,
@@ -287,7 +302,6 @@ def build_runtime_worker_components(
             HeartbeatRuntimeCompletionHandler(session_factory=session_factory),
             OnboardingRuntimeCompletionHandler(session_factory=session_factory),
             A2ARuntimeCompletionHandler(session_factory=session_factory),
-            PlanningChildCompletionHandler(session_factory=session_factory),
             SchedulingLaneCompletionHandler(session_factory=session_factory),
         ),
     )
@@ -304,6 +318,15 @@ def build_runtime_worker_components(
         claimant=resolved_claimant,
         settings=runtime_settings,
     )
+    product_reconciler = RuntimeProductReconciler(
+        session_factory=session_factory,
+        checkpoint_reader=driver,
+        handler=post_checkpoint_handler,
+    )
+    tool_result_reconciler = ToolResultReconciler(
+        session_factory=session_factory,
+        result_store=tool_result_store,
+    )
     channel_delivery_worker = ChannelDeliveryWorker(
         session_factory=session_factory,
         sender=DatabaseChannelDeliverySender(session_factory=session_factory),
@@ -316,6 +339,8 @@ def build_runtime_worker_components(
         graph_registry=graph_registry,
         driver=driver,
         worker=worker,
+        tool_result_reconciler=tool_result_reconciler,
+        product_reconciler=product_reconciler,
         channel_delivery_worker=channel_delivery_worker,
         session_context_scanner=session_context_scanner,
     )
@@ -407,6 +432,78 @@ class ChannelDeliveryDaemon:
         return 0.0
 
 
+class ProductReconcileDaemon:
+    """Retry products independently from Command and Graph execution."""
+
+    def __init__(
+        self,
+        reconciler: RuntimeProductReconciler,
+        *,
+        scan_delay_seconds: float = 0.5,
+        error_delay_seconds: float = 1.0,
+    ) -> None:
+        if scan_delay_seconds <= 0 or error_delay_seconds <= 0:
+            raise ValueError("product reconciliation daemon delays must be positive")
+        self._reconciler = reconciler
+        self._scan_delay_seconds = scan_delay_seconds
+        self._error_delay_seconds = error_delay_seconds
+
+    async def run(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                result = await self._reconciler.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Runtime product reconciliation iteration failed")
+                delay = self._error_delay_seconds
+            else:
+                delay = self._delay_after(result)
+            if delay:
+                await RuntimeCommandDaemon._wait(stop, delay)
+
+    def _delay_after(self, result: ProductReconcileResult) -> float:
+        if result.status in {"idle", "retry"}:
+            return self._scan_delay_seconds
+        return 0.0
+
+
+class ToolResultReconcileDaemon:
+    """Recover archived results independently without re-executing tools."""
+
+    def __init__(
+        self,
+        reconciler: ToolResultReconciler,
+        *,
+        scan_delay_seconds: float = 0.5,
+        error_delay_seconds: float = 1.0,
+    ) -> None:
+        if scan_delay_seconds <= 0 or error_delay_seconds <= 0:
+            raise ValueError("tool result reconciliation daemon delays must be positive")
+        self._reconciler = reconciler
+        self._scan_delay_seconds = scan_delay_seconds
+        self._error_delay_seconds = error_delay_seconds
+
+    async def run(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                result = await self._reconciler.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Runtime tool result reconciliation iteration failed")
+                delay = self._error_delay_seconds
+            else:
+                delay = self._delay_after(result)
+            if delay:
+                await RuntimeCommandDaemon._wait(stop, delay)
+
+    def _delay_after(self, result: ToolResultReconcileResult) -> float:
+        if result.status in {"idle", "deferred"}:
+            return self._scan_delay_seconds
+        return 0.0
+
+
 @asynccontextmanager
 async def runtime_worker_context(
     *,
@@ -476,6 +573,14 @@ async def running_runtime_worker_context(
             ).run(stop),
             name="agent-runtime-channel-delivery",
         )
+        product_reconcile_task = asyncio.create_task(
+            ProductReconcileDaemon(components.product_reconciler).run(stop),
+            name="agent-runtime-product-reconcile",
+        )
+        tool_result_reconcile_task = asyncio.create_task(
+            ToolResultReconcileDaemon(components.tool_result_reconciler).run(stop),
+            name="agent-runtime-tool-result-reconcile",
+        )
         try:
             yield components
         finally:
@@ -483,16 +588,24 @@ async def running_runtime_worker_context(
             task.cancel()
             compact_task.cancel()
             channel_delivery_task.cancel()
+            product_reconcile_task.cancel()
+            tool_result_reconcile_task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
             with suppress(asyncio.CancelledError):
                 await compact_task
             with suppress(asyncio.CancelledError):
                 await channel_delivery_task
+            with suppress(asyncio.CancelledError):
+                await product_reconcile_task
+            with suppress(asyncio.CancelledError):
+                await tool_result_reconcile_task
 
 
 __all__ = [
     "ChannelDeliveryDaemon",
+    "ProductReconcileDaemon",
+    "ToolResultReconcileDaemon",
     "RuntimeCommandDaemon",
     "RuntimeSchemaNotReady",
     "RuntimeWorkerComponents",

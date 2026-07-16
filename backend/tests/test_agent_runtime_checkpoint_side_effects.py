@@ -1,4 +1,4 @@
-"""Committed-checkpoint projection and delivery tests."""
+"""Product synchronization after settled checkpoint/control boundaries."""
 
 from __future__ import annotations
 
@@ -18,12 +18,7 @@ from app.services.agent_runtime.command_worker import (
     RuntimeCommandRecord,
     RuntimeRunRecord,
 )
-from app.services.agent_runtime.projector import ProjectionResult
-from app.services.agent_runtime.state import (
-    RunInputSnapshots,
-    RunRegistrySnapshot,
-    RuntimeGraphState,
-)
+from app.services.agent_runtime.state import RunInputSnapshots, RunRegistrySnapshot
 
 
 class _ScalarResult:
@@ -35,104 +30,68 @@ class _ScalarResult:
 
 
 class _Transaction:
-    def __init__(self, timeline: list[str]) -> None:
-        self.timeline = timeline
-
-    async def __aenter__(self) -> "_Transaction":
-        self.timeline.append("transaction_enter")
+    async def __aenter__(self):
         return self
 
-    async def __aexit__(self, exc_type, exc, traceback) -> bool:
-        self.timeline.append("transaction_exit")
+    async def __aexit__(self, exc_type, exc, traceback):
         return False
+
+
+class _StoredRun:
+    lane_held = True
+    lane_claimed_at = object()
 
 
 class _Session:
-    def __init__(self, timeline: list[str], delivery_status: str) -> None:
-        self.timeline = timeline
-        self.delivery_status = delivery_status
+    def __init__(self, value: object) -> None:
+        self.value = value
+        self.flush_count = 0
 
-    async def __aenter__(self) -> "_Session":
-        self.timeline.append("session_enter")
+    async def __aenter__(self):
         return self
 
-    async def __aexit__(self, exc_type, exc, traceback) -> bool:
-        self.timeline.append("session_exit")
+    async def __aexit__(self, exc_type, exc, traceback):
         return False
 
     def begin(self) -> _Transaction:
-        return _Transaction(self.timeline)
+        return _Transaction()
 
     async def execute(self, _statement) -> _ScalarResult:
-        self.timeline.append("load_delivery_status")
-        return _ScalarResult(self.delivery_status)
+        return _ScalarResult(self.value)
+
+    async def flush(self) -> None:
+        self.flush_count += 1
 
 
 class _SessionFactory:
-    def __init__(self, timeline: list[str], delivery_status: str = "pending") -> None:
-        self.timeline = timeline
-        self.delivery_status = delivery_status
+    def __init__(self, value: object = "pending") -> None:
+        self.value = value
+        self.sessions: list[_Session] = []
 
     def __call__(self) -> _Session:
-        return _Session(self.timeline, self.delivery_status)
+        session = _Session(self.value)
+        self.sessions.append(session)
+        return session
 
 
-class _Projector:
-    def __init__(self, timeline: list[str], *, status: str, checkpoint_id: str) -> None:
-        self.timeline = timeline
-        self.status = status
-        self.checkpoint_id = checkpoint_id
-        self.calls: list[tuple[object, uuid.UUID, uuid.UUID]] = []
-
-    async def project_run(self, db, *, tenant_id, run_id):
-        self.timeline.append("project")
-        self.calls.append((db, tenant_id, run_id))
-        return ProjectionResult(
-            tenant_id=tenant_id,
-            run_id=run_id,
-            applied_checkpoint_ids=(self.checkpoint_id,),
-            added_event_types=(),
-            authoritative_status=self.status,
-            authoritative_terminal=self.status in {"completed", "failed", "cancelled"},
-        )
-
-
-class _TerminalHandler:
-    def __init__(self, timeline: list[str], *, error: Exception | None = None) -> None:
-        self.timeline = timeline
-        self.error = error
-        self.calls = 0
+class _Handler:
+    def __init__(self) -> None:
+        self.statuses: list[str] = []
 
     async def handle(self, *, run, checkpoint) -> None:
-        del run, checkpoint
-        self.calls += 1
-        self.timeline.append("terminal_handler")
-        if self.error is not None:
-            raise self.error
-
-
-class _CheckpointHandler:
-    def __init__(self, timeline: list[str], *, error: Exception | None = None) -> None:
-        self.timeline = timeline
-        self.error = error
-        self.calls = 0
-
-    async def handle(self, *, run, checkpoint) -> None:
-        del run, checkpoint
-        self.calls += 1
-        self.timeline.append("checkpoint_handler")
-        if self.error is not None:
-            raise self.error
+        del run
+        self.statuses.append(checkpoint.state["lifecycle"]["status"])
 
 
 def _records(
     *,
     status: str = "completed",
-    checkpoint_id: str = "checkpoint-1",
     lifecycle: dict | None = None,
+    command_type: str = "start",
 ) -> tuple[RuntimeRunRecord, RuntimeCommandRecord, CheckpointObservation]:
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
+    command_id = uuid.uuid4()
     registry = RunRegistrySnapshot(
         tenant_id=str(tenant_id),
         run_id=str(run_id),
@@ -143,169 +102,124 @@ def _records(
         graph_name="runtime_graph",
         graph_version="v1",
         agent_id=str(uuid.uuid4()),
-        session_id=str(uuid.uuid4()),
     )
-    state: RuntimeGraphState = {
-        "registry": registry,
-        "snapshots": RunInputSnapshots(
-            session_context={},
-            session_context_version=0,
-            recent_session_messages=(),
-            related_run_summaries=(),
-            initial_input={},
-        ),
-        "lifecycle": {
-            "status": status,  # type: ignore[typeddict-item]
-            "next_route": "terminal" if status in {"completed", "failed", "cancelled"} else "wait",
-            **(lifecycle or {}),
-        },
-    }
     run = RuntimeRunRecord(
         tenant_id=tenant_id,
         run_id=run_id,
         thread_id=str(run_id),
         runtime_type="langgraph",
-        registry=registry,
+        goal=registry.goal,
+        run_kind=registry.run_kind,
+        source_type=registry.source_type,
+        model_id=registry.model_id,
+        graph_name=registry.graph_name,
+        graph_version=registry.graph_version,
+        agent_id=registry.agent_id,
+        session_id=registry.session_id,
+        system_role=registry.system_role,
+        parent_run_id=registry.parent_run_id,
+        root_run_id=registry.root_run_id,
     )
     command = RuntimeCommandRecord(
-        id=uuid.uuid4(),
+        id=command_id,
         tenant_id=tenant_id,
         run_id=run_id,
-        command_type="start",
-        payload={},
+        command_type=command_type,  # type: ignore[arg-type]
+        payload={"reason": "user_abort"} if command_type == "cancel" else {},
         actor_user_id=uuid.uuid4(),
         actor_agent_id=None,
     )
-    return run, command, CheckpointObservation(checkpoint_id=checkpoint_id, state=state)
+    terminal = status in {"completed", "failed", "cancelled"}
+    checkpoint = CheckpointObservation(
+        checkpoint_id="checkpoint-1",
+        state={
+            "registry": registry,
+            "snapshots": RunInputSnapshots(
+                session_context={},
+                session_context_version=0,
+                recent_session_messages=(),
+                related_run_summaries=(),
+                initial_input={},
+            ),
+            "lifecycle": {
+                "status": status,  # type: ignore[typeddict-item]
+                "next_route": "terminal" if terminal else "wait",
+                **(lifecycle or {}),
+            },
+        },
+        next_nodes=() if terminal else ("wait",),
+        tasks=() if terminal else (object(),),
+        interrupts=() if terminal else (object(),),
+        metadata={
+            "clawith_run_id": str(run_id),
+            "clawith_command_id": str(command_id),
+        },
+    )
+    return run, command, checkpoint
 
 
 @pytest.mark.asyncio
-async def test_projects_then_delivers_completed_checkpoint() -> None:
-    timeline: list[str] = []
+async def test_completed_checkpoint_delivers_without_projection_round_trip() -> None:
     run, command, checkpoint = _records(
         lifecycle={
-            "final_answer": "fallback answer",
-            "delivery_request": {"content": "verified answer"},
+            "final_answer": "fallback",
+            "delivery_request": {"content": "verified"},
         }
     )
-    projector = _Projector(timeline, status="completed", checkpoint_id=checkpoint.checkpoint_id)
     handler = RuntimeCheckpointSideEffects(
-        session_factory=_SessionFactory(timeline),  # type: ignore[arg-type]
-        projector=projector,  # type: ignore[arg-type]
+        session_factory=_SessionFactory(),  # type: ignore[arg-type]
     )
-
-    async def delivered(_db, request):
-        timeline.append("deliver")
-        assert request.content == "verified answer"
-        assert request.checkpoint_id == checkpoint.checkpoint_id
-        assert request.lifecycle_status == "completed"
 
     with patch(
         "app.services.agent_runtime.checkpoint_side_effects.deliver_runtime_message",
-        new=AsyncMock(side_effect=delivered),
+        new=AsyncMock(),
     ) as deliver:
         await handler.handle(run=run, command=command, checkpoint=checkpoint)
 
-    assert timeline.index("project") < timeline.index("deliver")
-    deliver.assert_awaited_once()
+    request = deliver.await_args.args[1]
+    assert request.content == "verified"
+    assert request.checkpoint_id == "checkpoint-1"
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_product_handler_runs_only_after_projection_commit() -> None:
-    timeline: list[str] = []
-    run, command, checkpoint = _records(status="waiting_agent")
-    product = _CheckpointHandler(timeline)
+async def test_cancel_uses_control_disposition_without_mutating_preserved_checkpoint() -> None:
+    run, command, checkpoint = _records(
+        status="waiting_user",
+        lifecycle={
+            "waiting_request": {
+                "waiting_type": "user",
+                "correlation_id": "confirm-1",
+            }
+        },
+        command_type="cancel",
+    )
+    terminal = _Handler()
     handler = RuntimeCheckpointSideEffects(
-        session_factory=_SessionFactory(timeline),  # type: ignore[arg-type]
-        projector=_Projector(
-            timeline,
-            status="waiting_agent",
-            checkpoint_id=checkpoint.checkpoint_id,
-        ),  # type: ignore[arg-type]
-        checkpoint_handlers=(product,),
+        session_factory=_SessionFactory("not_required"),  # type: ignore[arg-type]
+        terminal_handlers=(terminal,),
     )
 
     await handler.handle(run=run, command=command, checkpoint=checkpoint)
 
-    assert product.calls == 1
-    assert timeline.index("transaction_exit") < timeline.index("checkpoint_handler")
-
-
-def test_completed_planning_root_has_no_public_terminal_delivery() -> None:
-    run, _, checkpoint = _records(lifecycle={"final_answer": "internal"})
-    registry = replace(
-        run.registry,
-        run_kind="orchestration",
-        agent_id=None,
-        system_role="group_planning",
-    )
-    planning_run = replace(run, registry=registry)
-    planning_checkpoint = replace(
-        checkpoint,
-        state={**checkpoint.state, "registry": registry},
-    )
-
-    assert delivery_from_checkpoint(planning_run, planning_checkpoint) is None
+    assert checkpoint.state["lifecycle"]["status"] == "waiting_user"
+    assert checkpoint.next_nodes == ("wait",)
+    assert terminal.statuses == ["cancelled"]
 
 
 @pytest.mark.asyncio
-async def test_terminal_delivery_happens_before_a_failing_derived_handler() -> None:
-    timeline: list[str] = []
-    run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
-    terminal = _TerminalHandler(timeline, error=RuntimeError("compact failed"))
+async def test_cancel_before_start_releases_lane_without_fabricating_checkpoint() -> None:
+    run, command, _ = _records(command_type="cancel")
+    stored = _StoredRun()
+    sessions = _SessionFactory(stored)
     handler = RuntimeCheckpointSideEffects(
-        session_factory=_SessionFactory(timeline),  # type: ignore[arg-type]
-        projector=_Projector(
-            timeline,
-            status="completed",
-            checkpoint_id=checkpoint.checkpoint_id,
-        ),  # type: ignore[arg-type]
-        terminal_handlers=(terminal,),
+        session_factory=sessions,  # type: ignore[arg-type]
     )
 
-    async def delivered(_db, _request):
-        timeline.append("deliver")
+    await handler.handle(run=run, command=command, checkpoint=None)
 
-    with (
-        patch(
-            "app.services.agent_runtime.checkpoint_side_effects.deliver_runtime_message",
-            new=AsyncMock(side_effect=delivered),
-        ) as deliver,
-        pytest.raises(RuntimeError, match="compact failed"),
-    ):
-        await handler.handle(run=run, command=command, checkpoint=checkpoint)
-
-    assert timeline.index("deliver") < timeline.index("terminal_handler")
-    deliver.assert_awaited_once()
-    assert terminal.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_delivery_failure_does_not_skip_terminal_product_handlers() -> None:
-    timeline: list[str] = []
-    run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
-    terminal = _TerminalHandler(timeline)
-    handler = RuntimeCheckpointSideEffects(
-        session_factory=_SessionFactory(timeline),  # type: ignore[arg-type]
-        projector=_Projector(
-            timeline,
-            status="completed",
-            checkpoint_id=checkpoint.checkpoint_id,
-        ),  # type: ignore[arg-type]
-        terminal_handlers=(terminal,),
-    )
-
-    with (
-        patch(
-            "app.services.agent_runtime.checkpoint_side_effects.deliver_runtime_message",
-            new=AsyncMock(side_effect=RuntimeError("delivery failed")),
-        ),
-        pytest.raises(RuntimeError, match="delivery failed"),
-    ):
-        await handler.handle(run=run, command=command, checkpoint=checkpoint)
-
-    assert terminal.calls == 1
-    assert "terminal_handler" in timeline
+    assert stored.lane_held is False
+    assert stored.lane_claimed_at is None
+    assert sessions.sessions[0].flush_count == 1
 
 
 def test_waiting_delivery_uses_correlation_id_and_prompt() -> None:
@@ -326,77 +240,58 @@ def test_waiting_delivery_uses_correlation_id_and_prompt() -> None:
     assert delivery.kind == "waiting"
     assert delivery.content == "Continue?"
     assert delivery.interrupt_id == "confirm-1"
-    assert delivery.lifecycle_status == "waiting_user"
 
 
-@pytest.mark.asyncio
-async def test_not_required_run_projects_without_delivery() -> None:
-    timeline: list[str] = []
-    run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
-    handler = RuntimeCheckpointSideEffects(
-        session_factory=_SessionFactory(timeline, delivery_status="not_required"),  # type: ignore[arg-type]
-        projector=_Projector(
-            timeline,
-            status="completed",
-            checkpoint_id=checkpoint.checkpoint_id,
-        ),  # type: ignore[arg-type]
+def test_completed_planning_root_has_no_public_delivery() -> None:
+    run, _, checkpoint = _records(lifecycle={"final_answer": "internal"})
+    planning_run = replace(
+        run,
+        run_kind="orchestration",
+        agent_id=None,
+        system_role="group_planning",
     )
 
-    with patch(
-        "app.services.agent_runtime.checkpoint_side_effects.deliver_runtime_message",
-        new=AsyncMock(),
-    ) as deliver:
-        await handler.handle(run=run, command=command, checkpoint=checkpoint)
-
-    assert "project" in timeline
-    deliver.assert_not_awaited()
+    assert delivery_from_checkpoint(planning_run, checkpoint) is None
 
 
-@pytest.mark.asyncio
-async def test_projection_mismatch_stops_before_delivery() -> None:
-    timeline: list[str] = []
-    run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
-    handler = RuntimeCheckpointSideEffects(
-        session_factory=_SessionFactory(timeline),  # type: ignore[arg-type]
-        projector=_Projector(
-            timeline,
-            status="running",
-            checkpoint_id=checkpoint.checkpoint_id,
-        ),  # type: ignore[arg-type]
+def test_completed_group_handoff_preserves_frozen_intent_from_checkpoint() -> None:
+    handoff = {
+        "version": 1,
+        "source_run_id": str(uuid.uuid4()),
+        "mention_participant_ids": [str(uuid.uuid4())],
+        "idempotency_key": "stable-handoff-key",
+    }
+    run, _, checkpoint = _records(
+        lifecycle={
+            "final_answer": "fallback",
+            "delivery_request": {
+                "content": "Public handoff reply",
+                "group_handoff": handoff,
+            },
+        }
     )
 
-    with (
-        patch(
-            "app.services.agent_runtime.checkpoint_side_effects.deliver_runtime_message",
-            new=AsyncMock(),
-        ) as deliver,
-        pytest.raises(RuntimeCheckpointSideEffectError, match="differs") as raised,
-    ):
-        await handler.handle(run=run, command=command, checkpoint=checkpoint)
+    delivery = delivery_from_checkpoint(run, checkpoint)
 
-    assert raised.value.code == "projection_checkpoint_mismatch"
-    deliver.assert_not_awaited()
+    assert delivery is not None
+    assert delivery.content == "Public handoff reply"
+    assert delivery.group_handoff_intent == handoff
 
 
 @pytest.mark.asyncio
-async def test_rejects_checkpoint_outside_run_scope() -> None:
-    timeline: list[str] = []
+async def test_rejects_checkpoint_metadata_outside_run_scope() -> None:
     run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
     checkpoint = replace(
         checkpoint,
-        state={
-            **checkpoint.state,
-            "registry": replace(checkpoint.state["registry"], tenant_id=str(uuid.uuid4())),
+        metadata={
+            **checkpoint.metadata,
+            "clawith_run_id": str(uuid.uuid4()),
         },
     )
-    projector = _Projector(timeline, status="completed", checkpoint_id=checkpoint.checkpoint_id)
-    handler = RuntimeCheckpointSideEffects(
-        session_factory=_SessionFactory(timeline),  # type: ignore[arg-type]
-        projector=projector,  # type: ignore[arg-type]
-    )
 
-    with pytest.raises(RuntimeCheckpointSideEffectError, match="Run Registry") as raised:
-        await handler.handle(run=run, command=command, checkpoint=checkpoint)
+    with pytest.raises(RuntimeCheckpointSideEffectError) as raised:
+        await RuntimeCheckpointSideEffects(
+            session_factory=_SessionFactory(),  # type: ignore[arg-type]
+        ).handle(run=run, command=command, checkpoint=checkpoint)
 
     assert raised.value.code == "checkpoint_identity_mismatch"
-    assert projector.calls == []

@@ -15,7 +15,7 @@ from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.gateway_message import GatewayMessage
 from app.services.agent_runtime.a2a_runtime import a2a_mode_from_correlation
-from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
+from app.services.agent_runtime.adapter import RuntimeCommandIntake
 from app.services.agent_runtime.command_worker import (
     CheckpointObservation,
     RuntimeRunRecord,
@@ -241,7 +241,7 @@ class A2ARuntimeCompletionHandler:
         run: RuntimeRunRecord,
         checkpoint: CheckpointObservation,
     ) -> None:
-        if run.registry.source_type != "a2a":
+        if run.source_type != "a2a":
             return
         status = checkpoint.state["lifecycle"]["status"]
         if status not in _TERMINAL_STATUSES:
@@ -390,7 +390,7 @@ class A2ARuntimeCompletionHandler:
                 session.last_message_at = now
 
                 if mode in {"consult", "task_delegate"}:
-                    await TransactionalAgentRuntimeAdapter(db).resume_run(
+                    await RuntimeCommandIntake(db).resume_run(
                         ResumeRunCommand(
                             tenant_id=run.tenant_id,
                             run_id=source_run.id,

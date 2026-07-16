@@ -1,11 +1,10 @@
-"""Checkpoint-owned multi-Agent planning model and deterministic transitions."""
+"""Planning v2 model contract and terminal checkpoint transition."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
-import re
 from typing import Protocol, cast
 import uuid
 
@@ -17,7 +16,10 @@ from app.services.agent_runtime.model_capabilities import (
     ModelCapabilityError,
     ModelCapabilityResolver,
 )
-from app.services.agent_runtime.node_executor import RuntimeCancelSource
+from app.services.agent_runtime.node_executor import (
+    RuntimeCancelSource,
+    RuntimeInvocationCancelled,
+)
 from app.services.agent_runtime.state import (
     JsonObject,
     JsonValue,
@@ -34,31 +36,31 @@ from app.services.llm.utils import get_max_tokens
 
 
 _PLANNING_ROLE = "group_planning"
-_PLAN_VERSION = 1
-_EXECUTION_STRATEGIES = frozenset({"parallel", "sequential", "dependency"})
-_STEP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_STEP_TERMINAL = frozenset({"completed", "failed", "cancelled", "blocked"})
-_MAX_PLAN_STEPS = 50
-_MAX_APPLIED_COMMAND_IDS = 64
+_PLAN_VERSION = 2
+_PLAN_MODES = frozenset({"advisory", "enforced"})
+_MAX_ENTRY_STEPS = 50
+_PLAN_FIELDS = frozenset({"version", "mode", "goal", "plan_prompt", "entry_steps"})
+_ENTRY_FIELDS = frozenset({"agent_id", "instruction"})
 
 _SYSTEM_PROMPT = """You are Clawith's internal multi-Agent planning component.
 Return exactly one JSON object and no Markdown. Never call tools and never do the work yourself.
 Use only candidate agent_id values supplied by the caller.
-Schema:
+Return exactly this schema and no additional fields:
 {
-  "version": 1,
+  "version": 2,
+  "mode": "advisory | enforced",
   "goal": "collaboration goal",
-  "execution_strategy": "parallel | sequential | dependency",
-  "steps": [
+  "plan_prompt": "complete plan, roles, transitions, branches, and completion rules",
+  "entry_steps": [
     {
-      "step_id": "stable-id",
       "agent_id": "candidate UUID",
-      "instruction": "work assigned to that Agent",
-      "depends_on_step_ids": []
+      "instruction": "this entry Agent's current responsibility"
     }
   ]
 }
-parallel means every dependency list is empty. sequential means each step after the first depends only on the immediately previous step. dependency is any other acyclic dependency graph. Preserve explicit user assignments and ordering."""
+Set mode to enforced only when the human explicitly specified workflow constraints such as Agent assignments, order, rounds, dependencies, branches, or completion conditions. Otherwise use advisory.
+entry_steps starts only the first Agent or first parallel Agents. It may be a subset of candidates. Do not describe a DAG, step IDs, dependencies, progress, or later scheduling fields. Later collaboration proceeds through public Agent handoffs.
+plan_prompt must be complete enough for every later participating Agent to receive unchanged. Preserve the human's explicit constraints, but do not repeat platform rules or invent mandatory constraints."""
 
 
 class PlanningContractError(RuntimeError):
@@ -95,22 +97,59 @@ class PlanningCompletionPort(Protocol):
 def _required_text(value: object, *, field: str, max_length: int) -> str:
     if not isinstance(value, str) or not value.strip():
         raise PlanningContractError("invalid_plan", f"{field} must not be blank")
-    if len(value) > max_length:
+    normalized = value.strip()
+    if len(normalized) > max_length:
         raise PlanningContractError(
             "invalid_plan",
             f"{field} exceeds {max_length} characters",
         )
-    return value.strip()
+    return normalized
+
+
+def _require_exact_fields(
+    value: Mapping[object, object],
+    *,
+    expected: frozenset[str],
+    field: str,
+) -> None:
+    actual = set(value)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unsupported = sorted(str(key) for key in actual - expected)
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unsupported:
+            details.append("unsupported " + ", ".join(unsupported))
+        raise PlanningContractError(
+            "invalid_plan",
+            f"{field} must use the exact Planning v2 fields ({'; '.join(details)})",
+        )
+
+
+def _uuid_text(value: object, *, field: str) -> uuid.UUID:
+    if not isinstance(value, str):
+        raise PlanningContractError("invalid_plan", f"{field} must be a UUID string")
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
+        raise PlanningContractError(
+            "invalid_plan",
+            f"{field} must be a UUID string",
+        ) from exc
 
 
 def _candidate_agent_ids(state: RuntimeGraphState) -> frozenset[uuid.UUID]:
     candidates = state["snapshots"].initial_input.get("candidate_agents")
-    if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes, bytearray)):
+    if not isinstance(candidates, Sequence) or isinstance(
+        candidates,
+        (str, bytes, bytearray),
+    ):
         raise PlanningContractError(
             "invalid_planning_input",
             "candidate_agents must be an array",
         )
-    resolved: set[uuid.UUID] = set()
+    resolved: list[uuid.UUID] = []
     for candidate in candidates:
         if not isinstance(candidate, Mapping):
             raise PlanningContractError(
@@ -124,8 +163,8 @@ def _candidate_agent_ids(state: RuntimeGraphState) -> frozenset[uuid.UUID]:
                 "invalid_planning_input",
                 "candidate agent_id must be a UUID",
             ) from exc
-        resolved.add(agent_id)
-    if len(resolved) < 2:
+        resolved.append(agent_id)
+    if len(resolved) < 2 or len(set(resolved)) != len(resolved):
         raise PlanningContractError(
             "invalid_planning_input",
             "Planning requires at least two distinct candidate Agents",
@@ -133,164 +172,87 @@ def _candidate_agent_ids(state: RuntimeGraphState) -> frozenset[uuid.UUID]:
     return frozenset(resolved)
 
 
-def _has_cycle(steps: list[JsonObject]) -> bool:
-    dependencies = {
-        cast(str, step["step_id"]): set(cast(list[str], step["depends_on_step_ids"]))
-        for step in steps
-    }
-    ready = [step_id for step_id, values in dependencies.items() if not values]
-    visited = 0
-    while ready:
-        completed = ready.pop()
-        visited += 1
-        for step_id, values in dependencies.items():
-            if completed not in values:
-                continue
-            values.remove(completed)
-            if not values:
-                ready.append(step_id)
-    return visited != len(dependencies)
-
-
-def _is_sequential(steps: list[JsonObject]) -> bool:
-    for index, step in enumerate(steps):
-        dependencies = cast(list[str], step["depends_on_step_ids"])
-        expected = [] if index == 0 else [cast(str, steps[index - 1]["step_id"])]
-        if dependencies != expected:
-            return False
-    return True
-
-
 def validate_planning_output(
     raw: object,
     *,
     candidate_agent_ids: frozenset[uuid.UUID],
 ) -> JsonObject:
-    """Validate and normalize model output before it can enter a checkpoint."""
+    """Validate only Planning v2 structure and candidate scope."""
     if not isinstance(raw, Mapping):
         raise PlanningContractError("invalid_plan", "Planning output must be an object")
+    _require_exact_fields(raw, expected=_PLAN_FIELDS, field="Planning output")
     if raw.get("version") != _PLAN_VERSION:
-        raise PlanningContractError("invalid_plan", "Planning output version must be 1")
-    goal = _required_text(raw.get("goal"), field="goal", max_length=10_000)
-    strategy = raw.get("execution_strategy")
-    if strategy not in _EXECUTION_STRATEGIES:
+        raise PlanningContractError("invalid_plan", "Planning output version must be 2")
+    mode = raw.get("mode")
+    if mode not in _PLAN_MODES:
         raise PlanningContractError(
             "invalid_plan",
-            "execution_strategy must be parallel, sequential, or dependency",
+            "mode must be advisory or enforced",
         )
-    raw_steps = raw.get("steps")
+    goal = _required_text(raw.get("goal"), field="goal", max_length=10_000)
+    plan_prompt = _required_text(
+        raw.get("plan_prompt"),
+        field="plan_prompt",
+        max_length=40_000,
+    )
+    raw_entries = raw.get("entry_steps")
     if (
-        not isinstance(raw_steps, Sequence)
-        or isinstance(raw_steps, (str, bytes, bytearray))
-        or not raw_steps
-        or len(raw_steps) > _MAX_PLAN_STEPS
+        not isinstance(raw_entries, Sequence)
+        or isinstance(raw_entries, (str, bytes, bytearray))
+        or not raw_entries
+        or len(raw_entries) > _MAX_ENTRY_STEPS
     ):
         raise PlanningContractError(
             "invalid_plan",
-            f"steps must contain between 1 and {_MAX_PLAN_STEPS} entries",
+            f"entry_steps must contain between 1 and {_MAX_ENTRY_STEPS} entries",
         )
 
-    steps: list[JsonObject] = []
-    step_ids: set[str] = set()
-    for raw_step in raw_steps:
-        if not isinstance(raw_step, Mapping):
-            raise PlanningContractError("invalid_plan", "each step must be an object")
-        step_id = _required_text(
-            raw_step.get("step_id"),
-            field="step_id",
-            max_length=64,
-        )
-        if not _STEP_ID.fullmatch(step_id):
+    entries: list[JsonObject] = []
+    seen_agents: set[uuid.UUID] = set()
+    for index, raw_entry in enumerate(raw_entries):
+        if not isinstance(raw_entry, Mapping):
             raise PlanningContractError(
                 "invalid_plan",
-                "step_id may contain only letters, numbers, underscore, and hyphen",
+                "each entry_steps item must be an object",
             )
-        if step_id in step_ids:
-            raise PlanningContractError("invalid_plan", "step_id values must be unique")
-        step_ids.add(step_id)
-        try:
-            agent_id = uuid.UUID(str(raw_step.get("agent_id")))
-        except (TypeError, ValueError) as exc:
-            raise PlanningContractError("invalid_plan", "step agent_id must be a UUID") from exc
+        _require_exact_fields(
+            raw_entry,
+            expected=_ENTRY_FIELDS,
+            field=f"entry_steps[{index}]",
+        )
+        agent_id = _uuid_text(
+            raw_entry.get("agent_id"),
+            field=f"entry_steps[{index}].agent_id",
+        )
         if agent_id not in candidate_agent_ids:
             raise PlanningContractError(
                 "invalid_plan",
-                "step agent_id is not one of the mentioned candidate Agents",
+                "entry agent_id is not one of the mentioned candidate Agents",
             )
+        if agent_id in seen_agents:
+            raise PlanningContractError(
+                "invalid_plan",
+                "entry agent_id values must be unique",
+            )
+        seen_agents.add(agent_id)
         instruction = _required_text(
-            raw_step.get("instruction"),
-            field="instruction",
+            raw_entry.get("instruction"),
+            field=f"entry_steps[{index}].instruction",
             max_length=20_000,
         )
-        dependencies = raw_step.get("depends_on_step_ids", [])
-        if not isinstance(dependencies, list) or any(
-            not isinstance(dependency, str) or not dependency for dependency in dependencies
-        ):
-            raise PlanningContractError(
-                "invalid_plan",
-                "depends_on_step_ids must be an array of step IDs",
-            )
-        if len(dependencies) != len(set(dependencies)):
-            raise PlanningContractError(
-                "invalid_plan",
-                "depends_on_step_ids must not contain duplicates",
-            )
-        steps.append(
+        entries.append(
             {
-                "step_id": step_id,
                 "agent_id": str(agent_id),
                 "instruction": instruction,
-                "depends_on_step_ids": list(dependencies),
-                "status": "pending",
-                "child_run_id": None,
-                "result_summary": None,
-                "error": None,
             }
         )
 
-    for step in steps:
-        step_id = cast(str, step["step_id"])
-        dependencies = cast(list[str], step["depends_on_step_ids"])
-        if step_id in dependencies or any(dependency not in step_ids for dependency in dependencies):
-            raise PlanningContractError(
-                "invalid_plan",
-                "step dependencies must reference other steps in the same plan",
-            )
-    if _has_cycle(steps):
-        raise PlanningContractError("invalid_plan", "step dependencies must be acyclic")
-
-    planned_agent_ids = {
-        uuid.UUID(cast(str, step["agent_id"]))
-        for step in steps
-    }
-    if planned_agent_ids != candidate_agent_ids:
-        raise PlanningContractError(
-            "invalid_plan",
-            "every mentioned candidate Agent must receive at least one step",
-        )
-
-    all_parallel = all(not cast(list[str], step["depends_on_step_ids"]) for step in steps)
-    sequential = _is_sequential(steps)
-    if strategy == "parallel" and not all_parallel:
-        raise PlanningContractError(
-            "invalid_plan",
-            "parallel strategy cannot contain dependencies",
-        )
-    if strategy == "sequential" and not sequential:
-        raise PlanningContractError(
-            "invalid_plan",
-            "sequential strategy must form one ordered dependency chain",
-        )
-    if strategy == "dependency" and (all_parallel or sequential):
-        raise PlanningContractError(
-            "invalid_plan",
-            "dependency strategy must describe a non-parallel, non-linear DAG",
-        )
     return {
         "version": _PLAN_VERSION,
+        "mode": cast(str, mode),
         "goal": goal,
-        "execution_strategy": cast(str, strategy),
-        "steps": steps,
+        "plan_prompt": plan_prompt,
+        "entry_steps": entries,
     }
 
 
@@ -323,9 +285,9 @@ class PlanningModelService:
         self._session_factory = session_factory
         self._completion = completion
 
-    async def _load_model(self, state: RuntimeGraphState) -> LLMModel:
+    async def _load_model(self, context: RuntimeContext) -> LLMModel:
         try:
-            model_id = uuid.UUID(state["registry"].model_id)
+            model_id = uuid.UUID(context.model_id)
         except ValueError as exc:
             raise PlanningContractError(
                 "planning_model_unavailable",
@@ -355,10 +317,14 @@ class PlanningModelService:
             ) from exc
         return model
 
-    async def complete_once(self, state: RuntimeGraphState) -> PlanningModelResult:
+    async def complete_once(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+    ) -> PlanningModelResult:
         try:
             candidates = _candidate_agent_ids(state)
-            model = await self._load_model(state)
+            model = await self._load_model(context)
         except PlanningContractError as exc:
             return PlanningModelResult(
                 error_code=exc.code,
@@ -374,8 +340,11 @@ class PlanningModelService:
                 "validation_error": planning_state.get("last_error"),
             }
         request = {
-            "user_goal": state["registry"].goal,
-            "candidate_agents": state["snapshots"].initial_input.get("candidate_agents", []),
+            "user_goal": context.goal,
+            "candidate_agents": state["snapshots"].initial_input.get(
+                "candidate_agents",
+                [],
+            ),
             "explicit_user_plan_has_priority": True,
             "repair": repair_context,
         }
@@ -423,95 +392,27 @@ class PlanningModelService:
 
 
 def checkpoint_plan(state: RuntimeGraphState) -> JsonObject:
+    """Revalidate the immutable v2 plan against its frozen candidate scope."""
     planning = state["lifecycle"].get("planning")
     if not isinstance(planning, Mapping):
         raise PlanningContractError(
             "invalid_planning_checkpoint",
-            "Planning checkpoint has no plan state",
+            "Planning checkpoint has no v2 plan",
         )
-    steps = planning.get("steps")
-    if not isinstance(steps, list) or any(not isinstance(step, Mapping) for step in steps):
+    try:
+        return validate_planning_output(
+            planning,
+            candidate_agent_ids=_candidate_agent_ids(state),
+        )
+    except PlanningContractError as exc:
         raise PlanningContractError(
             "invalid_planning_checkpoint",
-            "Planning checkpoint steps are malformed",
-        )
-    return cast(JsonObject, dict(planning))
-
-
-def ready_plan_steps(plan: Mapping[str, object]) -> tuple[JsonObject, ...]:
-    raw_steps = plan.get("steps")
-    if not isinstance(raw_steps, list):
-        raise PlanningContractError(
-            "invalid_planning_checkpoint",
-            "Planning checkpoint steps are malformed",
-        )
-    steps = [cast(Mapping[str, object], step) for step in raw_steps if isinstance(step, Mapping)]
-    if len(steps) != len(raw_steps):
-        raise PlanningContractError(
-            "invalid_planning_checkpoint",
-            "Planning checkpoint steps are malformed",
-        )
-    status_by_id = {str(step.get("step_id")): step.get("status") for step in steps}
-    ready = []
-    for step in steps:
-        if step.get("status") != "pending":
-            continue
-        dependencies = step.get("depends_on_step_ids")
-        if not isinstance(dependencies, list):
-            raise PlanningContractError(
-                "invalid_planning_checkpoint",
-                "Planning step dependencies are malformed",
-            )
-        if all(status_by_id.get(str(dependency)) == "completed" for dependency in dependencies):
-            ready.append(cast(JsonObject, dict(step)))
-    return tuple(ready)
-
-
-def _append_command_id(lifecycle: Mapping[str, object], command_id: str) -> list[str]:
-    values = lifecycle.get("last_applied_command_ids", [])
-    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
-        raise PlanningContractError(
-            "invalid_checkpoint_command_ids",
-            "Planning checkpoint command IDs are malformed",
-        )
-    return [* [value for value in values if value != command_id], command_id][
-        -_MAX_APPLIED_COMMAND_IDS:
-    ]
-
-
-def _waiting_request(run_id: str) -> JsonObject:
-    return {
-        "waiting_type": "agent",
-        "correlation_id": f"planning:{run_id}",
-        "reason": "Waiting for planned Agent steps to finish.",
-    }
-
-
-def _step_result_summary(steps: list[JsonObject]) -> JsonObject:
-    artifact_refs: list[JsonValue] = []
-    for step in steps:
-        result = step.get("result_summary")
-        if isinstance(result, Mapping):
-            refs = result.get("artifact_refs")
-            if isinstance(refs, list):
-                artifact_refs.extend(cast(list[JsonValue], refs))
-    return {
-        "summary": "Group planning coordination finished.",
-        "steps": [
-            {
-                "step_id": step.get("step_id"),
-                "agent_id": step.get("agent_id"),
-                "status": step.get("status"),
-                "child_run_id": step.get("child_run_id"),
-            }
-            for step in steps
-        ],
-        "artifact_refs": artifact_refs,
-    }
+            f"Planning checkpoint plan is invalid: {exc}",
+        ) from exc
 
 
 class PlanningRuntimeNodeExecutor:
-    """Advance only the Planning Graph's checkpoint-owned orchestration state."""
+    """Produce one immutable v2 plan and terminate the Planning Run."""
 
     def __init__(
         self,
@@ -527,9 +428,8 @@ class PlanningRuntimeNodeExecutor:
         self._max_repairs = max_repairs
 
     @staticmethod
-    def _require_planning_run(state: RuntimeGraphState) -> None:
-        registry = state["registry"]
-        if registry.system_role != _PLANNING_ROLE or registry.agent_id is not None:
+    def _require_planning_run(context: RuntimeContext) -> None:
+        if context.system_role != _PLANNING_ROLE or context.agent_id is not None:
             raise PlanningContractError(
                 "planning_identity_mismatch",
                 "Planning executor requires the group_planning system Run",
@@ -546,21 +446,19 @@ class PlanningRuntimeNodeExecutor:
             return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
         cancel = await self._cancel_source.get_cancel(state, context)
         if cancel is not None:
-            lifecycle.update(
-                {
-                    "status": "cancelled",
-                    "next_route": "terminal",
-                    "reason": cancel.reason or "cancelled_by_command",
-                    "last_applied_command_ids": _append_command_id(
-                        lifecycle,
-                        cancel.command_id,
-                    ),
-                    "waiting_request": None,
-                }
-            )
+            if not cancel.command_id:
+                raise PlanningContractError(
+                    "invalid_cancel_command",
+                    "cancel command ID must not be blank",
+                )
+            raise RuntimeInvocationCancelled(cancel)
         return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
 
-    async def _model(self, state: RuntimeGraphState) -> RuntimeStateUpdate:
+    async def _model(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+    ) -> RuntimeStateUpdate:
         lifecycle = dict(state["lifecycle"])
         attempt = lifecycle.get("planning_attempt_count", 0)
         if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
@@ -569,15 +467,16 @@ class PlanningRuntimeNodeExecutor:
                 "planning_attempt_count must be a non-negative integer",
             )
         attempt += 1
-        result = await self._model_service.complete_once(state)
+        result = await self._model_service.complete_once(state, context)
         lifecycle["planning_attempt_count"] = attempt
         if result.plan is not None:
             lifecycle.update(
                 {
-                    "status": "waiting_agent",
-                    "next_route": "wait",
+                    "status": "completed",
+                    "next_route": "terminal",
+                    "reason": "planning_v2_ready",
                     "planning": dict(result.plan),
-                    "waiting_request": _waiting_request(state["registry"].run_id),
+                    "waiting_request": None,
                     "error": None,
                 }
             )
@@ -610,130 +509,6 @@ class PlanningRuntimeNodeExecutor:
         )
         return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
 
-    @staticmethod
-    def _apply_child_result(
-        state: RuntimeGraphState,
-        resume_value: JsonValue | None,
-    ) -> RuntimeStateUpdate:
-        if not isinstance(resume_value, Mapping):
-            raise PlanningContractError(
-                "invalid_planning_resume",
-                "Planning resume value must be an object",
-            )
-        if resume_value.get("resume_type") != "agent_result":
-            raise PlanningContractError(
-                "invalid_planning_resume",
-                "Planning only accepts agent_result resumes",
-            )
-        expected_correlation = f"planning:{state['registry'].run_id}"
-        if resume_value.get("correlation_id") != expected_correlation:
-            raise PlanningContractError(
-                "invalid_planning_resume",
-                "Planning resume correlation does not match the root Run",
-            )
-        payload = resume_value.get("payload")
-        if not isinstance(payload, Mapping):
-            raise PlanningContractError(
-                "invalid_planning_resume",
-                "Planning resume payload must be an object",
-            )
-        step_id = payload.get("step_id")
-        status = payload.get("status")
-        child_run_id = payload.get("child_run_id")
-        if not isinstance(step_id, str) or status not in {"completed", "failed", "cancelled"}:
-            raise PlanningContractError(
-                "invalid_planning_resume",
-                "Planning resume requires a step ID and terminal child status",
-            )
-        if child_run_id is not None:
-            try:
-                uuid.UUID(str(child_run_id))
-            except (TypeError, ValueError) as exc:
-                raise PlanningContractError(
-                    "invalid_planning_resume",
-                    "Planning child_run_id must be a UUID",
-                ) from exc
-
-        lifecycle = dict(state["lifecycle"])
-        plan = checkpoint_plan(state)
-        steps = [dict(cast(Mapping[str, JsonValue], step)) for step in cast(list, plan["steps"])]
-        target = next((step for step in steps if step.get("step_id") == step_id), None)
-        if target is None:
-            raise PlanningContractError(
-                "invalid_planning_resume",
-                "Planning resume references an unknown step",
-            )
-        current_status = target.get("status")
-        if current_status in _STEP_TERMINAL:
-            if current_status != status or target.get("child_run_id") != child_run_id:
-                raise PlanningContractError(
-                    "planning_result_conflict",
-                    "Planning step already has a different terminal result",
-                )
-        else:
-            target.update(
-                {
-                    "status": cast(str, status),
-                    "child_run_id": str(child_run_id) if child_run_id is not None else None,
-                    "result_summary": payload.get("result_summary"),
-                    "error": payload.get("error"),
-                }
-            )
-
-        changed = True
-        while changed:
-            changed = False
-            status_by_id = {str(step["step_id"]): step.get("status") for step in steps}
-            for step in steps:
-                if step.get("status") != "pending":
-                    continue
-                dependencies = cast(list[str], step.get("depends_on_step_ids", []))
-                if any(
-                    status_by_id.get(dependency) in {"failed", "cancelled", "blocked"}
-                    for dependency in dependencies
-                ):
-                    step.update(
-                        {
-                            "status": "blocked",
-                            "error": {
-                                "code": "dependency_failed",
-                                "message": "A dependency did not complete successfully.",
-                            },
-                        }
-                    )
-                    changed = True
-
-        plan["steps"] = steps
-        lifecycle["planning"] = plan
-        if all(step.get("status") in _STEP_TERMINAL for step in steps):
-            success = all(step.get("status") == "completed" for step in steps)
-            lifecycle.update(
-                {
-                    "status": "completed" if success else "failed",
-                    "next_route": "terminal",
-                    "waiting_request": None,
-                    "final_answer": "Group collaboration completed." if success else None,
-                    "result_summary": _step_result_summary(steps),
-                    "error": (
-                        None
-                        if success
-                        else {
-                            "code": "planning_child_failed",
-                            "message": "One or more planned Agent steps did not complete.",
-                        }
-                    ),
-                }
-            )
-        else:
-            lifecycle.update(
-                {
-                    "status": "waiting_agent",
-                    "next_route": "wait",
-                    "waiting_request": _waiting_request(state["registry"].run_id),
-                }
-            )
-        return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
-
     async def execute(
         self,
         node: RuntimeNodeName,
@@ -742,13 +517,12 @@ class PlanningRuntimeNodeExecutor:
         *,
         resume_value: JsonValue | None = None,
     ) -> RuntimeStateUpdate:
-        self._require_planning_run(state)
+        del resume_value
+        self._require_planning_run(context)
         if node == "control_guard":
             return await self._control(state, context)
         if node == "model":
-            return await self._model(state)
-        if node == "wait":
-            return self._apply_child_result(state, resume_value)
+            return await self._model(state, context)
         if node == "terminal":
             return {"lifecycle": dict(state["lifecycle"])}
         raise PlanningContractError(
@@ -777,11 +551,7 @@ class RuntimeNodeExecutorRouter:
         *,
         resume_value: JsonValue | None = None,
     ) -> RuntimeStateUpdate:
-        executor = (
-            self._planning_executor
-            if state["registry"].system_role == _PLANNING_ROLE
-            else self._agent_executor
-        )
+        executor = self._planning_executor if context.system_role == _PLANNING_ROLE else self._agent_executor
         return await executor.execute(
             node,
             state,
@@ -797,6 +567,5 @@ __all__ = [
     "PlanningRuntimeNodeExecutor",
     "RuntimeNodeExecutorRouter",
     "checkpoint_plan",
-    "ready_plan_steps",
     "validate_planning_output",
 ]

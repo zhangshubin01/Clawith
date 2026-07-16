@@ -108,7 +108,17 @@ def _records(
         run_id=run_id,
         thread_id=str(run_id),
         runtime_type="langgraph",
-        registry=registry,
+        goal=registry.goal,
+        run_kind=registry.run_kind,
+        source_type=registry.source_type,
+        model_id=registry.model_id,
+        graph_name=registry.graph_name,
+        graph_version=registry.graph_version,
+        agent_id=registry.agent_id,
+        session_id=registry.session_id,
+        system_role=registry.system_role,
+        parent_run_id=registry.parent_run_id,
+        root_run_id=registry.root_run_id,
     )
     lifecycle = {
         "status": status,

@@ -197,6 +197,7 @@ class SessionContextPack:
     snapshot: SessionContextSnapshot
     recent_messages: tuple[JsonObject, ...]
     pending_messages: tuple[JsonObject, ...] = ()
+    requires_transient_rebuild: bool = False
 
 
 def _copy_json_value(value: object, field: str) -> JsonValue:
@@ -402,6 +403,45 @@ def _after_watermark(message, watermark: MessagePosition):
     )
 
 
+def _at_or_before(message, cutoff: MessagePosition):
+    return or_(
+        message.created_at < cutoff.created_at,
+        and_(
+            message.created_at == cutoff.created_at,
+            message.id <= cutoff.message_id,
+        ),
+    )
+
+
+def _recent_message_ids_through_statement(
+    tenant_id: uuid.UUID,
+    session_id: uuid.UUID,
+    *,
+    cutoff: MessagePosition,
+    recent_limit: int,
+):
+    recent_message = aliased(ChatMessage)
+    recent_session = aliased(ChatSession)
+    return (
+        select(recent_message.id)
+        .join(
+            recent_session,
+            recent_message.conversation_id == sa_cast(recent_session.id, String),
+        )
+        .where(
+            recent_session.tenant_id == tenant_id,
+            recent_session.id == session_id,
+            recent_session.deleted_at.is_(None),
+            recent_message.conversation_id == sa_cast(recent_session.id, String),
+            recent_message.role.in_(_USER_VISIBLE_ROLES),
+            recent_message.created_at.is_not(None),
+            _at_or_before(recent_message, cutoff),
+        )
+        .order_by(recent_message.created_at.desc(), recent_message.id.desc())
+        .limit(recent_limit)
+    )
+
+
 def _compactable_messages_statement(
     tenant_id: uuid.UUID,
     session_id: uuid.UUID,
@@ -451,6 +491,40 @@ def _context_pack_messages_statement(
             ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
         )
         .where(*_message_scope(tenant_id, session_id))
+    )
+    if watermark is not None:
+        statement = statement.where(
+            or_(is_recent, _after_watermark(ChatMessage, watermark))
+        )
+    return statement.order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+
+
+def _context_pack_messages_through_statement(
+    tenant_id: uuid.UUID,
+    session_id: uuid.UUID,
+    watermark: MessagePosition | None,
+    *,
+    cutoff: MessagePosition,
+    recent_limit: int,
+):
+    """Select one context pack whose every message is at or before cutoff."""
+    recent_ids = _recent_message_ids_through_statement(
+        tenant_id,
+        session_id,
+        cutoff=cutoff,
+        recent_limit=recent_limit,
+    )
+    is_recent = ChatMessage.id.in_(recent_ids)
+    statement = (
+        select(ChatMessage, is_recent.label("is_recent"))
+        .join(
+            ChatSession,
+            ChatMessage.conversation_id == sa_cast(ChatSession.id, String),
+        )
+        .where(
+            *_message_scope(tenant_id, session_id),
+            _at_or_before(ChatMessage, cutoff),
+        )
     )
     if watermark is not None:
         statement = statement.where(
@@ -514,6 +588,25 @@ class SessionContextService:
     def _expected_agent_id(session: ChatSession) -> uuid.UUID | None:
         return None if session.session_type == "group" else session.agent_id
 
+    async def _load_state_for_session(
+        self,
+        db: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        session: ChatSession,
+    ) -> SessionContextState | None:
+        result = await db.execute(_state_statement(tenant_id, session.id))
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        expected_agent_id = self._expected_agent_id(session)
+        if row.agent_id != expected_agent_id:
+            raise SessionContextError(
+                "invalid_session_context_scope",
+                "persisted Session Context agent scope does not match its session",
+            )
+        return row
+
     async def _load_snapshot_for_session(
         self,
         db: AsyncSession,
@@ -521,17 +614,12 @@ class SessionContextService:
         tenant_id: uuid.UUID,
         session: ChatSession,
     ) -> SessionContextSnapshot:
-        result = await db.execute(_state_statement(tenant_id, session.id))
-        row = result.scalar_one_or_none()
-        if row is None:
-            return SessionContextSnapshot.empty()
-        expected_agent_id = self._expected_agent_id(session)
-        if row.agent_id != expected_agent_id:
-            raise SessionContextError(
-                "invalid_session_context_scope",
-                "persisted Session Context agent scope does not match its session",
-            )
-        return _snapshot_from_row(row)
+        row = await self._load_state_for_session(
+            db,
+            tenant_id=tenant_id,
+            session=session,
+        )
+        return SessionContextSnapshot.empty() if row is None else _snapshot_from_row(row)
 
     async def load_snapshot(
         self,
@@ -629,6 +717,101 @@ class SessionContextService:
             snapshot=snapshot,
             recent_messages=tuple(recent_messages),
             pending_messages=tuple(pending_messages),
+        )
+
+    async def load_context_pack_through(
+        self,
+        db: AsyncSession,
+        *,
+        tenant_id: uuid.UUID,
+        session_id: uuid.UUID,
+        cutoff: MessagePosition,
+    ) -> SessionContextPack:
+        """Capture one Group pack bounded by an authoritative trigger position."""
+        if cutoff.created_at.tzinfo is None or cutoff.created_at.utcoffset() is None:
+            raise SessionContextError(
+                "session_context_cutoff_mismatch",
+                "Group context cutoff must include a timezone",
+            )
+        session = await self._require_active_session(
+            db,
+            tenant_id=tenant_id,
+            session_id=session_id,
+        )
+        if session.session_type != "group":
+            raise SessionContextError(
+                "session_context_cutoff_scope_mismatch",
+                "Cutoff-specific Session Context is only valid for Group sessions",
+            )
+        state = await self._load_state_for_session(
+            db,
+            tenant_id=tenant_id,
+            session=session,
+        )
+        snapshot = (
+            SessionContextSnapshot.empty()
+            if state is None
+            else _snapshot_from_row(state)
+        )
+        authoritative_cutoff = await self._resolve_position(
+            db,
+            tenant_id=tenant_id,
+            session_id=session.id,
+            message_id=cutoff.message_id,
+        )
+        if authoritative_cutoff.sort_key != cutoff.sort_key:
+            raise SessionContextError(
+                "session_context_cutoff_mismatch",
+                "Group context cutoff differs from the authoritative trigger position",
+            )
+
+        watermark = None
+        if snapshot.covered_through_message_id is not None:
+            watermark = await self._resolve_position(
+                db,
+                tenant_id=tenant_id,
+                session_id=session.id,
+                message_id=snapshot.covered_through_message_id,
+            )
+        state_updated_after_cutoff = False
+        if state is not None:
+            updated_at = state.updated_at
+            state_updated_after_cutoff = (
+                updated_at is None
+                or updated_at.tzinfo is None
+                or updated_at.utcoffset() is None
+                or updated_at > cutoff.created_at
+            )
+        requires_rebuild = (
+            snapshot.version > 0
+            and (watermark is None or state_updated_after_cutoff)
+        ) or (
+            watermark is not None
+            and watermark.sort_key > cutoff.sort_key
+        )
+        selected_snapshot = (
+            SessionContextSnapshot.empty() if requires_rebuild else snapshot
+        )
+        selected_watermark = None if requires_rebuild else watermark
+        messages_result = await db.execute(
+            _context_pack_messages_through_statement(
+                tenant_id,
+                session.id,
+                selected_watermark,
+                cutoff=cutoff,
+                recent_limit=self.recent_message_limit,
+            )
+        )
+        pending_messages = []
+        recent_messages = []
+        for message, is_recent in messages_result.all():
+            serialized = _message_to_json(message)
+            (recent_messages if is_recent else pending_messages).append(serialized)
+        return SessionContextPack(
+            snapshot=selected_snapshot,
+            recent_messages=tuple(recent_messages),
+            pending_messages=tuple(pending_messages),
+            requires_transient_rebuild=requires_rebuild,
         )
 
     async def _resolve_position(

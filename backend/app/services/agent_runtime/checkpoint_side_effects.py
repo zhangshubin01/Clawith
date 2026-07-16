@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Protocol, cast
 
 from sqlalchemy import select
@@ -19,7 +20,6 @@ from app.services.agent_runtime.delivery import (
     DeliveryRequest,
     deliver_runtime_message,
 )
-from app.services.agent_runtime.projector import RuntimeProjector
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -59,17 +59,24 @@ class RuntimeCheckpointProductHandler(Protocol):
 def _validate_scope(
     run: RuntimeRunRecord,
     command: RuntimeCommandRecord,
-    checkpoint: CheckpointObservation,
-) -> str:
+    checkpoint: CheckpointObservation | None,
+) -> str | None:
     if command.tenant_id != run.tenant_id or command.run_id != run.run_id:
         raise RuntimeCheckpointSideEffectError(
             "command_scope_mismatch",
             "post-checkpoint command does not belong to the Run",
         )
-    if checkpoint.state["registry"] != run.registry:
+    if checkpoint is None:
+        if command.command_type != "cancel":
+            raise RuntimeCheckpointSideEffectError(
+                "missing_checkpoint",
+                "only cancel-before-start may synchronize without a checkpoint",
+            )
+        return None
+    if checkpoint.metadata.get("clawith_run_id") != str(run.run_id):
         raise RuntimeCheckpointSideEffectError(
             "checkpoint_identity_mismatch",
-            "post-checkpoint state does not match the Run Registry",
+            "post-checkpoint metadata does not match the Run Registry",
         )
     checkpoint_id = checkpoint.checkpoint_id.strip()
     if not checkpoint_id:
@@ -139,13 +146,30 @@ def _terminal_content(checkpoint: CheckpointObservation, *, status: str) -> str:
     return final_answer or ""
 
 
+def _terminal_group_handoff(
+    checkpoint: CheckpointObservation,
+) -> dict | None:
+    raw_request = checkpoint.state["lifecycle"].get("delivery_request")
+    if not isinstance(raw_request, Mapping):
+        return None
+    raw_handoff = raw_request.get("group_handoff")
+    if raw_handoff is None:
+        return None
+    if not isinstance(raw_handoff, Mapping):
+        raise RuntimeCheckpointSideEffectError(
+            "invalid_delivery_request",
+            "checkpoint group_handoff intent must be an object",
+        )
+    return dict(raw_handoff)
+
+
 def delivery_from_checkpoint(
     run: RuntimeRunRecord,
     checkpoint: CheckpointObservation,
 ) -> DeliveryRequest | None:
     """Derive a user-visible request without consulting a product projection."""
     status = checkpoint.state["lifecycle"]["status"]
-    if run.registry.system_role == "group_planning" and status == "completed":
+    if run.system_role == "group_planning" and status == "completed":
         return None
     if status == "waiting_user":
         return _waiting_delivery(run, checkpoint)
@@ -158,22 +182,21 @@ def delivery_from_checkpoint(
         content=_terminal_content(checkpoint, status=status),
         checkpoint_id=checkpoint.checkpoint_id,
         lifecycle_status=cast(DeliveryLifecycleStatus, status),
+        group_handoff_intent=_terminal_group_handoff(checkpoint),
     )
 
 
 class RuntimeCheckpointSideEffects:
-    """Project and deliver one observed checkpoint using short transactions."""
+    """Synchronize products after an already-settled Graph/control boundary."""
 
     def __init__(
         self,
         *,
         session_factory: RuntimeSessionFactory,
-        projector: RuntimeProjector,
         checkpoint_handlers: Sequence[RuntimeCheckpointProductHandler] = (),
         terminal_handlers: Sequence[RuntimeTerminalProductHandler] = (),
     ) -> None:
         self._session_factory = session_factory
-        self._projector = projector
         self._checkpoint_handlers = tuple(checkpoint_handlers)
         self._terminal_handlers = tuple(terminal_handlers)
 
@@ -182,34 +205,49 @@ class RuntimeCheckpointSideEffects:
         *,
         run: RuntimeRunRecord,
         command: RuntimeCommandRecord,
-        checkpoint: CheckpointObservation,
+        checkpoint: CheckpointObservation | None,
     ) -> None:
-        checkpoint_id = _validate_scope(run, command, checkpoint)
-        authoritative_status = checkpoint.state["lifecycle"]["status"]
+        _validate_scope(run, command, checkpoint)
+        if checkpoint is None:
+            async with self._session_factory() as db:
+                async with db.begin():
+                    result = await db.execute(
+                        select(AgentRun).where(
+                            AgentRun.tenant_id == run.tenant_id,
+                            AgentRun.id == run.run_id,
+                        )
+                    )
+                    stored = result.scalar_one_or_none()
+                    if stored is None:
+                        raise RuntimeCheckpointSideEffectError(
+                            "run_not_found",
+                            "cancelled Run does not exist",
+                        )
+                    stored.lane_held = False
+                    stored.lane_claimed_at = None
+                    await db.flush()
+            return
 
-        async with self._session_factory() as db:
-            async with db.begin():
-                projection = await self._projector.project_run(
-                    db,
-                    tenant_id=run.tenant_id,
-                    run_id=run.run_id,
-                )
-                if projection.authoritative_status != authoritative_status:
-                    raise RuntimeCheckpointSideEffectError(
-                        "projection_checkpoint_mismatch",
-                        "projector latest status differs from the observed checkpoint",
-                    )
-                if (
-                    projection.applied_checkpoint_ids
-                    and checkpoint_id not in projection.applied_checkpoint_ids
-                ):
-                    raise RuntimeCheckpointSideEffectError(
-                        "projection_checkpoint_mismatch",
-                        "projector did not apply the observed checkpoint",
-                    )
+        product_checkpoint = checkpoint
+        if command.command_type == "cancel":
+            lifecycle = {
+                **checkpoint.state["lifecycle"],
+                "status": "cancelled",
+                "next_route": "terminal",
+                "reason": command.payload.get("reason") or "cancelled_by_command",
+                "waiting_request": None,
+            }
+            product_checkpoint = replace(
+                checkpoint,
+                state={**checkpoint.state, "lifecycle": lifecycle},
+                next_nodes=(),
+                tasks=(),
+                interrupts=(),
+            )
+        authoritative_status = product_checkpoint.state["lifecycle"]["status"]
 
         errors: list[Exception] = []
-        delivery = delivery_from_checkpoint(run, checkpoint)
+        delivery = delivery_from_checkpoint(run, product_checkpoint)
         if delivery is not None:
             try:
                 async with self._session_factory() as db:
@@ -235,7 +273,7 @@ class RuntimeCheckpointSideEffects:
             try:
                 await checkpoint_handler.handle(
                     run=run,
-                    checkpoint=checkpoint,
+                    checkpoint=product_checkpoint,
                 )
             except Exception as exc:
                 errors.append(exc)
@@ -245,7 +283,7 @@ class RuntimeCheckpointSideEffects:
                 try:
                     await terminal_handler.handle(
                         run=run,
-                        checkpoint=checkpoint,
+                        checkpoint=product_checkpoint,
                     )
                 except Exception as exc:
                     errors.append(exc)

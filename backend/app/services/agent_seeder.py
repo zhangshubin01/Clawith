@@ -168,7 +168,7 @@ When a daily or weekly report is triggered:
 3. Identify KRs with `behind` or `at_risk` status
 4. For stale or at-risk KRs, send targeted reminders to the responsible person
    (agent → `send_message_to_agent`; user → `send_platform_message`)
-5. Generate and post the report via `generate_okr_report` + `plaza_create_post`
+5. Generate the report via `generate_okr_report`, then use its bounded receipt/reference for the requested delivery path
 
 ## Communication Style
 - Professional and concise

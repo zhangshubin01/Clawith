@@ -1,4 +1,4 @@
-"""Committed Planning checkpoint scheduling and child resumption tests."""
+"""Planning v2 committed-checkpoint entry scheduling tests."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
-from app.models.group import Group, GroupMember
+from app.models.group import Group
 from app.models.llm import LLMModel
 from app.models.participant import Participant
 from app.services.agent_runtime.command_worker import (
@@ -25,16 +25,13 @@ from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
 from app.services.agent_runtime.planning import validate_planning_output
 from app.services.agent_runtime.planning_scheduler import (
     PlanningCheckpointScheduler,
-    PlanningChildCompletionHandler,
+    PlanningSchedulingError,
 )
-from app.services.agent_runtime.state import (
-    RunInputSnapshots,
-    RunRegistrySnapshot,
-    RuntimeGraphState,
-)
+from app.services.agent_runtime.state import RunInputSnapshots, RuntimeGraphState
+from app.services.group_message_service import ResolvedGroupMention, _SenderScope
 
 
-NOW = datetime(2026, 7, 14, 13, 0, tzinfo=UTC)
+NOW = datetime(2026, 7, 16, 14, 0, tzinfo=UTC)
 
 
 class _Result:
@@ -46,17 +43,31 @@ class _Result:
 
 
 class _Transaction:
+    def __init__(self, db: "_Session") -> None:
+        self.db = db
+        self.added_size = len(db.added)
+        self.delivery_status = db.root.delivery_status
+        self.rolled_back = False
+
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, traceback):
+        del exc, traceback
+        if exc_type is not None:
+            del self.db.added[self.added_size :]
+            self.db.root.delivery_status = self.delivery_status
+            self.rolled_back = True
         return False
 
 
 class _Session:
-    def __init__(self, *results: object | None) -> None:
-        self.results = deque(results)
+    def __init__(self, root: AgentRun, *results: object | None) -> None:
+        self.root = root
+        self.results = deque((root, *results))
         self.flushes = 0
+        self.added: list[object] = []
+        self.transaction: _Transaction | None = None
 
     async def __aenter__(self):
         return self
@@ -65,7 +76,8 @@ class _Session:
         return False
 
     def begin(self):
-        return _Transaction()
+        self.transaction = _Transaction(self)
+        return self.transaction
 
     async def execute(self, statement):
         del statement
@@ -75,6 +87,9 @@ class _Session:
 
     async def flush(self):
         self.flushes += 1
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
 
 
 class _SessionFactory:
@@ -89,20 +104,125 @@ def _settings() -> Settings:
     return Settings(
         _env_file=None,
         AGENT_RUNTIME_V2_ENABLED=True,
+        AGENT_RUNTIME_V2_SOURCE_TYPES="chat,a2a",
         AGENT_RUNTIME_GRAPH_NAME="runtime",
         AGENT_RUNTIME_GRAPH_VERSION="v1",
     )
 
 
+def _target(
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+) -> ResolvedGroupMention:
+    model = LLMModel(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        provider="openai",
+        model="child-model",
+        api_key_encrypted="encrypted",
+        label=f"{name} Model",
+        enabled=True,
+    )
+    agent = Agent(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        creator_id=uuid.uuid4(),
+        name=name,
+        primary_model_id=model.id,
+        status="idle",
+        is_expired=False,
+        access_mode="company",
+        max_tool_rounds=50,
+    )
+    return ResolvedGroupMention(
+        participant_id=uuid.uuid4(),
+        participant_type="agent",
+        participant_ref_id=agent.id,
+        display_name=name,
+        valid=True,
+        triggers_agent=True,
+        agent=agent,
+        model=model,
+    )
+
+
 def _records():
     tenant_id = uuid.uuid4()
-    session_id = uuid.uuid4()
     group_id = uuid.uuid4()
+    session_id = uuid.uuid4()
     message_id = uuid.uuid4()
     root_id = uuid.uuid4()
-    sender_participant_id = uuid.uuid4()
-    first_agent_id, second_agent_id = uuid.uuid4(), uuid.uuid4()
-    planning_model_id = uuid.uuid4()
+    origin_user_id = uuid.uuid4()
+    sender = Participant(
+        id=uuid.uuid4(),
+        type="user",
+        ref_id=origin_user_id,
+        display_name="Requestor",
+    )
+    group = Group(
+        id=group_id,
+        tenant_id=tenant_id,
+        name="Planning Group",
+        created_by_participant_id=sender.id,
+    )
+    session = ChatSession(
+        id=session_id,
+        tenant_id=tenant_id,
+        session_type="group",
+        group_id=group_id,
+        title="Planning Group",
+        source_channel="web",
+        is_group=True,
+        is_primary=True,
+        created_by_participant_id=sender.id,
+    )
+    scope = _SenderScope(
+        group=group,
+        session=session,
+        participant=sender,
+        user_id=origin_user_id,
+        agent_id=None,
+        role="user",
+    )
+    first = _target(tenant_id=tenant_id, name="Researcher")
+    second = _target(tenant_id=tenant_id, name="Reviewer")
+    non_entry = _target(tenant_id=tenant_id, name="Observer")
+    candidates = (first, second, non_entry)
+    plan = validate_planning_output(
+        {
+            "version": 2,
+            "mode": "enforced",
+            "goal": "Research and review the launch",
+            "plan_prompt": (
+                "The Researcher gathers evidence. The Reviewer checks the evidence, "
+                "and each further handoff must be public."
+            ),
+            "entry_steps": [
+                {
+                    "agent_id": str(first.agent.id),
+                    "instruction": "Gather the launch evidence",
+                },
+                {
+                    "agent_id": str(second.agent.id),
+                    "instruction": "Review the launch evidence independently",
+                },
+            ],
+        },
+        candidate_agent_ids=frozenset(target.agent.id for target in candidates),
+    )
+    mentions = [target.payload() for target in candidates]
+    message = ChatMessage(
+        id=message_id,
+        user_id=origin_user_id,
+        agent_id=None,
+        role="user",
+        content="Research and review the launch",
+        conversation_id=str(session_id),
+        participant_id=sender.id,
+        mentions=mentions,
+        created_at=NOW,
+    )
     root = AgentRun(
         id=root_id,
         tenant_id=tenant_id,
@@ -111,11 +231,11 @@ def _records():
         source_type="chat",
         source_id=str(message_id),
         source_execution_id=f"group_mention:{message_id}:plan",
-        origin_user_id=uuid.uuid4(),
-        goal="Research then write",
+        origin_user_id=origin_user_id,
+        goal=message.content,
         run_kind="orchestration",
         system_role="group_planning",
-        model_id=planning_model_id,
+        model_id=uuid.uuid4(),
         runtime_type="langgraph",
         runtime_thread_id=str(root_id),
         graph_name="runtime_group_planning",
@@ -128,339 +248,281 @@ def _records():
             "group_id": str(group_id),
         },
     )
-    registry = RunRegistrySnapshot(
-        tenant_id=str(tenant_id),
-        run_id=str(root_id),
-        goal=root.goal,
-        run_kind="orchestration",
-        source_type="chat",
-        model_id=str(planning_model_id),
-        graph_name="runtime_group_planning",
-        graph_version="v1",
-        session_id=str(session_id),
-        system_role="group_planning",
-    )
     run = RuntimeRunRecord(
         tenant_id=tenant_id,
         run_id=root_id,
         thread_id=str(root_id),
         runtime_type="langgraph",
-        registry=registry,
-    )
-    plan = validate_planning_output(
-        {
-            "version": 1,
-            "goal": root.goal,
-            "execution_strategy": "sequential",
-            "steps": [
-                {
-                    "step_id": "research",
-                    "agent_id": str(first_agent_id),
-                    "instruction": "Research the facts",
-                    "depends_on_step_ids": [],
-                },
-                {
-                    "step_id": "write",
-                    "agent_id": str(second_agent_id),
-                    "instruction": "Write the answer",
-                    "depends_on_step_ids": ["research"],
-                },
-            ],
-        },
-        candidate_agent_ids=frozenset({first_agent_id, second_agent_id}),
+        goal=root.goal,
+        run_kind=root.run_kind,
+        source_type=root.source_type,
+        model_id=str(root.model_id),
+        graph_name=root.graph_name,
+        graph_version=root.graph_version,
+        agent_id=None,
+        session_id=str(session_id),
+        system_role="group_planning",
     )
     state: RuntimeGraphState = {
-        "registry": registry,
         "snapshots": RunInputSnapshots(
             session_context={},
             session_context_version=1,
             recent_session_messages=(),
             related_run_summaries=(),
             initial_input={
-                "sender_participant_id": str(sender_participant_id),
-                "mention_targets": [
-                    {"participant_id": str(sender_participant_id), "valid": True}
-                ],
+                "message_id": str(message.id),
+                "group_id": str(group.id),
+                "session_id": str(session.id),
+                "sender_participant_id": str(sender.id),
+                "mention_targets": mentions,
                 "candidate_agents": [
-                    {"agent_id": str(first_agent_id)},
-                    {"agent_id": str(second_agent_id)},
+                    {
+                        "agent_id": str(target.agent.id),
+                        "participant_id": str(target.participant_id),
+                        "name": target.display_name,
+                    }
+                    for target in candidates
                 ],
             },
         ),
-        "lifecycle": {
-            "status": "waiting_agent",
-            "next_route": "wait",
-            "planning": plan,
-            "waiting_request": {
-                "waiting_type": "agent",
-                "correlation_id": f"planning:{root_id}",
-            },
-        },
-    }
-    checkpoint = CheckpointObservation(checkpoint_id="planning-wait-1", state=state)
-    message = ChatMessage(
-        id=message_id,
-        role="user",
-        content=root.goal,
-        conversation_id=str(session_id),
-        participant_id=sender_participant_id,
-        mentions=[],
-        created_at=NOW,
-    )
-    session = ChatSession(
-        id=session_id,
-        tenant_id=tenant_id,
-        session_type="group",
-        group_id=group_id,
-        title="Group",
-        source_channel="web",
-        is_group=True,
-        is_primary=True,
-    )
-    group = Group(
-        id=group_id,
-        tenant_id=tenant_id,
-        name="Group",
-        created_by_participant_id=sender_participant_id,
-    )
-    child_model = LLMModel(
-        id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        provider="openai",
-        model="child-model",
-        api_key_encrypted="encrypted",
-        label="Child",
-        enabled=True,
-    )
-    agent = Agent(
-        id=first_agent_id,
-        tenant_id=tenant_id,
-        creator_id=uuid.uuid4(),
-        name="Researcher",
-        primary_model_id=child_model.id,
-        status="idle",
-        is_expired=False,
-        access_mode="company",
-    )
-    participant = Participant(
-        id=uuid.uuid4(),
-        type="agent",
-        ref_id=agent.id,
-        display_name=agent.name,
-    )
-    membership = GroupMember(
-        id=uuid.uuid4(),
-        group_id=group_id,
-        participant_id=participant.id,
-        role="member",
-        joined_at=NOW,
-        session_read_state={},
-    )
-    return (
-        run,
-        checkpoint,
-        root,
-        message,
-        session,
-        group,
-        agent,
-        participant,
-        membership,
-        child_model,
-    )
-
-
-@pytest.mark.asyncio
-async def test_waiting_checkpoint_creates_only_ready_child_run() -> None:
-    (
-        run,
-        checkpoint,
-        root,
-        message,
-        session,
-        group,
-        agent,
-        participant,
-        membership,
-        child_model,
-    ) = _records()
-    db = _Session(
-        root,
-        message,
-        session,
-        group,
-        None,
-        agent,
-        participant,
-        membership,
-        child_model,
-    )
-    handle = RunHandle(
-        tenant_id=run.tenant_id,
-        run_id=uuid.uuid4(),
-        thread_id=str(uuid.uuid4()),
-        command_id=uuid.uuid4(),
-        runtime_type="langgraph",
-        created=True,
-    )
-
-    with patch(
-        "app.services.agent_runtime.planning_scheduler.TransactionalAgentRuntimeAdapter.start_run",
-        new=AsyncMock(return_value=handle),
-    ) as start_run:
-        await PlanningCheckpointScheduler(
-            session_factory=_SessionFactory(db),  # type: ignore[arg-type]
-            settings=_settings(),
-        ).handle(run=run, checkpoint=checkpoint)
-
-    start_run.assert_awaited_once()
-    command = start_run.await_args.args[0]
-    assert isinstance(command, StartRunCommand)
-    assert command.source_execution_id == f"group_mention:{message.id}:step:research"
-    assert command.parent_run_id == root.id
-    assert command.root_run_id == root.id
-    assert command.agent_id == agent.id
-    assert command.goal == "Research the facts"
-    assert command.scheduling_lane_key == f"group_mention:{run.tenant_id}:{agent.id}"
-    assert command.scheduling_position_created_at == NOW
-    assert command.scheduling_position_id == message.id
-    assert command.payload["planning_step_id"] == "research"
-    assert command.payload["related_run_summaries"] == []
-
-
-@pytest.mark.asyncio
-async def test_existing_child_run_makes_checkpoint_scheduling_idempotent() -> None:
-    (
-        run,
-        checkpoint,
-        root,
-        message,
-        session,
-        group,
-        *_rest,
-    ) = _records()
-    db = _Session(root, message, session, group, uuid.uuid4())
-
-    with patch(
-        "app.services.agent_runtime.planning_scheduler.TransactionalAgentRuntimeAdapter.start_run",
-        new=AsyncMock(),
-    ) as start_run:
-        await PlanningCheckpointScheduler(
-            session_factory=_SessionFactory(db),  # type: ignore[arg-type]
-            settings=_settings(),
-        ).handle(run=run, checkpoint=checkpoint)
-
-    start_run.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_completed_planning_root_marks_delivery_not_required() -> None:
-    run, checkpoint, root, *_rest = _records()
-    checkpoint.state["lifecycle"].update(
-        {"status": "completed", "next_route": "terminal"}
-    )
-    db = _Session(root)
-
-    await PlanningCheckpointScheduler(
-        session_factory=_SessionFactory(db),  # type: ignore[arg-type]
-        settings=_settings(),
-    ).handle(run=run, checkpoint=checkpoint)
-
-    assert root.delivery_status == "not_required"
-    assert db.flushes == 1
-
-
-@pytest.mark.asyncio
-async def test_child_terminal_checkpoint_resumes_planning_root_once() -> None:
-    planning_run, _planning_checkpoint, root, message, session, *_rest = _records()
-    child_id = uuid.uuid4()
-    child_agent_id = uuid.uuid4()
-    child = AgentRun(
-        id=child_id,
-        tenant_id=planning_run.tenant_id,
-        agent_id=child_agent_id,
-        session_id=session.id,
-        source_type="chat",
-        source_id=str(message.id),
-        source_execution_id=f"group_mention:{message.id}:step:research",
-        parent_run_id=root.id,
-        root_run_id=root.id,
-        goal="Research",
-        run_kind="foreground",
-        model_id=uuid.uuid4(),
-        runtime_type="langgraph",
-        runtime_thread_id=str(child_id),
-        graph_name="runtime",
-        graph_version="v1",
-        lane_held=False,
-        delivery_status="delivered",
-    )
-    registry = RunRegistrySnapshot(
-        tenant_id=str(child.tenant_id),
-        run_id=str(child.id),
-        goal=child.goal,
-        run_kind="foreground",
-        source_type="chat",
-        model_id=str(child.model_id),
-        graph_name="runtime",
-        graph_version="v1",
-        agent_id=str(child.agent_id),
-        session_id=str(child.session_id),
-        parent_run_id=str(root.id),
-        root_run_id=str(root.id),
-    )
-    child_run = RuntimeRunRecord(
-        tenant_id=child.tenant_id,
-        run_id=child.id,
-        thread_id=str(child.id),
-        runtime_type="langgraph",
-        registry=registry,
-    )
-    state: RuntimeGraphState = {
-        "registry": registry,
-        "snapshots": RunInputSnapshots(
-            session_context={},
-            session_context_version=1,
-            recent_session_messages=(),
-            related_run_summaries=(),
-            initial_input={},
-        ),
+        "messages": [],
         "lifecycle": {
             "status": "completed",
             "next_route": "terminal",
-            "result_summary": {
-                "summary": "Research complete",
-                "artifact_refs": ["workspace:research.md"],
-            },
+            "planning": plan,
+            "waiting_request": None,
         },
     }
-    checkpoint = CheckpointObservation(checkpoint_id="child-terminal", state=state)
-    db = _Session(child, root)
-
-    with patch(
-        "app.services.agent_runtime.planning_scheduler.enqueue_resume",
-        new=AsyncMock(),
-    ) as enqueue:
-        await PlanningChildCompletionHandler(
-            session_factory=_SessionFactory(db),  # type: ignore[arg-type]
-        ).handle(run=child_run, checkpoint=checkpoint)
-
-    enqueue.assert_awaited_once()
-    assert enqueue.await_args.kwargs["run_id"] == root.id
-    assert enqueue.await_args.kwargs["idempotency_key"] == (
-        f"resume:planning:{root.id}:child:{child.id}:terminal:completed"
+    checkpoint = CheckpointObservation(
+        checkpoint_id="planning-v2-terminal",
+        state=state,
     )
-    assert enqueue.await_args.kwargs["payload"] == {
-        "resume_type": "agent_result",
-        "correlation_id": f"planning:{root.id}",
-        "payload": {
-            "step_id": "research",
-            "status": "completed",
-            "child_run_id": str(child.id),
-            "result_summary": {
-                "summary": "Research complete",
-                "artifact_refs": ["workspace:research.md"],
-            },
-            "error": None,
-        },
+    return run, checkpoint, root, message, scope, candidates, plan
+
+
+def _handle(tenant_id: uuid.UUID, *, created: bool = True) -> RunHandle:
+    run_id = uuid.uuid4()
+    return RunHandle(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        thread_id=str(run_id),
+        command_id=uuid.uuid4(),
+        runtime_type="langgraph",
+        created=created,
+    )
+
+
+@pytest.mark.asyncio
+async def test_completed_plan_creates_only_entry_children_with_one_immutable_plan() -> None:
+    run, checkpoint, root, message, scope, candidates, plan = _records()
+    first, second, non_entry = candidates
+    db = _Session(root, message)
+    start = AsyncMock(side_effect=(_handle(run.tenant_id), _handle(run.tenant_id)))
+
+    with (
+        patch(
+            "app.services.agent_runtime.planning_scheduler._load_sender_scope",
+            new=AsyncMock(return_value=scope),
+        ),
+        patch(
+            "app.services.agent_runtime.planning_scheduler._resolve_mentions",
+            new=AsyncMock(return_value=(first, second)),
+        ),
+        patch(
+            "app.services.agent_runtime.planning_scheduler.RuntimeCommandIntake.start_run",
+            new=start,
+        ),
+    ):
+        await PlanningCheckpointScheduler(
+            session_factory=_SessionFactory(db),  # type: ignore[arg-type]
+            settings=_settings(),
+        ).handle(run=run, checkpoint=checkpoint)
+
+    assert root.delivery_status == "not_required"
+    assert db.flushes == 1
+    assert start.await_count == 2
+    commands = [call.args[0] for call in start.await_args_list]
+    assert all(isinstance(command, StartRunCommand) for command in commands)
+    assert [command.agent_id for command in commands] == [
+        first.agent.id,
+        second.agent.id,
+    ]
+    assert non_entry.agent.id not in {command.agent_id for command in commands}
+    assert [command.goal for command in commands] == [
+        "Gather the launch evidence",
+        "Review the launch evidence independently",
+    ]
+    assert all(command.parent_run_id == root.id for command in commands)
+    assert all(command.root_run_id == root.id for command in commands)
+    assert all(command.source_id == str(message.id) for command in commands)
+    assert all(command.scheduling_position_created_at == NOW for command in commands)
+    assert all(command.scheduling_position_id == message.id for command in commands)
+    assert all(command.payload["mode"] == plan["mode"] for command in commands)
+    assert all(command.payload["plan_prompt"] == plan["plan_prompt"] for command in commands)
+    assert all(
+        command.payload["context_cutoff"] == {"message_id": str(message.id), "created_at": NOW.isoformat()}
+        for command in commands
+    )
+    assert [command.payload["current_responsibility"] for command in commands] == [
+        "Gather the launch evidence",
+        "Review the launch evidence independently",
+    ]
+    assert all("planning_step_id" not in command.payload for command in commands)
+    assert all("planning_instruction" not in command.payload for command in commands)
+    assert all("related_run_summaries" not in command.payload for command in commands)
+
+
+@pytest.mark.asyncio
+async def test_completed_plan_product_retry_is_idempotent() -> None:
+    run, checkpoint, root, message, scope, candidates, _ = _records()
+    first, second, _ = candidates
+    first_db = _Session(root, message)
+    second_db = _Session(root, message)
+    created_source_ids: set[str] = set()
+    created_runs = 0
+
+    async def start_run(command: StartRunCommand) -> RunHandle:
+        nonlocal created_runs
+        created = command.source_execution_id not in created_source_ids
+        if created:
+            created_source_ids.add(command.source_execution_id)
+            created_runs += 1
+        return _handle(run.tenant_id, created=created)
+
+    with (
+        patch(
+            "app.services.agent_runtime.planning_scheduler._load_sender_scope",
+            new=AsyncMock(return_value=scope),
+        ),
+        patch(
+            "app.services.agent_runtime.planning_scheduler._resolve_mentions",
+            new=AsyncMock(return_value=(first, second)),
+        ),
+        patch(
+            "app.services.agent_runtime.planning_scheduler.RuntimeCommandIntake.start_run",
+            new=AsyncMock(side_effect=start_run),
+        ) as start,
+    ):
+        scheduler = PlanningCheckpointScheduler(
+            session_factory=_SessionFactory(first_db, second_db),  # type: ignore[arg-type]
+            settings=_settings(),
+        )
+        await scheduler.handle(run=run, checkpoint=checkpoint)
+        await scheduler.handle(run=run, checkpoint=checkpoint)
+
+    assert start.await_count == 4
+    assert created_runs == 2
+    assert created_source_ids == {
+        f"group_mention:{message.id}:entry:{first.agent.id}",
+        f"group_mention:{message.id}:entry:{second.agent.id}",
     }
+    first_attempt = [call.args[0] for call in start.await_args_list[:2]]
+    second_attempt = [call.args[0] for call in start.await_args_list[2:]]
+    assert [command.idempotency_key for command in first_attempt] == [
+        command.idempotency_key for command in second_attempt
+    ]
+
+
+@pytest.mark.asyncio
+async def test_entry_revalidation_failure_creates_no_partial_child() -> None:
+    run, checkpoint, root, message, scope, candidates, _ = _records()
+    first, second, _ = candidates
+    invalid = ResolvedGroupMention(
+        participant_id=second.participant_id,
+        participant_type="agent",
+        participant_ref_id=second.agent.id,
+        display_name=second.display_name,
+        valid=False,
+        triggers_agent=False,
+        reason="agent_unavailable",
+    )
+    db = _Session(root, message)
+    start = AsyncMock()
+
+    with (
+        patch(
+            "app.services.agent_runtime.planning_scheduler._load_sender_scope",
+            new=AsyncMock(return_value=scope),
+        ),
+        patch(
+            "app.services.agent_runtime.planning_scheduler._resolve_mentions",
+            new=AsyncMock(return_value=(first, invalid)),
+        ),
+        patch(
+            "app.services.agent_runtime.planning_scheduler.RuntimeCommandIntake.start_run",
+            new=start,
+        ),
+    ):
+        with pytest.raises(PlanningSchedulingError) as raised:
+            await PlanningCheckpointScheduler(
+                session_factory=_SessionFactory(db),  # type: ignore[arg-type]
+                settings=_settings(),
+            ).handle(run=run, checkpoint=checkpoint)
+
+    assert raised.value.code == "planning_entry_unavailable"
+    start.assert_not_awaited()
+    assert root.delivery_status == "pending"
+    assert db.transaction is not None and db.transaction.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_later_child_write_failure_rolls_back_the_whole_entry_batch() -> None:
+    run, checkpoint, root, message, scope, candidates, _ = _records()
+    first, second, _ = candidates
+    db = _Session(root, message)
+    calls = 0
+
+    async def start_run(command: StartRunCommand) -> RunHandle:
+        nonlocal calls
+        calls += 1
+        db.add(("child", command.agent_id))
+        if calls == 2:
+            raise RuntimeError("second child write failed")
+        return _handle(run.tenant_id)
+
+    with (
+        patch(
+            "app.services.agent_runtime.planning_scheduler._load_sender_scope",
+            new=AsyncMock(return_value=scope),
+        ),
+        patch(
+            "app.services.agent_runtime.planning_scheduler._resolve_mentions",
+            new=AsyncMock(return_value=(first, second)),
+        ),
+        patch(
+            "app.services.agent_runtime.planning_scheduler.RuntimeCommandIntake.start_run",
+            new=AsyncMock(side_effect=start_run),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="second child"):
+            await PlanningCheckpointScheduler(
+                session_factory=_SessionFactory(db),  # type: ignore[arg-type]
+                settings=_settings(),
+            ).handle(run=run, checkpoint=checkpoint)
+
+    assert db.added == []
+    assert root.delivery_status == "pending"
+    assert db.transaction is not None and db.transaction.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_noncompleted_planning_checkpoint_never_schedules_or_resumes() -> None:
+    run, checkpoint, root, _message, _scope, _candidates, _plan = _records()
+    checkpoint.state["lifecycle"].update(
+        {
+            "status": "waiting_agent",
+            "next_route": "wait",
+            "waiting_request": {
+                "waiting_type": "agent",
+                "correlation_id": f"planning:{root.id}",
+            },
+        }
+    )
+    factory = _SessionFactory()
+
+    await PlanningCheckpointScheduler(
+        session_factory=factory,  # type: ignore[arg-type]
+        settings=_settings(),
+    ).handle(run=run, checkpoint=checkpoint)
+
+    assert not factory.sessions

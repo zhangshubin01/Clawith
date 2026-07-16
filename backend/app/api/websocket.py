@@ -17,12 +17,14 @@ from app.core.permissions import check_agent_access, is_agent_expired
 from app.core.security import decode_access_token
 from app.database import async_session
 from app.models.agent import Agent
+from app.models.agent_run import AgentRun
+from app.models.agent_run_command import AgentRunCommand
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.llm import LLMModel
 from app.models.user import User
 from app.services.activity_logger import log_activity
-from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
+from app.services.agent_runtime.adapter import RuntimeCommandIntake
 from app.services.agent_runtime.chat_intake import (
     ChatRuntimeIntake,
     ChatRuntimeIntakeError,
@@ -33,6 +35,7 @@ from app.services.agent_runtime.chat_stream import (
     stream_web_chat_run,
 )
 from app.services.agent_runtime.contracts import CancelRunCommand, RunHandle
+from app.services.agent_runtime.run_state_reader import open_run_state_reader
 from app.services.chat_session_service import ensure_primary_platform_session
 from app.services.llm.utils import convert_chat_messages_to_llm_format
 from app.services.onboarding import is_onboarded, mark_onboarding_phase, resolve_onboarding_prompt
@@ -54,6 +57,15 @@ class WebChatRuntimeIntake:
 
     run: ChatRuntimeIntake
     onboarding_target_phase: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedWebChatMessage:
+    """One client message already persisted as a durable Runtime command."""
+
+    runtime: WebChatRuntimeIntake
+    user_content: str
+    is_onboarding_trigger: bool = False
 
 
 class ConnectionManager:
@@ -210,8 +222,6 @@ class WebSocketChatHandler:
         self.history_messages: list[ChatMessage] = []
         self.conversation: list[dict] = []
         self.current_user_text: str = ""
-        self.waiting_runtime_run_id: uuid.UUID | None = None
-        self.waiting_runtime_correlation_id: str | None = None
 
     async def run(self):
         """Main entry point for handling the lifecycle of the WebSocket connection."""
@@ -403,150 +413,162 @@ class WebSocketChatHandler:
         if self.welcome_message and not self.history_messages:
             await self.websocket.send_json({"type": "done", "role": "assistant", "content": self.welcome_message})
 
-        pending_messages: deque[dict] = deque()
+        pending_runs: deque[AcceptedWebChatMessage] = deque()
         while True:
-            data = pending_messages.popleft() if pending_messages else await self.websocket.receive_json()
-            if data.get("type") == "abort":
-                continue
-
-            # Set a unique trace ID for this specific message processing.
-            trace_id = str(uuid.uuid4())[:12]
-            set_trace_id(trace_id)
-
-            content = data.get("content", "")
-            display_content = data.get("display_content", "")
-            file_name = data.get("file_name", "")
-            override_model_id = data.get("model_id")
-            is_onboarding_trigger = data.get("kind") == "onboarding_trigger"
-            logger.info(f"[WS] Received: {content[:50]}" + (" [onboarding]" if is_onboarding_trigger else ""))
-
-            if not content and not is_onboarding_trigger:
-                continue
-
-            if is_onboarding_trigger:
-                if await self._handle_onboarding_trigger_guard():
+            if pending_runs:
+                accepted = pending_runs.popleft()
+            else:
+                data = await self.websocket.receive_json()
+                if data.get("type") == "abort":
+                    if self.agent_type == "openclaw":
+                        continue
+                    await self._handle_cancel_packet(data)
                     continue
-                content = "Please begin the onboarding."
-
-            try:
-                message_id = self._optional_client_uuid(data.get("message_id"), field="message_id")
-                resume_run_id = self._optional_client_uuid(data.get("run_id"), field="run_id")
-            except ChatRuntimeIntakeError as exc:
-                await self.websocket.send_json(
-                    {"type": "error", "content": str(exc), "code": exc.code}
-                )
-                continue
-            resume_correlation_id = data.get("correlation_id")
-            if resume_correlation_id is not None and not isinstance(resume_correlation_id, str):
-                await self.websocket.send_json(
-                    {
-                        "type": "error",
-                        "content": "correlation_id must be a string",
-                        "code": "invalid_chat_resume_correlation",
-                    }
-                )
-                continue
-            if (
-                resume_run_id is None
-                and resume_correlation_id is None
-                and self.waiting_runtime_run_id is not None
-                and self.waiting_runtime_correlation_id is not None
-            ):
-                resume_run_id = self.waiting_runtime_run_id
-                resume_correlation_id = self.waiting_runtime_correlation_id
-
-            self.current_user_text = content
-            effective_llm_model = await self._resolve_effective_model(override_model_id)
-
-            # Quota Checks
-            if not await self._check_quotas():
-                continue
-
-            # Remote OpenClaw remains a gateway transport; every native Agent
-            # must enter through the durable Runtime and never fall back to the
-            # legacy in-request model/tool loop.
-            if self.agent_type == "openclaw":
-                self.conversation.append({"role": "user", "content": content})
-                await self._save_user_message(
-                    content,
-                    display_content,
-                    file_name,
-                    is_onboarding_trigger,
-                )
-                await self._route_openclaw(content)
-                continue
-
-            if effective_llm_model is None:
-                await self.websocket.send_json(
-                    {
-                        "type": "error",
-                        "content": (
-                            f"{self.agent_name} has no enabled LLM model configured. "
-                            "Select a model in Agent Settings."
-                        ),
-                        "code": "model_unavailable",
-                    }
-                )
-                continue
-
-            try:
-                web_intake = await self._enqueue_runtime_chat(
-                    content=content,
-                    display_content=display_content,
-                    file_name=file_name,
-                    model_id=effective_llm_model.id,
-                    message_id=message_id,
-                    resume_run_id=resume_run_id,
-                    resume_correlation_id=resume_correlation_id,
-                    is_onboarding_trigger=is_onboarding_trigger,
-                )
-            except ChatRuntimeIntakeError as exc:
-                logger.warning(f"[WS] Runtime chat intake rejected ({exc.code}): {exc}")
-                await self.websocket.send_json(
-                    {"type": "error", "content": str(exc), "code": exc.code}
-                )
-                continue
-            except Exception as exc:
-                error_code = getattr(exc, "code", "runtime_intake_failed")
-                logger.exception(f"[WS] Runtime chat intake failed ({error_code}): {exc}")
-                await self.websocket.send_json(
-                    {
-                        "type": "error",
-                        "content": "Message could not be accepted by the durable Runtime.",
-                        "code": error_code,
-                    }
-                )
-                continue
-
-            if web_intake is None:
-                await self.websocket.send_json(
-                    {
-                        "type": "error",
-                        "content": "Durable Runtime is not enabled for native Web Chat.",
-                        "code": "runtime_disabled",
-                    }
-                )
-                continue
+                accepted = await self._accept_client_message(data)
+                if accepted is None:
+                    continue
 
             outcome, queued_messages = await self._run_runtime_and_stream(
-                web_intake.run,
-                user_content=content,
+                accepted.runtime.run,
+                user_content=accepted.user_content,
             )
-            pending_messages.extend(queued_messages)
+            pending_runs.extend(queued_messages)
             if outcome is not None:
-                if not is_onboarding_trigger:
-                    self.conversation.append({"role": "user", "content": content})
+                if not accepted.is_onboarding_trigger:
+                    self.conversation.append(
+                        {"role": "user", "content": accepted.user_content}
+                    )
                 self.conversation.append(
                     {"role": "assistant", "content": outcome.content}
                 )
                 if (
                     outcome.status == "completed"
-                    and web_intake.onboarding_target_phase is not None
+                    and accepted.runtime.onboarding_target_phase is not None
                 ):
                     await self._mark_onboarding_runtime_phase(
-                        web_intake.onboarding_target_phase
+                        accepted.runtime.onboarding_target_phase
                     )
             continue
+
+    async def _accept_client_message(
+        self,
+        data: dict,
+    ) -> AcceptedWebChatMessage | None:
+        """Validate and durably enqueue one explicit client input."""
+        set_trace_id(str(uuid.uuid4())[:12])
+        content = data.get("content", "")
+        display_content = data.get("display_content", "")
+        file_name = data.get("file_name", "")
+        override_model_id = data.get("model_id")
+        is_onboarding_trigger = data.get("kind") == "onboarding_trigger"
+        logger.info(
+            f"[WS] Received: {str(content)[:50]}"
+            + (" [onboarding]" if is_onboarding_trigger else "")
+        )
+        if not isinstance(content, str) or (not content and not is_onboarding_trigger):
+            return None
+        if is_onboarding_trigger:
+            if await self._handle_onboarding_trigger_guard():
+                return None
+            content = "Please begin the onboarding."
+
+        try:
+            message_id = self._optional_client_uuid(
+                data.get("message_id"),
+                field="message_id",
+            )
+            resume_run_id = self._optional_client_uuid(
+                data.get("run_id"),
+                field="run_id",
+            )
+        except ChatRuntimeIntakeError as exc:
+            await self.websocket.send_json(
+                {"type": "error", "content": str(exc), "code": exc.code}
+            )
+            return None
+        resume_correlation_id = data.get("correlation_id")
+        if resume_correlation_id is not None and not isinstance(
+            resume_correlation_id,
+            str,
+        ):
+            await self.websocket.send_json(
+                {
+                    "type": "error",
+                    "content": "correlation_id must be a string",
+                    "code": "invalid_chat_resume_correlation",
+                }
+            )
+            return None
+
+        self.current_user_text = content
+        effective_llm_model = await self._resolve_effective_model(override_model_id)
+        if not await self._check_quotas():
+            return None
+        if self.agent_type == "openclaw":
+            self.conversation.append({"role": "user", "content": content})
+            await self._save_user_message(
+                content,
+                display_content,
+                file_name,
+                is_onboarding_trigger,
+            )
+            await self._route_openclaw(content)
+            return None
+        if effective_llm_model is None:
+            await self.websocket.send_json(
+                {
+                    "type": "error",
+                    "content": (
+                        f"{self.agent_name} has no enabled LLM model configured. "
+                        "Select a model in Agent Settings."
+                    ),
+                    "code": "model_unavailable",
+                }
+            )
+            return None
+
+        try:
+            web_intake = await self._enqueue_runtime_chat(
+                content=content,
+                display_content=display_content,
+                file_name=file_name,
+                model_id=effective_llm_model.id,
+                message_id=message_id,
+                resume_run_id=resume_run_id,
+                resume_correlation_id=resume_correlation_id,
+                is_onboarding_trigger=is_onboarding_trigger,
+            )
+        except ChatRuntimeIntakeError as exc:
+            logger.warning(f"[WS] Runtime chat intake rejected ({exc.code}): {exc}")
+            await self.websocket.send_json(
+                {"type": "error", "content": str(exc), "code": exc.code}
+            )
+            return None
+        except Exception as exc:
+            error_code = getattr(exc, "code", "runtime_intake_failed")
+            logger.exception(f"[WS] Runtime chat intake failed ({error_code}): {exc}")
+            await self.websocket.send_json(
+                {
+                    "type": "error",
+                    "content": "Message could not be accepted by the durable Runtime.",
+                    "code": error_code,
+                }
+            )
+            return None
+        if web_intake is None:
+            await self.websocket.send_json(
+                {
+                    "type": "error",
+                    "content": "Durable Runtime is not enabled for native Web Chat.",
+                    "code": "runtime_disabled",
+                }
+            )
+            return None
+        return AcceptedWebChatMessage(
+            runtime=web_intake,
+            user_content=content,
+            is_onboarding_trigger=is_onboarding_trigger,
+        )
 
     @staticmethod
     def _optional_client_uuid(value: object, *, field: str) -> uuid.UUID | None:
@@ -623,25 +645,27 @@ class WebSocketChatHandler:
                     if onboarding is not None and onboarding.lock_on_first_chunk
                     else None
                 )
-                intake = await enqueue_chat_runtime(
-                    db,
-                    agent=agent,
-                    user=user,
-                    session=session,
-                    model=model,
-                    content=content,
-                    display_content=display_content,
-                    file_name=file_name,
-                    message_id=message_id,
-                    resume_run_id=resume_run_id,
-                    resume_correlation_id=resume_correlation_id,
-                    runtime_instruction=(onboarding.prompt if onboarding is not None else ""),
-                    onboarding_target_phase=target_phase or "",
-                    persist_user_message=not is_onboarding_trigger,
-                    application_tools_enabled=not (
-                        onboarding is not None and onboarding.is_greeting_turn
-                    ),
-                )
+                async with open_run_state_reader(db) as run_state_reader:
+                    intake = await enqueue_chat_runtime(
+                        db,
+                        agent=agent,
+                        user=user,
+                        session=session,
+                        model=model,
+                        content=content,
+                        display_content=display_content,
+                        file_name=file_name,
+                        message_id=message_id,
+                        resume_run_id=resume_run_id,
+                        resume_correlation_id=resume_correlation_id,
+                        runtime_instruction=(onboarding.prompt if onboarding is not None else ""),
+                        onboarding_target_phase=target_phase or "",
+                        persist_user_message=not is_onboarding_trigger,
+                        application_tools_enabled=not (
+                            onboarding is not None and onboarding.is_greeting_turn
+                        ),
+                        run_state_reader=run_state_reader,
+                    )
                 if intake is None:
                     return None
                 if is_onboarding_trigger and session.title.startswith("Session "):
@@ -651,27 +675,140 @@ class WebSocketChatHandler:
                     onboarding_target_phase=target_phase,
                 )
 
-    async def _cancel_runtime_run(self, handle: RunHandle) -> None:
-        if self.user is None:
-            return
+    async def _cancel_runtime_run(self, run_id: uuid.UUID) -> RunHandle:
+        if self.user is None or self.conv_id is None:
+            raise ChatRuntimeIntakeError(
+                "chat_connection_not_ready",
+                "Web Chat connection has no authenticated session",
+            )
+        try:
+            session_id = uuid.UUID(self.conv_id)
+        except ValueError as exc:
+            raise ChatRuntimeIntakeError(
+                "invalid_chat_session",
+                "Web Chat session ID is invalid",
+            ) from exc
+        idempotency_key = f"cancel:web:{run_id}"
         async with async_session() as db:
             async with db.begin():
-                await TransactionalAgentRuntimeAdapter(db).cancel_run(
-                    CancelRunCommand(
-                        tenant_id=handle.tenant_id,
-                        run_id=handle.run_id,
-                        idempotency_key=f"cancel:web:{handle.run_id}",
-                        reason="cancelled_by_user",
-                        actor_user_id=self.user.id,
+                user = await db.get(User, self.user.id)
+                if user is None or not user.is_active:
+                    raise ChatRuntimeIntakeError(
+                        "chat_user_unavailable",
+                        "Authenticated Chat user is unavailable",
+                    )
+                agent, _ = await check_agent_access(db, user, self.agent_id)
+                session = await db.get(ChatSession, session_id)
+                if (
+                    session is None
+                    or session.tenant_id != agent.tenant_id
+                    or session.agent_id != agent.id
+                    or session.user_id != user.id
+                    or session.session_type != "direct"
+                    or session.group_id is not None
+                    or session.source_channel != "web"
+                    or session.deleted_at is not None
+                ):
+                    raise ChatRuntimeIntakeError(
+                        "chat_cancel_scope_mismatch",
+                        "Cancel target is outside this Direct Chat Session",
+                    )
+                run_result = await db.execute(
+                    select(AgentRun).where(
+                        AgentRun.tenant_id == agent.tenant_id,
+                        AgentRun.id == run_id,
                     )
                 )
+                run = run_result.scalar_one_or_none()
+                if (
+                    run is None
+                    or run.agent_id != agent.id
+                    or run.session_id != session.id
+                    or run.origin_user_id != user.id
+                    or run.source_type != "chat"
+                    or run.run_kind != "foreground"
+                    or run.runtime_type != "langgraph"
+                    or run.runtime_thread_id != str(session.id)
+                    or run.scheduling_lane_key
+                    != f"direct_chat_thread:{agent.tenant_id}:{session.id}"
+                ):
+                    raise ChatRuntimeIntakeError(
+                        "chat_cancel_scope_mismatch",
+                        "Cancel target is not a Run in this Direct Chat Session",
+                    )
+                existing_result = await db.execute(
+                    select(AgentRunCommand).where(
+                        AgentRunCommand.tenant_id == agent.tenant_id,
+                        AgentRunCommand.run_id == run.id,
+                        AgentRunCommand.command_type == "cancel",
+                        AgentRunCommand.idempotency_key == idempotency_key,
+                    )
+                )
+                existing = existing_result.scalar_one_or_none()
+                if not run.lane_held and existing is None:
+                    raise ChatRuntimeIntakeError(
+                        "chat_cancel_not_lane_holder",
+                        "Cancel target is no longer the active Direct Chat Run",
+                    )
+                return await RuntimeCommandIntake(db).cancel_run(
+                    CancelRunCommand(
+                        tenant_id=agent.tenant_id,
+                        run_id=run.id,
+                        idempotency_key=idempotency_key,
+                        reason="cancelled_by_user",
+                        actor_user_id=user.id,
+                    )
+                )
+
+    async def _handle_cancel_packet(
+        self,
+        data: dict,
+        *,
+        expected_run_id: uuid.UUID | None = None,
+    ) -> None:
+        try:
+            run_id = self._optional_client_uuid(data.get("run_id"), field="run_id")
+            if run_id is None:
+                raise ChatRuntimeIntakeError(
+                    "missing_cancel_run_id",
+                    "Cancellation requires an explicit run_id",
+                )
+            if expected_run_id is not None and run_id != expected_run_id:
+                raise ChatRuntimeIntakeError(
+                    "chat_cancel_run_mismatch",
+                    "Cancellation does not target the currently attached Run",
+                )
+            handle = await self._cancel_runtime_run(run_id)
+        except ChatRuntimeIntakeError as exc:
+            await self.websocket.send_json(
+                {"type": "error", "content": str(exc), "code": exc.code}
+            )
+            return
+        except Exception as exc:
+            logger.warning(f"[WS] Runtime cancel enqueue failed: {exc}")
+            await self.websocket.send_json(
+                {
+                    "type": "error",
+                    "content": "Cancellation could not be accepted.",
+                    "code": getattr(exc, "code", "runtime_cancel_failed"),
+                }
+            )
+            return
+        await self.websocket.send_json(
+            {
+                "type": "runtime_status",
+                "run_id": str(handle.run_id),
+                "event": "cancel_requested",
+                "status": "cancelling",
+            }
+        )
 
     async def _run_runtime_and_stream(
         self,
         intake: ChatRuntimeIntake,
         *,
         user_content: str,
-    ) -> tuple[ChatRuntimeStreamOutcome | None, list[dict]]:
+    ) -> tuple[ChatRuntimeStreamOutcome | None, list[AcceptedWebChatMessage]]:
         """Keep the socket responsive while durable work continues off-request."""
         if self.user is None or self.conv_id is None:
             raise ChatRuntimeIntakeError(
@@ -691,8 +828,7 @@ class WebSocketChatHandler:
             ),
             name=f"web-chat-runtime-{intake.handle.run_id}",
         )
-        queued_messages: list[dict] = []
-        cancel_requested = False
+        queued_messages: list[AcceptedWebChatMessage] = []
         try:
             while not stream_task.done():
                 try:
@@ -703,21 +839,23 @@ class WebSocketChatHandler:
                 except asyncio.TimeoutError:
                     continue
                 if message.get("type") == "abort":
-                    if not cancel_requested:
-                        cancel_requested = True
-                        try:
-                            await self._cancel_runtime_run(intake.handle)
-                        except Exception as exc:
-                            logger.warning(f"[WS] Runtime cancel enqueue failed: {exc}")
-                            await self.websocket.send_json(
-                                {
-                                    "type": "error",
-                                    "content": "Cancellation could not be accepted.",
-                                    "code": getattr(exc, "code", "runtime_cancel_failed"),
-                                }
-                            )
+                    await self._handle_cancel_packet(
+                        message,
+                        expected_run_id=intake.handle.run_id,
+                    )
                     continue
-                queued_messages.append(message)
+                accepted = await self._accept_client_message(message)
+                if accepted is None:
+                    continue
+                queued_messages.append(accepted)
+                await self.websocket.send_json(
+                    {
+                        "type": "runtime_status",
+                        "run_id": str(accepted.runtime.run.handle.run_id),
+                        "event": "queued",
+                        "status": "queued",
+                    }
+                )
             outcome = await stream_task
         except WebSocketDisconnect:
             stream_task.cancel()
@@ -743,13 +881,6 @@ class WebSocketChatHandler:
                 }
             )
             return None, queued_messages
-
-        if outcome.status == "waiting_user":
-            self.waiting_runtime_run_id = intake.handle.run_id
-            self.waiting_runtime_correlation_id = outcome.correlation_id
-        elif self.waiting_runtime_run_id == intake.handle.run_id:
-            self.waiting_runtime_run_id = None
-            self.waiting_runtime_correlation_id = None
 
         self.current_user_text = user_content
         await self._update_activity_and_quota(outcome.content)

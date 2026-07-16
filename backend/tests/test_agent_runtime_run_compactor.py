@@ -1,4 +1,4 @@
-"""Run Compact trigger, batching, and Tool Exchange boundary tests."""
+"""Frozen D-016 Thread Running Summary and semantic-boundary tests."""
 
 from __future__ import annotations
 
@@ -9,10 +9,11 @@ import pytest
 
 from app.config import Settings
 from app.models.llm import LLMModel
-from app.services.agent_runtime.node_executor import RunCompactResult
 from app.services.agent_runtime.run_compactor import (
     RunCompactInputs,
+    RunCompactorError,
     RuntimeRunCompactorService,
+    TransientRunCompactorError,
 )
 from app.services.agent_runtime.state import (
     JsonObject,
@@ -25,17 +26,8 @@ from app.services.llm.single_step import LLMCompletionStep
 from app.services.token_tracker import TokenUsage
 
 
-class _UnusedSessionFactory:
-    def __call__(self):
-        raise AssertionError("injected input loader must avoid database access")
-
-
-def _settings(**overrides) -> Settings:
-    return Settings(
-        _env_file=None,
-        AGENT_RUNTIME_SESSION_RECENT_MESSAGES=20,
-        **overrides,
-    )
+def _settings() -> Settings:
+    return Settings(_env_file=None)
 
 
 def _model(tenant_id: uuid.UUID, *, input_tokens: int = 100_000) -> LLMModel:
@@ -64,7 +56,7 @@ def _assistant(message_id: str, call_id: str) -> JsonObject:
     return {
         "id": message_id,
         "role": "assistant",
-        "content": None,
+        "content": "",
         "tool_calls": [
             {
                 "id": call_id,
@@ -75,19 +67,31 @@ def _assistant(message_id: str, call_id: str) -> JsonObject:
     }
 
 
-def _tool_result(message_id: str, call_id: str) -> JsonObject:
+def _tool_result(
+    message_id: str,
+    call_id: str,
+    *,
+    content: str = "result",
+) -> JsonObject:
     return {
         "id": message_id,
         "role": "tool",
         "tool_call_id": call_id,
-        "content": "result",
+        "content": content,
     }
 
 
 def _state(messages: list[JsonObject]) -> tuple[RuntimeGraphState, RuntimeContext, uuid.UUID]:
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
-    agent_id = uuid.uuid4()
+    current = next(
+        (
+            message
+            for message in reversed(messages)
+            if message.get("runtime_input") == "current"
+        ),
+        messages[-1],
+    )
     registry = RunRegistrySnapshot(
         tenant_id=str(tenant_id),
         run_id=str(run_id),
@@ -97,21 +101,24 @@ def _state(messages: list[JsonObject]) -> tuple[RuntimeGraphState, RuntimeContex
         model_id=str(uuid.uuid4()),
         graph_name="runtime_graph",
         graph_version="v1",
-        agent_id=str(agent_id),
+        agent_id=str(uuid.uuid4()),
     )
     state: RuntimeGraphState = {
         "registry": registry,
         "snapshots": RunInputSnapshots(
-            session_context={"version": 0, "summary": ""},
+            session_context={"version": 0},
             session_context_version=0,
             recent_session_messages=(),
             related_run_summaries=(),
-            initial_input={"content": "start"},
+            initial_input={
+                "message_id": current["id"],
+                "input_content": current["content"],
+            },
         ),
+        "messages": messages,  # type: ignore[typeddict-item]
         "lifecycle": {
             "status": "running",
             "next_route": "compact",
-            "run_messages": messages,
             "pending_tool_calls": [],
         },
     }
@@ -120,29 +127,39 @@ def _state(messages: list[JsonObject]) -> tuple[RuntimeGraphState, RuntimeContex
         run_id=str(run_id),
         command_id=str(uuid.uuid4()),
         executor=object(),  # type: ignore[arg-type]
+        goal=registry.goal,
+        run_kind=registry.run_kind,
+        source_type=registry.source_type,
+        model_id=registry.model_id,
+        graph_name=registry.graph_name,
+        graph_version=registry.graph_version,
+        agent_id=registry.agent_id,
+        session_id=registry.session_id,
+        system_role=registry.system_role,
+        parent_run_id=registry.parent_run_id,
+        root_run_id=registry.root_run_id,
+        model_turn_limit=50,
     )
     return state, context, tenant_id
 
 
-def _step(summary_number: int) -> LLMCompletionStep:
+def _step(**overrides: str) -> LLMCompletionStep:
     arguments = {
-        "goal": "Complete the work",
-        "progress": [f"batch-{summary_number}"],
-        "completed_steps": [],
-        "run_decisions": [],
-        "blockers": [],
-        "evidence_refs": [],
-        "artifact_refs": [],
-        "next_step": "continue",
+        "task_goal_and_constraints": "Complete the work accurately",
+        "completed_work_and_results": "Reviewed earlier context",
+        "key_decisions_and_evidence": "Use the durable receipt",
+        "unfinished_or_blocked": "No blockers",
+        "next_actions": "Answer the exact current request",
+        **overrides,
     }
     return LLMCompletionStep(
         content="",
         tool_calls=(
             {
-                "id": f"compact-{summary_number}",
+                "id": "compact-1",
                 "type": "function",
                 "function": {
-                    "name": "commit_run_summary",
+                    "name": "commit_thread_summary",
                     "arguments": json.dumps(arguments),
                 },
             },
@@ -153,197 +170,345 @@ def _step(summary_number: int) -> LLMCompletionStep:
     )
 
 
-def _loader(model: LLMModel, ledger: dict | None = None):
-    async def load(_state: RuntimeGraphState) -> RunCompactInputs:
-        return RunCompactInputs(model=model, ledger=ledger or {})
-
-    return load
-
-
 def _service(
     *,
     model: LLMModel,
-    settings: Settings,
     completion,
+    effective_budget: int,
+    current_tokens: int,
     ledger: dict | None = None,
 ) -> RuntimeRunCompactorService:
+    async def load(
+        _state: RuntimeGraphState,
+        _context: RuntimeContext,
+    ) -> RunCompactInputs:
+        return RunCompactInputs(
+            model=model,
+            ledger=ledger or {},
+            effective_input_budget=effective_budget,
+            current_input_tokens=current_tokens,
+        )
+
     return RuntimeRunCompactorService(
-        session_factory=_UnusedSessionFactory(),  # type: ignore[arg-type]
-        settings=settings,
+        settings=_settings(),
         completion=completion,
-        input_loader=_loader(model, ledger),
+        input_loader=load,
     )
 
 
 @pytest.mark.asyncio
-async def test_message_threshold_compacts_only_prefix_before_recent_twenty() -> None:
-    messages = [_normal(f"message-{index}") for index in range(25)]
+async def test_below_eighty_percent_skips_compact() -> None:
+    messages = [_normal("old"), _normal("current")]
     state, context, tenant_id = _state(messages)
-    calls = 0
 
-    async def complete(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        return _step(calls)
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("sub-80% request must not call the compact model")
 
     result = await _service(
         model=_model(tenant_id),
-        settings=_settings(AGENT_RUNTIME_RUN_COMPACT_MESSAGE_THRESHOLD=21),
-        completion=complete,
-    ).compact_if_needed(state, context, forced=False)
+        completion=forbidden,
+        effective_budget=1_000,
+        current_tokens=799,
+    ).compact_if_needed(state, context)
 
-    assert result.compacted is True
-    assert result.covered_through_run_message_id == "message-4"
-    assert result.run_messages == tuple(messages[5:])
-    assert result.run_summary is not None
-    assert result.run_summary["progress"] == ["batch-1"]
-    assert calls == 1
+    assert result.compacted is False
 
 
 @pytest.mark.asyncio
-async def test_recent_window_expands_to_keep_complete_tool_exchange() -> None:
-    old = _normal("old")
-    exchange = [
-        _assistant("assistant-tools", "call-1"),
-        _tool_result("result-1", "call-1"),
-    ]
-    recent = [_normal(f"recent-{index}") for index in range(19)]
-    state, context, tenant_id = _state([old, *exchange, *recent])
-
-    async def complete(*_args, **_kwargs):
-        return _step(1)
-
-    result = await _service(
-        model=_model(tenant_id),
-        settings=_settings(),
-        completion=complete,
-        ledger={"call-1": {"status": "succeeded"}},
-    ).compact_if_needed(state, context, forced=True)
-
-    assert result.compacted is True
-    assert result.covered_through_run_message_id == "old"
-    assert result.run_messages == tuple([*exchange, *recent])
-
-
-@pytest.mark.asyncio
-async def test_started_tool_exchange_is_never_crossed_by_compact_watermark() -> None:
-    old = _normal("old-safe")
-    pending = _assistant("assistant-pending", "call-pending")
-    recent = [_normal(f"recent-{index}") for index in range(20)]
-    state, context, tenant_id = _state([old, pending, *recent])
-
-    async def complete(*_args, **_kwargs):
-        return _step(1)
-
-    result = await _service(
-        model=_model(tenant_id),
-        settings=_settings(),
-        completion=complete,
-        ledger={"call-pending": {"status": "started"}},
-    ).compact_if_needed(state, context, forced=True)
-
-    assert result.compacted is True
-    assert result.covered_through_run_message_id == "old-safe"
-    assert result.run_messages == tuple([pending, *recent])
-
-
-@pytest.mark.asyncio
-async def test_no_safe_prefix_before_pending_exchange_keeps_all_exact_messages() -> None:
-    pending = _assistant("assistant-pending", "call-pending")
-    recent = [_normal(f"recent-{index}") for index in range(20)]
-    state, context, tenant_id = _state([pending, *recent])
-
-    async def complete(*_args, **_kwargs):
-        raise AssertionError("unsafe history must not reach the compact model")
-
-    result = await _service(
-        model=_model(tenant_id),
-        settings=_settings(),
-        completion=complete,
-        ledger={"call-pending": {"status": "unknown", "may_have_side_effect": True}},
-    ).compact_if_needed(state, context, forced=True)
-
-    assert result == RunCompactResult(
-        error={
-            "code": "run_compact_boundary_unavailable",
-            "message": "No complete safe prefix exists before the recent Run window",
-        }
+async def test_missing_complete_business_request_budget_fails_closed() -> None:
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
     )
 
+    async def load(
+        _state: RuntimeGraphState,
+        _context: RuntimeContext,
+    ) -> RunCompactInputs:
+        return RunCompactInputs(model=_model(tenant_id), ledger={})
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("missing request budget must fail before model use")
+
+    service = RuntimeRunCompactorService(
+        settings=_settings(),
+        completion=forbidden,
+        input_loader=load,
+    )
+
+    with pytest.raises(RunCompactorError) as raised:
+        await service.compact_if_needed(state, context)
+
+    assert raised.value.code == "missing_request_budget"
+
 
 @pytest.mark.asyncio
-async def test_compact_batches_never_split_large_message_blocks() -> None:
+async def test_at_eighty_percent_compacts_prefix_and_keeps_current_input_exact() -> None:
     messages = [
-        _normal("old-a", "a" * 6_000),
-        _normal("old-b", "b" * 6_000),
-        *[_normal(f"recent-{index}") for index in range(20)],
+        *[_normal(f"old-{index}", "old history " * 12) for index in range(8)],
+        {
+            **_normal("current", "EXACT CURRENT INPUT"),
+            "runtime_input": "current",
+        },
+    ]
+    state, context, tenant_id = _state(messages)
+    async def complete(*_args, **_kwargs):
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=800,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.thread_summary is not None
+    assert set(result.thread_summary) == {
+        "task_goal_and_constraints",
+        "completed_work_and_results",
+        "key_decisions_and_evidence",
+        "unfinished_or_blocked",
+        "next_actions",
+    }
+    assert result.recent_messages is not None
+    assert result.recent_messages[-1]["content"] == "EXACT CURRENT INPUT"
+    assert result.recent_messages[-1]["runtime_input"] == "current"
+    assert result.covered_through_message_id != "current"
+
+
+@pytest.mark.asyncio
+async def test_long_single_run_compacts_safe_work_after_exact_current_input() -> None:
+    messages = [
+        {
+            **_normal("current", "EXACT CURRENT INPUT"),
+            "runtime_input": "current",
+        },
+        _normal("completed-work", "completed work " * 300),
+        _normal("recent", "recent result"),
     ]
     state, context, tenant_id = _state(messages)
     payloads: list[dict] = []
 
     async def complete(_model, prompt, **_kwargs):
         payloads.append(json.loads(prompt[1].content))
-        return _step(len(payloads))
-
-    result = await _service(
-        model=_model(tenant_id, input_tokens=5_000),
-        settings=_settings(),
-        completion=complete,
-    ).compact_if_needed(state, context, forced=True)
-
-    assert result.compacted is True
-    assert len(payloads) == 2
-    assert [len(payload["covered_messages"]) for payload in payloads] == [1, 1]
-    assert result.covered_through_run_message_id == "old-b"
-
-
-@pytest.mark.asyncio
-async def test_short_run_below_all_thresholds_skips_model_call() -> None:
-    state, context, tenant_id = _state([_normal("only-message")])
-
-    async def complete(*_args, **_kwargs):
-        raise AssertionError("short Run must not be compacted")
+        return _step()
 
     result = await _service(
         model=_model(tenant_id),
-        settings=_settings(),
         completion=complete,
-    ).compact_if_needed(state, context, forced=False)
-
-    assert result == RunCompactResult()
-
-
-@pytest.mark.asyncio
-async def test_eighty_five_percent_token_threshold_compacts_even_under_twenty_messages() -> None:
-    messages = [
-        _normal(f"large-{index}", str(index) * 9_000)
-        for index in range(5)
-    ]
-    state, context, tenant_id = _state(messages)
-    calls = 0
-
-    async def complete(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        return _step(calls)
-
-    result = await _service(
-        model=_model(tenant_id, input_tokens=15_000),
-        settings=_settings(),
-        completion=complete,
-    ).compact_if_needed(state, context, forced=False)
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
 
     assert result.compacted is True
-    assert result.run_messages is not None
-    assert len(result.run_messages) < len(messages)
-    assert result.covered_through_run_message_id is not None
-    assert calls >= 1
+    assert result.covered_through_message_id == "completed-work"
+    assert result.recent_messages is not None
+    assert [message["id"] for message in result.recent_messages] == [
+        "current",
+        "recent",
+    ]
+    assert result.recent_messages[0]["content"] == "EXACT CURRENT INPUT"
+    assert payloads[0]["authoritative_exact_inputs"][0]["content"] == (
+        "EXACT CURRENT INPUT"
+    )
 
 
 @pytest.mark.asyncio
-async def test_invalid_compact_output_keeps_previous_checkpoint_history() -> None:
-    messages = [_normal(f"message-{index}") for index in range(21)]
+async def test_prior_run_input_marker_does_not_pin_current_run_compact() -> None:
+    messages = [
+        {
+            **_normal("prior-run-input", "prior input " * 300),
+            "runtime_input": "current",
+            "runtime_run_id": str(uuid.uuid4()),
+        },
+        {
+            **_normal("current", "EXACT CURRENT INPUT"),
+            "runtime_input": "current",
+        },
+    ]
     state, context, tenant_id = _state(messages)
+
+    async def complete(*_args, **_kwargs):
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.covered_through_message_id == "prior-run-input"
+    assert result.recent_messages is not None
+    assert [message["id"] for message in result.recent_messages] == ["current"]
+
+
+@pytest.mark.asyncio
+async def test_current_run_resume_input_remains_exact_across_later_compact() -> None:
+    messages = [
+        {
+            **_normal("current", "EXACT CURRENT INPUT"),
+            "runtime_input": "current",
+        },
+        _normal("before-resume", "completed before resume " * 160),
+        {
+            **_normal("resume", "EXACT RESUME INPUT"),
+            "runtime_input": "resume",
+        },
+        _normal("after-resume", "completed after resume " * 160),
+        _normal("recent", "recent result"),
+    ]
+    state, context, tenant_id = _state(messages)
+    state["messages"][2]["runtime_run_id"] = context.run_id  # type: ignore[index]
+
+    async def complete(*_args, **_kwargs):
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.covered_through_message_id == "after-resume"
+    assert result.recent_messages is not None
+    assert [message["id"] for message in result.recent_messages] == [
+        "current",
+        "resume",
+        "recent",
+    ]
+    assert result.recent_messages[1]["content"] == "EXACT RESUME INPUT"
+
+
+@pytest.mark.asyncio
+async def test_generated_current_message_id_is_protected_by_run_identity() -> None:
+    messages = [
+        {
+            **_normal("generated-current", "EXACT GENERATED INPUT"),
+            "runtime_input": "current",
+        },
+        _normal("completed-work", "completed work " * 300),
+        _normal("recent", "recent result"),
+    ]
+    state, context, tenant_id = _state(messages)
+    state["messages"][0]["runtime_run_id"] = context.run_id  # type: ignore[index]
+    state["snapshots"] = RunInputSnapshots(
+        session_context={"version": 0},
+        session_context_version=0,
+        recent_session_messages=(),
+        related_run_summaries=(),
+        initial_input={"input_content": "EXACT GENERATED INPUT"},
+    )
+
+    async def complete(*_args, **_kwargs):
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.recent_messages is not None
+    assert [message["id"] for message in result.recent_messages] == [
+        "generated-current",
+        "recent",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_started_exchange_is_retained_and_never_crossed() -> None:
+    messages = [
+        _normal("old-safe", "old " * 300),
+        _assistant("assistant-pending", "call-pending"),
+        {**_normal("current", "exact"), "runtime_input": "current"},
+    ]
+    state, context, tenant_id = _state(messages)
+
+    async def complete(*_args, **_kwargs):
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+        ledger={"call-pending": {"status": "started"}},
+    ).compact_if_needed(state, context)
+
+    assert result.covered_through_message_id == "old-safe"
+    assert result.recent_messages is not None
+    assert [message["id"] for message in result.recent_messages] == [
+        "assistant-pending",
+        "current",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_oversized_settled_exchange_enters_summary_as_facts_and_refs() -> None:
+    messages = [
+        _assistant("assistant-tools", "call-1"),
+        _tool_result("result-1", "call-1", content="x" * 30_000),
+        {**_normal("current", "exact"), "runtime_input": "current"},
+    ]
+    state, context, tenant_id = _state(messages)
+    payloads: list[dict] = []
+
+    async def complete(_model, prompt, **_kwargs):
+        payloads.append(json.loads(prompt[1].content))
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id, input_tokens=5_000),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+        ledger={
+            "call-1": {
+                "status": "succeeded",
+                "tool_name": "lookup",
+                "result_summary": "found the answer",
+                "result_ref": "result://call-1",
+                "request_ref": "request://call-1",
+            }
+        },
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    serialized = json.dumps(payloads, ensure_ascii=False)
+    assert "historical_tool_exchange" in serialized
+    assert "result://call-1" in serialized
+    assert "request://call-1" in serialized
+    assert "x" * 1_000 not in serialized
+
+
+@pytest.mark.asyncio
+async def test_transient_provider_failure_is_typed_for_langgraph_retry() -> None:
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+
+    async def complete(*_args, **_kwargs):
+        raise TimeoutError("provider timeout")
+
+    with pytest.raises(TransientRunCompactorError) as raised:
+        await _service(
+            model=_model(tenant_id),
+            completion=complete,
+            effective_budget=1_000,
+            current_tokens=900,
+        ).compact_if_needed(state, context)
+
+    assert raised.value.is_transient_compact_error is True
+
+
+@pytest.mark.asyncio
+async def test_invalid_summary_is_deterministic_and_never_committed() -> None:
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
 
     async def complete(*_args, **_kwargs):
         return LLMCompletionStep(
@@ -354,12 +519,34 @@ async def test_invalid_compact_output_keeps_previous_checkpoint_history() -> Non
             usage=TokenUsage(total_tokens=1),
         )
 
-    result = await _service(
-        model=_model(tenant_id),
-        settings=_settings(),
-        completion=complete,
-    ).compact_if_needed(state, context, forced=True)
+    with pytest.raises(RunCompactorError) as raised:
+        await _service(
+            model=_model(tenant_id),
+            completion=complete,
+            effective_budget=1_000,
+            current_tokens=900,
+        ).compact_if_needed(state, context)
 
-    assert result.compacted is False
-    assert result.error is not None
-    assert result.error["code"] == "invalid_run_compact_output"
+    assert raised.value.code == "invalid_thread_compact_output"
+    assert "thread_summary" not in state
+    assert "summary_covered_through_message_id" not in state
+
+
+@pytest.mark.asyncio
+async def test_summary_over_4096_tokens_is_rejected() -> None:
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 15_000), _normal("current")]
+    )
+
+    async def complete(*_args, **_kwargs):
+        return _step(completed_work_and_results="x" * 20_000)
+
+    with pytest.raises(RunCompactorError) as raised:
+        await _service(
+            model=_model(tenant_id, input_tokens=100_000),
+            completion=complete,
+            effective_budget=100_000,
+            current_tokens=80_000,
+        ).compact_if_needed(state, context)
+
+    assert raised.value.code == "thread_summary_exceeds_budget"

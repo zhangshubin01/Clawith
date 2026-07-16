@@ -289,6 +289,29 @@ def _allowed_tool_names(tools_for_llm: list[dict] | None) -> set[str]:
     return names
 
 
+def _tool_round_limit_warning(
+    *,
+    round_index: int,
+    max_rounds: int,
+    allowed_tool_names: set[str],
+    urgent: bool,
+) -> str:
+    """Build a warning that never advertises unavailable continuation tools."""
+    prefix = (
+        f"🚨 仅剩 {max_rounds - round_index} 轮模型决策。"
+        if urgent
+        else f"⚠️ 你已使用 {round_index}/{max_rounds} 轮模型决策。"
+    )
+    actions: list[str] = []
+    if "upsert_focus_item" in allowed_tool_names:
+        actions.append("使用 `upsert_focus_item` 保存需要续接的工作状态")
+    if "set_trigger" in allowed_tool_names:
+        actions.append("仅在确实需要未来唤醒时使用 `set_trigger` 安排续接")
+    if not actions:
+        return f"{prefix}请立即完成关键步骤、验证结果并收尾。"
+    return f"{prefix}请立即完成关键步骤并验证结果；" + "；".join(actions) + "。"
+
+
 def _tool_not_enabled_message(tool_name: str) -> str:
     return (
         f"Tool `{tool_name}` is not enabled for this agent. "
@@ -313,39 +336,57 @@ async def _process_tool_call(
     fn = tc["function"]
     tool_name = fn["name"]
     raw_args = fn.get("arguments", "{}")
-    logger.info(f"[LLM] Calling tool: {tool_name}({json.dumps(raw_args, ensure_ascii=False)})")
-
     try:
         args = json.loads(raw_args) if raw_args else {}
     except json.JSONDecodeError:
         args = {}
 
-    # Guard: check if tool requires arguments
+    try:
+        from app.services.agent_runtime.tool_execution import sanitize_tool_arguments
+        from app.services.builtin_tool_definitions import builtin_sensitive_paths
+
+        logged_args = sanitize_tool_arguments(
+            args,
+            sensitive_paths=builtin_sensitive_paths(tool_name),
+        )
+    except Exception:
+        logged_args = {"_redacted": "tool arguments could not be safely serialized"}
+    logger.info("[LLM] Calling tool: {}({})", tool_name, logged_args)
+
+    # Enforce the resolved workset before inspecting tool-specific arguments.
+    # A disabled tool must not bypass this guard via another validation path.
+    if tool_name not in allowed_tool_names:
+        result = _tool_not_enabled_message(tool_name)
+        logger.warning(
+            f"[LLM] Blocked disabled tool call: {tool_name} agent_id={agent_id}"
+        )
+        if on_tool_call:
+            try:
+                await on_tool_call(
+                    {
+                        "name": tool_name,
+                        "call_id": tc.get("id", ""),
+                        "args": args,
+                        "status": "done",
+                        "result": result,
+                        "reasoning_content": full_reasoning_content,
+                    }
+                )
+            except Exception:
+                pass
+        api_messages.append(
+            LLMMessage(
+                role="tool",
+                tool_call_id=tc["id"],
+                content=result,
+            )
+        )
+        return ""
+
+    # Guard: check if an enabled tool requires arguments.
     should_execute, error_msg = _check_tool_requires_args(tool_name, args)
     if not should_execute:
         return error_msg
-
-    # if tool_name not in allowed_tool_names:
-    #     result = _tool_not_enabled_message(tool_name)
-    #     logger.warning(f"[LLM] Blocked disabled tool call: {tool_name} agent_id={agent_id}")
-    #     if on_tool_call:
-    #         try:
-    #             await on_tool_call({
-    #                 "name": tool_name,
-    #                 "call_id": tc.get("id", ""),
-    #                 "args": args,
-    #                 "status": "done",
-    #                 "result": result,
-    #                 "reasoning_content": full_reasoning_content
-    #             })
-    #         except Exception:
-    #             pass
-    #     api_messages.append(LLMMessage(
-    #         role="tool",
-    #         tool_call_id=tc["id"],
-    #         content=result,
-    #     ))
-    #     return ""
 
     # Notify client about tool call (in-progress)
     if on_tool_call:
@@ -463,22 +504,28 @@ async def call_llm(
                 )
         on_tool_call = _default_on_tool_call
 
-    # Build rich prompt with soul, memory, skills, relationships
-    from app.services.agent_context import build_agent_context
-    # Look up current user's display name so the agent knows who it's talking to
-    static_prompt, dynamic_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_user_name)
-    if system_prompt_suffix:
-        dynamic_prompt += system_prompt_suffix
-
-    # Load tools dynamically from DB. `skip_tools=True` is set by the WS
-    # handler on the onboarding greeting turn; keep the runtime-level `finish`
-    # tool available so every turn still has an explicit stop signal.
+    # Resolve the effective Tool Schema before the prompt so capability policies
+    # and Skill discovery cannot advertise tools absent from this model step.
+    # `skip_tools=True` is set by the WS handler on the onboarding greeting turn;
+    # keep `finish` available so the turn still has an explicit stop signal.
     if skip_tools:
         tools_for_llm = [FINISH_TOOL_DEFINITION]
     else:
         from app.services.agent_tools import AGENT_TOOLS
         tools_for_llm = await get_agent_tools_for_llm(agent_id) if agent_id else AGENT_TOOLS
     allowed_tool_names = _allowed_tool_names(tools_for_llm)
+
+    from app.services.agent_context import build_agent_context
+
+    static_prompt, dynamic_prompt = await build_agent_context(
+        agent_id,
+        agent_name,
+        "",
+        current_user_name=_user_name,
+        allowed_tool_names=allowed_tool_names,
+    )
+    if system_prompt_suffix:
+        dynamic_prompt = f"{dynamic_prompt}\n\n{system_prompt_suffix.strip()}"
 
     # Convert messages to LLMMessage format
     api_messages = [LLMMessage(role="system", content=static_prompt, dynamic_content=dynamic_prompt)]
@@ -515,19 +562,29 @@ async def call_llm(
         _warn_threshold_80 = int(_max_tool_rounds * 0.8)
         _warn_threshold_96 = _max_tool_rounds - 2
         if round_i == _warn_threshold_80:
-            api_messages.append(LLMMessage(
-                role="user",
-                content=(
-                    f"⚠️ 你已使用 {round_i}/{_max_tool_rounds} 轮工具调用。"
-                    "如果当前任务尚未完成，请尽快使用 upsert_focus_item 保存进度，"
-                    "并使用 set_trigger 设置续接触发器，在剩余轮次中做好收尾。"
-                ),
-            ))
+            api_messages.append(
+                LLMMessage(
+                    role="user",
+                    content=_tool_round_limit_warning(
+                        round_index=round_i,
+                        max_rounds=_max_tool_rounds,
+                        allowed_tool_names=allowed_tool_names,
+                        urgent=False,
+                    ),
+                )
+            )
         elif round_i == _warn_threshold_96:
-            api_messages.append(LLMMessage(
-                role="user",
-                content="🚨 仅剩 2 轮工具调用。请立即使用 upsert_focus_item 保存进度并设置续接触发器。",
-            ))
+            api_messages.append(
+                LLMMessage(
+                    role="user",
+                    content=_tool_round_limit_warning(
+                        round_index=round_i,
+                        max_rounds=_max_tool_rounds,
+                        allowed_tool_names=allowed_tool_names,
+                        urgent=True,
+                    ),
+                )
+            )
 
         # Check token usage limit mid-loop (every 3 rounds)
         if round_i > 0 and round_i % 3 == 0:

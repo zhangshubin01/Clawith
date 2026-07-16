@@ -1,40 +1,31 @@
-"""Caller-transaction intake and product queries for the durable Runtime."""
+"""Caller-transaction command intake for the durable Runtime."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import cast
 import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
+from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.agent_run_command import AgentRunCommand
 from app.services.agent_runtime.config import RuntimeGateDecision, RuntimeRolloutPolicy
 from app.services.agent_runtime.contracts import (
     CancelRunCommand,
-    DeliveryStatus,
+    RUNTIME_COMMAND_METADATA_KEY,
     ResumeRunCommand,
     RunHandle,
-    RunKind,
-    RuntimeSourceType,
-    RuntimeType,
-    RuntimeEvent,
-    RuntimeEventCursor,
-    RunView,
     StartRunCommand,
 )
 from app.services.agent_runtime.graph import RuntimeGraphIdentity
-from app.services.agent_runtime.event_stream import DatabaseRuntimeEventStream
 from app.services.agent_runtime.persistence import (
     RunRegistration,
     enqueue_cancel,
     enqueue_resume,
     register_run_with_start,
 )
-from app.services.agent_runtime.state import LifecycleStatus
 
 
 class RuntimeAdapterError(RuntimeError):
@@ -45,8 +36,8 @@ class RuntimeAdapterError(RuntimeError):
         self.code = code
 
 
-class TransactionalAgentRuntimeAdapter:
-    """Persist Runtime inputs inside an AsyncSession owned by the caller.
+class RuntimeCommandIntake:
+    """Persist Runtime commands inside an AsyncSession owned by the caller.
 
     This layer accepts commands and returns stable identities. It never commits,
     invokes a Graph, or passes an ``AgentRun`` ORM instance into execution code.
@@ -57,14 +48,12 @@ class TransactionalAgentRuntimeAdapter:
         db: AsyncSession,
         *,
         settings: Settings | None = None,
-        event_stream: DatabaseRuntimeEventStream | None = None,
     ) -> None:
         runtime_settings = settings or get_settings()
         self._db = db
         self._rollout = RuntimeRolloutPolicy.from_settings(runtime_settings)
         self._current_graph = RuntimeGraphIdentity.from_settings(runtime_settings)
         self._planning_graph = RuntimeGraphIdentity.planning_from_settings(runtime_settings)
-        self._event_stream = event_stream
 
     @staticmethod
     def _require_v2(decision: RuntimeGateDecision) -> None:
@@ -103,6 +92,85 @@ class TransactionalAgentRuntimeAdapter:
             raise RuntimeAdapterError("run_scope_mismatch", "loaded Run is outside the requested tenant")
         return run
 
+    async def _configured_model_turn_limit(self, command: StartRunCommand) -> int | None:
+        """Resolve the immutable Run budget without a Runtime-side fallback."""
+        requested = command.requested_model_turn_limit
+        if requested is not None and (
+            isinstance(requested, bool)
+            or not isinstance(requested, int)
+            or requested <= 0
+        ):
+            raise RuntimeAdapterError(
+                "invalid_requested_model_turn_limit",
+                "requested_model_turn_limit must be a positive integer",
+            )
+
+        if command.run_kind == "orchestration":
+            if requested is not None:
+                raise RuntimeAdapterError(
+                    "invalid_requested_model_turn_limit",
+                    "Planning Runs use their own bounded attempt policy",
+                )
+            return None
+
+        if command.agent_id is None:
+            raise RuntimeAdapterError(
+                "agent_required",
+                "Agent Runs require an agent_id before resolving their model turn limit",
+            )
+        result = await self._db.execute(
+            select(Agent).where(
+                Agent.tenant_id == command.tenant_id,
+                Agent.id == command.agent_id,
+            )
+        )
+        agent = result.scalar_one_or_none()
+        if agent is None:
+            raise RuntimeAdapterError(
+                "agent_not_found",
+                "Agent does not exist in the Runtime command tenant",
+            )
+        configured = agent.max_tool_rounds
+        if (
+            isinstance(configured, bool)
+            or not isinstance(configured, int)
+            or configured <= 0
+        ):
+            raise RuntimeAdapterError(
+                "invalid_agent_model_turn_limit",
+                "Agent max_tool_rounds must be a positive model turn limit",
+            )
+        return configured if requested is None else min(configured, requested)
+
+    @staticmethod
+    def _start_payload(command: StartRunCommand) -> dict:
+        requested = command.requested_model_turn_limit
+        if requested is not None and (
+            isinstance(requested, bool)
+            or not isinstance(requested, int)
+            or requested <= 0
+        ):
+            raise RuntimeAdapterError(
+                "invalid_requested_model_turn_limit",
+                "requested_model_turn_limit must be a positive integer",
+            )
+        if command.run_kind == "orchestration" and requested is not None:
+            raise RuntimeAdapterError(
+                "invalid_requested_model_turn_limit",
+                "Planning Runs use their own bounded attempt policy",
+            )
+        if RUNTIME_COMMAND_METADATA_KEY in command.payload:
+            raise RuntimeAdapterError(
+                "reserved_runtime_metadata",
+                f"{RUNTIME_COMMAND_METADATA_KEY} is reserved for Runtime control metadata",
+            )
+        payload = dict(command.payload)
+        if command.run_kind != "orchestration":
+            payload[RUNTIME_COMMAND_METADATA_KEY] = {
+                "requested_model_turn_limit": command.requested_model_turn_limit,
+            }
+        return payload
+
     def _require_existing_v2(self, run: AgentRun) -> None:
         decision = self._rollout.decide(
             agent_id=run.agent_id,
@@ -119,10 +187,10 @@ class TransactionalAgentRuntimeAdapter:
                 "runtime_type_mismatch",
                 "v2 adapter may only return handles for LangGraph Runs",
             )
-        if run.runtime_thread_id != str(run.id):
+        if not run.runtime_thread_id or not run.runtime_thread_id.strip():
             raise RuntimeAdapterError(
                 "runtime_identity_mismatch",
-                "Run thread_id must equal run_id",
+                "Run thread_id must be a non-empty stable identity",
             )
 
     @staticmethod
@@ -132,7 +200,7 @@ class TransactionalAgentRuntimeAdapter:
         *,
         created: bool,
     ) -> RunHandle:
-        TransactionalAgentRuntimeAdapter._require_run_identity(run)
+        RuntimeCommandIntake._require_run_identity(run)
         if command.tenant_id != run.tenant_id or command.run_id != run.id:
             raise RuntimeAdapterError(
                 "command_scope_mismatch",
@@ -149,6 +217,7 @@ class TransactionalAgentRuntimeAdapter:
 
     async def start_run(self, command: StartRunCommand) -> RunHandle:
         """Atomically register one Run and its start command without committing."""
+        start_payload = self._start_payload(command)
         existing = await self._find_start_retry(command)
         if existing is None:
             decision = self._rollout.decide(
@@ -162,6 +231,7 @@ class TransactionalAgentRuntimeAdapter:
                 and command.system_role == "group_planning"
                 else self._current_graph
             )
+            model_turn_limit = None
         else:
             decision = self._rollout.decide(
                 agent_id=existing.agent_id,
@@ -173,7 +243,25 @@ class TransactionalAgentRuntimeAdapter:
                 name=existing.graph_name,
                 version=existing.graph_version,
             )
+            model_turn_limit = existing.model_turn_limit
         self._require_v2(decision)
+        if existing is None:
+            model_turn_limit = await self._configured_model_turn_limit(command)
+        elif existing.run_kind == "orchestration":
+            if model_turn_limit is not None:
+                raise RuntimeAdapterError(
+                    "invalid_stored_model_turn_limit",
+                    "Planning Run unexpectedly has an Agent model turn limit",
+                )
+        elif (
+            isinstance(model_turn_limit, bool)
+            or not isinstance(model_turn_limit, int)
+            or model_turn_limit <= 0
+        ):
+            raise RuntimeAdapterError(
+                "invalid_stored_model_turn_limit",
+                "Existing Agent Run has no valid immutable model turn limit",
+            )
         if existing is not None:
             self._require_run_identity(existing)
 
@@ -195,6 +283,8 @@ class TransactionalAgentRuntimeAdapter:
                 run_kind=command.run_kind,
                 system_role=command.system_role,
                 model_id=command.model_id,
+                model_turn_limit=model_turn_limit,
+                runtime_thread_id=command.runtime_thread_id,
                 runtime_type=runtime_type,
                 graph_name=graph_identity.name,
                 graph_version=graph_identity.version,
@@ -204,7 +294,7 @@ class TransactionalAgentRuntimeAdapter:
                 delivery_status=command.delivery_status,
                 delivery_target=command.delivery_target,
             ),
-            start_payload=command.payload,
+            start_payload=start_payload,
             start_idempotency_key=command.idempotency_key,
             actor_user_id=command.actor_user_id,
             actor_agent_id=command.actor_agent_id,
@@ -245,38 +335,8 @@ class TransactionalAgentRuntimeAdapter:
         )
         return self._handle(run, enqueued.command, created=enqueued.created)
 
-    async def get_run_state(self, tenant_id: uuid.UUID, run_id: uuid.UUID) -> RunView:
-        """Return the product query projection without treating it as execution state."""
-        run = await self._get_run(tenant_id=tenant_id, run_id=run_id)
-        return RunView(
-            tenant_id=run.tenant_id,
-            run_id=run.id,
-            source_type=cast(RuntimeSourceType, run.source_type),
-            run_kind=cast(RunKind, run.run_kind),
-            goal=run.goal,
-            runtime_type=cast(RuntimeType, run.runtime_type),
-            execution_status=cast(LifecycleStatus | None, run.projected_execution_status),
-            waiting_type=run.projected_waiting_type,
-            result_summary=run.projected_result_summary,
-            error_code=run.projected_error_code,
-            last_error=run.projected_last_error,
-            delivery_status=cast(DeliveryStatus, run.delivery_status),
-            projection_checkpoint_id=run.projected_checkpoint_id,
-            projection_updated_at=run.projection_updated_at,
-            created_at=run.created_at,
-            updated_at=run.updated_at,
-        )
 
-    def stream_run(
-        self,
-        handle: RunHandle,
-        *,
-        after: RuntimeEventCursor | None = None,
-    ) -> AsyncIterator[RuntimeEvent]:
-        """Delegate long-lived reads to a fresh-session event stream service."""
-        if self._event_stream is None:
-            raise RuntimeAdapterError(
-                "runtime_event_stream_unavailable",
-                "Runtime event streaming requires a dedicated session factory",
-            )
-        return self._event_stream.stream_run(handle, after=after)
+__all__ = [
+    "RuntimeAdapterError",
+    "RuntimeCommandIntake",
+]

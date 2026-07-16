@@ -1,4 +1,4 @@
-"""Checkpoint-owned Planning Graph contract and transition tests."""
+"""Planning v2 checkpoint contract and terminal transition tests."""
 
 from __future__ import annotations
 
@@ -16,13 +16,12 @@ from app.services.agent_runtime.planning import (
     PlanningModelResult,
     PlanningModelService,
     PlanningRuntimeNodeExecutor,
-    ready_plan_steps,
+    checkpoint_plan,
     validate_planning_output,
 )
 from app.services.agent_runtime.state import (
     JsonObject,
     RunInputSnapshots,
-    RunRegistrySnapshot,
     RuntimeContext,
     RuntimeGraphState,
     RuntimeNodeExecutor,
@@ -40,26 +39,8 @@ def _candidate(agent_id: uuid.UUID, name: str) -> JsonObject:
     }
 
 
-def _state(
-    agent_ids: tuple[uuid.UUID, ...],
-    *,
-    model_id: uuid.UUID | None = None,
-    run_id: uuid.UUID | None = None,
-) -> RuntimeGraphState:
-    resolved_run_id = run_id or uuid.uuid4()
+def _state(agent_ids: tuple[uuid.UUID, ...]) -> RuntimeGraphState:
     return {
-        "registry": RunRegistrySnapshot(
-            tenant_id=str(uuid.uuid4()),
-            run_id=str(resolved_run_id),
-            goal="Research the topic, then write the answer",
-            run_kind="orchestration",
-            source_type="chat",
-            model_id=str(model_id or uuid.uuid4()),
-            graph_name="runtime_group_planning",
-            graph_version="v1",
-            session_id=str(uuid.uuid4()),
-            system_role="group_planning",
-        ),
         "snapshots": RunInputSnapshots(
             session_context={},
             session_context_version=1,
@@ -67,55 +48,69 @@ def _state(
             related_run_summaries=(),
             initial_input={
                 "candidate_agents": [
-                    _candidate(agent_id, f"Agent {index}")
-                    for index, agent_id in enumerate(agent_ids, start=1)
+                    _candidate(agent_id, f"Agent {index}") for index, agent_id in enumerate(agent_ids, start=1)
                 ]
             },
         ),
+        "messages": [],
         "lifecycle": {
             "status": "running",
             "next_route": "model",
-            "run_messages": [],
             "pending_tool_calls": [],
         },
     }
 
 
-def _plan(
-    first: uuid.UUID,
-    second: uuid.UUID,
+def _context(
     *,
-    strategy: str = "sequential",
-) -> dict:
-    dependencies = [] if strategy == "parallel" else ["research"]
-    return {
-        "version": 1,
-        "goal": "Produce one grounded answer",
-        "execution_strategy": strategy,
-        "steps": [
-            {
-                "step_id": "research",
-                "agent_id": str(first),
-                "instruction": "Research the evidence",
-                "depends_on_step_ids": [],
-            },
-            {
-                "step_id": "write",
-                "agent_id": str(second),
-                "instruction": "Write the final answer",
-                "depends_on_step_ids": dependencies,
-            },
-        ],
-    }
-
-
-def _context(state: RuntimeGraphState) -> RuntimeContext:
+    model_id: uuid.UUID | None = None,
+    run_id: uuid.UUID | None = None,
+) -> RuntimeContext:
     return RuntimeContext(
-        tenant_id=state["registry"].tenant_id,
-        run_id=state["registry"].run_id,
+        tenant_id=str(uuid.uuid4()),
+        run_id=str(run_id or uuid.uuid4()),
         command_id=str(uuid.uuid4()),
         executor=cast(RuntimeNodeExecutor, object()),
+        goal="Research the topic, then write the answer",
+        run_kind="orchestration",
+        source_type="chat",
+        model_id=str(model_id or uuid.uuid4()),
+        graph_name="runtime_group_planning",
+        graph_version="v1",
+        agent_id=None,
+        session_id=str(uuid.uuid4()),
+        system_role="group_planning",
     )
+
+
+def _plan(
+    first: uuid.UUID,
+    second: uuid.UUID | None = None,
+    *,
+    mode: str = "advisory",
+) -> dict:
+    entries = [
+        {
+            "agent_id": str(first),
+            "instruction": "Research the evidence",
+        }
+    ]
+    if second is not None:
+        entries.append(
+            {
+                "agent_id": str(second),
+                "instruction": "Review the initial evidence",
+            }
+        )
+    return {
+        "version": 2,
+        "mode": mode,
+        "goal": "Produce one grounded answer",
+        "plan_prompt": (
+            "Research the request, publish each handoff in the group, and stop when the requested answer is grounded."
+        ),
+        "entry_steps": entries,
+    }
 
 
 class _CancelSource:
@@ -128,8 +123,8 @@ class _PlanningModel:
     def __init__(self, *results: PlanningModelResult) -> None:
         self.results = deque(results)
 
-    async def complete_once(self, state):
-        del state
+    async def complete_once(self, state, context):
+        del state, context
         return self.results.popleft()
 
 
@@ -158,78 +153,72 @@ def _session_factory(model: LLMModel):
     return factory
 
 
-def test_plan_validator_accepts_the_three_execution_strategies() -> None:
-    first, second, third = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    candidates = frozenset({first, second, third})
-    parallel = {
-        "version": 1,
-        "goal": "Parallel work",
-        "execution_strategy": "parallel",
-        "steps": [
-            {
-                "step_id": name,
-                "agent_id": str(agent_id),
-                "instruction": name,
-                "depends_on_step_ids": [],
-            }
-            for name, agent_id in (("a", first), ("b", second), ("c", third))
-        ],
-    }
-    sequential = {
-        **parallel,
-        "goal": "Sequential work",
-        "execution_strategy": "sequential",
-        "steps": [
-            {**parallel["steps"][0]},
-            {**parallel["steps"][1], "depends_on_step_ids": ["a"]},
-            {**parallel["steps"][2], "depends_on_step_ids": ["b"]},
-        ],
-    }
-    dependency = {
-        **parallel,
-        "goal": "DAG work",
-        "execution_strategy": "dependency",
-        "steps": [
-            {**parallel["steps"][0]},
-            {**parallel["steps"][1]},
-            {**parallel["steps"][2], "depends_on_step_ids": ["a", "b"]},
-        ],
-    }
+def test_plan_validator_accepts_an_entry_subset_without_inventing_a_dag() -> None:
+    first, second, non_entry = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    raw = _plan(first, second, mode="enforced")
 
-    assert validate_planning_output(parallel, candidate_agent_ids=candidates)[
-        "execution_strategy"
-    ] == "parallel"
-    assert validate_planning_output(sequential, candidate_agent_ids=candidates)[
-        "execution_strategy"
-    ] == "sequential"
-    assert validate_planning_output(dependency, candidate_agent_ids=candidates)[
-        "execution_strategy"
-    ] == "dependency"
+    plan = validate_planning_output(
+        raw,
+        candidate_agent_ids=frozenset({first, second, non_entry}),
+    )
+
+    assert plan == raw
+    assert [entry["agent_id"] for entry in plan["entry_steps"]] == [
+        str(first),
+        str(second),
+    ]
+    assert "steps" not in plan
+    assert "execution_strategy" not in plan
 
 
 @pytest.mark.parametrize(
     "mutation",
     [
+        "legacy_v1",
         "unknown_agent",
-        "cycle",
-        "strategy_mismatch",
-        "missing_candidate",
+        "duplicate_agent",
+        "blank_goal",
+        "blank_plan_prompt",
+        "blank_instruction",
+        "invalid_mode",
+        "unknown_field",
+        "too_many_entries",
     ],
 )
-def test_plan_validator_rejects_unsafe_or_incomplete_plans(mutation: str) -> None:
+def test_plan_validator_rejects_non_v2_or_nonstructural_input(mutation: str) -> None:
     first, second = uuid.uuid4(), uuid.uuid4()
+    candidates = {first, second}
     raw = _plan(first, second)
-    if mutation == "unknown_agent":
-        raw["steps"][1]["agent_id"] = str(uuid.uuid4())
-    elif mutation == "cycle":
-        raw["steps"][0]["depends_on_step_ids"] = ["write"]
-    elif mutation == "strategy_mismatch":
+    if mutation == "legacy_v1":
+        raw = {
+            "version": 1,
+            "goal": "Old plan",
+            "execution_strategy": "parallel",
+            "steps": [],
+        }
+    elif mutation == "unknown_agent":
+        raw["entry_steps"][1]["agent_id"] = str(uuid.uuid4())
+    elif mutation == "duplicate_agent":
+        raw["entry_steps"][1]["agent_id"] = str(first)
+    elif mutation == "blank_goal":
+        raw["goal"] = "  "
+    elif mutation == "blank_plan_prompt":
+        raw["plan_prompt"] = ""
+    elif mutation == "blank_instruction":
+        raw["entry_steps"][0]["instruction"] = " "
+    elif mutation == "invalid_mode":
+        raw["mode"] = "dependency"
+    elif mutation == "unknown_field":
         raw["execution_strategy"] = "parallel"
     else:
-        raw["steps"] = raw["steps"][:1]
+        many_agents = tuple(uuid.uuid4() for _ in range(51))
+        candidates.update(many_agents)
+        raw["entry_steps"] = [
+            {"agent_id": str(agent_id), "instruction": f"Entry {index}"} for index, agent_id in enumerate(many_agents)
+        ]
 
-    with pytest.raises(PlanningContractError, match="Agent|acyclic|parallel|mentioned"):
-        validate_planning_output(raw, candidate_agent_ids=frozenset({first, second}))
+    with pytest.raises(PlanningContractError):
+        validate_planning_output(raw, candidate_agent_ids=frozenset(candidates))
 
 
 @pytest.mark.asyncio
@@ -246,13 +235,13 @@ async def test_planning_model_uses_the_pinned_platform_model_without_tools() -> 
         max_output_tokens=2048,
         max_input_tokens=64_000,
     )
-    state = _state((first, second), model_id=model.id)
+    state = _state((first, second))
     calls = []
 
     async def complete(model_arg, messages, **kwargs):
         calls.append((model_arg, messages, kwargs))
         return LLMCompletionStep(
-            content=json.dumps(_plan(first, second)),
+            content=json.dumps(_plan(first)),
             tool_calls=(),
             reasoning_content=None,
             retry_instruction=None,
@@ -262,16 +251,24 @@ async def test_planning_model_uses_the_pinned_platform_model_without_tools() -> 
     result = await PlanningModelService(
         session_factory=_session_factory(model),  # type: ignore[arg-type]
         completion=complete,
-    ).complete_once(state)
+    ).complete_once(state, _context(model_id=model.id))
 
-    assert result.plan is not None
+    assert result.plan == _plan(first)
     assert calls[0][0] is model
     assert calls[0][2] == {
         "tools": None,
         "agent_id": None,
         "supports_vision": False,
     }
-    assert calls[0][1][0].role == "system"
+    planning_prompt = str(calls[0][1][0].content)
+    assert '"version": 2' in planning_prompt
+    assert '"entry_steps"' in planning_prompt
+    assert "advisory" in planning_prompt
+    assert "enforced" in planning_prompt
+    assert "depends_on_step_ids" not in planning_prompt
+    assert "digital employee in Clawith" not in planning_prompt
+    assert "call `finish`" not in planning_prompt
+    assert "call `wait`" not in planning_prompt
 
 
 @pytest.mark.asyncio
@@ -294,9 +291,10 @@ async def test_invalid_plans_receive_two_repairs_then_fail_the_checkpoint() -> N
         model_service=model,  # type: ignore[arg-type]
         max_repairs=2,
     )
+    context = _context()
 
     for attempt in range(1, 4):
-        update = await executor.execute("model", state, _context(state))
+        update = await executor.execute("model", state, context)
         state["lifecycle"] = update["lifecycle"]
         assert state["lifecycle"]["planning_attempt_count"] == attempt
 
@@ -309,127 +307,68 @@ async def test_invalid_plans_receive_two_repairs_then_fail_the_checkpoint() -> N
 
 
 @pytest.mark.asyncio
-async def test_child_results_unlock_dependencies_and_complete_the_root() -> None:
+async def test_valid_plan_completes_without_waiting_and_freezes_the_exact_v2_plan() -> None:
     first, second = uuid.uuid4(), uuid.uuid4()
     state = _state((first, second))
     plan = validate_planning_output(
-        _plan(first, second),
+        _plan(first, mode="enforced"),
+        candidate_agent_ids=frozenset({first, second}),
+    )
+    executor = PlanningRuntimeNodeExecutor(
+        cancel_source=_CancelSource(),  # type: ignore[arg-type]
+        model_service=_PlanningModel(PlanningModelResult(plan=plan)),  # type: ignore[arg-type]
+    )
+
+    update = await executor.execute("model", state, _context())
+
+    assert update["lifecycle"]["status"] == "completed"
+    assert update["lifecycle"]["next_route"] == "terminal"
+    assert update["lifecycle"]["planning"] == plan
+    assert update["lifecycle"]["waiting_request"] is None
+    assert update["lifecycle"]["error"] is None
+
+
+def test_checkpoint_plan_revalidates_the_frozen_candidate_scope() -> None:
+    first, second = uuid.uuid4(), uuid.uuid4()
+    state = _state((first, second))
+    state["lifecycle"]["planning"] = _plan(first)
+
+    assert checkpoint_plan(state) == _plan(first)
+
+    state["lifecycle"]["planning"] = _plan(uuid.uuid4())
+    with pytest.raises(PlanningContractError, match="candidate"):
+        checkpoint_plan(state)
+
+
+@pytest.mark.asyncio
+async def test_planning_executor_has_no_child_resume_path() -> None:
+    first, second = uuid.uuid4(), uuid.uuid4()
+    state = _state((first, second))
+    plan = validate_planning_output(
+        _plan(first),
         candidate_agent_ids=frozenset({first, second}),
     )
     state["lifecycle"].update(
         {
-            "status": "waiting_agent",
-            "next_route": "wait",
+            "status": "completed",
+            "next_route": "terminal",
             "planning": plan,
-            "waiting_request": {
-                "waiting_type": "agent",
-                "correlation_id": f"planning:{state['registry'].run_id}",
-            },
+            "waiting_request": None,
         }
     )
     executor = PlanningRuntimeNodeExecutor(
         cancel_source=_CancelSource(),  # type: ignore[arg-type]
         model_service=_PlanningModel(),  # type: ignore[arg-type]
     )
-    first_child = uuid.uuid4()
-    update = await executor.execute(
-        "wait",
-        state,
-        _context(state),
-        resume_value={
-            "resume_type": "agent_result",
-            "correlation_id": f"planning:{state['registry'].run_id}",
-            "payload": {
-                "step_id": "research",
-                "status": "completed",
-                "child_run_id": str(first_child),
-                "result_summary": {"summary": "evidence"},
-                "error": None,
+
+    with pytest.raises(PlanningContractError, match="cannot execute wait"):
+        await executor.execute(
+            "wait",
+            state,
+            _context(),
+            resume_value={
+                "resume_type": "agent_result",
+                "correlation_id": "planning:legacy",
+                "payload": {},
             },
-        },
-    )
-    state["lifecycle"] = update["lifecycle"]
-
-    assert state["lifecycle"]["status"] == "waiting_agent"
-    ready = ready_plan_steps(cast(JsonObject, state["lifecycle"]["planning"]))
-    assert [step["step_id"] for step in ready] == ["write"]
-
-    second_child = uuid.uuid4()
-    update = await executor.execute(
-        "wait",
-        state,
-        _context(state),
-        resume_value={
-            "resume_type": "agent_result",
-            "correlation_id": f"planning:{state['registry'].run_id}",
-            "payload": {
-                "step_id": "write",
-                "status": "completed",
-                "child_run_id": str(second_child),
-                "result_summary": {"summary": "answer"},
-                "error": None,
-            },
-        },
-    )
-
-    assert update["lifecycle"]["status"] == "completed"
-    assert update["lifecycle"]["next_route"] == "terminal"
-    assert update["lifecycle"]["result_summary"]["steps"] == [
-        {
-            "step_id": "research",
-            "agent_id": str(first),
-            "status": "completed",
-            "child_run_id": str(first_child),
-        },
-        {
-            "step_id": "write",
-            "agent_id": str(second),
-            "status": "completed",
-            "child_run_id": str(second_child),
-        },
-    ]
-
-
-@pytest.mark.asyncio
-async def test_failed_dependency_blocks_descendants_and_fails_the_root() -> None:
-    first, second = uuid.uuid4(), uuid.uuid4()
-    state = _state((first, second))
-    state["lifecycle"].update(
-        {
-            "status": "waiting_agent",
-            "next_route": "wait",
-            "planning": validate_planning_output(
-                _plan(first, second),
-                candidate_agent_ids=frozenset({first, second}),
-            ),
-            "waiting_request": {
-                "waiting_type": "agent",
-                "correlation_id": f"planning:{state['registry'].run_id}",
-            },
-        }
-    )
-    executor = PlanningRuntimeNodeExecutor(
-        cancel_source=_CancelSource(),  # type: ignore[arg-type]
-        model_service=_PlanningModel(),  # type: ignore[arg-type]
-    )
-    update = await executor.execute(
-        "wait",
-        state,
-        _context(state),
-        resume_value={
-            "resume_type": "agent_result",
-            "correlation_id": f"planning:{state['registry'].run_id}",
-            "payload": {
-                "step_id": "research",
-                "status": "failed",
-                "child_run_id": str(uuid.uuid4()),
-                "result_summary": None,
-                "error": {"code": "child_failed"},
-            },
-        },
-    )
-
-    assert update["lifecycle"]["status"] == "failed"
-    planning = cast(JsonObject, update["lifecycle"]["planning"])
-    assert cast(list[JsonObject], planning["steps"])[1]["status"] == "blocked"
-    assert update["lifecycle"]["error"]["code"] == "planning_child_failed"
+        )

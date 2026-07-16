@@ -53,6 +53,8 @@ class RunRegistration:
     root_run_id: uuid.UUID | None = None
     system_role: str | None = None
     model_id: uuid.UUID | None = None
+    model_turn_limit: int | None = None
+    runtime_thread_id: str | None = None
     scheduling_lane_key: str | None = None
     scheduling_position_created_at: datetime | None = None
     scheduling_position_id: uuid.UUID | None = None
@@ -125,6 +127,11 @@ def _validate_registration(registration: RunRegistration) -> None:
     )
     _require_optional_text(registration.correlation_id, field="correlation_id", max_length=200)
     _require_optional_text(
+        registration.runtime_thread_id,
+        field="runtime_thread_id",
+        max_length=255,
+    )
+    _require_optional_text(
         registration.scheduling_lane_key,
         field="scheduling_lane_key",
         max_length=255,
@@ -140,16 +147,27 @@ def _validate_registration(registration: RunRegistration) -> None:
             registration.agent_id is not None
             or registration.system_role != "group_planning"
             or registration.model_id is None
+            or registration.model_turn_limit is not None
         ):
             raise RuntimePersistenceError(
                 "invalid_runtime_input",
-                "orchestration runs require agent_id=null, system_role=group_planning, and model_id",
+                "orchestration runs require agent_id=null, system_role=group_planning, model_id, and no Agent turn limit",
             )
-    elif registration.agent_id is None or registration.system_role is not None:
-        raise RuntimePersistenceError(
-            "invalid_runtime_input",
-            "non-orchestration runs require agent_id and system_role=null",
-        )
+    else:
+        if registration.agent_id is None or registration.system_role is not None:
+            raise RuntimePersistenceError(
+                "invalid_runtime_input",
+                "non-orchestration runs require agent_id and system_role=null",
+            )
+        if (
+            isinstance(registration.model_turn_limit, bool)
+            or not isinstance(registration.model_turn_limit, int)
+            or registration.model_turn_limit <= 0
+        ):
+            raise RuntimePersistenceError(
+                "invalid_runtime_input",
+                "non-orchestration runs require a positive model_turn_limit",
+            )
 
     lane_values = (
         registration.scheduling_lane_key,
@@ -191,6 +209,7 @@ def _registration_values(registration: RunRegistration) -> dict[str, Any]:
         "run_kind": registration.run_kind,
         "system_role": registration.system_role,
         "model_id": registration.model_id,
+        "model_turn_limit": registration.model_turn_limit,
         "runtime_type": registration.runtime_type,
         "graph_name": registration.graph_name,
         "graph_version": registration.graph_version,
@@ -205,7 +224,8 @@ def _require_exact_source_retry(existing: AgentRun, registration: RunRegistratio
     mismatched = [
         field for field, expected in _registration_values(registration).items() if getattr(existing, field) != expected
     ]
-    if existing.runtime_thread_id != str(existing.id):
+    expected_thread_id = registration.runtime_thread_id or str(existing.id)
+    if existing.runtime_thread_id != expected_thread_id:
         mismatched.append("runtime_thread_id")
     if mismatched:
         raise RuntimePersistenceError(
@@ -325,7 +345,7 @@ async def register_run_with_start(
     run_id = uuid.uuid4()
     run = AgentRun(
         id=run_id,
-        runtime_thread_id=str(run_id),
+        runtime_thread_id=registration.runtime_thread_id or str(run_id),
         lane_held=False,
         delivery_status=registration.delivery_status,
         **_registration_values(registration),
@@ -494,6 +514,14 @@ def _claim_statement(now: datetime, *, max_attempts: int):
             previous.run_id == AgentRunCommand.run_id,
             previous.status.in_(("pending", "claimed")),
             tuple_(previous.created_at, previous.id) < tuple_(AgentRunCommand.created_at, AgentRunCommand.id),
+            or_(
+                AgentRunCommand.command_type != "cancel",
+                previous.command_type != "start",
+                and_(
+                    previous.status == "claimed",
+                    previous.claim_expires_at >= now,
+                ),
+            ),
         )
     )
     active_lane_holder = exists(
@@ -536,7 +564,6 @@ def _claim_statement(now: datetime, *, max_attempts: int):
                     AgentRunCommand.claim_expires_at < now,
                 ),
             ),
-            AgentRunCommand.attempt_count < max_attempts,
             ~earlier_unfinished,
             or_(
                 candidate_run.scheduling_lane_key.is_(None),
@@ -608,25 +635,47 @@ async def claim_next_command(
     command = result.scalar_one_or_none()
     if command is None:
         return None
-    if command.attempt_count >= max_attempts:
-        raise RuntimePersistenceError(
-            "command_reconciliation_required",
-            "command reached its attempt limit and must be reconciled with its checkpoint",
+    if (
+        command.attempt_count < max_attempts
+        and command.command_type == "start"
+        and not await _acquire_start_lane(
+            db,
+            command=command,
+            now=now,
         )
-
-    if command.command_type == "start" and not await _acquire_start_lane(
-        db,
-        command=command,
-        now=now,
     ):
         return None
 
     command.claimed_by = claimant
     command.status = "claimed"
     command.claim_expires_at = now + timedelta(seconds=claim_ttl_seconds)
-    command.attempt_count += 1
     command.error_code = None
     command.applied_at = None
+    await db.flush()
+    return command
+
+
+async def mark_command_product_synced(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    command_id: uuid.UUID,
+) -> AgentRunCommand:
+    """Clear the post-settlement reconciliation marker idempotently."""
+    command = await _get_locked_command(db, tenant_id=tenant_id, command_id=command_id)
+    if command.status != "applied":
+        raise RuntimePersistenceError(
+            "command_not_applied",
+            "product synchronization requires an applied Command",
+        )
+    if command.error_code is None:
+        return command
+    if command.error_code != "product_sync_pending":
+        raise RuntimePersistenceError(
+            "command_reconciliation_conflict",
+            "applied Command has an unrelated error marker",
+        )
+    command.error_code = None
     await db.flush()
     return command
 
@@ -654,6 +703,36 @@ async def _get_locked_command(
     return command
 
 
+async def begin_command_attempt(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    command_id: uuid.UUID,
+    claimant: str,
+    max_attempts: int,
+) -> AgentRunCommand:
+    """Consume one business recovery attempt after the Thread lock is held."""
+    if max_attempts <= 0:
+        raise RuntimePersistenceError(
+            "invalid_runtime_input",
+            "max_attempts must be positive",
+        )
+    command = await _get_locked_command(
+        db,
+        tenant_id=tenant_id,
+        command_id=command_id,
+    )
+    _require_claimant(command, claimant)
+    if command.attempt_count >= max_attempts:
+        raise RuntimePersistenceError(
+            "command_reconciliation_required",
+            "command reached its attempt limit and must be quarantined",
+        )
+    command.attempt_count += 1
+    await db.flush()
+    return command
+
+
 def _require_claimant(command: AgentRunCommand, claimant: str) -> None:
     _require_text(claimant, field="claimant", max_length=128)
     if command.status != "claimed" or command.claimed_by != claimant:
@@ -669,12 +748,19 @@ async def mark_command_applied(
     tenant_id: uuid.UUID,
     command_id: uuid.UUID,
     claimant: str,
-    applied_checkpoint_id: str,
+    applied_checkpoint_id: str | None,
     clock: Callable[[], datetime] | None = None,
 ) -> AgentRunCommand:
     """Mark a claimed command applied after its checkpoint is observable."""
-    _require_text(applied_checkpoint_id, field="applied_checkpoint_id", max_length=255)
     command = await _get_locked_command(db, tenant_id=tenant_id, command_id=command_id)
+    if applied_checkpoint_id is None:
+        if command.command_type != "cancel":
+            raise RuntimePersistenceError(
+                "invalid_runtime_input",
+                "only cancel-before-start may settle without a checkpoint",
+            )
+    else:
+        _require_text(applied_checkpoint_id, field="applied_checkpoint_id", max_length=255)
     if (
         command.status == "applied"
         and command.claimed_by == claimant
@@ -684,11 +770,69 @@ async def mark_command_applied(
     _require_claimant(command, claimant)
     command.status = "applied"
     command.applied_checkpoint_id = applied_checkpoint_id
-    command.error_code = None
+    # Graph/control settlement and product reconciliation are intentionally
+    # separate. This existing field is a narrow crash-safe receipt so a
+    # reconciler can retry products without returning the Command to pending.
+    command.error_code = "product_sync_pending"
     command.claim_expires_at = None
     command.applied_at = (clock or (lambda: datetime.now(UTC)))()
     await db.flush()
     return command
+
+
+async def reject_unstarted_run_for_cancel(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    cancel_command_id: uuid.UUID,
+    clock: Callable[[], datetime] | None = None,
+) -> tuple[AgentRunCommand, ...]:
+    """Reject prior start work only when cancel observes no Run checkpoint.
+
+    A currently claimed start is never preempted here; the Thread lock makes
+    this path reachable only for pending or expired claims.
+    """
+    cancel = await _get_locked_command(
+        db,
+        tenant_id=tenant_id,
+        command_id=cancel_command_id,
+    )
+    if cancel.run_id != run_id or cancel.command_type != "cancel":
+        raise RuntimePersistenceError(
+            "command_scope_mismatch",
+            "cancel Command does not belong to the target Run",
+        )
+    now = (clock or (lambda: datetime.now(UTC)))()
+    result = await db.execute(
+        select(AgentRunCommand)
+        .where(
+            AgentRunCommand.tenant_id == tenant_id,
+            AgentRunCommand.run_id == run_id,
+            AgentRunCommand.command_type == "start",
+            tuple_(AgentRunCommand.created_at, AgentRunCommand.id)
+            < tuple_(cancel.created_at, cancel.id),
+            or_(
+                AgentRunCommand.status == "pending",
+                and_(
+                    AgentRunCommand.status == "claimed",
+                    AgentRunCommand.claim_expires_at < now,
+                ),
+            ),
+        )
+        .with_for_update()
+    )
+    starts = tuple(result.scalars().all())
+    for start in starts:
+        start.status = "rejected"
+        start.claimed_by = None
+        start.claim_expires_at = None
+        start.applied_checkpoint_id = None
+        start.error_code = "cancelled_before_start"
+        start.applied_at = now
+    if starts:
+        await db.flush()
+    return starts
 
 
 async def mark_command_rejected(

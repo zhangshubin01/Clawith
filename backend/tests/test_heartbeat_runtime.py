@@ -65,7 +65,7 @@ async def test_runtime_heartbeat_pins_claimed_occurrence_and_caller_transaction(
     )
 
     with patch(
-        "app.services.heartbeat_runtime.TransactionalAgentRuntimeAdapter.start_run",
+        "app.services.heartbeat_runtime.RuntimeCommandIntake.start_run",
         new=AsyncMock(return_value=handle),
     ) as start_run:
         result = await enqueue_heartbeat_runtime(
@@ -73,6 +73,11 @@ async def test_runtime_heartbeat_pins_claimed_occurrence_and_caller_transaction(
             agent=agent,
             occurrence_at=occurrence,
             instruction="  Review the inbox  ",
+            context={
+                "recent_activity": [
+                    {"action_type": "chat_reply", "summary": "Answered Ray"}
+                ]
+            },
             settings_override=_settings(enabled=True),
         )
 
@@ -92,7 +97,31 @@ async def test_runtime_heartbeat_pins_claimed_occurrence_and_caller_transaction(
     assert command.model_id == agent.primary_model_id
     assert command.delivery_status == "not_required"
     assert command.idempotency_key == f"start:{command.source_execution_id}"
-    assert command.payload["heartbeat_instruction"] == "Review the inbox"
+    assert "heartbeat_instruction" not in command.payload
+    assert command.payload["heartbeat_context"] == {
+        "recent_activity": [
+            {"action_type": "chat_reply", "summary": "Answered Ray"}
+        ]
+    }
+
+
+def test_default_heartbeat_prompt_does_not_advertise_hardcoded_tools() -> None:
+    prompt = "\n".join(
+        (
+            heartbeat_service.DEFAULT_HEARTBEAT_INSTRUCTION,
+            heartbeat_service.PRIVATE_AGENT_HEARTBEAT_APPEND,
+            heartbeat_service.CUSTOM_HEARTBEAT_GUARDRAILS,
+        )
+    )
+
+    for hardcoded_tool in (
+        "web_search",
+        "write_file",
+        "plaza_get_new_posts",
+        "plaza_create_post",
+        "plaza_add_comment",
+    ):
+        assert hardcoded_tool not in prompt
 
 
 @pytest.mark.asyncio
@@ -100,7 +129,7 @@ async def test_disabled_heartbeat_rollout_leaves_claim_for_legacy_execution() ->
     agent = _agent()
 
     with patch(
-        "app.services.heartbeat_runtime.TransactionalAgentRuntimeAdapter.start_run",
+        "app.services.heartbeat_runtime.RuntimeCommandIntake.start_run",
         new=AsyncMock(),
     ) as start_run:
         result = await enqueue_heartbeat_runtime(
@@ -164,7 +193,7 @@ async def test_oneshot_registration_uses_a_unique_background_occurrence() -> Non
     )
 
     with patch(
-        "app.services.heartbeat_runtime.TransactionalAgentRuntimeAdapter.start_run",
+        "app.services.heartbeat_runtime.RuntimeCommandIntake.start_run",
         new=AsyncMock(return_value=handle),
     ) as start_run:
         result = await enqueue_oneshot_runtime(
@@ -173,7 +202,7 @@ async def test_oneshot_registration_uses_a_unique_background_occurrence() -> Non
             prompt="  Prepare the OKR report  ",
             occurrence_id=occurrence_id,
             triggered_by_user_id=user_id,
-            requested_max_steps=40,
+            requested_model_turn_limit=40,
             settings_override=_settings(enabled=True),
         )
 
@@ -185,7 +214,8 @@ async def test_oneshot_registration_uses_a_unique_background_occurrence() -> Non
     assert command.goal == "Prepare the OKR report"
     assert command.payload["background_mode"] == "oneshot"
     assert command.payload["triggered_by_user_id"] == str(user_id)
-    assert command.payload["requested_max_steps"] == 40
+    assert command.requested_model_turn_limit == 40
+    assert "requested_max_steps" not in command.payload
 
 
 @pytest.mark.asyncio
@@ -203,7 +233,7 @@ async def test_schedule_registration_pins_the_schedule_occurrence() -> None:
     )
 
     with patch(
-        "app.services.heartbeat_runtime.TransactionalAgentRuntimeAdapter.start_run",
+        "app.services.heartbeat_runtime.RuntimeCommandIntake.start_run",
         new=AsyncMock(return_value=handle),
     ) as start_run:
         result = await enqueue_schedule_runtime(

@@ -135,7 +135,7 @@ class HeartbeatRuntimeCompletionHandler:
         run: RuntimeRunRecord,
         checkpoint: CheckpointObservation,
     ) -> None:
-        if run.registry.source_type != "heartbeat":
+        if run.source_type != "heartbeat":
             return
         lifecycle = checkpoint.state["lifecycle"]
         status = lifecycle["status"]
@@ -154,7 +154,7 @@ class HeartbeatRuntimeCompletionHandler:
         if mode == "oneshot" and raw_triggered_by is None:
             return
         try:
-            agent_id = uuid.UUID(run.registry.agent_id or "")
+            agent_id = uuid.UUID(run.agent_id or "")
         except ValueError as exc:
             raise HeartbeatRuntimeCompletionError(
                 "invalid_heartbeat_agent",

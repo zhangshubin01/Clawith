@@ -138,45 +138,56 @@ async def test_group_compact_trigger_uses_the_smallest_active_agent_budget() -> 
 
 
 @pytest.mark.asyncio
-async def test_direct_compact_trigger_uses_current_primary_without_fallback_minimum() -> None:
+async def test_direct_session_has_no_second_session_compact_policy() -> None:
     tenant_id = uuid.uuid4()
-    primary = _model(tenant_id, input_tokens=40_000)
-    fallback = _model(tenant_id, input_tokens=8_000)
-    agent = Agent(
-        id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        creator_id=uuid.uuid4(),
-        name="Direct",
-        status="idle",
-        is_expired=False,
-        primary_model_id=primary.id,
-        fallback_model_id=fallback.id,
-    )
     session = ChatSession(
         id=uuid.uuid4(),
         tenant_id=tenant_id,
         session_type="direct",
-        agent_id=agent.id,
+        agent_id=uuid.uuid4(),
         user_id=uuid.uuid4(),
         title="Direct",
         source_channel="web",
         is_primary=True,
     )
-    settings = Settings(AGENT_RUNTIME_SUMMARY_THRESHOLD_RATIO=0.85)
-    db = _DB(_Result([session]), _Result([agent]), _Result([primary]))
+    db = _DB(_Result([session]))
 
-    policy = await background.SessionCompactPolicyResolver(
-        settings=settings
-    ).resolve(
-        db,  # type: ignore[arg-type]
-        tenant_id=tenant_id,
-        session_id=session.id,
+    with pytest.raises(background.SessionContextBackgroundError) as raised:
+        await background.SessionCompactPolicyResolver().resolve(
+            db,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            session_id=session.id,
+        )
+
+    assert raised.value.code == "direct_thread_owns_context"
+
+
+@pytest.mark.asyncio
+async def test_background_scanner_only_selects_group_sessions() -> None:
+    captured = []
+
+    class _ScannerDB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def execute(self, statement):
+            captured.append(statement)
+            return _Result()
+
+    scanner = background.SessionContextCompactionScanner(
+        session_factory=lambda: _ScannerDB(),  # type: ignore[arg-type]
+        service=object(),  # type: ignore[arg-type]
+        settings=Settings(),
     )
 
-    assert policy.source_agent_id == agent.id
-    assert policy.contributing_model_ids == (primary.id,)
-    assert policy.threshold_tokens == _threshold(primary, settings)
-    assert policy.threshold_tokens > _threshold(fallback, settings)
+    assert await scanner.scan_once() == 0
+    assert len(captured) == 1
+    compiled = captured[0].compile()
+    assert "session_type" in str(compiled)
+    assert "group" in compiled.params.values()
 
 
 def test_message_trigger_keeps_short_sessions_uncompacted_and_honors_early_count() -> None:

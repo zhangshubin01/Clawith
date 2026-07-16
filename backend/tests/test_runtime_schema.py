@@ -48,7 +48,7 @@ def _check_sql(table: sa.Table) -> dict[str | None, str]:
     }
 
 
-def test_agent_run_model_captures_registry_projection_and_lane_contract():
+def test_agent_run_model_captures_registry_thread_budget_and_lane_contract():
     table = AgentRun.__table__
 
     assert set(table.columns.keys()) == {
@@ -68,6 +68,7 @@ def test_agent_run_model_captures_registry_projection_and_lane_contract():
         "run_kind",
         "system_role",
         "model_id",
+        "model_turn_limit",
         "runtime_type",
         "runtime_thread_id",
         "graph_name",
@@ -77,40 +78,27 @@ def test_agent_run_model_captures_registry_projection_and_lane_contract():
         "scheduling_position_id",
         "lane_held",
         "lane_claimed_at",
-        "projected_execution_status",
-        "projected_waiting_type",
-        "projected_waiting_reason",
-        "projected_result_summary",
-        "projected_error_code",
-        "projected_last_error",
-        "projected_checkpoint_id",
-        "projection_updated_at",
         "session_context_applied_checkpoint_id",
         "delivery_status",
         "delivery_target",
-        "projected_started_at",
-        "projected_completed_at",
         "created_at",
         "updated_at",
     }
     assert table.primary_key.name == "pk_agent_runs"
-    assert _constraint_names(table, sa.UniqueConstraint) == {
-        "uq_agent_runs_runtime_thread_id",
-        "uq_agent_runs_tenant_id_id",
-    }
+    assert _constraint_names(table, sa.UniqueConstraint) == {"uq_agent_runs_tenant_id_id"}
     assert _constraint_names(table, sa.CheckConstraint) == {
         "ck_agent_runs_source_type",
         "ck_agent_runs_run_kind",
         "ck_agent_runs_runtime_type",
-        "ck_agent_runs_projected_execution_status",
         "ck_agent_runs_delivery_status",
         "ck_agent_runs_langgraph_model",
+        "ck_agent_runs_model_turn_limit",
         "ck_agent_runs_lane_holder_key",
         "ck_agent_runs_lane_position",
         "ck_agent_runs_orchestration_identity",
     }
     assert {index.name for index in table.indexes} == {
-        "ix_agent_runs_tenant_agent_projected_status",
+        "ix_agent_runs_tenant_thread_created_at",
         "ix_agent_runs_session_created_at",
         "ix_agent_runs_parent_run_id",
         "ix_agent_runs_root_run_id",
@@ -124,11 +112,14 @@ def test_agent_run_model_captures_registry_projection_and_lane_contract():
     assert table.c.lane_held.nullable is False
     assert table.c.delivery_status.nullable is False
     assert table.c.runtime_thread_id.nullable is False
+    assert table.c.model_turn_limit.nullable is True
 
     checks = _check_sql(table)
     assert "model_id is not null" in checks["ck_agent_runs_langgraph_model"]
     assert "scheduling_lane_key is not null" in checks["ck_agent_runs_lane_holder_key"]
     assert "system_role = 'group_planning'" in checks["ck_agent_runs_orchestration_identity"]
+    assert "model_turn_limit is null" in checks["ck_agent_runs_model_turn_limit"]
+    assert "model_turn_limit > 0" in checks["ck_agent_runs_model_turn_limit"]
 
     foreign_keys = _foreign_key_specs(table)
     assert foreign_keys["fk_agent_runs_tenant_session_chat_sessions"] == (
@@ -145,6 +136,7 @@ def test_agent_run_model_captures_registry_projection_and_lane_contract():
     indexes = {index.name: index for index in table.indexes}
     assert indexes["uq_agent_runs_source_execution"].unique is True
     assert indexes["uq_agent_runs_active_lane"].unique is True
+    assert indexes["ix_agent_runs_tenant_thread_created_at"].unique is False
     assert indexes["uq_agent_runs_source_execution"].dialect_options["postgresql"]["where"] is not None
     assert indexes["uq_agent_runs_active_lane"].dialect_options["postgresql"]["where"] is not None
     assert indexes["ix_agent_runs_lane_candidate_order"].dialect_options["postgresql"]["where"] is not None
@@ -283,9 +275,12 @@ def test_agent_tool_execution_model_captures_idempotency_and_lease_contract():
         "arguments_hash",
         "sanitized_arguments",
         "request_ref",
+        "effect",
+        "retry_policy",
         "status",
         "result_summary",
         "result_ref",
+        "result_metadata",
         "lease_owner",
         "lease_expires_at",
         "started_at",
@@ -297,7 +292,9 @@ def test_agent_tool_execution_model_captures_idempotency_and_lease_contract():
         "uq_agent_tool_executions_run_tool_call"
     }
     assert _constraint_names(table, sa.CheckConstraint) == {
-        "ck_agent_tool_executions_status"
+        "ck_agent_tool_executions_effect",
+        "ck_agent_tool_executions_retry_policy",
+        "ck_agent_tool_executions_status",
     }
     assert {index.name for index in table.indexes} == {
         "ix_agent_tool_executions_tenant_status_started",

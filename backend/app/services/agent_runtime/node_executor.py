@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+import json
 from typing import Literal, Protocol, cast
 import uuid
+
+from langchain_core.messages import RemoveMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from app.services.agent_runtime.state import (
     JsonObject,
@@ -15,13 +19,13 @@ from app.services.agent_runtime.state import (
     RuntimeLifecycle,
     RuntimeNodeName,
     RuntimeStateUpdate,
+    runtime_messages_as_json,
 )
 from app.services.llm.finish import FINISH_PROTOCOL_REMINDER
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _WAITING_STATUSES = frozenset({"waiting_user", "waiting_external", "waiting_agent"})
-_MAX_APPLIED_COMMAND_IDS = 64
 
 ModelIntent = Literal["tool_calls", "wait", "finish", "text", "error"]
 VerificationOutcome = Literal["pass", "repair", "fail"]
@@ -33,6 +37,15 @@ class RuntimeNodeTransitionError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class RuntimeInvocationCancelled(RuntimeError):
+    """Stop an invocation without committing a synthetic cancelled checkpoint."""
+
+    def __init__(self, signal: "CancelSignal") -> None:
+        super().__init__(signal.reason or "runtime invocation cancelled")
+        self.cancel_command_id = signal.command_id
+        self.reason = signal.reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +65,8 @@ class ModelStepResult:
     tool_calls: tuple[JsonObject, ...] = ()
     waiting_request: JsonObject | None = None
     finish_content: str | None = None
+    finish_mention_participant_ids: tuple[str, ...] = ()
+    finish_delivery_intent: JsonObject | None = None
     repair_instruction: str | None = None
     error: JsonObject | None = None
 
@@ -87,13 +102,12 @@ class FinalizationResult:
 
 @dataclass(frozen=True, slots=True)
 class RunCompactResult:
-    """One optional replacement of the checkpoint's active Run history."""
+    """One optional atomic replacement of the Thread's model-visible history."""
 
     compacted: bool = False
-    run_summary: JsonObject | None = None
-    run_messages: tuple[JsonObject, ...] | None = None
-    covered_through_run_message_id: str | None = None
-    error: JsonObject | None = None
+    thread_summary: JsonObject | None = None
+    recent_messages: tuple[JsonObject, ...] | None = None
+    covered_through_message_id: str | None = None
 
 
 class RuntimeCancelSource(Protocol):
@@ -117,14 +131,12 @@ class RuntimeModelStepService(Protocol):
 
 
 class RuntimeRunCompactor(Protocol):
-    """Compact only safely covered Run messages into checkpoint state."""
+    """Compact only safely covered Thread messages into checkpoint state."""
 
     async def compact_if_needed(
         self,
         state: RuntimeGraphState,
         context: RuntimeContext,
-        *,
-        forced: bool,
     ) -> RunCompactResult: ...
 
 
@@ -135,10 +147,8 @@ class NoopRuntimeRunCompactor:
         self,
         state: RuntimeGraphState,
         context: RuntimeContext,
-        *,
-        forced: bool,
     ) -> RunCompactResult:
-        del state, context, forced
+        del state, context
         return RunCompactResult()
 
 
@@ -207,6 +217,22 @@ class DeterministicRuntimeVerifier:
 class DefaultRuntimeFinalizer:
     """Create a conservative terminal summary from the verified answer."""
 
+    @staticmethod
+    def _verified_refs(
+        verification: VerificationResult,
+        field_name: str,
+    ) -> list[JsonValue]:
+        raw_refs = verification.details.get(field_name, [])
+        if not isinstance(raw_refs, list) or any(
+            not isinstance(reference, str) or not reference.strip()
+            for reference in raw_refs
+        ):
+            raise RuntimeNodeTransitionError(
+                "invalid_verification_result",
+                f"verified {field_name} must be a list of non-empty strings",
+            )
+        return list(dict.fromkeys(reference.strip() for reference in raw_refs))
+
     async def finalize(
         self,
         state: RuntimeGraphState,
@@ -214,20 +240,24 @@ class DefaultRuntimeFinalizer:
         answer: str,
         verification: VerificationResult,
     ) -> FinalizationResult:
-        del context
+        del state
+        source_run_id = context.run_id
+        artifact_refs = self._verified_refs(verification, "artifact_refs")
+        evidence_refs = self._verified_refs(verification, "evidence_refs")
         return FinalizationResult(
             result_summary={
                 "summary": answer,
                 "verification": dict(verification.details),
-                "artifact_refs": [],
+                "artifact_refs": artifact_refs,
+                "evidence_refs": evidence_refs,
             },
             session_context_delta={
-                "source_run_id": state["registry"].run_id,
+                "source_run_id": source_run_id,
                 "new_requirements": [],
                 "new_decisions": [],
                 "resolved_open_items": [],
                 "new_open_items": [],
-                "evidence_refs": [],
+                "evidence_refs": evidence_refs,
                 "workspace_refs": [],
                 "result_summary": answer,
             },
@@ -244,14 +274,15 @@ def _counter(lifecycle: RuntimeLifecycle, field_name: str) -> int:
     return value
 
 
-def _messages(lifecycle: RuntimeLifecycle) -> list[JsonObject]:
-    value = lifecycle.get("run_messages", [])
-    if not isinstance(value, list) or any(not isinstance(message, Mapping) for message in value):
+def _messages(state: RuntimeGraphState) -> list[JsonObject]:
+    try:
+        value = runtime_messages_as_json(state)
+    except (TypeError, ValueError) as exc:
         raise RuntimeNodeTransitionError(
-            "invalid_run_messages",
-            "checkpoint run_messages must be an array of objects",
-        )
-    return [dict(cast(Mapping[str, JsonValue], message)) for message in value]
+            "invalid_thread_messages",
+            "checkpoint messages must use the LangGraph messages channel",
+        ) from exc
+    return [dict(message) for message in value]
 
 
 def _tool_calls(lifecycle: RuntimeLifecycle) -> tuple[JsonObject, ...]:
@@ -269,40 +300,81 @@ def _tool_calls(lifecycle: RuntimeLifecycle) -> tuple[JsonObject, ...]:
     return tuple(dict(cast(Mapping[str, JsonValue], call)) for call in value)
 
 
-def _append_command_id(lifecycle: RuntimeLifecycle, command_id: str) -> list[str]:
-    values = lifecycle.get("last_applied_command_ids", [])
-    if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
-        raise RuntimeNodeTransitionError(
-            "invalid_checkpoint_command_ids",
-            "checkpoint command IDs must be non-empty strings",
-        )
-    return [
-        *[value for value in values if value != command_id],
-        command_id,
-    ][-_MAX_APPLIED_COMMAND_IDS:]
-
-
 def _error(code: str, message: str) -> JsonObject:
     return {"code": code, "message": message}
 
 
-def _runtime_message_id(state: RuntimeGraphState, position: str) -> str:
-    return str(uuid.uuid5(uuid.UUID(state["registry"].run_id), position))
+def _message_for_channel(message: JsonObject) -> JsonObject:
+    """Normalize harness dictionaries to LangGraph's standard message input."""
+    normalized = dict(message)
+    role = normalized.get("role")
+    if role not in {"user", "assistant", "tool", "system"}:
+        raise RuntimeNodeTransitionError(
+            "invalid_thread_message",
+            "Runtime message role is unsupported",
+        )
+    normalized.setdefault("content", "")
+    raw_calls = normalized.get("tool_calls")
+    if isinstance(raw_calls, list):
+        calls: list[JsonObject] = []
+        for raw in raw_calls:
+            if not isinstance(raw, Mapping):
+                raise RuntimeNodeTransitionError(
+                    "invalid_thread_message",
+                    "assistant tool calls must be objects",
+                )
+            call = dict(raw)
+            if isinstance(call.get("function"), Mapping):
+                calls.append(cast(JsonObject, call))
+                continue
+            name = call.get("name")
+            arguments = call.get("arguments", {})
+            if not isinstance(name, str) or not name:
+                raise RuntimeNodeTransitionError(
+                    "invalid_thread_message",
+                    "assistant tool calls require a name",
+                )
+            calls.append(
+                {
+                    "id": cast(str, call.get("id", "")),
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": (
+                            arguments
+                            if isinstance(arguments, str)
+                            else json.dumps(arguments, ensure_ascii=False)
+                        ),
+                    },
+                }
+            )
+        normalized["tool_calls"] = calls
+    return cast(JsonObject, normalized)
+
+
+def _resume_message_content(resume_value: Mapping[str, JsonValue]) -> str:
+    resume_type = resume_value.get("resume_type")
+    payload = resume_value.get("payload")
+    if resume_type == "user_input" and isinstance(payload, Mapping):
+        content = payload.get("content")
+        if isinstance(content, str):
+            return content
+    return json.dumps(
+        resume_value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+    )
+
+
+def _runtime_message_id(context: RuntimeContext, position: str) -> str:
+    return str(uuid.uuid5(uuid.UUID(context.run_id), position))
 
 
 def _schedule_compact(
     lifecycle: dict,
-    *,
-    return_route: Literal["model", "wait"],
-    forced: bool = False,
 ) -> None:
-    lifecycle.update(
-        {
-            "next_route": "compact",
-            "compact_return_route": return_route,
-            "compact_forced": forced,
-        }
-    )
+    lifecycle["next_route"] = "compact"
 
 
 def _validate_waiting_request(request: JsonObject | None) -> JsonObject:
@@ -338,18 +410,16 @@ class DeterministicRuntimeNodeExecutor:
         run_compactor: RuntimeRunCompactor | None = None,
         verifier: RuntimeVerifier | None = None,
         finalizer: RuntimeFinalizer | None = None,
-        max_model_steps: int = 50,
         max_verification_repairs: int = 2,
     ) -> None:
-        if max_model_steps <= 0 or max_verification_repairs < 0:
-            raise ValueError("Runtime step limits are invalid")
+        if max_verification_repairs < 0:
+            raise ValueError("Runtime verification repair limit is invalid")
         self._cancel_source = cancel_source
         self._model_service = model_service
         self._tool_service = tool_service
         self._run_compactor = run_compactor or NoopRuntimeRunCompactor()
         self._verifier = verifier or DeterministicRuntimeVerifier()
         self._finalizer = finalizer or DefaultRuntimeFinalizer()
-        self._max_model_steps = max_model_steps
         self._max_verification_repairs = max_verification_repairs
 
     async def _control_guard(
@@ -369,16 +439,7 @@ class DeterministicRuntimeNodeExecutor:
                     "invalid_cancel_command",
                     "cancel command ID must not be blank",
                 )
-            lifecycle.update(
-                {
-                    "status": "cancelled",
-                    "next_route": "terminal",
-                    "reason": cancel.reason or "cancelled_by_command",
-                    "last_applied_command_ids": _append_command_id(state["lifecycle"], cancel.command_id),
-                    "waiting_request": None,
-                    "pending_tool_calls": [],
-                }
-            )
+            raise RuntimeInvocationCancelled(cancel)
         return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
 
     async def _compact(
@@ -387,48 +448,43 @@ class DeterministicRuntimeNodeExecutor:
         context: RuntimeContext,
     ) -> RuntimeStateUpdate:
         lifecycle = dict(state["lifecycle"])
-        return_route = lifecycle.get("compact_return_route")
-        if return_route not in {"model", "wait"}:
+        if lifecycle.get("status") != "running":
             raise RuntimeNodeTransitionError(
-                "invalid_compact_return_route",
-                "compact node requires a model or wait return route",
-            )
-        forced = lifecycle.get("compact_forced", False)
-        if not isinstance(forced, bool):
-            raise RuntimeNodeTransitionError(
-                "invalid_compact_trigger",
-                "compact_forced must be a boolean",
+                "invalid_compact_status",
+                "Thread Compact may run only immediately before a business model call",
             )
         result = await self._run_compactor.compact_if_needed(
             state,
             context,
-            forced=forced,
         )
+        update: RuntimeStateUpdate = {}
         if result.compacted:
             if (
-                result.run_summary is None
-                or result.run_messages is None
-                or not isinstance(result.covered_through_run_message_id, str)
-                or not result.covered_through_run_message_id
+                result.thread_summary is None
+                or result.recent_messages is None
+                or not isinstance(result.covered_through_message_id, str)
+                or not result.covered_through_message_id
             ):
                 raise RuntimeNodeTransitionError(
-                    "invalid_run_compact_result",
-                    "successful Run Compact requires summary, messages, and watermark",
+                    "invalid_thread_compact_result",
+                    "successful Thread Compact requires summary, recent messages, and watermark",
                 )
-            lifecycle.update(
+            update.update(
                 {
-                    "run_summary": dict(result.run_summary),
-                    "run_messages": [dict(message) for message in result.run_messages],
-                    "covered_through_run_message_id": result.covered_through_run_message_id,
-                    "run_compact_error": None,
+                    "thread_summary": dict(result.thread_summary),
+                    "summary_covered_through_message_id": result.covered_through_message_id,
+                    "messages": [
+                        RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                        *[
+                            _message_for_channel(dict(message))
+                            for message in result.recent_messages
+                        ],
+                    ],
                 }
             )
-        elif result.error is not None:
-            lifecycle["run_compact_error"] = dict(result.error)
-        lifecycle["next_route"] = return_route
-        lifecycle["compact_return_route"] = None
-        lifecycle["compact_forced"] = False
-        return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
+        lifecycle["next_route"] = "model"
+        update["lifecycle"] = cast(RuntimeLifecycle, lifecycle)
+        return update
 
     async def _model(
         self,
@@ -437,22 +493,16 @@ class DeterministicRuntimeNodeExecutor:
     ) -> RuntimeStateUpdate:
         lifecycle = dict(state["lifecycle"])
         step_count = _counter(state["lifecycle"], "model_step_count") + 1
-        requested_limit = state["snapshots"].initial_input.get(
-            "requested_max_steps"
-        )
-        if requested_limit is None:
-            model_step_limit = self._max_model_steps
-        elif (
-            isinstance(requested_limit, bool)
-            or not isinstance(requested_limit, int)
-            or requested_limit <= 0
+        model_step_limit = context.model_turn_limit
+        if (
+            isinstance(model_step_limit, bool)
+            or not isinstance(model_step_limit, int)
+            or model_step_limit <= 0
         ):
             raise RuntimeNodeTransitionError(
                 "invalid_model_step_limit",
-                "checkpoint requested_max_steps must be a positive integer",
+                "Runtime Context model_turn_limit must be a positive integer",
             )
-        else:
-            model_step_limit = min(requested_limit, self._max_model_steps)
         if step_count > model_step_limit:
             lifecycle.update(
                 {
@@ -469,10 +519,11 @@ class DeterministicRuntimeNodeExecutor:
 
         result = await self._model_service.complete_once(state, context)
         lifecycle["model_step_count"] = step_count
-        messages = _messages(state["lifecycle"])
+        if result.intent != "finish":
+            lifecycle.pop("finish_delivery_intent", None)
+        new_messages: list[JsonObject] = []
         if result.assistant_message is not None:
-            messages.append(dict(result.assistant_message))
-        lifecycle["run_messages"] = messages
+            new_messages.append(dict(result.assistant_message))
 
         if result.intent == "tool_calls":
             if not result.tool_calls:
@@ -493,30 +544,44 @@ class DeterministicRuntimeNodeExecutor:
             lifecycle.update(
                 {
                     "status": f"waiting_{waiting_type}",
+                    "next_route": "wait",
                     "waiting_request": request,
                     "pending_tool_calls": [],
                 }
             )
-            _schedule_compact(lifecycle, return_route="wait", forced=True)
         elif result.intent == "finish":
             if not isinstance(result.finish_content, str) or not result.finish_content.strip():
                 raise RuntimeNodeTransitionError(
                     "invalid_model_intent",
                     "finish intent requires non-empty content",
                 )
+            finish_delivery_intent = result.finish_delivery_intent
+            if finish_delivery_intent is not None and not isinstance(
+                finish_delivery_intent,
+                Mapping,
+            ):
+                raise RuntimeNodeTransitionError(
+                    "invalid_group_handoff_intent",
+                    "finish delivery intent must be an object",
+                )
             lifecycle.update(
                 {
                     "status": "verifying",
                     "next_route": "verify",
                     "final_answer": result.finish_content,
+                    "finish_delivery_intent": (
+                        dict(finish_delivery_intent)
+                        if finish_delivery_intent is not None
+                        else None
+                    ),
                     "pending_tool_calls": [],
                 }
             )
         elif result.intent == "text":
-            messages.append(
+            new_messages.append(
                 {
                     "id": _runtime_message_id(
-                        state,
+                        context,
                         f"model-step:{step_count}:repair",
                     ),
                     "role": "user",
@@ -526,11 +591,10 @@ class DeterministicRuntimeNodeExecutor:
             lifecycle.update(
                 {
                     "status": "running",
-                    "run_messages": messages,
                     "pending_tool_calls": [],
                 }
             )
-            _schedule_compact(lifecycle, return_route="model")
+            _schedule_compact(lifecycle)
         elif result.intent == "error":
             error = result.error or _error("model_call_failed", "The model call failed.")
             lifecycle.update(
@@ -546,7 +610,14 @@ class DeterministicRuntimeNodeExecutor:
                 "invalid_model_intent",
                 f"unsupported model intent {result.intent!r}",
             )
-        return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
+        update: RuntimeStateUpdate = {
+            "lifecycle": cast(RuntimeLifecycle, lifecycle),
+        }
+        if new_messages:
+            update["messages"] = [
+                _message_for_channel(message) for message in new_messages
+            ]
+        return update
 
     async def _tool(
         self,
@@ -565,11 +636,8 @@ class DeterministicRuntimeNodeExecutor:
             calls,
         )
         lifecycle = dict(state["lifecycle"])
-        messages = _messages(state["lifecycle"])
-        messages.extend(dict(message) for message in result.messages)
         lifecycle.update(
             {
-                "run_messages": messages,
                 "pending_tool_calls": [dict(call) for call in result.pending_tool_calls],
             }
         )
@@ -580,30 +648,18 @@ class DeterministicRuntimeNodeExecutor:
                     "invalid_cancel_command",
                     "cancel command ID must not be blank",
                 )
-            lifecycle.update(
-                {
-                    "status": "cancelled",
-                    "next_route": "terminal",
-                    "reason": cancel.reason or "cancelled_by_command",
-                    "last_applied_command_ids": _append_command_id(
-                        state["lifecycle"],
-                        cancel.command_id,
-                    ),
-                    "waiting_request": None,
-                    "error": None,
-                }
-            )
+            raise RuntimeInvocationCancelled(cancel)
         elif result.waiting_request is not None:
             request = _validate_waiting_request(result.waiting_request)
             waiting_type = cast(str, request["waiting_type"])
             lifecycle.update(
                 {
                     "status": f"waiting_{waiting_type}",
+                    "next_route": "wait",
                     "waiting_request": request,
                     "error": dict(result.error) if result.error is not None else None,
                 }
             )
-            _schedule_compact(lifecycle, return_route="wait", forced=True)
         elif result.error is not None:
             lifecycle.update(
                 {
@@ -621,8 +677,15 @@ class DeterministicRuntimeNodeExecutor:
                     "error": None,
                 }
             )
-            _schedule_compact(lifecycle, return_route="model")
-        return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
+            _schedule_compact(lifecycle)
+        update: RuntimeStateUpdate = {
+            "lifecycle": cast(RuntimeLifecycle, lifecycle),
+        }
+        if result.messages:
+            update["messages"] = [
+                _message_for_channel(dict(message)) for message in result.messages
+            ]
+        return update
 
     async def _verify(
         self,
@@ -637,6 +700,15 @@ class DeterministicRuntimeNodeExecutor:
             )
         verification = await self._verifier.verify(state, context, candidate)
         lifecycle = dict(state["lifecycle"])
+        raw_finish_delivery_intent = lifecycle.get("finish_delivery_intent")
+        if raw_finish_delivery_intent is not None and not isinstance(
+            raw_finish_delivery_intent,
+            Mapping,
+        ):
+            raise RuntimeNodeTransitionError(
+                "invalid_group_handoff_intent",
+                "checkpoint finish delivery intent must be an object",
+            )
         lifecycle["verification_result"] = {
             "outcome": verification.outcome,
             "reason": verification.reason,
@@ -649,6 +721,26 @@ class DeterministicRuntimeNodeExecutor:
                 candidate,
                 verification,
             )
+            delivery_request = (
+                dict(finalized.delivery_request)
+                if finalized.delivery_request is not None
+                else None
+            )
+            if raw_finish_delivery_intent is not None:
+                delivery_request = delivery_request or {}
+                existing_handoff = delivery_request.get("group_handoff")
+                if existing_handoff is not None and existing_handoff != dict(
+                    raw_finish_delivery_intent
+                ):
+                    raise RuntimeNodeTransitionError(
+                        "invalid_group_handoff_intent",
+                        "finalizer changed the frozen Group handoff intent",
+                    )
+                delivery_request["content"] = candidate
+                delivery_request["group_handoff"] = dict(
+                    raw_finish_delivery_intent
+                )
+            lifecycle.pop("finish_delivery_intent", None)
             lifecycle.update(
                 {
                     "status": "completed",
@@ -658,11 +750,12 @@ class DeterministicRuntimeNodeExecutor:
                         dict(finalized.session_context_delta) if finalized.session_context_delta is not None else None
                     ),
                     "delivery_request": (
-                        dict(finalized.delivery_request) if finalized.delivery_request is not None else None
+                        delivery_request
                     ),
                 }
             )
         elif verification.outcome == "repair":
+            lifecycle.pop("finish_delivery_intent", None)
             attempts = _counter(state["lifecycle"], "verification_attempt_count") + 1
             lifecycle["verification_attempt_count"] = attempts
             if attempts > self._max_verification_repairs:
@@ -678,26 +771,29 @@ class DeterministicRuntimeNodeExecutor:
                     }
                 )
             else:
-                messages = _messages(state["lifecycle"])
-                messages.append(
-                    {
-                        "id": _runtime_message_id(
-                            state,
-                            f"verification:{attempts}:repair",
-                        ),
-                        "role": "user",
-                        "content": verification.reason or "The finish candidate needs repair before completion.",
-                    }
-                )
                 lifecycle.update(
                     {
                         "status": "running",
-                        "run_messages": messages,
                         "final_answer": None,
                     }
                 )
-                _schedule_compact(lifecycle, return_route="model")
+                _schedule_compact(lifecycle)
+                return {
+                    "lifecycle": cast(RuntimeLifecycle, lifecycle),
+                    "messages": [
+                        _message_for_channel({
+                            "id": _runtime_message_id(
+                                context,
+                                f"verification:{attempts}:repair",
+                            ),
+                            "role": "user",
+                            "content": verification.reason
+                            or "The finish candidate needs repair before completion.",
+                        })
+                    ],
+                }
         elif verification.outcome == "fail":
+            lifecycle.pop("finish_delivery_intent", None)
             lifecycle.update(
                 {
                     "status": "failed",
@@ -733,28 +829,31 @@ class DeterministicRuntimeNodeExecutor:
                 "resume value must be an object",
             )
         lifecycle = dict(state["lifecycle"])
-        messages = _messages(state["lifecycle"])
-        messages.append(
-            {
-                "id": _runtime_message_id(
-                    state,
-                    f"resume:{context.command_id}",
-                ),
-                "role": "user",
-                "content": dict(cast(Mapping[str, JsonValue], resume_value)),
-                "runtime_input": "resume",
-            }
-        )
         lifecycle.update(
             {
                 "status": "running",
                 "reason": None,
                 "waiting_request": None,
-                "run_messages": messages,
             }
         )
-        _schedule_compact(lifecycle, return_route="model", forced=True)
-        return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
+        _schedule_compact(lifecycle)
+        return {
+            "lifecycle": cast(RuntimeLifecycle, lifecycle),
+            "messages": [
+                _message_for_channel({
+                    "id": _runtime_message_id(
+                        context,
+                        f"resume:{context.command_id}",
+                    ),
+                    "role": "user",
+                    "content": _resume_message_content(
+                        cast(Mapping[str, JsonValue], resume_value)
+                    ),
+                    "runtime_input": "resume",
+                    "runtime_run_id": context.run_id,
+                })
+            ],
+        }
 
     async def execute(
         self,
@@ -802,6 +901,7 @@ __all__ = [
     "RuntimeFinalizer",
     "RuntimeModelStepService",
     "RuntimeRunCompactor",
+    "RuntimeInvocationCancelled",
     "RuntimeNodeTransitionError",
     "RuntimeToolStepService",
     "RuntimeVerifier",

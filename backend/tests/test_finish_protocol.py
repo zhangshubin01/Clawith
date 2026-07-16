@@ -79,13 +79,117 @@ def _model():
 
 
 def test_finish_tool_schema_is_default_and_requires_content():
-    from app.services.llm.finish import FINISH_TOOL_DEFINITION, FINISH_TOOL_SEED
+    from app.services.llm.finish import (
+        FINISH_TOOL_DEFINITION,
+        FINISH_TOOL_SEED,
+        group_finish_tool_definition,
+    )
 
     assert FINISH_TOOL_DEFINITION["function"]["name"] == "finish"
+    description = FINISH_TOOL_DEFINITION["function"]["description"]
+    assert "user's requested outcome is complete" in description
+    assert "required verification has passed" in description
+    assert "progress update" in description
     assert FINISH_TOOL_DEFINITION["function"]["parameters"]["required"] == ["content"]
     assert FINISH_TOOL_SEED["name"] == "finish"
     assert FINISH_TOOL_SEED["is_default"] is True
     assert FINISH_TOOL_SEED["parameters_schema"]["required"] == ["content"]
+    assert "mention_participant_ids" not in (
+        FINISH_TOOL_DEFINITION["function"]["parameters"]["properties"]
+    )
+    assert FINISH_TOOL_DEFINITION["function"]["parameters"]["additionalProperties"] is False
+
+    group_finish = group_finish_tool_definition()
+    mention_schema = group_finish["function"]["parameters"]["properties"][
+        "mention_participant_ids"
+    ]
+    assert mention_schema["type"] == "array"
+    assert mention_schema["maxItems"] == 100
+    assert mention_schema["uniqueItems"] is True
+    assert group_finish["function"]["parameters"]["required"] == ["content"]
+
+
+def test_group_finish_parser_accepts_only_bounded_stable_participant_ids() -> None:
+    from app.services.llm.finish import find_finish_call
+
+    first = uuid.uuid4()
+    second = uuid.uuid4()
+    parsed = find_finish_call(
+        [
+            {
+                "id": "call_group_finish",
+                "function": {
+                    "name": "finish",
+                    "arguments": {
+                        "content": "I have finished; please review the evidence.",
+                        "mention_participant_ids": [
+                            str(first),
+                            str(second),
+                            str(first),
+                        ],
+                    },
+                },
+            }
+        ],
+        allow_group_mentions=True,
+    )
+
+    assert parsed is not None and parsed.valid is True
+    assert parsed.mention_participant_ids == (str(first), str(second))
+
+    invalid_id = find_finish_call(
+        [
+            {
+                "id": "call_invalid_group_finish",
+                "function": {
+                    "name": "finish",
+                    "arguments": {
+                        "content": "Done",
+                        "mention_participant_ids": ["Analyst by display name"],
+                    },
+                },
+            }
+        ],
+        allow_group_mentions=True,
+    )
+    assert invalid_id is not None and invalid_id.valid is False
+    assert "UUID" in (invalid_id.error or "")
+
+
+def test_non_group_finish_rejects_group_or_unknown_bypass_fields() -> None:
+    from app.services.llm.finish import find_finish_call
+
+    target = uuid.uuid4()
+    group_bypass = find_finish_call(
+        [
+            {
+                "id": "call_non_group_finish",
+                "function": {
+                    "name": "finish",
+                    "arguments": {
+                        "content": "Done",
+                        "mention_participant_ids": [str(target)],
+                    },
+                },
+            }
+        ]
+    )
+    assert group_bypass is not None and group_bypass.valid is False
+    assert "Group Agent Run" in (group_bypass.error or "")
+
+    unknown = find_finish_call(
+        [
+            {
+                "id": "call_unknown_finish_field",
+                "function": {
+                    "name": "finish",
+                    "arguments": {"content": "Done", "artifact_refs": ["fake"]},
+                },
+            }
+        ]
+    )
+    assert unknown is not None and unknown.valid is False
+    assert "unsupported" in (unknown.error or "")
 
 
 def test_find_finish_call_validates_arguments():
@@ -284,6 +388,28 @@ def test_finish_is_in_always_available_core_tools():
     from app.services.agent_tools import _ALWAYS_INCLUDE_CORE
 
     assert "finish" in _ALWAYS_INCLUDE_CORE
+
+
+def test_tool_round_warning_only_names_tools_present_in_current_schema():
+    from app.services.llm.caller import _tool_round_limit_warning
+
+    without_continuation_tools = _tool_round_limit_warning(
+        round_index=8,
+        max_rounds=10,
+        allowed_tool_names={"finish"},
+        urgent=False,
+    )
+    assert "upsert_focus_item" not in without_continuation_tools
+    assert "set_trigger" not in without_continuation_tools
+
+    with_continuation_tools = _tool_round_limit_warning(
+        round_index=8,
+        max_rounds=10,
+        allowed_tool_names={"finish", "upsert_focus_item", "set_trigger"},
+        urgent=True,
+    )
+    assert "upsert_focus_item" in with_continuation_tools
+    assert "set_trigger" in with_continuation_tools
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections import deque
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -10,11 +12,17 @@ import uuid
 from fastapi import WebSocketDisconnect
 import pytest
 
-from app.api.websocket import WebChatRuntimeIntake, WebSocketChatHandler
+from app.api.websocket import (
+    AcceptedWebChatMessage,
+    WebChatRuntimeIntake,
+    WebSocketChatHandler,
+)
+from app.models.agent_run import AgentRun
+from app.models.agent_run_command import AgentRunCommand
 from app.models.chat_session import ChatSession
 from app.models.llm import LLMModel
 from app.models.user import User
-from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
+from app.services.agent_runtime.chat_intake import ChatRuntimeIntake, ChatRuntimeIntakeError
 from app.services.agent_runtime.chat_stream import ChatRuntimeStreamOutcome
 from app.services.agent_runtime.contracts import (
     CancelRunCommand,
@@ -45,9 +53,33 @@ class _Transaction:
         return False
 
 
+class _AsyncContext:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _Result:
+    def __init__(self, value: object = None) -> None:
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
 class _Session:
-    def __init__(self, records: dict[type, object] | None = None) -> None:
+    def __init__(
+        self,
+        records: dict[type, object] | None = None,
+        *results: object,
+    ) -> None:
         self.records = records or {}
+        self.results = deque(results)
 
     async def __aenter__(self):
         return self
@@ -60,6 +92,12 @@ class _Session:
 
     async def get(self, model, _identity):
         return self.records.get(model)
+
+    async def execute(self, _statement):
+        return _Result(self.results.popleft() if self.results else None)
+
+    async def commit(self):
+        return None
 
 
 def _handler(websocket: _WebSocket) -> WebSocketChatHandler:
@@ -94,6 +132,51 @@ def _handle(tenant_id: uuid.UUID) -> RunHandle:
         runtime_type="langgraph",
         created=True,
     )
+
+
+def _direct_cancel_records(
+    handler: WebSocketChatHandler,
+    run_id: uuid.UUID,
+    *,
+    lane_held: bool = True,
+) -> tuple[object, ChatSession, AgentRun]:
+    assert handler.user is not None and handler.conv_id is not None
+    agent = SimpleNamespace(id=handler.agent_id, tenant_id=handler.user.tenant_id)
+    session = ChatSession(
+        id=uuid.UUID(handler.conv_id),
+        tenant_id=handler.user.tenant_id,
+        session_type="direct",
+        agent_id=handler.agent_id,
+        user_id=handler.user.id,
+        title="Direct",
+        source_channel="web",
+        is_group=False,
+        is_primary=True,
+    )
+    run = AgentRun(
+        id=run_id,
+        tenant_id=handler.user.tenant_id,
+        agent_id=handler.agent_id,
+        session_id=session.id,
+        source_type="chat",
+        goal="Answer",
+        run_kind="foreground",
+        model_id=uuid.uuid4(),
+        model_turn_limit=50,
+        runtime_type="langgraph",
+        runtime_thread_id=str(session.id),
+        graph_name="runtime_graph",
+        graph_version="v1",
+        scheduling_lane_key=(
+            f"direct_chat_thread:{handler.user.tenant_id}:{session.id}"
+        ),
+        scheduling_position_created_at=datetime.now(UTC),
+        scheduling_position_id=uuid.uuid4(),
+        lane_held=lane_held,
+        delivery_status="pending",
+        origin_user_id=handler.user.id,
+    )
+    return agent, session, run
 
 
 @pytest.mark.asyncio
@@ -151,11 +234,16 @@ async def test_native_message_uses_runtime_without_entering_legacy_tool_loop() -
 
 
 @pytest.mark.asyncio
-async def test_next_message_resumes_the_exact_wait_returned_on_this_socket() -> None:
-    websocket = _WebSocket({"content": "Yes, publish it"})
+async def test_resume_requires_explicit_run_and_correlation_from_client() -> None:
+    run_id = uuid.uuid4()
+    websocket = _WebSocket(
+        {
+            "content": "Yes, publish it",
+            "run_id": str(run_id),
+            "correlation_id": "publish-confirmation",
+        }
+    )
     handler = _handler(websocket)
-    handler.waiting_runtime_run_id = uuid.uuid4()
-    handler.waiting_runtime_correlation_id = "publish-confirmation"
     model = SimpleNamespace(id=uuid.uuid4())
     intake = ChatRuntimeIntake(
         handle=_handle(handler.user.tenant_id),
@@ -180,8 +268,40 @@ async def test_next_message_resumes_the_exact_wait_returned_on_this_socket() -> 
         with pytest.raises(WebSocketDisconnect):
             await handler.message_loop()
 
-    assert enqueue.await_args.kwargs["resume_run_id"] == handler.waiting_runtime_run_id
+    assert enqueue.await_args.kwargs["resume_run_id"] == run_id
     assert enqueue.await_args.kwargs["resume_correlation_id"] == "publish-confirmation"
+
+
+@pytest.mark.asyncio
+async def test_plain_message_never_uses_connection_memory_as_implicit_resume() -> None:
+    websocket = _WebSocket({"content": "New ordinary turn"})
+    handler = _handler(websocket)
+    model = SimpleNamespace(id=uuid.uuid4())
+    intake = ChatRuntimeIntake(
+        handle=_handle(handler.user.tenant_id),
+        message_id=uuid.uuid4(),
+        resumed=False,
+    )
+
+    with (
+        patch.object(handler, "_resolve_effective_model", new=AsyncMock(return_value=model)),
+        patch.object(handler, "_check_quotas", new=AsyncMock(return_value=True)),
+        patch.object(
+            handler,
+            "_enqueue_runtime_chat",
+            new=AsyncMock(return_value=WebChatRuntimeIntake(run=intake)),
+        ) as enqueue,
+        patch.object(
+            handler,
+            "_run_runtime_and_stream",
+            new=AsyncMock(return_value=(None, [])),
+        ),
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    assert enqueue.await_args.kwargs["resume_run_id"] is None
+    assert enqueue.await_args.kwargs["resume_correlation_id"] is None
 
 
 @pytest.mark.asyncio
@@ -282,9 +402,14 @@ async def test_web_intake_pins_onboarding_metadata_without_a_visible_user_messag
         lock_on_first_chunk=True,
         is_greeting_turn=True,
     )
+    run_state_reader = SimpleNamespace()
 
     with (
         patch("app.api.websocket.async_session", return_value=db),
+        patch(
+            "app.api.websocket.open_run_state_reader",
+            return_value=_AsyncContext(run_state_reader),
+        ),
         patch("app.api.websocket.check_agent_access", new=AsyncMock(return_value=(agent, None))),
         patch(
             "app.api.websocket.resolve_onboarding_prompt",
@@ -314,6 +439,7 @@ async def test_web_intake_pins_onboarding_metadata_without_a_visible_user_messag
     assert enqueue.await_args.kwargs["onboarding_target_phase"] == "greeted"
     assert enqueue.await_args.kwargs["persist_user_message"] is False
     assert enqueue.await_args.kwargs["application_tools_enabled"] is False
+    assert enqueue.await_args.kwargs["run_state_reader"] is run_state_reader
     assert session.title == "Onboarding"
 
 
@@ -321,18 +447,250 @@ async def test_web_intake_pins_onboarding_metadata_without_a_visible_user_messag
 async def test_abort_enqueues_a_durable_cancel_command() -> None:
     handler = _handler(_WebSocket())
     handle = _handle(handler.user.tenant_id)
+    agent = SimpleNamespace(id=handler.agent_id, tenant_id=handler.user.tenant_id)
+    session = ChatSession(
+        id=uuid.UUID(handler.conv_id),
+        tenant_id=handler.user.tenant_id,
+        session_type="direct",
+        agent_id=handler.agent_id,
+        user_id=handler.user.id,
+        title="Direct",
+        source_channel="web",
+        is_group=False,
+        is_primary=True,
+    )
+    run = AgentRun(
+        id=handle.run_id,
+        tenant_id=handler.user.tenant_id,
+        agent_id=handler.agent_id,
+        session_id=session.id,
+        source_type="chat",
+        goal="Answer",
+        run_kind="foreground",
+        model_id=uuid.uuid4(),
+        model_turn_limit=50,
+        runtime_type="langgraph",
+        runtime_thread_id=str(session.id),
+        graph_name="runtime_graph",
+        graph_version="v1",
+        scheduling_lane_key=(
+            f"direct_chat_thread:{handler.user.tenant_id}:{session.id}"
+        ),
+        scheduling_position_created_at=datetime.now(UTC),
+        scheduling_position_id=uuid.uuid4(),
+        lane_held=True,
+        delivery_status="pending",
+        origin_user_id=handler.user.id,
+    )
+    db = _Session(
+        {User: handler.user, ChatSession: session},
+        run,
+        None,
+    )
 
     with (
-        patch("app.api.websocket.async_session", return_value=_Session()),
+        patch("app.api.websocket.async_session", return_value=db),
         patch(
-            "app.api.websocket.TransactionalAgentRuntimeAdapter.cancel_run",
+            "app.api.websocket.check_agent_access",
+            new=AsyncMock(return_value=(agent, None)),
+        ),
+        patch(
+            "app.api.websocket.RuntimeCommandIntake.cancel_run",
             new=AsyncMock(return_value=handle),
         ) as cancel_run,
     ):
-        await handler._cancel_runtime_run(handle)
+        result = await handler._cancel_runtime_run(handle.run_id)
 
+    assert result == handle
     command = cancel_run.await_args.args[0]
     assert isinstance(command, CancelRunCommand)
     assert command.run_id == handle.run_id
     assert command.idempotency_key == f"cancel:web:{handle.run_id}"
     assert command.actor_user_id == handler.user.id
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejects_run_from_another_session() -> None:
+    handler = _handler(_WebSocket())
+    run_id = uuid.uuid4()
+    agent, session, run = _direct_cancel_records(handler, run_id)
+    run.session_id = uuid.uuid4()
+    db = _Session({User: handler.user, ChatSession: session}, run)
+
+    with (
+        patch("app.api.websocket.async_session", return_value=db),
+        patch(
+            "app.api.websocket.check_agent_access",
+            new=AsyncMock(return_value=(agent, None)),
+        ),
+    ):
+        with pytest.raises(ChatRuntimeIntakeError) as raised:
+            await handler._cancel_runtime_run(run_id)
+
+    assert getattr(raised.value, "code", None) == "chat_cancel_scope_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_cancel_remains_idempotent_after_lane_release() -> None:
+    handler = _handler(_WebSocket())
+    handle = _handle(handler.user.tenant_id)
+    agent, session, run = _direct_cancel_records(
+        handler,
+        handle.run_id,
+        lane_held=False,
+    )
+    existing = AgentRunCommand(
+        id=uuid.uuid4(),
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        command_type="cancel",
+        payload={"reason": "cancelled_by_user"},
+        actor_user_id=handler.user.id,
+        idempotency_key=f"cancel:web:{run.id}",
+        status="applied",
+        attempt_count=1,
+        created_at=datetime.now(UTC),
+        applied_at=datetime.now(UTC),
+    )
+    db = _Session({User: handler.user, ChatSession: session}, run, existing)
+
+    with (
+        patch("app.api.websocket.async_session", return_value=db),
+        patch(
+            "app.api.websocket.check_agent_access",
+            new=AsyncMock(return_value=(agent, None)),
+        ),
+        patch(
+            "app.api.websocket.RuntimeCommandIntake.cancel_run",
+            new=AsyncMock(return_value=handle),
+        ) as cancel_run,
+    ):
+        result = await handler._cancel_runtime_run(run.id)
+
+    assert result == handle
+    cancel_run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_main_message_loop_accepts_cancel_after_waiting_stream_has_ended() -> None:
+    run_id = uuid.uuid4()
+    websocket = _WebSocket({"type": "abort", "run_id": str(run_id)})
+    handler = _handler(websocket)
+    handle = _handle(handler.user.tenant_id)
+    handle = RunHandle(
+        tenant_id=handle.tenant_id,
+        run_id=run_id,
+        thread_id=handle.thread_id,
+        command_id=handle.command_id,
+        runtime_type=handle.runtime_type,
+        created=handle.created,
+    )
+
+    with patch.object(
+        handler,
+        "_cancel_runtime_run",
+        new=AsyncMock(return_value=handle),
+    ) as cancel:
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    cancel.assert_awaited_once_with(run_id)
+    assert websocket.sent == [
+        {
+            "type": "runtime_status",
+            "run_id": str(run_id),
+            "event": "cancel_requested",
+            "status": "cancelling",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_run_id_fails_closed() -> None:
+    websocket = _WebSocket({"type": "abort"})
+    handler = _handler(websocket)
+
+    with patch.object(handler, "_cancel_runtime_run", new=AsyncMock()) as cancel:
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    cancel.assert_not_awaited()
+    assert websocket.sent[0]["code"] == "missing_cancel_run_id"
+
+
+@pytest.mark.asyncio
+async def test_openclaw_abort_keeps_existing_non_runtime_behavior() -> None:
+    handler = _handler(_WebSocket({"type": "abort"}))
+    handler.agent_type = "openclaw"
+
+    with patch.object(handler, "_cancel_runtime_run", new=AsyncMock()) as cancel:
+        with pytest.raises(WebSocketDisconnect):
+            await handler.message_loop()
+
+    cancel.assert_not_awaited()
+
+
+class _BlockingWebSocket(_WebSocket):
+    async def receive_json(self):
+        if self.incoming:
+            return self.incoming.pop(0)
+        await asyncio.sleep(10)
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+async def test_followup_message_is_durably_accepted_while_current_stream_runs() -> None:
+    websocket = _BlockingWebSocket({"content": "Queue this next"})
+    handler = _handler(websocket)
+    current = ChatRuntimeIntake(
+        handle=_handle(handler.user.tenant_id),
+        message_id=uuid.uuid4(),
+        resumed=False,
+    )
+    queued = AcceptedWebChatMessage(
+        runtime=WebChatRuntimeIntake(
+            run=ChatRuntimeIntake(
+                handle=_handle(handler.user.tenant_id),
+                message_id=uuid.uuid4(),
+                resumed=False,
+            )
+        ),
+        user_content="Queue this next",
+    )
+    outcome = ChatRuntimeStreamOutcome(
+        status="completed",
+        content="First done",
+        cursor=RuntimeEventCursor(datetime.now(UTC), uuid.uuid4()),
+    )
+
+    async def _stream(**_kwargs):
+        await asyncio.sleep(0.01)
+        return outcome
+
+    with (
+        patch("app.api.websocket.stream_web_chat_run", new=_stream),
+        patch.object(
+            handler,
+            "_accept_client_message",
+            new=AsyncMock(return_value=queued),
+        ) as accept,
+        patch.object(handler, "_update_activity_and_quota", new=AsyncMock()),
+        patch("app.api.websocket.async_session", return_value=_Session()),
+        patch(
+            "app.api.websocket.maybe_mark_session_read_for_active_viewer",
+            new=AsyncMock(return_value=False),
+        ),
+    ):
+        returned, queued_messages = await handler._run_runtime_and_stream(
+            current,
+            user_content="First",
+        )
+
+    assert returned == outcome
+    assert queued_messages == [queued]
+    accept.assert_awaited_once_with({"content": "Queue this next"})
+    assert any(
+        packet.get("event") == "queued"
+        and packet.get("run_id") == str(queued.runtime.run.handle.run_id)
+        for packet in websocket.sent
+    )

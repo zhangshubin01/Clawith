@@ -73,7 +73,7 @@ async def test_todo_registration_updates_task_in_same_caller_session() -> None:
     )
 
     with patch(
-        "app.services.task_executor.TransactionalAgentRuntimeAdapter.start_run",
+        "app.services.task_executor.RuntimeCommandIntake.start_run",
         new=AsyncMock(return_value=handle),
     ) as start_run:
         result = await enqueue_task_runtime(
@@ -111,7 +111,7 @@ async def test_idempotent_task_retry_does_not_duplicate_queue_log() -> None:
     )
 
     with patch(
-        "app.services.task_executor.TransactionalAgentRuntimeAdapter.start_run",
+        "app.services.task_executor.RuntimeCommandIntake.start_run",
         new=AsyncMock(return_value=handle),
     ):
         await enqueue_task_runtime(
@@ -141,7 +141,7 @@ async def test_supervision_uses_a_distinct_runtime_occurrence() -> None:
     )
 
     with patch(
-        "app.services.task_executor.TransactionalAgentRuntimeAdapter.start_run",
+        "app.services.task_executor.RuntimeCommandIntake.start_run",
         new=AsyncMock(return_value=handle),
     ) as start_run:
         supervision_result = await enqueue_task_runtime(
@@ -166,7 +166,7 @@ async def test_disabled_rollout_does_not_silently_start_runtime() -> None:
     task, agent = _records()
 
     with patch(
-        "app.services.task_executor.TransactionalAgentRuntimeAdapter.start_run",
+        "app.services.task_executor.RuntimeCommandIntake.start_run",
         new=AsyncMock(),
     ) as start_run:
         result = await enqueue_task_runtime(

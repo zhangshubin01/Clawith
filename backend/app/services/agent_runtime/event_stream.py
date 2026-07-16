@@ -147,7 +147,7 @@ class DatabaseRuntimeEventStream:
 
     @staticmethod
     def _validate_handle(handle: RunHandle) -> None:
-        if handle.runtime_type != "langgraph" or handle.thread_id != str(handle.run_id):
+        if handle.runtime_type != "langgraph" or not handle.thread_id.strip():
             raise RuntimeEventStreamError(
                 "runtime_identity_mismatch",
                 "event stream handle is not a valid LangGraph Run identity",
@@ -167,10 +167,13 @@ class DatabaseRuntimeEventStream:
                 "run_not_found",
                 "event stream Run does not exist in its tenant",
             )
-        if run.runtime_type != "langgraph" or run.runtime_thread_id != str(run.id):
+        if (
+            run.runtime_type != "langgraph"
+            or run.runtime_thread_id != handle.thread_id
+        ):
             raise RuntimeEventStreamError(
                 "runtime_identity_mismatch",
-                "event stream Run identity is not LangGraph-backed",
+                "event stream handle does not match the stored LangGraph Run identity",
             )
         return run
 

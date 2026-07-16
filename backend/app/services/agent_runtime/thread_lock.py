@@ -18,25 +18,39 @@ _RELEASE_SQL = sa.text("SELECT pg_advisory_unlock(:lock_key)")
 class ThreadLockNotAcquired(RuntimeError):
     """Another worker currently owns the Run thread lock."""
 
-    def __init__(self, run_id: uuid.UUID, lock_key: int) -> None:
-        super().__init__(f"Agent Run {run_id} thread lock is already held")
-        self.run_id = run_id
+    def __init__(self, thread_id: str | uuid.UUID, lock_key: int) -> None:
+        super().__init__(f"Agent Runtime thread {thread_id} lock is already held")
+        self.thread_id = str(thread_id)
+        # Compatibility for existing metrics/tests while callers move to the
+        # real Thread identity.
+        self.run_id = thread_id
         self.lock_key = lock_key
 
 
 class ThreadLockReleaseError(RuntimeError):
     """The dedicated connection did not own the lock at release time."""
 
-    def __init__(self, run_id: uuid.UUID, lock_key: int) -> None:
-        super().__init__(f"Agent Run {run_id} thread lock could not be released")
-        self.run_id = run_id
+    def __init__(self, thread_id: str | uuid.UUID, lock_key: int) -> None:
+        super().__init__(f"Agent Runtime thread {thread_id} lock could not be released")
+        self.thread_id = str(thread_id)
+        self.run_id = thread_id
         self.lock_key = lock_key
 
 
-def thread_lock_key(run_id: uuid.UUID) -> int:
-    """Derive one stable signed PostgreSQL bigint key from a Run UUID."""
+def thread_lock_key(thread_id: str | uuid.UUID) -> int:
+    """Derive one stable signed PostgreSQL bigint key from a Thread identity."""
+    try:
+        identity_bytes = (
+            thread_id.bytes
+            if isinstance(thread_id, uuid.UUID)
+            else uuid.UUID(str(thread_id)).bytes
+        )
+    except ValueError:
+        identity_bytes = str(thread_id).encode("utf-8")
+    if not identity_bytes:
+        raise ValueError("thread_id must not be blank")
     digest = hashlib.blake2b(
-        run_id.bytes,
+        identity_bytes,
         digest_size=8,
         person=b"clawith-run-v1",
     ).digest()
@@ -45,7 +59,7 @@ def thread_lock_key(run_id: uuid.UUID) -> int:
 
 async def run_with_thread_lock(
     engine: AsyncEngine,
-    run_id: uuid.UUID,
+    thread_id: str | uuid.UUID,
     callback: Callable[[AsyncConnection], Awaitable[T]],
 ) -> T:
     """Run checkpoint/invoke/reconcile work on one locked connection.
@@ -54,14 +68,14 @@ async def run_with_thread_lock(
     passed to the callback and retained until the unlock query completes.
     Failure to acquire never invokes the callback.
     """
-    lock_key = thread_lock_key(run_id)
+    lock_key = thread_lock_key(thread_id)
     async with engine.connect() as connection:
         acquired_result = await connection.execute(
             _ACQUIRE_SQL,
             {"lock_key": lock_key},
         )
         if not bool(acquired_result.scalar_one()):
-            raise ThreadLockNotAcquired(run_id, lock_key)
+            raise ThreadLockNotAcquired(thread_id, lock_key)
 
         try:
             return await callback(connection)
@@ -71,4 +85,4 @@ async def run_with_thread_lock(
                 {"lock_key": lock_key},
             )
             if not bool(released_result.scalar_one()):
-                raise ThreadLockReleaseError(run_id, lock_key)
+                raise ThreadLockReleaseError(thread_id, lock_key)

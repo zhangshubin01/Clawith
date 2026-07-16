@@ -161,7 +161,10 @@ def _snapshot(
     )
 
 
-def _records() -> tuple[RuntimeRunRecord, CheckpointObservation, AgentRun]:
+def _records(
+    *,
+    direct: bool = False,
+) -> tuple[RuntimeRunRecord, CheckpointObservation, AgentRun]:
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
     agent_id = uuid.uuid4()
@@ -181,9 +184,19 @@ def _records() -> tuple[RuntimeRunRecord, CheckpointObservation, AgentRun]:
     run = RuntimeRunRecord(
         tenant_id=tenant_id,
         run_id=run_id,
-        thread_id=str(run_id),
+        thread_id=str(session_id if direct else run_id),
         runtime_type="langgraph",
-        registry=registry,
+        goal=registry.goal,
+        run_kind=registry.run_kind,
+        source_type=registry.source_type,
+        model_id=registry.model_id,
+        graph_name=registry.graph_name,
+        graph_version=registry.graph_version,
+        agent_id=registry.agent_id,
+        session_id=registry.session_id,
+        system_role=registry.system_role,
+        parent_run_id=registry.parent_run_id,
+        root_run_id=registry.root_run_id,
     )
     state: RuntimeGraphState = {
         "registry": registry,
@@ -220,13 +233,28 @@ def _records() -> tuple[RuntimeRunRecord, CheckpointObservation, AgentRun]:
         run_kind="foreground",
         model_id=uuid.uuid4(),
         runtime_type="langgraph",
-        runtime_thread_id=str(run_id),
+        runtime_thread_id=str(session_id if direct else run_id),
         graph_name="runtime_graph",
         graph_version="v1",
         lane_held=False,
         delivery_status="pending",
     )
     return run, checkpoint, stored_run
+
+
+@pytest.mark.asyncio
+async def test_direct_thread_terminal_does_not_run_session_compact() -> None:
+    run, checkpoint, _stored_run = _records(direct=True)
+    compactor = _Compactor()
+    handler = SessionContextCompletionHandler(
+        session_factory=_SessionFactory(),  # type: ignore[arg-type]
+        context_service=_ContextService([], ()),  # type: ignore[arg-type]
+        compactor=compactor,
+    )
+
+    await handler.handle(run=run, checkpoint=checkpoint)
+
+    assert compactor.requests == []
 
 
 @pytest.mark.asyncio

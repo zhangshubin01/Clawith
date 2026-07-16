@@ -660,14 +660,14 @@ def validate_tool_exchange_integrity(
 def select_recent_blocks(
     blocks: Sequence[MessageBlock],
     *,
-    target_messages: int = 20,
+    target_messages: int | None = None,
     token_budget: int | None = None,
     token_counter: TokenCounter | None = None,
     tool_execution_ledger: Ledger | None = None,
 ) -> RecentBlockSelection:
     """Select recent blocks backward while preserving Tool Exchange atomicity."""
 
-    if target_messages <= 0:
+    if target_messages is not None and target_messages <= 0:
         raise ValueError("target_messages must be greater than zero")
     if (token_budget is None) != (token_counter is None):
         raise ValueError("token_budget and token_counter must be provided together")
@@ -695,7 +695,11 @@ def select_recent_blocks(
         requires_confirmation = requires_confirmation or block.requires_confirmation
 
     for block in reversed(blocks):
-        if window_closed or selected_message_count >= target_messages:
+        if (
+            window_closed
+            or target_messages is not None
+            and selected_message_count >= target_messages
+        ):
             window_closed = True
             omit(block)
             continue
@@ -760,7 +764,7 @@ def build_recent_tool_safe_window(
     messages: Sequence[Mapping[str, Any]],
     tool_execution_ledger: Ledger | None = None,
     *,
-    target_messages: int = 20,
+    target_messages: int | None = None,
     token_budget: int | None = None,
     token_counter: TokenCounter | None = None,
 ) -> RecentBlockSelection:

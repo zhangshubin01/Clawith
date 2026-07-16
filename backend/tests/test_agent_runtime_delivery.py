@@ -1,8 +1,10 @@
 """Focused tests for checkpoint-derived Runtime delivery transactions."""
 
 from collections import deque
+from dataclasses import replace
 from datetime import UTC, datetime
 import inspect
+from unittest.mock import AsyncMock, patch
 import uuid
 
 import pytest
@@ -21,6 +23,10 @@ from app.services.agent_runtime.delivery import (
     DeliveryRequest,
     DeliveryServiceError,
     deliver_runtime_message,
+)
+from app.services.agent_runtime.group_handoff import (
+    GroupAgentHandoffApplyResult,
+    GroupAgentHandoffError,
 )
 
 
@@ -292,6 +298,217 @@ async def test_group_terminal_delivery_is_one_transaction_with_agent_identity() 
     assert f"group_members.group_id = '{group_id}'" in membership_sql
     assert f"group_members.participant_id = '{participant.id}'" in membership_sql
     assert "group_members.removed_at IS NULL" in membership_sql
+
+
+@pytest.mark.asyncio
+async def test_group_handoff_delivery_uses_frozen_intent_in_the_same_transaction() -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    session = _session(tenant_id=tenant_id, agent_id=None, group_id=group_id)
+    run = _run(
+        tenant_id=tenant_id,
+        session=session,
+        agent_id=agent_id,
+        delivery_target={
+            "kind": "group",
+            "session_id": str(session.id),
+            "group_id": str(group_id),
+        },
+    )
+    agent = _agent(tenant_id, agent_id)
+    participant = _participant(agent_id)
+    membership = GroupMember(
+        group_id=group_id,
+        participant_id=participant.id,
+        role="member",
+        removed_at=None,
+    )
+    request = _terminal_request(run, content="Public result and handoff")
+    message_id = uuid.uuid5(
+        run.id,
+        f"delivery-message:{request.idempotency_key}",
+    )
+    message = ChatMessage(
+        id=message_id,
+        agent_id=agent_id,
+        user_id=None,
+        role="assistant",
+        content=request.content,
+        conversation_id=str(session.id),
+        participant_id=participant.id,
+        mentions=[{"participant_id": str(uuid.uuid4())}],
+        created_at=NOW,
+    )
+    handoff = {
+        "version": 1,
+        "source_run_id": str(run.id),
+        "mention_participant_ids": [message.mentions[0]["participant_id"]],
+        "idempotency_key": request.idempotency_key,
+    }
+    request = replace(request, group_handoff_intent=handoff)
+    db = _RecordingDB(
+        run,
+        None,
+        session,
+        agent,
+        participant,
+        _group(tenant_id, group_id),
+        membership,
+    )
+
+    with patch(
+        "app.services.agent_runtime.delivery.apply_group_agent_handoff",
+        new=AsyncMock(
+            return_value=GroupAgentHandoffApplyResult(
+                message=message,
+                run_handles=(),
+            )
+        ),
+    ) as apply:
+        receipt = await deliver_runtime_message(db, request, clock=lambda: NOW)
+
+    assert receipt.status == "delivered"
+    assert receipt.message_id == message.id
+    assert apply.await_count == 1
+    assert apply.await_args.args[0] is db
+    assert apply.await_args.kwargs["source_run"] is run
+    assert apply.await_args.kwargs["content"] == request.content
+    assert apply.await_args.kwargs["intent_payload"] == handoff
+    assert apply.await_args.kwargs["expected_idempotency_key"] == request.idempotency_key
+    assert apply.await_args.kwargs["expected_message_id"] == message_id
+    assert _added(db, ChatMessage) == []
+    assert len(_added(db, AgentRunEvent)) == 1
+
+
+@pytest.mark.asyncio
+async def test_group_handoff_race_failure_publishes_nothing_and_is_observable() -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    session = _session(tenant_id=tenant_id, agent_id=None, group_id=group_id)
+    run = _run(
+        tenant_id=tenant_id,
+        session=session,
+        agent_id=agent_id,
+        delivery_target={
+            "kind": "group",
+            "session_id": str(session.id),
+            "group_id": str(group_id),
+        },
+    )
+    participant = _participant(agent_id)
+    membership = GroupMember(
+        group_id=group_id,
+        participant_id=participant.id,
+        role="member",
+        removed_at=None,
+    )
+    request = _terminal_request(run, content="Handoff")
+    request = replace(
+        request,
+        group_handoff_intent={
+            "version": 1,
+            "source_run_id": str(run.id),
+            "mention_participant_ids": [str(uuid.uuid4())],
+            "idempotency_key": request.idempotency_key,
+        },
+    )
+    db = _RecordingDB(
+        run,
+        None,
+        session,
+        _agent(tenant_id, agent_id),
+        participant,
+        _group(tenant_id, group_id),
+        membership,
+    )
+
+    with patch(
+        "app.services.agent_runtime.delivery.apply_group_agent_handoff",
+        new=AsyncMock(
+            side_effect=GroupAgentHandoffError(
+                "group_handoff_target_invalid",
+                "target was removed after preflight",
+                repairable=True,
+            )
+        ),
+    ):
+        receipt = await deliver_runtime_message(db, request, clock=lambda: NOW)
+
+    assert receipt.status == "failed"
+    assert receipt.error_code == "group_handoff_target_invalid"
+    assert receipt.message_id is None
+    assert _added(db, ChatMessage) == []
+    event = _added(db, AgentRunEvent)[0]
+    assert event.event_type == "delivery_failed"
+
+
+@pytest.mark.asyncio
+async def test_group_handoff_delivery_retry_does_not_repeat_message_or_child_runs() -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    session = _session(tenant_id=tenant_id, agent_id=None, group_id=group_id)
+    run = _run(
+        tenant_id=tenant_id,
+        session=session,
+        agent_id=agent_id,
+        delivery_target={
+            "kind": "group",
+            "session_id": str(session.id),
+            "group_id": str(group_id),
+        },
+    )
+    base_request = _terminal_request(run, content="Handoff")
+    request = replace(
+        base_request,
+        group_handoff_intent={
+            "version": 1,
+            "source_run_id": str(run.id),
+            "mention_participant_ids": [str(uuid.uuid4())],
+            "idempotency_key": base_request.idempotency_key,
+        },
+    )
+    message_id = uuid.uuid5(
+        run.id,
+        f"delivery-message:{request.idempotency_key}",
+    )
+    event = AgentRunEvent(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        run_id=run.id,
+        agent_id=agent_id,
+        event_type="delivery_succeeded",
+        summary="Runtime delivery succeeded",
+        payload={
+            "version": 1,
+            "status": "delivered",
+            "delivery_kind": "terminal",
+            "checkpoint_id": request.checkpoint_id,
+            "message_id": str(message_id),
+            "requested_session_id": str(session.id),
+            "actual_session_id": str(session.id),
+            "fallback_reason": None,
+            "error_code": None,
+        },
+        artifact_refs=[],
+        idempotency_key=request.idempotency_key,
+        source_checkpoint_id=request.checkpoint_id,
+    )
+    db = _RecordingDB(run, event)
+
+    with patch(
+        "app.services.agent_runtime.delivery.apply_group_agent_handoff",
+        new=AsyncMock(),
+    ) as apply:
+        receipt = await deliver_runtime_message(db, request, clock=lambda: NOW)
+
+    assert receipt.status == "delivered"
+    assert receipt.message_id == message_id
+    apply.assert_not_awaited()
+    assert db.added == []
+    assert len(db.statements) == 2
 
 
 @pytest.mark.asyncio

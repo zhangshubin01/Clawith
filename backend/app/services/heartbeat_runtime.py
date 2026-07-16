@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 import uuid
 
@@ -9,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.models.agent import Agent
-from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
+from app.services.agent_runtime.adapter import RuntimeCommandIntake
 from app.services.agent_runtime.config import decide_runtime_v2
 from app.services.agent_runtime.contracts import RunHandle, StartRunCommand
 
@@ -83,6 +84,7 @@ async def enqueue_heartbeat_runtime(
     agent: Agent,
     occurrence_at: datetime,
     instruction: str,
+    context: Mapping[str, object] | None = None,
     settings_override: Settings | None = None,
 ) -> RunHandle | None:
     """Register one claimed heartbeat in the caller transaction when v2 is selected."""
@@ -103,7 +105,7 @@ async def enqueue_heartbeat_runtime(
         )
 
     source_execution_id = heartbeat_source_execution_id(agent.id, occurrence_at)
-    return await TransactionalAgentRuntimeAdapter(
+    return await RuntimeCommandIntake(
         db,
         settings=runtime_settings,
     ).start_run(
@@ -121,7 +123,7 @@ async def enqueue_heartbeat_runtime(
             payload={
                 "background_mode": "heartbeat",
                 "heartbeat_occurrence_at": occurrence_at.astimezone(UTC).isoformat(),
-                "heartbeat_instruction": normalized_instruction,
+                "heartbeat_context": dict(context or {}),
             },
             origin_user_id=agent.creator_id,
         )
@@ -135,7 +137,7 @@ async def enqueue_oneshot_runtime(
     prompt: str,
     occurrence_id: uuid.UUID,
     triggered_by_user_id: uuid.UUID | None,
-    requested_max_steps: int,
+    requested_model_turn_limit: int,
     settings_override: Settings | None = None,
 ) -> RunHandle | None:
     """Register one explicit background task without an entrypoint tool loop."""
@@ -155,16 +157,16 @@ async def enqueue_oneshot_runtime(
             "Runtime oneshot prompt is empty",
         )
     if (
-        isinstance(requested_max_steps, bool)
-        or not isinstance(requested_max_steps, int)
-        or requested_max_steps <= 0
+        isinstance(requested_model_turn_limit, bool)
+        or not isinstance(requested_model_turn_limit, int)
+        or requested_model_turn_limit <= 0
     ):
         raise HeartbeatRuntimeIntakeError(
             "oneshot_step_limit_invalid",
             "Runtime oneshot requested step limit must be positive",
         )
     source_execution_id = f"oneshot:{agent.id}:{occurrence_id}"
-    return await TransactionalAgentRuntimeAdapter(
+    return await RuntimeCommandIntake(
         db,
         settings=runtime_settings,
     ).start_run(
@@ -177,6 +179,7 @@ async def enqueue_oneshot_runtime(
             goal=normalized_prompt,
             run_kind="background",
             model_id=agent.primary_model_id,
+            requested_model_turn_limit=requested_model_turn_limit,
             delivery_status="not_required",
             idempotency_key=f"start:{source_execution_id}",
             payload={
@@ -188,7 +191,6 @@ async def enqueue_oneshot_runtime(
                     if triggered_by_user_id is not None
                     else None
                 ),
-                "requested_max_steps": requested_max_steps,
                 "agent_name": agent.name,
             },
             origin_user_id=triggered_by_user_id or agent.creator_id,
@@ -223,7 +225,7 @@ async def enqueue_schedule_runtime(
             "Runtime schedule instruction is empty",
         )
     source_execution_id = f"schedule:{schedule_id}:{occurrence_id}"
-    return await TransactionalAgentRuntimeAdapter(
+    return await RuntimeCommandIntake(
         db,
         settings=runtime_settings,
     ).start_run(

@@ -54,7 +54,7 @@ class OnboardingRuntimeCompletionHandler:
         target_phase = initial_input.get("onboarding_target_phase")
         if target_phase is None:
             return
-        if run.registry.source_type != "chat":
+        if run.source_type != "chat":
             raise OnboardingRuntimeCompletionError(
                 "invalid_onboarding_source",
                 "onboarding metadata is only valid on Chat Runs",
@@ -67,7 +67,7 @@ class OnboardingRuntimeCompletionHandler:
                 "completed onboarding Run has an invalid target phase",
             )
         try:
-            agent_id = uuid.UUID(run.registry.agent_id or "")
+            agent_id = uuid.UUID(run.agent_id or "")
             user_id = uuid.UUID(str(initial_input.get("user_id", "")))
         except ValueError as exc:
             raise OnboardingRuntimeCompletionError(

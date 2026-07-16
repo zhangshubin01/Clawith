@@ -1,35 +1,33 @@
-"""Checkpoint-driven Planning child scheduling and child-result resumption."""
+"""Apply one completed Planning v2 checkpoint to product entry Runs."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-import re
+from collections.abc import Mapping, Sequence
 import uuid
 
 from sqlalchemy import select
 
 from app.config import Settings, get_settings
-from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.audit import ChatMessage
-from app.models.chat_session import ChatSession
-from app.models.group import Group, GroupMember
-from app.models.llm import LLMModel
-from app.models.participant import Participant
-from app.services.agent_runtime.adapter import TransactionalAgentRuntimeAdapter
+from app.services.agent_runtime.adapter import RuntimeCommandIntake
 from app.services.agent_runtime.command_worker import (
     CheckpointObservation,
     RuntimeRunRecord,
     RuntimeSessionFactory,
 )
 from app.services.agent_runtime.contracts import StartRunCommand
-from app.services.agent_runtime.persistence import enqueue_resume
-from app.services.agent_runtime.planning import checkpoint_plan, ready_plan_steps
+from app.services.agent_runtime.planning import checkpoint_plan
+from app.services.group_message_service import (
+    GroupMessageServiceError,
+    ResolvedGroupMention,
+    _SenderScope,
+    _load_sender_scope,
+    _resolve_mentions,
+)
 
 
 _PLANNING_ROLE = "group_planning"
-_ACTIVE_AGENT_STATUSES = frozenset({"creating", "running", "idle"})
-_STEP_SOURCE = re.compile(r"^group_mention:(?P<message_id>[0-9a-f-]{36}):step:(?P<step_id>.+)$")
 
 
 class PlanningSchedulingError(RuntimeError):
@@ -40,83 +38,327 @@ class PlanningSchedulingError(RuntimeError):
         self.code = code
 
 
-def _step_failure_resume(
-    *,
-    root: AgentRun,
-    step_id: str,
-    error_code: str,
-) -> dict:
-    return {
-        "resume_type": "agent_result",
-        "correlation_id": f"planning:{root.id}",
-        "payload": {
-            "step_id": step_id,
-            "status": "failed",
-            "child_run_id": None,
-            "result_summary": None,
-            "error": {
-                "code": error_code,
-                "message": "The planned Agent step could not be started.",
-            },
-        },
-    }
+def _uuid(value: object, *, field: str) -> uuid.UUID:
+    if not isinstance(value, str):
+        raise PlanningSchedulingError(
+            "invalid_planning_checkpoint",
+            f"{field} must be a UUID string",
+        )
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
+        raise PlanningSchedulingError(
+            "invalid_planning_checkpoint",
+            f"{field} must be a UUID string",
+        ) from exc
 
 
-async def _enqueue_step_failure(
-    db,
+def _required_mapping(value: object, *, field: str) -> Mapping[object, object]:
+    if not isinstance(value, Mapping):
+        raise PlanningSchedulingError(
+            "invalid_planning_checkpoint",
+            f"{field} must be an object",
+        )
+    return value
+
+
+def _required_sequence(value: object, *, field: str) -> Sequence[object]:
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        raise PlanningSchedulingError(
+            "invalid_planning_checkpoint",
+            f"{field} must be an array",
+        )
+    return value
+
+
+def _candidate_participants(
+    initial_input: Mapping[str, object],
+) -> dict[uuid.UUID, uuid.UUID]:
+    candidates = _required_sequence(
+        initial_input.get("candidate_agents"),
+        field="candidate_agents",
+    )
+    output: dict[uuid.UUID, uuid.UUID] = {}
+    participant_ids: set[uuid.UUID] = set()
+    for index, candidate_value in enumerate(candidates):
+        candidate = _required_mapping(
+            candidate_value,
+            field=f"candidate_agents[{index}]",
+        )
+        agent_id = _uuid(
+            candidate.get("agent_id"),
+            field=f"candidate_agents[{index}].agent_id",
+        )
+        participant_id = _uuid(
+            candidate.get("participant_id"),
+            field=f"candidate_agents[{index}].participant_id",
+        )
+        if agent_id in output or participant_id in participant_ids:
+            raise PlanningSchedulingError(
+                "invalid_planning_checkpoint",
+                "candidate_agents identities must be unique",
+            )
+        output[agent_id] = participant_id
+        participant_ids.add(participant_id)
+    if len(output) < 2:
+        raise PlanningSchedulingError(
+            "invalid_planning_checkpoint",
+            "Planning requires at least two candidate Agents",
+        )
+    return output
+
+
+def _authoritative_agent_mentions(
+    mentions: object,
+) -> dict[uuid.UUID, uuid.UUID]:
+    raw_mentions = _required_sequence(mentions, field="trigger message mentions")
+    output: dict[uuid.UUID, uuid.UUID] = {}
+    participant_ids: set[uuid.UUID] = set()
+    for index, mention_value in enumerate(raw_mentions):
+        mention = _required_mapping(
+            mention_value,
+            field=f"trigger message mentions[{index}]",
+        )
+        if mention.get("valid") is not True or mention.get("triggers_agent") is not True:
+            continue
+        if mention.get("participant_type") != "agent":
+            raise PlanningSchedulingError(
+                "planning_source_invalid",
+                "A triggering mention must resolve to an Agent participant",
+            )
+        participant_id = _uuid(
+            mention.get("participant_id"),
+            field=f"trigger message mentions[{index}].participant_id",
+        )
+        agent_id = _uuid(
+            mention.get("participant_ref_id"),
+            field=f"trigger message mentions[{index}].participant_ref_id",
+        )
+        if agent_id in output or participant_id in participant_ids:
+            raise PlanningSchedulingError(
+                "planning_source_invalid",
+                "Triggering Agent mentions must be unique",
+            )
+        output[agent_id] = participant_id
+        participant_ids.add(participant_id)
+    return output
+
+
+def _root_group_scope(
+    root: AgentRun,
+    run: RuntimeRunRecord,
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    if (
+        root.run_kind != "orchestration"
+        or root.system_role != _PLANNING_ROLE
+        or root.agent_id is not None
+        or root.source_type != "chat"
+        or root.source_id is None
+        or root.session_id is None
+        or root.runtime_thread_id != str(root.id)
+        or run.thread_id != root.runtime_thread_id
+        or run.session_id != str(root.session_id)
+        or run.run_kind != root.run_kind
+        or run.source_type != root.source_type
+    ):
+        raise PlanningSchedulingError(
+            "planning_identity_mismatch",
+            "Planning root identity is incomplete or differs from the checkpoint Run",
+        )
+    message_id = _uuid(root.source_id, field="Planning root source_id")
+    delivery_target = _required_mapping(
+        root.delivery_target,
+        field="Planning root delivery_target",
+    )
+    if delivery_target.get("kind") != "group":
+        raise PlanningSchedulingError(
+            "planning_identity_mismatch",
+            "Planning root delivery target must be a Group",
+        )
+    group_id = _uuid(
+        delivery_target.get("group_id"),
+        field="Planning root delivery_target.group_id",
+    )
+    delivery_session_id = _uuid(
+        delivery_target.get("session_id"),
+        field="Planning root delivery_target.session_id",
+    )
+    if delivery_session_id != root.session_id:
+        raise PlanningSchedulingError(
+            "planning_identity_mismatch",
+            "Planning root session and delivery target differ",
+        )
+    return message_id, group_id, root.session_id
+
+
+def _initial_scope(
+    checkpoint: CheckpointObservation,
+    *,
+    message_id: uuid.UUID,
+    group_id: uuid.UUID,
+    session_id: uuid.UUID,
+) -> tuple[Mapping[str, object], uuid.UUID, Sequence[object]]:
+    initial_input = checkpoint.state["snapshots"].initial_input
+    if (
+        _uuid(initial_input.get("message_id"), field="initial_input.message_id") != message_id
+        or _uuid(initial_input.get("group_id"), field="initial_input.group_id") != group_id
+        or _uuid(initial_input.get("session_id"), field="initial_input.session_id") != session_id
+    ):
+        raise PlanningSchedulingError(
+            "planning_identity_mismatch",
+            "Planning input scope differs from the Planning root",
+        )
+    sender_participant_id = _uuid(
+        initial_input.get("sender_participant_id"),
+        field="initial_input.sender_participant_id",
+    )
+    mention_targets = _required_sequence(
+        initial_input.get("mention_targets"),
+        field="initial_input.mention_targets",
+    )
+    return initial_input, sender_participant_id, mention_targets
+
+
+def _validate_source(
     *,
     root: AgentRun,
-    step_id: str,
-    error_code: str,
+    message: ChatMessage,
+    scope: _SenderScope,
+    mention_targets: Sequence[object],
+    candidate_participants: Mapping[uuid.UUID, uuid.UUID],
 ) -> None:
-    await enqueue_resume(
-        db,
+    if (
+        message.created_at is None
+        or message.participant_id != scope.participant.id
+        or message.conversation_id != str(scope.session.id)
+        or root.goal != message.content
+        or root.origin_user_id != scope.user_id
+        or root.origin_agent_id != scope.agent_id
+    ):
+        raise PlanningSchedulingError(
+            "planning_source_invalid",
+            "Planning trigger message or sender no longer matches the root input",
+        )
+    if message.mentions != list(mention_targets):
+        raise PlanningSchedulingError(
+            "planning_source_invalid",
+            "Planning mention snapshot differs from the trigger message",
+        )
+    if _authoritative_agent_mentions(message.mentions) != candidate_participants:
+        raise PlanningSchedulingError(
+            "planning_source_invalid",
+            "Planning candidates differ from the authoritative trigger mentions",
+        )
+
+
+def _validate_entry_targets(
+    *,
+    entries: Sequence[Mapping[str, object]],
+    candidate_participants: Mapping[uuid.UUID, uuid.UUID],
+    targets: Sequence[ResolvedGroupMention],
+) -> tuple[tuple[Mapping[str, object], ResolvedGroupMention], ...]:
+    if len(entries) != len(targets):
+        raise PlanningSchedulingError(
+            "planning_entry_unavailable",
+            "Planning entry resolution returned an incomplete target set",
+        )
+    validated = []
+    for entry, target in zip(entries, targets, strict=True):
+        agent_id = _uuid(entry.get("agent_id"), field="entry_steps.agent_id")
+        expected_participant_id = candidate_participants[agent_id]
+        if (
+            target.participant_id != expected_participant_id
+            or target.participant_type != "agent"
+            or target.participant_ref_id != agent_id
+            or target.valid is not True
+            or target.triggers_agent is not True
+            or target.agent is None
+            or target.agent.id != agent_id
+            or target.model is None
+            or target.agent.primary_model_id != target.model.id
+        ):
+            raise PlanningSchedulingError(
+                "planning_entry_unavailable",
+                "A Planning entry Agent is no longer an available Group target",
+            )
+        validated.append((entry, target))
+    return tuple(validated)
+
+
+def _entry_command(
+    *,
+    root: AgentRun,
+    message: ChatMessage,
+    scope: _SenderScope,
+    mention_targets: Sequence[object],
+    plan: Mapping[str, object],
+    entry: Mapping[str, object],
+    target: ResolvedGroupMention,
+) -> StartRunCommand:
+    if message.created_at is None or target.agent is None or target.model is None:
+        raise PlanningSchedulingError(
+            "planning_entry_unavailable",
+            "A Planning entry is missing its pinned execution identity",
+        )
+    instruction = entry["instruction"]
+    mode = plan["mode"]
+    plan_prompt = plan["plan_prompt"]
+    if not all(isinstance(value, str) for value in (instruction, mode, plan_prompt)):
+        raise PlanningSchedulingError(
+            "invalid_planning_checkpoint",
+            "Planning text fields must be strings",
+        )
+    source_execution_id = f"group_mention:{message.id}:entry:{target.agent.id}"
+    return StartRunCommand(
         tenant_id=root.tenant_id,
-        run_id=root.id,
-        payload=_step_failure_resume(
-            root=root,
-            step_id=step_id,
-            error_code=error_code,
-        ),
-        idempotency_key=f"resume:planning:{root.id}:step:{step_id}:{error_code}",
+        agent_id=target.agent.id,
+        session_id=scope.session.id,
+        source_type="chat",
+        source_id=str(message.id),
+        source_execution_id=source_execution_id,
+        goal=instruction,
+        run_kind="foreground",
+        model_id=target.model.id,
+        parent_run_id=root.id,
+        root_run_id=root.id,
+        scheduling_lane_key=f"group_mention:{root.tenant_id}:{target.agent.id}",
+        scheduling_position_created_at=message.created_at,
+        scheduling_position_id=message.id,
+        delivery_status="pending",
+        delivery_target={
+            "kind": "group",
+            "session_id": str(scope.session.id),
+            "group_id": str(scope.group.id),
+        },
+        idempotency_key=f"start:{source_execution_id}",
+        payload={
+            "message_id": str(message.id),
+            "group_id": str(scope.group.id),
+            "session_id": str(scope.session.id),
+            "sender_participant_id": str(scope.participant.id),
+            "mention_targets": list(mention_targets),
+            "target_participant_id": str(target.participant_id),
+            "mode": mode,
+            "plan_prompt": plan_prompt,
+            "current_responsibility": instruction,
+            "context_cutoff": {
+                "message_id": str(message.id),
+                "created_at": message.created_at.isoformat(),
+            },
+            "source_channel": scope.session.source_channel,
+        },
+        origin_user_id=root.origin_user_id,
+        origin_agent_id=root.origin_agent_id,
         actor_user_id=root.origin_user_id,
         actor_agent_id=root.origin_agent_id,
     )
 
 
-def _dependency_summaries(plan: Mapping[str, object], step: Mapping[str, object]) -> list[dict]:
-    raw_steps = plan.get("steps")
-    dependencies = step.get("depends_on_step_ids")
-    if not isinstance(raw_steps, list) or not isinstance(dependencies, list):
-        raise PlanningSchedulingError(
-            "invalid_planning_checkpoint",
-            "Planning steps or dependencies are malformed",
-        )
-    by_id = {
-        str(candidate.get("step_id")): candidate
-        for candidate in raw_steps
-        if isinstance(candidate, Mapping)
-    }
-    output = []
-    for dependency_id in dependencies:
-        dependency = by_id.get(str(dependency_id))
-        if dependency is None or dependency.get("status") != "completed":
-            raise PlanningSchedulingError(
-                "planning_dependency_not_ready",
-                "Scheduler selected a step whose dependency is not complete",
-            )
-        output.append(
-            {
-                "planning_step_id": str(dependency_id),
-                "child_run_id": dependency.get("child_run_id"),
-                "result_summary": dependency.get("result_summary"),
-            }
-        )
-    return output
-
-
 class PlanningCheckpointScheduler:
-    """Create every ready child Run from a committed Planning checkpoint."""
+    """Create only Planning v2 entry Runs after a stable completed checkpoint."""
 
     def __init__(
         self,
@@ -133,36 +375,19 @@ class PlanningCheckpointScheduler:
         run: RuntimeRunRecord,
         checkpoint: CheckpointObservation,
     ) -> None:
-        if run.registry.system_role != _PLANNING_ROLE:
+        if run.system_role != _PLANNING_ROLE:
             return
-        status = checkpoint.state["lifecycle"]["status"]
-        if status == "completed":
-            async with self._session_factory() as db:
-                async with db.begin():
-                    result = await db.execute(
-                        select(AgentRun)
-                        .where(
-                            AgentRun.tenant_id == run.tenant_id,
-                            AgentRun.id == run.run_id,
-                        )
-                        .with_for_update()
-                    )
-                    root = result.scalar_one_or_none()
-                    if root is None:
-                        raise PlanningSchedulingError(
-                            "run_not_found",
-                            "Completed Planning Run no longer exists",
-                        )
-                    root.delivery_status = "not_required"
-                    await db.flush()
-            return
-        if status != "waiting_agent":
+        if checkpoint.state["lifecycle"]["status"] != "completed":
             return
 
         plan = checkpoint_plan(checkpoint.state)
-        ready = ready_plan_steps(plan)
-        if not ready:
-            return
+        raw_entries = plan["entry_steps"]
+        if not isinstance(raw_entries, Sequence):
+            raise PlanningSchedulingError(
+                "invalid_planning_checkpoint",
+                "Planning entry_steps must be an array",
+            )
+        entries = tuple(_required_mapping(entry, field="entry_steps") for entry in raw_entries)
 
         async with self._session_factory() as db:
             async with db.begin():
@@ -175,261 +400,84 @@ class PlanningCheckpointScheduler:
                     .with_for_update()
                 )
                 root = root_result.scalar_one_or_none()
-                if (
-                    root is None
-                    or root.run_kind != "orchestration"
-                    or root.system_role != _PLANNING_ROLE
-                    or root.agent_id is not None
-                    or root.source_id is None
-                    or root.session_id is None
-                ):
+                if root is None:
                     raise PlanningSchedulingError(
-                        "planning_identity_mismatch",
-                        "Planning root registry is incomplete",
+                        "run_not_found",
+                        "Completed Planning Run no longer exists",
                     )
-                try:
-                    message_id = uuid.UUID(root.source_id)
-                except ValueError as exc:
-                    raise PlanningSchedulingError(
-                        "planning_source_invalid",
-                        "Planning root source_id must be the trigger message UUID",
-                    ) from exc
+                message_id, group_id, session_id = _root_group_scope(root, run)
+                initial_input, sender_participant_id, mention_targets = _initial_scope(
+                    checkpoint,
+                    message_id=message_id,
+                    group_id=group_id,
+                    session_id=session_id,
+                )
+                candidate_participants = _candidate_participants(initial_input)
+
                 message_result = await db.execute(
                     select(ChatMessage).where(
                         ChatMessage.id == message_id,
-                        ChatMessage.conversation_id == str(root.session_id),
+                        ChatMessage.conversation_id == str(session_id),
                     )
                 )
                 message = message_result.scalar_one_or_none()
-                if message is None or message.created_at is None:
+                if message is None:
                     raise PlanningSchedulingError(
                         "planning_source_missing",
                         "Planning trigger message is unavailable",
                     )
-                session_result = await db.execute(
-                    select(ChatSession).where(
-                        ChatSession.id == root.session_id,
-                        ChatSession.tenant_id == root.tenant_id,
-                        ChatSession.session_type == "group",
-                        ChatSession.deleted_at.is_(None),
+                try:
+                    scope = await _load_sender_scope(
+                        db,
+                        tenant_id=root.tenant_id,
+                        group_id=group_id,
+                        session_id=session_id,
+                        sender_participant_id=sender_participant_id,
                     )
+                except GroupMessageServiceError as exc:
+                    raise PlanningSchedulingError(exc.code, str(exc)) from exc
+                _validate_source(
+                    root=root,
+                    message=message,
+                    scope=scope,
+                    mention_targets=mention_targets,
+                    candidate_participants=candidate_participants,
                 )
-                session = session_result.scalar_one_or_none()
-                if session is None or session.group_id is None:
-                    raise PlanningSchedulingError(
-                        "planning_session_unavailable",
-                        "Planning group session is unavailable",
-                    )
-                group_result = await db.execute(
-                    select(Group).where(
-                        Group.id == session.group_id,
-                        Group.tenant_id == root.tenant_id,
-                        Group.deleted_at.is_(None),
-                    )
+
+                entry_participant_ids = tuple(
+                    candidate_participants[_uuid(entry.get("agent_id"), field="entry_steps.agent_id")]
+                    for entry in entries
                 )
-                if group_result.scalar_one_or_none() is None:
-                    raise PlanningSchedulingError(
-                        "planning_group_unavailable",
-                        "Planning group is unavailable",
+                try:
+                    targets = await _resolve_mentions(
+                        db,
+                        tenant_id=root.tenant_id,
+                        group_id=group_id,
+                        participant_ids=entry_participant_ids,
                     )
+                except GroupMessageServiceError as exc:
+                    raise PlanningSchedulingError(exc.code, str(exc)) from exc
+                validated_entries = _validate_entry_targets(
+                    entries=entries,
+                    candidate_participants=candidate_participants,
+                    targets=targets,
+                )
 
-                adapter = TransactionalAgentRuntimeAdapter(db, settings=self._settings)
-                initial_input = checkpoint.state["snapshots"].initial_input
-                mention_targets = initial_input.get("mention_targets", [])
-                sender_participant_id = initial_input.get("sender_participant_id")
-                for step in ready:
-                    step_id = str(step["step_id"])
-                    agent_id = uuid.UUID(str(step["agent_id"]))
-                    source_execution_id = f"group_mention:{message.id}:step:{step_id}"
-                    existing_result = await db.execute(
-                        select(AgentRun.id).where(
-                            AgentRun.source_type == "chat",
-                            AgentRun.source_execution_id == source_execution_id,
-                        )
-                    )
-                    if existing_result.scalar_one_or_none() is not None:
-                        continue
-
-                    agent_result = await db.execute(
-                        select(Agent).where(
-                            Agent.id == agent_id,
-                            Agent.tenant_id == root.tenant_id,
-                            Agent.status.in_(_ACTIVE_AGENT_STATUSES),
-                            Agent.is_expired.is_(False),
-                            Agent.access_mode != "private",
-                        )
-                    )
-                    agent = agent_result.scalar_one_or_none()
-                    if agent is None or agent.primary_model_id is None:
-                        await _enqueue_step_failure(
-                            db,
-                            root=root,
-                            step_id=step_id,
-                            error_code="agent_unavailable",
-                        )
-                        continue
-                    participant_result = await db.execute(
-                        select(Participant).where(
-                            Participant.type == "agent",
-                            Participant.ref_id == agent.id,
-                        )
-                    )
-                    participant = participant_result.scalar_one_or_none()
-                    if participant is None:
-                        await _enqueue_step_failure(
-                            db,
-                            root=root,
-                            step_id=step_id,
-                            error_code="agent_not_group_member",
-                        )
-                        continue
-                    membership_result = await db.execute(
-                        select(GroupMember).where(
-                            GroupMember.group_id == session.group_id,
-                            GroupMember.participant_id == participant.id,
-                            GroupMember.removed_at.is_(None),
-                        )
-                    )
-                    if membership_result.scalar_one_or_none() is None:
-                        await _enqueue_step_failure(
-                            db,
-                            root=root,
-                            step_id=step_id,
-                            error_code="agent_not_group_member",
-                        )
-                        continue
-                    model_result = await db.execute(
-                        select(LLMModel).where(
-                            LLMModel.id == agent.primary_model_id,
-                            LLMModel.enabled.is_(True),
-                        )
-                    )
-                    model = model_result.scalar_one_or_none()
-                    if model is None or model.tenant_id not in {None, root.tenant_id}:
-                        await _enqueue_step_failure(
-                            db,
-                            root=root,
-                            step_id=step_id,
-                            error_code="agent_model_unavailable",
-                        )
-                        continue
-
+                adapter = RuntimeCommandIntake(db, settings=self._settings)
+                for entry, target in validated_entries:
                     await adapter.start_run(
-                        StartRunCommand(
-                            tenant_id=root.tenant_id,
-                            agent_id=agent.id,
-                            session_id=session.id,
-                            source_type="chat",
-                            source_id=str(message.id),
-                            source_execution_id=source_execution_id,
-                            goal=str(step["instruction"]),
-                            run_kind="foreground",
-                            model_id=model.id,
-                            parent_run_id=root.id,
-                            root_run_id=root.id,
-                            scheduling_lane_key=f"group_mention:{root.tenant_id}:{agent.id}",
-                            scheduling_position_created_at=message.created_at,
-                            scheduling_position_id=message.id,
-                            delivery_status="pending",
-                            delivery_target={
-                                "kind": "group",
-                                "session_id": str(session.id),
-                                "group_id": str(session.group_id),
-                            },
-                            idempotency_key=f"start:{source_execution_id}",
-                            payload={
-                                "message_id": str(message.id),
-                                "group_id": str(session.group_id),
-                                "session_id": str(session.id),
-                                "sender_participant_id": sender_participant_id,
-                                "mention_targets": mention_targets,
-                                "target_participant_id": str(participant.id),
-                                "planning_root_run_id": str(root.id),
-                                "planning_step_id": step_id,
-                                "planning_instruction": str(step["instruction"]),
-                                "related_run_summaries": _dependency_summaries(plan, step),
-                                "source_channel": session.source_channel,
-                            },
-                            origin_user_id=root.origin_user_id,
-                            origin_agent_id=root.origin_agent_id,
-                            actor_user_id=root.origin_user_id,
-                            actor_agent_id=root.origin_agent_id,
+                        _entry_command(
+                            root=root,
+                            message=message,
+                            scope=scope,
+                            mention_targets=mention_targets,
+                            plan=plan,
+                            entry=entry,
+                            target=target,
                         )
                     )
+                root.delivery_status = "not_required"
+                await db.flush()
 
 
-class PlanningChildCompletionHandler:
-    """Resume one Planning root from a child terminal checkpoint exactly once."""
-
-    def __init__(self, *, session_factory: RuntimeSessionFactory) -> None:
-        self._session_factory = session_factory
-
-    async def handle(
-        self,
-        *,
-        run: RuntimeRunRecord,
-        checkpoint: CheckpointObservation,
-    ) -> None:
-        status = checkpoint.state["lifecycle"]["status"]
-        if status not in {"completed", "failed", "cancelled"}:
-            return
-        if run.registry.parent_run_id is None or run.registry.system_role is not None:
-            return
-
-        async with self._session_factory() as db:
-            async with db.begin():
-                child_result = await db.execute(
-                    select(AgentRun).where(
-                        AgentRun.tenant_id == run.tenant_id,
-                        AgentRun.id == run.run_id,
-                    )
-                )
-                child = child_result.scalar_one_or_none()
-                if (
-                    child is None
-                    or child.parent_run_id is None
-                    or child.source_execution_id is None
-                ):
-                    return
-                match = _STEP_SOURCE.fullmatch(child.source_execution_id)
-                if match is None:
-                    return
-                root_result = await db.execute(
-                    select(AgentRun).where(
-                        AgentRun.tenant_id == child.tenant_id,
-                        AgentRun.id == child.parent_run_id,
-                        AgentRun.run_kind == "orchestration",
-                        AgentRun.system_role == _PLANNING_ROLE,
-                    )
-                )
-                root = root_result.scalar_one_or_none()
-                if root is None:
-                    return
-                lifecycle = checkpoint.state["lifecycle"]
-                await enqueue_resume(
-                    db,
-                    tenant_id=root.tenant_id,
-                    run_id=root.id,
-                    payload={
-                        "resume_type": "agent_result",
-                        "correlation_id": f"planning:{root.id}",
-                        "payload": {
-                            "step_id": match.group("step_id"),
-                            "status": status,
-                            "child_run_id": str(child.id),
-                            "result_summary": lifecycle.get("result_summary"),
-                            "error": lifecycle.get("error"),
-                        },
-                    },
-                    idempotency_key=(
-                        f"resume:planning:{root.id}:child:{child.id}:terminal:{status}"
-                    ),
-                    actor_agent_id=child.agent_id,
-                )
-
-
-__all__ = [
-    "PlanningCheckpointScheduler",
-    "PlanningChildCompletionHandler",
-    "PlanningSchedulingError",
-]
+__all__ = ["PlanningCheckpointScheduler", "PlanningSchedulingError"]

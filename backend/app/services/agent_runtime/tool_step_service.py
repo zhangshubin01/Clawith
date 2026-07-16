@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import hashlib
 import json
 from typing import Protocol, cast
 import uuid
 
 from sqlalchemy import func, select
 
+from app.config import get_settings
 from app.models.agent import Agent
 from app.models.agent_tool_execution import AgentToolExecution
 from app.services.agent_runtime.a2a_runtime import (
@@ -20,8 +22,11 @@ from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.group_runtime_tools import (
     GROUP_READ_TOOL_NAMES,
     GROUP_TOOL_NAMES,
+    GROUP_WORKSPACE_MUTATION_TOOL_NAMES,
     GROUP_WRITE_TOOL_NAMES,
+    GroupRuntimeToolError,
     GroupRuntimeToolService,
+    GroupWorkspaceReconciliationPending,
     with_group_runtime_tools,
 )
 from app.services.agent_runtime.node_executor import (
@@ -32,49 +37,32 @@ from app.services.agent_runtime.state import (
     JsonObject,
     RuntimeContext,
     RuntimeGraphState,
+    runtime_messages_as_json,
 )
 from app.services.agent_runtime.tool_execution import (
     ToolExecutionError,
     ToolExecutionOutcome,
     ToolExecutionReservation,
+    execution_outcome,
     mark_tool_execution_failed,
     mark_tool_execution_succeeded,
     mark_tool_execution_unknown,
+    normalize_tool_outcome,
     reserve_tool_execution,
+    sanitize_tool_arguments,
+    takeover_tool_execution_for_reconciliation,
 )
-from app.services.agent_tools import execute_tool, get_agent_tools_for_llm
-
-
-_READ_TOOL_NAMES = frozenset(
-    {
-        "list_files",
-        "read_file",
-        "list_focus_items",
-        "search_files",
-        "find_files",
-        "list_triggers",
-        "jina_search",
-        "jina_read",
-        "read_webpage",
-        "read_document",
-        "discover_resources",
-        "bitable_list_tables",
-        "bitable_list_fields",
-        "bitable_query_records",
-        "feishu_doc_search",
-        "feishu_wiki_list",
-        "feishu_doc_read",
-        "feishu_calendar_list",
-        "feishu_user_search",
-        "feishu_approval_query",
-        "feishu_approval_get",
-        "read_emails",
-        "list_published_pages",
-        "search_clawhub",
-        "agentbay_browser_screenshot",
-        "agentbay_code_read_file",
-    }
-) | GROUP_READ_TOOL_NAMES
+from app.services.agent_runtime.tool_result_store import ToolResultStore
+from app.services.agent_tools import (
+    agentbay_run_scope_id,
+    execute_builtin_tool_outcome,
+    get_runtime_agent_tools_for_llm,
+)
+from app.services.builtin_tool_definitions import (
+    builtin_cross_space_action,
+    builtin_policy,
+    builtin_sensitive_paths,
+)
 _CONTROL_TOOL_NAMES = frozenset({"finish", "wait"})
 _HEARTBEAT_PRIVATE_PLAZA_TOOLS = frozenset(
     {"plaza_get_new_posts", "plaza_create_post", "plaza_add_comment"}
@@ -94,7 +82,7 @@ class ToolExecutor(Protocol):
         user_id: uuid.UUID,
         session_id: str = "",
         on_output: object | None = None,
-    ) -> str: ...
+    ) -> ToolExecutionOutcome | str: ...
 
 
 ToolProvider = Callable[[uuid.UUID], Awaitable[list[dict]]]
@@ -107,11 +95,12 @@ class ToolPolicy:
 
 
 def _policy(tool_name: str) -> ToolPolicy:
-    if tool_name in _READ_TOOL_NAMES:
+    if tool_name in GROUP_READ_TOOL_NAMES:
         return ToolPolicy("read", "safe")
     if tool_name in GROUP_WRITE_TOOL_NAMES:
         return ToolPolicy("write", "conditional")
-    return ToolPolicy("external_write", "never")
+    policy = builtin_policy(tool_name)
+    return ToolPolicy(policy["effect"], policy["retry_policy"])
 
 
 def _tool_name(tool: Mapping[str, object]) -> str | None:
@@ -179,7 +168,7 @@ def _assistant_message_id(
             "pending tool calls require unique non-empty IDs",
         )
     matches = []
-    for message in reversed(state["lifecycle"].get("run_messages", [])):
+    for message in reversed(runtime_messages_as_json(state)):
         raw_calls = message.get("tool_calls")
         if not isinstance(raw_calls, list):
             continue
@@ -207,6 +196,13 @@ def _result_message_id(run_id: uuid.UUID, call_id: str) -> str:
     return str(uuid.uuid5(run_id, f"tool-result:{call_id}"))
 
 
+def _tool_execution_lease_owner(command_id: str, call_id: str) -> str:
+    """Give every executor/recovery invocation a distinct durable fence token."""
+    invocation_id = str(uuid.uuid4())
+    prefix = f"runtime:{command_id}:{call_id}"
+    return f"{prefix[: 127 - len(invocation_id)]}:{invocation_id}"
+
+
 def _result_message(
     *,
     run_id: uuid.UUID,
@@ -219,7 +215,7 @@ def _result_message(
         if outcome.status == "succeeded"
         else "Tool execution failed without a reusable result."
     )
-    return {
+    message: JsonObject = {
         "id": _result_message_id(run_id, call_id),
         "role": "tool",
         "tool_call_id": call_id,
@@ -228,6 +224,15 @@ def _result_message(
         "execution_status": outcome.status,
         "result_ref": outcome.result_ref,
     }
+    if outcome.error_code is not None:
+        message["error_code"] = outcome.error_code
+    if outcome.retryable:
+        message["retryable"] = True
+    if outcome.artifact_refs:
+        message["artifact_refs"] = list(outcome.artifact_refs)
+    if outcome.evidence_refs:
+        message["evidence_refs"] = list(outcome.evidence_refs)
+    return message
 
 
 def _waiting_request(
@@ -246,16 +251,24 @@ def _waiting_request(
 
 
 def _heartbeat_tool_limit(
-    state: RuntimeGraphState,
+    context: RuntimeContext,
     agent: Agent,
     tool_name: str,
 ) -> int | None:
-    if state["registry"].source_type != "heartbeat":
+    if context.source_type != "heartbeat":
         return None
     is_private = (getattr(agent, "access_mode", None) or "company") != "company"
     if is_private and tool_name in _HEARTBEAT_PRIVATE_PLAZA_TOOLS:
         return 0
     return _HEARTBEAT_PLAZA_LIMITS.get(tool_name)
+
+
+def _is_group_agent_run(state: RuntimeGraphState) -> bool:
+    """Recognize the Group scope already validated into the input snapshot."""
+    return isinstance(
+        state["snapshots"].initial_input.get("group_context"),
+        Mapping,
+    )
 
 
 def _heartbeat_blocked_summary(
@@ -280,10 +293,11 @@ class RuntimeToolStepService:
         *,
         session_factory: RuntimeSessionFactory,
         cancel_source: RuntimeCancelSource,
-        tool_provider: ToolProvider = get_agent_tools_for_llm,
-        tool_executor: ToolExecutor = execute_tool,
+        tool_provider: ToolProvider = get_runtime_agent_tools_for_llm,
+        tool_executor: ToolExecutor = execute_builtin_tool_outcome,
         group_tool_service: GroupRuntimeToolService | None = None,
         a2a_service: RuntimeA2AService | None = None,
+        tool_result_store: ToolResultStore | None = None,
         lease_ttl_seconds: int = 300,
     ) -> None:
         if lease_ttl_seconds <= 0:
@@ -296,19 +310,25 @@ class RuntimeToolStepService:
             session_factory=session_factory
         )
         self._a2a_service = a2a_service
+        self._tool_result_store = tool_result_store or ToolResultStore(
+            session_factory=session_factory
+        )
         self._lease_ttl_seconds = lease_ttl_seconds
+        self._inline_result_max_bytes = (
+            get_settings().AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES
+        )
 
     async def _agent(
         self,
-        state: RuntimeGraphState,
+        context: RuntimeContext,
     ) -> Agent:
         try:
-            tenant_id = uuid.UUID(state["registry"].tenant_id)
-            agent_id = uuid.UUID(state["registry"].agent_id or "")
+            tenant_id = uuid.UUID(context.tenant_id)
+            agent_id = uuid.UUID(context.agent_id or "")
         except ValueError as exc:
             raise ToolExecutionError(
                 "invalid_runtime_identity",
-                "Runtime tool state contains an invalid UUID",
+                "Runtime Context contains an invalid UUID",
             ) from exc
         async with self._session_factory() as db:
             result = await db.execute(
@@ -347,7 +367,10 @@ class RuntimeToolStepService:
                     tool_name=tool_name,
                     assistant_message_id=assistant_message_id,
                     arguments=arguments,
-                    sanitized_arguments=arguments,
+                    sanitized_arguments=sanitize_tool_arguments(
+                        arguments,
+                        sensitive_paths=builtin_sensitive_paths(tool_name),
+                    ),
                     request_ref=None,
                     side_effect_classification=cast(str, policy.side_effect_classification),  # type: ignore[arg-type]
                     retry_policy=cast(str, policy.retry_policy),  # type: ignore[arg-type]
@@ -355,29 +378,171 @@ class RuntimeToolStepService:
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
 
-    async def _mark_succeeded(
+    async def _settle_outcome(
         self,
         *,
         tenant_id: uuid.UUID,
         reservation: ToolExecutionReservation,
         lease_owner: str,
-        result: str,
+        policy: ToolPolicy,
+        outcome: ToolExecutionOutcome,
     ) -> ToolExecutionOutcome:
+        normalized, archive_body = normalize_tool_outcome(
+            outcome,
+            effect=cast(str, policy.side_effect_classification),  # type: ignore[arg-type]
+            retry_policy=cast(str, policy.retry_policy),  # type: ignore[arg-type]
+            inline_max_bytes=self._inline_result_max_bytes,
+        )
+        if normalized.private_binary is not None:
+            try:
+                receipt = await self._tool_result_store.write_binary(
+                    reservation.execution,
+                    normalized.private_binary,
+                    mime_type=str(
+                        normalized.metadata.get("mime_type") or "image/png"
+                    ),
+                )
+                receipt_ref = getattr(receipt, "ref", None)
+                if not isinstance(receipt_ref, str) or not receipt_ref:
+                    receipt_ref = str(receipt)
+                content_hash = getattr(receipt, "content_hash", None)
+                mime_type = getattr(receipt, "mime_type", None)
+                size = getattr(receipt, "size", None)
+                if not isinstance(content_hash, str):
+                    content_hash = hashlib.sha256(
+                        normalized.private_binary
+                    ).hexdigest()
+                if not isinstance(mime_type, str):
+                    mime_type = str(
+                        normalized.metadata.get("mime_type") or "image/png"
+                    )
+                if not isinstance(size, int):
+                    size = len(normalized.private_binary)
+            except Exception as exc:
+                normalized = ToolExecutionOutcome(
+                    status="failed",
+                    result_summary=(
+                        "Tool screenshot could not be archived privately; "
+                        "retry with a new read tool call."
+                    ),
+                    result_ref=None,
+                    error_code="tool_binary_archive_failed",
+                    retryable=True,
+                    metadata={
+                        **normalized.metadata,
+                        "archive_status": "failed",
+                        "archive_error_code": type(exc).__name__,
+                    },
+                )
+                archive_body = None
+            else:
+                normalized = replace(
+                    normalized,
+                    evidence_refs=tuple(
+                        dict.fromkeys(
+                            (*normalized.evidence_refs, receipt_ref)
+                        )
+                    ),
+                    metadata={
+                        **normalized.metadata,
+                        "content_hash": content_hash,
+                        "mime_type": mime_type,
+                        "size": size,
+                        "archive_status": "stored",
+                    },
+                    private_binary=None,
+                )
+        if archive_body is not None and normalized.status == "succeeded":
+            try:
+                result_ref = await self._tool_result_store.write(
+                    reservation.execution,
+                    normalized,
+                    archive_body,
+                )
+            except Exception as exc:
+                archive_metadata = {
+                    **normalized.metadata,
+                    "archive_status": "failed",
+                    "archive_error_code": type(exc).__name__,
+                }
+                if policy.side_effect_classification == "read":
+                    normalized = ToolExecutionOutcome(
+                        status="failed",
+                        result_summary=(
+                            "Tool result could not be archived; retry with a new "
+                            "read tool call."
+                        ),
+                        result_ref=None,
+                        error_code="tool_result_archive_failed",
+                        retryable=True,
+                        metadata=archive_metadata,
+                    )
+                else:
+                    normalized = replace(
+                        normalized,
+                        result_ref=None,
+                        metadata=archive_metadata,
+                    )
+            else:
+                normalized = replace(
+                    normalized,
+                    result_ref=result_ref,
+                    metadata={
+                        **normalized.metadata,
+                        "archive_status": "stored",
+                    },
+                )
+        elif archive_body is not None:
+            normalized = replace(
+                normalized,
+                metadata={
+                    **normalized.metadata,
+                    "archive_status": "not_stored_for_non_success",
+                },
+            )
+
         async with self._session_factory() as db:
             async with db.begin():
-                execution = await mark_tool_execution_succeeded(
+                settle = {
+                    "succeeded": mark_tool_execution_succeeded,
+                    "failed": mark_tool_execution_failed,
+                    "unknown": mark_tool_execution_unknown,
+                }[normalized.status]
+                execution = await settle(
                     db,
                     tenant_id=tenant_id,
                     execution_id=reservation.execution.id,
                     lease_owner=lease_owner,
-                    result_summary=result,
-                    result_ref=None,
+                    result_summary=normalized.result_summary,
+                    result_ref=normalized.result_ref,
+                    error_code=normalized.error_code,
+                    retryable=normalized.retryable,
+                    artifact_refs=normalized.artifact_refs,
+                    evidence_refs=normalized.evidence_refs,
+                    metadata=normalized.metadata,
                 )
-        return ToolExecutionOutcome(
-            status="succeeded",
+        return replace(
+            normalized,
             result_summary=execution.result_summary,
             result_ref=execution.result_ref,
         )
+
+    async def _takeover_for_reconciliation(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        reservation: ToolExecutionReservation,
+        lease_owner: str,
+    ):
+        async with self._session_factory() as db:
+            async with db.begin():
+                return await takeover_tool_execution_for_reconciliation(
+                    db,
+                    tenant_id=tenant_id,
+                    execution_id=reservation.execution.id,
+                    lease_owner=lease_owner,
+                    lease_ttl_seconds=self._lease_ttl_seconds,
+                )
 
     async def _mark_exception(
         self,
@@ -388,29 +553,73 @@ class RuntimeToolStepService:
         policy: ToolPolicy,
         exc: Exception,
     ) -> ToolExecutionOutcome:
-        summary = f"{type(exc).__name__}: tool execution failed"
-        async with self._session_factory() as db:
-            async with db.begin():
-                if policy.side_effect_classification == "read":
-                    execution = await mark_tool_execution_failed(
-                        db,
-                        tenant_id=tenant_id,
-                        execution_id=reservation.execution.id,
-                        lease_owner=lease_owner,
-                        result_summary=summary,
-                    )
-                else:
-                    execution = await mark_tool_execution_unknown(
-                        db,
-                        tenant_id=tenant_id,
-                        execution_id=reservation.execution.id,
-                        lease_owner=lease_owner,
-                        result_summary=summary,
-                    )
-        return ToolExecutionOutcome(
-            status=cast(str, execution.status),  # type: ignore[arg-type]
-            result_summary=execution.result_summary,
-            result_ref=execution.result_ref,
+        known_failure = (
+            policy.side_effect_classification == "read"
+            or isinstance(exc, (GroupRuntimeToolError, ToolExecutionError))
+        )
+        return await self._settle_outcome(
+            tenant_id=tenant_id,
+            reservation=reservation,
+            lease_owner=lease_owner,
+            policy=policy,
+            outcome=ToolExecutionOutcome(
+                status="failed" if known_failure else "unknown",
+                result_summary=f"{type(exc).__name__}: tool execution failed",
+                result_ref=None,
+                error_code=(
+                    exc.code
+                    if isinstance(exc, (GroupRuntimeToolError, ToolExecutionError))
+                    else "tool_execution_exception"
+                ),
+                retryable=(
+                    known_failure
+                    and policy.side_effect_classification == "read"
+                    and policy.retry_policy == "safe"
+                ),
+                metadata={"error_class": type(exc).__name__},
+            ),
+        )
+
+    def _group_unknown_failure(
+        self,
+        *,
+        run_id: uuid.UUID,
+        call_id: str,
+        tool_name: str,
+        policy: ToolPolicy,
+        outcome: ToolExecutionOutcome,
+        messages: Sequence[JsonObject],
+        pending_tool_calls: Sequence[JsonObject],
+    ) -> ToolStepResult:
+        """End an unresumable Group Run without creating a user interrupt."""
+        normalized, _ = normalize_tool_outcome(
+            outcome,
+            effect=cast(str, policy.side_effect_classification),  # type: ignore[arg-type]
+            retry_policy=cast(str, policy.retry_policy),  # type: ignore[arg-type]
+            inline_max_bytes=self._inline_result_max_bytes,
+        )
+        if normalized.status != "unknown":
+            raise ToolExecutionError(
+                "invalid_group_tool_outcome",
+                "Group unknown-outcome handling requires an unknown ledger fact",
+            )
+        error_code = normalized.error_code or "tool_outcome_unknown"
+        error_message = normalized.result_summary or (
+            "Tool outcome is unknown; confirm the external result before starting "
+            "a new Group Run."
+        )
+        return ToolStepResult(
+            messages=(
+                *messages,
+                _result_message(
+                    run_id=run_id,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    outcome=normalized,
+                ),
+            ),
+            pending_tool_calls=tuple(pending_tool_calls),
+            error={"code": error_code, "message": error_message},
         )
 
     async def _successful_tool_count(
@@ -437,21 +646,20 @@ class RuntimeToolStepService:
         tenant_id: uuid.UUID,
         reservation: ToolExecutionReservation,
         lease_owner: str,
+        policy: ToolPolicy,
         result_summary: str,
     ) -> ToolExecutionOutcome:
-        async with self._session_factory() as db:
-            async with db.begin():
-                execution = await mark_tool_execution_failed(
-                    db,
-                    tenant_id=tenant_id,
-                    execution_id=reservation.execution.id,
-                    lease_owner=lease_owner,
-                    result_summary=result_summary,
-                )
-        return ToolExecutionOutcome(
-            status="failed",
-            result_summary=execution.result_summary,
-            result_ref=execution.result_ref,
+        return await self._settle_outcome(
+            tenant_id=tenant_id,
+            reservation=reservation,
+            lease_owner=lease_owner,
+            policy=policy,
+            outcome=ToolExecutionOutcome(
+                status="failed",
+                result_summary=result_summary,
+                result_ref=None,
+                error_code="tool_policy_blocked",
+            ),
         )
 
     async def execute_pending(
@@ -461,9 +669,9 @@ class RuntimeToolStepService:
         tool_calls: tuple[JsonObject, ...],
     ) -> ToolStepResult:
         try:
-            tenant_id = uuid.UUID(state["registry"].tenant_id)
-            run_id = uuid.UUID(state["registry"].run_id)
-            agent = await self._agent(state)
+            tenant_id = uuid.UUID(context.tenant_id)
+            run_id = uuid.UUID(context.run_id)
+            agent = await self._agent(context)
             assistant_message_id = _assistant_message_id(state, tool_calls)
             allowed_names = _allowed_tool_names(
                 with_group_runtime_tools(
@@ -486,7 +694,10 @@ class RuntimeToolStepService:
                         f"tool {tool_name!r} is not enabled for this Agent",
                     )
                 policy = _policy(tool_name)
-                lease_owner = f"runtime:{context.command_id}:{call_id}"[:128]
+                lease_owner = _tool_execution_lease_owner(
+                    context.command_id,
+                    call_id,
+                )
                 reservation = await self._reserve(
                     tenant_id=tenant_id,
                     run_id=run_id,
@@ -531,6 +742,98 @@ class RuntimeToolStepService:
                             )
                         )
                         continue
+                    if (
+                        tool_name in GROUP_WORKSPACE_MUTATION_TOOL_NAMES
+                        and reservation.execution.status == "started"
+                    ):
+                        takeover = await self._takeover_for_reconciliation(
+                            tenant_id=tenant_id,
+                            reservation=reservation,
+                            lease_owner=lease_owner,
+                        )
+                        if takeover.active:
+                            raise GroupWorkspaceReconciliationPending(
+                                "Group workspace operation still has an active executor",
+                                code="group_workspace_active_lease",
+                                defer_without_attempt=True,
+                            )
+                        if takeover.terminal_outcome is not None:
+                            outcome = takeover.terminal_outcome
+                            if outcome.status == "unknown":
+                                return self._group_unknown_failure(
+                                    run_id=run_id,
+                                    call_id=call_id,
+                                    tool_name=tool_name,
+                                    policy=policy,
+                                    outcome=outcome,
+                                    messages=messages,
+                                    pending_tool_calls=tool_calls[index + 1 :],
+                                )
+                            messages.append(
+                                _result_message(
+                                    run_id=run_id,
+                                    call_id=call_id,
+                                    tool_name=tool_name,
+                                    outcome=outcome,
+                                )
+                            )
+                            continue
+                        if not takeover.acquired:
+                            raise GroupWorkspaceReconciliationPending(
+                                "Group workspace operation could not acquire a recovery fence",
+                                code="group_workspace_fence_unavailable",
+                                defer_without_attempt=True,
+                            )
+                        outcome = (
+                            await self._group_tool_service.reconcile_workspace_operation(
+                                state,
+                                context,
+                                agent,
+                                tool_name,
+                                arguments,
+                                operation_id=reservation.execution.id,
+                                lease_owner=lease_owner,
+                            )
+                        )
+                        outcome = await self._settle_outcome(
+                            tenant_id=tenant_id,
+                            reservation=reservation,
+                            lease_owner=lease_owner,
+                            policy=policy,
+                            outcome=outcome,
+                        )
+                        if outcome.status == "unknown":
+                            return self._group_unknown_failure(
+                                run_id=run_id,
+                                call_id=call_id,
+                                tool_name=tool_name,
+                                policy=policy,
+                                outcome=outcome,
+                                messages=messages,
+                                pending_tool_calls=tool_calls[index + 1 :],
+                            )
+                        messages.append(
+                            _result_message(
+                                run_id=run_id,
+                                call_id=call_id,
+                                tool_name=tool_name,
+                                outcome=outcome,
+                            )
+                        )
+                        continue
+                    if (
+                        _is_group_agent_run(state)
+                        and reservation.requires_confirmation
+                    ):
+                        return self._group_unknown_failure(
+                            run_id=run_id,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            policy=policy,
+                            outcome=execution_outcome(reservation.execution),
+                            messages=messages,
+                            pending_tool_calls=tool_calls[index + 1 :],
+                        )
                     return ToolStepResult(
                         messages=tuple(messages),
                         waiting_request=_waiting_request(
@@ -541,6 +844,42 @@ class RuntimeToolStepService:
                         ),
                         pending_tool_calls=tool_calls[index:],
                     )
+
+                canonical_cross_space_action = builtin_cross_space_action(tool_name)
+                if (
+                    _is_group_agent_run(state)
+                    and canonical_cross_space_action is not None
+                ):
+                    outcome = await self._settle_outcome(
+                        tenant_id=tenant_id,
+                        reservation=reservation,
+                        lease_owner=lease_owner,
+                        policy=policy,
+                        outcome=ToolExecutionOutcome(
+                            status="failed",
+                            result_summary=(
+                                "Group cross-space actions require an explicit "
+                                "human-approved grant; no provider action was executed."
+                            ),
+                            result_ref=None,
+                            error_code=(
+                                "group_cross_space_confirmation_required"
+                            ),
+                            retryable=False,
+                            metadata={
+                                "canonical_action": canonical_cross_space_action,
+                            },
+                        ),
+                    )
+                    messages.append(
+                        _result_message(
+                            run_id=run_id,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            outcome=outcome,
+                        )
+                    )
+                    continue
 
                 if tool_name == "send_message_to_agent" and self._a2a_service:
                     try:
@@ -568,6 +907,16 @@ class RuntimeToolStepService:
                             exc=exc,
                         )
                         if outcome.status == "unknown":
+                            if _is_group_agent_run(state):
+                                return self._group_unknown_failure(
+                                    run_id=run_id,
+                                    call_id=call_id,
+                                    tool_name=tool_name,
+                                    policy=policy,
+                                    outcome=outcome,
+                                    messages=messages,
+                                    pending_tool_calls=tool_calls[index + 1 :],
+                                )
                             return ToolStepResult(
                                 messages=tuple(messages),
                                 waiting_request=_waiting_request(
@@ -580,6 +929,19 @@ class RuntimeToolStepService:
                             )
                     else:
                         if a2a_result is not None:
+                            if (
+                                _is_group_agent_run(state)
+                                and a2a_result.outcome.status == "unknown"
+                            ):
+                                return self._group_unknown_failure(
+                                    run_id=run_id,
+                                    call_id=call_id,
+                                    tool_name=tool_name,
+                                    policy=policy,
+                                    outcome=a2a_result.outcome,
+                                    messages=messages,
+                                    pending_tool_calls=tool_calls[index + 1 :],
+                                )
                             messages.append(
                                 _result_message(
                                     run_id=run_id,
@@ -596,7 +958,7 @@ class RuntimeToolStepService:
                                 )
                             continue
 
-                heartbeat_limit = _heartbeat_tool_limit(state, agent, tool_name)
+                heartbeat_limit = _heartbeat_tool_limit(context, agent, tool_name)
                 if heartbeat_limit is not None:
                     successful_count = (
                         0
@@ -612,6 +974,7 @@ class RuntimeToolStepService:
                             tenant_id=tenant_id,
                             reservation=reservation,
                             lease_owner=lease_owner,
+                            policy=policy,
                             result_summary=_heartbeat_blocked_summary(
                                 agent,
                                 tool_name,
@@ -630,26 +993,43 @@ class RuntimeToolStepService:
 
                 try:
                     if tool_name in GROUP_TOOL_NAMES:
-                        raw_result = await self._group_tool_service.execute(
-                            state,
-                            agent,
-                            tool_name,
-                            arguments,
-                        )
+                        if tool_name in GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
+                            raw_result = await self._group_tool_service.execute(
+                                state,
+                                context,
+                                agent,
+                                tool_name,
+                                arguments,
+                                operation_id=reservation.execution.id,
+                                lease_owner=lease_owner,
+                            )
+                        else:
+                            raw_result = await self._group_tool_service.execute(
+                                state,
+                                context,
+                                agent,
+                                tool_name,
+                                arguments,
+                            )
                     else:
-                        raw_result = await self._tool_executor(
-                            tool_name,
-                            arguments,
-                            agent.id,
-                            context.actor_user_id and uuid.UUID(context.actor_user_id) or agent.creator_id,
-                            state["registry"].session_id or "",
-                        )
-                    outcome = await self._mark_succeeded(
-                        tenant_id=tenant_id,
-                        reservation=reservation,
-                        lease_owner=lease_owner,
-                        result=str(raw_result),
-                    )
+                        agentbay_run_token = None
+                        if tool_name.startswith("agentbay_"):
+                            agentbay_run_token = agentbay_run_scope_id.set(
+                                context.run_id
+                            )
+                        try:
+                            raw_result = await self._tool_executor(
+                                tool_name,
+                                arguments,
+                                agent.id,
+                                context.actor_user_id and uuid.UUID(context.actor_user_id) or agent.creator_id,
+                                context.session_id or "",
+                            )
+                        finally:
+                            if agentbay_run_token is not None:
+                                agentbay_run_scope_id.reset(agentbay_run_token)
+                except GroupWorkspaceReconciliationPending:
+                    raise
                 except Exception as exc:
                     outcome = await self._mark_exception(
                         tenant_id=tenant_id,
@@ -659,6 +1039,16 @@ class RuntimeToolStepService:
                         exc=exc,
                     )
                     if outcome.status == "unknown":
+                        if _is_group_agent_run(state):
+                            return self._group_unknown_failure(
+                                run_id=run_id,
+                                call_id=call_id,
+                                tool_name=tool_name,
+                                policy=policy,
+                                outcome=outcome,
+                                messages=messages,
+                                pending_tool_calls=tool_calls[index + 1 :],
+                            )
                         return ToolStepResult(
                             messages=tuple(messages),
                             waiting_request=_waiting_request(
@@ -669,6 +1059,64 @@ class RuntimeToolStepService:
                             ),
                             pending_tool_calls=tool_calls[index:],
                         )
+                else:
+                    if isinstance(raw_result, ToolExecutionOutcome):
+                        proposed_outcome = raw_result
+                    else:
+                        proposed_outcome = ToolExecutionOutcome(
+                            status=(
+                                "failed"
+                                if policy.side_effect_classification == "read"
+                                else "unknown"
+                            ),
+                            result_summary=(
+                                "Tool handler returned an untyped result; its "
+                                "business outcome was not accepted."
+                            ),
+                            result_ref=None,
+                            error_code="untyped_tool_outcome",
+                            retryable=False,
+                            metadata={"error_class": type(raw_result).__name__},
+                        )
+                    # Settlement stays outside the handler-exception block. If
+                    # private archive succeeds and DB settlement fails, the
+                    # receipt remains started for reconciliation; it must not
+                    # be rewritten as a fresh handler failure.
+                    try:
+                        outcome = await self._settle_outcome(
+                            tenant_id=tenant_id,
+                            reservation=reservation,
+                            lease_owner=lease_owner,
+                            policy=policy,
+                            outcome=proposed_outcome,
+                        )
+                    except Exception as exc:
+                        if tool_name in GROUP_WORKSPACE_MUTATION_TOOL_NAMES:
+                            raise GroupWorkspaceReconciliationPending(
+                                "Group workspace ledger settlement requires reconciliation"
+                            ) from exc
+                        raise
+                if outcome.status == "unknown":
+                    if _is_group_agent_run(state):
+                        return self._group_unknown_failure(
+                            run_id=run_id,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            policy=policy,
+                            outcome=outcome,
+                            messages=messages,
+                            pending_tool_calls=tool_calls[index + 1 :],
+                        )
+                    return ToolStepResult(
+                        messages=tuple(messages),
+                        waiting_request=_waiting_request(
+                            run_id=run_id,
+                            call_id=call_id,
+                            requires_confirmation=True,
+                            error_code=outcome.error_code or "tool_outcome_unknown",
+                        ),
+                        pending_tool_calls=tool_calls[index:],
+                    )
                 messages.append(
                     _result_message(
                         run_id=run_id,
@@ -678,6 +1126,8 @@ class RuntimeToolStepService:
                     )
                 )
             return ToolStepResult(messages=tuple(messages))
+        except GroupWorkspaceReconciliationPending:
+            raise
         except ToolExecutionError as exc:
             return ToolStepResult(
                 error={"code": exc.code, "message": str(exc)},

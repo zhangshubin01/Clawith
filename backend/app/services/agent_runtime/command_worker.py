@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
 import asyncio
 import logging
 from typing import Literal, Protocol, cast
@@ -16,24 +18,38 @@ from app.config import Settings, get_settings
 from app.models.agent_run import AgentRun
 from app.models.agent_run_command import AgentRunCommand
 from app.services.agent_runtime.persistence import (
+    begin_command_attempt,
     claim_next_command,
     mark_command_applied,
+    mark_command_product_synced,
     mark_command_rejected,
+    reject_unstarted_run_for_cancel,
     release_command_claim,
     renew_command_claim,
 )
+from app.services.agent_runtime.node_executor import RuntimeInvocationCancelled
 from app.services.agent_runtime.state import (
     JsonObject,
-    RunRegistrySnapshot,
     RuntimeGraphState,
 )
 from app.services.agent_runtime.thread_lock import ThreadLockNotAcquired, run_with_thread_lock
+from app.services.agent_runtime.tool_execution import (
+    ToolExecutionReconciliationPending,
+)
 
 
 logger = logging.getLogger(__name__)
 
 RuntimeCommandType = Literal["start", "resume", "cancel"]
 CommandWorkStatus = Literal["idle", "applied", "reconciled", "rejected", "retry"]
+CheckpointDisposition = Literal[
+    "not_started",
+    "runnable",
+    "execution_error_recoverable",
+    "waiting",
+    "terminal",
+    "inconsistent",
+]
 _COMMAND_TYPES = frozenset({"start", "resume", "cancel"})
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _LIFECYCLE_STATUSES = frozenset(
@@ -64,7 +80,21 @@ class RuntimeRunRecord:
     run_id: uuid.UUID
     thread_id: str
     runtime_type: str
-    registry: RunRegistrySnapshot
+    goal: str
+    run_kind: str
+    source_type: str
+    model_id: str
+    graph_name: str
+    graph_version: str
+    agent_id: str | None = None
+    session_id: str | None = None
+    system_role: str | None = None
+    parent_run_id: str | None = None
+    root_run_id: str | None = None
+    model_turn_limit: int | None = None
+    source_id: str | None = None
+    scheduling_position_created_at: datetime | None = None
+    scheduling_position_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,18 +108,68 @@ class RuntimeCommandRecord:
     payload: JsonObject
     actor_user_id: uuid.UUID | None
     actor_agent_id: uuid.UUID | None
+    attempt_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class CheckpointObservation:
-    """Latest checkpoint state observed through the installed Checkpointer API."""
+    """Complete state needed to classify one committed ``StateSnapshot``."""
 
     checkpoint_id: str
     state: RuntimeGraphState
+    next_nodes: tuple[str, ...] = ()
+    tasks: tuple[object, ...] = ()
+    interrupts: tuple[object, ...] = ()
+    metadata: Mapping[str, object] = field(default_factory=dict)
+    created_at: datetime | None = None
+
+
+def classify_checkpoint(
+    observation: CheckpointObservation | None,
+) -> CheckpointDisposition:
+    """Classify execution only when values/next/tasks/interrupts agree."""
+    if observation is None:
+        return "not_started"
+    try:
+        status = observation.state["lifecycle"]["status"]
+    except (KeyError, TypeError):
+        return "inconsistent"
+
+    task_names = tuple(
+        str(name)
+        for task in observation.tasks
+        if (name := getattr(task, "name", None)) is not None
+    )
+    if task_names and task_names != observation.next_nodes:
+        return "inconsistent"
+
+    if status in _TERMINAL_STATUSES:
+        if observation.next_nodes or observation.tasks or observation.interrupts:
+            return "inconsistent"
+        return "terminal"
+
+    if status in {"waiting_user", "waiting_external", "waiting_agent"}:
+        if not observation.next_nodes or not observation.tasks or not observation.interrupts:
+            return "inconsistent"
+        return "waiting"
+
+    if observation.interrupts or not observation.next_nodes or not observation.tasks:
+        return "inconsistent"
+    if any(getattr(task, "error", None) is not None for task in observation.tasks):
+        return "execution_error_recoverable"
+    return "runnable"
 
 
 class RuntimeCheckpointReader(Protocol):
-    """Read the latest committed checkpoint for a validated Run thread."""
+    """Read exact Run/Command checkpoints without trusting Thread latest."""
+
+    async def read_for_command(
+        self,
+        *,
+        connection: AsyncConnection,
+        run: RuntimeRunRecord,
+        command: RuntimeCommandRecord,
+    ) -> CheckpointObservation | None: ...
 
     async def read_latest(
         self,
@@ -113,14 +193,14 @@ class RuntimeCommandExecutor(Protocol):
 
 
 class RuntimePostCheckpointHandler(Protocol):
-    """Apply idempotent side effects after a command is visible in a checkpoint."""
+    """Apply idempotent products after Graph/control settlement."""
 
     async def handle(
         self,
         *,
         run: RuntimeRunRecord,
         command: RuntimeCommandRecord,
-        checkpoint: CheckpointObservation,
+        checkpoint: CheckpointObservation | None,
     ) -> None: ...
 
 
@@ -173,7 +253,7 @@ class CommandWorkResult:
     error_code: str | None = None
 
 
-def _command_record(command: AgentRunCommand) -> RuntimeCommandRecord:
+def runtime_command_record(command: AgentRunCommand) -> RuntimeCommandRecord:
     payload = command.payload
     if not isinstance(payload, dict):
         raise RetryableCommandError(
@@ -188,6 +268,7 @@ def _command_record(command: AgentRunCommand) -> RuntimeCommandRecord:
         payload=dict(payload),
         actor_user_id=command.actor_user_id,
         actor_agent_id=command.actor_agent_id,
+        attempt_count=command.attempt_count,
     )
 
 
@@ -250,7 +331,7 @@ class RuntimeCommandWorker:
                 )
                 if command is None:
                     return None
-                return _command_record(command)
+                return runtime_command_record(command)
 
     async def _load_run(self, command: RuntimeCommandRecord) -> RuntimeRunRecord:
         async with self._session_factory() as db:
@@ -277,19 +358,21 @@ class RuntimeCommandWorker:
                         "run_scope_mismatch",
                         "loaded Run identity does not match the claimed command",
                     )
-                if run.runtime_thread_id != str(run.id):
+                if not run.runtime_thread_id or not run.runtime_thread_id.strip():
                     raise RetryableCommandError(
                         "runtime_identity_mismatch",
-                        "Run thread_id must equal run_id",
+                        "Run thread_id must not be blank",
                     )
                 if run.model_id is None or not run.graph_name or not run.graph_version:
                     raise RetryableCommandError(
                         "invalid_graph_identity",
                         "LangGraph Run is missing pinned model or graph identity",
                     )
-                registry = RunRegistrySnapshot(
-                    tenant_id=str(run.tenant_id),
-                    run_id=str(run.id),
+                return RuntimeRunRecord(
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    thread_id=run.runtime_thread_id,
+                    runtime_type=run.runtime_type,
                     goal=run.goal,
                     run_kind=run.run_kind,
                     source_type=run.source_type,
@@ -301,13 +384,12 @@ class RuntimeCommandWorker:
                     system_role=run.system_role,
                     parent_run_id=(str(run.parent_run_id) if run.parent_run_id is not None else None),
                     root_run_id=str(run.root_run_id) if run.root_run_id is not None else None,
-                )
-                return RuntimeRunRecord(
-                    tenant_id=run.tenant_id,
-                    run_id=run.id,
-                    thread_id=run.runtime_thread_id,
-                    runtime_type=run.runtime_type,
-                    registry=registry,
+                    model_turn_limit=run.model_turn_limit,
+                    source_id=run.source_id,
+                    scheduling_position_created_at=(
+                        run.scheduling_position_created_at
+                    ),
+                    scheduling_position_id=run.scheduling_position_id,
                 )
 
     async def _renew_claim(self, command: RuntimeCommandRecord) -> None:
@@ -319,6 +401,17 @@ class RuntimeCommandWorker:
                     command_id=command.id,
                     claimant=self._claimant,
                     claim_ttl_seconds=self._claim_ttl_seconds,
+                )
+
+    async def _begin_attempt(self, command: RuntimeCommandRecord) -> None:
+        async with self._session_factory() as db:
+            async with db.begin():
+                await begin_command_attempt(
+                    db,
+                    tenant_id=command.tenant_id,
+                    command_id=command.id,
+                    claimant=self._claimant,
+                    max_attempts=self._max_attempts,
                 )
 
     async def _heartbeat(self, command: RuntimeCommandRecord, stop: asyncio.Event) -> None:
@@ -338,7 +431,7 @@ class RuntimeCommandWorker:
     async def _mark_applied(
         self,
         command: RuntimeCommandRecord,
-        checkpoint_id: str,
+        checkpoint_id: str | None,
     ) -> None:
         async with self._session_factory() as db:
             async with db.begin():
@@ -350,6 +443,16 @@ class RuntimeCommandWorker:
                     applied_checkpoint_id=checkpoint_id,
                 )
 
+    async def _reject_unstarted_start(self, command: RuntimeCommandRecord) -> None:
+        async with self._session_factory() as db:
+            async with db.begin():
+                await reject_unstarted_run_for_cancel(
+                    db,
+                    tenant_id=command.tenant_id,
+                    run_id=command.run_id,
+                    cancel_command_id=command.id,
+                )
+
     async def _mark_rejected(self, command: RuntimeCommandRecord, error_code: str) -> None:
         async with self._session_factory() as db:
             async with db.begin():
@@ -359,6 +462,15 @@ class RuntimeCommandWorker:
                     command_id=command.id,
                     claimant=self._claimant,
                     error_code=error_code,
+                )
+
+    async def _mark_product_synced(self, command: RuntimeCommandRecord) -> None:
+        async with self._session_factory() as db:
+            async with db.begin():
+                await mark_command_product_synced(
+                    db,
+                    tenant_id=command.tenant_id,
+                    command_id=command.id,
                 )
 
     async def _release_for_retry(self, command: RuntimeCommandRecord, error_code: str) -> None:
@@ -377,10 +489,35 @@ class RuntimeCommandWorker:
             # expires. Do not mask the execution failure that caused the retry.
             logger.exception("Runtime command claim release failed", extra={"command_id": command.id})
 
+    async def _defer_without_attempt(
+        self,
+        command: RuntimeCommandRecord,
+        error_code: str,
+    ) -> None:
+        """Release active-owner contention and refund this business attempt."""
+        async with self._session_factory() as db:
+            async with db.begin():
+                released = await release_command_claim(
+                    db,
+                    tenant_id=command.tenant_id,
+                    command_id=command.id,
+                    claimant=self._claimant,
+                    error_code=error_code,
+                )
+                if released.attempt_count <= 0:
+                    raise CommandWorkerError(
+                        "invalid_command_attempt",
+                        "deferred command has no consumed attempt to refund",
+                    )
+                released.attempt_count -= 1
+                await db.flush()
+
     @staticmethod
     def _validate_checkpoint(
         run: RuntimeRunRecord,
         observation: CheckpointObservation,
+        *,
+        command: RuntimeCommandRecord | None = None,
     ) -> None:
         if not observation.checkpoint_id.strip():
             raise RetryableCommandError(
@@ -388,59 +525,31 @@ class RuntimeCommandWorker:
                 "checkpoint reader returned a blank checkpoint ID",
             )
         try:
-            registry = observation.state["registry"]
             lifecycle = observation.state["lifecycle"]
             status = lifecycle["status"]
         except (KeyError, TypeError) as exc:
             raise RetryableCommandError(
                 "invalid_checkpoint_state",
-                "checkpoint is missing Runtime identity or lifecycle state",
+                "checkpoint is missing Runtime lifecycle state",
             ) from exc
-        if registry != run.registry:
-            raise RetryableCommandError(
-                "checkpoint_identity_mismatch",
-                "checkpoint tenant, Run, model, or graph identity differs from the Run Registry",
-            )
         if status not in _LIFECYCLE_STATUSES:
             raise RetryableCommandError(
                 "invalid_checkpoint_status",
                 "checkpoint lifecycle status is unsupported",
             )
-        applied_ids = lifecycle.get("last_applied_command_ids", [])
-        if not isinstance(applied_ids, list) or any(not isinstance(value, str) for value in applied_ids):
+        if observation.metadata.get("clawith_run_id") != str(run.run_id):
             raise RetryableCommandError(
-                "invalid_checkpoint_command_ids",
-                "checkpoint command reconciliation IDs are malformed",
+                "checkpoint_identity_mismatch",
+                "checkpoint metadata does not belong to the locked Run",
             )
-
-    @classmethod
-    def _checkpoint_contains(
-        cls,
-        run: RuntimeRunRecord,
-        observation: CheckpointObservation,
-        command_id: uuid.UUID,
-    ) -> bool:
-        cls._validate_checkpoint(run, observation)
-        return str(command_id) in observation.state["lifecycle"].get(
-            "last_applied_command_ids",
-            [],
-        )
-
-    @classmethod
-    def _command_is_observed(
-        cls,
-        run: RuntimeRunRecord,
-        observation: CheckpointObservation,
-        command: RuntimeCommandRecord,
-    ) -> bool:
-        if not cls._checkpoint_contains(run, observation, command.id):
-            return False
-        if command.command_type == "cancel" and observation.state["lifecycle"]["status"] != "cancelled":
+        if (
+            command is not None
+            and observation.metadata.get("clawith_command_id") != str(command.id)
+        ):
             raise RetryableCommandError(
-                "cancel_not_observed",
-                "cancel command ID is present but checkpoint lifecycle is not cancelled",
+                "checkpoint_command_mismatch",
+                "checkpoint metadata does not belong to the claimed Command",
             )
-        return True
 
     async def _reject(
         self,
@@ -455,12 +564,12 @@ class RuntimeCommandWorker:
             error_code=error_code,
         )
 
-    async def _handle_observed_checkpoint(
+    async def _sync_products_best_effort(
         self,
         *,
         run: RuntimeRunRecord,
         command: RuntimeCommandRecord,
-        checkpoint: CheckpointObservation,
+        checkpoint: CheckpointObservation | None,
     ) -> None:
         try:
             await self._post_checkpoint_handler.handle(
@@ -468,13 +577,21 @@ class RuntimeCommandWorker:
                 command=command,
                 checkpoint=checkpoint,
             )
-        except RetryableCommandError:
-            raise
-        except Exception as exc:
-            raise RetryableCommandError(
-                "post_checkpoint_handler_failed",
-                "post-checkpoint side effects did not complete",
-            ) from exc
+            await self._mark_product_synced(command)
+        except Exception:
+            # Product reconciliation is deliberately downstream from the
+            # durable Graph/control boundary. Retrying the Command here could
+            # re-enter the Graph and repeat model/tool side effects.
+            logger.exception(
+                "Runtime product synchronization failed after Command settlement",
+                extra={
+                    "run_id": run.run_id,
+                    "command_id": command.id,
+                    "checkpoint_id": (
+                        checkpoint.checkpoint_id if checkpoint is not None else None
+                    ),
+                },
+            )
 
     async def _handle_pre_command(
         self,
@@ -503,55 +620,107 @@ class RuntimeCommandWorker:
         self,
         connection: AsyncConnection,
         command: RuntimeCommandRecord,
+        run: RuntimeRunRecord,
     ) -> CommandWorkResult:
-        try:
-            run = await self._load_run(command)
-        except CommandExecutionRejected as exc:
-            return await self._reject(command, exc.code)
+        if command.command_type not in _COMMAND_TYPES:
+            return await self._reject(command, "unsupported_command")
 
-        checkpoint = await self._checkpoint_reader.read_latest(
+        await self._begin_attempt(command)
+
+        command_checkpoint = await self._checkpoint_reader.read_for_command(
             connection=connection,
             run=run,
+            command=command,
         )
-        if checkpoint is not None and self._command_is_observed(run, checkpoint, command):
+        if command_checkpoint is not None:
+            self._validate_checkpoint(run, command_checkpoint, command=command)
+            if command.command_type == "cancel":
+                raise RetryableCommandError(
+                    "cancel_checkpoint_forbidden",
+                    "cancel must preserve an existing checkpoint, not create its own",
+                )
+            disposition = classify_checkpoint(command_checkpoint)
+            if disposition in {"waiting", "terminal"}:
+                await self._mark_applied(command, command_checkpoint.checkpoint_id)
+                await self._sync_products_best_effort(
+                    run=run,
+                    command=command,
+                    checkpoint=command_checkpoint,
+                )
+                return CommandWorkResult(
+                    status="reconciled",
+                    command_id=command.id,
+                    run_id=command.run_id,
+                    checkpoint_id=command_checkpoint.checkpoint_id,
+                )
+            if disposition == "inconsistent":
+                raise RetryableCommandError(
+                    "inconsistent_checkpoint",
+                    "checkpoint values, next, tasks, and interrupts disagree",
+                )
+            checkpoint = command_checkpoint
+        else:
+            checkpoint = await self._checkpoint_reader.read_latest(
+                connection=connection,
+                run=run,
+            )
+            if checkpoint is not None:
+                self._validate_checkpoint(run, checkpoint)
+
+            if command.command_type == "cancel":
+                if checkpoint is None:
+                    await self._reject_unstarted_start(command)
+                    await self._mark_applied(command, None)
+                    await self._sync_products_best_effort(
+                        run=run,
+                        command=command,
+                        checkpoint=None,
+                    )
+                    return CommandWorkResult(
+                        status="applied",
+                        command_id=command.id,
+                        run_id=command.run_id,
+                    )
+                disposition = classify_checkpoint(checkpoint)
+                if disposition == "terminal":
+                    return await self._reject(command, "already_terminal")
+                if disposition == "inconsistent":
+                    raise RetryableCommandError(
+                        "inconsistent_checkpoint",
+                        "cannot cancel from an internally inconsistent checkpoint",
+                    )
+                # The Thread lock proves no invocation is currently advancing.
+                # Preserve the last committed checkpoint as the cancellation
+                # boundary; the applied cancel Command is the control truth.
+                await self._mark_applied(command, checkpoint.checkpoint_id)
+                await self._sync_products_best_effort(
+                    run=run,
+                    command=command,
+                    checkpoint=checkpoint,
+                )
+                return CommandWorkResult(
+                    status="applied",
+                    command_id=command.id,
+                    run_id=command.run_id,
+                    checkpoint_id=checkpoint.checkpoint_id,
+                )
+
+            if command.command_type == "start" and checkpoint is not None:
+                raise RetryableCommandError(
+                    "start_checkpoint_conflict",
+                    "start found a checkpoint for this Run without matching Command metadata",
+                )
+            if command.command_type == "resume" and checkpoint is None:
+                return await self._reject(command, "thread_not_started")
+            if checkpoint is not None and classify_checkpoint(checkpoint) == "terminal":
+                return await self._reject(command, "already_terminal")
+
             await self._handle_pre_command(
                 run=run,
                 command=command,
                 checkpoint=checkpoint,
             )
-            await self._handle_observed_checkpoint(
-                run=run,
-                command=command,
-                checkpoint=checkpoint,
-            )
-            await self._mark_applied(command, checkpoint.checkpoint_id)
-            return CommandWorkResult(
-                status="reconciled",
-                command_id=command.id,
-                run_id=command.run_id,
-                checkpoint_id=checkpoint.checkpoint_id,
-            )
 
-        if command.command_type not in _COMMAND_TYPES:
-            return await self._reject(command, "unsupported_command")
-        if command.command_type == "start" and checkpoint is not None:
-            raise RetryableCommandError(
-                "start_checkpoint_conflict",
-                "start command found an existing checkpoint without its command ID",
-            )
-        if command.command_type != "start" and checkpoint is None:
-            return await self._reject(command, "thread_not_started")
-        if checkpoint is not None:
-            status = checkpoint.state["lifecycle"]["status"]
-            if status in _TERMINAL_STATUSES:
-                terminal_code = "terminal_cancel" if command.command_type == "cancel" else "terminal_resume"
-                return await self._reject(command, terminal_code)
-
-        await self._handle_pre_command(
-            run=run,
-            command=command,
-            checkpoint=checkpoint,
-        )
         try:
             await self._command_executor.execute(
                 connection=connection,
@@ -562,18 +731,31 @@ class RuntimeCommandWorker:
         except CommandExecutionRejected as exc:
             return await self._reject(command, exc.code)
 
-        observed = await self._checkpoint_reader.read_latest(
+        observed = await self._checkpoint_reader.read_for_command(
             connection=connection,
             run=run,
+            command=command,
         )
-        if observed is None or not self._command_is_observed(run, observed, command):
+        if observed is None:
             raise CommandCheckpointNotObserved(command.id)
-        await self._handle_observed_checkpoint(
+        self._validate_checkpoint(run, observed, command=command)
+        disposition = classify_checkpoint(observed)
+        if disposition == "inconsistent":
+            raise RetryableCommandError(
+                "inconsistent_checkpoint",
+                "checkpoint values, next, tasks, and interrupts disagree",
+            )
+        if disposition not in {"waiting", "terminal"}:
+            raise RetryableCommandError(
+                "command_not_stable",
+                "Command checkpoint remains runnable and must be continued",
+            )
+        await self._mark_applied(command, observed.checkpoint_id)
+        await self._sync_products_best_effort(
             run=run,
             command=command,
             checkpoint=observed,
         )
-        await self._mark_applied(command, observed.checkpoint_id)
         return CommandWorkResult(
             status="applied",
             command_id=command.id,
@@ -586,6 +768,8 @@ class RuntimeCommandWorker:
         command = await self._claim()
         if command is None:
             return CommandWorkResult(status="idle")
+        if command.attempt_count >= self._max_attempts:
+            return await self._reject(command, "reconciliation_required")
 
         stop_heartbeat = asyncio.Event()
         heartbeat = asyncio.create_task(
@@ -594,10 +778,14 @@ class RuntimeCommandWorker:
         )
         try:
             try:
+                try:
+                    run = await self._load_run(command)
+                except CommandExecutionRejected as exc:
+                    return await self._reject(command, exc.code)
                 return await run_with_thread_lock(
                     self._lock_engine,
-                    command.run_id,
-                    lambda connection: self._process_locked(connection, command),
+                    run.thread_id,
+                    lambda connection: self._process_locked(connection, command, run),
                 )
             except ThreadLockNotAcquired:
                 await self._release_for_retry(command, "thread_lock_busy")
@@ -606,6 +794,23 @@ class RuntimeCommandWorker:
                     command_id=command.id,
                     run_id=command.run_id,
                     error_code="thread_lock_busy",
+                )
+            except RuntimeInvocationCancelled:
+                # The Graph node deliberately raised before committing a
+                # synthetic cancelled state. Settle this invocation, release
+                # the real Thread lock, then let the durable cancel Command
+                # apply against the preserved checkpoint.
+                return await self._reject(command, "cancelled_before_apply")
+            except ToolExecutionReconciliationPending as exc:
+                if exc.defer_without_attempt:
+                    await self._defer_without_attempt(command, exc.code)
+                else:
+                    await self._release_for_retry(command, exc.code)
+                return CommandWorkResult(
+                    status="retry",
+                    command_id=command.id,
+                    run_id=command.run_id,
+                    error_code=exc.code,
                 )
             except RetryableCommandError as exc:
                 await self._release_for_retry(command, exc.code)

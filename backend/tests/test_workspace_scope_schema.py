@@ -12,12 +12,12 @@ MIGRATION_PATH = (
     Path(__file__).resolve().parents[1]
     / "alembic"
     / "versions"
-    / "202607141430_add_group_workspace_scope.py"
+    / "202607161200_unify_runtime_group_schema.py"
 )
 
 
 def _load_migration():
-    spec = util.spec_from_file_location("add_group_workspace_scope", MIGRATION_PATH)
+    spec = util.spec_from_file_location("unify_runtime_group_schema", MIGRATION_PATH)
     assert spec is not None and spec.loader is not None
     module = util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -60,5 +60,5 @@ def test_workspace_models_expose_one_shared_scope_contract() -> None:
 def test_workspace_scope_migration_follows_the_runtime_schema() -> None:
     migration = _load_migration()
 
-    assert migration.revision == "add_group_workspace_scope"
-    assert migration.down_revision == "create_agent_runtime_schema"
+    assert migration.revision == "unify_runtime_group_schema"
+    assert migration.down_revision == "add_title_to_agent_focus_items"

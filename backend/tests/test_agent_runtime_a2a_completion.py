@@ -191,7 +191,17 @@ def _records(
         run_id=target_run_id,
         thread_id=str(target_run_id),
         runtime_type="langgraph",
-        registry=registry,
+        goal=registry.goal,
+        run_kind=registry.run_kind,
+        source_type=registry.source_type,
+        model_id=registry.model_id,
+        graph_name=registry.graph_name,
+        graph_version=registry.graph_version,
+        agent_id=registry.agent_id,
+        session_id=registry.session_id,
+        system_role=registry.system_role,
+        parent_run_id=registry.parent_run_id,
+        root_run_id=registry.root_run_id,
     )
     lifecycle = {
         "status": status,
@@ -250,7 +260,7 @@ async def test_completed_request_projects_message_and_resumes_source_atomically(
             new=AsyncMock(return_value=participant),
         ),
         patch(
-            "app.services.agent_runtime.a2a_completion.TransactionalAgentRuntimeAdapter.resume_run",
+            "app.services.agent_runtime.a2a_completion.RuntimeCommandIntake.resume_run",
             new=AsyncMock(side_effect=resume_source),
         ) as resume_run,
     ):
@@ -328,7 +338,7 @@ async def test_gateway_target_completion_queues_reply_without_a_source_run() -> 
             new=AsyncMock(return_value=participant),
         ),
         patch(
-            "app.services.agent_runtime.a2a_completion.TransactionalAgentRuntimeAdapter.resume_run",
+            "app.services.agent_runtime.a2a_completion.RuntimeCommandIntake.resume_run",
             new=AsyncMock(),
         ) as resume_run,
     ):
@@ -365,7 +375,7 @@ async def test_notify_projects_target_result_without_resuming_source() -> None:
             new=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
         ),
         patch(
-            "app.services.agent_runtime.a2a_completion.TransactionalAgentRuntimeAdapter.resume_run",
+            "app.services.agent_runtime.a2a_completion.RuntimeCommandIntake.resume_run",
             new=AsyncMock(),
         ) as resume_run,
     ):
@@ -386,7 +396,7 @@ async def test_existing_terminal_message_makes_callback_idempotent() -> None:
     factory = _SessionFactory(db)
 
     with patch(
-        "app.services.agent_runtime.a2a_completion.TransactionalAgentRuntimeAdapter.resume_run",
+        "app.services.agent_runtime.a2a_completion.RuntimeCommandIntake.resume_run",
         new=AsyncMock(),
     ) as resume_run:
         await A2ARuntimeCompletionHandler(
@@ -426,7 +436,7 @@ async def test_unsuccessful_target_resumes_source_with_structured_error(
             new=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
         ),
         patch(
-            "app.services.agent_runtime.a2a_completion.TransactionalAgentRuntimeAdapter.resume_run",
+            "app.services.agent_runtime.a2a_completion.RuntimeCommandIntake.resume_run",
             new=AsyncMock(return_value=handle),
         ) as resume_run,
     ):

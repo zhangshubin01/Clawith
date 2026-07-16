@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 import uuid
 
 from sqlalchemy import select
@@ -22,15 +22,8 @@ class RuntimeCancelSourceError(RuntimeError):
 
 
 def _require_scope(
-    state: RuntimeGraphState,
     context: RuntimeContext,
 ) -> tuple[uuid.UUID, uuid.UUID]:
-    registry = state["registry"]
-    if registry.tenant_id != context.tenant_id or registry.run_id != context.run_id:
-        raise RuntimeCancelSourceError(
-            "runtime_scope_mismatch",
-            "Runtime context does not match checkpoint tenant or Run identity",
-        )
     try:
         return uuid.UUID(context.tenant_id), uuid.UUID(context.run_id)
     except ValueError as exc:
@@ -38,21 +31,6 @@ def _require_scope(
             "invalid_runtime_identity",
             "Runtime tenant and Run identities must be UUIDs",
         ) from exc
-
-
-def _applied_command_ids(state: RuntimeGraphState) -> frozenset[str]:
-    raw = state["lifecycle"].get("last_applied_command_ids", [])
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
-        raise RuntimeCancelSourceError(
-            "invalid_checkpoint_command_ids",
-            "checkpoint command IDs must be an array",
-        )
-    if any(not isinstance(command_id, str) or not command_id for command_id in raw):
-        raise RuntimeCancelSourceError(
-            "invalid_checkpoint_command_ids",
-            "checkpoint command IDs must be non-empty strings",
-        )
-    return frozenset(raw)
 
 
 def _cancel_signal(command: AgentRunCommand) -> CancelSignal:
@@ -85,8 +63,8 @@ class DatabaseRuntimeCancelSource:
         state: RuntimeGraphState,
         context: RuntimeContext,
     ) -> CancelSignal | None:
-        tenant_id, run_id = _require_scope(state, context)
-        applied_ids = _applied_command_ids(state)
+        del state
+        tenant_id, run_id = _require_scope(context)
         async with self._session_factory() as db:
             result = await db.execute(
                 select(AgentRunCommand)
@@ -99,8 +77,7 @@ class DatabaseRuntimeCancelSource:
                 .order_by(AgentRunCommand.created_at, AgentRunCommand.id)
             )
             for command in result.scalars().all():
-                if str(command.id) not in applied_ids:
-                    return _cancel_signal(command)
+                return _cancel_signal(command)
         return None
 
 

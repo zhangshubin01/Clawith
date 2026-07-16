@@ -87,6 +87,8 @@ class Agent(Base):
     cache_creation_tokens_month: Mapped[int] = mapped_column(Integer, default=0)
     cache_creation_tokens_total: Mapped[int] = mapped_column(Integer, default=0)
     context_window_size: Mapped[int] = mapped_column(Integer, default=100)
+    # Historical field name: this is the maximum number of model-decision turns
+    # allowed for one Agent Run, not the number of tools executed.
     max_tool_rounds: Mapped[int] = mapped_column(Integer, default=50)
 
     # Trigger limits (per-agent, configurable from Settings UI)
@@ -188,12 +190,6 @@ class AgentTemplate(Base):
     default_autonomy_policy: Mapped[dict] = mapped_column(JSON, default={})
     # Talent Market card: 2-4 short capability bullets shown under the role
     capability_bullets: Mapped[list] = mapped_column(JSON, default=[])
-    # Founding onboarding ritual. Used as the system prompt when the very first
-    # human opens a chat with an agent created from this template — it guides
-    # the agent to collect project context, introduce itself, and suggest a
-    # first task. Every subsequent user meets the agent via a simpler built-in
-    # welcoming prompt (see app.services.onboarding), not this content.
-    bootstrap_content: Mapped[str | None] = mapped_column(Text, default=None)
     is_builtin: Mapped[bool] = mapped_column(default=False)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

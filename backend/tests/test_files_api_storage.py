@@ -74,7 +74,7 @@ class PrefixOnlyStorage(StorageBackend):
 
 
 @pytest.mark.asyncio
-async def test_list_files_accepts_s3_prefix_directory(monkeypatch):
+async def test_list_files_hides_legacy_focus_file_from_s3_prefix_directory(monkeypatch):
     agent_id = uuid.uuid4()
     storage = PrefixOnlyStorage({f"{agent_id}/focus.md": b"# Focus\n"})
     monkeypatch.setattr(files, "get_storage_backend", lambda: storage)
@@ -87,9 +87,7 @@ async def test_list_files_accepts_s3_prefix_directory(monkeypatch):
 
     result = await files.list_files(agent_id, path="", current_user=user, db=None)
 
-    assert [item.name for item in result] == ["focus.md"]
-    assert result[0].path == "focus.md"
-    assert result[0].version_token == "v:8"
+    assert result == []
 
 
 @pytest.mark.asyncio
@@ -109,6 +107,28 @@ async def test_list_files_allows_empty_agent_root(monkeypatch):
 @pytest.mark.asyncio
 async def test_read_file_returns_version_token(monkeypatch):
     agent_id = uuid.uuid4()
+    storage = PrefixOnlyStorage({f"{agent_id}/workspace/note.md": b"# Note\n"})
+    monkeypatch.setattr(files, "get_storage_backend", lambda: storage)
+
+    async def allow_access(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(files, "check_agent_access", allow_access)
+    user = SimpleNamespace(tenant_id=None)
+
+    result = await files.read_file(
+        agent_id,
+        path="workspace/note.md",
+        current_user=user,
+        db=None,
+    )
+
+    assert result.version_token == "v:7"
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_legacy_focus_file(monkeypatch):
+    agent_id = uuid.uuid4()
     storage = PrefixOnlyStorage({f"{agent_id}/focus.md": b"# Focus\n"})
     monkeypatch.setattr(files, "get_storage_backend", lambda: storage)
 
@@ -118,9 +138,15 @@ async def test_read_file_returns_version_token(monkeypatch):
     monkeypatch.setattr(files, "check_agent_access", allow_access)
     user = SimpleNamespace(tenant_id=None)
 
-    result = await files.read_file(agent_id, path="focus.md", current_user=user, db=None)
+    with pytest.raises(files.HTTPException) as exc:
+        await files.read_file(
+            agent_id,
+            path="focus.md",
+            current_user=user,
+            db=None,
+        )
 
-    assert result.version_token == "v:8"
+    assert exc.value.status_code == 410
 
 
 @pytest.mark.asyncio

@@ -13,12 +13,12 @@ MIGRATION_PATH = (
     Path(__file__).resolve().parents[1]
     / "alembic"
     / "versions"
-    / "202607141500_create_channel_delivery_outbox.py"
+    / "202607161200_unify_runtime_group_schema.py"
 )
 
 
 def _load_migration():
-    spec = util.spec_from_file_location("create_channel_delivery_outbox", MIGRATION_PATH)
+    spec = util.spec_from_file_location("unify_runtime_group_schema", MIGRATION_PATH)
     assert spec is not None and spec.loader is not None
     module = util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -28,8 +28,8 @@ def _load_migration():
 def test_channel_delivery_migration_follows_the_runtime_schema_head() -> None:
     migration = _load_migration()
 
-    assert migration.revision == "create_channel_delivery_outbox"
-    assert migration.down_revision == "add_group_workspace_scope"
+    assert migration.revision == "unify_runtime_group_schema"
+    assert migration.down_revision == "add_title_to_agent_focus_items"
 
 
 def test_channel_delivery_model_is_an_outbox_not_runtime_state() -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
-from typing import cast
+from typing import Any, cast
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 import uuid
 
@@ -26,9 +26,46 @@ _ALLOWED_RUNTIME_MSGPACK_TYPES = (
 )
 
 
-def runtime_thread_config(run_id: uuid.UUID) -> dict[str, dict[str, str]]:
-    """Return the one supported checkpoint identity: thread_id equals Run ID."""
-    return {"configurable": {"thread_id": str(run_id)}}
+def runtime_thread_config(
+    thread_id: str | uuid.UUID,
+    *,
+    checkpoint_id: str | None = None,
+) -> dict[str, dict[str, str]]:
+    """Build an exact LangGraph Thread/checkpoint identity.
+
+    A Thread is not necessarily a Run. Direct Chat can place multiple logical
+    Runs on one Thread, while Group and background Runs currently keep their
+    independent ``run_id`` Thread identity.
+    """
+    resolved_thread_id = str(thread_id).strip()
+    if not resolved_thread_id:
+        raise CheckpointerConfigurationError("Runtime thread_id must not be blank")
+    configurable = {"thread_id": resolved_thread_id}
+    if checkpoint_id is not None:
+        resolved_checkpoint_id = checkpoint_id.strip()
+        if not resolved_checkpoint_id:
+            raise CheckpointerConfigurationError("checkpoint_id must not be blank")
+        configurable["checkpoint_id"] = resolved_checkpoint_id
+    return {"configurable": configurable}
+
+
+def runtime_command_config(
+    thread_id: str | uuid.UUID,
+    *,
+    run_id: uuid.UUID,
+    command_id: uuid.UUID,
+    checkpoint_id: str | None = None,
+) -> dict[str, Any]:
+    """Bind one Graph invocation to Clawith Run/Command metadata."""
+    config: dict[str, Any] = runtime_thread_config(
+        thread_id,
+        checkpoint_id=checkpoint_id,
+    )
+    config["metadata"] = {
+        "clawith_run_id": str(run_id),
+        "clawith_command_id": str(command_id),
+    }
+    return config
 
 
 def _to_psycopg_url(database_url: str) -> str:

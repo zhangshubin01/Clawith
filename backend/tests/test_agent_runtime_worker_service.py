@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from collections import deque
+from dataclasses import replace
 import asyncio
 import uuid
 from unittest.mock import AsyncMock, patch
@@ -26,19 +27,26 @@ from app.services.agent_runtime.onboarding_completion import (
 )
 from app.services.agent_runtime.planning_scheduler import (
     PlanningCheckpointScheduler,
-    PlanningChildCompletionHandler,
 )
+from app.services.agent_runtime.product_reconciler import ProductReconcileResult
 from app.services.agent_runtime.scheduling_lane import SchedulingLaneCompletionHandler
 from app.services.agent_runtime.session_context_completion import (
     SessionContextCompletionHandler,
 )
 from app.services.agent_runtime.state import RunRegistrySnapshot
 from app.services.agent_runtime.task_completion import TaskRuntimeCompletionHandler
+from app.services.agent_runtime.tool_result_store import ToolResultReconcileResult
 from app.services.agent_runtime.trigger_completion import TriggerRuntimeCompletionHandler
+from app.services.agent_runtime.verification import (
+    RuntimeToolReferenceReader,
+    ToolLedgerRuntimeVerifier,
+)
 from app.services.agent_runtime.worker_service import (
     ChannelDeliveryDaemon,
+    ProductReconcileDaemon,
     RuntimeCommandDaemon,
     RuntimeSchemaNotReady,
+    ToolResultReconcileDaemon,
     assert_runtime_schema_ready,
     build_runtime_worker_components,
     running_runtime_worker_context,
@@ -165,7 +173,61 @@ async def test_channel_delivery_daemon_continues_after_retry() -> None:
     assert worker.calls == 2
 
 
-def test_component_builder_installs_pinned_agent_and_planning_graphs() -> None:
+@pytest.mark.asyncio
+async def test_product_reconcile_daemon_retries_independently() -> None:
+    stop = asyncio.Event()
+
+    class Reconciler:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run_once(self) -> ProductReconcileResult:
+            self.calls += 1
+            if self.calls == 2:
+                stop.set()
+                return ProductReconcileResult(status="idle")
+            return ProductReconcileResult(status="retry")
+
+    reconciler = Reconciler()
+    daemon = ProductReconcileDaemon(
+        reconciler,  # type: ignore[arg-type]
+        scan_delay_seconds=0.001,
+        error_delay_seconds=0.001,
+    )
+
+    await asyncio.wait_for(daemon.run(stop), timeout=1)
+
+    assert reconciler.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_result_reconcile_daemon_defers_without_busy_looping() -> None:
+    stop = asyncio.Event()
+
+    class Reconciler:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run_once(self) -> ToolResultReconcileResult:
+            self.calls += 1
+            if self.calls == 2:
+                stop.set()
+                return ToolResultReconcileResult(status="idle")
+            return ToolResultReconcileResult(status="deferred")
+
+    reconciler = Reconciler()
+    daemon = ToolResultReconcileDaemon(
+        reconciler,  # type: ignore[arg-type]
+        scan_delay_seconds=0.001,
+        error_delay_seconds=0.001,
+    )
+
+    await asyncio.wait_for(daemon.run(stop), timeout=1)
+
+    assert reconciler.calls == 2
+
+
+def test_component_builder_installs_current_agent_and_planning_graphs() -> None:
     components = build_runtime_worker_components(
         checkpointer=InMemorySaver(),
         session_factory=_SessionFactory(),  # type: ignore[arg-type]
@@ -195,18 +257,48 @@ def test_component_builder_installs_pinned_agent_and_planning_graphs() -> None:
         run_id=run_id,
         thread_id=str(run_id),
         runtime_type="langgraph",
-        registry=registry,
+        goal=registry.goal,
+        run_kind=registry.run_kind,
+        source_type=registry.source_type,
+        model_id=registry.model_id,
+        graph_name=registry.graph_name,
+        graph_version=registry.graph_version,
+        agent_id=registry.agent_id,
+        session_id=registry.session_id,
+        system_role=registry.system_role,
+        parent_run_id=registry.parent_run_id,
+        root_run_id=registry.root_run_id,
     )
     assert components.graph_registry.resolve(run) is components.graph
-    assert (
-        components.graph_registry.resolve_identity(
-            "worker_service_test_group_planning",
-            "v1",
-        )
-        is components.planning_graph
+    planning_run = replace(
+        run,
+        run_kind="orchestration",
+        system_role="group_planning",
+        graph_name="legacy-planning-name",
+        graph_version="old-version",
     )
+    assert components.graph_registry.resolve(planning_run) is components.planning_graph
     assert components.worker._checkpoint_reader is components.driver
     assert components.worker._command_executor is components.driver
+    agent_executor = components.driver._node_executor._agent_executor
+    assert isinstance(agent_executor._verifier, ToolLedgerRuntimeVerifier)
+    reference_exists = agent_executor._verifier._reference_exists
+    assert reference_exists is not None
+    assert isinstance(reference_exists.__self__, RuntimeToolReferenceReader)
+    assert agent_executor._verifier._result_store is not None
+    assert (
+        agent_executor._verifier._result_store
+        is agent_executor._tool_service._tool_result_store
+    )
+    assert (
+        components.tool_result_reconciler._result_store
+        is agent_executor._tool_service._tool_result_store
+    )
+    assert components.product_reconciler._checkpoint_reader is components.driver
+    assert (
+        components.product_reconciler._handler
+        is components.worker._post_checkpoint_handler
+    )
     assert components.channel_delivery_worker._claimant == "worker-test"
     assert isinstance(
         components.worker._pre_command_handler,
@@ -220,7 +312,6 @@ def test_component_builder_installs_pinned_agent_and_planning_graphs() -> None:
         HeartbeatRuntimeCompletionHandler,
         OnboardingRuntimeCompletionHandler,
         A2ARuntimeCompletionHandler,
-        PlanningChildCompletionHandler,
         SchedulingLaneCompletionHandler,
     ]
     checkpoint_handlers = components.worker._post_checkpoint_handler._checkpoint_handlers

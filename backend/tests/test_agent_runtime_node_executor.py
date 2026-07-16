@@ -20,6 +20,8 @@ from app.services.agent_runtime.node_executor import (
     FinalizationResult,
     ModelStepResult,
     RunCompactResult,
+    RuntimeInvocationCancelled,
+    RuntimeNodeTransitionError,
     ToolStepResult,
     VerificationResult,
 )
@@ -31,6 +33,7 @@ from app.services.agent_runtime.state import (
     RuntimeContext,
     RuntimeGraphState,
     RuntimeNodeExecutor,
+    runtime_messages_as_json,
 )
 
 
@@ -63,10 +66,10 @@ def _state(run_id: uuid.UUID) -> RuntimeGraphState:
             related_run_summaries=(),
             initial_input={"message_id": "message-1"},
         ),
+        "messages": [],
         "lifecycle": {
             "status": "running",
             "next_route": "model",
-            "run_messages": [],
             "pending_tool_calls": [],
         },
     }
@@ -122,17 +125,15 @@ class ToolService:
 class RunCompactor:
     def __init__(self, result: RunCompactResult | None = None) -> None:
         self.result = result or RunCompactResult()
-        self.calls: list[bool] = []
+        self.calls = 0
 
     async def compact_if_needed(
         self,
         state: RuntimeGraphState,
         context: RuntimeContext,
-        *,
-        forced: bool,
     ) -> RunCompactResult:
         del state, context
-        self.calls.append(forced)
+        self.calls += 1
         return self.result
 
 
@@ -171,23 +172,79 @@ class Finalizer:
 @pytest.mark.asyncio
 async def test_default_finalizer_emits_a_source_bound_session_delta() -> None:
     run_id = uuid.uuid4()
+    context = RuntimeContext(
+        tenant_id=str(uuid.uuid4()),
+        run_id=str(run_id),
+        command_id=str(uuid.uuid4()),
+        executor=cast(RuntimeNodeExecutor, object()),
+    )
     finalized = await DefaultRuntimeFinalizer().finalize(
         _state(run_id),
-        cast(RuntimeContext, object()),
+        context,
         "Verified answer",
-        VerificationResult(outcome="pass", details={"code": "ok"}),
+        VerificationResult(
+            outcome="pass",
+            details={
+                "code": "ok",
+                "artifact_refs": ["artifact://verified"],
+                "evidence_refs": ["evidence://verified"],
+            },
+        ),
     )
 
+    assert finalized.result_summary["artifact_refs"] == ["artifact://verified"]
+    assert finalized.result_summary["evidence_refs"] == ["evidence://verified"]
     assert finalized.session_context_delta == {
         "source_run_id": str(run_id),
         "new_requirements": [],
         "new_decisions": [],
         "resolved_open_items": [],
         "new_open_items": [],
-        "evidence_refs": [],
+        "evidence_refs": ["evidence://verified"],
         "workspace_refs": [],
         "result_summary": "Verified answer",
     }
+
+
+@pytest.mark.asyncio
+async def test_group_finish_intent_is_frozen_into_terminal_delivery_request() -> None:
+    run_id = uuid.uuid4()
+    intent: JsonObject = {
+        "version": 1,
+        "source_run_id": str(run_id),
+        "mention_participant_ids": [str(uuid.uuid4())],
+        "idempotency_key": f"run:{run_id}:terminal:completed",
+    }
+    state = _state(run_id)
+    executor = DeterministicRuntimeNodeExecutor(
+        cancel_source=CancelSource(),
+        model_service=ModelService(
+            ModelStepResult(
+                intent="finish",
+                finish_content="Public handoff reply",
+                finish_delivery_intent=intent,
+            )
+        ),
+        tool_service=ToolService(),
+        verifier=Verifier(VerificationResult(outcome="pass", details={"code": "ok"})),
+    )
+    context = _context(run_id, executor, "command-group-handoff")
+
+    model_update = await executor.execute("model", state, context)
+    verifying_state = cast(
+        RuntimeGraphState,
+        {**state, "lifecycle": model_update["lifecycle"]},
+    )
+    assert verifying_state["lifecycle"]["finish_delivery_intent"] == intent
+
+    verify_update = await executor.execute("verify", verifying_state, context)
+    lifecycle = verify_update["lifecycle"]
+    assert lifecycle["status"] == "completed"
+    assert lifecycle["delivery_request"] == {
+        "content": "Public handoff reply",
+        "group_handoff": intent,
+    }
+    assert "finish_delivery_intent" not in lifecycle
 
 
 def _executor(
@@ -197,7 +254,6 @@ def _executor(
     tools: ToolService | None = None,
     run_compactor: RunCompactor | None = None,
     verifier: Verifier | None = None,
-    max_model_steps: int = 50,
     max_verification_repairs: int = 2,
 ) -> DeterministicRuntimeNodeExecutor:
     return DeterministicRuntimeNodeExecutor(
@@ -207,21 +263,26 @@ def _executor(
         run_compactor=run_compactor,
         verifier=verifier,
         finalizer=Finalizer(),
-        max_model_steps=max_model_steps,
         max_verification_repairs=max_verification_repairs,
     )
 
 
 @pytest.mark.asyncio
-async def test_compact_replaces_only_run_summary_and_covered_messages() -> None:
+async def test_compact_atomically_replaces_thread_summary_and_covered_messages() -> None:
     run_id = uuid.uuid4()
     retained = {"id": "recent-1", "role": "user", "content": "recent"}
     compactor = RunCompactor(
         RunCompactResult(
             compacted=True,
-            run_summary={"goal": "done", "next_step": "continue"},
-            run_messages=(retained,),
-            covered_through_run_message_id="old-20",
+            thread_summary={
+                "task_goal_and_constraints": "done",
+                "completed_work_and_results": "done",
+                "key_decisions_and_evidence": "",
+                "unfinished_or_blocked": "",
+                "next_actions": "continue",
+            },
+            recent_messages=(retained,),
+            covered_through_message_id="old-boundary",
         )
     )
     executor = _executor(ModelService(), run_compactor=compactor)
@@ -229,8 +290,6 @@ async def test_compact_replaces_only_run_summary_and_covered_messages() -> None:
     state["lifecycle"].update(
         {
             "next_route": "compact",
-            "compact_return_route": "model",
-            "compact_forced": True,
             "pending_tool_calls": [{"id": "pending-exact"}],
             "waiting_request": {"correlation_id": "wait-exact"},
             "verification_result": {"outcome": "repair"},
@@ -244,56 +303,55 @@ async def test_compact_replaces_only_run_summary_and_covered_messages() -> None:
     )
 
     lifecycle = update["lifecycle"]
-    assert compactor.calls == [True]
+    assert compactor.calls == 1
     assert lifecycle["next_route"] == "model"
-    assert lifecycle["run_summary"] == {"goal": "done", "next_step": "continue"}
-    assert lifecycle["run_messages"] == [retained]
-    assert lifecycle["covered_through_run_message_id"] == "old-20"
+    assert update["thread_summary"]["next_actions"] == "continue"
+    assert update["summary_covered_through_message_id"] == "old-boundary"
+    assert update["messages"][-1] == retained
     assert lifecycle["pending_tool_calls"] == [{"id": "pending-exact"}]
     assert lifecycle["waiting_request"] == {"correlation_id": "wait-exact"}
     assert lifecycle["verification_result"] == {"outcome": "repair"}
 
 
 @pytest.mark.asyncio
-async def test_compact_failure_records_diagnostic_and_continues_wait_route() -> None:
+async def test_compact_is_rejected_outside_the_pre_model_running_boundary() -> None:
     run_id = uuid.uuid4()
-    compactor = RunCompactor(
-        RunCompactResult(error={"code": "compact_failed", "message": "keep old"})
-    )
+    compactor = RunCompactor()
     executor = _executor(ModelService(), run_compactor=compactor)
     state = _state(run_id)
     state["lifecycle"].update(
         {
             "status": "waiting_user",
             "next_route": "compact",
-            "compact_return_route": "wait",
-            "compact_forced": True,
         }
     )
 
-    update = await executor.execute(
-        "compact",
-        state,
-        _context(run_id, executor, "command-compact"),
-    )
+    with pytest.raises(RuntimeNodeTransitionError) as raised:
+        await executor.execute(
+            "compact",
+            state,
+            _context(run_id, executor, "command-compact"),
+        )
 
-    assert update["lifecycle"]["next_route"] == "wait"
-    assert update["lifecycle"]["run_compact_error"] == {
-        "code": "compact_failed",
-        "message": "keep old",
-    }
+    assert raised.value.code == "invalid_compact_status"
+    assert compactor.calls == 0
 
 
 def _context(
     run_id: uuid.UUID,
     executor: DeterministicRuntimeNodeExecutor,
     command_id: str,
+    *,
+    model_turn_limit: int | None = 50,
 ) -> RuntimeContext:
     return RuntimeContext(
         tenant_id="tenant-1",
         run_id=str(run_id),
         command_id=command_id,
         executor=cast(RuntimeNodeExecutor, executor),
+        graph_name="node_executor_test",
+        graph_version="v1",
+        model_turn_limit=model_turn_limit,
         actor_user_id="user-1",
     )
 
@@ -303,6 +361,7 @@ async def _invoke(
     executor: DeterministicRuntimeNodeExecutor,
     *,
     command_id: str = "command-1",
+    model_turn_limit: int | None = 50,
 ) -> dict[str, JsonValue]:
     graph = build_agent_runtime_graph(
         checkpointer=InMemorySaver(),
@@ -311,7 +370,12 @@ async def _invoke(
     return await graph.compiled.ainvoke(
         _state(run_id),
         runtime_thread_config(run_id),
-        context=_context(run_id, executor, command_id),
+        context=_context(
+            run_id,
+            executor,
+            command_id,
+            model_turn_limit=model_turn_limit,
+        ),
     )
 
 
@@ -340,7 +404,7 @@ async def test_finish_is_verified_and_finalized_into_terminal_checkpoint_state()
     }
     assert lifecycle["session_context_delta"] == {"decisions": ["done"]}
     assert lifecycle["delivery_request"] == {"content": "done"}
-    assert lifecycle["last_applied_command_ids"] == ["command-1"]
+    assert "last_applied_command_ids" not in lifecycle
     assert verifier.calls == ["done"]
 
 
@@ -370,10 +434,10 @@ async def test_tool_batch_is_executed_before_the_next_model_step() -> None:
     assert lifecycle["model_step_count"] == 2
     assert lifecycle["pending_tool_calls"] == []
     assert tools.calls == [(tool_call,)]
-    assert lifecycle["run_messages"] == [
-        {"role": "assistant", "tool_calls": [tool_call]},
-        {"role": "tool", "tool_call_id": "call-1", "content": "result"},
-    ]
+    messages = runtime_messages_as_json(cast(RuntimeGraphState, result))
+    assert [message["role"] for message in messages] == ["assistant", "tool"]
+    assert messages[0]["tool_calls"][0]["id"] == "call-1"  # type: ignore[index]
+    assert messages[1]["tool_call_id"] == "call-1"
 
 
 @pytest.mark.asyncio
@@ -408,7 +472,12 @@ async def test_wait_interrupt_resumes_the_same_run_and_then_finishes() -> None:
     assert waiting.next == ("wait",)
 
     resumed = await graph.compiled.ainvoke(
-        Command(resume={"confirmed": True}),
+        Command(
+            resume={
+                "resume_type": "user_input",
+                "payload": {"content": "EXACT RESUME INPUT"},
+            }
+        ),
         config,
         context=_context(run_id, executor, "command-resume"),
     )
@@ -416,18 +485,15 @@ async def test_wait_interrupt_resumes_the_same_run_and_then_finishes() -> None:
     lifecycle = resumed["lifecycle"]
     assert lifecycle["status"] == "completed"
     assert lifecycle["waiting_request"] is None
-    assert lifecycle["last_applied_command_ids"] == [
-        "command-start",
-        "command-resume",
-    ]
-    assert lifecycle["run_messages"] == [
-        {
-            "id": str(uuid.uuid5(run_id, "resume:command-resume")),
-            "role": "user",
-            "content": {"confirmed": True},
-            "runtime_input": "resume",
-        }
-    ]
+    assert "last_applied_command_ids" not in lifecycle
+    messages = runtime_messages_as_json(cast(RuntimeGraphState, resumed))
+    assert messages[-1]["id"] == str(
+        uuid.uuid5(run_id, "resume:command-resume")
+    )
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"] == "EXACT RESUME INPUT"
+    assert messages[-1]["runtime_input"] == "resume"
+    assert messages[-1]["runtime_run_id"] == str(run_id)
 
 
 @pytest.mark.asyncio
@@ -436,14 +502,25 @@ async def test_cancel_is_observed_before_the_model_or_a_new_tool_can_start() -> 
     model = ModelService(ModelStepResult(intent="finish", finish_content="too late"))
     cancel = CancelSource(CancelSignal(command_id="cancel-1", reason="user_abort"))
     executor = _executor(model, cancel=cancel)
+    graph = build_agent_runtime_graph(
+        checkpointer=InMemorySaver(),
+        settings=_settings(),
+    )
+    config = runtime_thread_config(run_id)
 
-    result = await _invoke(run_id, executor, command_id="worker-command")
+    with pytest.raises(RuntimeInvocationCancelled) as raised:
+        await graph.compiled.ainvoke(
+            _state(run_id),
+            config,
+            context=_context(run_id, executor, "worker-command"),
+        )
 
-    lifecycle = result["lifecycle"]
-    assert lifecycle["status"] == "cancelled"
-    assert lifecycle["reason"] == "user_abort"
-    assert lifecycle["last_applied_command_ids"] == ["cancel-1", "worker-command"]
+    assert raised.value.cancel_command_id == "cancel-1"
+    assert raised.value.reason == "user_abort"
     assert model.calls == 0
+    preserved = await graph.compiled.aget_state(config)
+    assert preserved.values["lifecycle"]["status"] == "running"
+    assert "last_applied_command_ids" not in preserved.values["lifecycle"]
 
 
 @pytest.mark.asyncio
@@ -455,46 +532,75 @@ async def test_plain_text_repair_stops_at_the_model_step_limit() -> None:
             assistant_message={"role": "assistant", "content": "plain text"},
         )
     )
-    executor = _executor(model, max_model_steps=1)
+    executor = _executor(model)
 
-    result = await _invoke(run_id, executor)
+    result = await _invoke(run_id, executor, model_turn_limit=1)
 
     lifecycle = result["lifecycle"]
     assert lifecycle["status"] == "failed"
     assert lifecycle["reason"] == "model_step_limit_reached"
     assert lifecycle["model_step_count"] == 1
     assert model.calls == 1
-    assert lifecycle["run_messages"][-1]["role"] == "user"
+    assert runtime_messages_as_json(cast(RuntimeGraphState, result))[-1]["role"] == "user"
 
 
 @pytest.mark.asyncio
-async def test_product_owned_step_limit_can_narrow_the_global_runtime_limit() -> None:
+async def test_model_turn_limit_is_runtime_context_not_model_visible_input() -> None:
     run_id = uuid.uuid4()
     state = _state(run_id)
     state["snapshots"].initial_input["requested_max_steps"] = 1
     model = ModelService(
         ModelStepResult(
             intent="text",
-            assistant_message={"role": "assistant", "content": "plain text"},
-        )
+            assistant_message={"role": "assistant", "content": "first"},
+        ),
+        ModelStepResult(
+            intent="text",
+            assistant_message={"role": "assistant", "content": "second"},
+        ),
     )
-    executor = _executor(model, max_model_steps=50)
+    executor = _executor(model)
+    context = RuntimeContext(
+        tenant_id="tenant-1",
+        run_id=str(run_id),
+        command_id="command-budget",
+        executor=cast(RuntimeNodeExecutor, executor),
+        model_turn_limit=2,
+    )
 
-    first = await executor.execute(
-        "model",
-        state,
-        cast(RuntimeContext, object()),
-    )
+    first = await executor.execute("model", state, context)
     state["lifecycle"] = first["lifecycle"]
-    second = await executor.execute(
-        "model",
-        state,
-        cast(RuntimeContext, object()),
+    second = await executor.execute("model", state, context)
+    state["lifecycle"] = second["lifecycle"]
+    exhausted = await executor.execute("model", state, context)
+
+    assert model.calls == 2
+    assert exhausted["lifecycle"]["status"] == "failed"
+    assert exhausted["lifecycle"]["reason"] == "model_step_limit_reached"
+    assert exhausted["lifecycle"]["model_step_count"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_limit", [None, 0, -1, True])
+async def test_missing_or_invalid_model_turn_limit_fails_explicitly(
+    invalid_limit: object,
+) -> None:
+    run_id = uuid.uuid4()
+    model = ModelService()
+    executor = _executor(model)
+    context = RuntimeContext(
+        tenant_id="tenant-1",
+        run_id=str(run_id),
+        command_id="command-invalid-budget",
+        executor=cast(RuntimeNodeExecutor, executor),
+        model_turn_limit=invalid_limit,  # type: ignore[arg-type]
     )
 
-    assert second["lifecycle"]["status"] == "failed"
-    assert second["lifecycle"]["reason"] == "model_step_limit_reached"
-    assert model.calls == 1
+    with pytest.raises(RuntimeNodeTransitionError) as raised:
+        await executor.execute("model", _state(run_id), context)
+
+    assert raised.value.code == "invalid_model_step_limit"
+    assert model.calls == 0
 
 
 @pytest.mark.asyncio
@@ -520,11 +626,10 @@ async def test_verification_repairs_are_bounded() -> None:
     assert lifecycle["status"] == "failed"
     assert lifecycle["reason"] == "verification_repair_limit_reached"
     assert lifecycle["verification_attempt_count"] == 2
-    assert lifecycle["run_messages"] == [
-        {
-            "id": str(uuid.uuid5(run_id, "verification:1:repair")),
-            "role": "user",
-            "content": "add evidence",
-        }
-    ]
+    messages = runtime_messages_as_json(cast(RuntimeGraphState, result))
+    assert messages[-1]["id"] == str(
+        uuid.uuid5(run_id, "verification:1:repair")
+    )
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"] == "add evidence"
     assert verifier.calls == ["first", "second"]

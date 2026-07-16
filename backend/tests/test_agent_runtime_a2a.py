@@ -271,7 +271,7 @@ async def test_gateway_message_and_native_target_run_are_accepted_atomically() -
             ),
         ),
         patch(
-            "app.services.agent_runtime.a2a_runtime.TransactionalAgentRuntimeAdapter.start_run",
+            "app.services.agent_runtime.a2a_runtime.RuntimeCommandIntake.start_run",
             new=AsyncMock(return_value=handle),
         ) as start_run,
     ):
@@ -302,7 +302,8 @@ async def test_gateway_message_and_native_target_run_are_accepted_atomically() -
     assert command.origin_agent_id == source.id
     assert command.payload["gateway_message_id"] == str(message_id)
     assert command.payload["gateway_reply_agent_id"] == str(source.id)
-    assert command.payload["input_content"].endswith("Research the incident")
+    assert command.payload["input_content"] == "Research the incident"
+    assert "a2a_message" not in command.payload
 
 
 @pytest.mark.asyncio
@@ -382,7 +383,7 @@ async def test_delegate_creates_target_run_and_receipt_in_one_transaction() -> N
             ),
         ),
         patch(
-            "app.services.agent_runtime.a2a_runtime.TransactionalAgentRuntimeAdapter.start_run",
+            "app.services.agent_runtime.a2a_runtime.RuntimeCommandIntake.start_run",
             new=AsyncMock(return_value=handle),
         ) as start_run,
         patch(
@@ -432,6 +433,14 @@ async def test_delegate_creates_target_run_and_receipt_in_one_transaction() -> N
     assert command.source_type == "a2a"
     assert command.session_id == session.id
     assert command.model_id == target.primary_model_id
+    assert "runtime_instruction" in command.payload
+    assert "automatically" in command.payload["runtime_instruction"]
+    assert "send_message_to_agent" in command.payload["runtime_instruction"]
+    assert command.payload["message_id"] == str(
+        uuid.uuid5(source_run.id, "a2a-input:delegate-call")
+    )
+    assert command.payload["input_content"] == "Research the latest facts"
+    assert "a2a_message" not in command.payload
     assert cycle_guard.calls[0]["source_run_id"] == source_run.id
     messages = [value for value in db.added if isinstance(value, ChatMessage)]
     assert len(messages) == 1
@@ -528,7 +537,7 @@ async def test_openclaw_target_is_queued_atomically_without_legacy_executor() ->
             new=AsyncMock(side_effect=mark_succeeded),
         ),
         patch(
-            "app.services.agent_runtime.a2a_runtime.TransactionalAgentRuntimeAdapter.start_run",
+            "app.services.agent_runtime.a2a_runtime.RuntimeCommandIntake.start_run",
             new=AsyncMock(),
         ) as start_run,
     ):
@@ -604,7 +613,7 @@ async def test_openclaw_report_resumes_native_source_from_tool_receipt() -> None
     )
 
     with patch(
-        "app.services.agent_runtime.a2a_runtime.TransactionalAgentRuntimeAdapter.resume_run",
+        "app.services.agent_runtime.a2a_runtime.RuntimeCommandIntake.resume_run",
         new=AsyncMock(return_value=handle),
     ) as resume_run:
         completion = await complete_gateway_a2a_runtime(

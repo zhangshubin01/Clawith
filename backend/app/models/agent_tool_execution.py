@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -30,6 +31,14 @@ class AgentToolExecution(Base):
         CheckConstraint(
             "status IN ('started', 'succeeded', 'failed', 'unknown')",
             name="ck_agent_tool_executions_status",
+        ),
+        CheckConstraint(
+            "effect IN ('read', 'write', 'external_write')",
+            name="ck_agent_tool_executions_effect",
+        ),
+        CheckConstraint(
+            "retry_policy IN ('safe', 'conditional', 'never')",
+            name="ck_agent_tool_executions_retry_policy",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "run_id"],
@@ -66,9 +75,27 @@ class AgentToolExecution(Base):
     arguments_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     sanitized_arguments: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     request_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    effect: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="external_write",
+        server_default="external_write",
+    )
+    retry_policy: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="never",
+        server_default="never",
+    )
     status: Mapped[str] = mapped_column(String(24), nullable=False)
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    result_metadata: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime] = mapped_column(

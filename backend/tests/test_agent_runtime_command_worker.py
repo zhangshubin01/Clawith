@@ -24,6 +24,19 @@ from app.services.agent_runtime.state import (
     RunRegistrySnapshot,
     RuntimeGraphState,
 )
+from app.services.agent_runtime.tool_execution import (
+    ToolExecutionReconciliationPending,
+)
+
+
+@pytest.fixture(autouse=True)
+def _stub_business_attempt_boundary():
+    with patch.object(
+        RuntimeCommandWorker,
+        "_begin_attempt",
+        new_callable=AsyncMock,
+    ) as begin_attempt:
+        yield begin_attempt
 
 
 class _ScalarResult:
@@ -70,6 +83,9 @@ class _Session:
         self.timeline.append("load_run")
         return _ScalarResult(self.run)
 
+    async def flush(self) -> None:
+        self.timeline.append("flush")
+
 
 class _SessionFactory:
     def __init__(self, timeline: list[str], run: AgentRun | None) -> None:
@@ -115,15 +131,28 @@ class _Engine:
 
 
 class _Reader:
-    def __init__(self, *observations: CheckpointObservation | None) -> None:
-        self.observations = deque(observations)
+    def __init__(
+        self,
+        *,
+        command: tuple[CheckpointObservation | None, ...] = (),
+        latest: tuple[CheckpointObservation | None, ...] = (),
+    ) -> None:
+        self.command_observations = deque(command)
+        self.latest_observations = deque(latest)
         self.calls: list[tuple[object, RuntimeRunRecord]] = []
+
+    async def read_for_command(self, *, connection, run, command):
+        del command
+        self.calls.append((connection, run))
+        if not self.command_observations:
+            raise AssertionError("unexpected command checkpoint read")
+        return self.command_observations.popleft()
 
     async def read_latest(self, *, connection, run):
         self.calls.append((connection, run))
-        if not self.observations:
-            raise AssertionError("unexpected checkpoint read")
-        return self.observations.popleft()
+        if not self.latest_observations:
+            raise AssertionError("unexpected latest checkpoint read")
+        return self.latest_observations.popleft()
 
 
 class _Executor:
@@ -231,7 +260,7 @@ def _checkpoint(
     run: AgentRun,
     *,
     status: str,
-    command_ids: list[str] | None = None,
+    command: AgentRunCommand | None = None,
     checkpoint_id: str = "checkpoint-1",
     registry: RunRegistrySnapshot | None = None,
 ) -> CheckpointObservation:
@@ -246,11 +275,26 @@ def _checkpoint(
         ),
         "lifecycle": {
             "status": status,  # type: ignore[typeddict-item]
-            "next_route": "terminal" if status in {"completed", "failed", "cancelled"} else "model",
-            "last_applied_command_ids": command_ids or [],
+            "next_route": (
+                "terminal"
+                if status in {"completed", "failed", "cancelled"}
+                else ("wait" if status.startswith("waiting_") else "model")
+            ),
         },
     }
-    return CheckpointObservation(checkpoint_id=checkpoint_id, state=state)
+    terminal = status in {"completed", "failed", "cancelled"}
+    waiting = status.startswith("waiting_")
+    metadata = {"clawith_run_id": str(run.id)}
+    if command is not None:
+        metadata["clawith_command_id"] = str(command.id)
+    return CheckpointObservation(
+        checkpoint_id=checkpoint_id,
+        state=state,
+        next_nodes=() if terminal else (("wait",) if waiting else ("model",)),
+        tasks=() if terminal else (object(),),
+        interrupts=(object(),) if waiting else (),
+        metadata=metadata,
+    )
 
 
 def _worker(
@@ -283,8 +327,8 @@ async def test_pre_command_side_effect_runs_after_claim_commit_and_before_graph(
     timeline: list[str] = []
     run = _run()
     command = _command(run, "start")
-    observed = _checkpoint(run, status="running", command_ids=[str(command.id)])
-    reader = _Reader(None, observed)
+    observed = _checkpoint(run, status="completed", command=command)
+    reader = _Reader(command=(None, observed), latest=(None,))
     executor = _Executor(timeline)
     pre_handler = _PreCommandHandler(timeline)
     worker = _worker(
@@ -319,11 +363,19 @@ async def test_pre_command_side_effect_runs_after_claim_commit_and_before_graph(
 async def test_claim_commits_before_lock_and_heartbeat_runs_during_execution() -> None:
     timeline: list[str] = []
     run = _run()
+    trigger_message_id = uuid.uuid4()
+    trigger_created_at = datetime(2026, 7, 13, 11, 59, tzinfo=UTC)
+    run.source_id = str(trigger_message_id)
+    run.scheduling_position_created_at = trigger_created_at
+    run.scheduling_position_id = trigger_message_id
     command = _command(run, "start")
     renewal_seen = asyncio.Event()
     reader = _Reader(
-        None,
-        _checkpoint(run, status="running", command_ids=[str(command.id)]),
+        command=(
+            None,
+            _checkpoint(run, status="completed", command=command),
+        ),
+        latest=(None,),
     )
     executor = _Executor(timeline, wait_for=renewal_seen)
 
@@ -363,13 +415,16 @@ async def test_claim_commits_before_lock_and_heartbeat_runs_during_execution() -
     assert result.checkpoint_id == "checkpoint-1"
     assert timeline.index("transaction_exit") < timeline.index("lock_acquire")
     assert timeline.index("claim_renewed") < timeline.index("executor_end")
-    assert timeline.index("post_checkpoint:checkpoint-1") < timeline.index("applied:checkpoint-1")
-    assert timeline.index("applied:checkpoint-1") < timeline.index("lock_release")
+    assert timeline.index("applied:checkpoint-1") < timeline.index("post_checkpoint:checkpoint-1")
+    assert timeline.index("post_checkpoint:checkpoint-1") < timeline.index("lock_release")
     renew_claim.assert_awaited()
     mark_applied.assert_awaited_once()
     _, run_record, command_record, initial_checkpoint = executor.calls[0]
     assert isinstance(run_record, RuntimeRunRecord)
     assert not isinstance(run_record, AgentRun)
+    assert run_record.source_id == str(trigger_message_id)
+    assert run_record.scheduling_position_created_at == trigger_created_at
+    assert run_record.scheduling_position_id == trigger_message_id
     assert isinstance(command_record, RuntimeCommandRecord)
     assert initial_checkpoint is None
 
@@ -380,12 +435,12 @@ async def test_checkpoint_reconciliation_marks_applied_without_invoking_graph() 
     run = _run()
     command = _command(run)
     reader = _Reader(
-        _checkpoint(
+        command=(_checkpoint(
             run,
             status="waiting_user",
-            command_ids=[str(command.id)],
+            command=command,
             checkpoint_id="checkpoint-reconciled",
-        )
+        ),)
     )
     executor = _Executor(timeline)
     post_checkpoint_handler = _PostCheckpointHandler(timeline)
@@ -416,17 +471,17 @@ async def test_checkpoint_reconciliation_marks_applied_without_invoking_graph() 
 
 
 @pytest.mark.asyncio
-async def test_post_checkpoint_failure_releases_command_before_marking_applied() -> None:
+async def test_post_checkpoint_failure_does_not_requeue_an_applied_command() -> None:
     timeline: list[str] = []
     run = _run()
     command = _command(run)
     reader = _Reader(
-        _checkpoint(
+        command=(_checkpoint(
             run,
             status="waiting_user",
-            command_ids=[str(command.id)],
+            command=command,
             checkpoint_id="checkpoint-side-effects",
-        )
+        ),)
     )
     executor = _Executor(timeline)
     post_checkpoint_handler = _PostCheckpointHandler(
@@ -456,20 +511,21 @@ async def test_post_checkpoint_failure_releases_command_before_marking_applied()
             post_checkpoint_handler=post_checkpoint_handler,
         ).run_once()
 
-    assert result.status == "retry"
-    assert result.error_code == "post_checkpoint_handler_failed"
+    assert result.status == "reconciled"
     assert executor.calls == []
-    assert release.await_args.kwargs["error_code"] == "post_checkpoint_handler_failed"
-    mark_applied.assert_not_awaited()
+    release.assert_not_awaited()
+    mark_applied.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_terminal_cancel_is_rejected_from_checkpoint_not_projection() -> None:
     timeline: list[str] = []
     run = _run()
-    run.projected_execution_status = "running"
     command = _command(run, "cancel")
-    reader = _Reader(_checkpoint(run, status="completed"))
+    reader = _Reader(
+        command=(None,),
+        latest=(_checkpoint(run, status="completed"),),
+    )
     executor = _Executor(timeline)
 
     with (
@@ -490,8 +546,8 @@ async def test_terminal_cancel_is_rejected_from_checkpoint_not_projection() -> N
         ).run_once()
 
     assert result.status == "rejected"
-    assert result.error_code == "terminal_cancel"
-    assert reject.await_args.kwargs["error_code"] == "terminal_cancel"
+    assert result.error_code == "already_terminal"
+    assert reject.await_args.kwargs["error_code"] == "already_terminal"
     assert executor.calls == []
     assert "projected_" not in inspect.getsource(RuntimeCommandWorker)
 
@@ -502,7 +558,10 @@ async def test_missing_command_id_after_invoke_returns_command_to_pending() -> N
     run = _run()
     command = _command(run)
     active = _checkpoint(run, status="waiting_user")
-    reader = _Reader(active, _checkpoint(run, status="running", checkpoint_id="checkpoint-2"))
+    reader = _Reader(
+        command=(None, None),
+        latest=(active,),
+    )
     executor = _Executor(timeline)
 
     with (
@@ -533,18 +592,14 @@ async def test_missing_command_id_after_invoke_returns_command_to_pending() -> N
 
 
 @pytest.mark.asyncio
-async def test_cancel_requires_cancelled_checkpoint_even_when_command_id_is_present() -> None:
+async def test_cancel_preserves_latest_checkpoint_without_invoking_graph() -> None:
     timeline: list[str] = []
     run = _run()
     command = _command(run, "cancel")
+    preserved = _checkpoint(run, status="waiting_user", checkpoint_id="checkpoint-before-cancel")
     reader = _Reader(
-        _checkpoint(run, status="running"),
-        _checkpoint(
-            run,
-            status="running",
-            command_ids=[str(command.id)],
-            checkpoint_id="checkpoint-after-cancel",
-        ),
+        command=(None,),
+        latest=(preserved,),
     )
     executor = _Executor(timeline)
 
@@ -569,11 +624,11 @@ async def test_cancel_requires_cancelled_checkpoint_even_when_command_id_is_pres
             executor=executor,
         ).run_once()
 
-    assert result.status == "retry"
-    assert result.error_code == "cancel_not_observed"
-    assert release.await_args.kwargs["error_code"] == "cancel_not_observed"
-    mark_applied.assert_not_awaited()
-    assert len(executor.calls) == 1
+    assert result.status == "applied"
+    assert result.checkpoint_id == "checkpoint-before-cancel"
+    release.assert_not_awaited()
+    assert mark_applied.await_args.kwargs["applied_checkpoint_id"] == "checkpoint-before-cancel"
+    assert executor.calls == []
 
 
 @pytest.mark.asyncio
@@ -610,12 +665,160 @@ async def test_lock_contention_never_reads_or_invokes_and_releases_claim() -> No
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_identity_mismatch_is_reclaimable_and_not_executed() -> None:
+async def test_active_tool_fence_defer_refunds_business_attempt_and_releases_claim(
+    _stub_business_attempt_boundary,
+) -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    worker = _worker(
+        timeline=timeline,
+        run=run,
+        reader=_Reader(command=(None,), latest=(None,)),
+        executor=_Executor(
+            timeline,
+            error=ToolExecutionReconciliationPending(
+                "group_workspace_active_lease",
+                "another invocation still owns the Group workspace operation",
+                defer_without_attempt=True,
+            ),
+        ),
+    )
+    worker._defer_without_attempt = AsyncMock()  # type: ignore[method-assign]
+
+    with patch(
+        "app.services.agent_runtime.command_worker.claim_next_command",
+        new=AsyncMock(return_value=command),
+    ):
+        result = await worker.run_once()
+
+    assert result.status == "retry"
+    assert result.error_code == "group_workspace_active_lease"
+    _stub_business_attempt_boundary.assert_awaited_once()
+    worker._defer_without_attempt.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_defer_release_atomically_refunds_the_consumed_attempt() -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    command.attempt_count = 3
+    worker = _worker(
+        timeline=timeline,
+        run=run,
+        reader=_Reader(),
+        executor=_Executor(timeline),
+    )
+
+    with patch(
+        "app.services.agent_runtime.command_worker.release_command_claim",
+        new=AsyncMock(return_value=command),
+    ) as release:
+        await worker._defer_without_attempt(
+            RuntimeCommandRecord(
+                id=command.id,
+                tenant_id=command.tenant_id,
+                run_id=command.run_id,
+                command_type="start",
+                payload=dict(command.payload),
+                actor_user_id=command.actor_user_id,
+                actor_agent_id=command.actor_agent_id,
+                attempt_count=command.attempt_count,
+            ),
+            "group_workspace_active_lease",
+        )
+
+    assert command.attempt_count == 2
+    release.assert_awaited_once()
+    assert "flush" in timeline
+
+
+@pytest.mark.asyncio
+async def test_exhausted_command_is_explicitly_quarantined_before_lock_or_graph(
+    _stub_business_attempt_boundary,
+) -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    command.attempt_count = 5
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_rejected",
+            new=AsyncMock(),
+        ) as rejected,
+    ):
+        result = await _worker(
+            timeline=timeline,
+            run=run,
+            reader=_Reader(),
+            executor=_Executor(timeline),
+        ).run_once()
+
+    assert result.status == "rejected"
+    assert result.error_code == "reconciliation_required"
+    rejected.assert_awaited_once()
+    _stub_business_attempt_boundary.assert_not_awaited()
+    assert "lock_acquire" not in timeline
+
+
+@pytest.mark.asyncio
+async def test_business_attempt_starts_only_after_real_thread_lock(
+    _stub_business_attempt_boundary,
+) -> None:
+    timeline: list[str] = []
+    run = _run()
+    command = _command(run, "start")
+    observed = _checkpoint(run, status="completed", command=command)
+    _stub_business_attempt_boundary.side_effect = lambda _command: timeline.append(
+        "business_attempt"
+    )
+
+    with (
+        patch(
+            "app.services.agent_runtime.command_worker.claim_next_command",
+            new=AsyncMock(return_value=command),
+        ),
+        patch(
+            "app.services.agent_runtime.command_worker.mark_command_applied",
+            new=AsyncMock(),
+        ),
+    ):
+        await _worker(
+            timeline=timeline,
+            run=run,
+            reader=_Reader(command=(None, observed), latest=(None,)),
+            executor=_Executor(timeline),
+        ).run_once()
+
+    assert timeline.index("lock_acquire") < timeline.index("business_attempt")
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_metadata_mismatch_is_reclaimable_and_not_executed() -> None:
     timeline: list[str] = []
     run = _run()
     command = _command(run)
-    wrong_registry = replace(_registry(run), tenant_id=str(uuid.uuid4()))
-    reader = _Reader(_checkpoint(run, status="waiting_user", registry=wrong_registry))
+    checkpoint = _checkpoint(
+        run,
+        status="waiting_user",
+        command=command,
+    )
+    checkpoint = replace(
+        checkpoint,
+        metadata={
+            **checkpoint.metadata,
+            "clawith_run_id": str(uuid.uuid4()),
+        },
+    )
+    reader = _Reader(
+        command=(checkpoint,)
+    )
     executor = _Executor(timeline)
 
     with (
@@ -646,7 +849,7 @@ async def test_resume_without_checkpoint_is_rejected_without_execution() -> None
     timeline: list[str] = []
     run = _run()
     command = _command(run, "resume")
-    reader = _Reader(None)
+    reader = _Reader(command=(None,), latest=(None,))
     executor = _Executor(timeline)
 
     with (
@@ -677,7 +880,10 @@ async def test_unexpected_driver_error_releases_claim_then_propagates() -> None:
     timeline: list[str] = []
     run = _run()
     command = _command(run)
-    reader = _Reader(_checkpoint(run, status="waiting_user"))
+    reader = _Reader(
+        command=(None,),
+        latest=(_checkpoint(run, status="waiting_user"),),
+    )
     executor = _Executor(timeline, error=RuntimeError("provider unavailable"))
 
     with (
@@ -706,7 +912,10 @@ async def test_driver_can_deterministically_reject_invalid_resume() -> None:
     timeline: list[str] = []
     run = _run()
     command = _command(run)
-    reader = _Reader(_checkpoint(run, status="waiting_user"))
+    reader = _Reader(
+        command=(None,),
+        latest=(_checkpoint(run, status="waiting_user"),),
+    )
     executor = _Executor(
         timeline,
         error=CommandExecutionRejected("invalid_resume", "correlation ID does not match"),

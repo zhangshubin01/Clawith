@@ -81,7 +81,7 @@ class TriggerRuntimeCompletionHandler:
         run: RuntimeRunRecord,
         checkpoint: CheckpointObservation,
     ) -> None:
-        if run.registry.source_type != "trigger":
+        if run.source_type != "trigger":
             return
         status = checkpoint.state["lifecycle"]["status"]
         if status not in _TERMINAL_STATUSES:

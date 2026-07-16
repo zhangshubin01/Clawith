@@ -8,11 +8,14 @@ executed, or must the Runtime reuse/reconcile an earlier outcome?
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import re
+import unicodedata
 from typing import Any, Callable, Literal
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import uuid
 
 from sqlalchemy import select
@@ -38,6 +41,118 @@ _SIDE_EFFECT_CLASSIFICATIONS = frozenset({"read", "write", "external_write"})
 _RETRY_POLICIES = frozenset({"safe", "conditional", "never"})
 _METADATA_KEY = "__clawith_tool_execution__"
 _METADATA_VERSION = 1
+_RESULT_METADATA_MAX_BYTES = 16 * 1024
+_RESULT_METADATA_KEYS = frozenset(
+    {
+        "error_code",
+        "error_class",
+        "retryable",
+        "artifact_refs",
+        "evidence_refs",
+        "nul_replacements",
+        "control_replacements",
+        "redaction_count",
+        "summary_truncated",
+        "content_hash",
+        "artifact_content_hash",
+        "mime_type",
+        "size",
+        "archive_status",
+        "archive_error_code",
+        "message_id",
+        "accepted_recipients",
+        "refused_recipients",
+        "tenant_id",
+        "period_start",
+        "period_end",
+        "objective_count",
+        "kr_count",
+        "objective_id",
+        "kr_id",
+        "report_id",
+        "progress_log_id",
+        "owner_type",
+        "owner_id",
+        "member_type",
+        "member_id",
+        "report_date",
+        "previous_value",
+        "current_value",
+        "target_value",
+        "status",
+        "changed_fields",
+        "content_truncated",
+        "okr_content_hash",
+        "stored_character_count",
+        "source",
+        "operation_id",
+        "updated_count",
+        "skipped_count",
+        "error_count",
+        "updated_refs",
+        "report_type",
+        "workspace_path",
+        "db_status",
+        "projection_status",
+        "provider",
+        "operation",
+        "project_id",
+        "project_name",
+        "database_name",
+        "region",
+        "value_ref",
+        "env_id",
+        "env_key",
+        "targets",
+        "domain",
+        "verified",
+        "available",
+        "price",
+        "period",
+        "deploy_method",
+        "git_ref",
+        "linked_repo",
+        "confirmed_blob_digests",
+        "deployment_id",
+        "deployment_url",
+        "deployment_state",
+    }
+)
+_SENSITIVE_KEYS = frozenset(
+    {
+        "apikey",
+        "accesstoken",
+        "refreshtoken",
+        "token",
+        "password",
+        "passwd",
+        "authorization",
+        "cookie",
+        "setcookie",
+        "dsn",
+        "secret",
+        "clientsecret",
+        "privatekey",
+        "signedurl",
+        "signature",
+        "sig",
+        "xamzsignature",
+        "xamzcredential",
+        "xamzsecuritytoken",
+        "xgoogsignature",
+        "xgoogcredential",
+        "xgoogsecuritytoken",
+    }
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|"
+    r"authorization|cookie|dsn|client[_-]?secret)\b(\s*[:=]\s*)"
+    r"(?:bearer\s+)?([^\s,;]+)"
+)
+_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+_DSN_RE = re.compile(
+    r"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s<>\"']+"
+)
 
 
 class ToolExecutionError(RuntimeError):
@@ -48,6 +163,380 @@ class ToolExecutionError(RuntimeError):
         self.code = code
 
 
+class ToolExecutionReconciliationPending(RuntimeError):
+    """Recovery must retry without pretending that a tool outcome is known."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        defer_without_attempt: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.defer_without_attempt = defer_without_attempt
+
+
+def _sensitive_key(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = re.sub(r"[^a-z0-9]", "", value.casefold())
+    return normalized in _SENSITIVE_KEYS
+
+
+def _sanitize_url(value: str) -> tuple[str, int]:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value, 0
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.query:
+        return value, 0
+    redactions = 0
+    query = []
+    for key, item in parse_qsl(parsed.query, keep_blank_values=True):
+        if _sensitive_key(key):
+            query.append((key, "[REDACTED]"))
+            redactions += 1
+        else:
+            query.append((key, item))
+    if not redactions:
+        return value, 0
+    return (
+        urlunsplit(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                urlencode(query),
+                parsed.fragment,
+            )
+        ),
+        redactions,
+    )
+
+
+def _redact_text(value: str) -> tuple[str, int]:
+    count = 0
+
+    def assignment(match: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        return f"{match.group(1)}{match.group(2)}[REDACTED]"
+
+    redacted = _SECRET_ASSIGNMENT_RE.sub(assignment, value)
+
+    def dsn(match: re.Match[str]) -> str:
+        nonlocal count
+        count += 1
+        scheme = match.group(0).split(":", 1)[0]
+        return f"{scheme}://[REDACTED]"
+
+    redacted = _DSN_RE.sub(dsn, redacted)
+
+    def url(match: re.Match[str]) -> str:
+        nonlocal count
+        normalized, replacements = _sanitize_url(match.group(0))
+        count += replacements
+        return normalized
+
+    return _URL_RE.sub(url, redacted), count
+
+
+def _normalize_text(value: str, *, redact: bool) -> tuple[str, int, int, int]:
+    nul_replacements = 0
+    control_replacements = 0
+    output: list[str] = []
+    for character in value:
+        if character == "\x00":
+            output.append("\ufffd")
+            nul_replacements += 1
+        elif character in {"\t", "\n", "\r"}:
+            output.append(character)
+        elif unicodedata.category(character) == "Cc":
+            output.append("\ufffd")
+            control_replacements += 1
+        else:
+            output.append(character)
+    normalized = "".join(output)
+    if not redact:
+        return normalized, nul_replacements, control_replacements, 0
+    redacted, redaction_count = _redact_text(normalized)
+    return redacted, nul_replacements, control_replacements, redaction_count
+
+
+def _sanitize_json(value: Any, *, sensitive: bool = False) -> Any:
+    if sensitive:
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key, _, _, _ = _normalize_text(str(key), redact=False)
+            if normalized_key in sanitized:
+                raise ToolExecutionError(
+                    "invalid_tool_execution_input",
+                    "JSON keys collide after control-character normalization",
+                )
+            sanitized[normalized_key] = _sanitize_json(
+                item,
+                sensitive=_sensitive_key(normalized_key),
+            )
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_json(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_json(item) for item in value]
+    if isinstance(value, str):
+        normalized, _, _, _ = _normalize_text(value, redact=True)
+        return normalized
+    return value
+
+
+def sanitize_tool_arguments(
+    arguments: dict[str, Any],
+    *,
+    sensitive_paths: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Return a JSON-safe recursive secret-redacted ledger copy."""
+    copied = _json_copy(arguments, field="arguments")
+    sanitized = _sanitize_json(copied)
+    if not isinstance(sanitized, dict):  # pragma: no cover - guarded by _json_copy
+        raise ToolExecutionError(
+            "invalid_tool_execution_input",
+            "arguments must normalize to a JSON object",
+        )
+    for dotted_path in sensitive_paths:
+        parts = [part for part in dotted_path.split(".") if part]
+        if not parts:
+            continue
+        current: Any = sanitized
+        for part in parts[:-1]:
+            if not isinstance(current, dict) or part not in current:
+                current = None
+                break
+            current = current[part]
+        if isinstance(current, dict) and parts[-1] in current:
+            current[parts[-1]] = "[REDACTED]"
+    return _json_copy(sanitized, field="sanitized_arguments")
+
+
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    marker = "\n...[tool result archived]...\n"
+    marker_bytes = marker.encode("utf-8")
+    if len(marker_bytes) >= max_bytes:
+        return encoded[:max_bytes].decode("utf-8", errors="ignore")
+    remaining = max_bytes - len(marker_bytes)
+    head_size = (remaining * 3) // 5
+    tail_size = remaining - head_size
+    head = encoded[:head_size].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_size:].decode("utf-8", errors="ignore")
+    while len((head + marker + tail).encode("utf-8")) > max_bytes and tail:
+        tail = tail[:-1]
+    return head + marker + tail
+
+
+def _bounded_result_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    filtered = _sanitize_json(
+        {
+            key: deepcopy(item)
+            for key, item in value.items()
+            if key in _RESULT_METADATA_KEYS
+        }
+    )
+    if not isinstance(filtered, dict):  # pragma: no cover - constructed as dict
+        raise ToolExecutionError(
+            "invalid_tool_outcome_metadata",
+            "tool outcome metadata must be an object",
+        )
+    try:
+        encoded = json.dumps(
+            filtered,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ToolExecutionError(
+            "invalid_tool_outcome_metadata",
+            "tool outcome metadata must contain finite JSON values",
+        ) from exc
+    if len(encoded) > _RESULT_METADATA_MAX_BYTES:
+        raise ToolExecutionError(
+            "invalid_tool_outcome_metadata",
+            "tool outcome metadata exceeds its storage limit",
+        )
+    copied = json.loads(encoded)
+    if not isinstance(copied, dict):  # pragma: no cover - constructed as dict
+        raise ToolExecutionError(
+            "invalid_tool_outcome_metadata",
+            "tool outcome metadata must be an object",
+        )
+    return copied
+
+
+def normalize_tool_outcome(
+    outcome: ToolExecutionOutcome,
+    *,
+    effect: SideEffectClassification,
+    retry_policy: RetryPolicy,
+    inline_max_bytes: int,
+) -> tuple[ToolExecutionOutcome, str | None]:
+    """Normalize one typed result and return any body requiring private archive."""
+    if inline_max_bytes <= 0:
+        raise ToolExecutionError(
+            "invalid_tool_execution_input",
+            "inline_max_bytes must be positive",
+        )
+    if outcome.status not in {"succeeded", "failed", "unknown"}:
+        raise ToolExecutionError(
+            "invalid_tool_outcome",
+            f"unsupported tool outcome status: {outcome.status}",
+        )
+    if outcome.result_summary is not None and not isinstance(
+        outcome.result_summary, str
+    ):
+        raise ToolExecutionError(
+            "invalid_tool_outcome",
+            "tool outcome summary must be a string or null",
+        )
+    if outcome.result_ref is not None and not isinstance(outcome.result_ref, str):
+        raise ToolExecutionError(
+            "invalid_tool_outcome",
+            "tool outcome result_ref must be a string or null",
+        )
+    if outcome.error_code is not None and not isinstance(outcome.error_code, str):
+        raise ToolExecutionError(
+            "invalid_tool_outcome",
+            "tool outcome error_code must be a string or null",
+        )
+    if not isinstance(outcome.retryable, bool) or not isinstance(
+        outcome.metadata, dict
+    ):
+        raise ToolExecutionError(
+            "invalid_tool_outcome",
+            "tool outcome retryable/metadata types are invalid",
+        )
+    if outcome.private_binary is not None and not isinstance(
+        outcome.private_binary,
+        bytes,
+    ):
+        raise ToolExecutionError(
+            "invalid_tool_outcome",
+            "private binary tool outcome content must be bytes or null",
+        )
+    if outcome.private_binary is not None and outcome.status != "succeeded":
+        raise ToolExecutionError(
+            "invalid_tool_outcome",
+            "private binary tool outcome content requires succeeded status",
+        )
+    summary = outcome.result_summary
+    nul_replacements = control_replacements = redaction_count = 0
+    if summary is not None:
+        summary, nul_replacements, control_replacements, redaction_count = (
+            _normalize_text(summary, redact=True)
+        )
+    refs: list[tuple[str, ...]] = []
+    for raw_refs in (outcome.artifact_refs, outcome.evidence_refs):
+        if not isinstance(raw_refs, (tuple, list)):
+            raise ToolExecutionError(
+                "invalid_tool_outcome",
+                "artifact and evidence refs must be arrays",
+            )
+        normalized_refs: list[str] = []
+        for raw_ref in raw_refs:
+            if not isinstance(raw_ref, str) or not raw_ref.strip():
+                raise ToolExecutionError(
+                    "invalid_tool_outcome",
+                    "artifact and evidence refs must be non-empty strings",
+                )
+            ref, nul_count, control_count, ref_redactions = _normalize_text(
+                raw_ref.strip(),
+                redact=True,
+            )
+            nul_replacements += nul_count
+            control_replacements += control_count
+            redaction_count += ref_redactions
+            normalized_refs.append(ref)
+        refs.append(tuple(normalized_refs))
+    result_ref = outcome.result_ref
+    if result_ref is not None:
+        result_ref, nul_count, control_count, ref_redactions = _normalize_text(
+            result_ref.strip(),
+            redact=True,
+        )
+        nul_replacements += nul_count
+        control_replacements += control_count
+        redaction_count += ref_redactions
+        if not result_ref:
+            result_ref = None
+    error_code = outcome.error_code
+    if error_code is not None:
+        error_code, nul_count, control_count, _ = _normalize_text(
+            error_code.strip(),
+            redact=False,
+        )
+        nul_replacements += nul_count
+        control_replacements += control_count
+        error_code = error_code[:200] or None
+
+    archived_body: str | None = None
+    summary_truncated = False
+    content_hash: str | None = None
+    if summary is not None:
+        content_hash = hashlib.sha256(summary.encode("utf-8")).hexdigest()
+        if len(summary.encode("utf-8")) > inline_max_bytes:
+            summary_truncated = True
+            if result_ref is None:
+                archived_body = summary
+            summary = _truncate_utf8(summary, inline_max_bytes)
+
+    retryable = (
+        outcome.retryable
+        and outcome.status == "failed"
+        and effect == "read"
+        and retry_policy == "safe"
+    )
+    metadata = _bounded_result_metadata(
+        {
+            **outcome.metadata,
+            "error_code": error_code,
+            "retryable": retryable,
+            "artifact_refs": list(refs[0]),
+            "evidence_refs": list(refs[1]),
+            "nul_replacements": nul_replacements,
+            "control_replacements": control_replacements,
+            "redaction_count": redaction_count,
+            "summary_truncated": summary_truncated,
+            "content_hash": content_hash,
+            "archive_status": (
+                "pending"
+                if archived_body is not None
+                else "external_ref"
+                if result_ref is not None and summary_truncated
+                else "inline"
+            ),
+        }
+    )
+    return (
+        ToolExecutionOutcome(
+            status=outcome.status,
+            result_summary=summary,
+            result_ref=result_ref,
+            error_code=error_code,
+            retryable=retryable,
+            artifact_refs=refs[0],
+            evidence_refs=refs[1],
+            metadata=metadata,
+            private_binary=outcome.private_binary,
+        ),
+        archived_body,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ToolExecutionOutcome:
     """The durable, safe-to-reuse portion of a completed tool outcome."""
@@ -55,6 +544,23 @@ class ToolExecutionOutcome:
     status: Literal["succeeded", "failed", "unknown"]
     result_summary: str | None
     result_ref: str | None
+    error_code: str | None = None
+    retryable: bool = False
+    artifact_refs: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+    # Ephemeral handoff to ToolResultStore. It is archived before ledger
+    # settlement and never serialized into messages or result metadata.
+    private_binary: bytes | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+    @property
+    def summary(self) -> str | None:
+        """Canonical public name while old callers migrate from result_summary."""
+        return self.result_summary
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +595,16 @@ class ToolExecutionReservation:
         return not self.blocked and self.reusable_result is None
 
 
+@dataclass(frozen=True, slots=True)
+class ToolExecutionTakeover:
+    """Atomic recovery-fence decision for an existing ledger position."""
+
+    execution: AgentToolExecution
+    acquired: bool
+    active: bool
+    terminal_outcome: ToolExecutionOutcome | None
+
+
 def _require_text(value: str, *, field: str, max_length: int) -> None:
     if not value or not value.strip():
         raise ToolExecutionError("invalid_tool_execution_input", f"{field} must not be blank")
@@ -102,6 +618,11 @@ def _require_text(value: str, *, field: str, max_length: int) -> None:
 def _require_optional_text(value: str | None, *, field: str, max_length: int) -> None:
     if value is not None:
         _require_text(value, field=field, max_length=max_length)
+
+
+def _metadata_count(metadata: dict[str, Any] | None, field_name: str) -> int:
+    value = (metadata or {}).get(field_name, 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 def _json_copy(value: dict[str, Any], *, field: str) -> dict[str, Any]:
@@ -142,20 +663,19 @@ def _stored_arguments(
     side_effect_classification: str,
     retry_policy: str,
 ) -> dict[str, Any]:
-    safe_arguments = (
-        _json_copy(sanitized_arguments, field="sanitized_arguments") if sanitized_arguments is not None else None
+    del side_effect_classification, retry_policy
+    return (
+        _json_copy(sanitized_arguments, field="sanitized_arguments")
+        if sanitized_arguments is not None
+        else {}
     )
-    return {
-        "arguments": safe_arguments,
-        _METADATA_KEY: {
-            "version": _METADATA_VERSION,
-            "side_effect_classification": side_effect_classification,
-            "retry_policy": retry_policy,
-        },
-    }
 
 
 def _execution_metadata(execution: AgentToolExecution) -> tuple[str, str]:
+    effect = getattr(execution, "effect", None)
+    retry_policy = getattr(execution, "retry_policy", None)
+    if effect in _SIDE_EFFECT_CLASSIFICATIONS and retry_policy in _RETRY_POLICIES:
+        return str(effect), str(retry_policy)
     stored = execution.sanitized_arguments
     metadata = stored.get(_METADATA_KEY) if isinstance(stored, dict) else None
     if not isinstance(metadata, dict) or metadata.get("version") != _METADATA_VERSION:
@@ -167,6 +687,22 @@ def _execution_metadata(execution: AgentToolExecution) -> tuple[str, str]:
     if effect not in _SIDE_EFFECT_CLASSIFICATIONS or retry_policy not in _RETRY_POLICIES:
         return "external_write", "never"
     return str(effect), str(retry_policy)
+
+
+def execution_policy(execution: AgentToolExecution) -> tuple[str, str]:
+    """Read explicit policy columns with conservative legacy fallback."""
+    return _execution_metadata(execution)
+
+
+def _execution_arguments(execution: AgentToolExecution) -> dict[str, Any]:
+    stored = execution.sanitized_arguments
+    if not isinstance(stored, dict):
+        return {}
+    metadata = stored.get(_METADATA_KEY)
+    if isinstance(metadata, dict) and "arguments" in stored:
+        legacy = stored.get("arguments")
+        return legacy if isinstance(legacy, dict) else {}
+    return stored
 
 
 def _validate_request(
@@ -280,15 +816,20 @@ def _require_exact_request(
     arguments_hash: str,
     stored_arguments: dict[str, Any],
     request_ref: str | None,
+    side_effect_classification: str,
+    retry_policy: str,
 ) -> None:
     expected = {
         "tool_name": tool_name,
         "assistant_message_id": assistant_message_id,
         "arguments_hash": arguments_hash,
-        "sanitized_arguments": stored_arguments,
         "request_ref": request_ref,
     }
     mismatched = [field for field, value in expected.items() if getattr(existing, field) != value]
+    if _execution_arguments(existing) != stored_arguments:
+        mismatched.append("sanitized_arguments")
+    if _execution_metadata(existing) != (side_effect_classification, retry_policy):
+        mismatched.extend(("effect", "retry_policy"))
     if mismatched:
         raise ToolExecutionError(
             "tool_call_idempotency_mismatch",
@@ -297,11 +838,33 @@ def _require_exact_request(
 
 
 def _outcome(execution: AgentToolExecution) -> ToolExecutionOutcome:
+    metadata = getattr(execution, "result_metadata", None)
+    metadata = _bounded_result_metadata(metadata if isinstance(metadata, dict) else {})
+    artifact_refs = metadata.get("artifact_refs", [])
+    evidence_refs = metadata.get("evidence_refs", [])
     return ToolExecutionOutcome(
         status=execution.status,  # type: ignore[arg-type]
         result_summary=execution.result_summary,
         result_ref=execution.result_ref,
+        error_code=(
+            str(metadata["error_code"])
+            if isinstance(metadata.get("error_code"), str)
+            else None
+        ),
+        retryable=metadata.get("retryable") is True,
+        artifact_refs=tuple(
+            str(value) for value in artifact_refs if isinstance(value, str)
+        ) if isinstance(artifact_refs, list) else (),
+        evidence_refs=tuple(
+            str(value) for value in evidence_refs if isinstance(value, str)
+        ) if isinstance(evidence_refs, list) else (),
+        metadata=metadata,
     )
+
+
+def execution_outcome(execution: AgentToolExecution) -> ToolExecutionOutcome:
+    """Rehydrate the shared typed outcome from one terminal ledger fact."""
+    return _outcome(execution)
 
 
 def _decision_for_existing(
@@ -359,6 +922,7 @@ def _decision_for_existing(
         execution.status = "started"
         execution.result_summary = None
         execution.result_ref = None
+        execution.result_metadata = {}
         execution.lease_owner = lease_owner
         execution.lease_expires_at = lease_expires_at
         execution.started_at = now
@@ -452,6 +1016,8 @@ async def reserve_tool_execution(
             arguments_hash=arguments_hash,
             stored_arguments=stored_arguments,
             request_ref=request_ref,
+            side_effect_classification=side_effect_classification,
+            retry_policy=retry_policy,
         )
         decision = _decision_for_existing(
             existing,
@@ -474,6 +1040,9 @@ async def reserve_tool_execution(
         arguments_hash=arguments_hash,
         sanitized_arguments=deepcopy(stored_arguments),
         request_ref=request_ref,
+        effect=side_effect_classification,
+        retry_policy=retry_policy,
+        result_metadata={},
         status="started",
         lease_owner=lease_owner,
         lease_expires_at=lease_expires_at,
@@ -511,6 +1080,8 @@ async def reserve_tool_execution(
             arguments_hash=arguments_hash,
             stored_arguments=stored_arguments,
             request_ref=request_ref,
+            side_effect_classification=side_effect_classification,
+            retry_policy=retry_policy,
         )
         # A concurrent winner has already crossed into started.  Even when its
         # lease later expires, the losing worker may not execute the call.
@@ -582,6 +1153,107 @@ async def renew_tool_execution_lease(
     return execution
 
 
+async def assert_tool_execution_fence(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    lease_owner: str,
+    clock: Callable[[], datetime] | None = None,
+) -> AgentToolExecution:
+    """Lock and verify an unexpired owner immediately around one side effect."""
+    execution = await _get_locked_execution(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution_id,
+    )
+    _require_lease_owner(execution, lease_owner)
+    now = (clock or (lambda: datetime.now(UTC)))()
+    if execution.lease_expires_at is None or execution.lease_expires_at <= now:
+        raise ToolExecutionError(
+            "tool_execution_lease_lost",
+            "tool execution lease expired before the fenced side effect",
+        )
+    return execution
+
+
+async def takeover_tool_execution_for_reconciliation(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    lease_owner: str,
+    lease_ttl_seconds: int,
+    reopen_unknown: bool = False,
+    clock: Callable[[], datetime] | None = None,
+) -> ToolExecutionTakeover:
+    """Atomically replace only an expired owner before reading durable facts."""
+    _require_text(lease_owner, field="lease_owner", max_length=128)
+    if lease_ttl_seconds <= 0:
+        raise ToolExecutionError(
+            "invalid_tool_execution_input",
+            "lease_ttl_seconds must be positive",
+        )
+    execution = await _get_locked_execution(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution_id,
+    )
+    now = (clock or (lambda: datetime.now(UTC)))()
+    if execution.status == "unknown" and reopen_unknown:
+        execution.status = "started"
+        execution.lease_owner = lease_owner
+        execution.lease_expires_at = now + timedelta(seconds=lease_ttl_seconds)
+        execution.completed_at = None
+        await db.flush()
+        return ToolExecutionTakeover(
+            execution=execution,
+            acquired=True,
+            active=False,
+            terminal_outcome=None,
+        )
+    if execution.status != "started":
+        if execution.status not in {"succeeded", "failed", "unknown"}:
+            raise ToolExecutionError(
+                "invalid_tool_execution_state",
+                f"tool execution {execution.id} has unsupported status {execution.status}",
+            )
+        return ToolExecutionTakeover(
+            execution=execution,
+            acquired=False,
+            active=False,
+            terminal_outcome=_outcome(execution),
+        )
+
+    if execution.lease_owner == lease_owner:
+        if execution.lease_expires_at is None or execution.lease_expires_at <= now:
+            execution.lease_expires_at = now + timedelta(seconds=lease_ttl_seconds)
+            await db.flush()
+        return ToolExecutionTakeover(
+            execution=execution,
+            acquired=True,
+            active=False,
+            terminal_outcome=None,
+        )
+    if execution.lease_expires_at is not None and execution.lease_expires_at > now:
+        return ToolExecutionTakeover(
+            execution=execution,
+            acquired=False,
+            active=True,
+            terminal_outcome=None,
+        )
+
+    execution.lease_owner = lease_owner
+    execution.lease_expires_at = now + timedelta(seconds=lease_ttl_seconds)
+    await db.flush()
+    return ToolExecutionTakeover(
+        execution=execution,
+        acquired=True,
+        active=False,
+        terminal_outcome=None,
+    )
+
+
 async def _mark_terminal(
     db: AsyncSession,
     *,
@@ -591,21 +1263,68 @@ async def _mark_terminal(
     status: Literal["succeeded", "failed", "unknown"],
     result_summary: str | None,
     result_ref: str | None,
+    error_code: str | None,
+    retryable: bool,
+    artifact_refs: tuple[str, ...],
+    evidence_refs: tuple[str, ...],
+    metadata: dict[str, Any] | None,
     clock: Callable[[], datetime] | None,
 ) -> AgentToolExecution:
+    if result_summary is not None:
+        result_summary, nul_count, control_count, redaction_count = _normalize_text(
+            result_summary,
+            redact=True,
+        )
+    else:
+        nul_count = control_count = redaction_count = 0
+    if result_ref is not None:
+        result_ref, ref_nul, ref_control, ref_redactions = _normalize_text(
+            result_ref,
+            redact=True,
+        )
+        nul_count += ref_nul
+        control_count += ref_control
+        redaction_count += ref_redactions
     _require_optional_text(result_ref, field="result_ref", max_length=500)
     if result_summary is not None and len(result_summary) > 1_000_000:
         raise ToolExecutionError(
             "invalid_tool_execution_input",
             "result_summary exceeds its storage limit",
         )
+    result_metadata = _bounded_result_metadata(
+        {
+            **(metadata or {}),
+            "error_code": error_code,
+            "retryable": retryable,
+            "artifact_refs": list(artifact_refs),
+            "evidence_refs": list(evidence_refs),
+            "nul_replacements": (
+                _metadata_count(metadata, "nul_replacements") + nul_count
+            ),
+            "control_replacements": (
+                _metadata_count(metadata, "control_replacements")
+                + control_count
+            ),
+            "redaction_count": (
+                _metadata_count(metadata, "redaction_count")
+                + redaction_count
+            ),
+        }
+    )
     execution = await _get_locked_execution(
         db,
         tenant_id=tenant_id,
         execution_id=execution_id,
     )
     if execution.status == status:
-        if execution.result_summary == result_summary and execution.result_ref == result_ref:
+        if (
+            execution.result_summary == result_summary
+            and execution.result_ref == result_ref
+            and (
+                not getattr(execution, "result_metadata", None)
+                or execution.result_metadata == result_metadata
+            )
+        ):
             return execution
         raise ToolExecutionError(
             "tool_execution_terminal_conflict",
@@ -620,6 +1339,7 @@ async def _mark_terminal(
     execution.status = status
     execution.result_summary = result_summary
     execution.result_ref = result_ref
+    execution.result_metadata = result_metadata
     execution.lease_expires_at = None
     execution.completed_at = (clock or (lambda: datetime.now(UTC)))()
     await db.flush()
@@ -634,6 +1354,11 @@ async def mark_tool_execution_succeeded(
     lease_owner: str,
     result_summary: str | None,
     result_ref: str | None,
+    error_code: str | None = None,
+    retryable: bool = False,
+    artifact_refs: tuple[str, ...] = (),
+    evidence_refs: tuple[str, ...] = (),
+    metadata: dict[str, Any] | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> AgentToolExecution:
     """Persist a reusable successful receipt under a row lock."""
@@ -645,6 +1370,11 @@ async def mark_tool_execution_succeeded(
         status="succeeded",
         result_summary=result_summary,
         result_ref=result_ref,
+        error_code=error_code,
+        retryable=retryable,
+        artifact_refs=artifact_refs,
+        evidence_refs=evidence_refs,
+        metadata=metadata,
         clock=clock,
     )
 
@@ -657,6 +1387,11 @@ async def mark_tool_execution_failed(
     lease_owner: str,
     result_summary: str | None,
     result_ref: str | None = None,
+    error_code: str | None = None,
+    retryable: bool = False,
+    artifact_refs: tuple[str, ...] = (),
+    evidence_refs: tuple[str, ...] = (),
+    metadata: dict[str, Any] | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> AgentToolExecution:
     """Persist a known failure; only explicit safe-read policy may retry it."""
@@ -668,6 +1403,11 @@ async def mark_tool_execution_failed(
         status="failed",
         result_summary=result_summary,
         result_ref=result_ref,
+        error_code=error_code,
+        retryable=retryable,
+        artifact_refs=artifact_refs,
+        evidence_refs=evidence_refs,
+        metadata=metadata,
         clock=clock,
     )
 
@@ -680,6 +1420,11 @@ async def mark_tool_execution_unknown(
     lease_owner: str,
     result_summary: str | None,
     result_ref: str | None = None,
+    error_code: str | None = None,
+    retryable: bool = False,
+    artifact_refs: tuple[str, ...] = (),
+    evidence_refs: tuple[str, ...] = (),
+    metadata: dict[str, Any] | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> AgentToolExecution:
     """Persist an uncertain outcome that always requires reconciliation."""
@@ -691,5 +1436,10 @@ async def mark_tool_execution_unknown(
         status="unknown",
         result_summary=result_summary,
         result_ref=result_ref,
+        error_code=error_code,
+        retryable=retryable,
+        artifact_refs=artifact_refs,
+        evidence_refs=evidence_refs,
+        metadata=metadata,
         clock=clock,
     )

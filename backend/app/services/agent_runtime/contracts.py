@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Literal
 import uuid
 
 from app.services.agent_runtime.state import JsonObject, LifecycleStatus
@@ -15,6 +14,7 @@ RuntimeSourceType = Literal["chat", "trigger", "task", "a2a", "heartbeat"]
 RunKind = Literal["foreground", "background", "delegated", "orchestration"]
 RuntimeType = Literal["legacy", "langgraph"]
 DeliveryStatus = Literal["not_required", "pending", "delivered", "failed"]
+RUNTIME_COMMAND_METADATA_KEY = "__clawith_runtime"
 RuntimeEventType = Literal[
     "run_created",
     "status_changed",
@@ -51,6 +51,8 @@ class StartRunCommand:
     root_run_id: uuid.UUID | None = None
     system_role: str | None = None
     model_id: uuid.UUID | None = None
+    runtime_thread_id: str | None = None
+    requested_model_turn_limit: int | None = None
     scheduling_lane_key: str | None = None
     scheduling_position_created_at: datetime | None = None
     scheduling_position_id: uuid.UUID | None = None
@@ -98,22 +100,29 @@ class RunHandle:
 
 @dataclass(frozen=True, slots=True)
 class RunView:
-    """Product query view; never an input to Graph routing or recovery."""
+    """Typed view derived from one exact Run/Command checkpoint."""
 
     tenant_id: uuid.UUID
     run_id: uuid.UUID
+    thread_id: str
+    session_id: uuid.UUID | None
     source_type: RuntimeSourceType
     run_kind: RunKind
     goal: str
     runtime_type: RuntimeType
     execution_status: LifecycleStatus | None
+    current_node: str | None
+    model_step_count: int
     waiting_type: str | None
+    waiting_reason: str | None
+    waiting_correlation_id: str | None
     result_summary: str | None
     error_code: str | None
     last_error: str | None
+    verification_result: JsonObject | None
     delivery_status: DeliveryStatus
-    projection_checkpoint_id: str | None
-    projection_updated_at: datetime | None
+    applied_checkpoint_id: str | None
+    checkpoint_created_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -137,22 +146,3 @@ class RuntimeEventCursor:
 
     created_at: datetime
     event_id: uuid.UUID
-
-
-class AgentRuntimeAdapter(Protocol):
-    """The only Runtime surface available to channels and product services."""
-
-    async def start_run(self, command: StartRunCommand) -> RunHandle: ...
-
-    async def resume_run(self, command: ResumeRunCommand) -> RunHandle: ...
-
-    async def cancel_run(self, command: CancelRunCommand) -> RunHandle: ...
-
-    async def get_run_state(self, tenant_id: uuid.UUID, run_id: uuid.UUID) -> RunView: ...
-
-    def stream_run(
-        self,
-        handle: RunHandle,
-        *,
-        after: RuntimeEventCursor | None = None,
-    ) -> AsyncIterator[RuntimeEvent]: ...

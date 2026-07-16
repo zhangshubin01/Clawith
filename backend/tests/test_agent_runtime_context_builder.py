@@ -13,6 +13,7 @@ from app.services.agent_runtime.session_context_service import (
 from app.services.agent_runtime.state import (
     RunInputSnapshots,
     RunRegistrySnapshot,
+    RuntimeContext,
     RuntimeGraphState,
 )
 
@@ -25,6 +26,22 @@ class _SessionContextService:
     async def load_context_pack(self, db, *, tenant_id, session_id):
         self.calls.append((db, tenant_id, session_id))
         return self.pack
+
+
+class _ScalarResult:
+    def __init__(self, value: str):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class _Db:
+    def __init__(self, session_type: str = "group") -> None:
+        self.session_type = session_type
+
+    async def execute(self, _statement):
+        return _ScalarResult(self.session_type)
 
 
 def _snapshot(*, version: int = 3, summary: str = "session summary"):
@@ -99,15 +116,42 @@ def _state(
             session_id=str(uuid.uuid4()),
         ),
         "snapshots": snapshots,
+        "messages": run_messages or [],
+        "thread_summary": {
+            "task_goal_and_constraints": "Finish the task",
+            "completed_work_and_results": "Read docs",
+            "key_decisions_and_evidence": "",
+            "unfinished_or_blocked": "",
+            "next_actions": "Continue",
+        },
         "lifecycle": {
             "status": status,
             "next_route": next_route,
-            "run_messages": run_messages or [],
-            "run_summary": {"progress": ["read docs"]},
             "waiting_request": None,
             "verification_result": None,
         },
     }
+
+
+def _context(state: RuntimeGraphState) -> RuntimeContext:
+    registry = state["registry"]
+    return RuntimeContext(
+        tenant_id=registry.tenant_id,
+        run_id=registry.run_id,
+        command_id="command-1",
+        executor=object(),  # type: ignore[arg-type]
+        goal=registry.goal,
+        run_kind=registry.run_kind,
+        source_type=registry.source_type,
+        model_id=registry.model_id,
+        graph_name=registry.graph_name,
+        graph_version=registry.graph_version,
+        agent_id=registry.agent_id,
+        session_id=registry.session_id,
+        system_role=registry.system_role,
+        parent_run_id=registry.parent_run_id,
+        root_run_id=registry.root_run_id,
+    )
 
 
 @pytest.mark.asyncio
@@ -124,7 +168,9 @@ async def test_capture_new_run_freezes_latest_session_context_and_recent_message
     session_service = _SessionContextService(pack)
     builder = context_builder.ContextBuilder(session_service)
 
-    db = object()
+    # This test exercises the generic non-Group Session Context path. Group
+    # Runs require an immutable trigger cutoff and are covered separately.
+    db = _Db("a2a")
     snapshots = await builder.capture_run_inputs(
         db,
         tenant_id=tenant_id,
@@ -144,6 +190,29 @@ async def test_capture_new_run_freezes_latest_session_context_and_recent_message
 
 
 @pytest.mark.asyncio
+async def test_direct_chat_does_not_reload_session_compact_or_recent_messages():
+    session_service = _SessionContextService(
+        SessionContextPack(
+            snapshot=_snapshot(),
+            recent_messages=(_session_message("would-duplicate"),),
+        )
+    )
+    builder = context_builder.ContextBuilder(session_service)
+
+    snapshots = await builder.capture_run_inputs(
+        _Db("direct"),
+        tenant_id=uuid.uuid4(),
+        session_id=uuid.uuid4(),
+        initial_input={"message_id": "current", "input_content": "exact"},
+    )
+
+    assert session_service.calls == []
+    assert snapshots.session_context == SessionContextSnapshot.empty().to_json()
+    assert snapshots.recent_session_messages == ()
+    assert snapshots.pending_session_messages == ()
+
+
+@pytest.mark.asyncio
 async def test_resume_build_reuses_checkpoint_snapshot_without_refreshing_session():
     original_pack = SessionContextPack(
         snapshot=_snapshot(version=2, summary="original"),
@@ -155,7 +224,7 @@ async def test_resume_build_reuses_checkpoint_snapshot_without_refreshing_sessio
     tenant_id = uuid.uuid4()
     session_id = uuid.uuid4()
     snapshots = await builder.capture_run_inputs(
-        object(),
+        _Db("a2a"),
         tenant_id=tenant_id,
         session_id=session_id,
         initial_input={"content": "start"},
@@ -166,8 +235,10 @@ async def test_resume_build_reuses_checkpoint_snapshot_without_refreshing_sessio
         pending_messages=(_session_message("parallel-pending"),),
     )
 
+    state = _state(snapshots=snapshots, run_messages=[_normal("run-message")])
     built = await builder.build(
-        _state(snapshots=snapshots, run_messages=[_normal("run-message")]),
+        state,
+        _context(state),
         resume_input={"content": "continue"},
     )
 
@@ -182,7 +253,7 @@ async def test_resume_build_reuses_checkpoint_snapshot_without_refreshing_sessio
 
 
 @pytest.mark.asyncio
-async def test_recent_20_run_messages_expand_to_keep_parallel_tool_exchange_whole():
+async def test_semantic_thread_window_keeps_parallel_tool_exchange_whole():
     exchange = [
         _assistant("assistant-tools", ["call-a", "call-b"]),
         _tool_result("result-a", "call-a"),
@@ -200,10 +271,11 @@ async def test_recent_20_run_messages_expand_to_keep_parallel_tool_exchange_whol
         _SessionContextService(SessionContextPack(SessionContextSnapshot.empty(), ()))
     )
 
-    built = await builder.build(_state(snapshots=snapshots, run_messages=run_messages))
+    state = _state(snapshots=snapshots, run_messages=run_messages)
+    built = await builder.build(state, _context(state))
 
-    assert len(built.recent_run_messages) == 22
-    assert [message["id"] for message in built.recent_run_messages[:3]] == [
+    assert len(built.recent_thread_messages) == 22
+    assert [message["id"] for message in built.recent_thread_messages[:3]] == [
         "assistant-tools",
         "result-a",
         "result-b",
@@ -225,15 +297,17 @@ async def test_incomplete_started_tool_exchange_blocks_model_context():
         _SessionContextService(SessionContextPack(SessionContextSnapshot.empty(), ()))
     )
 
+    state = _state(
+        snapshots=snapshots,
+        run_messages=[_assistant("assistant-pending", ["call-pending"])],
+    )
     built = await builder.build(
-        _state(
-            snapshots=snapshots,
-            run_messages=[_assistant("assistant-pending", ["call-pending"])],
-        ),
+        state,
+        _context(state),
         tool_execution_ledger={"call-pending": {"status": "started"}},
     )
 
-    assert built.recent_run_messages == ()
+    assert built.recent_thread_messages == ()
     assert built.blocked is True
     assert built.retry_model is False
     assert built.requires_confirmation is False
@@ -254,7 +328,7 @@ async def test_current_run_uses_checkpoint_lifecycle_and_has_no_query_projection
     state = _state(snapshots=snapshots, status="waiting_user", next_route="wait")
     state["lifecycle"]["waiting_request"] = {"question": "Which option?"}
 
-    built = await builder.build(state)
+    built = await builder.build(state, _context(state))
 
     assert built.current_run["lifecycle_status"] == "waiting_user"
     assert built.current_run["waiting_request"] == {"question": "Which option?"}

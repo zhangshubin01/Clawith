@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
+import uuid
 
 
 FINISH_TOOL_NAME = "finish"
+MAX_GROUP_FINISH_MENTIONS = 100
 
 FINISH_TOOL_DEFINITION: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": FINISH_TOOL_NAME,
         "description": (
-            "Finish the current turn and send the final user-facing response. "
-            "You MUST call this tool exactly when you are ready to stop. Put the full answer "
-            "the user should see in content. Do not call any other tools in the same response."
+            "Finish the current Run and send the final user-facing response only "
+            "after the user's requested outcome is complete and all required "
+            "verification has passed. Never use finish for a progress update or an "
+            "incomplete result. Put the full answer the user should see in content, "
+            "and do not call any other tools in the same response."
         ),
         "parameters": {
             "type": "object",
@@ -27,9 +32,28 @@ FINISH_TOOL_DEFINITION: dict[str, Any] = {
                 },
             },
             "required": ["content"],
+            "additionalProperties": False,
         },
     },
 }
+
+
+def group_finish_tool_definition() -> dict[str, Any]:
+    """Return the shared finish schema with the Group-only handoff field."""
+    definition = deepcopy(FINISH_TOOL_DEFINITION)
+    parameters = definition["function"]["parameters"]
+    parameters["properties"]["mention_participant_ids"] = {
+        "type": "array",
+        "description": (
+            "Optional stable participant UUIDs for Agent members to wake after this "
+            "final public group reply. Query group members when an ID is unknown; "
+            "never infer IDs from display names."
+        ),
+        "items": {"type": "string", "format": "uuid"},
+        "maxItems": MAX_GROUP_FINISH_MENTIONS,
+        "uniqueItems": True,
+    }
+    return definition
 
 FINISH_TOOL_SEED: dict[str, Any] = {
     "name": FINISH_TOOL_NAME,
@@ -56,6 +80,7 @@ class FinishCall:
 
     call_id: str
     content: str
+    mention_participant_ids: tuple[str, ...] = ()
     error: str | None = None
 
     @property
@@ -75,7 +100,11 @@ def parse_tool_arguments(raw_args: Any) -> dict[str, Any]:
     return {}
 
 
-def find_finish_call(tool_calls: list[dict] | None) -> FinishCall | None:
+def find_finish_call(
+    tool_calls: list[dict] | None,
+    *,
+    allow_group_mentions: bool = False,
+) -> FinishCall | None:
     """Return the first finish call from a tool call list, if present."""
     for tc in tool_calls or []:
         fn = tc.get("function") or {}
@@ -100,6 +129,76 @@ def find_finish_call(tool_calls: list[dict] | None) -> FinishCall | None:
                 error="`finish` requires a non-empty string field `content`.",
             )
 
-        return FinishCall(call_id=call_id, content=content)
+        unsupported = set(args) - {"content", "mention_participant_ids"}
+        if unsupported:
+            return FinishCall(
+                call_id=call_id,
+                content="",
+                error=(
+                    "`finish` contains unsupported fields: "
+                    + ", ".join(sorted(str(field) for field in unsupported))
+                    + "."
+                ),
+            )
+
+        raw_mentions = args.get("mention_participant_ids")
+        if raw_mentions is not None and not allow_group_mentions:
+            return FinishCall(
+                call_id=call_id,
+                content="",
+                error=(
+                    "`mention_participant_ids` is available only to a validated "
+                    "Group Agent Run."
+                ),
+            )
+        if raw_mentions is None:
+            mention_ids: tuple[str, ...] = ()
+        elif not isinstance(raw_mentions, list):
+            return FinishCall(
+                call_id=call_id,
+                content="",
+                error="`mention_participant_ids` must be an array of participant UUID strings.",
+            )
+        elif len(raw_mentions) > MAX_GROUP_FINISH_MENTIONS:
+            return FinishCall(
+                call_id=call_id,
+                content="",
+                error=(
+                    "`mention_participant_ids` may contain at most "
+                    f"{MAX_GROUP_FINISH_MENTIONS} entries."
+                ),
+            )
+        else:
+            normalized: list[str] = []
+            for raw_participant_id in raw_mentions:
+                if not isinstance(raw_participant_id, str):
+                    return FinishCall(
+                        call_id=call_id,
+                        content="",
+                        error=(
+                            "`mention_participant_ids` must contain only participant "
+                            "UUID strings."
+                        ),
+                    )
+                try:
+                    participant_id = str(uuid.UUID(raw_participant_id))
+                except ValueError:
+                    return FinishCall(
+                        call_id=call_id,
+                        content="",
+                        error=(
+                            "`mention_participant_ids` must contain only valid "
+                            "participant UUID strings."
+                        ),
+                    )
+                if participant_id not in normalized:
+                    normalized.append(participant_id)
+            mention_ids = tuple(normalized)
+
+        return FinishCall(
+            call_id=call_id,
+            content=content,
+            mention_participant_ids=mention_ids,
+        )
 
     return None

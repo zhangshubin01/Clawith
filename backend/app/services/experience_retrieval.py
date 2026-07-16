@@ -27,6 +27,7 @@ from app.models.experience_reference import ExperienceReference
 from app.models.llm import LLMModel
 from app.models.org import OrgMember
 from app.models.system_settings import SystemSetting
+from app.services.agent_runtime.tool_execution import ToolExecutionOutcome
 
 # Agents echo this marker in their final answer to cite an entry they actually used.
 CITATION_RE = re.compile(r"\[\[exp:([0-9a-fA-F-]{36})\]\]")
@@ -223,19 +224,40 @@ async def _expand_query(db, agent, keyword: str) -> list[str]:
     return terms
 
 
-async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
-    """Keyword search over the visible, published library. Returns lightweight candidates."""
-    keyword = (arguments.get("keyword") or arguments.get("query") or "").strip()
+async def search_experience_outcome(
+    agent_id: uuid.UUID,
+    arguments: dict,
+) -> ToolExecutionOutcome:
+    """Return a typed search fact over the visible, published library."""
+    keyword = arguments.get("keyword") or arguments.get("query") or ""
+    if not isinstance(keyword, str):
+        return ToolExecutionOutcome(
+            status="failed",
+            result_summary="search_experience keyword must be a string.",
+            result_ref=None,
+            error_code="invalid_tool_arguments",
+        )
+    keyword = keyword.strip()
     # Tokenize on whitespace: agents pass multi-word queries (e.g. "合同 验收 合格"),
     # which must match per-term, not as one contiguous substring. Dedup, keep order.
     tokens = list(dict.fromkeys(tok for tok in keyword.lower().split() if tok))[:24]
     if not tokens:
-        return "Provide a `keyword` to search the experience library."
+        return ToolExecutionOutcome(
+            status="failed",
+            result_summary="search_experience requires keyword.",
+            result_ref=None,
+            error_code="invalid_tool_arguments",
+        )
     try:
         async with async_session() as db:
             agent = await _resolve_agent(db, agent_id)
             if not agent or agent.is_system:
-                return "This agent cannot access the experience library."
+                return ToolExecutionOutcome(
+                    status="failed",
+                    result_summary="This Agent cannot access the experience library.",
+                    result_ref=None,
+                    error_code="experience_access_denied",
+                )
             dept_ids = await _agent_department_ids(db, agent)
 
             # ① Query expansion: fold in strict synonyms so differently-phrased entries still match.
@@ -290,7 +312,14 @@ async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
                     hits.append((e, matched))
 
             if not hits:
-                return f"No experience entries match “{keyword}”. Proceed without internal experience."
+                return ToolExecutionOutcome(
+                    status="succeeded",
+                    result_summary=(
+                        f"No experience entries match “{keyword}”. "
+                        "Proceed without internal experience."
+                    ),
+                    result_ref=None,
+                )
 
             # Score = sum of matched tokens' IDF. Rarer tokens weigh more; smoothed so any
             # match always scores > 0 (log((N+1)/df) stays positive even when df == N).
@@ -314,26 +343,55 @@ async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
                     f"[[exp:{e.id}]]\n  适用条件/失效信号: {applic}"
                 )
             lines.append("\nTo read one: call `read_experience` with its entry id.")
-            return "\n".join(lines)
+            return ToolExecutionOutcome(
+                status="succeeded",
+                result_summary="\n".join(lines),
+                result_ref=None,
+            )
     except Exception as e:
         logger.warning(f"search_experience failed for {agent_id}: {e}")
-        return f"Experience search failed: {str(e)[:160]}"
+        return ToolExecutionOutcome(
+            status="failed",
+            result_summary=f"Experience search failed: {type(e).__name__}.",
+            result_ref=None,
+            error_code="experience_search_failed",
+            retryable=True,
+        )
 
 
-async def read_experience(agent_id: uuid.UUID, arguments: dict) -> str:
-    """Return the entry's full markdown body + applicability, and record a `read`."""
+async def search_experience(agent_id: uuid.UUID, arguments: dict) -> str:
+    """Legacy display adapter for the typed experience search."""
+    outcome = await search_experience_outcome(agent_id, arguments)
+    return outcome.result_summary or "Experience search returned no summary."
+
+
+async def read_experience_outcome(
+    agent_id: uuid.UUID,
+    arguments: dict,
+) -> ToolExecutionOutcome:
+    """Return one visible entry; read telemetry cannot change the read fact."""
     raw_id = str(arguments.get("entry_id") or "").strip()
     # Tolerate the agent pasting the full "[[exp:<uuid>]]" citation marker.
     m = re.search(r"[0-9a-fA-F-]{36}", raw_id)
     try:
         entry_id = uuid.UUID(m.group(0) if m else raw_id)
     except (ValueError, AttributeError):
-        return "Provide a valid `entry_id` (from search_experience results)."
+        return ToolExecutionOutcome(
+            status="failed",
+            result_summary="read_experience requires a valid entry_id.",
+            result_ref=None,
+            error_code="invalid_tool_arguments",
+        )
     try:
         async with async_session() as db:
             agent = await _resolve_agent(db, agent_id)
             if not agent or agent.is_system:
-                return "This agent cannot access the experience library."
+                return ToolExecutionOutcome(
+                    status="failed",
+                    result_summary="This Agent cannot access the experience library.",
+                    result_ref=None,
+                    error_code="experience_access_denied",
+                )
             dept_ids = await _agent_department_ids(db, agent)
             entry = (
                 await db.execute(
@@ -347,20 +405,15 @@ async def read_experience(agent_id: uuid.UUID, arguments: dict) -> str:
                 )
             ).scalar_one_or_none()
             if not entry:
-                return "Experience entry not found or not visible to you."
-
-            db.add(
-                ExperienceReference(
-                    entry_id=entry.id,
-                    kind="read",
-                    tenant_id=agent.tenant_id,
-                    agent_id=agent.id,
+                return ToolExecutionOutcome(
+                    status="failed",
+                    result_summary="Experience entry not found or not visible.",
+                    result_ref=None,
+                    error_code="experience_not_found",
                 )
-            )
-            await db.commit()
 
             tags = ", ".join(entry.tags or []) or "—"
-            return (
+            summary = (
                 f"📚 Experience [[exp:{entry.id}]] — {entry.title}\n"
                 f"标签: {tags} · 复核: {_freshness_marker(entry)}\n\n"
                 f"{entry.body}\n\n"
@@ -370,9 +423,42 @@ async def read_experience(agent_id: uuid.UUID, arguments: dict) -> str:
                 "right there as the adoption record. "
                 "If your situation no longer matches the applicability above, do not apply it."
             )
+            try:
+                db.add(
+                    ExperienceReference(
+                        entry_id=entry.id,
+                        kind="read",
+                        tenant_id=agent.tenant_id,
+                        agent_id=agent.id,
+                    )
+                )
+                await db.commit()
+            except Exception as telemetry_error:
+                logger.warning(
+                    "Experience read succeeded but telemetry failed for %s: %s",
+                    entry.id,
+                    type(telemetry_error).__name__,
+                )
+            return ToolExecutionOutcome(
+                status="succeeded",
+                result_summary=summary,
+                result_ref=None,
+            )
     except Exception as e:
         logger.warning(f"read_experience failed for {agent_id}/{raw_id}: {e}")
-        return f"Failed to read experience: {str(e)[:160]}"
+        return ToolExecutionOutcome(
+            status="failed",
+            result_summary=f"Failed to read experience: {type(e).__name__}.",
+            result_ref=None,
+            error_code="experience_read_failed",
+            retryable=True,
+        )
+
+
+async def read_experience(agent_id: uuid.UUID, arguments: dict) -> str:
+    """Legacy display adapter for the typed experience read."""
+    outcome = await read_experience_outcome(agent_id, arguments)
+    return outcome.result_summary or "Experience read returned no summary."
 
 
 async def record_experience_citations(

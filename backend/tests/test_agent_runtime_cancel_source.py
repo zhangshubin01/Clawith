@@ -84,8 +84,6 @@ def _command(
 def _state(
     tenant_id: uuid.UUID,
     run_id: uuid.UUID,
-    *,
-    applied_ids: list[str] | None = None,
 ) -> RuntimeGraphState:
     return {
         "registry": RunRegistrySnapshot(
@@ -108,7 +106,6 @@ def _state(
         "lifecycle": {
             "status": "running",
             "next_route": "model",
-            "last_applied_command_ids": applied_ids or [],
         },
     }
 
@@ -123,18 +120,17 @@ def _context(tenant_id: uuid.UUID, run_id: uuid.UUID) -> RuntimeContext:
 
 
 @pytest.mark.asyncio
-async def test_returns_first_unapplied_durable_cancel() -> None:
+async def test_returns_first_active_durable_cancel_without_checkpoint_receipts() -> None:
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
-    already_applied = _command(tenant_id, run_id, reason="old")
     pending = _command(tenant_id, run_id, reason=" user_abort ")
-    session = _Session([already_applied, pending])
+    session = _Session([pending])
     source = DatabaseRuntimeCancelSource(
         session_factory=_SessionFactory(session),  # type: ignore[arg-type]
     )
 
     signal = await source.get_cancel(
-        _state(tenant_id, run_id, applied_ids=[str(already_applied.id)]),
+        _state(tenant_id, run_id),
         _context(tenant_id, run_id),
     )
 
@@ -150,16 +146,15 @@ async def test_returns_first_unapplied_durable_cancel() -> None:
 
 
 @pytest.mark.asyncio
-async def test_returns_none_when_every_active_cancel_is_checkpointed() -> None:
+async def test_returns_none_when_no_pending_or_claimed_cancel_exists() -> None:
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
-    command = _command(tenant_id, run_id)
     source = DatabaseRuntimeCancelSource(
-        session_factory=_SessionFactory(_Session([command])),  # type: ignore[arg-type]
+        session_factory=_SessionFactory(_Session([])),  # type: ignore[arg-type]
     )
 
     signal = await source.get_cancel(
-        _state(tenant_id, run_id, applied_ids=[str(command.id)]),
+        _state(tenant_id, run_id),
         _context(tenant_id, run_id),
     )
 
@@ -167,20 +162,19 @@ async def test_returns_none_when_every_active_cancel_is_checkpointed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rejects_context_outside_checkpoint_scope_before_database_read() -> None:
+async def test_legacy_checkpoint_registry_does_not_override_runtime_context_scope() -> None:
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
     factory = _SessionFactory(_Session([]))
     source = DatabaseRuntimeCancelSource(session_factory=factory)  # type: ignore[arg-type]
 
-    with pytest.raises(RuntimeCancelSourceError, match="does not match") as raised:
-        await source.get_cancel(
-            _state(tenant_id, run_id),
-            _context(uuid.uuid4(), run_id),
-        )
+    signal = await source.get_cancel(
+        _state(tenant_id, run_id),
+        _context(uuid.uuid4(), run_id),
+    )
 
-    assert raised.value.code == "runtime_scope_mismatch"
-    assert factory.calls == 0
+    assert signal is None
+    assert factory.calls == 1
 
 
 @pytest.mark.asyncio

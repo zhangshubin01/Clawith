@@ -212,6 +212,203 @@ async def test_context_pack_uses_latest_state_and_recent_20_user_visible_message
 
 
 @pytest.mark.asyncio
+async def test_group_cutoff_pack_uses_full_position_for_pending_and_recent_messages():
+    session = _session(session_type="group")
+    base = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+    watermark = _message(
+        uuid.UUID(int=10),
+        session_id=session.id,
+        created_at=base - timedelta(seconds=1),
+    )
+    lower_same_timestamp = _message(
+        uuid.UUID(int=19),
+        session_id=session.id,
+        created_at=base,
+        role="assistant",
+    )
+    cutoff_message = _message(
+        uuid.UUID(int=20),
+        session_id=session.id,
+        created_at=base,
+    )
+    state = _state(session, version=4, watermark=watermark.id)
+    # A rolling state committed exactly at the trigger timestamp is not after
+    # the cutoff; the full message position remains the tie-break for messages.
+    state.updated_at = base
+    db = _FakeSession(
+        _Result(scalar=session),
+        _Result(scalar=state),
+        _Result(scalar=cutoff_message),
+        _Result(scalar=watermark),
+        _Result(
+            rows=[
+                (lower_same_timestamp, True),
+                (cutoff_message, True),
+            ]
+        ),
+    )
+
+    pack = await service.SessionContextService().load_context_pack_through(
+        db,
+        tenant_id=session.tenant_id,
+        session_id=session.id,
+        cutoff=service.MessagePosition(
+            created_at=cutoff_message.created_at,
+            message_id=cutoff_message.id,
+        ),
+    )
+
+    assert pack.snapshot.version == 4
+    assert pack.requires_transient_rebuild is False
+    assert [message["id"] for message in pack.recent_messages] == [
+        str(lower_same_timestamp.id),
+        str(cutoff_message.id),
+    ]
+    cutoff_sql = _sql(db.statements[-1])
+    assert "chat_messages.created_at <" in cutoff_sql
+    assert "chat_messages.created_at =" in cutoff_sql
+    assert "chat_messages.id <=" in cutoff_sql
+    assert "ORDER BY chat_messages_1.created_at DESC, chat_messages_1.id DESC" in cutoff_sql
+
+
+@pytest.mark.asyncio
+async def test_group_cutoff_rebuilds_when_terminal_delta_updated_state_after_cutoff():
+    session = _session(session_type="group")
+    base = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+    watermark = _message(
+        uuid.UUID(int=10),
+        session_id=session.id,
+        created_at=base - timedelta(seconds=1),
+    )
+    cutoff_message = _message(
+        uuid.UUID(int=20),
+        session_id=session.id,
+        created_at=base,
+    )
+    state = _state(
+        session,
+        version=5,
+        watermark=watermark.id,
+        summary="terminal result committed after the trigger must not leak",
+    )
+    # Terminal SessionContextDelta can advance the rolling state without
+    # advancing its message watermark because the public reply remains recent.
+    state.updated_at = base + timedelta(seconds=1)
+    db = _FakeSession(
+        _Result(scalar=session),
+        _Result(scalar=state),
+        _Result(scalar=cutoff_message),
+        _Result(scalar=watermark),
+        _Result(rows=[(watermark, False), (cutoff_message, True)]),
+    )
+
+    pack = await service.SessionContextService().load_context_pack_through(
+        db,
+        tenant_id=session.tenant_id,
+        session_id=session.id,
+        cutoff=service.MessagePosition(
+            created_at=cutoff_message.created_at,
+            message_id=cutoff_message.id,
+        ),
+    )
+
+    assert pack.snapshot == service.SessionContextSnapshot.empty()
+    assert pack.requires_transient_rebuild is True
+    assert [message["id"] for message in pack.pending_messages] == [
+        str(watermark.id)
+    ]
+    assert [message["id"] for message in pack.recent_messages] == [
+        str(cutoff_message.id)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_group_cutoff_pack_rebuilds_when_current_compact_is_after_cutoff():
+    session = _session(session_type="group")
+    base = datetime(2026, 7, 16, 10, 0, tzinfo=UTC)
+    old_message = _message(
+        uuid.UUID(int=1),
+        session_id=session.id,
+        created_at=base - timedelta(seconds=1),
+    )
+    cutoff_message = _message(
+        uuid.UUID(int=2),
+        session_id=session.id,
+        created_at=base,
+    )
+    future_watermark = _message(
+        uuid.UUID(int=3),
+        session_id=session.id,
+        created_at=base + timedelta(seconds=1),
+        role="assistant",
+    )
+    state = _state(
+        session,
+        version=9,
+        watermark=future_watermark.id,
+        summary="must not be injected",
+    )
+    db = _FakeSession(
+        _Result(scalar=session),
+        _Result(scalar=state),
+        _Result(scalar=cutoff_message),
+        _Result(scalar=future_watermark),
+        _Result(rows=[(old_message, False), (cutoff_message, True)]),
+    )
+
+    pack = await service.SessionContextService().load_context_pack_through(
+        db,
+        tenant_id=session.tenant_id,
+        session_id=session.id,
+        cutoff=service.MessagePosition(
+            created_at=cutoff_message.created_at,
+            message_id=cutoff_message.id,
+        ),
+    )
+
+    assert pack.snapshot == service.SessionContextSnapshot.empty()
+    assert pack.requires_transient_rebuild is True
+    assert [message["id"] for message in pack.pending_messages] == [
+        str(old_message.id)
+    ]
+    assert [message["id"] for message in pack.recent_messages] == [
+        str(cutoff_message.id)
+    ]
+    assert state.version == 9
+    assert state.summary == "must not be injected"
+    assert state.covered_through_message_id == future_watermark.id
+
+
+@pytest.mark.asyncio
+async def test_group_cutoff_pack_fails_closed_when_trigger_position_mismatches():
+    session = _session(session_type="group")
+    authoritative = _message(
+        uuid.uuid4(),
+        session_id=session.id,
+        created_at=datetime(2026, 7, 16, 10, 0, tzinfo=UTC),
+    )
+    db = _FakeSession(
+        _Result(scalar=session),
+        _Result(scalar=None),
+        _Result(scalar=authoritative),
+    )
+
+    with pytest.raises(service.SessionContextError) as exc_info:
+        await service.SessionContextService().load_context_pack_through(
+            db,
+            tenant_id=session.tenant_id,
+            session_id=session.id,
+            cutoff=service.MessagePosition(
+                created_at=authoritative.created_at + timedelta(seconds=1),
+                message_id=authoritative.id,
+            ),
+        )
+
+    assert exc_info.value.code == "session_context_cutoff_mismatch"
+    assert len(db.statements) == 3
+
+
+@pytest.mark.asyncio
 async def test_incremental_read_resolves_watermark_position_before_ordered_query():
     session = _session()
     base = datetime(2026, 7, 13, 10, 0, tzinfo=UTC)
