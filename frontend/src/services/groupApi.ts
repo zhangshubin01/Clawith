@@ -7,6 +7,7 @@ import type {
     GroupMemberCandidate,
     GroupMessage,
     GroupMessageIntake,
+    GroupRunState,
     GroupSession,
     GroupSessionSummary,
     GroupTextFile,
@@ -110,6 +111,15 @@ export const groupApi = {
             method: 'POST',
             body: JSON.stringify(data),
         }),
+
+    runState: (groupId: string, sessionId: string, runId: string) =>
+        fetchJson<GroupRunState>(`/groups/${groupId}/sessions/${sessionId}/runs/${runId}`),
+
+    cancelRun: (groupId: string, sessionId: string, runId: string) =>
+        fetchJson<GroupRunState>(
+            `/groups/${groupId}/sessions/${sessionId}/runs/${runId}/cancel`,
+            { method: 'POST' },
+        ),
 
     sessionSummary: (groupId: string, sessionId: string) =>
         fetchJson<GroupSessionSummary>(`/groups/${groupId}/sessions/${sessionId}/summary`),

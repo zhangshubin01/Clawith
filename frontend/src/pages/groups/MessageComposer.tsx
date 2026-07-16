@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { IconRobot, IconSend, IconUser } from '@tabler/icons-react';
+import { IconPlayerStop, IconRobot, IconSend, IconUser } from '@tabler/icons-react';
 import type { GroupMember } from '../../types/group';
 
 interface MessageComposerProps {
     members: GroupMember[];
     disabled?: boolean;
+    canCancel?: boolean;
+    cancelling?: boolean;
+    onCancel?: () => void;
     onSend: (content: string, mentionParticipantIds: string[]) => Promise<void>;
 }
 
@@ -25,7 +28,14 @@ function findMentionQuery(value: string, caret: number): MentionQuery | null {
     return { start: at, text };
 }
 
-export default function MessageComposer({ members, disabled, onSend }: MessageComposerProps) {
+export default function MessageComposer({
+    members,
+    disabled,
+    canCancel = false,
+    cancelling = false,
+    onCancel,
+    onSend,
+}: MessageComposerProps) {
     const { t } = useTranslation();
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [value, setValue] = useState('');
@@ -201,6 +211,17 @@ export default function MessageComposer({ members, disabled, onSend }: MessageCo
                             : t('groups.sendHint', 'Enter 发送，Shift + Enter 换行')}
                     </span>
                     <div style={{ flex: 1 }} />
+                    {canCancel && (
+                        <button
+                            type="button"
+                            className="btn btn-secondary chat-composer-send"
+                            disabled={cancelling}
+                            onClick={onCancel}
+                            title={t('groups.cancelRun', '停止运行')}
+                        >
+                            <IconPlayerStop size={16} stroke={1.75} />
+                        </button>
+                    )}
                     <button
                         type="button"
                         className="btn btn-primary chat-composer-send"

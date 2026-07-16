@@ -77,6 +77,12 @@ export interface GroupMessageIntake {
     error_code: string | null;
 }
 
+export interface GroupRunState {
+    run_id: string;
+    status: string;
+    can_cancel: boolean;
+}
+
 export interface GroupTextFile {
     path: string;
     content: string;

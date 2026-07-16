@@ -21,3 +21,8 @@ test('group message backfill sends the forward cursor to the backend', () => {
   assert.match(source, /after:\s*opts\.after/);
   assert.doesNotMatch(source, /backend does not implement it yet/);
 });
+
+test('group runs expose exact state and explicit cancellation by run id', () => {
+  assert.match(source, /runState:[\s\S]*sessions\/\$\{sessionId\}\/runs\/\$\{runId\}/);
+  assert.match(source, /cancelRun:[\s\S]*runs\/\$\{runId\}\/cancel/);
+});

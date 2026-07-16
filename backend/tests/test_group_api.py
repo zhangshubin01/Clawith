@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 import uuid
 
@@ -13,6 +14,7 @@ from app.api import groups as groups_api
 from app.models.audit import AuditLog
 from app.models.chat_session import ChatSession
 from app.models.group import Group
+from app.models.agent_run import AgentRun
 from app.models.participant import Participant
 from app.models.user import User
 from app.services.group_chat_service import GroupChatServiceError, GroupSessionDeletion
@@ -97,6 +99,8 @@ def test_group_router_exposes_management_and_read_state_boundaries() -> None:
     assert ("POST", "/api/groups/{group_id}/sessions/{session_id}/read") in routes
     assert ("GET", "/api/groups/{group_id}/sessions/{session_id}/messages") in routes
     assert ("POST", "/api/groups/{group_id}/sessions/{session_id}/messages") in routes
+    assert ("GET", "/api/groups/{group_id}/sessions/{session_id}/runs/{run_id}") in routes
+    assert ("POST", "/api/groups/{group_id}/sessions/{session_id}/runs/{run_id}/cancel") in routes
     assert ("GET", "/api/groups/{group_id}/announcement") in routes
     assert ("PUT", "/api/groups/{group_id}/announcement") in routes
     assert ("GET", "/api/groups/{group_id}/agents/{agent_id}/memory") in routes
@@ -341,3 +345,82 @@ async def test_create_message_commits_before_realtime_publish(monkeypatch) -> No
         f"publish:{output.cursor}",
         f"publish:{failure_output.cursor}",
     ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_group_run_uses_exact_scoped_run_and_durable_command(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    user = _user(tenant_id)
+    participant = _participant(user)
+    group = _group(tenant_id, participant.id)
+    session = _session(tenant_id, group.id, participant.id)
+    run = AgentRun(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        agent_id=uuid.uuid4(),
+        session_id=session.id,
+        source_type="chat",
+        goal="long task",
+        run_kind="foreground",
+        runtime_type="langgraph",
+        runtime_thread_id=str(uuid.uuid4()),
+        graph_name="agent_runtime",
+        graph_version="test",
+        model_id=uuid.uuid4(),
+        model_turn_limit=50,
+        delivery_status="pending",
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    db = _RecordingDB()
+    commands = []
+
+    async def fake_participant(_db, _user):
+        return participant
+
+    async def fake_group_run(_db, **kwargs):
+        assert kwargs == {
+            "tenant_id": tenant_id,
+            "group_id": group.id,
+            "session_id": session.id,
+            "participant_id": participant.id,
+            "run_id": run.id,
+        }
+        return run
+
+    @asynccontextmanager
+    async def fake_reader(_db):
+        class Reader:
+            async def get_run_state(self, _tenant_id, _run_id):
+                return SimpleNamespace(execution_status="running")
+
+        yield Reader()
+
+    class FakeIntake:
+        def __init__(self, _db):
+            assert _db is db
+
+        async def cancel_run(self, command):
+            commands.append(command)
+            return SimpleNamespace(run_id=run.id)
+
+    monkeypatch.setattr(groups_api, "_current_participant", fake_participant)
+    monkeypatch.setattr(groups_api, "_authorized_group_run", fake_group_run)
+    monkeypatch.setattr(groups_api, "_open_run_state_reader", fake_reader)
+    monkeypatch.setattr(groups_api, "RuntimeCommandIntake", FakeIntake)
+
+    result = await groups_api.cancel_group_run(
+        group.id,
+        session.id,
+        run.id,
+        current_user=user,
+        db=db,
+    )
+
+    assert result.run_id == run.id
+    assert result.status == "cancelling"
+    assert result.can_cancel is False
+    assert len(commands) == 1
+    assert commands[0].tenant_id == tenant_id
+    assert commands[0].run_id == run.id
+    assert commands[0].actor_user_id == user.id

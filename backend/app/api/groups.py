@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent
+from app.models.agent_run import AgentRun
 from app.models.audit import AuditLog, ChatMessage
 from app.models.group import GroupMember
 from app.models.participant import Participant
@@ -24,6 +25,12 @@ from app.services import group_message_service
 from app.services.agent_runtime.session_context_service import (
     SessionContextError,
     SessionContextService,
+)
+from app.services.agent_runtime.adapter import RuntimeCommandIntake
+from app.services.agent_runtime.contracts import CancelRunCommand
+from app.services.agent_runtime.run_state_reader import (
+    RunStateReadError,
+    open_run_state_reader as _open_run_state_reader,
 )
 from app.services.group_chat_service import GroupChatServiceError
 from app.services.group_file_service import GroupFileServiceError
@@ -143,6 +150,12 @@ class GroupMessageIntakeOut(BaseModel):
     error_code: str | None = None
 
 
+class GroupRunStateOut(BaseModel):
+    run_id: uuid.UUID
+    status: str
+    can_cancel: bool
+
+
 class GroupTextFileIn(BaseModel):
     content: str
     expected_version_token: str | None = None
@@ -212,6 +225,38 @@ async def _current_participant(db: AsyncSession, current_user: User) -> Particip
         current_user.display_name,
         current_user.avatar_url,
     )
+
+
+async def _authorized_group_run(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    group_id: uuid.UUID,
+    session_id: uuid.UUID,
+    participant_id: uuid.UUID,
+    run_id: uuid.UUID,
+) -> AgentRun:
+    await group_chat_service.authorize_group_session(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        session_id=session_id,
+        participant_id=participant_id,
+        human_only=True,
+    )
+    result = await db.execute(
+        select(AgentRun).where(
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.id == run_id,
+            AgentRun.session_id == session_id,
+            AgentRun.source_type == "chat",
+            AgentRun.runtime_type == "langgraph",
+        )
+    )
+    run = result.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Group run not found")
+    return run
 
 
 def _translate_domain_error(exc: GroupChatServiceError) -> HTTPException:
@@ -915,6 +960,87 @@ async def create_group_message(
         created=intake.created,
         error_code=intake.error_code,
     )
+
+
+@router.get(
+    "/{group_id}/sessions/{session_id}/runs/{run_id}",
+    response_model=GroupRunStateOut,
+)
+async def get_group_run_state(
+    group_id: uuid.UUID,
+    session_id: uuid.UUID,
+    run_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    tenant_id = _tenant_id(current_user)
+    participant = await _current_participant(db, current_user)
+    try:
+        run = await _authorized_group_run(
+            db,
+            tenant_id=tenant_id,
+            group_id=group_id,
+            session_id=session_id,
+            participant_id=participant.id,
+            run_id=run_id,
+        )
+    except GroupChatServiceError as exc:
+        raise _translate_domain_error(exc) from exc
+    try:
+        async with _open_run_state_reader(db) as reader:
+            view = await reader.get_run_state(tenant_id, run.id)
+    except RunStateReadError as exc:
+        raise HTTPException(status_code=409, detail=exc.code) from exc
+    execution_status = view.execution_status or "created"
+    return GroupRunStateOut(
+        run_id=run.id,
+        status=execution_status,
+        can_cancel=execution_status not in {"completed", "failed", "cancelled"},
+    )
+
+
+@router.post(
+    "/{group_id}/sessions/{session_id}/runs/{run_id}/cancel",
+    response_model=GroupRunStateOut,
+)
+async def cancel_group_run(
+    group_id: uuid.UUID,
+    session_id: uuid.UUID,
+    run_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    tenant_id = _tenant_id(current_user)
+    participant = await _current_participant(db, current_user)
+    try:
+        run = await _authorized_group_run(
+            db,
+            tenant_id=tenant_id,
+            group_id=group_id,
+            session_id=session_id,
+            participant_id=participant.id,
+            run_id=run_id,
+        )
+    except GroupChatServiceError as exc:
+        raise _translate_domain_error(exc) from exc
+    try:
+        async with _open_run_state_reader(db) as reader:
+            view = await reader.get_run_state(tenant_id, run.id)
+    except RunStateReadError as exc:
+        raise HTTPException(status_code=409, detail=exc.code) from exc
+    if view.execution_status in {"completed", "failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="Group run is already terminal")
+
+    await RuntimeCommandIntake(db).cancel_run(
+        CancelRunCommand(
+            tenant_id=tenant_id,
+            run_id=run.id,
+            idempotency_key=f"cancel:group:{run.id}:user:{current_user.id}",
+            reason="cancelled_by_user",
+            actor_user_id=current_user.id,
+        )
+    )
+    return GroupRunStateOut(run_id=run.id, status="cancelling", can_cancel=False)
 
 
 @router.get("/{group_id}/announcement", response_model=GroupTextFileOut)

@@ -106,6 +106,18 @@ async def test_group_workspace_uses_fixed_storage_prefix_and_group_revision(
         ("reports/final.md", False)
     ]
 
+    await group_file_service.delete_workspace_file(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor.id,
+        path=entries[0].path,
+        expected_version_token=entries[0].version_token,
+    )
+    assert await storage.exists(
+        f"groups/{group_id}/workspace/reports/final.md"
+    ) is False
+
 
 @pytest.mark.asyncio
 async def test_group_workspace_rejects_traversal_and_stale_writes(

@@ -772,15 +772,16 @@ async def list_workspace(
     prefix = normalize_storage_key(f"{_group_root(group_id)}/workspace").rstrip("/") + "/"
     output = []
     for entry in await storage.list_dir(key):
+        version = await storage.get_version(entry.key)
         relative = normalize_storage_key(entry.key).removeprefix(prefix)
         output.append(
             GroupWorkspaceEntry(
                 path=relative,
                 name=entry.name,
                 is_dir=entry.is_dir,
-                size=entry.size,
-                modified_at=entry.modified_at,
-                version_token=_entry_version(entry),
+                size=version.size,
+                modified_at=version.modified_at,
+                version_token=version.token if version.exists else None,
             )
         )
     return tuple(output)
@@ -811,15 +812,16 @@ async def index_workspace(
     while pending and len(output) < limit:
         current = pending.pop(0)
         for entry in await storage.list_dir(current):
+            version = await storage.get_version(entry.key)
             relative = normalize_storage_key(entry.key).removeprefix(prefix)
             output.append(
                 GroupWorkspaceEntry(
                     path=relative,
                     name=entry.name,
                     is_dir=entry.is_dir,
-                    size=entry.size,
-                    modified_at=entry.modified_at,
-                    version_token=_entry_version(entry),
+                    size=version.size,
+                    modified_at=version.modified_at,
+                    version_token=version.token if version.exists else None,
                 )
             )
             if entry.is_dir:

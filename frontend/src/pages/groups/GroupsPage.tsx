@@ -75,6 +75,8 @@ export default function GroupsPage() {
     const [messages, setMessages] = useState<GroupMessage[]>([]);
     const [hasMore, setHasMore] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
+    const [trackedRunIds, setTrackedRunIds] = useState<string[]>([]);
+    const [cancellingRuns, setCancellingRuns] = useState(false);
     // One nav rail now: a tree of groups with their sessions nested underneath. It collapses to a
     // stub, and the side panel stays out of the way until asked for.
     const [groupsCollapsed, setGroupsCollapsed] = useState(
@@ -94,21 +96,23 @@ export default function GroupsPage() {
     const [deletingGroup, setDeletingGroup] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
 
-    const { data: groups = [], refetch: refetchGroups } = useQuery({
+    const { data: groups = [], isFetched: groupsFetched, refetch: refetchGroups } = useQuery({
         queryKey: ['groups'],
         queryFn: () => groupApi.list(),
     });
 
+    const activeGroup = groups.find((group) => group.id === groupId);
+
     const { data: sessions = [], refetch: refetchSessions } = useQuery({
         queryKey: ['group-sessions', groupId],
         queryFn: () => groupApi.sessions(groupId!),
-        enabled: Boolean(groupId),
+        enabled: Boolean(activeGroup),
     });
 
     const { data: members = [], refetch: refetchMembers } = useQuery({
         queryKey: ['group-members', groupId],
         queryFn: () => groupApi.members(groupId!),
-        enabled: Boolean(groupId),
+        enabled: Boolean(activeGroup),
     });
 
     // The tree shows every group's sessions and a per-group unread + last-activity roll-up, but the
@@ -144,8 +148,32 @@ export default function GroupsPage() {
         return map;
     }, [groups, sessionsByGroup]);
 
-    const activeGroup = groups.find((group) => group.id === groupId);
     const activeSession = sessions.find((session) => session.id === sessionId);
+
+    const { data: trackedRunStates = [], refetch: refetchTrackedRuns } = useQuery({
+        queryKey: ['group-run-states', groupId, sessionId, trackedRunIds],
+        queryFn: () => Promise.all(
+            trackedRunIds.map((runId) => groupApi.runState(groupId!, sessionId!, runId)),
+        ),
+        enabled: Boolean(groupId && sessionId && trackedRunIds.length > 0),
+        retry: false,
+        refetchInterval: (query) => (
+            query.state.data?.some((run) => run.can_cancel) ? 1000 : false
+        ),
+    });
+    const activeRunIds = trackedRunStates
+        .filter((run) => run.can_cancel)
+        .map((run) => run.run_id);
+
+    useEffect(() => {
+        setTrackedRunIds([]);
+    }, [sessionId]);
+
+    useEffect(() => {
+        if (trackedRunStates.length > 0 && activeRunIds.length === 0) {
+            setTrackedRunIds([]);
+        }
+    }, [activeRunIds.length, trackedRunStates.length]);
 
     const me = useMemo(
         () => members.find(
@@ -170,6 +198,12 @@ export default function GroupsPage() {
     }, [groupId, groups, navigate]);
 
     useEffect(() => {
+        if (groupsFetched && groupId && !activeGroup) {
+            navigate('/groups', { replace: true });
+        }
+    }, [activeGroup, groupId, groupsFetched, navigate]);
+
+    useEffect(() => {
         if (!groupId || sessionId || sessions.length === 0) return;
         const landing = sessions.find((session) => session.is_primary) ?? sessions[0];
         navigate(`/groups/${groupId}/${landing.id}`, { replace: true });
@@ -188,7 +222,7 @@ export default function GroupsPage() {
 
     // Load the newest page whenever the session changes.
     useEffect(() => {
-        if (!groupId || !sessionId) {
+        if (!activeGroup || !activeSession) {
             setMessages([]);
             setHasMore(false);
             return;
@@ -197,7 +231,7 @@ export default function GroupsPage() {
         setMessages([]);
         setHasMore(false);
         void groupApi
-            .messages(groupId, sessionId, { limit: HISTORY_PAGE_SIZE })
+            .messages(activeGroup.id, activeSession.id, { limit: HISTORY_PAGE_SIZE })
             .then((page) => {
                 if (cancelled) return;
                 // Merge rather than replace: a pushed message can land while this page is in flight.
@@ -210,7 +244,7 @@ export default function GroupsPage() {
         return () => {
             cancelled = true;
         };
-    }, [groupId, sessionId, toast, t]);
+    }, [activeGroup, activeSession, groupId, sessionId, toast, t]);
 
     const messagesRef = useRef(messages);
     messagesRef.current = messages;
@@ -295,6 +329,9 @@ export default function GroupsPage() {
                 message_id: createRandomUUID(),
             });
             setMessages((previous) => mergeMessages(previous, [intake.message]));
+            if (intake.run_ids.length > 0) {
+                setTrackedRunIds((current) => [...new Set([...current, ...intake.run_ids])]);
+            }
 
             // Planning can fail before any agent starts — say so instead of leaving a silent gap.
             if (intake.error_code) {
@@ -305,6 +342,22 @@ export default function GroupsPage() {
         } catch (error: any) {
             toast.error(error?.message ?? t('groups.sendFailed', '发送失败'));
             throw error;
+        }
+    };
+
+    const cancelActiveRuns = async () => {
+        if (!groupId || !sessionId || activeRunIds.length === 0 || cancellingRuns) return;
+        setCancellingRuns(true);
+        try {
+            await Promise.all(
+                activeRunIds.map((runId) => groupApi.cancelRun(groupId, sessionId, runId)),
+            );
+            await refetchTrackedRuns();
+            toast.info(t('groups.cancelAccepted', '已请求停止当前运行'));
+        } catch (error: any) {
+            toast.error(error?.message ?? t('groups.cancelFailed', '停止运行失败'));
+        } finally {
+            setCancellingRuns(false);
         }
     };
 
@@ -604,7 +657,13 @@ export default function GroupsPage() {
                             onLoadMore={() => void loadMore()}
                         />
 
-                        <MessageComposer members={members} onSend={sendMessage} />
+                        <MessageComposer
+                            members={members}
+                            canCancel={activeRunIds.length > 0}
+                            cancelling={cancellingRuns}
+                            onCancel={() => void cancelActiveRuns()}
+                            onSend={sendMessage}
+                        />
                     </>
                 ) : (
                     <div className="group-main-empty">
@@ -663,6 +722,7 @@ export default function GroupsPage() {
                 open={Boolean(creatingSession)}
                 title={t('groups.newSession', '新建会话')}
                 placeholder={t('groups.sessionTitlePlaceholder', '会话名称，可留空')}
+                allowEmpty
                 onConfirm={(value) => void createSession(value)}
                 onCancel={() => setCreatingSession(null)}
             />

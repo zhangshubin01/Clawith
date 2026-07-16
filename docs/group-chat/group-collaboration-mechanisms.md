@@ -749,6 +749,18 @@ Group Run 启动时的普通 ACK 会先把来源 Run 的产品 `delivery_status`
 
 人类消息、规划失败系统消息、ACK、waiting/terminal 以及带 mention 的 handoff 都只在产品事务提交后发布 `message.created`。推送是至少一次通知，失败不回滚已提交事实；前端按 message ID 去重并以 `after` 追回空窗。健康 WebSocket 建立后立即清理 4 秒轮询 timer，避免页面持续请求消息接口。详细契约和回归表见 `docs/group-chat/frontend-realtime-contract.md`。
 
+#### 10.2.10 Group 交互边界回归修复（2026-07-16）
+
+本轮浏览器 E2E 暴露的交互缺陷按既有产品语义做最小修复，没有增加第二套 Runtime 或文件版本协议：
+
+1. 新建 Group Session 允许提交空标题，由后端生成默认标题；创建 Group 仍要求非空名称。`PromptModal` 只通过显式 `allowEmpty` 开放这一处行为。
+2. URL 中的 Group 不在当前用户可见列表时，前端在已取得权威 Group 列表后返回 `/groups`；Sessions、Members 和 Messages 都不会以未授权 URL ID 作为请求 scope。Toast Context 保持稳定引用，错误提示本身不再触发请求 effect 重跑。
+3. Group Workspace 列表返回的 `version_token` 必须来自 storage `get_version` 的同一 canonical token，不能直接使用 Local/S3 list metadata 的近似 token。用户可以把列表返回的 token 原样用于条件删除；真正发生并发修改时仍返回 conflict。
+4. 删除全局 Agent 时，Direct/A2A Session 被软删除并解除 Agent 外键，`ChatMessage.agent_id` 被置空；Agent Participant 作为历史显示 tombstone 保留，活跃 Group membership 置为 removed。因此 Agent 不再出现在群成员或邀请候选中，但既有群消息及发送者名称仍可读取。
+5. Group 发送接口返回的每个精确 `run_id` 都可通过 Group/Session scoped Run State 接口读取，并通过显式 cancel 接口写入既有 `AgentRunCommand(cancel)`。前端只在状态仍可取消时显示停止按钮；一次操作只取消这些目标 Run，不级联 root、公开 handoff child 或私下 A2A child。
+
+对应回归覆盖空标题的显式开放、未授权 route 的请求门禁与稳定 Toast、list-token 直接删除、Agent 删除时历史保留语义，以及 Group Run scope/cancel Command。未受这些改动影响的既有群消息、Planning、handoff 与 A2A 用例不重复执行整套浏览器回归。
+
 ### 10.3 仍待后续产品决定
 
 以下事项不阻塞上述正确性修复：
