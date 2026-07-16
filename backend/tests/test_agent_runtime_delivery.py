@@ -233,6 +233,73 @@ def test_delivery_request_uses_the_documented_stable_keys() -> None:
 
 
 @pytest.mark.asyncio
+async def test_direct_delivery_accepts_the_session_scoped_langgraph_thread() -> None:
+    tenant_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    session = _session(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        user_id=user_id,
+    )
+    run = _run(tenant_id=tenant_id, session=session, agent_id=agent_id)
+    run.runtime_thread_id = str(session.id)
+    participant = _participant(agent_id)
+    db = _RecordingDB(
+        run,
+        None,
+        session,
+        _agent(tenant_id, agent_id),
+        participant,
+        _user(tenant_id, user_id),
+    )
+
+    receipt = await deliver_runtime_message(
+        db,
+        _terminal_request(run, content="Same conversation, next Run"),
+        clock=lambda: NOW,
+    )
+
+    assert run.id != session.id
+    assert run.runtime_thread_id == str(session.id)
+    assert receipt.status == "delivered"
+    assert receipt.actual_session_id == session.id
+    assert _added(db, ChatMessage)[0].conversation_id == str(session.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime_type", "runtime_thread_id"),
+    [
+        ("legacy", "legacy-thread"),
+        ("langgraph", ""),
+        ("langgraph", "   "),
+    ],
+)
+async def test_delivery_rejects_an_invalid_runtime_identity(
+    runtime_type: str,
+    runtime_thread_id: str,
+) -> None:
+    tenant_id = uuid.uuid4()
+    session = _session(
+        tenant_id=tenant_id,
+        agent_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+    )
+    run = _run(tenant_id=tenant_id, session=session, agent_id=session.agent_id)
+    run.runtime_type = runtime_type
+    run.runtime_thread_id = runtime_thread_id
+    db = _RecordingDB(run)
+
+    with pytest.raises(DeliveryServiceError) as exc_info:
+        await deliver_runtime_message(db, _terminal_request(run))
+
+    assert exc_info.value.code == "runtime_identity_mismatch"
+    assert len(db.statements) == 1
+    assert db.added == []
+
+
+@pytest.mark.asyncio
 async def test_group_terminal_delivery_is_one_transaction_with_agent_identity() -> None:
     tenant_id = uuid.uuid4()
     agent_id = uuid.uuid4()

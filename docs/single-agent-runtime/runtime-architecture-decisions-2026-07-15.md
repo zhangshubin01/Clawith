@@ -237,6 +237,8 @@ Direct Chat 的短期对话记忆直接由 LangGraph Thread State 中的标准 `
 
 Direct Chat 不增加 Thread 映射表、`AgentThread` 表、`ThreadMapper` 或单独的 Thread Adapter。`ChatSession.id` 直接作为 LangGraph `thread_id`；现有 Runtime 代码只负责把该 ID 放入 LangGraph config，不建立第二套身份。
 
+落地核对（2026-07-16）：3010 首次部署回归暴露 `delivery.py` 仍残留旧的 `runtime_thread_id == run_id` guard，导致合法的 Direct Chat terminal delivery 在产品同步阶段失败。Delivery 现在只校验 Run 使用 LangGraph 且具有非空稳定 thread identity；Direct Chat 的 `thread_id == ChatSession.id` scope 继续由 Chat intake/resume/cancel 边界校验，目标 Session、Agent、User/Group 则由 Delivery 自身的 target resolver 校验。回归测试同时覆盖 Session-scoped Thread 的成功交付，以及 legacy runtime、空/纯空白 thread identity 在任何写入前 fail closed。
+
 ### D-010：保留窄的事务命令入口，删除虚假的 Runtime Adapter 抽象
 
 Chat、Task、Trigger、Heartbeat、A2A 和 Planning 仍必须通过同一处应用服务接受 Runtime 命令。该边界负责在调用方持有的数据库事务内统一完成：

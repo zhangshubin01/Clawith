@@ -788,10 +788,14 @@ async def deliver_runtime_message(
             "run_scope_mismatch",
             "loaded delivery Run is outside the requested tenant scope",
         )
-    if run.runtime_type != "langgraph" or run.runtime_thread_id != str(run.id):
+    if (
+        run.runtime_type != "langgraph"
+        or not run.runtime_thread_id
+        or not run.runtime_thread_id.strip()
+    ):
         raise DeliveryServiceError(
             "runtime_identity_mismatch",
-            "delivery requires a LangGraph Run whose thread_id equals run_id",
+            "delivery requires a LangGraph Run with a non-empty thread_id",
         )
 
     existing = await _existing_receipt(db, request=request)
