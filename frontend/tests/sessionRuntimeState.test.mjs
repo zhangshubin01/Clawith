@@ -6,6 +6,7 @@ import {
   runtimeCompletionNeedsMessageRefresh,
   sessionActiveRunFromResponse,
   sessionRuntimeStateResponseIsValid,
+  terminalAssistantMessageAlreadyPresent,
   waitingSessionActiveRunHint,
 } from '../src/pages/agent-detail/sessionRuntimeState.ts';
 
@@ -35,6 +36,41 @@ test('settled lane transition refreshes canonical messages after websocket loss'
   assert.equal(runtimeCompletionNeedsMessageRefresh(waitingRun, null), true);
   assert.equal(runtimeCompletionNeedsMessageRefresh(null, null), false);
   assert.equal(runtimeCompletionNeedsMessageRefresh(waitingRun, waitingRun), false);
+});
+
+test('websocket terminal packet does not duplicate a canonical refreshed answer', () => {
+  assert.equal(
+    terminalAssistantMessageAlreadyPresent(
+      [{ id: 'message-1', role: 'assistant', content: 'final answer', _streaming: false }],
+      'message-1',
+      'final answer',
+    ),
+    true,
+  );
+  assert.equal(
+    terminalAssistantMessageAlreadyPresent(
+      [{ id: 'message-1', role: 'assistant', content: 'final answer', _streaming: false }],
+      'message-2',
+      'final answer',
+    ),
+    false,
+  );
+  assert.equal(
+    terminalAssistantMessageAlreadyPresent(
+      [{ role: 'assistant', content: 'final answer', _streaming: true }],
+      null,
+      'final answer',
+    ),
+    false,
+  );
+  assert.equal(
+    terminalAssistantMessageAlreadyPresent(
+      [{ role: 'assistant', content: 'final answer', _streaming: false }],
+      null,
+      'final answer',
+    ),
+    true,
+  );
 });
 
 test('waiting websocket packet is only a non-actionable hint', () => {

@@ -65,6 +65,7 @@ import {
     runtimeCompletionNeedsMessageRefresh,
     sessionActiveRunFromResponse,
     sessionRuntimeStateResponseIsValid,
+    terminalAssistantMessageAlreadyPresent,
     type SessionActiveRun,
     waitingSessionActiveRunHint,
 } from './sessionRuntimeState';
@@ -2834,7 +2835,7 @@ export default function AgentDetailPage() {
         } catch (e: any) { toast.error(t('common.error.saveFailed', '保存失败'), { details: String(e?.message || e) }); }
         setExpirySaving(false);
     };
-    interface ChatMsg { role: 'user' | 'assistant' | 'tool_call'; content: string; fileName?: string; toolName?: string; toolCallId?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; toolThinking?: string; thinking?: string; imageUrl?: string; timestamp?: string; }
+    interface ChatMsg { id?: string; role: 'user' | 'assistant' | 'tool_call'; content: string; fileName?: string; toolName?: string; toolCallId?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; toolThinking?: string; thinking?: string; imageUrl?: string; timestamp?: string; }
     const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
     const getToolTargetKey = (args: any): string => {
         if (!args) return '';
@@ -3526,8 +3527,21 @@ export default function AgentDetailPage() {
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
                     const thinking = (last && last.role === 'assistant' && (last as any)._streaming) ? last.thinking : undefined;
-                    if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), parseChatMsg({ role: 'assistant', content: d.content, thinking, timestamp: new Date().toISOString() })];
-                    return [...prev, parseChatMsg({ role: d.role, content: d.content, timestamp: new Date().toISOString() })];
+                    const terminalMessage = parseChatMsg({
+                        ...(d.message_id && { id: String(d.message_id) }),
+                        role: 'assistant',
+                        content: d.content,
+                        thinking,
+                        timestamp: new Date().toISOString(),
+                    });
+                    if (last && last.role === 'assistant' && (last as any)._streaming) return [...prev.slice(0, -1), terminalMessage];
+                    // Runtime-state polling can observe the committed terminal
+                    // message before its websocket `done` packet arrives. In
+                    // that ordering, refreshSessionMessages already installed
+                    // the canonical row, so appending the packet would render
+                    // the same answer twice until the next page reload.
+                    if (terminalAssistantMessageAlreadyPresent(prev, d.message_id, d.content)) return prev;
+                    return [...prev, terminalMessage];
                 });
                 const currentSessionId = activeSessionIdRef.current ? String(activeSessionIdRef.current) : '';
                 if (currentSessionId) clearUnreadForSession(currentSessionId);

@@ -89,6 +89,23 @@ export const runtimeCompletionNeedsMessageRefresh = (
     next: SessionActiveRun | null,
 ): boolean => previous !== null && next === null;
 
+export const terminalAssistantMessageAlreadyPresent = (
+    messages: Array<{ id?: string; role?: string; content?: string; _streaming?: boolean }>,
+    messageId: unknown,
+    content: unknown,
+): boolean => {
+    if (typeof messageId === 'string' && messageId.trim()) {
+        return messages.some((message) => message.id === messageId);
+    }
+    const lastMessage = messages[messages.length - 1];
+    return (
+        lastMessage?.role === 'assistant'
+        && lastMessage._streaming !== true
+        && typeof content === 'string'
+        && lastMessage.content === content
+    );
+};
+
 export const waitingSessionActiveRunHint = ({
     runId,
     sessionId,
