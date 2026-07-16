@@ -115,6 +115,7 @@ def _execution(
         request_ref="request://1",
         effect=effect,
         retry_policy=retry_policy,
+        attempt_count=1,
         result_metadata={},
         status=status,
         result_summary=result_summary,
@@ -131,7 +132,7 @@ async def _reserve(
     run_id: uuid.UUID,
     effect: str = "external_write",
     retry_policy: str = "never",
-    retry_failed: bool = False,
+    resume_safe_read: bool = False,
     arguments: dict | None = None,
 ):
     return await tool_execution.reserve_tool_execution(
@@ -148,7 +149,7 @@ async def _reserve(
         retry_policy=retry_policy,
         lease_owner="worker-1",
         lease_ttl_seconds=60,
-        retry_failed=retry_failed,
+        resume_safe_read=resume_safe_read,
         clock=lambda: _NOW,
     )
 
@@ -354,7 +355,7 @@ async def test_idempotency_key_rejects_changed_arguments_or_execution_metadata()
 
 
 @pytest.mark.asyncio
-async def test_failed_execution_only_retries_when_explicitly_safe_and_read_only():
+async def test_terminal_failed_execution_is_never_reopened():
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
     failed = _execution(
@@ -379,49 +380,205 @@ async def test_failed_execution_only_retries_when_explicitly_safe_and_read_only(
     assert blocked.error_code == "tool_execution_failed"
     assert blocked_db.flush_count == 0
 
-    retry_db = _FakeSession(run_id, failed)
-    retry = await _reserve(
-        retry_db,
+    replay_db = _FakeSession(run_id, failed)
+    replay = await _reserve(
+        replay_db,
         tenant_id=tenant_id,
         run_id=run_id,
         effect="read",
         retry_policy="safe",
-        retry_failed=True,
+        resume_safe_read=True,
     )
-    assert retry.can_execute is True
-    assert retry.retrying is True
-    assert retry.prior_failure.result_summary == "temporary read failure"
-    assert failed.status == "started"
-    assert failed.result_summary is None
-    assert failed.completed_at is None
-    assert retry_db.flush_count == 1
+    assert replay.can_execute is False
+    assert replay.retrying is False
+    assert replay.prior_failure.result_summary == "temporary read failure"
+    assert failed.status == "failed"
+    assert replay_db.flush_count == 0
 
 
 @pytest.mark.asyncio
-async def test_failed_external_write_cannot_be_retried_even_when_requested():
+async def test_retry_pending_safe_read_claims_one_durable_next_attempt():
     tenant_id = uuid.uuid4()
     run_id = uuid.uuid4()
-    failed = _execution(
+    pending = _execution(
         tenant_id=tenant_id,
         run_id=run_id,
-        status="failed",
-        effect="external_write",
-        retry_policy="never",
-        result_summary="known failure",
+        status="started",
+        effect="read",
+        retry_policy="safe",
+        result_summary="temporary read failure",
     )
-    db = _FakeSession(run_id, failed)
+    pending.result_metadata = {
+        "error_code": "temporary_read_failure",
+        "retryable": True,
+        "runtime_attempt_count": 1,
+        "runtime_retry_pending": True,
+    }
+    pending.lease_owner = None
+    pending.lease_expires_at = None
+    db = _FakeSession(run_id, pending)
 
-    with pytest.raises(tool_execution.ToolExecutionError) as exc_info:
-        await _reserve(
-            db,
-            tenant_id=tenant_id,
-            run_id=run_id,
-            retry_failed=True,
-        )
+    reservation = await _reserve(
+        db,
+        tenant_id=tenant_id,
+        run_id=run_id,
+        effect="read",
+        retry_policy="safe",
+        resume_safe_read=True,
+    )
 
-    assert exc_info.value.code == "unsafe_tool_retry"
-    assert failed.status == "failed"
+    assert reservation.can_execute is True
+    assert reservation.retrying is True
+    assert reservation.prior_failure is not None
+    assert reservation.prior_failure.error_code == "temporary_read_failure"
+    assert pending.status == "started"
+    assert pending.attempt_count == 2
+    assert pending.result_summary is None
+    assert pending.result_metadata == {}
+    assert pending.lease_owner == "worker-1"
+    assert db.flush_count == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_safe_read_without_retry_marker_requires_result_probe():
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="started",
+        effect="read",
+        retry_policy="safe",
+    )
+    execution.attempt_count = 1
+    execution.lease_expires_at = _NOW - timedelta(seconds=1)
+    db = _FakeSession(run_id, execution)
+
+    reservation = await _reserve(
+        db,
+        tenant_id=tenant_id,
+        run_id=run_id,
+        effect="read",
+        retry_policy="safe",
+        resume_safe_read=True,
+    )
+
+    assert reservation.can_execute is False
+    assert reservation.retrying is False
+    assert reservation.reconciliation_required is True
+    assert reservation.error_code == "safe_read_result_reconciliation_required"
+    assert reservation.prior_failure is None
+    assert execution.status == "started"
+    assert execution.attempt_count == 1
     assert db.flush_count == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_safe_read_closes_only_after_result_probe_is_unavailable():
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="started",
+        effect="read",
+        retry_policy="safe",
+    )
+    execution.attempt_count = 2
+    execution.lease_expires_at = _NOW - timedelta(seconds=1)
+    db = _FakeSession(execution)
+
+    closed = await tool_execution.mark_expired_safe_read_result_unavailable(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution.id,
+        probe_error_code="tool_result_unreadable",
+        clock=lambda: _NOW,
+    )
+
+    assert closed.status == "failed"
+    assert closed.result_metadata["error_code"] == "safe_read_result_unavailable"
+    assert closed.result_metadata["error_class"] == "tool_result_unreadable"
+    assert closed.result_metadata["retryable"] is False
+    assert closed.result_metadata["runtime_attempt_count"] == 2
+    assert closed.lease_owner is None
+    assert closed.lease_expires_at is None
+    assert closed.completed_at == _NOW
+    assert db.flush_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_pending_marker_releases_lease_without_closing_receipt():
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="started",
+        effect="read",
+        retry_policy="safe",
+    )
+    execution.attempt_count = 1
+    db = _FakeSession(execution)
+
+    result = await tool_execution.mark_tool_execution_retry_pending(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution.id,
+        lease_owner="worker-1",
+        result_summary="temporary failure",
+        error_code="temporary_read_failure",
+        metadata={"source": "provider"},
+    )
+
+    assert result.status == "started"
+    assert result.attempt_count == 1
+    assert result.result_summary == "temporary failure"
+    assert result.result_metadata["runtime_retry_pending"] is True
+    assert result.result_metadata["runtime_attempt_count"] == 1
+    assert result.result_metadata["retryable"] is True
+    assert result.lease_owner is None
+    assert result.lease_expires_at is None
+    assert db.flush_count == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_final_safe_read_attempt_closes_without_provider_replay():
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="started",
+        effect="read",
+        retry_policy="safe",
+    )
+    execution.attempt_count = tool_execution.SAFE_READ_MAX_ATTEMPTS
+    execution.result_metadata = {
+        "error_code": "temporary_read_failure",
+        "retryable": True,
+        "runtime_attempt_count": tool_execution.SAFE_READ_MAX_ATTEMPTS,
+        "runtime_retry_pending": True,
+    }
+    execution.lease_expires_at = _NOW - timedelta(seconds=1)
+    db = _FakeSession(run_id, execution)
+
+    reservation = await _reserve(
+        db,
+        tenant_id=tenant_id,
+        run_id=run_id,
+        effect="read",
+        retry_policy="safe",
+        resume_safe_read=True,
+    )
+
+    assert reservation.can_execute is False
+    assert reservation.prior_failure is not None
+    assert reservation.prior_failure.error_code == "tool_retry_exhausted"
+    assert execution.status == "failed"
+    assert execution.result_metadata["runtime_attempt_count"] == 3
+    assert execution.result_metadata["runtime_retry_exhausted"] is True
+    assert db.flush_count == 1
 
 
 @pytest.mark.asyncio

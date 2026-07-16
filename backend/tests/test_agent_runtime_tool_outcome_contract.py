@@ -55,6 +55,12 @@ class _MemoryStorage(StorageBackend):
         self.values[key] = data
 
 
+class _FailingReadStorage(_MemoryStorage):
+    async def read_bytes(self, key: str) -> bytes:
+        del key
+        raise TimeoutError("object storage probe timed out")
+
+
 class _ScalarResult:
     def __init__(self, value) -> None:
         self.value = value
@@ -96,6 +102,12 @@ class _DB:
         return None
 
 
+class _FailingDB(_DB):
+    async def execute(self, statement):
+        del statement
+        raise TimeoutError("ledger settlement timed out")
+
+
 def _factory(*results):
     @asynccontextmanager
     async def factory():
@@ -110,6 +122,14 @@ def _sequence_factory(*databases: _DB):
     @asynccontextmanager
     async def factory():
         yield remaining.popleft()
+
+    return factory
+
+
+def _failing_factory():
+    @asynccontextmanager
+    async def factory():
+        yield _FailingDB()
 
     return factory
 
@@ -626,6 +646,61 @@ async def test_result_reconciler_does_not_guess_success_without_an_envelope() ->
     result = await reconciler.run_once()
 
     assert result.status == "deferred"
+    assert execution.status == "started"
+    assert execution.result_ref is None
+
+
+@pytest.mark.asyncio
+async def test_result_reconciler_defers_transient_storage_probe_failures() -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(tenant_id=tenant_id, run_id=run_id)
+    execution.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    reconciler = ToolResultReconciler(
+        session_factory=_factory(),
+        result_store=ToolResultStore(
+            session_factory=_factory(),
+            storage=_FailingReadStorage(),
+        ),
+    )
+
+    result = await reconciler.reconcile_candidate(execution)
+
+    assert result.status == "deferred"
+    assert result.error_code == "tool_result_probe_failed"
+    assert execution.status == "started"
+    assert execution.result_ref is None
+
+
+@pytest.mark.asyncio
+async def test_result_reconciler_defers_transient_ledger_settlement_failures() -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(tenant_id=tenant_id, run_id=run_id)
+    execution.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    storage = _MemoryStorage()
+    store = ToolResultStore(
+        session_factory=_failing_factory(),
+        storage=storage,
+    )
+    await store.write(
+        execution,
+        ToolExecutionOutcome(
+            status="succeeded",
+            result_summary="archived result",
+            result_ref=None,
+        ),
+        "full archived result",
+    )
+    reconciler = ToolResultReconciler(
+        session_factory=_failing_factory(),
+        result_store=store,
+    )
+
+    result = await reconciler.reconcile_candidate(execution)
+
+    assert result.status == "deferred"
+    assert result.error_code == "tool_result_settlement_failed"
     assert execution.status == "started"
     assert execution.result_ref is None
 

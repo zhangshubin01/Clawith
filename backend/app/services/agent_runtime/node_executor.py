@@ -154,7 +154,7 @@ class NoopRuntimeRunCompactor:
 
 
 class RuntimeToolStepService(Protocol):
-    """Execute one pending tool batch through the Tool Execution Ledger."""
+    """Execute pending tools through the Tool Execution Ledger."""
 
     async def execute_pending(
         self,
@@ -712,15 +712,39 @@ class DeterministicRuntimeNodeExecutor:
                 "missing_pending_tool_calls",
                 "tool route requires pending tool calls",
             )
+        call_ids = [call.get("id") for call in calls]
+        if (
+            any(not isinstance(call_id, str) or not call_id.strip() for call_id in call_ids)
+            or len(set(call_ids)) != len(call_ids)
+        ):
+            lifecycle = dict(state["lifecycle"])
+            lifecycle.update(
+                {
+                    "status": "failed",
+                    "next_route": "terminal",
+                    "reason": "tool_execution_failed",
+                    "error": _error(
+                        "invalid_tool_call",
+                        "pending tool calls require unique non-empty IDs",
+                    ),
+                }
+            )
+            return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
+        # One LangGraph Tool node task owns one receipt. RetryPolicy budgets are
+        # node-task scoped, so passing the whole batch here would make several
+        # receipts share one retry counter.
+        current_call = calls[0]
+        tail_calls = calls[1:]
         result = await self._tool_service.execute_pending(
             state,
             context,
-            calls,
+            (current_call,),
         )
+        pending_calls = (*result.pending_tool_calls, *tail_calls)
         lifecycle = dict(state["lifecycle"])
         lifecycle.update(
             {
-                "pending_tool_calls": [dict(call) for call in result.pending_tool_calls],
+                "pending_tool_calls": [dict(call) for call in pending_calls],
             }
         )
         if result.cancel_signal is not None:
@@ -759,13 +783,43 @@ class DeterministicRuntimeNodeExecutor:
                     "error": None,
                 }
             )
-            _schedule_compact(lifecycle)
+            if pending_calls:
+                lifecycle["next_route"] = "tool"
+            else:
+                _schedule_compact(lifecycle)
         update: RuntimeStateUpdate = {
             "lifecycle": cast(RuntimeLifecycle, lifecycle),
         }
-        if result.messages:
+        output_messages = [
+            _message_for_channel(dict(message)) for message in result.messages
+        ]
+        if (
+            result.cancel_signal is None
+            and result.waiting_request is None
+            and result.error is None
+            and not pending_calls
+        ):
+            deferred_resume_messages = lifecycle.get(
+                "deferred_resume_messages",
+                [],
+            )
+            if not isinstance(deferred_resume_messages, list) or any(
+                not isinstance(message, Mapping)
+                for message in deferred_resume_messages
+            ):
+                raise RuntimeNodeTransitionError(
+                    "invalid_deferred_resume_messages",
+                    "deferred resume messages must be an array of objects",
+                )
+            output_messages.extend(
+                _message_for_channel(dict(message))
+                for message in deferred_resume_messages
+            )
+            lifecycle["deferred_resume_messages"] = []
+            update["lifecycle"] = cast(RuntimeLifecycle, lifecycle)
+        if output_messages:
             update["messages"] = [
-                _message_for_channel(dict(message)) for message in result.messages
+                *output_messages,
             ]
         return update
 
@@ -911,6 +965,7 @@ class DeterministicRuntimeNodeExecutor:
                 "resume value must be an object",
             )
         lifecycle = dict(state["lifecycle"])
+        waiting_status = state["lifecycle"]["status"]
         lifecycle.update(
             {
                 "status": "running",
@@ -918,23 +973,38 @@ class DeterministicRuntimeNodeExecutor:
                 "waiting_request": None,
             }
         )
+        resume_message = _message_for_channel({
+            "id": _runtime_message_id(
+                context,
+                f"resume:{context.command_id}",
+            ),
+            "role": "user",
+            "content": _resume_message_content(
+                cast(Mapping[str, JsonValue], resume_value)
+            ),
+            "runtime_input": "resume",
+            "runtime_run_id": context.run_id,
+        })
+        pending_calls = _tool_calls(cast(RuntimeLifecycle, lifecycle))
+        if waiting_status == "waiting_agent" and pending_calls:
+            deferred = lifecycle.get("deferred_resume_messages", [])
+            if not isinstance(deferred, list) or any(
+                not isinstance(message, Mapping) for message in deferred
+            ):
+                raise RuntimeNodeTransitionError(
+                    "invalid_deferred_resume_messages",
+                    "deferred resume messages must be an array of objects",
+                )
+            lifecycle["deferred_resume_messages"] = [
+                *[dict(message) for message in deferred],
+                dict(resume_message),
+            ]
+            lifecycle["next_route"] = "tool"
+            return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
         _schedule_compact(lifecycle)
         return {
             "lifecycle": cast(RuntimeLifecycle, lifecycle),
-            "messages": [
-                _message_for_channel({
-                    "id": _runtime_message_id(
-                        context,
-                        f"resume:{context.command_id}",
-                    ),
-                    "role": "user",
-                    "content": _resume_message_content(
-                        cast(Mapping[str, JsonValue], resume_value)
-                    ),
-                    "runtime_input": "resume",
-                    "runtime_run_id": context.run_id,
-                })
-            ],
+            "messages": [resume_message],
         }
 
     async def execute(

@@ -16,6 +16,7 @@ from app.models.agent_tool_execution import AgentToolExecution
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.tool_execution import (
     ToolExecutionOutcome,
+    execution_outcome,
     mark_tool_execution_succeeded,
 )
 from app.services.storage_runtime.base import StorageBackend
@@ -113,8 +114,10 @@ class ToolResultEnvelope:
 class ToolResultReconcileResult:
     """Outcome of one bounded private-result reconciliation pass."""
 
-    status: Literal["idle", "reconciled", "deferred"]
+    status: Literal["idle", "reconciled", "unavailable", "deferred"]
     execution_id: uuid.UUID | None = None
+    outcome: ToolExecutionOutcome | None = None
+    error_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -517,30 +520,70 @@ class ToolResultReconciler:
             return ToolResultReconcileResult(status="idle")
 
         for candidate in candidates:
-            try:
-                envelope = await self._result_store.load_for_reconciliation(
-                    candidate
-                )
-            except ToolResultStoreError as exc:
-                if exc.code != "tool_result_unreadable":
+            reconciled = await self.reconcile_candidate(candidate)
+            if reconciled.status == "unavailable":
+                if reconciled.error_code != "tool_result_unreadable":
                     logger.warning(
                         "Tool result envelope could not reconcile execution %s: %s",
                         candidate.id,
-                        exc.code,
+                        reconciled.error_code,
                     )
                 continue
+            if reconciled.status == "reconciled":
+                return reconciled
+        return ToolResultReconcileResult(status="deferred")
 
-            settled = await self._settle_if_still_expired(
+    async def reconcile_candidate(
+        self,
+        candidate: AgentToolExecution,
+    ) -> ToolResultReconcileResult:
+        """Probe and settle one exact receipt without executing its provider."""
+        try:
+            envelope = await self._result_store.load_for_reconciliation(candidate)
+        except ToolResultStoreError as exc:
+            return ToolResultReconcileResult(
+                status="unavailable",
+                execution_id=candidate.id,
+                error_code=exc.code,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Tool result storage probe deferred execution %s: %s",
+                candidate.id,
+                type(exc).__name__,
+            )
+            return ToolResultReconcileResult(
+                status="deferred",
+                execution_id=candidate.id,
+                error_code="tool_result_probe_failed",
+            )
+        try:
+            outcome = await self._settle_if_still_expired(
                 execution_id=candidate.id,
                 envelope=envelope,
-                now=now,
+                now=datetime.now(UTC),
             )
-            if settled:
-                return ToolResultReconcileResult(
-                    status="reconciled",
-                    execution_id=candidate.id,
-                )
-        return ToolResultReconcileResult(status="deferred")
+        except Exception as exc:
+            logger.warning(
+                "Tool result ledger settlement deferred execution %s: %s",
+                candidate.id,
+                type(exc).__name__,
+            )
+            return ToolResultReconcileResult(
+                status="deferred",
+                execution_id=candidate.id,
+                error_code="tool_result_settlement_failed",
+            )
+        if outcome is None:
+            return ToolResultReconcileResult(
+                status="deferred",
+                execution_id=candidate.id,
+            )
+        return ToolResultReconcileResult(
+            status="reconciled",
+            execution_id=candidate.id,
+            outcome=outcome,
+        )
 
     async def _settle_if_still_expired(
         self,
@@ -548,7 +591,7 @@ class ToolResultReconciler:
         execution_id: uuid.UUID,
         envelope: ToolResultEnvelope,
         now: datetime,
-    ) -> bool:
+    ) -> ToolExecutionOutcome | None:
         async with self._session_factory() as db:
             async with db.begin():
                 result = await db.execute(
@@ -558,20 +601,20 @@ class ToolResultReconciler:
                 )
                 execution = result.scalar_one_or_none()
                 if execution is None or execution.status != "started":
-                    return False
+                    return None
                 if (
                     execution.lease_expires_at is None
                     or execution.lease_expires_at > now
                     or not execution.lease_owner
                 ):
-                    return False
+                    return None
                 if (
                     execution.id != envelope.execution_id
                     or execution.tenant_id != envelope.tenant_id
                     or execution.run_id != envelope.run_id
                     or execution.tool_call_id != envelope.tool_call_id
                 ):
-                    return False
+                    return None
                 await mark_tool_execution_succeeded(
                     db,
                     tenant_id=execution.tenant_id,
@@ -594,7 +637,7 @@ class ToolResultReconciler:
                     },
                     clock=lambda: now,
                 )
-                return True
+                return execution_outcome(execution)
 
 
 __all__ = [

@@ -277,6 +277,7 @@ def test_agent_tool_execution_model_captures_idempotency_and_lease_contract():
         "request_ref",
         "effect",
         "retry_policy",
+        "attempt_count",
         "status",
         "result_summary",
         "result_ref",
@@ -293,6 +294,7 @@ def test_agent_tool_execution_model_captures_idempotency_and_lease_contract():
     }
     assert _constraint_names(table, sa.CheckConstraint) == {
         "ck_agent_tool_executions_effect",
+        "ck_agent_tool_executions_attempt_count",
         "ck_agent_tool_executions_retry_policy",
         "ck_agent_tool_executions_status",
     }
@@ -302,6 +304,8 @@ def test_agent_tool_execution_model_captures_idempotency_and_lease_contract():
     }
     assert table.c.lease_owner.nullable is True
     assert table.c.lease_expires_at.nullable is True
+    assert table.c.attempt_count.nullable is False
+    assert str(table.c.attempt_count.server_default.arg) == "1"
     assert table.c.updated_at.nullable is False
     assert _foreign_key_specs(table)["fk_agent_tool_executions_tenant_run_agent_runs"] == (
         ("tenant_id", "run_id"),

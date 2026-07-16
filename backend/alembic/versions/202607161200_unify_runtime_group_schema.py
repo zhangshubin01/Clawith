@@ -131,6 +131,7 @@ RUNTIME_COLUMNS = {
         "request_ref",
         "effect",
         "retry_policy",
+        "attempt_count",
         "status",
         "result_summary",
         "result_ref",
@@ -239,6 +240,7 @@ RUNTIME_CHECKS = {
         "ck_agent_tool_executions_retry_policy": (
             "retry_policy IN ('safe', 'conditional', 'never')"
         ),
+        "ck_agent_tool_executions_attempt_count": "attempt_count >= 1",
     },
     "session_context_states": {
         "ck_session_context_states_version": "version >= 1"
@@ -2002,6 +2004,12 @@ def _create_agent_tool_executions() -> None:
             "retry_policy",
             sa.String(length=24),
             server_default=sa.text("'never'"),
+            nullable=False,
+        ),
+        sa.Column(
+            "attempt_count",
+            sa.Integer(),
+            server_default=sa.text("1"),
             nullable=False,
         ),
         sa.Column("status", sa.String(length=24), nullable=False),

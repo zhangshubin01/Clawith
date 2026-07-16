@@ -35,6 +35,7 @@ from app.services.agent_runtime.state import (
     RuntimeNodeExecutor,
     runtime_messages_as_json,
 )
+from app.services.agent_runtime.tool_execution import RetryableToolNodeError
 
 
 def _settings() -> Settings:
@@ -120,6 +121,72 @@ class ToolService:
         del state, context
         self.calls.append(tool_calls)
         return self.result
+
+
+class PerCallRetryingToolService:
+    """Fail each receipt twice so LangGraph must budget retries per call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[JsonObject, ...]] = []
+        self.attempts: dict[str, int] = {}
+
+    async def execute_pending(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        tool_calls: tuple[JsonObject, ...],
+    ) -> ToolStepResult:
+        del state, context
+        self.calls.append(tool_calls)
+        messages: list[JsonObject] = []
+        for call in tool_calls:
+            call_id = str(call["id"])
+            attempt = self.attempts.get(call_id, 0) + 1
+            self.attempts[call_id] = attempt
+            if attempt < 3:
+                raise RetryableToolNodeError(
+                    tool_call_id=call_id,
+                    error_code="temporary_read_failure",
+                )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": f"result:{call_id}",
+                }
+            )
+        return ToolStepResult(messages=tuple(messages))
+
+
+class WaitingAgentThenTailToolService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[JsonObject, ...]] = []
+
+    async def execute_pending(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        tool_calls: tuple[JsonObject, ...],
+    ) -> ToolStepResult:
+        del state, context
+        self.calls.append(tool_calls)
+        call = tool_calls[0]
+        call_id = str(call["id"])
+        message: JsonObject = {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": f"result:{call_id}",
+        }
+        if call_id == "call-agent":
+            return ToolStepResult(
+                messages=(message,),
+                waiting_request={
+                    "waiting_type": "agent",
+                    "correlation_id": "a2a:consult:00000000-0000-0000-0000-000000000001",
+                    "reason": "waiting_for_consult",
+                },
+            )
+        return ToolStepResult(messages=(message,))
 
 
 class RunCompactor:
@@ -438,6 +505,151 @@ async def test_tool_batch_is_executed_before_the_next_model_step() -> None:
     assert [message["role"] for message in messages] == ["assistant", "tool"]
     assert messages[0]["tool_calls"][0]["id"] == "call-1"  # type: ignore[index]
     assert messages[1]["tool_call_id"] == "call-1"
+
+
+@pytest.mark.asyncio
+async def test_each_tool_call_gets_an_independent_langgraph_retry_budget(
+    monkeypatch,
+) -> None:
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("langgraph.pregel._retry.asyncio.sleep", no_sleep)
+    run_id = uuid.uuid4()
+    tool_calls: tuple[JsonObject, ...] = (
+        {"id": "call-1", "name": "lookup", "arguments": {"query": "one"}},
+        {"id": "call-2", "name": "lookup", "arguments": {"query": "two"}},
+    )
+    model = ModelService(
+        ModelStepResult(
+            intent="tool_calls",
+            assistant_message={"role": "assistant", "tool_calls": list(tool_calls)},
+            tool_calls=tool_calls,
+        ),
+        ModelStepResult(intent="finish", finish_content="both reads completed"),
+    )
+    tools = PerCallRetryingToolService()
+    executor = DeterministicRuntimeNodeExecutor(
+        cancel_source=CancelSource(),
+        model_service=model,
+        tool_service=tools,
+        finalizer=Finalizer(),
+    )
+
+    result = await _invoke(run_id, executor)
+
+    assert result["lifecycle"]["status"] == "completed"
+    assert result["lifecycle"]["pending_tool_calls"] == []
+    assert tools.attempts == {"call-1": 3, "call-2": 3}
+    assert tools.calls == [
+        (tool_calls[0],),
+        (tool_calls[0],),
+        (tool_calls[0],),
+        (tool_calls[1],),
+        (tool_calls[1],),
+        (tool_calls[1],),
+    ]
+    messages = runtime_messages_as_json(cast(RuntimeGraphState, result))
+    assert [message["tool_call_id"] for message in messages if message["role"] == "tool"] == [
+        "call-1",
+        "call-2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tool_call_ids_fail_before_any_provider_execution() -> None:
+    run_id = uuid.uuid4()
+    duplicate_calls: tuple[JsonObject, ...] = (
+        {"id": "call-duplicate", "name": "write", "arguments": {"value": 1}},
+        {"id": "call-duplicate", "name": "write", "arguments": {"value": 2}},
+    )
+    model = ModelService(
+        ModelStepResult(
+            intent="tool_calls",
+            assistant_message={
+                "role": "assistant",
+                "tool_calls": list(duplicate_calls),
+            },
+            tool_calls=duplicate_calls,
+        )
+    )
+    tools = ToolService()
+    executor = _executor(model, tools=tools)
+
+    result = await _invoke(run_id, executor)
+
+    assert result["lifecycle"]["status"] == "failed"
+    assert result["lifecycle"]["error"] == {
+        "code": "invalid_tool_call",
+        "message": "pending tool calls require unique non-empty IDs",
+    }
+    assert tools.calls == []
+
+
+@pytest.mark.asyncio
+async def test_waiting_agent_resume_finishes_tail_before_returning_to_model() -> None:
+    run_id = uuid.uuid4()
+    tool_calls: tuple[JsonObject, ...] = (
+        {"id": "call-agent", "name": "delegate", "arguments": {}},
+        {"id": "call-tail", "name": "lookup", "arguments": {}},
+    )
+    model = ModelService(
+        ModelStepResult(
+            intent="tool_calls",
+            assistant_message={"role": "assistant", "tool_calls": list(tool_calls)},
+            tool_calls=tool_calls,
+        ),
+        ModelStepResult(intent="finish", finish_content="collaboration complete"),
+    )
+    tools = WaitingAgentThenTailToolService()
+    executor = DeterministicRuntimeNodeExecutor(
+        cancel_source=CancelSource(),
+        model_service=model,
+        tool_service=tools,
+        finalizer=Finalizer(),
+    )
+    graph = build_agent_runtime_graph(
+        checkpointer=InMemorySaver(),
+        settings=_settings(),
+    )
+    config = runtime_thread_config(run_id)
+
+    interrupted = await graph.compiled.ainvoke(
+        _state(run_id),
+        config,
+        context=_context(run_id, executor, "command-start"),
+    )
+
+    assert interrupted["lifecycle"]["status"] == "waiting_agent"
+    assert interrupted["lifecycle"]["pending_tool_calls"] == [tool_calls[1]]
+    assert tools.calls == [(tool_calls[0],)]
+
+    resumed = await graph.compiled.ainvoke(
+        Command(
+            resume={
+                "resume_type": "agent_result",
+                "payload": {"result_summary": "delegated result"},
+            }
+        ),
+        config,
+        context=_context(run_id, executor, "command-resume-agent"),
+    )
+
+    assert resumed["lifecycle"]["status"] == "completed"
+    assert resumed["lifecycle"]["pending_tool_calls"] == []
+    assert resumed["lifecycle"]["deferred_resume_messages"] == []
+    assert tools.calls == [(tool_calls[0],), (tool_calls[1],)]
+    messages = runtime_messages_as_json(cast(RuntimeGraphState, resumed))
+    assert [message["role"] for message in messages] == [
+        "assistant",
+        "tool",
+        "tool",
+        "user",
+    ]
+    assert [
+        message["tool_call_id"] for message in messages if message["role"] == "tool"
+    ] == ["call-agent", "call-tail"]
+    assert "delegated result" in str(messages[-1]["content"])
 
 
 @pytest.mark.asyncio

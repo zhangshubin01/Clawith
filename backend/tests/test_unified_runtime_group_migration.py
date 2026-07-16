@@ -298,7 +298,12 @@ def test_final_runtime_shape_is_declared_directly() -> None:
         ("tenant_id", "runtime_thread_id", "created_at", "id"),
     )
 
-    assert {"effect", "retry_policy", "result_metadata"}.issubset(tool_columns)
+    assert {
+        "effect",
+        "retry_policy",
+        "attempt_count",
+        "result_metadata",
+    }.issubset(tool_columns)
     assert migration.RUNTIME_CHECKS["agent_tool_executions"] == {
         "ck_agent_tool_executions_status": (
             "status IN ('started', 'succeeded', 'failed', 'unknown')"
@@ -309,6 +314,7 @@ def test_final_runtime_shape_is_declared_directly() -> None:
         "ck_agent_tool_executions_retry_policy": (
             "retry_policy IN ('safe', 'conditional', 'never')"
         ),
+        "ck_agent_tool_executions_attempt_count": "attempt_count >= 1",
     }
     assert not {
         "agent_run_projections",

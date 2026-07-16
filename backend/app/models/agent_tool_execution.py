@@ -40,6 +40,10 @@ class AgentToolExecution(Base):
             "retry_policy IN ('safe', 'conditional', 'never')",
             name="ck_agent_tool_executions_retry_policy",
         ),
+        CheckConstraint(
+            "attempt_count >= 1",
+            name="ck_agent_tool_executions_attempt_count",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "run_id"],
             ["agent_runs.tenant_id", "agent_runs.id"],
@@ -86,6 +90,13 @@ class AgentToolExecution(Base):
         nullable=False,
         default="never",
         server_default="never",
+    )
+    # Durable provider-attempt budget for this exact (run_id, tool_call_id)
+    # receipt. It is independent from model turns and Command retries.
+    attempt_count: Mapped[int] = mapped_column(
+        nullable=False,
+        default=1,
+        server_default="1",
     )
     status: Mapped[str] = mapped_column(String(24), nullable=False)
     result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -35,6 +35,7 @@ ToolExecutionStatus = Literal[
 ]
 SideEffectClassification = Literal["read", "write", "external_write"]
 RetryPolicy = Literal["safe", "conditional", "never"]
+SAFE_READ_MAX_ATTEMPTS = 3
 
 _PERSISTED_STATUSES = frozenset({"started", "succeeded", "failed", "unknown"})
 _SIDE_EFFECT_CLASSIFICATIONS = frozenset({"read", "write", "external_write"})
@@ -116,6 +117,10 @@ _RESULT_METADATA_KEYS = frozenset(
         "deployment_id",
         "deployment_url",
         "deployment_state",
+        "runtime_attempt_count",
+        "runtime_retry_pending",
+        "runtime_retry_exhausted",
+        "last_error_code",
     }
 )
 _SENSITIVE_KEYS = frozenset(
@@ -161,6 +166,15 @@ class ToolExecutionError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class RetryableToolNodeError(RuntimeError):
+    """Ask LangGraph to retry one safe-read Tool node attempt."""
+
+    def __init__(self, *, tool_call_id: str, error_code: str | None) -> None:
+        super().__init__("safe read tool attempt is eligible for Runtime retry")
+        self.tool_call_id = tool_call_id
+        self.error_code = error_code
 
 
 class ToolExecutionReconciliationPending(RuntimeError):
@@ -625,6 +639,13 @@ def _metadata_count(metadata: dict[str, Any] | None, field_name: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+def _attempt_count(execution: AgentToolExecution) -> int:
+    value = getattr(execution, "attempt_count", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return 1
+    return value
+
+
 def _json_copy(value: dict[str, Any], *, field: str) -> dict[str, Any]:
     try:
         serialized = json.dumps(
@@ -870,7 +891,7 @@ def execution_outcome(execution: AgentToolExecution) -> ToolExecutionOutcome:
 def _decision_for_existing(
     execution: AgentToolExecution,
     *,
-    retry_failed: bool,
+    resume_safe_read: bool,
     lease_owner: str,
     lease_expires_at: datetime,
     now: datetime,
@@ -889,6 +910,125 @@ def _decision_for_existing(
             error_code=None,
         )
     if execution.status == "started":
+        metadata = (
+            execution.result_metadata
+            if isinstance(execution.result_metadata, dict)
+            else {}
+        )
+        retry_pending = metadata.get("runtime_retry_pending") is True
+        lease_expired = (
+            execution.lease_expires_at is None
+            or execution.lease_expires_at <= now
+        )
+        attempt_count = _attempt_count(execution)
+        if (
+            resume_safe_read
+            and effect == "read"
+            and retry_policy == "safe"
+            and attempt_count < SAFE_READ_MAX_ATTEMPTS
+            and retry_pending
+            and lease_expired
+        ):
+            prior_failure = ToolExecutionOutcome(
+                status="failed",
+                result_summary=(
+                    execution.result_summary
+                    or "The previous safe read attempt did not settle."
+                ),
+                result_ref=None,
+                error_code=(
+                    str(metadata["error_code"])
+                    if isinstance(metadata.get("error_code"), str)
+                    else "safe_read_attempt_interrupted"
+                ),
+                retryable=True,
+                metadata=_bounded_result_metadata(metadata),
+            )
+            execution.attempt_count = attempt_count + 1
+            execution.result_summary = None
+            execution.result_ref = None
+            execution.result_metadata = {}
+            execution.lease_owner = lease_owner
+            execution.lease_expires_at = lease_expires_at
+            execution.started_at = now
+            execution.completed_at = None
+            return ToolExecutionReservation(
+                execution=execution,
+                created=False,
+                retrying=True,
+                reusable_result=None,
+                prior_failure=prior_failure,
+                blocked=False,
+                reconciliation_required=False,
+                requires_confirmation=False,
+                error_code=None,
+            )
+        if (
+            resume_safe_read
+            and effect == "read"
+            and retry_policy == "safe"
+            and attempt_count >= SAFE_READ_MAX_ATTEMPTS
+            and retry_pending
+            and lease_expired
+        ):
+            last_error_code = (
+                str(metadata["error_code"])
+                if isinstance(metadata.get("error_code"), str)
+                else "safe_read_attempt_interrupted"
+            )
+            execution.status = "failed"
+            execution.result_summary = (
+                "The final safe read attempt did not settle before its lease "
+                f"expired. Runtime automatic retries were exhausted after "
+                f"{attempt_count} attempts. Do not repeat the identical tool "
+                "call unchanged."
+            )
+            execution.result_ref = None
+            execution.result_metadata = _bounded_result_metadata(
+                {
+                    "error_code": "tool_retry_exhausted",
+                    "retryable": False,
+                    "runtime_attempt_count": attempt_count,
+                    "runtime_retry_exhausted": True,
+                    "runtime_retry_pending": False,
+                    "last_error_code": last_error_code,
+                }
+            )
+            execution.lease_owner = None
+            execution.lease_expires_at = None
+            execution.completed_at = now
+            return ToolExecutionReservation(
+                execution=execution,
+                created=False,
+                retrying=False,
+                reusable_result=None,
+                prior_failure=_outcome(execution),
+                blocked=True,
+                reconciliation_required=False,
+                requires_confirmation=False,
+                error_code="tool_execution_failed",
+            )
+        if (
+            resume_safe_read
+            and effect == "read"
+            and retry_policy == "safe"
+            and lease_expired
+            and not retry_pending
+        ):
+            # A private result envelope may already prove success even though
+            # ledger settlement crashed. The caller must probe reconciliation
+            # before this receipt can be closed or exposed to the model.
+            return ToolExecutionReservation(
+                execution=execution,
+                created=False,
+                retrying=False,
+                reusable_result=None,
+                prior_failure=None,
+                blocked=True,
+                reconciliation_required=True,
+                requires_confirmation=False,
+                error_code="safe_read_result_reconciliation_required",
+            )
         return ToolExecutionReservation(
             execution=execution,
             created=False,
@@ -911,32 +1051,6 @@ def _decision_for_existing(
             reconciliation_required=True,
             requires_confirmation=effect != "read",
             error_code="tool_outcome_unknown",
-        )
-    if execution.status == "failed" and retry_failed:
-        if effect != "read" or retry_policy != "safe":
-            raise ToolExecutionError(
-                "unsafe_tool_retry",
-                "only failed read tools with retry_policy=safe may be re-reserved",
-            )
-        prior_failure = _outcome(execution)
-        execution.status = "started"
-        execution.result_summary = None
-        execution.result_ref = None
-        execution.result_metadata = {}
-        execution.lease_owner = lease_owner
-        execution.lease_expires_at = lease_expires_at
-        execution.started_at = now
-        execution.completed_at = None
-        return ToolExecutionReservation(
-            execution=execution,
-            created=False,
-            retrying=True,
-            reusable_result=None,
-            prior_failure=prior_failure,
-            blocked=False,
-            reconciliation_required=False,
-            requires_confirmation=False,
-            error_code=None,
         )
     if execution.status == "failed":
         return ToolExecutionReservation(
@@ -971,15 +1085,15 @@ async def reserve_tool_execution(
     retry_policy: RetryPolicy,
     lease_owner: str,
     lease_ttl_seconds: int,
-    retry_failed: bool = False,
+    resume_safe_read: bool = False,
     clock: Callable[[], datetime] | None = None,
 ) -> ToolExecutionReservation:
     """Atomically reserve an exact tool call without committing the caller transaction.
 
     A returned reservation permits execution only when ``can_execute`` is true.
-    Existing ``started`` and ``unknown`` rows are never reclaimed based on lease
-    expiry; expiry makes them reconciliation candidates, not proof that an
-    external side effect did not happen.
+    Only a durable retry-pending or expired ``read + safe`` receipt may claim a
+    bounded next attempt. Writes, unknown outcomes, and terminal failures are
+    never reopened.
     """
     _validate_request(
         tool_call_id=tool_call_id,
@@ -1019,14 +1133,15 @@ async def reserve_tool_execution(
             side_effect_classification=side_effect_classification,
             retry_policy=retry_policy,
         )
+        prior_status = existing.status
         decision = _decision_for_existing(
             existing,
-            retry_failed=retry_failed,
+            resume_safe_read=resume_safe_read,
             lease_owner=lease_owner,
             lease_expires_at=lease_expires_at,
             now=now,
         )
-        if decision.retrying:
+        if decision.retrying or existing.status != prior_status:
             await db.flush()
         return decision
 
@@ -1042,6 +1157,7 @@ async def reserve_tool_execution(
         request_ref=request_ref,
         effect=side_effect_classification,
         retry_policy=retry_policy,
+        attempt_count=1,
         result_metadata={},
         status="started",
         lease_owner=lease_owner,
@@ -1087,7 +1203,7 @@ async def reserve_tool_execution(
         # lease later expires, the losing worker may not execute the call.
         return _decision_for_existing(
             concurrent,
-            retry_failed=False,
+            resume_safe_read=False,
             lease_owner=lease_owner,
             lease_expires_at=lease_expires_at,
             now=now,
@@ -1254,6 +1370,114 @@ async def takeover_tool_execution_for_reconciliation(
     )
 
 
+async def mark_tool_execution_retry_pending(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    lease_owner: str,
+    result_summary: str | None,
+    error_code: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> AgentToolExecution:
+    """Persist one transient safe-read failure without closing its receipt."""
+    execution = await _get_locked_execution(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution_id,
+    )
+    _require_lease_owner(execution, lease_owner)
+    effect, retry_policy = _execution_metadata(execution)
+    attempt_count = _attempt_count(execution)
+    if effect != "read" or retry_policy != "safe":
+        raise ToolExecutionError(
+            "unsafe_tool_retry",
+            "only read tools with retry_policy=safe may remain retry-pending",
+        )
+    if attempt_count >= SAFE_READ_MAX_ATTEMPTS:
+        raise ToolExecutionError(
+            "tool_retry_budget_exhausted",
+            "safe read tool receipt has no remaining Runtime retry attempts",
+        )
+    execution.result_summary = result_summary
+    execution.result_ref = None
+    execution.result_metadata = _bounded_result_metadata(
+        {
+            **(metadata or {}),
+            "error_code": error_code,
+            "retryable": True,
+            "runtime_attempt_count": attempt_count,
+            "runtime_retry_pending": True,
+        }
+    )
+    # The provider has returned a known failure, so no execution remains behind
+    # this lease. The next LangGraph attempt must atomically claim the same row.
+    execution.lease_owner = None
+    execution.lease_expires_at = None
+    await db.flush()
+    return execution
+
+
+async def mark_expired_safe_read_result_unavailable(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    probe_error_code: str,
+    clock: Callable[[], datetime] | None = None,
+) -> AgentToolExecution:
+    """Close an expired safe read only after its result envelope was probed."""
+    execution = await _get_locked_execution(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution_id,
+    )
+    if execution.status in {"succeeded", "failed", "unknown"}:
+        return execution
+    effect, retry_policy = _execution_metadata(execution)
+    metadata = (
+        execution.result_metadata
+        if isinstance(execution.result_metadata, dict)
+        else {}
+    )
+    now = (clock or (lambda: datetime.now(UTC)))()
+    if (
+        execution.status != "started"
+        or effect != "read"
+        or retry_policy != "safe"
+        or metadata.get("runtime_retry_pending") is True
+        or execution.lease_expires_at is None
+        or execution.lease_expires_at > now
+    ):
+        raise ToolExecutionError(
+            "safe_read_reconciliation_pending",
+            "safe read receipt is not eligible to close after result probing",
+        )
+    attempt_count = _attempt_count(execution)
+    execution.status = "failed"
+    execution.result_summary = (
+        "The Runtime lost the safe read result before it could record a "
+        "durable retryable failure. No recoverable result envelope was found, "
+        "so the provider call was not repeated automatically; the model may "
+        "make a new decision."
+    )
+    execution.result_ref = None
+    execution.result_metadata = _bounded_result_metadata(
+        {
+            "error_code": "safe_read_result_unavailable",
+            "error_class": probe_error_code,
+            "retryable": False,
+            "runtime_attempt_count": attempt_count,
+            "runtime_retry_pending": False,
+        }
+    )
+    execution.lease_owner = None
+    execution.lease_expires_at = None
+    execution.completed_at = now
+    await db.flush()
+    return execution
+
+
 async def _mark_terminal(
     db: AsyncSession,
     *,
@@ -1394,7 +1618,7 @@ async def mark_tool_execution_failed(
     metadata: dict[str, Any] | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> AgentToolExecution:
-    """Persist a known failure; only explicit safe-read policy may retry it."""
+    """Persist a terminal known failure; terminal receipts are never reopened."""
     return await _mark_terminal(
         db,
         tenant_id=tenant_id,

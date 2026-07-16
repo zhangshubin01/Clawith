@@ -273,7 +273,7 @@ Compact 的最终决策以 `runtime-architecture-decisions-2026-07-15.md` 的 D-
 - **影响：**模型和 Verifier 读取到错误的执行事实，可能把“工具调用完成”误判成“用户目标完成”。
 - **证据边界：**该问题在此前 Benchmark 中已复现；3010 HY3 noexec 长任务按要求跳过 `execute_code`，不能写成该次长跑再次复现。
 - **已确认方案：**保留 `agent_tool_executions`，不增加第二张结果表或平行 outcome 类型；扩展现有 `ToolExecutionOutcome` 供普通工具与 A2A 共用。`succeeded` 必须由工具契约明确证明业务成功，明确失败记 `failed`，副作用发出后不可判定记 `unknown`。各工具族必须依据 Provider 结构化响应、HTTP 状态或 exit code 适配，不能再把任意正常返回或展示文本前缀当执行事实。
-- **重试边界：**`retryable` 只记录资格，不等于已实现自动重试；V1 不对同一 receipt 自动设置 `retry_failed=True`。只有 `read + safe` 可由后续模型轮次用新 call 重试并消耗正常 model-turn budget；external write 超时/断连进入 unknown 和对账，永不盲目重做。第一版保持 Tool Call 顺序串行。
+- **重试边界（已确认并实现）：**`tool` 节点使用 LangGraph 原生 `RetryPolicy`；一个 node task 只推进一个 pending call，使 node retry budget 与 ledger receipt 一一对应，并在切片前校验整批 call ID 唯一且非空。`waiting_agent` resume 会先完成同一 assistant message 的剩余 Tool Call，再把协作结果交回模型，保证每个 call 恰有一个 ToolMessage 且不丢 tail。只有持久化策略为 `read + safe` 且 typed outcome 明确为 `failed + retryable` 时，才在同一 `tool_call_id` / 同一 ledger receipt 内最多执行 3 次 Provider attempt（首次 + 2 次重试）。每次授权前持久化递增独立 `attempt_count`，中间失败不生成 ToolMessage；最终成功、确定性失败或预算耗尽后只生成一个 Tool Result。预算耗尽会返回 non-retryable，并阻止模型无新信息地原样重复。Terminal failed 不再重开；只有明确的 durable retry-pending marker 能授权下一次 Provider attempt，单纯 lease 过期不算失败证据。无 marker 的过期 safe read 必须先探测私有 Result Store：有成功 envelope 则恢复 success，确认 missing/损坏/scope 不匹配后才关闭为“结果不可用”的 non-retryable failed；瞬时存储或 ledger 异常只 defer，不关闭 Run/receipt。所有路径都不重调 Provider，也不伪装成 retry-exhausted。未分类 exception、归档/settlement 失败、write/external_write 和 unknown 均不进入该重试。模型之后主动生成的新 call 是新的模型决策，不计入 Runtime 自动重试。第一版仍保持 Tool Call 顺序串行。
 
 ### SA-T02：NUL 字节导致 Tool Result 无法持久化
 

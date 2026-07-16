@@ -16,6 +16,7 @@ from app.services.agent_runtime.graph import (
     build_agent_runtime_graph,
     route_after_control,
 )
+from app.services.agent_runtime.tool_execution import RetryableToolNodeError
 from app.services.agent_runtime.state import (
     ControlRoute,
     JsonValue,
@@ -137,6 +138,38 @@ class InvalidTerminalExecutor:
         del context, resume_value
         if node == "terminal":
             return {"lifecycle": {"status": "running", "next_route": "model"}}
+        return {"lifecycle": dict(state["lifecycle"])}
+
+
+class RetryingToolExecutor:
+    def __init__(self) -> None:
+        self.calls: list[RuntimeNodeName] = []
+        self.tool_attempts = 0
+
+    async def execute(
+        self,
+        node: RuntimeNodeName,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        *,
+        resume_value: JsonValue | None = None,
+    ) -> RuntimeStateUpdate:
+        del context, resume_value
+        self.calls.append(node)
+        if node == "tool":
+            self.tool_attempts += 1
+            if self.tool_attempts < 3:
+                raise RetryableToolNodeError(
+                    tool_call_id="call-retry",
+                    error_code="temporary_read_failure",
+                )
+            return {
+                "lifecycle": {
+                    "status": "completed",
+                    "next_route": "terminal",
+                    "final_answer": "done",
+                }
+            }
         return {"lifecycle": dict(state["lifecycle"])}
 
 
@@ -315,6 +348,39 @@ async def test_graph_executes_new_state_without_registry_injection() -> None:
 
     assert result["lifecycle"]["status"] == "completed"
     assert "registry" not in result
+
+
+@pytest.mark.asyncio
+async def test_tool_node_uses_langgraph_retry_policy_without_checkpointing_failures(
+    monkeypatch,
+) -> None:
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("langgraph.pregel._retry.asyncio.sleep", no_sleep)
+    run_id = uuid.uuid4()
+    executor = RetryingToolExecutor()
+    graph = build_agent_runtime_graph(
+        checkpointer=InMemorySaver(),
+        settings=_settings(),
+    )
+
+    result = await graph.compiled.ainvoke(
+        _state(run_id, route="tool"),
+        runtime_thread_config(run_id),
+        context=_context(run_id, executor, command_id="command-retry"),
+    )
+
+    assert result["lifecycle"]["status"] == "completed"
+    assert executor.tool_attempts == 3
+    assert executor.calls == [
+        "control_guard",
+        "tool",
+        "tool",
+        "tool",
+        "control_guard",
+        "terminal",
+    ]
 
 
 @pytest.mark.asyncio

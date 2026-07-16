@@ -21,6 +21,10 @@ from app.services.agent_runtime.state import (
     RuntimeStateUpdate,
     runtime_messages_as_json,
 )
+from app.services.agent_runtime.tool_execution import (
+    RetryableToolNodeError,
+    SAFE_READ_MAX_ATTEMPTS,
+)
 
 
 CONTROL_GUARD_NODE = "control_guard"
@@ -51,6 +55,17 @@ def _retry_transient_compact_error(error: Exception) -> bool:
 COMPACT_RETRY_POLICY = RetryPolicy(
     max_attempts=3,
     retry_on=_retry_transient_compact_error,
+)
+
+
+def _retry_safe_read_tool_error(error: Exception) -> bool:
+    """Retry only failures already qualified by the durable Tool Ledger."""
+    return isinstance(error, RetryableToolNodeError)
+
+
+TOOL_RETRY_POLICY = RetryPolicy(
+    max_attempts=SAFE_READ_MAX_ATTEMPTS,
+    retry_on=_retry_safe_read_tool_error,
 )
 
 
@@ -240,7 +255,11 @@ def build_agent_runtime_graph(
         retry_policy=COMPACT_RETRY_POLICY,
     )
     builder.add_node(MODEL_NODE, _make_node("model", identity))
-    builder.add_node(TOOL_NODE, _make_node("tool", identity))
+    builder.add_node(
+        TOOL_NODE,
+        _make_node("tool", identity),
+        retry_policy=TOOL_RETRY_POLICY,
+    )
     builder.add_node(VERIFY_NODE, _make_node("verify", identity))
     builder.add_node(WAIT_NODE, _make_wait_node(identity))
     builder.add_node(TERMINAL_NODE, _make_node("terminal", identity))

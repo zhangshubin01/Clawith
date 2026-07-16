@@ -221,6 +221,10 @@ def build_runtime_worker_components(
         context_builder=context_builder,
     )
     tool_result_store = ToolResultStore(session_factory=session_factory)
+    tool_result_reconciler = ToolResultReconciler(
+        session_factory=session_factory,
+        result_store=tool_result_store,
+    )
     reference_reader = RuntimeToolReferenceReader(
         session_factory=session_factory,
     )
@@ -232,6 +236,7 @@ def build_runtime_worker_components(
             settings=runtime_settings,
         ),
         tool_result_store=tool_result_store,
+        tool_result_reconciler=tool_result_reconciler,
     )
     run_compactor = RuntimeRunCompactorService(
         settings=runtime_settings,
@@ -322,10 +327,6 @@ def build_runtime_worker_components(
         session_factory=session_factory,
         checkpoint_reader=driver,
         handler=post_checkpoint_handler,
-    )
-    tool_result_reconciler = ToolResultReconciler(
-        session_factory=session_factory,
-        result_store=tool_result_store,
     )
     channel_delivery_worker = ChannelDeliveryWorker(
         session_factory=session_factory,

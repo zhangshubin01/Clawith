@@ -40,11 +40,16 @@ from app.services.agent_runtime.state import (
     runtime_messages_as_json,
 )
 from app.services.agent_runtime.tool_execution import (
+    RetryableToolNodeError,
+    SAFE_READ_MAX_ATTEMPTS,
     ToolExecutionError,
     ToolExecutionOutcome,
+    ToolExecutionReconciliationPending,
     ToolExecutionReservation,
     execution_outcome,
+    mark_expired_safe_read_result_unavailable,
     mark_tool_execution_failed,
+    mark_tool_execution_retry_pending,
     mark_tool_execution_succeeded,
     mark_tool_execution_unknown,
     normalize_tool_outcome,
@@ -52,7 +57,10 @@ from app.services.agent_runtime.tool_execution import (
     sanitize_tool_arguments,
     takeover_tool_execution_for_reconciliation,
 )
-from app.services.agent_runtime.tool_result_store import ToolResultStore
+from app.services.agent_runtime.tool_result_store import (
+    ToolResultReconciler,
+    ToolResultStore,
+)
 from app.services.agent_tools import (
     agentbay_run_scope_id,
     execute_builtin_tool_outcome,
@@ -298,6 +306,7 @@ class RuntimeToolStepService:
         group_tool_service: GroupRuntimeToolService | None = None,
         a2a_service: RuntimeA2AService | None = None,
         tool_result_store: ToolResultStore | None = None,
+        tool_result_reconciler: ToolResultReconciler | None = None,
         lease_ttl_seconds: int = 300,
     ) -> None:
         if lease_ttl_seconds <= 0:
@@ -312,6 +321,10 @@ class RuntimeToolStepService:
         self._a2a_service = a2a_service
         self._tool_result_store = tool_result_store or ToolResultStore(
             session_factory=session_factory
+        )
+        self._tool_result_reconciler = tool_result_reconciler or ToolResultReconciler(
+            session_factory=session_factory,
+            result_store=self._tool_result_store,
         )
         self._lease_ttl_seconds = lease_ttl_seconds
         self._inline_result_max_bytes = (
@@ -376,6 +389,10 @@ class RuntimeToolStepService:
                     retry_policy=cast(str, policy.retry_policy),  # type: ignore[arg-type]
                     lease_owner=lease_owner,
                     lease_ttl_seconds=self._lease_ttl_seconds,
+                    resume_safe_read=(
+                        policy.side_effect_classification == "read"
+                        and policy.retry_policy == "safe"
+                    ),
                 )
 
     async def _settle_outcome(
@@ -423,11 +440,11 @@ class RuntimeToolStepService:
                     status="failed",
                     result_summary=(
                         "Tool screenshot could not be archived privately; "
-                        "retry with a new read tool call."
+                        "the provider call will not be repeated."
                     ),
                     result_ref=None,
                     error_code="tool_binary_archive_failed",
-                    retryable=True,
+                    retryable=False,
                     metadata={
                         **normalized.metadata,
                         "archive_status": "failed",
@@ -469,12 +486,12 @@ class RuntimeToolStepService:
                     normalized = ToolExecutionOutcome(
                         status="failed",
                         result_summary=(
-                            "Tool result could not be archived; retry with a new "
-                            "read tool call."
+                            "Tool result could not be archived; the provider "
+                            "call will not be repeated."
                         ),
                         result_ref=None,
                         error_code="tool_result_archive_failed",
-                        retryable=True,
+                        retryable=False,
                         metadata=archive_metadata,
                     )
                 else:
@@ -498,6 +515,60 @@ class RuntimeToolStepService:
                 metadata={
                     **normalized.metadata,
                     "archive_status": "not_stored_for_non_success",
+                },
+            )
+
+        raw_attempt_count = getattr(reservation.execution, "attempt_count", 1)
+        attempt_count = (
+            raw_attempt_count
+            if isinstance(raw_attempt_count, int)
+            and not isinstance(raw_attempt_count, bool)
+            and raw_attempt_count >= 1
+            else 1
+        )
+        normalized = replace(
+            normalized,
+            metadata={
+                **normalized.metadata,
+                "runtime_attempt_count": attempt_count,
+            },
+        )
+        if normalized.retryable and attempt_count < SAFE_READ_MAX_ATTEMPTS:
+            async with self._session_factory() as db:
+                async with db.begin():
+                    await mark_tool_execution_retry_pending(
+                        db,
+                        tenant_id=tenant_id,
+                        execution_id=reservation.execution.id,
+                        lease_owner=lease_owner,
+                        result_summary=normalized.result_summary,
+                        error_code=normalized.error_code,
+                        metadata=normalized.metadata,
+                    )
+            raise RetryableToolNodeError(
+                tool_call_id=reservation.execution.tool_call_id,
+                error_code=normalized.error_code,
+            )
+        if normalized.retryable:
+            last_error_code = normalized.error_code
+            prior_summary = normalized.result_summary or (
+                "The safe read tool failed without a reusable result."
+            )
+            normalized = replace(
+                normalized,
+                result_summary=(
+                    f"{prior_summary}\n\n"
+                    f"Runtime automatic retries were exhausted after "
+                    f"{attempt_count} attempts. Do not repeat the identical "
+                    "tool call unchanged."
+                ),
+                error_code="tool_retry_exhausted",
+                retryable=False,
+                metadata={
+                    **normalized.metadata,
+                    "last_error_code": last_error_code,
+                    "runtime_retry_exhausted": True,
+                    "runtime_retry_pending": False,
                 },
             )
 
@@ -571,11 +642,10 @@ class RuntimeToolStepService:
                     if isinstance(exc, (GroupRuntimeToolError, ToolExecutionError))
                     else "tool_execution_exception"
                 ),
-                retryable=(
-                    known_failure
-                    and policy.side_effect_classification == "read"
-                    and policy.retry_policy == "safe"
-                ),
+                # Automatic Runtime retry requires a typed provider outcome
+                # with retryable=true. An unclassified Python exception may be
+                # a bad argument, missing file, permission error, or code bug.
+                retryable=False,
                 metadata={"error_class": type(exc).__name__},
             ),
         )
@@ -742,6 +812,77 @@ class RuntimeToolStepService:
                             )
                         )
                         continue
+                    if (
+                        reservation.error_code
+                        == "safe_read_result_reconciliation_required"
+                    ):
+                        reconciliation = (
+                            await self._tool_result_reconciler.reconcile_candidate(
+                                reservation.execution
+                            )
+                        )
+                        if (
+                            reconciliation.status == "reconciled"
+                            and reconciliation.outcome is not None
+                        ):
+                            messages.append(
+                                _result_message(
+                                    run_id=run_id,
+                                    call_id=call_id,
+                                    tool_name=tool_name,
+                                    outcome=reconciliation.outcome,
+                                )
+                            )
+                            continue
+                        if reconciliation.status == "unavailable":
+                            try:
+                                async with self._session_factory() as db:
+                                    async with db.begin():
+                                        execution = (
+                                            await mark_expired_safe_read_result_unavailable(
+                                                db,
+                                                tenant_id=tenant_id,
+                                                execution_id=reservation.execution.id,
+                                                probe_error_code=(
+                                                    reconciliation.error_code
+                                                    or "tool_result_unavailable"
+                                                ),
+                                            )
+                                        )
+                            except Exception as exc:
+                                raise ToolExecutionReconciliationPending(
+                                    (
+                                        exc.code
+                                        if isinstance(exc, ToolExecutionError)
+                                        else "safe_read_result_reconciliation_pending"
+                                    ),
+                                    str(exc),
+                                    defer_without_attempt=True,
+                                ) from exc
+                            messages.append(
+                                _result_message(
+                                    run_id=run_id,
+                                    call_id=call_id,
+                                    tool_name=tool_name,
+                                    outcome=execution_outcome(execution),
+                                )
+                            )
+                            continue
+                        raise ToolExecutionReconciliationPending(
+                            "safe_read_result_reconciliation_pending",
+                            "Safe read result reconciliation has not settled yet",
+                            defer_without_attempt=True,
+                        )
+                    if (
+                        reservation.execution.status == "started"
+                        and policy.side_effect_classification == "read"
+                        and policy.retry_policy == "safe"
+                    ):
+                        raise ToolExecutionReconciliationPending(
+                            "safe_read_attempt_active",
+                            "A safe read attempt still owns the active receipt",
+                            defer_without_attempt=True,
+                        )
                     if (
                         tool_name in GROUP_WORKSPACE_MUTATION_TOOL_NAMES
                         and reservation.execution.status == "started"
@@ -1126,7 +1267,11 @@ class RuntimeToolStepService:
                     )
                 )
             return ToolStepResult(messages=tuple(messages))
-        except GroupWorkspaceReconciliationPending:
+        except (
+            GroupWorkspaceReconciliationPending,
+            RetryableToolNodeError,
+            ToolExecutionReconciliationPending,
+        ):
             raise
         except ToolExecutionError as exc:
             return ToolStepResult(

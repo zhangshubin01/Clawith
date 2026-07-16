@@ -175,11 +175,16 @@ class S3StorageBackend(StorageBackend):
 
     async def read_bytes(self, key: str) -> bytes:
         client = self._client_or_raise()
-        response = await asyncio.to_thread(
-            client.get_object,
-            Bucket=self.bucket,
-            Key=self._object_key(key),
-        )
+        try:
+            response = await asyncio.to_thread(
+                client.get_object,
+                Bucket=self.bucket,
+                Key=self._object_key(key),
+            )
+        except Exception as exc:
+            if _is_missing_object_error(exc):
+                raise FileNotFoundError(key) from exc
+            raise
         body = response["Body"]
         return await asyncio.to_thread(body.read)
 

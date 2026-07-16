@@ -915,7 +915,7 @@ Vercel Deploy 本批固定合同（已完成）：只迁移现有 `vercel_deploy
 
 - `started`：已经持久化 reservation，但尚未得到可证明的结果；租约过期不等于没有执行。
 - `succeeded`：工具契约已经明确证明业务操作成功；“Python 函数正常返回字符串”本身不再等于成功。
-- `failed`：已经明确知道业务操作没有成功；只有 `effect=read && retry_policy=safe` 的失败具备重试资格，但资格不等于 Runtime 已实施自动重试。
+- `failed`：已经明确知道业务操作没有成功；只有 `effect=read && retry_policy=safe` 且 typed outcome 明确给出 `retryable=true` 的失败具备 Runtime 自动重试资格。
 - `unknown`：副作用可能已经发出，但无法确认是否成功；必须等待对账或人工确认，禁止自动重试。
 
 Durable Runtime 不新建平行结果类型，而是扩展 `agent_runtime/tool_execution.py` 已有的 `ToolExecutionOutcome`，让普通工具与 A2A 共用同一窄结构：
@@ -933,13 +933,17 @@ metadata
 
 Feishu、MCP/HTTP、Sandbox、Workspace 等工具族各自依据 Provider 结构化响应、HTTP 状态或 exit code 把结果适配成该结构；新工具和修改过的工具必须原生返回结构化结果。现有 legacy `call_llm` 可以暂时保留字符串展示兼容，但 Durable Runtime 不再把任意字符串直接记为成功，也不采用一套全局 `❌ / Error / Failed` 前缀猜测作为最终事实模型。上线时所有已启用的 Durable Runtime 工具必须已有 typed adapter；任何漏网字符串结果统一 `untyped_tool_outcome` fail closed，不能为兼容而记成 succeeded。
 
-错误映射固定为：参数、权限、明确 4xx 或 Provider 明确拒绝是 `failed`；只读超时是 `failed + retryable`；外部写在请求发出后的超时、断连或响应不可判定是 `unknown`。Provider 支持幂等键时使用 `run_id:tool_call_id`，但幂等键不能替代本地 ledger。V1 的 `retryable` 只记录事实与资格，`RuntimeToolStepService` 不自动对同一 call 设置 `retry_failed=True`；后续模型轮次只有在 `read + safe` 时才可用新 call 发起重试，并继续消耗 Run 的正常 model-turn budget。相同 tool_call receipt 重放始终复用或 fail closed。
+错误映射固定为：参数、权限、明确 4xx、Provider 明确拒绝、缺少文件和未分类 Python exception 是确定性 `failed + non-retryable`；只读超时、限流、临时网络或 Provider 明确标记的瞬时错误才是 `failed + retryable`；外部写在请求发出后的超时、断连或响应不可判定是 `unknown`。Provider 支持幂等键时使用 `run_id:tool_call_id`，但幂等键不能替代本地 ledger。
+
+`tool` 节点使用 LangGraph 原生 `RetryPolicy`，每个 receipt 最多 3 次 Provider attempt（首次 + 2 次重试），采用 LangGraph 的退避与 jitter。一个 Tool node task 只推进一个 pending call，剩余 call 按原顺序继续进入后续 Tool node task，因此 LangGraph 的 node-task retry budget 与 ledger receipt 一一对应，不会被同一模型响应中的多个 Tool Call 共享。若前一个 A2A call 进入 `waiting_agent`，resume payload 先保存在 checkpoint；Runtime 必须先顺序完成该 assistant message 的剩余 Tool Call，再按 `assistant -> 全部 ToolMessage -> resume user message` 顺序把协作结果交回模型，不能静默丢弃 tail，也不能把 user resume 插进未闭合的 tool exchange。资格同时要求持久化策略为 `read + safe` 且本次 typed outcome 为 `failed + retryable`；write、external_write、unknown、归档失败和 ledger settlement 失败都不能进入 Provider 自动重试。中间失败只把同一 `agent_tool_executions` 行标成 retry-pending，不写 ToolMessage，也不产生新的 tool_call；下一次 LangGraph node attempt 原子领取同一 receipt，并递增持久化 `attempt_count`。最终成功、确定性失败或预算耗尽后才 settle 一次 terminal fact，并向模型写入唯一一个确定性 Tool Result message。预算耗尽的结果改为 non-retryable，并明确要求模型不要原样重复相同工具与参数；模型后来基于新信息主动生成的新 tool_call 属于新的模型决策，不计入 Runtime 自动重试。
+
+Terminal `failed` receipt 永不重新打开；旧的 `retry_failed=True` 路径不再作为生产重试机制。Command/checkpoint replay 只能领取明确持久化为 `runtime_retry_pending=true` 且 lease 已释放或过期的 safe-read receipt，并继续受同一个持久化 attempt budget 限制；lease 过期本身不是 Provider 失败证据。active lease 只 defer Command。若 safe-read receipt 在没有 retry-pending 标记时过期，Runtime 先通过私有 Result Store 做一次受控 reconciliation probe：已有成功 envelope 时优先补齐 ledger success；明确 missing、损坏或 scope 不匹配时，才把“读结果在持久化前丢失”关闭为 non-retryable failed，让模型下一轮重新决策；S3 timeout/5xx、凭证/网络错误或 ledger settlement 暂时失败只 defer Command，不能关闭 Run 或 receipt。两条 terminal 路径都不重调 Provider，也不能伪装成 retry-exhausted；行锁重检保证 Command replay 不覆盖并发 Reconciler 已恢复的 terminal fact。相同 terminal receipt 的重放始终复用或 fail closed。
 
 工具第一版继续按模型返回顺序串行执行。修复事实模型时不引入并发；以后只有整批均为 `read + parallel_safe` 时才可另行评估有界并行，任何 write/external_write 批次仍必须串行。
 
 #### 2. Ledger 表只补必要字段
 
-现有表继续作为唯一工具执行事实表。统一 migration 中把当前藏在 `sanitized_arguments.__clawith_tool_execution__` 的 `effect`、`retry_policy` 提升为显式列，并增加一个有界的 `result_metadata JSONB`。该 JSONB 只允许固定白名单字段：error code/class、retryable、artifact/evidence refs、截断/规范化计数、content hash 和 archive 状态；禁止放原始 Provider payload、大结果或秘密。`status / result_summary / result_ref / request_ref` 保留，但本批不引入新的通用 request store。
+现有表继续作为唯一工具执行事实表。统一 migration 中把当前藏在 `sanitized_arguments.__clawith_tool_execution__` 的 `effect`、`retry_policy` 提升为显式列，增加 `attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1)`，并增加一个有界的 `result_metadata JSONB`。`attempt_count` 表示该 receipt 已授权的 Provider attempt 数，独立于 model turn 和 Command attempt；新建 reservation 即为 1，每次领取下一次 safe-read retry 前在 row lock 内持久化递增，避免进程重启或 Command replay 重置内存预算。该 JSONB 只允许固定白名单字段：error code/class、retryable、retry-pending/exhausted、attempt count、artifact/evidence refs、截断/规范化计数、content hash 和 archive 状态；禁止放原始 Provider payload、大结果或秘密。`status / result_summary / result_ref / request_ref` 保留，但本批不引入新的通用 request store。
 
 迁移必须兼容旧 receipt：先从旧 `sanitized_arguments.__clawith_tool_execution__` backfill；缺失或非法值保守写为 `external_write / never`，再增加 NOT NULL/default/CHECK。迁移窗口内读取端保留旧 metadata fallback，直到 backfill 校验完成；started/succeeded/failed/unknown 四类旧行都必须做恢复回归。
 
@@ -957,7 +961,7 @@ Feishu、MCP/HTTP、Sandbox、Workspace 等工具族各自依据 Provider 结构
 - ledger 只保存不透明 `tool-result://{agent_tool_execution_id}`，不保存 storage key 或长期 presigned URL。opaque ref 自身不是授权边界；`ToolResultStore.resolve(ref, tenant_id)` 必须先通过 ledger FK 校验 tenant/run 归属，再定位对象。Agent Workspace、`list_files` 和企业资料目录都不能看到该 namespace。
 - 二进制或已有稳定 artifact 的工具直接保留原 artifact/provider ref，不把 base64 再复制成 Tool Result。
 
-非原子顺序固定为：先用 execution ID 的确定性 key 写 Result Store envelope，再 settle DB ledger。对象写成功但 DB settle 失败时，receipt 保持 `started` 并 fail closed，绝不重执行；Reconciler 可校验 envelope 后补 settle，无法关联的对象由后续 cleanup 处理。外部写已经明确成功、但对象归档本身失败时，ledger 仍可 `succeeded + bounded summary` 并记录 `archive_error_code`，绝不能因此改成 unknown 或重做副作用；只读工具若无法保存其必要结果，可以形成明确的 retryable failure。retention/cleanup 最终必须覆盖该私有 prefix，但清理失败不改变 execution fact，也不触发重执行；具体 job 与周期不在本轮部署范围。
+非原子顺序固定为：先用 execution ID 的确定性 key 写 Result Store envelope，再 settle DB ledger。对象写成功但 DB settle 失败时，receipt 保持 `started` 并 fail closed，绝不重执行；Reconciler 可校验 envelope 后补 settle，无法关联的对象由后续 cleanup 处理。外部写已经明确成功、但对象归档本身失败时，ledger 仍可 `succeeded + bounded summary` 并记录 `archive_error_code`，绝不能因此改成 unknown 或重做副作用；只读结果归档失败也不重新调用 Provider，本版直接形成明确的 non-retryable archive failure，后续如需优化应只重试归档步骤。retention/cleanup 最终必须覆盖该私有 prefix，但清理失败不改变 execution fact，也不触发重执行；具体 job 与周期不在本轮部署范围。
 
 #### 4. 参数与日志脱敏
 

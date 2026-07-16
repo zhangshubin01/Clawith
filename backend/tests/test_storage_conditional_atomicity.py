@@ -254,6 +254,18 @@ class _HeadClient:
         return self.response
 
 
+class _GetClient:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[dict[str, Any]] = []
+
+    def get_object(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        raise AssertionError("test get client requires an explicit outcome")
+
+
 class _MutationClient:
     def __init__(
         self,
@@ -488,6 +500,32 @@ async def test_s3_head_explicit_missing_returns_absent(error: Exception) -> None
     version = await backend.get_version("workspace/report.md")
 
     assert version.exists is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [_S3Error(404, "404"), _S3Error(404, "NoSuchKey"), _S3Error(404, "NotFound")],
+)
+async def test_s3_read_explicit_missing_raises_file_not_found(error: Exception) -> None:
+    backend = S3StorageBackend(bucket="bucket")
+    backend._client = _GetClient(error=error)
+
+    with pytest.raises(FileNotFoundError):
+        await backend.read_bytes("runtime/tool-results/missing.json")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [_S3Error(500, "InternalError"), TimeoutError("read timed out")],
+)
+async def test_s3_read_operational_failures_propagate(error: Exception) -> None:
+    backend = S3StorageBackend(bucket="bucket")
+    backend._client = _GetClient(error=error)
+
+    with pytest.raises(type(error)):
+        await backend.read_bytes("runtime/tool-results/unavailable.json")
 
 
 @pytest.mark.asyncio

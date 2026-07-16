@@ -18,11 +18,14 @@ from app.services.agent_runtime.state import (
     RuntimeGraphState,
 )
 from app.services.agent_runtime.tool_execution import (
+    RetryableToolNodeError,
     ToolExecutionOutcome,
+    ToolExecutionReconciliationPending,
     ToolExecutionReservation,
     ToolExecutionTakeover,
     execution_outcome,
 )
+from app.services.agent_runtime.tool_result_store import ToolResultReconcileResult
 
 
 class _Result:
@@ -77,6 +80,19 @@ class _A2AService:
 
     async def execute(self, **kwargs):
         self.calls.append(kwargs)
+        return self.result
+
+
+class _ToolResultReconciler:
+    def __init__(self, result: ToolResultReconcileResult) -> None:
+        self.result = result
+        self.calls: list[AgentToolExecution] = []
+
+    async def reconcile_candidate(
+        self,
+        execution: AgentToolExecution,
+    ) -> ToolResultReconcileResult:
+        self.calls.append(execution)
         return self.result
 
 
@@ -263,6 +279,7 @@ def _service(
     executor,
     *,
     a2a_service=None,
+    tool_result_reconciler=None,
 ) -> tool_step_service.RuntimeToolStepService:
     return tool_step_service.RuntimeToolStepService(
         session_factory=_session_factory(agent),
@@ -270,6 +287,7 @@ def _service(
         tool_provider=_tools,
         tool_executor=executor,
         a2a_service=a2a_service,
+        tool_result_reconciler=tool_result_reconciler,
     )
 
 
@@ -837,7 +855,7 @@ async def test_archive_success_with_ledger_settlement_failure_keeps_started_rece
 @pytest.mark.parametrize(
     ("tool_name", "expected_status", "expected_retryable"),
     [
-        ("read_file", "failed", True),
+        ("read_file", "failed", False),
         ("write_file", "succeeded", False),
     ],
 )
@@ -1650,6 +1668,148 @@ async def test_read_failure_is_known_and_returned_to_model_without_retry(
 
 
 @pytest.mark.asyncio
+async def test_retryable_read_failure_retries_same_receipt_then_returns_one_result(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-read-retry", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    context = _context(state)
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-read-retry",
+        "read_file",
+    )
+    execution.attempt_count = 1
+    provider_calls = 0
+    reserve_calls: list[bool] = []
+
+    async def reserve(db, **kwargs):
+        del db
+        reserve_calls.append(kwargs["resume_safe_read"])
+        if len(reserve_calls) == 2:
+            execution.attempt_count = 2
+        return _reservation(execution)
+
+    async def execute(*args, **kwargs):
+        nonlocal provider_calls
+        del args, kwargs
+        provider_calls += 1
+        if provider_calls == 1:
+            return ToolExecutionOutcome(
+                status="failed",
+                result_summary="Temporary read failure.",
+                result_ref=None,
+                error_code="temporary_read_failure",
+                retryable=True,
+            )
+        return ToolExecutionOutcome(
+            status="succeeded",
+            result_summary="Recovered contents.",
+            result_ref=None,
+        )
+
+    async def mark_retry_pending(db, **kwargs):
+        del db
+        execution.result_summary = kwargs["result_summary"]
+        execution.result_metadata = kwargs["metadata"]
+        return execution
+
+    async def mark_succeeded(db, **kwargs):
+        del db
+        execution.status = "succeeded"
+        execution.result_summary = kwargs["result_summary"]
+        execution.result_metadata = kwargs["metadata"]
+        return execution
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_retry_pending",
+        mark_retry_pending,
+    )
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_succeeded",
+        mark_succeeded,
+    )
+    service = _service(agent, _CancelSource(None, None), execute)
+
+    with pytest.raises(RetryableToolNodeError):
+        await service.execute_pending(state, context, (call,))
+    result = await service.execute_pending(state, context, (call,))
+
+    assert provider_calls == 2
+    assert reserve_calls == [True, True]
+    assert len(result.messages) == 1
+    assert result.messages[0]["tool_call_id"] == "call-read-retry"
+    assert result.messages[0]["execution_status"] == "succeeded"
+    assert result.messages[0]["content"] == "Recovered contents."
+    assert execution.result_metadata["runtime_attempt_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_retryable_read_exhaustion_returns_one_non_retryable_result(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-read-exhausted", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-read-exhausted",
+        "read_file",
+    )
+    execution.attempt_count = 3
+
+    async def reserve(db, **kwargs):
+        del db
+        assert kwargs["resume_safe_read"] is True
+        return _reservation(execution)
+
+    async def execute(*args, **kwargs):
+        del args, kwargs
+        return ToolExecutionOutcome(
+            status="failed",
+            result_summary="Temporary read failure.",
+            result_ref=None,
+            error_code="temporary_read_failure",
+            retryable=True,
+        )
+
+    async def mark_failed(db, **kwargs):
+        del db
+        execution.status = "failed"
+        execution.result_summary = kwargs["result_summary"]
+        execution.result_metadata = kwargs["metadata"]
+        return execution
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(tool_step_service, "mark_tool_execution_failed", mark_failed)
+
+    result = await _service(agent, _CancelSource(None), execute).execute_pending(
+        state,
+        _context(state),
+        (call,),
+    )
+
+    assert len(result.messages) == 1
+    assert result.messages[0]["execution_status"] == "failed"
+    assert result.messages[0]["error_code"] == "tool_retry_exhausted"
+    assert result.messages[0].get("retryable") is None
+    assert "Do not repeat the identical tool call unchanged" in result.messages[0][
+        "content"
+    ]
+    assert execution.result_metadata["runtime_attempt_count"] == 3
+    assert execution.result_metadata["runtime_retry_exhausted"] is True
+    assert execution.result_metadata["last_error_code"] == "temporary_read_failure"
+
+
+@pytest.mark.asyncio
 async def test_write_exception_is_unknown_and_preserves_the_unresolved_batch(
     monkeypatch,
 ) -> None:
@@ -1795,6 +1955,284 @@ async def test_started_receipt_waits_for_reconciliation_and_keeps_pending_call(
     assert result.waiting_request is not None
     assert result.waiting_request["waiting_type"] == "external"
     assert result.pending_tool_calls == (call,)
+
+
+@pytest.mark.asyncio
+async def test_active_safe_read_receipt_defers_command_without_provider_replay(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-read-active", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-read-active",
+        "read_file",
+    )
+    execution.attempt_count = 2
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(
+            execution,
+            blocked=True,
+            error_code="tool_execution_started",
+        )
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"active safe read was replayed: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+
+    with pytest.raises(ToolExecutionReconciliationPending) as exc_info:
+        await _service(
+            agent,
+            _CancelSource(None),
+            forbidden,
+        ).execute_pending(state, _context(state), (call,))
+
+    assert exc_info.value.code == "safe_read_attempt_active"
+    assert exc_info.value.defer_without_attempt is True
+
+
+@pytest.mark.asyncio
+async def test_expired_safe_read_recovers_archived_success_before_closing(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-read-reconcile", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-read-reconcile",
+        "read_file",
+    )
+    recovered = ToolExecutionOutcome(
+        status="succeeded",
+        result_summary="archived read result",
+        result_ref=f"tool-result://{execution.id}",
+    )
+    reconciler = _ToolResultReconciler(
+        ToolResultReconcileResult(
+            status="reconciled",
+            execution_id=execution.id,
+            outcome=recovered,
+        )
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(
+            execution,
+            blocked=True,
+            error_code="safe_read_result_reconciliation_required",
+        )
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"reconciled safe read was replayed: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+
+    result = await _service(
+        agent,
+        _CancelSource(None),
+        forbidden,
+        tool_result_reconciler=reconciler,
+    ).execute_pending(state, _context(state), (call,))
+
+    assert reconciler.calls == [execution]
+    assert len(result.messages) == 1
+    assert result.messages[0]["tool_call_id"] == "call-read-reconcile"
+    assert result.messages[0]["content"] == "archived read result"
+    assert result.waiting_request is None
+
+
+@pytest.mark.asyncio
+async def test_expired_safe_read_closes_only_after_store_probe_misses(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-read-missing", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-read-missing",
+        "read_file",
+    )
+    reconciler = _ToolResultReconciler(
+        ToolResultReconcileResult(
+            status="unavailable",
+            execution_id=execution.id,
+            error_code="tool_result_unreadable",
+        )
+    )
+    closed = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-read-missing",
+        "read_file",
+    )
+    closed.id = execution.id
+    closed.status = "failed"
+    closed.result_summary = "safe read result unavailable"
+    closed.result_metadata = {
+        "error_code": "safe_read_result_unavailable",
+        "retryable": False,
+    }
+    close_calls = []
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(
+            execution,
+            blocked=True,
+            error_code="safe_read_result_reconciliation_required",
+        )
+
+    async def close(db, **kwargs):
+        del db
+        close_calls.append(kwargs)
+        return closed
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"missing safe read was replayed: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_expired_safe_read_result_unavailable",
+        close,
+    )
+
+    result = await _service(
+        agent,
+        _CancelSource(None),
+        forbidden,
+        tool_result_reconciler=reconciler,
+    ).execute_pending(state, _context(state), (call,))
+
+    assert reconciler.calls == [execution]
+    assert close_calls == [
+        {
+            "tenant_id": tenant_id,
+            "execution_id": execution.id,
+            "probe_error_code": "tool_result_unreadable",
+        }
+    ]
+    assert len(result.messages) == 1
+    assert result.messages[0]["error_code"] == "safe_read_result_unavailable"
+    assert result.waiting_request is None
+
+
+@pytest.mark.asyncio
+async def test_expired_safe_read_defers_on_transient_store_probe_failure(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-read-probe-timeout", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-read-probe-timeout",
+        "read_file",
+    )
+    reconciler = _ToolResultReconciler(
+        ToolResultReconcileResult(
+            status="deferred",
+            execution_id=execution.id,
+            error_code="tool_result_probe_failed",
+        )
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(
+            execution,
+            blocked=True,
+            error_code="safe_read_result_reconciliation_required",
+        )
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"deferred safe read was replayed: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+
+    with pytest.raises(ToolExecutionReconciliationPending) as exc_info:
+        await _service(
+            agent,
+            _CancelSource(None),
+            forbidden,
+            tool_result_reconciler=reconciler,
+        ).execute_pending(state, _context(state), (call,))
+
+    assert reconciler.calls == [execution]
+    assert exc_info.value.code == "safe_read_result_reconciliation_pending"
+    assert exc_info.value.defer_without_attempt is True
+
+
+@pytest.mark.asyncio
+async def test_expired_safe_read_defers_when_unavailable_close_fails(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    call = _call("call-read-close-timeout", "read_file")
+    state = _state(tenant_id, agent, (call,))
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(state["registry"].run_id),
+        "call-read-close-timeout",
+        "read_file",
+    )
+    reconciler = _ToolResultReconciler(
+        ToolResultReconcileResult(
+            status="unavailable",
+            execution_id=execution.id,
+            error_code="tool_result_unreadable",
+        )
+    )
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(
+            execution,
+            blocked=True,
+            error_code="safe_read_result_reconciliation_required",
+        )
+
+    async def close(db, **kwargs):
+        del db, kwargs
+        raise TimeoutError("ledger close timed out")
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError(f"unsettled safe read was replayed: {args}, {kwargs}")
+
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_expired_safe_read_result_unavailable",
+        close,
+    )
+
+    with pytest.raises(ToolExecutionReconciliationPending) as exc_info:
+        await _service(
+            agent,
+            _CancelSource(None),
+            forbidden,
+            tool_result_reconciler=reconciler,
+        ).execute_pending(state, _context(state), (call,))
+
+    assert exc_info.value.code == "safe_read_result_reconciliation_pending"
+    assert exc_info.value.defer_without_attempt is True
+    assert execution.status == "started"
 
 
 @pytest.mark.asyncio
