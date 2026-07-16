@@ -143,7 +143,12 @@ async def test_register_run_and_start_command_share_the_caller_transaction():
     )
 
     assert result.created is True
-    assert db.added == [result.run, result.start_command]
+    assert db.added[:2] == [result.run, result.start_command]
+    assert len(db.added) == 3
+    created_event = db.added[2]
+    assert created_event.event_type == "run_created"
+    assert created_event.run_id == result.run.id
+    assert created_event.payload["thread_id"] == str(result.run.id)
     assert db.flush_count == 1
     assert result.run.id == result.start_command.run_id
     assert result.run.runtime_thread_id == str(result.run.id)

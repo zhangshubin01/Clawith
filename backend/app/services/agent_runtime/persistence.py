@@ -14,6 +14,7 @@ from sqlalchemy.orm import aliased
 
 from app.models.agent_run import AgentRun
 from app.models.agent_run_command import AgentRunCommand
+from app.models.agent_run_event import AgentRunEvent
 
 
 _SOURCE_TYPES = frozenset({"chat", "trigger", "task", "a2a", "heartbeat"})
@@ -362,10 +363,27 @@ async def register_run_with_start(
         status="pending",
         attempt_count=0,
     )
+    created_event = AgentRunEvent(
+        id=uuid.uuid5(run_id, "lifecycle-event:run_created"),
+        tenant_id=registration.tenant_id,
+        run_id=run_id,
+        agent_id=registration.agent_id,
+        event_type="run_created",
+        summary="Runtime Run created",
+        payload={
+            "status": "queued",
+            "source_type": registration.source_type,
+            "thread_id": run.runtime_thread_id,
+        },
+        artifact_refs=[],
+        idempotency_key=f"run:{run_id}:created",
+        source_checkpoint_id=None,
+    )
     try:
         async with db.begin_nested():
             db.add(run)
             db.add(start_command)
+            db.add(created_event)
             await db.flush()
         return RegisteredRun(run=run, start_command=start_command, created=True)
     except IntegrityError:

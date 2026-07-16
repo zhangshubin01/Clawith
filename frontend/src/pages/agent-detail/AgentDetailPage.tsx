@@ -62,6 +62,7 @@ import AgentDirectory from './AgentDirectory';
 import { useAgentDetailRoute } from './hooks/useAgentDetailRoute';
 import {
     failClosedSessionActiveRun,
+    runtimeCompletionNeedsMessageRefresh,
     sessionActiveRunFromResponse,
     sessionRuntimeStateResponseIsValid,
     type SessionActiveRun,
@@ -2370,6 +2371,44 @@ export default function AgentDetailPage() {
 
     const buildSessionRuntimeKey = (agentId: string, sessionId: string) => `${agentId}:${sessionId}`;
 
+    const refreshSessionMessages = async (agentId: string, sessionId: string) => {
+        try {
+            const tkn = localStorage.getItem('token');
+            const response = await fetch(
+                `/api/agents/${agentId}/sessions/${sessionId}/messages?limit=${HISTORY_PAGE_SIZE}`,
+                { headers: { Authorization: `Bearer ${tkn}` } },
+            );
+            if (!response.ok) return;
+            const messages = await response.json();
+            if (
+                currentAgentIdRef.current !== agentId
+                || activeSessionIdRef.current !== sessionId
+            ) return;
+            const parsed = messages.map((message: any) => parseChatMsg({
+                role: message.role,
+                content: message.content || '',
+                ...(message.toolName && {
+                    toolName: message.toolName,
+                    toolArgs: message.toolArgs,
+                    toolStatus: message.toolStatus,
+                    toolResult: message.toolResult,
+                    toolThinking: message.toolThinking,
+                }),
+                ...(message.thinking && { thinking: message.thinking }),
+                ...(message.created_at && { timestamp: message.created_at }),
+                ...(message.id && { id: message.id }),
+            }));
+            setChatMessages(parsed);
+            setChatOldestTimestamp(
+                messages.length > 0 ? messages[0].created_at : null,
+            );
+            setChatHistoryHasMore(messages.length >= HISTORY_PAGE_SIZE);
+            setMessagesLoadedRuntimeKey(buildSessionRuntimeKey(agentId, sessionId));
+        } catch {
+            // Runtime-state polling will retry; keep the current local messages.
+        }
+    };
+
     const clearReconnectTimer = (key: SessionRuntimeKey) => {
         const timer = reconnectTimerRef.current[key];
         if (timer) {
@@ -2437,7 +2476,13 @@ export default function AgentDetailPage() {
                 );
                 return;
             }
+            const previous = sessionActiveRunRef.current[
+                buildSessionRuntimeKey(agentId, sessionId)
+            ] || null;
             applySessionActiveRun(agentId, sessionId, next);
+            if (runtimeCompletionNeedsMessageRefresh(previous, next)) {
+                void refreshSessionMessages(agentId, sessionId);
+            }
             if (
                 currentAgentIdRef.current === agentId
                 && activeSessionIdRef.current === sessionId

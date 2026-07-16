@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   failClosedSessionActiveRun,
+  runtimeCompletionNeedsMessageRefresh,
   sessionActiveRunFromResponse,
   sessionRuntimeStateResponseIsValid,
   waitingSessionActiveRunHint,
@@ -28,6 +29,12 @@ test('runtime-state request failure preserves display identity but disables acti
     canCancel: false,
   });
   assert.equal(failClosedSessionActiveRun(null), null);
+});
+
+test('settled lane transition refreshes canonical messages after websocket loss', () => {
+  assert.equal(runtimeCompletionNeedsMessageRefresh(waitingRun, null), true);
+  assert.equal(runtimeCompletionNeedsMessageRefresh(null, null), false);
+  assert.equal(runtimeCompletionNeedsMessageRefresh(waitingRun, waitingRun), false);
 });
 
 test('waiting websocket packet is only a non-actionable hint', () => {

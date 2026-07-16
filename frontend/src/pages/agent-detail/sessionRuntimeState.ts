@@ -84,6 +84,11 @@ export const failClosedSessionActiveRun = (
     canCancel: false,
 } : null;
 
+export const runtimeCompletionNeedsMessageRefresh = (
+    previous: SessionActiveRun | null,
+    next: SessionActiveRun | null,
+): boolean => previous !== null && next === null;
+
 export const waitingSessionActiveRunHint = ({
     runId,
     sessionId,

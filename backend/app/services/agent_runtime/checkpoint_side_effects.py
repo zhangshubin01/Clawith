@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 import uuid
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
 from app.models.agent_run import AgentRun
+from app.models.agent_run_event import AgentRunEvent
 from app.services.agent_runtime.command_worker import (
     CheckpointObservation,
     RuntimeCommandRecord,
@@ -190,6 +193,100 @@ def delivery_from_checkpoint(
     )
 
 
+def _event_payload(checkpoint: CheckpointObservation) -> dict:
+    lifecycle = checkpoint.state["lifecycle"]
+    status = lifecycle["status"]
+    payload: dict = {"status": status}
+    if status.startswith("waiting_"):
+        waiting = lifecycle.get("waiting_request")
+        if isinstance(waiting, Mapping):
+            payload.update(dict(waiting))
+            payload.setdefault("waiting_type", status.removeprefix("waiting_"))
+    else:
+        reason = _text_field(lifecycle.get("reason"))
+        if reason is not None:
+            payload["reason"] = reason
+        error = lifecycle.get("error")
+        if isinstance(error, Mapping):
+            error_code = _text_field(error.get("code"))
+            if error_code is not None:
+                payload["error_code"] = error_code
+    return payload
+
+
+async def _record_lifecycle_events(
+    db,
+    *,
+    run: RuntimeRunRecord,
+    command: RuntimeCommandRecord,
+    checkpoint: CheckpointObservation | None,
+) -> None:
+    """Project committed Graph/control boundaries into an idempotent event log."""
+    now = datetime.now(UTC)
+    agent_id = uuid.UUID(run.agent_id) if run.agent_id is not None else None
+    events: list[tuple[str, str, dict, str, str | None]] = []
+    if checkpoint is None:
+        events.append(
+            (
+                "run_cancelled",
+                "Runtime Run cancelled before start",
+                {"status": "cancelled", "reason": "cancelled_before_start"},
+                f"command:{command.id}:run_cancelled",
+                None,
+            )
+        )
+    else:
+        if command.command_type == "resume":
+            events.append(
+                (
+                    "resumed",
+                    "Runtime Run resumed",
+                    {"status": "running"},
+                    f"command:{command.id}:resumed",
+                    checkpoint.checkpoint_id,
+                )
+            )
+        status = checkpoint.state["lifecycle"]["status"]
+        event_type = {
+            "waiting_user": "waiting_started",
+            "waiting_external": "waiting_started",
+            "waiting_agent": "waiting_started",
+            "completed": "run_completed",
+            "failed": "run_failed",
+            "cancelled": "run_cancelled",
+        }.get(status)
+        if event_type is not None:
+            events.append(
+                (
+                    event_type,
+                    f"Runtime Run {status.replace('_', ' ')}",
+                    _event_payload(checkpoint),
+                    f"checkpoint:{checkpoint.checkpoint_id}:{event_type}",
+                    checkpoint.checkpoint_id,
+                )
+            )
+
+    for position, (event_type, summary, payload, key, checkpoint_id) in enumerate(events):
+        statement = (
+            insert(AgentRunEvent)
+            .values(
+                id=uuid.uuid5(run.run_id, f"lifecycle-event:{key}"),
+                tenant_id=run.tenant_id,
+                run_id=run.run_id,
+                agent_id=agent_id,
+                event_type=event_type,
+                summary=summary,
+                payload=payload,
+                artifact_refs=[],
+                idempotency_key=key,
+                source_checkpoint_id=checkpoint_id,
+                created_at=now + timedelta(microseconds=position),
+            )
+            .on_conflict_do_nothing()
+        )
+        await db.execute(statement)
+
+
 class RuntimeCheckpointSideEffects:
     """Synchronize products after an already-settled Graph/control boundary."""
 
@@ -229,6 +326,12 @@ class RuntimeCheckpointSideEffects:
                         )
                     stored.lane_held = False
                     stored.lane_claimed_at = None
+                    await _record_lifecycle_events(
+                        db,
+                        run=run,
+                        command=command,
+                        checkpoint=None,
+                    )
                     await db.flush()
             return
 
@@ -252,11 +355,17 @@ class RuntimeCheckpointSideEffects:
 
         errors: list[Exception] = []
         delivery = delivery_from_checkpoint(run, product_checkpoint)
-        if delivery is not None:
-            receipt: DeliveryReceipt | None = None
-            try:
-                async with self._session_factory() as db:
-                    async with db.begin():
+        receipt: DeliveryReceipt | None = None
+        try:
+            async with self._session_factory() as db:
+                async with db.begin():
+                    await _record_lifecycle_events(
+                        db,
+                        run=run,
+                        command=command,
+                        checkpoint=product_checkpoint,
+                    )
+                    if delivery is not None:
                         status_result = await db.execute(
                             select(AgentRun.delivery_status).where(
                                 AgentRun.tenant_id == run.tenant_id,
@@ -271,8 +380,9 @@ class RuntimeCheckpointSideEffects:
                             )
                         if delivery_status != "not_required":
                             receipt = await deliver_runtime_message(db, delivery)
-            except Exception as exc:
-                errors.append(exc)
+        except Exception as exc:
+            errors.append(exc)
+        if delivery is not None:
             if (
                 receipt is not None
                 and receipt.status == "delivered"

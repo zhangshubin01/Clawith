@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import uuid
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.services.agent_runtime.checkpoint_side_effects import (
     RuntimeCheckpointSideEffectError,
@@ -47,6 +48,7 @@ class _Session:
     def __init__(self, value: object) -> None:
         self.value = value
         self.flush_count = 0
+        self.statements = []
 
     async def __aenter__(self):
         return self
@@ -57,7 +59,8 @@ class _Session:
     def begin(self) -> _Transaction:
         return _Transaction()
 
-    async def execute(self, _statement) -> _ScalarResult:
+    async def execute(self, statement) -> _ScalarResult:
+        self.statements.append(statement)
         return _ScalarResult(self.value)
 
     async def flush(self) -> None:
@@ -180,6 +183,56 @@ async def test_completed_checkpoint_delivers_without_projection_round_trip() -> 
     request = deliver.await_args.args[1]
     assert request.content == "verified"
     assert request.checkpoint_id == "checkpoint-1"
+
+
+@pytest.mark.asyncio
+async def test_waiting_checkpoint_projects_lifecycle_event() -> None:
+    run, command, checkpoint = _records(
+        status="waiting_external",
+        lifecycle={
+            "waiting_request": {
+                "waiting_type": "external",
+                "correlation_id": "poll-1",
+                "reason": "async_tool_poll_pending",
+            }
+        },
+    )
+    sessions = _SessionFactory("not_required")
+
+    await RuntimeCheckpointSideEffects(
+        session_factory=sessions,  # type: ignore[arg-type]
+    ).handle(run=run, command=command, checkpoint=checkpoint)
+
+    compiled = sessions.sessions[0].statements[0].compile(
+        dialect=postgresql.dialect()
+    )
+    assert compiled.params["event_type"] == "waiting_started"
+    assert compiled.params["payload"]["waiting_type"] == "external"
+    assert compiled.params["payload"]["correlation_id"] == "poll-1"
+
+
+@pytest.mark.asyncio
+async def test_resume_terminal_checkpoint_projects_resume_and_terminal_events() -> None:
+    run, command, checkpoint = _records(
+        command_type="resume",
+        lifecycle={"final_answer": "done"},
+    )
+    sessions = _SessionFactory("not_required")
+
+    await RuntimeCheckpointSideEffects(
+        session_factory=sessions,  # type: ignore[arg-type]
+    ).handle(run=run, command=command, checkpoint=checkpoint)
+
+    compiled = [
+        statement.compile(dialect=postgresql.dialect()).params
+        for statement in sessions.sessions[0].statements
+    ]
+    assert [
+        params["event_type"] for params in compiled if "event_type" in params
+    ] == [
+        "resumed",
+        "run_completed",
+    ]
 
 
 @pytest.mark.asyncio
