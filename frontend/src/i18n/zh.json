@@ -2269,6 +2269,11 @@
     "renameSession": "重命名会话",
     "renameSessionFailed": "重命名失败",
     "sessionNamePlaceholder": "会话名称",
-    "sessionTitlePlaceholder": "会话名称，可留空"
+    "sessionTitlePlaceholder": "会话名称，可留空",
+    "agentCount": "{{count}} 个智能体",
+    "memberCount": "{{count}} 位成员",
+    "showPanel": "展开面板",
+    "hidePanel": "收起面板",
+    "dragToResize": "拖动调整宽度"
   }
 }

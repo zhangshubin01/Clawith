@@ -2144,6 +2144,13 @@
     "renameSession": "Rename session",
     "renameSessionFailed": "Rename failed",
     "sessionNamePlaceholder": "Session name",
-    "sessionTitlePlaceholder": "Session name (optional)"
+    "sessionTitlePlaceholder": "Session name (optional)",
+    "agentCount": "{{count}} agents",
+    "agentCount_one": "{{count}} agent",
+    "memberCount": "{{count}} members",
+    "memberCount_one": "{{count}} member",
+    "showPanel": "Show panel",
+    "hidePanel": "Hide panel",
+    "dragToResize": "Drag to resize"
   }
 }

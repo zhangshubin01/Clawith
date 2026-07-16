@@ -5,16 +5,15 @@ import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
     IconChevronDown,
     IconChevronRight,
-    IconDots,
     IconLayoutSidebarLeftCollapse,
     IconLayoutSidebarLeftExpand,
+    IconLayoutSidebarRightCollapse,
+    IconLayoutSidebarRightExpand,
     IconMessage2,
     IconPencil,
     IconPlus,
     IconSettings,
     IconTrash,
-    IconUserPlus,
-    IconUsers,
 } from '@tabler/icons-react';
 import { groupApi } from '../../services/groupApi';
 import { compareCursor, useGroupRealtime } from '../../hooks/useGroupRealtime';
@@ -93,8 +92,6 @@ export default function GroupsPage() {
     const [deletingSession, setDeletingSession] = useState<GroupSession | null>(null);
     const [deletingGroup, setDeletingGroup] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
-    // The ⋯ menu on the breadcrumb group name.
-    const [groupMenuOpen, setGroupMenuOpen] = useState(false);
 
     const { data: groups = [], refetch: refetchGroups } = useQuery({
         queryKey: ['groups'],
@@ -157,6 +154,12 @@ export default function GroupsPage() {
         [members, currentUser?.id],
     );
     const isManager = me?.role === 'manager';
+
+    // Header facts line: the group's makeup, which does not change as the session switches.
+    const memberCounts = useMemo(() => ({
+        agents: members.filter((member) => member.participant_type === 'agent').length,
+        people: members.filter((member) => member.participant_type === 'user').length,
+    }), [members]);
 
     // Land on a group, then on a session, so the pane is never pointing at nothing.
     useEffect(() => {
@@ -225,7 +228,8 @@ export default function GroupsPage() {
         void queryClient.invalidateQueries({ queryKey: ['group-sessions', groupId] });
     }, [queryClient, groupId]);
 
-    const { status } = useGroupRealtime({
+    // Called for its transport side effects; the header no longer surfaces connection status.
+    useGroupRealtime({
         groupId,
         sessionId,
         getLastCursor,
@@ -391,9 +395,8 @@ export default function GroupsPage() {
                         title={t('groups.expandGroups', '展开群聊栏')}
                         onClick={toggleGroups}
                     >
-                        <IconLayoutSidebarLeftExpand size={16} stroke={1.7} />
                         <span className="group-rail-stub-icon">
-                            <IconUsers size={15} stroke={1.6} />
+                            <IconLayoutSidebarLeftExpand size={16} stroke={1.7} />
                             {totalUnread > 0 && <span className="group-rail-dot" />}
                         </span>
                     </button>
@@ -478,7 +481,7 @@ export default function GroupsPage() {
                                                     setShowSettings(true);
                                                 }}
                                             >
-                                                <IconDots size={14} stroke={1.8} />
+                                                <IconSettings size={14} stroke={1.8} />
                                             </button>
                                         </div>
 
@@ -569,63 +572,24 @@ export default function GroupsPage() {
                     <>
                         <header className="group-main-header">
                             <div className="group-main-heading">
-                                <div className="group-breadcrumb">
-                                    <button
-                                        type="button"
-                                        className="group-breadcrumb-group"
-                                        onClick={() => setGroupMenuOpen((open) => !open)}
-                                    >
-                                        <span className="group-breadcrumb-name">{activeGroup.name}</span>
-                                        <IconDots size={13} stroke={1.8} />
-                                    </button>
-                                    {status === 'polling' && (
-                                        <span className="group-breadcrumb-status">{t('groups.polling', '轮询中')}</span>
-                                    )}
-                                    {status === 'offline' && (
-                                        <span className="group-breadcrumb-status">{t('groups.offline', '连接断开')}</span>
-                                    )}
-                                    {groupMenuOpen && (
-                                        <>
-                                            <div
-                                                className="group-menu-overlay"
-                                                onClick={() => setGroupMenuOpen(false)}
-                                            />
-                                            <div className="group-menu">
-                                                <button
-                                                    type="button"
-                                                    className="group-menu-item"
-                                                    onClick={() => {
-                                                        setGroupMenuOpen(false);
-                                                        setShowSettings(true);
-                                                    }}
-                                                >
-                                                    <IconSettings size={15} stroke={1.7} />
-                                                    {t('groups.settings', '群设置')}
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    className="group-menu-item"
-                                                    onClick={() => {
-                                                        setGroupMenuOpen(false);
-                                                        setShowInvite(true);
-                                                    }}
-                                                >
-                                                    <IconUserPlus size={15} stroke={1.7} />
-                                                    {t('groups.inviteTitle', '邀请成员')}
-                                                </button>
-                                            </div>
-                                        </>
-                                    )}
-                                </div>
                                 <div className="group-main-title">{activeSession.title}</div>
+                                <div className="group-main-subtitle">
+                                    {t('groups.agentCount', '{{count}} 个智能体', { count: memberCounts.agents })}
+                                    {' · '}
+                                    {t('groups.memberCount', '{{count}} 位成员', { count: memberCounts.people })}
+                                </div>
                             </div>
                             <button
                                 type="button"
                                 className={`group-icon-btn ${showPanel ? 'active' : ''}`}
-                                title={t('groups.members', '成员')}
+                                title={showPanel
+                                    ? t('groups.hidePanel', '收起面板')
+                                    : t('groups.showPanel', '展开面板')}
                                 onClick={togglePanel}
                             >
-                                <IconUsers size={16} stroke={1.7} />
+                                {showPanel
+                                    ? <IconLayoutSidebarRightCollapse size={16} stroke={1.7} />
+                                    : <IconLayoutSidebarRightExpand size={16} stroke={1.7} />}
                             </button>
                         </header>
 
