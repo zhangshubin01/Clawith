@@ -36,6 +36,11 @@ class LLMModel(Base):
             "('manual', 'provider_api', 'builtin_registry', 'runtime_config')",
             name="ck_llm_models_capability_source",
         ),
+        CheckConstraint(
+            "tool_calling_capability_source IS NULL OR "
+            "tool_calling_capability_source IN ('probe', 'builtin_registry')",
+            name="ck_llm_models_tool_calling_capability_source",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -57,6 +62,10 @@ class LLMModel(Base):
     max_input_tokens_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
     capability_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     capability_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    supports_tool_calling: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    tool_calling_capability_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    tool_calling_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tool_calling_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

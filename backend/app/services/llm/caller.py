@@ -477,6 +477,14 @@ async def call_llm(
     _max_tool_rounds, _token_limit_msg = await _get_agent_config(agent_id)
     if _token_limit_msg:
         return _token_limit_msg
+    from app.services.agent_runtime.model_capabilities import (
+        ModelCapabilityError,
+        ModelCapabilityResolver,
+    )
+    try:
+        ModelCapabilityResolver.require_native_tool_calling(model)
+    except ModelCapabilityError as exc:
+        return f"[Error] {exc.code}: {exc}"
     if max_tool_rounds_override and max_tool_rounds_override < _max_tool_rounds:
         _max_tool_rounds = max_tool_rounds_override
 
@@ -555,6 +563,22 @@ async def call_llm(
     max_tokens = get_max_tokens(model.provider, model.model, getattr(model, 'max_output_tokens', None))
     _accumulated_usage = TokenUsage()
     _unsaved_usage = TokenUsage()
+    _protocol_repairs: set[str] = set()
+
+    async def _protocol_violation(repair_code: str) -> str:
+        if agent_id and _unsaved_usage.total_tokens > 0:
+            await record_token_usage(agent_id, _unsaved_usage)
+        await client.close()
+        error_code = (
+            "finish_protocol_violation"
+            if repair_code == "missing_finish"
+            else f"{repair_code}_protocol_violation"
+        )
+        return (
+            f"[Error] {error_code}: The model repeated the {repair_code!r} "
+            "tool protocol error after one bounded repair. Native tool calling "
+            "is not working for this request."
+        )
 
     # Tool-calling loop
     for round_i in range(_max_tool_rounds):
@@ -635,13 +659,19 @@ async def call_llm(
         if not response.tool_calls:
             if response.content:
                 api_messages.append(LLMMessage(role="assistant", content=response.content))
+            if "missing_finish" in _protocol_repairs:
+                return await _protocol_violation("missing_finish")
             api_messages.append(LLMMessage(role="user", content=FINISH_PROTOCOL_REMINDER))
+            _protocol_repairs.add("missing_finish")
             continue
 
         # Execute tool calls
         logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
         sanitized_tool_calls, retry_instruction = _sanitize_tool_calls_for_context(response.tool_calls)
         if retry_instruction:
+            if "invalid_tool_call" in _protocol_repairs:
+                return await _protocol_violation("invalid_tool_call")
+            _protocol_repairs.add("invalid_tool_call")
             api_messages.append(LLMMessage(role="user", content=retry_instruction))
             continue
 
@@ -652,6 +682,10 @@ async def call_llm(
                     await record_token_usage(agent_id, _unsaved_usage)
                 await client.close()
                 return finish_call.content
+
+            if "invalid_finish" in _protocol_repairs:
+                return await _protocol_violation("invalid_finish")
+            _protocol_repairs.add("invalid_finish")
 
             api_messages.append(LLMMessage(
                 role="assistant",

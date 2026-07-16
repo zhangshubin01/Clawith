@@ -547,11 +547,14 @@ def _repair(
     context: RuntimeContext,
     step: LLMCompletionStep,
     instruction: str,
+    *,
+    repair_code: str | None = None,
 ) -> ModelStepResult:
     return ModelStepResult(
         intent="text",
         assistant_message=_assistant_message(state, context, step),
         repair_instruction=instruction,
+        repair_code=repair_code,
     )
 
 
@@ -565,11 +568,18 @@ def _parse_step(
     allow_group_handoff: bool,
 ) -> ModelStepResult:
     if step.retry_instruction:
-        return _repair(state, context, step, step.retry_instruction)
+        return _repair(
+            state,
+            context,
+            step,
+            step.retry_instruction,
+            repair_code="invalid_tool_call",
+        )
     if not step.tool_calls:
         return ModelStepResult(
             intent="text",
             assistant_message=_assistant_message(state, context, step),
+            repair_code="missing_finish",
         )
 
     calls = [cast(JsonObject, deepcopy(call)) for call in step.tool_calls]
@@ -585,6 +595,7 @@ def _parse_step(
                 context,
                 step,
                 "`finish` must be the only tool call in the response. Retry without mixing intents.",
+                repair_code="invalid_finish",
             )
         if not finish.valid:
             return _repair(
@@ -592,6 +603,7 @@ def _parse_step(
                 context,
                 step,
                 finish.error or "Retry `finish` with valid content.",
+                repair_code="invalid_finish",
             )
         return ModelStepResult(
             intent="finish",
@@ -612,6 +624,7 @@ def _parse_step(
                 context,
                 step,
                 "`wait` must be the only tool call in the response. Retry without mixing intents.",
+                repair_code="invalid_wait",
             )
         function = wait_calls[0].get("function")
         raw_arguments = function.get("arguments") if isinstance(function, Mapping) else None
@@ -627,6 +640,7 @@ def _parse_step(
                 context,
                 step,
                 "`wait` requires waiting_type=user|agent|external and a non-empty reason.",
+                repair_code="invalid_wait",
             )
         question = arguments.get("question")
         if waiting_type == "user" and (
@@ -637,6 +651,7 @@ def _parse_step(
                 context,
                 step,
                 "`wait` with waiting_type=user requires a non-empty answerable question.",
+                repair_code="invalid_wait",
             )
         if waiting_type == "user" and not allow_user_wait:
             return _repair(
@@ -688,6 +703,7 @@ def _parse_step(
             context,
             step,
             "Use only enabled tools and provide a non-empty tool call ID.",
+            repair_code="invalid_tool_call",
         )
     return ModelStepResult(
         intent="tool_calls",
@@ -767,6 +783,7 @@ class RuntimeModelStepService:
                 "model_unavailable",
                 "pinned Runtime model is disabled or outside the tenant scope",
             )
+        ModelCapabilityResolver.require_native_tool_calling(model)
         if agent is None or agent.status not in _ACTIVE_AGENT_STATUSES or agent.is_expired:
             raise ContextBuildError(
                 "agent_unavailable",
@@ -791,6 +808,7 @@ class RuntimeModelStepService:
             fallback is None
             or not fallback.enabled
             or fallback.tenant_id not in {None, tenant_id}
+            or fallback.supports_tool_calling is not True
         ):
             return None
         return fallback

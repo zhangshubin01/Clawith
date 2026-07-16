@@ -68,6 +68,7 @@ class ModelStepResult:
     finish_mention_participant_ids: tuple[str, ...] = ()
     finish_delivery_intent: JsonObject | None = None
     repair_instruction: str | None = None
+    repair_code: str | None = None
     error: JsonObject | None = None
 
 
@@ -272,6 +273,30 @@ def _counter(lifecycle: RuntimeLifecycle, field_name: str) -> int:
             f"checkpoint {field_name} must be a non-negative integer",
         )
     return value
+
+
+def _model_protocol_repairs(lifecycle: RuntimeLifecycle) -> dict[str, int]:
+    raw = lifecycle.get("model_protocol_repairs", {})
+    if not isinstance(raw, Mapping):
+        raise RuntimeNodeTransitionError(
+            "invalid_model_protocol_repairs",
+            "checkpoint model_protocol_repairs must be an object",
+        )
+    repairs: dict[str, int] = {}
+    for code, count in raw.items():
+        if (
+            not isinstance(code, str)
+            or not code
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+        ):
+            raise RuntimeNodeTransitionError(
+                "invalid_model_protocol_repairs",
+                "checkpoint model protocol repair entries must be non-negative integers",
+            )
+        repairs[code] = count
+    return repairs
 
 
 def _messages(state: RuntimeGraphState) -> list[JsonObject]:
@@ -578,23 +603,80 @@ class DeterministicRuntimeNodeExecutor:
                 }
             )
         elif result.intent == "text":
-            new_messages.append(
-                {
-                    "id": _runtime_message_id(
-                        context,
-                        f"model-step:{step_count}:repair",
-                    ),
-                    "role": "user",
-                    "content": result.repair_instruction or FINISH_PROTOCOL_REMINDER,
-                }
-            )
-            lifecycle.update(
-                {
-                    "status": "running",
-                    "pending_tool_calls": [],
-                }
-            )
-            _schedule_compact(lifecycle)
+            repair_code = result.repair_code
+            if repair_code is not None:
+                if not repair_code:
+                    raise RuntimeNodeTransitionError(
+                        "invalid_model_repair_code",
+                        "model repair_code must not be blank",
+                    )
+                repairs = _model_protocol_repairs(state["lifecycle"])
+                if repairs.get(repair_code, 0) >= 1:
+                    violation_code = (
+                        "finish_protocol_violation"
+                        if repair_code == "missing_finish"
+                        else "model_tool_protocol_violation"
+                    )
+                    lifecycle.update(
+                        {
+                            "status": "failed",
+                            "next_route": "terminal",
+                            "reason": violation_code,
+                            "pending_tool_calls": [],
+                            "error": _error(
+                                violation_code,
+                                (
+                                    f"The model repeated the {repair_code!r} protocol "
+                                    "error after one bounded repair. Native tool "
+                                    "calling is not working for this Run."
+                                ),
+                            ),
+                        }
+                    )
+                else:
+                    repairs[repair_code] = repairs.get(repair_code, 0) + 1
+                    new_messages.append(
+                        {
+                            "id": _runtime_message_id(
+                                context,
+                                f"model-step:{step_count}:repair",
+                            ),
+                            "role": "user",
+                            "content": (
+                                result.repair_instruction
+                                or FINISH_PROTOCOL_REMINDER
+                            ),
+                        }
+                    )
+                    lifecycle.update(
+                        {
+                            "status": "running",
+                            "model_protocol_repairs": cast(JsonObject, repairs),
+                            "pending_tool_calls": [],
+                        }
+                    )
+                    _schedule_compact(lifecycle)
+            else:
+                new_messages.append(
+                    {
+                        "id": _runtime_message_id(
+                            context,
+                            f"model-step:{step_count}:repair",
+                        ),
+                        "role": "user",
+                        "content": (
+                            result.repair_instruction
+                            or "Retry after resolving the reported business constraint."
+                        ),
+                    }
+                )
+                lifecycle.update(
+                    {
+                        "status": "running",
+                        "pending_tool_calls": [],
+                    }
+                )
+                _schedule_compact(lifecycle)
         elif result.intent == "error":
             error = result.error or _error("model_call_failed", "The model call failed.")
             lifecycle.update(

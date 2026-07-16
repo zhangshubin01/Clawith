@@ -75,6 +75,7 @@ def _model():
         temperature=0,
         max_output_tokens=256,
         request_timeout=1,
+        supports_tool_calling=True,
     )
 
 
@@ -290,6 +291,92 @@ async def test_call_llm_requires_finish_tool_to_stop(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("supports_tool_calling", "error_code"),
+    [
+        (None, "model_tool_calling_unverified"),
+        (False, "model_tool_calling_unsupported"),
+    ],
+)
+async def test_legacy_tool_loop_fails_closed_before_provider_call(
+    monkeypatch,
+    supports_tool_calling,
+    error_code,
+):
+    from app.services.llm import caller
+
+    model = _model()
+    model.supports_tool_calling = supports_tool_calling
+
+    def create_client(**_kwargs):
+        raise AssertionError("provider must not be called")
+
+    monkeypatch.setattr(caller, "_get_agent_config", lambda _agent_id: _async_return((50, None)))
+    monkeypatch.setattr(caller, "create_llm_client", create_client)
+
+    result = await caller.call_llm(
+        model,
+        [{"role": "user", "content": "hello"}],
+        "Agent",
+        "",
+        agent_id=uuid.uuid4(),
+    )
+
+    assert result.startswith(f"[Error] {error_code}:")
+
+
+@pytest.mark.asyncio
+async def test_call_llm_plain_text_finish_repair_is_bounded(monkeypatch):
+    from app.services.llm import caller
+    from app.services.llm.finish import FINISH_PROTOCOL_REMINDER
+
+    fake_client = FakeStreamClient([
+        _plain_response("First plain response."),
+        _plain_response("Second plain response."),
+    ])
+
+    monkeypatch.setattr(caller, "_get_agent_config", lambda _agent_id: _async_return((50, None)))
+    monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
+    monkeypatch.setattr(
+        "app.services.agent_context.build_agent_context",
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+    )
+    monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
+        {
+            "type": "function",
+            "function": {
+                "name": "finish",
+                "description": "Finish",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"content": {"type": "string"}},
+                    "required": ["content"],
+                },
+            },
+        }
+    ]))
+    monkeypatch.setattr(caller, "create_llm_client", lambda **_kwargs: fake_client)
+    monkeypatch.setattr(caller, "record_token_usage", lambda *_args, **_kwargs: _async_return(None))
+
+    result = await caller.call_llm(
+        _model(),
+        [{"role": "user", "content": "hello"}],
+        "Agent",
+        "",
+        agent_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+    )
+
+    assert result.startswith("[Error] finish_protocol_violation:")
+    assert len(fake_client.messages_seen) == 2
+    assert sum(
+        message.role == "user" and message.content == FINISH_PROTOCOL_REMINDER
+        for message in fake_client.messages_seen[-1]
+    ) == 1
+    assert fake_client.closed is True
+
+
+@pytest.mark.asyncio
 async def test_invalid_finish_does_not_stop_and_is_returned_as_tool_error(monkeypatch):
     from app.services.llm import caller
 
@@ -338,6 +425,96 @@ async def test_invalid_finish_does_not_stop_and_is_returned_as_tool_error(monkey
         and "content" in str(msg.content)
         for msg in second_round_messages
     )
+
+
+@pytest.mark.asyncio
+async def test_repeated_invalid_finish_is_bounded_by_protocol_code(monkeypatch):
+    from app.services.llm import caller
+
+    fake_client = FakeStreamClient([
+        _finish_response_with_arguments("{}"),
+        _finish_response_with_arguments("{}"),
+    ])
+    monkeypatch.setattr(caller, "_get_agent_config", lambda _agent_id: _async_return((50, None)))
+    monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
+    monkeypatch.setattr(
+        "app.services.agent_context.build_agent_context",
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+    )
+    monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
+        {
+            "type": "function",
+            "function": {
+                "name": "finish",
+                "description": "Finish",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]))
+    monkeypatch.setattr(caller, "create_llm_client", lambda **_kwargs: fake_client)
+    monkeypatch.setattr(caller, "record_token_usage", lambda *_args, **_kwargs: _async_return(None))
+
+    result = await caller.call_llm(
+        _model(),
+        [{"role": "user", "content": "hello"}],
+        "Agent",
+        "",
+        agent_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+    )
+
+    assert result.startswith("[Error] invalid_finish_protocol_violation:")
+    assert len(fake_client.messages_seen) == 2
+    assert fake_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_repeated_invalid_tool_json_is_bounded_by_protocol_code(monkeypatch):
+    from app.services.llm import caller
+    from app.services.llm.client import LLMResponse
+
+    invalid = LLMResponse(
+        content="",
+        tool_calls=[
+            {
+                "id": "call-bad-json",
+                "type": "function",
+                "function": {"name": "finish", "arguments": '{"content":'},
+            }
+        ],
+    )
+    fake_client = FakeStreamClient([invalid, invalid])
+    monkeypatch.setattr(caller, "_get_agent_config", lambda _agent_id: _async_return((50, None)))
+    monkeypatch.setattr(caller, "_get_user_name", lambda _user_id: _async_return("Ray"))
+    monkeypatch.setattr(
+        "app.services.agent_context.build_agent_context",
+        lambda *_args, **_kwargs: _async_return(("static", "dynamic")),
+    )
+    monkeypatch.setattr(caller, "get_agent_tools_for_llm", lambda _agent_id: _async_return([
+        {
+            "type": "function",
+            "function": {
+                "name": "finish",
+                "description": "Finish",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]))
+    monkeypatch.setattr(caller, "create_llm_client", lambda **_kwargs: fake_client)
+    monkeypatch.setattr(caller, "record_token_usage", lambda *_args, **_kwargs: _async_return(None))
+
+    result = await caller.call_llm(
+        _model(),
+        [{"role": "user", "content": "hello"}],
+        "Agent",
+        "",
+        agent_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+    )
+
+    assert result.startswith("[Error] invalid_tool_call_protocol_violation:")
+    assert len(fake_client.messages_seen) == 2
+    assert fake_client.closed is True
 
 
 @pytest.mark.asyncio

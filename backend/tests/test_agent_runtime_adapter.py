@@ -14,6 +14,7 @@ from app.config import Settings
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.agent_run_command import AgentRunCommand
+from app.models.llm import LLMModel
 from app.services.agent_runtime.adapter import (
     RuntimeAdapterError,
     RuntimeCommandIntake,
@@ -72,6 +73,24 @@ def _agent(
     )
     agent.max_tool_rounds = model_turn_limit  # type: ignore[assignment]
     return agent
+
+
+def _model(
+    tenant_id: uuid.UUID,
+    *,
+    model_id: uuid.UUID,
+    supports_tool_calling: bool | None = True,
+) -> LLMModel:
+    return LLMModel(
+        id=model_id,
+        tenant_id=tenant_id,
+        provider="ollama",
+        model="local-model",
+        api_key_encrypted="ollama",
+        label="Local model",
+        enabled=True,
+        supports_tool_calling=supports_tool_calling,
+    )
 
 
 def _run(
@@ -166,7 +185,7 @@ async def test_start_pins_agent_budget_thread_and_internal_request_metadata() ->
         model_turn_limit=40,
     )
     start_command = _stored_command(run, "start")
-    db = _session(agent)
+    db = _session(agent, _model(tenant_id, model_id=command.model_id))
 
     with patch(
         "app.services.agent_runtime.adapter.register_run_with_start",
@@ -214,7 +233,7 @@ async def test_oneshot_request_can_only_narrow_the_agent_hard_limit(
         agent_id=agent.id,
         model_turn_limit=expected,
     )
-    db = _session(agent)
+    db = _session(agent, _model(tenant_id, model_id=command.model_id))
 
     with patch(
         "app.services.agent_runtime.adapter.register_run_with_start",
@@ -249,6 +268,42 @@ async def test_missing_or_invalid_agent_budget_fails_without_runtime_fallback(
             ).start_run(_start(tenant_id, agent.id))
 
     assert raised.value.code == "invalid_agent_model_turn_limit"
+    persist.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("supports_tool_calling", "error_code"),
+    [
+        (None, "model_tool_calling_unverified"),
+        (False, "model_tool_calling_unsupported"),
+    ],
+)
+async def test_new_agent_run_fails_before_persistence_without_verified_tool_calling(
+    supports_tool_calling: bool | None,
+    error_code: str,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    command = _start(tenant_id, agent.id)
+    model = _model(
+        tenant_id,
+        model_id=command.model_id,
+        supports_tool_calling=supports_tool_calling,
+    )
+    db = _session(agent, model)
+
+    with patch(
+        "app.services.agent_runtime.adapter.register_run_with_start",
+        new=AsyncMock(),
+    ) as persist:
+        with pytest.raises(RuntimeAdapterError) as raised:
+            await RuntimeCommandIntake(
+                db,
+                settings=_settings(enabled=True),
+            ).start_run(command)
+
+    assert raised.value.code == error_code
     persist.assert_not_awaited()
 
 
@@ -337,6 +392,7 @@ async def test_planning_start_uses_dedicated_graph_and_no_agent_turn_limit() -> 
     assert persist.await_args.kwargs["start_payload"] == {
         "candidate_agents": []
     }
+    assert db.execute.await_count == 0
 
 
 @pytest.mark.asyncio

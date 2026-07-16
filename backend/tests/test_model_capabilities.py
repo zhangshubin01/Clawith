@@ -55,6 +55,10 @@ def test_llm_capability_columns_and_checks_are_declared() -> None:
         "max_input_tokens_override",
         "capability_source",
         "capability_checked_at",
+        "supports_tool_calling",
+        "tool_calling_capability_source",
+        "tool_calling_checked_at",
+        "tool_calling_error",
     ):
         assert table.c[column_name].nullable is True
 
@@ -67,6 +71,31 @@ def test_llm_capability_columns_and_checks_are_declared() -> None:
     capability_source_check = constraints["ck_llm_models_capability_source"]
     for source in ("manual", "provider_api", "builtin_registry", "runtime_config"):
         assert source in capability_source_check
+
+
+@pytest.mark.parametrize(
+    ("supports_tool_calling", "error_code"),
+    [
+        (None, "model_tool_calling_unverified"),
+        (False, "model_tool_calling_unsupported"),
+    ],
+)
+def test_agent_runtime_requires_verified_native_tool_calling(
+    supports_tool_calling: bool | None,
+    error_code: str,
+) -> None:
+    model = _model(supports_tool_calling=supports_tool_calling)
+
+    with pytest.raises(ModelCapabilityError) as exc_info:
+        ModelCapabilityResolver.require_native_tool_calling(model)
+
+    assert exc_info.value.code == error_code
+
+
+def test_verified_native_tool_calling_is_accepted() -> None:
+    ModelCapabilityResolver.require_native_tool_calling(
+        _model(supports_tool_calling=True)
+    )
 
 
 def test_matching_overrides_win_without_changing_limit_semantics() -> None:

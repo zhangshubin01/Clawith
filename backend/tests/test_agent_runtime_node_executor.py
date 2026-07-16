@@ -524,24 +524,97 @@ async def test_cancel_is_observed_before_the_model_or_a_new_tool_can_start() -> 
 
 
 @pytest.mark.asyncio
-async def test_plain_text_repair_stops_at_the_model_step_limit() -> None:
+async def test_plain_text_finish_protocol_is_repaired_once_then_fails_explicitly() -> None:
     run_id = uuid.uuid4()
     model = ModelService(
         ModelStepResult(
             intent="text",
-            assistant_message={"role": "assistant", "content": "plain text"},
-        )
+            assistant_message={"role": "assistant", "content": "first plain text"},
+            repair_code="missing_finish",
+        ),
+        ModelStepResult(
+            intent="text",
+            assistant_message={"role": "assistant", "content": "second plain text"},
+            repair_code="missing_finish",
+        ),
     )
     executor = _executor(model)
 
-    result = await _invoke(run_id, executor, model_turn_limit=1)
+    result = await _invoke(run_id, executor, model_turn_limit=50)
 
     lifecycle = result["lifecycle"]
     assert lifecycle["status"] == "failed"
-    assert lifecycle["reason"] == "model_step_limit_reached"
-    assert lifecycle["model_step_count"] == 1
-    assert model.calls == 1
-    assert runtime_messages_as_json(cast(RuntimeGraphState, result))[-1]["role"] == "user"
+    assert lifecycle["reason"] == "finish_protocol_violation"
+    assert lifecycle["error"]["code"] == "finish_protocol_violation"
+    assert lifecycle["model_step_count"] == 2
+    assert lifecycle["model_protocol_repairs"] == {"missing_finish": 1}
+    assert model.calls == 2
+    messages = runtime_messages_as_json(cast(RuntimeGraphState, result))
+    assert [message["role"] for message in messages] == [
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert sum(
+        "must either call another available tool" in str(message.get("content", ""))
+        for message in messages
+    ) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("repair_code", "instruction"),
+    [
+        ("invalid_finish", "Retry finish with valid content."),
+        ("invalid_tool_call", "Retry with valid JSON tool arguments."),
+    ],
+)
+async def test_repeated_model_tool_protocol_repair_code_fails_explicitly(
+    repair_code: str,
+    instruction: str,
+) -> None:
+    run_id = uuid.uuid4()
+    repair = ModelStepResult(
+        intent="text",
+        assistant_message={"role": "assistant", "content": "bad tool call"},
+        repair_instruction=instruction,
+        repair_code=repair_code,
+    )
+    model = ModelService(repair, repair)
+    executor = _executor(model)
+
+    result = await _invoke(run_id, executor, model_turn_limit=50)
+
+    lifecycle = result["lifecycle"]
+    assert lifecycle["status"] == "failed"
+    assert lifecycle["reason"] == "model_tool_protocol_violation"
+    assert lifecycle["error"]["code"] == "model_tool_protocol_violation"
+    assert lifecycle["model_protocol_repairs"] == {repair_code: 1}
+    assert lifecycle["model_step_count"] == 2
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_business_repairs_are_not_counted_as_model_tool_protocol_failures() -> None:
+    run_id = uuid.uuid4()
+    model = ModelService(
+        ModelStepResult(
+            intent="text",
+            repair_instruction="Query current Group members before handoff.",
+        ),
+        ModelStepResult(
+            intent="text",
+            repair_instruction="Use an active participant ID.",
+        ),
+        ModelStepResult(intent="finish", finish_content="Recovered handoff"),
+    )
+    executor = _executor(model)
+
+    result = await _invoke(run_id, executor, model_turn_limit=50)
+
+    assert result["lifecycle"]["status"] == "completed"
+    assert "model_protocol_repairs" not in result["lifecycle"]
+    assert model.calls == 3
 
 
 @pytest.mark.asyncio

@@ -104,6 +104,7 @@ class RuntimeLifecycle(TypedDict):
     next_route: ControlRoute
     reason: NotRequired[str | None]
     model_step_count: NotRequired[int]
+    model_protocol_repairs: NotRequired[JsonObject]
     verification_attempt_count: NotRequired[int]
     pending_tool_calls: NotRequired[list[JsonObject]]
     waiting_request: NotRequired[JsonObject | None]

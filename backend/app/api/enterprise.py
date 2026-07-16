@@ -2,8 +2,10 @@
 
 import uuid
 import logging
-
-logger = logging.getLogger(__name__)
+from dataclasses import dataclass
+from datetime import UTC, datetime
+import hashlib
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -29,9 +31,11 @@ from app.schemas.schemas import (
 from app.services.autonomy_service import autonomy_service
 from app.services.enterprise_sync import enterprise_sync_service
 from app.services.llm import get_provider_manifest, get_model_api_key, create_llm_client, LLMMessage
+from app.services.llm.finish import FINISH_TOOL_DEFINITION, find_finish_call
 from app.services.platform_service import platform_service
 from app.services.sso_service import sso_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/enterprise", tags=["enterprise"])
 settings = get_settings()
 
@@ -82,15 +86,118 @@ class LLMTestRequest(BaseModel):
     model_id: str | None = None  # existing model ID to use stored API key
 
 
-async def _load_llm_test_api_key(model_id: str | None) -> str | None:
-    """Load the stored API key for llm-test using a short-lived independent session."""
-    if not model_id:
-        return None
+@dataclass(frozen=True, slots=True)
+class LLMTestTarget:
+    """Exact configuration tested without holding a DB transaction over I/O."""
 
+    model_id: uuid.UUID | None
+    provider: str
+    model: str
+    api_key: str
+    base_url: str | None
+    stored_config_fingerprint: str | None = None
+
+
+def _llm_config_fingerprint(model: LLMModel) -> str:
+    payload = json.dumps(
+        {
+            "provider": model.provider,
+            "model": model.model,
+            "base_url": model.base_url,
+            "api_key_encrypted": model.api_key_encrypted,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalized_base_url(value: str | None) -> str:
+    return (value or "").strip().rstrip("/")
+
+
+async def _resolve_llm_test_target(
+    data: LLMTestRequest,
+    current_user: User,
+) -> LLMTestTarget:
+    """Resolve either an unsaved draft or the exact persisted model identity."""
+    if not data.model_id:
+        api_key = (
+            data.api_key
+            if data.api_key and not data.api_key.startswith("****")
+            else ""
+        )
+        return LLMTestTarget(
+            model_id=None,
+            provider=data.provider.strip(),
+            model=data.model.strip(),
+            api_key=api_key,
+            base_url=data.base_url or None,
+        )
+
+    try:
+        model_id = uuid.UUID(data.model_id)
+    except ValueError as exc:
+        raise ValueError("model_id must be a valid UUID") from exc
     async with async_session() as session:
-        result = await session.execute(select(LLMModel).where(LLMModel.id == model_id))
+        result = await session.execute(
+            select(LLMModel).where(LLMModel.id == model_id)
+        )
         existing = result.scalar_one_or_none()
-        return get_model_api_key(existing) if existing else None
+    if existing is None:
+        raise ValueError("Stored model does not exist")
+    if (
+        not _is_platform_admin_user(current_user)
+        and existing.tenant_id != current_user.tenant_id
+    ):
+        raise PermissionError("Stored model is outside the current tenant")
+    if data.api_key and not data.api_key.startswith("****"):
+        raise ValueError("Save the API key change before testing this model")
+    if (
+        data.provider.strip() != existing.provider
+        or data.model.strip() != existing.model
+        or _normalized_base_url(data.base_url)
+        != _normalized_base_url(existing.base_url)
+    ):
+        raise ValueError("Save provider, model, and Base URL changes before testing")
+    return LLMTestTarget(
+        model_id=existing.id,
+        provider=existing.provider,
+        model=existing.model,
+        api_key=get_model_api_key(existing),
+        base_url=existing.base_url,
+        stored_config_fingerprint=_llm_config_fingerprint(existing),
+    )
+
+
+async def _record_llm_tool_capability(
+    target: LLMTestTarget,
+    *,
+    supported: bool | None,
+    error: str | None,
+) -> bool:
+    """Record a probe only if the persisted model configuration is unchanged."""
+    if target.model_id is None or target.stored_config_fingerprint is None:
+        return False
+    async with async_session() as session:
+        result = await session.execute(
+            select(LLMModel)
+            .where(LLMModel.id == target.model_id)
+            .with_for_update()
+        )
+        existing = result.scalar_one_or_none()
+        if (
+            existing is None
+            or _llm_config_fingerprint(existing)
+            != target.stored_config_fingerprint
+        ):
+            return False
+        existing.supports_tool_calling = supported
+        existing.tool_calling_capability_source = "probe"
+        existing.tool_calling_checked_at = datetime.now(UTC)
+        existing.tool_calling_error = error[:500] if error else None
+        await session.commit()
+        return True
 
 
 @router.post("/llm-test")
@@ -98,35 +205,120 @@ async def test_llm_model(
     data: LLMTestRequest,
     current_user: User = Depends(get_current_admin),
 ):
-    """Test an LLM model configuration by making a simple API call."""
+    """Test connectivity and native ``finish`` tool calling independently."""
     import time
-
-    # Resolve API key: use provided key, or look up from stored model
-    api_key = data.api_key if data.api_key and not data.api_key.startswith('****') else None
-    if not api_key and data.model_id:
-        api_key = await _load_llm_test_api_key(data.model_id)
-    if not api_key:
-        return {"success": False, "latency_ms": 0, "error": "API Key is required"}
 
     start = time.time()
     try:
+        target = await _resolve_llm_test_target(data, current_user)
+    except (PermissionError, ValueError) as exc:
+        return {
+            "success": False,
+            "connection_success": False,
+            "latency_ms": 0,
+            "connection_latency_ms": 0,
+            "tool_calling_supported": None,
+            "tool_calling_latency_ms": 0,
+            "capability_recorded": False,
+            "error": str(exc),
+        }
+    if not target.api_key:
+        return {
+            "success": False,
+            "connection_success": False,
+            "latency_ms": 0,
+            "connection_latency_ms": 0,
+            "tool_calling_supported": None,
+            "tool_calling_latency_ms": 0,
+            "capability_recorded": False,
+            "error": "API Key is required",
+        }
+
+    client = None
+    try:
         client = create_llm_client(
-            provider=data.provider,
-            model=data.model,
-            api_key=api_key,
-            base_url=data.base_url or None,
+            provider=target.provider,
+            model=target.model,
+            api_key=target.api_key,
+            base_url=target.base_url,
         )
-        # Simple test: ask model to say "ok"
+        connection_start = time.time()
         response = await client.complete(
             messages=[LLMMessage(role="user", content="Say 'ok' and nothing else.")],
+            tools=None,
             max_tokens=16,
         )
-        latency_ms = int((time.time() - start) * 1000)
+        connection_latency_ms = int((time.time() - connection_start) * 1000)
         reply = (response.content or "")[:100] if response else ""
-        return {"success": True, "latency_ms": latency_ms, "reply": reply}
+        tool_start = time.time()
+        tool_error: str | None = None
+        try:
+            tool_response = await client.complete(
+                messages=[
+                    LLMMessage(
+                        role="system",
+                        content=(
+                            "This is a native tool-calling protocol test. Call the "
+                            "provided finish tool exactly once and do not answer in text."
+                        ),
+                    ),
+                    LLMMessage(
+                        role="user",
+                        content="Call finish now with content set to ok.",
+                    ),
+                ],
+                tools=[FINISH_TOOL_DEFINITION],
+                max_tokens=128,
+            )
+            tool_calls = list(tool_response.tool_calls or [])
+            finish_call = find_finish_call(tool_calls)
+            tool_supported = bool(
+                len(tool_calls) == 1
+                and finish_call is not None
+                and finish_call.valid
+            )
+            if not tool_supported:
+                tool_error = (
+                    "Model returned plain text or an invalid tool call instead of "
+                    "exactly one valid finish tool call."
+                )
+        except Exception as exc:
+            tool_supported = None
+            tool_error = f"Native finish tool probe failed: {type(exc).__name__}: {exc}"[:500]
+        tool_latency_ms = int((time.time() - tool_start) * 1000)
+        capability_recorded = await _record_llm_tool_capability(
+            target,
+            supported=tool_supported,
+            error=tool_error,
+        )
+        latency_ms = int((time.time() - start) * 1000)
+        return {
+            "success": tool_supported is True,
+            "connection_success": True,
+            "latency_ms": latency_ms,
+            "connection_latency_ms": connection_latency_ms,
+            "reply": reply,
+            "tool_calling_supported": tool_supported,
+            "tool_calling_latency_ms": tool_latency_ms,
+            "tool_calling_error": tool_error,
+            "capability_recorded": capability_recorded,
+            "error": tool_error,
+        }
     except Exception as e:
         latency_ms = int((time.time() - start) * 1000)
-        return {"success": False, "latency_ms": latency_ms, "error": str(e)[:500]}
+        return {
+            "success": False,
+            "connection_success": False,
+            "latency_ms": latency_ms,
+            "connection_latency_ms": latency_ms,
+            "tool_calling_supported": None,
+            "tool_calling_latency_ms": 0,
+            "capability_recorded": False,
+            "error": str(e)[:500],
+        }
+    finally:
+        if client is not None:
+            await client.close()
 
 
 
@@ -301,6 +493,7 @@ async def update_llm_model(
         raise HTTPException(status_code=404, detail="Model not found")
 
     try:
+        original_config_fingerprint = _llm_config_fingerprint(model)
         if data.provider:
             model.provider = data.provider
         if data.model:
@@ -324,10 +517,18 @@ async def update_llm_model(
         if hasattr(data, 'request_timeout') and data.request_timeout is not None:
             model.request_timeout = data.request_timeout
 
+        if _llm_config_fingerprint(model) != original_config_fingerprint:
+            model.supports_tool_calling = None
+            model.tool_calling_capability_source = None
+            model.tool_calling_checked_at = None
+            model.tool_calling_error = (
+                "Model configuration changed; rerun the native tool-calling test."
+            )
+
         await db.commit()
         await db.refresh(model)
         return LLMModelOut.model_validate(model)
-    except SQLAlchemyError as e:
+    except SQLAlchemyError:
         await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update model")
 

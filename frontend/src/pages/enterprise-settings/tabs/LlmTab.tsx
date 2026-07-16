@@ -17,6 +17,10 @@ interface LLMModel {
     max_tokens_per_day?: number;
     enabled: boolean;
     supports_vision?: boolean;
+    supports_tool_calling?: boolean | null;
+    tool_calling_capability_source?: 'probe' | 'builtin_registry' | null;
+    tool_calling_checked_at?: string | null;
+    tool_calling_error?: string | null;
     max_output_tokens?: number;
     request_timeout?: number;
     temperature?: number;
@@ -201,9 +205,12 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                 body: JSON.stringify(testData),
             });
             const result = await res.json();
-            if (result.success) {
+            if (result.capability_recorded) invalidateModelCaches();
+            if (result.connection_success && result.tool_calling_supported === true) {
                 if (btn) {
-                    btn.textContent = t('enterprise.llm.testSuccess', { latency: result.latency_ms });
+                    btn.textContent = result.capability_recorded
+                        ? t('enterprise.llm.testSuccessWithTools', '连接与原生工具调用均可用 · {{latency}}ms', { latency: result.latency_ms })
+                        : t('enterprise.llm.draftTestSuccess', '测试通过；保存模型后需再次测试');
                     btn.style.color = 'var(--success)';
                 }
                 setTimeout(() => {
@@ -212,6 +219,19 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                         btn.style.color = '';
                     }
                 }, 3000);
+            } else if (result.connection_success) {
+                const capabilityUnknown = result.tool_calling_supported == null;
+                await dialog.alert(
+                    capabilityUnknown
+                        ? t('enterprise.llm.toolTestUnknown', '连接成功，但原生工具调用暂未确认')
+                        : t('enterprise.llm.toolTestUnsupported', '连接成功，但原生工具调用不可用'),
+                    {
+                        type: 'error',
+                        title: t('enterprise.llm.agentCompatibilityTest', 'Agent 兼容性测试'),
+                        details: String(result.tool_calling_error || result.error || 'Model did not return a valid finish tool call.'),
+                    },
+                );
+                if (btn) btn.textContent = origText;
             } else {
                 await dialog.alert(t('enterprise.llm.testFailedShort', '连通性测试失败'), {
                     type: 'error',
@@ -437,6 +457,35 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                                         }} />
                                     </button>
                                     {m.supports_vision && <span className="badge" style={{ background: 'rgba(99,102,241,0.15)', color: 'rgb(99,102,241)', fontSize: '10px' }}>Vision</span>}
+                                    {m.supports_tool_calling === true ? (
+                                        <span
+                                            className="badge"
+                                            title={m.tool_calling_capability_source === 'probe'
+                                                ? t('enterprise.llm.toolsVerifiedTitle', 'This exact model configuration passed the native finish-tool probe.')
+                                                : t('enterprise.llm.toolsRegistryTitle', 'Preserved from the built-in cloud provider registry; rerun the test to verify this exact configuration.')}
+                                            style={{ background: 'rgba(34,197,94,0.15)', color: 'rgb(34,197,94)', fontSize: '10px' }}
+                                        >
+                                            {m.tool_calling_capability_source === 'probe'
+                                                ? t('enterprise.llm.toolsVerified', 'Tools verified')
+                                                : t('enterprise.llm.toolsRegistry', 'Tools registry')}
+                                        </span>
+                                    ) : m.supports_tool_calling === false ? (
+                                        <span
+                                            className="badge"
+                                            title={m.tool_calling_error || t('enterprise.llm.toolsUnavailableTitle', 'The model connected but did not return a valid native finish tool call.')}
+                                            style={{ background: 'rgba(239,68,68,0.15)', color: 'rgb(239,68,68)', fontSize: '10px' }}
+                                        >
+                                            {t('enterprise.llm.toolsUnavailable', 'Tools unavailable')}
+                                        </span>
+                                    ) : (
+                                        <span
+                                            className="badge"
+                                            title={m.tool_calling_error || t('enterprise.llm.toolsUnverifiedTitle', 'Run the model test before using this model in Agent Runtime.')}
+                                            style={{ background: 'rgba(245,158,11,0.15)', color: 'rgb(245,158,11)', fontSize: '10px' }}
+                                        >
+                                            {t('enterprise.llm.toolsUnverified', 'Tools unverified')}
+                                        </span>
+                                    )}
                                     {tenantForDefault?.default_model_id === m.id ? (
                                         <span className="badge" style={{ background: 'rgba(34,197,94,0.15)', color: 'rgb(34,197,94)', fontSize: '10px' }}>{t('enterprise.llm.defaultBadge', '默认')}</span>
                                     ) : m.enabled ? (

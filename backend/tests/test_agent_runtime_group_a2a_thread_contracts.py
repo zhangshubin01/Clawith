@@ -501,6 +501,18 @@ async def _persist_start(command: StartRunCommand, agent: Agent | None) -> Agent
     if command.run_kind != "orchestration":
         assert agent is not None
         results.append(agent)
+        results.append(
+            LLMModel(
+                id=command.model_id,
+                tenant_id=command.tenant_id,
+                provider="openai",
+                model="group-contract-model",
+                api_key_encrypted="encrypted",
+                label="Group contract model",
+                enabled=True,
+                supports_tool_calling=True,
+            )
+        )
     results.append(None)
     db = _Session(*results)
 

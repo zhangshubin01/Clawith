@@ -11,6 +11,7 @@ from app.config import Settings, get_settings
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.agent_run_command import AgentRunCommand
+from app.models.llm import LLMModel
 from app.services.agent_runtime.config import RuntimeGateDecision, RuntimeRolloutPolicy
 from app.services.agent_runtime.contracts import (
     CancelRunCommand,
@@ -20,6 +21,10 @@ from app.services.agent_runtime.contracts import (
     StartRunCommand,
 )
 from app.services.agent_runtime.graph import RuntimeGraphIdentity
+from app.services.agent_runtime.model_capabilities import (
+    ModelCapabilityError,
+    ModelCapabilityResolver,
+)
 from app.services.agent_runtime.persistence import (
     RunRegistration,
     enqueue_cancel,
@@ -142,6 +147,33 @@ class RuntimeCommandIntake:
             )
         return configured if requested is None else min(configured, requested)
 
+    async def _require_agent_runtime_model(self, command: StartRunCommand) -> None:
+        """Reject new tool-driven Agent Runs before any durable Run is created."""
+        if command.run_kind == "orchestration":
+            return
+        if command.model_id is None:
+            raise RuntimeAdapterError(
+                "model_required",
+                "Agent Runtime requires a pinned model before the Run can start",
+            )
+        result = await self._db.execute(
+            select(LLMModel).where(LLMModel.id == command.model_id)
+        )
+        model = result.scalar_one_or_none()
+        if (
+            model is None
+            or not model.enabled
+            or model.tenant_id not in {None, command.tenant_id}
+        ):
+            raise RuntimeAdapterError(
+                "model_unavailable",
+                "Agent Runtime model is disabled or outside the command tenant",
+            )
+        try:
+            ModelCapabilityResolver.require_native_tool_calling(model)
+        except ModelCapabilityError as exc:
+            raise RuntimeAdapterError(exc.code, str(exc)) from exc
+
     @staticmethod
     def _start_payload(command: StartRunCommand) -> dict:
         requested = command.requested_model_turn_limit
@@ -247,6 +279,7 @@ class RuntimeCommandIntake:
         self._require_v2(decision)
         if existing is None:
             model_turn_limit = await self._configured_model_turn_limit(command)
+            await self._require_agent_runtime_model(command)
         elif existing.run_kind == "orchestration":
             if model_turn_limit is not None:
                 raise RuntimeAdapterError(

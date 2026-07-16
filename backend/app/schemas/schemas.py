@@ -433,6 +433,10 @@ class LLMModelOut(BaseModel):
     max_tokens_per_day: int | None = None
     enabled: bool
     supports_vision: bool = False
+    supports_tool_calling: bool | None = None
+    tool_calling_capability_source: str | None = None
+    tool_calling_checked_at: datetime | None = None
+    tool_calling_error: str | None = None
     max_output_tokens: int | None = None
     request_timeout: int | None = None
     created_at: datetime

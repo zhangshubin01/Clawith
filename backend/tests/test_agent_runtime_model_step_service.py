@@ -104,6 +104,7 @@ def _model(tenant_id: uuid.UUID, *, capable: bool = True) -> LLMModel:
         max_output_tokens=2048,
         max_input_tokens=100_000 if capable else None,
         context_window_tokens=None,
+        supports_tool_calling=True,
     )
 
 
@@ -273,6 +274,37 @@ def _failover_service(
         tool_provider=_tools,
         prompt_builder=_prompt,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("supports_tool_calling", "error_code"),
+    [
+        (None, "model_tool_calling_unverified"),
+        (False, "model_tool_calling_unsupported"),
+    ],
+)
+async def test_agent_model_step_fails_closed_before_provider_call(
+    supports_tool_calling: bool | None,
+    error_code: str,
+) -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    model.supports_tool_calling = supports_tool_calling
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    completion = AsyncMock()
+
+    result = await _service(
+        model,
+        agent,
+        _ContextBuilder(_build()),
+        completion,
+    ).complete_once(state, _context(state))
+
+    assert result.intent == "error"
+    assert result.error["code"] == error_code
+    completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio

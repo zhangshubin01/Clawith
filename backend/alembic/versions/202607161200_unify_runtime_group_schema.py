@@ -299,6 +299,79 @@ RUNTIME_INDEXES = {
     ),
 }
 
+_PRECREATED_PHASE_OBJECTS = {
+    "experience_library": {
+        "table:experience_entries",
+        "table:experience_references",
+        "index:ix_experience_entries_tenant_id",
+        "index:ix_experience_entries_status",
+        "index:ix_experience_entries_visibility_scope",
+        "index:ix_experience_entries_origin",
+        "index:ix_experience_entries_created_at",
+        "index:ix_experience_references_entry_id",
+        "index:ix_experience_references_kind",
+        "index:ix_experience_references_tenant_id",
+        "index:ix_experience_references_agent_id",
+        "index:ix_experience_references_created_at",
+    },
+    "group_domain": {
+        "table:groups",
+        "table:group_members",
+        "index:ix_groups_tenant_id_deleted_at",
+        "index:ix_group_members_participant_id",
+    },
+    "unified_chat": {
+        "column:chat_sessions.tenant_id",
+        "column:chat_sessions.session_type",
+        "column:chat_sessions.group_id",
+        "column:chat_sessions.created_by_participant_id",
+        "column:chat_sessions.deleted_at",
+        "column:chat_sessions.updated_at",
+        "column:chat_messages.mentions",
+        "index:ix_chat_sessions_tenant_id",
+        "index:ix_chat_sessions_group_id",
+        "index:uq_chat_sessions_primary_direct",
+        "index:uq_chat_sessions_primary_group",
+        "constraint:fk_chat_sessions_tenant_id_tenants",
+        "constraint:fk_chat_sessions_group_id_groups",
+        "constraint:fk_chat_sessions_created_by_participant_id_participants",
+        "constraint:uq_chat_sessions_tenant_id_id",
+        "constraint:ck_chat_sessions_session_type",
+    },
+    "llm_capabilities": {
+        "column:llm_models.context_window_tokens",
+        "column:llm_models.context_window_tokens_override",
+        "column:llm_models.max_input_tokens",
+        "column:llm_models.max_input_tokens_override",
+        "column:llm_models.capability_source",
+        "column:llm_models.capability_checked_at",
+        "column:llm_models.supports_tool_calling",
+        "column:llm_models.tool_calling_capability_source",
+        "column:llm_models.tool_calling_checked_at",
+        "column:llm_models.tool_calling_error",
+        "constraint:ck_llm_models_context_window_tokens_positive",
+        "constraint:ck_llm_models_context_window_tokens_override_positive",
+        "constraint:ck_llm_models_max_input_tokens_positive",
+        "constraint:ck_llm_models_max_input_tokens_override_positive",
+        "constraint:ck_llm_models_capability_source",
+        "constraint:ck_llm_models_tool_calling_capability_source",
+    },
+    "runtime_schema": {
+        *(f"table:{name}" for name in RUNTIME_TABLES),
+        *(f"index:{name}" for name in RUNTIME_INDEXES),
+        *(
+            f"constraint:{name}"
+            for checks in RUNTIME_CHECKS.values()
+            for name in checks
+        ),
+        *(
+            f"constraint:{name}"
+            for uniques in RUNTIME_UNIQUES.values()
+            for name in uniques
+        ),
+    },
+}
+
 _DERIVED_SESSION_TYPE = """
 CASE
     WHEN cs.source_channel = 'agent' THEN 'a2a'
@@ -366,8 +439,67 @@ def _require_empty_tables(
             )
 
 
+def _schema_object_names(bind: sa.Connection) -> set[str]:
+    """Return the named public-schema objects used by the fresh-DB guard."""
+    result = bind.execute(
+        sa.text(
+            """
+            SELECT 'table:' || tablename
+            FROM pg_catalog.pg_tables
+            WHERE schemaname = current_schema()
+            UNION ALL
+            SELECT 'column:' || table_name || '.' || column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+            UNION ALL
+            SELECT 'index:' || indexname
+            FROM pg_catalog.pg_indexes
+            WHERE schemaname = current_schema()
+            UNION ALL
+            SELECT 'constraint:' || constraint_name
+            FROM information_schema.table_constraints
+            WHERE constraint_schema = current_schema()
+            """
+        )
+    )
+    return {str(value) for value in result.scalars().all()}
+
+
+def _precreated_phase_state(phase: str, actual: set[str]) -> bool:
+    """Accept only an entirely absent or entirely metadata-precreated phase."""
+    expected = _PRECREATED_PHASE_OBJECTS[phase]
+    present = expected.intersection(actual)
+    if not present:
+        return False
+    if present == expected:
+        return True
+    missing = sorted(expected - present)
+    raise RuntimeError(
+        f"Refusing partially precreated {phase} schema; missing: {', '.join(missing)}"
+    )
+
+
+def _finish_precreated_phase(phase: str, bind: sa.Connection) -> None:
+    """Apply only non-metadata work when 001 already created the final shape."""
+    if phase == "unified_chat":
+        bind.execute(
+            sa.text("LOCK TABLE chat_sessions, chat_messages IN ACCESS EXCLUSIVE MODE")
+        )
+        _audit_unified_chat_final(bind)
+        bind.execute(sa.text("DROP INDEX IF EXISTS uq_chat_sessions_primary_platform"))
+    elif phase == "llm_capabilities":
+        _backfill_legacy_tool_calling_capabilities()
+    elif phase == "runtime_schema":
+        op.execute(sa.text(f'CREATE SCHEMA IF NOT EXISTS "{_CHECKPOINT_SCHEMA}"'))
+
+
 def _run_phase(phase: str, *, downgrade: bool) -> None:
     direction = "downgrade" if downgrade else "upgrade"
+    if not downgrade and phase in _PRECREATED_PHASE_OBJECTS:
+        bind = op.get_bind()
+        if _precreated_phase_state(phase, _schema_object_names(bind)):
+            _finish_precreated_phase(phase, bind)
+            return
     function = globals().get(f"_{direction}_{phase}")
     if not callable(function):
         raise RuntimeError(f"Missing migration phase: {direction} {phase}")
@@ -1036,6 +1168,18 @@ _LLM_CAPABILITY_COLUMNS = {
     "capability_checked_at": lambda: sa.Column(
         "capability_checked_at", sa.DateTime(timezone=True), nullable=True
     ),
+    "supports_tool_calling": lambda: sa.Column(
+        "supports_tool_calling", sa.Boolean(), nullable=True
+    ),
+    "tool_calling_capability_source": lambda: sa.Column(
+        "tool_calling_capability_source", sa.String(length=32), nullable=True
+    ),
+    "tool_calling_checked_at": lambda: sa.Column(
+        "tool_calling_checked_at", sa.DateTime(timezone=True), nullable=True
+    ),
+    "tool_calling_error": lambda: sa.Column(
+        "tool_calling_error", sa.String(length=500), nullable=True
+    ),
 }
 _LLM_CAPABILITY_CHECKS = {
     "ck_llm_models_context_window_tokens_positive": (
@@ -1054,7 +1198,28 @@ _LLM_CAPABILITY_CHECKS = {
         "capability_source IS NULL OR capability_source IN "
         "('manual', 'provider_api', 'builtin_registry', 'runtime_config')"
     ),
+    "ck_llm_models_tool_calling_capability_source": (
+        "tool_calling_capability_source IS NULL OR "
+        "tool_calling_capability_source IN ('probe', 'builtin_registry')"
+    ),
 }
+
+_LEGACY_TOOL_CALLING_PROVIDERS = (
+    "anthropic",
+    "openai",
+    "openai-response",
+    "openai_response",
+    "openairesponses",
+    "azure",
+    "deepseek",
+    "qwen",
+    "minimax",
+    "openrouter",
+    "zhipu",
+    "baidu",
+    "gemini",
+    "kimi",
+)
 
 
 def _upgrade_llm_capabilities() -> None:
@@ -1062,11 +1227,38 @@ def _upgrade_llm_capabilities() -> None:
         op.add_column("llm_models", factory())
     for name, expression in _LLM_CAPABILITY_CHECKS.items():
         op.create_check_constraint(name, "llm_models", expression)
+    _backfill_legacy_tool_calling_capabilities()
+
+
+def _backfill_legacy_tool_calling_capabilities() -> None:
+    """Preserve already-running cloud models without inferring local support."""
+    providers = ", ".join(f"'{provider}'" for provider in _LEGACY_TOOL_CALLING_PROVIDERS)
+    op.execute(
+        sa.text(
+            "UPDATE llm_models "
+            "SET supports_tool_calling = true, "
+            "tool_calling_capability_source = 'builtin_registry', "
+            "tool_calling_checked_at = now(), "
+            "tool_calling_error = NULL "
+            "WHERE supports_tool_calling IS NULL "
+            f"AND lower(provider) IN ({providers})"
+        )
+    )
 
 
 def _downgrade_llm_capabilities() -> None:
     bind = op.get_bind()
     bind.execute(sa.text("LOCK TABLE llm_models IN ACCESS EXCLUSIVE MODE"))
+    bind.execute(
+        sa.text(
+            "UPDATE llm_models "
+            "SET supports_tool_calling = NULL, "
+            "tool_calling_capability_source = NULL, "
+            "tool_calling_checked_at = NULL, "
+            "tool_calling_error = NULL "
+            "WHERE tool_calling_capability_source = 'builtin_registry'"
+        )
+    )
     predicate = " OR ".join(
         f"{name} IS NOT NULL" for name in _LLM_CAPABILITY_COLUMNS
     )

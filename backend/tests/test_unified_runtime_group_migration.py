@@ -553,6 +553,32 @@ def test_llm_and_workspace_alterations_match_current_models(monkeypatch) -> None
     migration._upgrade_llm_capabilities()
     migration._upgrade_group_workspace_scope()
 
+    assert set(migration._LEGACY_TOOL_CALLING_PROVIDERS).isdisjoint(
+        {"ollama", "vllm", "sglang", "custom"}
+    )
+    assert {
+        "anthropic",
+        "openai",
+        "openai-response",
+        "openai_response",
+        "openairesponses",
+        "azure",
+        "deepseek",
+        "qwen",
+        "minimax",
+        "openrouter",
+        "zhipu",
+        "baidu",
+        "gemini",
+        "kimi",
+    } == set(migration._LEGACY_TOOL_CALLING_PROVIDERS)
+    assert any(
+        "UPDATE llm_models" in statement
+        and "tool_calling_capability_source" in statement
+        and "builtin_registry" in statement
+        for statement in statements
+    )
+
     llm_table = LLMModel.__table__
     assert set(migration._LLM_CAPABILITY_COLUMNS) == {
         column_name
@@ -617,7 +643,7 @@ def test_llm_and_workspace_alterations_match_current_models(monkeypatch) -> None
             False,
         )
     }
-    assert statements == [
+    assert statements[-2:] == [
         "UPDATE workspace_file_revisions SET scope_type = 'agent', "
         "scope_id = agent_id WHERE scope_type IS NULL OR scope_id IS NULL",
         "UPDATE workspace_edit_locks SET scope_type = 'agent', "
@@ -644,6 +670,56 @@ def test_upgrade_and_downgrade_use_exact_inverse_phase_order(monkeypatch) -> Non
         *(f"up:{phase}" for phase in EXPECTED_UPGRADE_PHASES),
         *(f"down:{phase}" for phase in reversed(EXPECTED_UPGRADE_PHASES)),
     ]
+
+
+@pytest.mark.parametrize(
+    "phase",
+    (
+        "experience_library",
+        "group_domain",
+        "unified_chat",
+        "llm_capabilities",
+        "runtime_schema",
+    ),
+)
+def test_fresh_metadata_precreation_is_all_or_nothing(phase: str) -> None:
+    migration = _load_migration()
+    expected = migration._PRECREATED_PHASE_OBJECTS[phase]
+
+    assert migration._precreated_phase_state(phase, set()) is False
+    assert migration._precreated_phase_state(phase, set(expected)) is True
+
+    with pytest.raises(RuntimeError, match=f"partially precreated {phase}"):
+        migration._precreated_phase_state(phase, {next(iter(expected))})
+
+
+def test_fresh_metadata_phase_skips_duplicate_ddl_and_runs_reconciliation(
+    monkeypatch,
+) -> None:
+    migration = _load_migration()
+    bind = object()
+    reconciled: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(migration.op, "get_bind", lambda: bind)
+    monkeypatch.setattr(
+        migration,
+        "_schema_object_names",
+        lambda _bind: set(migration._PRECREATED_PHASE_OBJECTS["unified_chat"]),
+    )
+    monkeypatch.setattr(
+        migration,
+        "_finish_precreated_phase",
+        lambda phase, phase_bind: reconciled.append((phase, phase_bind)),
+    )
+    monkeypatch.setattr(
+        migration,
+        "_upgrade_unified_chat",
+        lambda: pytest.fail("duplicate unified-chat DDL must be skipped"),
+    )
+
+    migration._run_phase("unified_chat", downgrade=False)
+
+    assert reconciled == [("unified_chat", bind)]
 
 
 def test_chat_backfill_and_downgrade_audits_remain_fail_closed() -> None:
