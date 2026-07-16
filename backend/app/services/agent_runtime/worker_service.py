@@ -300,7 +300,6 @@ def build_runtime_worker_components(
             SessionContextCompletionHandler(
                 session_factory=session_factory,
                 context_service=session_context_service,
-                compactor=session_context_compactor,
             ),
             TaskRuntimeCompletionHandler(session_factory=session_factory),
             TriggerRuntimeCompletionHandler(session_factory=session_factory),

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import dataclass
+import json
 from typing import Protocol
 import uuid
 
@@ -21,7 +24,7 @@ from app.services.agent_runtime.session_context_service import (
     SessionContextService,
     SessionContextSnapshot,
 )
-from app.services.agent_runtime.state import JsonObject
+from app.services.agent_runtime.state import JsonObject, JsonValue
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -54,6 +57,69 @@ class SessionContextCompactor(Protocol):
     async def compact(self, request: SessionCompactRequest) -> SessionContextCandidate: ...
 
 
+def _json_identity(value: JsonValue) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _merge_unique_values(
+    existing: Sequence[JsonValue],
+    additions: Sequence[JsonValue],
+) -> tuple[JsonValue, ...]:
+    merged: list[JsonValue] = []
+    identities: set[str] = set()
+    for value in (*existing, *additions):
+        identity = _json_identity(value)
+        if identity in identities:
+            continue
+        identities.add(identity)
+        merged.append(deepcopy(value))
+    return tuple(merged)
+
+
+def _merge_terminal_delta(
+    snapshot: SessionContextSnapshot,
+    delta: SessionContextDelta,
+) -> SessionContextCandidate:
+    resolved = {_json_identity(value) for value in delta.resolved_open_items}
+    remaining_open_items = tuple(
+        value
+        for value in snapshot.open_items
+        if _json_identity(value) not in resolved
+    )
+    summary = (
+        f"{snapshot.summary}\n\n{delta.result_summary}"
+        if snapshot.summary and snapshot.summary != delta.result_summary
+        else delta.result_summary
+    )
+    return SessionContextCandidate(
+        summary=summary,
+        requirements=_merge_unique_values(
+            snapshot.requirements,
+            delta.new_requirements,
+        ),
+        decisions=_merge_unique_values(snapshot.decisions, delta.new_decisions),
+        open_items=_merge_unique_values(remaining_open_items, delta.new_open_items),
+        evidence_refs=_merge_unique_values(
+            snapshot.evidence_refs,
+            delta.evidence_refs,
+        ),
+        workspace_refs=_merge_unique_values(
+            snapshot.workspace_refs,
+            delta.workspace_refs,
+        ),
+        # A terminal delta contains structured Run facts, not a claim that any
+        # public ChatMessage was compacted.  Only the background message-window
+        # compactor may advance this watermark.
+        covered_through_message_id=snapshot.covered_through_message_id,
+    )
+
+
 class SessionContextCompletionHandler:
     """Merge one terminal delta and its Run receipt in the same transaction."""
 
@@ -61,14 +127,12 @@ class SessionContextCompletionHandler:
         self,
         *,
         session_factory: RuntimeSessionFactory,
-        compactor: SessionContextCompactor,
         context_service: SessionContextService | None = None,
         max_conflict_retries: int = 3,
     ) -> None:
         if max_conflict_retries <= 0:
             raise ValueError("max_conflict_retries must be positive")
         self._session_factory = session_factory
-        self._compactor = compactor
         self._context_service = context_service or SessionContextService()
         self._max_conflict_retries = max_conflict_retries
 
@@ -114,7 +178,7 @@ class SessionContextCompletionHandler:
         run: RuntimeRunRecord,
         checkpoint: CheckpointObservation,
         delta: SessionContextDelta,
-    ) -> SessionCompactRequest | None:
+    ) -> tuple[uuid.UUID, SessionContextSnapshot, SessionContextCandidate] | None:
         async with self._session_factory() as db:
             result = await db.execute(
                 select(AgentRun).where(
@@ -137,52 +201,25 @@ class SessionContextCompletionHandler:
                 tenant_id=run.tenant_id,
                 session_id=stored_run.session_id,
             )
-            messages = await self._context_service.load_compactable_messages_after_watermark(
-                db,
-                tenant_id=run.tenant_id,
-                session_id=stored_run.session_id,
-                covered_through_message_id=snapshot.covered_through_message_id,
+            return (
+                stored_run.session_id,
+                snapshot,
+                _merge_terminal_delta(snapshot, delta),
             )
-            return SessionCompactRequest(
-                tenant_id=run.tenant_id,
-                session_id=stored_run.session_id,
-                source_agent_id=stored_run.agent_id,
-                checkpoint_id=checkpoint.checkpoint_id,
-                snapshot=snapshot,
-                messages=messages,
-                delta=delta,
-            )
-
-    @staticmethod
-    def _expected_watermark(request: SessionCompactRequest) -> uuid.UUID | None:
-        if not request.messages:
-            return request.snapshot.covered_through_message_id
-        message_id = request.messages[-1].get("id")
-        if not isinstance(message_id, str):
-            raise SessionContextCompletionError(
-                "invalid_session_compact_message",
-                "Session Compact input has no terminal message ID",
-            )
-        try:
-            return uuid.UUID(message_id)
-        except ValueError as exc:
-            raise SessionContextCompletionError(
-                "invalid_session_compact_message",
-                "Session Compact input has an invalid terminal message ID",
-            ) from exc
 
     async def _commit(
         self,
         *,
         run: RuntimeRunRecord,
-        request: SessionCompactRequest,
+        checkpoint_id: str,
+        session_id: uuid.UUID,
+        snapshot: SessionContextSnapshot,
         candidate: SessionContextCandidate,
     ) -> bool:
-        expected_watermark = self._expected_watermark(request)
-        if candidate.covered_through_message_id != expected_watermark:
+        if candidate.covered_through_message_id != snapshot.covered_through_message_id:
             raise SessionContextCompletionError(
                 "session_context_watermark_mismatch",
-                "Session compactor did not preserve the deterministic message watermark",
+                "terminal Session Context merge cannot advance the message watermark",
             )
 
         async with self._session_factory() as db:
@@ -201,31 +238,31 @@ class SessionContextCompletionHandler:
                         "run_not_found",
                         "terminal Session Context source Run does not exist",
                     )
-                if self._receipt_state(stored_run, request.checkpoint_id):
+                if self._receipt_state(stored_run, checkpoint_id):
                     return True
-                if stored_run.session_id != request.session_id:
+                if stored_run.session_id != session_id:
                     raise SessionContextCompletionError(
                         "session_context_source_changed",
-                        "Run Session changed while Session Context was being compacted",
+                        "Run Session changed while its terminal delta was being merged",
                     )
                 current = await self._context_service.load_snapshot(
                     db,
                     tenant_id=run.tenant_id,
-                    session_id=request.session_id,
+                    session_id=session_id,
                 )
-                if current != request.snapshot:
+                if current != snapshot:
                     raise SessionContextConflict()
                 await self._context_service.compare_and_swap(
                     db,
                     tenant_id=run.tenant_id,
-                    session_id=request.session_id,
-                    expected_version=request.snapshot.version,
+                    session_id=session_id,
+                    expected_version=snapshot.version,
                     expected_covered_through_message_id=(
-                        request.snapshot.covered_through_message_id
+                        snapshot.covered_through_message_id
                     ),
                     candidate=candidate,
                 )
-                stored_run.session_context_applied_checkpoint_id = request.checkpoint_id
+                stored_run.session_context_applied_checkpoint_id = checkpoint_id
                 await db.flush()
                 return True
 
@@ -246,11 +283,13 @@ class SessionContextCompletionHandler:
             )
             if request is None:
                 return
-            candidate = await self._compactor.compact(request)
+            session_id, snapshot, candidate = request
             try:
                 if await self._commit(
                     run=run,
-                    request=request,
+                    checkpoint_id=checkpoint.checkpoint_id,
+                    session_id=session_id,
+                    snapshot=snapshot,
                     candidate=candidate,
                 ):
                     return

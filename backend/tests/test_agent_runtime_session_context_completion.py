@@ -14,7 +14,6 @@ from app.services.agent_runtime.command_worker import (
     RuntimeRunRecord,
 )
 from app.services.agent_runtime.session_context_completion import (
-    SessionCompactRequest,
     SessionContextCompletionError,
     SessionContextCompletionHandler,
 )
@@ -81,26 +80,13 @@ class _ContextService:
     def __init__(
         self,
         snapshots: list[SessionContextSnapshot],
-        messages: tuple[dict, ...],
     ) -> None:
         self.snapshots = deque(snapshots)
-        self.messages = messages
         self.compare_calls: list[tuple[int, SessionContextCandidate]] = []
 
     async def load_snapshot(self, db, *, tenant_id, session_id):
         del db, tenant_id, session_id
         return self.snapshots.popleft()
-
-    async def load_compactable_messages_after_watermark(
-        self,
-        db,
-        *,
-        tenant_id,
-        session_id,
-        covered_through_message_id,
-    ):
-        del db, tenant_id, session_id, covered_through_message_id
-        return self.messages
 
     async def compare_and_swap(
         self,
@@ -118,29 +104,12 @@ class _ContextService:
             _snapshot(version=expected_version),
             version=expected_version + 1,
             summary=candidate.summary,
+            requirements=tuple(candidate.requirements),
+            decisions=tuple(candidate.decisions),
+            open_items=tuple(candidate.open_items),
+            evidence_refs=tuple(candidate.evidence_refs),
+            workspace_refs=tuple(candidate.workspace_refs),
             covered_through_message_id=candidate.covered_through_message_id,
-        )
-
-
-class _Compactor:
-    def __init__(self) -> None:
-        self.requests: list[SessionCompactRequest] = []
-
-    async def compact(self, request: SessionCompactRequest) -> SessionContextCandidate:
-        self.requests.append(request)
-        watermark = (
-            uuid.UUID(request.messages[-1]["id"])
-            if request.messages
-            else request.snapshot.covered_through_message_id
-        )
-        return SessionContextCandidate(
-            summary=f"merged-v{request.snapshot.version}",
-            requirements=request.delta.new_requirements,
-            decisions=request.delta.new_decisions,
-            open_items=request.delta.new_open_items,
-            evidence_refs=request.delta.evidence_refs,
-            workspace_refs=request.delta.workspace_refs,
-            covered_through_message_id=watermark,
         )
 
 
@@ -148,15 +117,21 @@ def _snapshot(
     *,
     version: int = 1,
     watermark: uuid.UUID | None = None,
+    summary: str = "old",
+    requirements: tuple = (),
+    decisions: tuple = (),
+    open_items: tuple = (),
+    evidence_refs: tuple = (),
+    workspace_refs: tuple = (),
 ) -> SessionContextSnapshot:
     return SessionContextSnapshot(
         version=version,
-        summary="old",
-        requirements=(),
-        decisions=(),
-        open_items=(),
-        evidence_refs=(),
-        workspace_refs=(),
+        summary=summary,
+        requirements=requirements,
+        decisions=decisions,
+        open_items=open_items,
+        evidence_refs=evidence_refs,
+        workspace_refs=workspace_refs,
         covered_through_message_id=watermark,
     )
 
@@ -245,28 +220,45 @@ def _records(
 @pytest.mark.asyncio
 async def test_direct_thread_terminal_does_not_run_session_compact() -> None:
     run, checkpoint, _stored_run = _records(direct=True)
-    compactor = _Compactor()
     handler = SessionContextCompletionHandler(
         session_factory=_SessionFactory(),  # type: ignore[arg-type]
-        context_service=_ContextService([], ()),  # type: ignore[arg-type]
-        compactor=compactor,
+        context_service=_ContextService([]),  # type: ignore[arg-type]
     )
 
     await handler.handle(run=run, checkpoint=checkpoint)
-
-    assert compactor.requests == []
 
 
 @pytest.mark.asyncio
 async def test_terminal_delta_and_receipt_commit_together_and_replay_is_noop() -> None:
     run, checkpoint, stored_run = _records()
     message_id = uuid.uuid4()
-    snapshot = _snapshot()
-    context_service = _ContextService(
-        [snapshot, snapshot],
-        ({"id": str(message_id), "role": "assistant", "content": "done"},),
+    snapshot = _snapshot(
+        watermark=message_id,
+        summary="existing summary",
+        requirements=("keep exact wording",),
+        decisions=("use checkpoint",),
+        open_items=(
+            "resolved item",
+            "keep item",
+            {"id": "structured", "state": "open"},
+        ),
+        evidence_refs=("evidence://existing",),
+        workspace_refs=("workspace://existing",),
     )
-    compactor = _Compactor()
+    checkpoint.state["lifecycle"]["session_context_delta"] = {
+        "source_run_id": str(run.run_id),
+        "new_requirements": ["keep exact wording", "new requirement"],
+        "new_decisions": ["use checkpoint", "new decision"],
+        "resolved_open_items": [
+            "resolved item",
+            {"state": "open", "id": "structured"},
+        ],
+        "new_open_items": ["new item"],
+        "evidence_refs": ["evidence://existing", "evidence://new"],
+        "workspace_refs": ["workspace://existing", "workspace://new"],
+        "result_summary": "answer completed",
+    }
+    context_service = _ContextService([snapshot, snapshot])
     first_load = _Session(stored_run)
     first_commit = _Session(stored_run)
     replay = _Session(stored_run)
@@ -274,7 +266,6 @@ async def test_terminal_delta_and_receipt_commit_together_and_replay_is_noop() -
     handler = SessionContextCompletionHandler(
         session_factory=factory,  # type: ignore[arg-type]
         context_service=context_service,  # type: ignore[arg-type]
-        compactor=compactor,
     )
 
     await handler.handle(run=run, checkpoint=checkpoint)
@@ -282,34 +273,54 @@ async def test_terminal_delta_and_receipt_commit_together_and_replay_is_noop() -
 
     assert stored_run.session_context_applied_checkpoint_id == "checkpoint-terminal"
     assert first_commit.flushes == 1
-    assert len(compactor.requests) == 1
     assert context_service.compare_calls[0][0] == 1
-    assert context_service.compare_calls[0][1].covered_through_message_id == message_id
+    candidate = context_service.compare_calls[0][1]
+    assert candidate.summary == "existing summary\n\nanswer completed"
+    assert candidate.requirements == (
+        "keep exact wording",
+        "new requirement",
+    )
+    assert candidate.decisions == ("use checkpoint", "new decision")
+    assert candidate.open_items == ("keep item", "new item")
+    assert candidate.evidence_refs == (
+        "evidence://existing",
+        "evidence://new",
+    )
+    assert candidate.workspace_refs == (
+        "workspace://existing",
+        "workspace://new",
+    )
+    assert candidate.covered_through_message_id == message_id
     assert factory.calls == 3
 
 
 @pytest.mark.asyncio
-async def test_concurrent_context_change_recompacts_from_the_winning_snapshot() -> None:
+async def test_concurrent_context_change_remerges_from_the_winning_snapshot() -> None:
     run, checkpoint, stored_run = _records()
     message_id = uuid.uuid4()
-    old = _snapshot(version=2)
-    winner = _snapshot(version=3)
-    context_service = _ContextService(
-        [old, winner, winner, winner],
-        ({"id": str(message_id), "role": "assistant", "content": "done"},),
+    old = _snapshot(version=2, summary="old", watermark=message_id)
+    winner = _snapshot(
+        version=3,
+        summary="winner",
+        watermark=message_id,
+        decisions=("concurrent decision",),
     )
-    compactor = _Compactor()
+    context_service = _ContextService([old, winner, winner, winner])
     factory = _SessionFactory(*[_Session(stored_run) for _ in range(4)])
     handler = SessionContextCompletionHandler(
         session_factory=factory,  # type: ignore[arg-type]
         context_service=context_service,  # type: ignore[arg-type]
-        compactor=compactor,
     )
 
     await handler.handle(run=run, checkpoint=checkpoint)
 
-    assert [request.snapshot.version for request in compactor.requests] == [2, 3]
     assert context_service.compare_calls[0][0] == 3
+    assert context_service.compare_calls[0][1].summary == "winner\n\nanswer completed"
+    assert context_service.compare_calls[0][1].decisions == (
+        "concurrent decision",
+        "use checkpoint",
+    )
+    assert context_service.compare_calls[0][1].covered_through_message_id == message_id
     assert stored_run.session_context_applied_checkpoint_id == "checkpoint-terminal"
 
 
@@ -319,8 +330,7 @@ async def test_different_terminal_checkpoint_cannot_replace_existing_receipt() -
     stored_run.session_context_applied_checkpoint_id = "another-checkpoint"
     handler = SessionContextCompletionHandler(
         session_factory=_SessionFactory(_Session(stored_run)),  # type: ignore[arg-type]
-        context_service=_ContextService([], ()),  # type: ignore[arg-type]
-        compactor=_Compactor(),
+        context_service=_ContextService([]),  # type: ignore[arg-type]
     )
 
     with pytest.raises(SessionContextCompletionError) as exc_info:
