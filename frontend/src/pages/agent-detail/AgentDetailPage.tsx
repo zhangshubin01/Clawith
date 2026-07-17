@@ -441,13 +441,24 @@ function DistillButton({ text, sessionId }: { text: string; sessionId?: string |
 /** Renders a [[exp:<uuid>]] citation as a green inline pill: 「经验:<title 8>…」→ /plaza detail. */
 function ExperienceCitation({ id }: { id: string }) {
     const qc = useQueryClient();
-    const { data } = useQuery({ queryKey: ['exp-cite', id], queryFn: () => experienceApi.get(id), staleTime: 300000, retry: false });
+    const {
+        data,
+        isPending: citationPending,
+        isError: citationError,
+    } = useQuery({ queryKey: ['exp-cite', id], queryFn: () => experienceApi.get(id), staleTime: 300000, retry: false });
     // Opens the entry in a docked drawer over the conversation. Navigating to /plaza would
     // tear the user out of the chat they're reading — the citation is a footnote, not an exit.
     const [detail, setDetail] = React.useState(false);
     const [editing, setEditing] = React.useState<ExperienceDraft | null>(null);
     const title = data?.title || '';
-    const label = title ? `经验:${title.slice(0, 8)}${title.length > 8 ? '…' : ''}` : '经验';
+    const label = citationPending
+        ? '经验加载中'
+        : citationError
+            ? '经验已删除或不可访问'
+            : title
+                ? `经验:${title.slice(0, 8)}${title.length > 8 ? '…' : ''}`
+                : '经验（未命名）';
+    const unavailable = citationPending || citationError;
     const refresh = () => {
         qc.invalidateQueries({ queryKey: ['experience'] });
         qc.invalidateQueries({ queryKey: ['exp-cite', id] });
@@ -455,12 +466,16 @@ function ExperienceCitation({ id }: { id: string }) {
     return (
         <>
             <button
-                onClick={(e) => { e.stopPropagation(); setDetail(true); }}
-                title={title || '团队经验库条目'}
+                onClick={(e) => { e.stopPropagation(); if (data) setDetail(true); }}
+                title={citationError ? '该经验已删除、下架或你无权查看' : (title || label)}
+                disabled={!data}
                 style={{
                     display: 'inline-flex', alignItems: 'center', gap: 4, padding: '1px 8px', borderRadius: 999,
-                    fontSize: 12, lineHeight: '18px', border: '1px solid var(--success)', color: 'var(--success)',
-                    background: 'var(--success-subtle)', cursor: 'pointer', verticalAlign: 'middle',
+                    fontSize: 12, lineHeight: '18px',
+                    border: `1px solid ${unavailable ? 'var(--border-subtle)' : 'var(--success)'}`,
+                    color: unavailable ? 'var(--text-tertiary)' : 'var(--success)',
+                    background: unavailable ? 'var(--bg-tertiary)' : 'var(--success-subtle)',
+                    cursor: data ? 'pointer' : 'default', verticalAlign: 'middle', opacity: 1,
                 }}
             >{label}</button>
             {detail && (

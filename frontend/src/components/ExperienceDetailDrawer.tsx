@@ -102,8 +102,17 @@ export function EntryDrawer({ entryId, onClose, onEdit, onChanged, docked }: {
     docked?: boolean;
 }) {
     const qc = useQueryClient();
-    const { data: entry } = useQuery({ queryKey: ['experience-entry', entryId], queryFn: () => experienceApi.get(entryId) });
-    const { data: refs } = useQuery({ queryKey: ['experience-refs', entryId], queryFn: () => experienceApi.references(entryId) });
+    const {
+        data: entry,
+        isPending: entryPending,
+        isError: entryError,
+    } = useQuery({ queryKey: ['experience-entry', entryId], queryFn: () => experienceApi.get(entryId), retry: false });
+    const { data: refs } = useQuery({
+        queryKey: ['experience-refs', entryId],
+        queryFn: () => experienceApi.references(entryId),
+        enabled: Boolean(entry),
+        retry: false,
+    });
     const retire = useMutation({ mutationFn: () => experienceApi.retire(entryId), onSuccess: () => { onChanged(); onClose(); } });
     const republish = useMutation({ mutationFn: () => experienceApi.publish(entryId), onSuccess: () => { onChanged(); onClose(); } });
     const review = useMutation({
@@ -111,7 +120,15 @@ export function EntryDrawer({ entryId, onClose, onEdit, onChanged, docked }: {
         onSuccess: () => { qc.invalidateQueries({ queryKey: ['experience-entry', entryId] }); onChanged(); },
     });
 
-    if (!entry) return <Drawer onClose={onClose} docked={docked}><div>加载中...</div></Drawer>;
+    if (entryPending) return <Drawer onClose={onClose} docked={docked}><div>加载中...</div></Drawer>;
+    if (entryError || !entry) {
+        return (
+            <Drawer onClose={onClose} docked={docked}>
+                <div style={{ color: 'var(--text-secondary)', marginBottom: 16 }}>经验已删除或不可访问</div>
+                <button onClick={onClose} style={secondaryBtn}>关闭</button>
+            </Drawer>
+        );
+    }
     const f = freshness(entry);
     const daysLeft = retiredDaysLeft(entry);
     return (
