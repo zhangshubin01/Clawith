@@ -231,7 +231,10 @@ steps:
         compose exec -T backend alembic current --check-heads
 
         echo "检查目标版本 checkpoint schema"
-        CHECKPOINT_VERSION=$(echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" | compose exec -T postgres psql -U clawith -d clawith -At | tr -d '\r')
+        echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" \
+          | compose exec -T postgres psql -U clawith -d clawith -At \
+          | tr -d '\r' > /tmp/checkpoint_version
+        CHECKPOINT_VERSION=$(cat /tmp/checkpoint_version)
         echo "checkpoint version=$CHECKPOINT_VERSION"
         [ "$CHECKPOINT_VERSION" -ge 0 ]
 
@@ -398,7 +401,10 @@ steps:
         docker exec "$NEW_CONTAINER" alembic current --check-heads
 
         echo "检查升级后 checkpoint schema"
-        CHECKPOINT_VERSION=$(echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" | compose exec -T postgres psql -U clawith -d clawith -At | tr -d '\r')
+        echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" \
+          | compose exec -T postgres psql -U clawith -d clawith -At \
+          | tr -d '\r' > /tmp/checkpoint_version
+        CHECKPOINT_VERSION=$(cat /tmp/checkpoint_version)
         echo "checkpoint version=$CHECKPOINT_VERSION"
         [ "$CHECKPOINT_VERSION" -ge 0 ]
 
