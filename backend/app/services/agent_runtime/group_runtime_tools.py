@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 import hashlib
 import json
 import uuid
@@ -57,6 +58,25 @@ GROUP_WORKSPACE_MUTATION_TOOL_NAMES = frozenset(
 )
 GROUP_TOOL_NAMES = GROUP_READ_TOOL_NAMES | GROUP_WRITE_TOOL_NAMES
 
+_AGENT_WORKSPACE_TOOL_NAMES = frozenset(
+    {
+        "list_files",
+        "read_file",
+        "search_files",
+        "find_files",
+        "write_file",
+        "edit_file",
+        "move_file",
+        "delete_file",
+    }
+)
+_AGENT_WORKSPACE_GROUP_SCOPE_NOTE = (
+    "Group scope note: this tool accesses the Agent's own Workspace, not the "
+    "current Group Workspace. Paths listed in `group_context.workspace_index` "
+    "must use the corresponding `group_*` workspace tool. A missing result here "
+    "does not mean that the path is absent from Group Workspace."
+)
+
 
 class GroupRuntimeToolError(RuntimeError):
     """A group tool call has invalid checkpoint scope or arguments."""
@@ -94,10 +114,20 @@ def with_group_runtime_tools(
     state: RuntimeGraphState,
 ) -> list[dict]:
     """Append group tools only when a validated group snapshot exists."""
-    resolved = [dict(tool) for tool in tools]
+    resolved = [deepcopy(dict(tool)) for tool in tools]
     group_context = state["snapshots"].initial_input.get("group_context")
     if not isinstance(group_context, Mapping):
         return resolved
+    for tool in resolved:
+        function = tool.get("function")
+        if not isinstance(function, dict) or _tool_name(tool) not in _AGENT_WORKSPACE_TOOL_NAMES:
+            continue
+        description = function.get("description")
+        function["description"] = (
+            f"{description.strip()}\n\n{_AGENT_WORKSPACE_GROUP_SCOPE_NOTE}"
+            if isinstance(description, str) and description.strip()
+            else _AGENT_WORKSPACE_GROUP_SCOPE_NOTE
+        )
     names = {_tool_name(tool) for tool in resolved}
     resolved.extend(
         json.loads(json.dumps(tool))

@@ -1182,13 +1182,19 @@ async def test_group_snapshot_adds_only_current_group_tools_and_platform_rules()
     assert "send_message_to_agent" in tool_names
     group_system_prompt = str(calls[0][0][0].content)
     assert "Answer only from this group" in group_system_prompt
+    assert "access only the Agent's own Workspace" in group_system_prompt
+    assert "Every path in `group_context.workspace_index`" in group_system_prompt
+    assert "not evidence that a Group Workspace path is missing" in group_system_prompt
     assert "only need private advice or facts" in group_system_prompt
     assert "must publicly continue or own the next responsibility" in group_system_prompt
     assert "user explicitly asks you to let that Agent continue" in group_system_prompt
     assert "finish without a handoff" in group_system_prompt
     assert "first call `group_query_members`" in group_system_prompt
     assert "exactly one `finish` call" in group_system_prompt
-    assert "same call's `mention_participant_ids`" in group_system_prompt
+    assert "all intended target IDs" in group_system_prompt
+    assert "one child Run per ID" in group_system_prompt
+    assert "after `finish`, you cannot add another handoff target" in group_system_prompt
+    assert "every intended recipient" in group_system_prompt
     assert "textual `@name` or display name" in group_system_prompt
     assert "omit `mention_participant_ids`" in group_system_prompt
     assert "Dynamic context" not in str(calls[0][0][0].content)

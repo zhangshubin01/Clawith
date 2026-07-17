@@ -163,7 +163,15 @@ def test_group_tool_definitions_exist_only_for_validated_group_snapshots() -> No
     session_id = uuid.uuid4()
     agent = _agent(tenant_id)
     participant_id = uuid.uuid4()
-    base = [{"type": "function", "function": {"name": "read_file"}}]
+    base = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read from the workspace.",
+            },
+        }
+    ]
 
     direct_tools = with_group_runtime_tools(
         base,
@@ -189,9 +197,19 @@ def test_group_tool_definitions_exist_only_for_validated_group_snapshots() -> No
     )
 
     assert {tool["function"]["name"] for tool in direct_tools} == {"read_file"}
+    assert direct_tools[0]["function"]["description"] == "Read from the workspace."
+    assert base[0]["function"]["description"] == "Read from the workspace."
     assert GROUP_TOOL_NAMES.issubset(
         {tool["function"]["name"] for tool in group_tools}
     )
+    group_read_file = next(
+        tool for tool in group_tools if tool["function"]["name"] == "read_file"
+    )
+    description = group_read_file["function"]["description"]
+    assert "Agent's own Workspace" in description
+    assert "not the current Group Workspace" in description
+    assert "group_context.workspace_index" in description
+    assert "missing result" in description
 
 
 @pytest.mark.asyncio
