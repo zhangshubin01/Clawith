@@ -241,11 +241,7 @@ steps:
         test "$RUNNING_IMAGE_ID" = "$EXPECTED_IMAGE_ID"
         test "$(docker image inspect "clawith-backend:$IMAGE_TAG" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$DRONE_COMMIT"
 
-        UVICORN_COUNT="$(docker top "$BACKEND_ID" -eo args | grep -c '[u]vicorn app.main:app' || true)"
-        if [ "$UVICORN_COUNT" -ne 1 ]; then
-          echo "预期 1 个 Uvicorn worker，实际 $UVICORN_COUNT"
-          exit 1
-        fi
+        docker exec "$BACKEND_ID" python -c 'from pathlib import Path; cmdlines = [p.read_bytes().replace(b"\0", b" ").decode(errors="ignore") for p in Path("/proc").glob("[0-9]*/cmdline")]; matches = [cmd for cmd in cmdlines if "uvicorn app.main:app" in cmd]; assert len(matches) == 1, matches'
 
         for CONTAINER_NAME in $(docker network inspect "$NETWORK" --format '{{range .Containers}}{{.Name}} {{end}}'); do
           case "$CONTAINER_NAME" in
@@ -406,11 +402,7 @@ steps:
         test "$RUNNING_IMAGE_ID" = "$EXPECTED_IMAGE_ID"
         test "$(docker image inspect "$NEW_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$DRONE_COMMIT"
 
-        UVICORN_COUNT="$(docker top "$NEW_CONTAINER" -eo args | grep -c '[u]vicorn app.main:app' || true)"
-        if [ "$UVICORN_COUNT" -ne 1 ]; then
-          echo "预期 1 个 Uvicorn worker，实际 $UVICORN_COUNT"
-          exit 1
-        fi
+        docker exec "$NEW_CONTAINER" python -c 'from pathlib import Path; cmdlines = [p.read_bytes().replace(b"\0", b" ").decode(errors="ignore") for p in Path("/proc").glob("[0-9]*/cmdline")]; matches = [cmd for cmd in cmdlines if "uvicorn app.main:app" in cmd]; assert len(matches) == 1, matches'
         for CONTAINER_NAME in $(docker network inspect "$NETWORK" --format '{{range .Containers}}{{.Name}} {{end}}'); do
           case "$CONTAINER_NAME" in
             "$PROJECT"*) ;;
