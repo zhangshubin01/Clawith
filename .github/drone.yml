@@ -241,8 +241,9 @@ steps:
         BACKEND_ID="$(compose ps -q backend)"
         EXPECTED_IMAGE_ID="$(docker image inspect "clawith-backend:$IMAGE_TAG" --format '{{.Id}}')"
         RUNNING_IMAGE_ID="$(docker inspect "$BACKEND_ID" --format '{{.Image}}')"
-        test "$RUNNING_IMAGE_ID" = "$EXPECTED_IMAGE_ID"
-        test "$(docker image inspect "clawith-backend:$IMAGE_TAG" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$DRONE_COMMIT"
+        [ "$RUNNING_IMAGE_ID" = "$EXPECTED_IMAGE_ID" ]
+        docker image inspect "clawith-backend:$IMAGE_TAG" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' > /tmp/backend_revision
+        [ "$(cat /tmp/backend_revision)" = "$DRONE_COMMIT" ]
 
         UVICORN_COUNT="$(docker top "$BACKEND_ID" -eo args 2>/dev/null | grep -c '[u]vicorn app.main:app' || true)"
         if [ "$UVICORN_COUNT" -gt 0 ]; then
@@ -329,8 +330,10 @@ steps:
         wait_healthy "$(compose ps -q postgres)"
         wait_healthy "$(compose ps -q redis)"
 
-        OLD_REVISION="$(docker image inspect "$OLD_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
-        OLD_VERSION="$(docker image inspect "$OLD_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')"
+        docker image inspect "$OLD_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' > /tmp/old_revision
+        OLD_REVISION=$(cat /tmp/old_revision)
+        docker image inspect "$OLD_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' > /tmp/old_version
+        OLD_VERSION=$(cat /tmp/old_version)
         echo "启动升级源 version=$OLD_VERSION revision=$OLD_REVISION"
         docker run -d \
           --name "$OLD_CONTAINER" \
@@ -410,8 +413,9 @@ steps:
 
         EXPECTED_IMAGE_ID="$(docker image inspect "$NEW_IMAGE" --format '{{.Id}}')"
         RUNNING_IMAGE_ID="$(docker inspect "$NEW_CONTAINER" --format '{{.Image}}')"
-        test "$RUNNING_IMAGE_ID" = "$EXPECTED_IMAGE_ID"
-        test "$(docker image inspect "$NEW_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$DRONE_COMMIT"
+        [ "$RUNNING_IMAGE_ID" = "$EXPECTED_IMAGE_ID" ]
+        docker image inspect "$NEW_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' > /tmp/new_revision
+        [ "$(cat /tmp/new_revision)" = "$DRONE_COMMIT" ]
 
         UVICORN_COUNT="$(docker top "$NEW_CONTAINER" -eo args 2>/dev/null | grep -c '[u]vicorn app.main:app' || true)"
         if [ "$UVICORN_COUNT" -gt 0 ]; then
