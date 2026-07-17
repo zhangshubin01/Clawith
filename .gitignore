@@ -44,3 +44,4 @@ docs/
 backups/
 backend/tests/test_agent_api_live.py
 .omc/
+.idea/
