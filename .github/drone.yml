@@ -231,9 +231,9 @@ steps:
         compose exec -T backend alembic current --check-heads
 
         echo "检查目标版本 checkpoint schema"
-        CHECKPOINT_VERSION=$(echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" | compose exec -T postgres psql -U clawith -d clawith -At)
+        CHECKPOINT_VERSION=$(echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" | compose exec -T postgres psql -U clawith -d clawith -At | tr -d '\r')
         echo "checkpoint version=$CHECKPOINT_VERSION"
-        test "$CHECKPOINT_VERSION" -ge 0
+        [ "$CHECKPOINT_VERSION" -ge 0 ]
 
         BACKEND_ID="$(compose ps -q backend)"
         EXPECTED_IMAGE_ID="$(docker image inspect "clawith-backend:$IMAGE_TAG" --format '{{.Id}}')"
@@ -398,9 +398,9 @@ steps:
         docker exec "$NEW_CONTAINER" alembic current --check-heads
 
         echo "检查升级后 checkpoint schema"
-        CHECKPOINT_VERSION=$(echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" | compose exec -T postgres psql -U clawith -d clawith -At)
+        CHECKPOINT_VERSION=$(echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" | compose exec -T postgres psql -U clawith -d clawith -At | tr -d '\r')
         echo "checkpoint version=$CHECKPOINT_VERSION"
-        test "$CHECKPOINT_VERSION" -ge 0
+        [ "$CHECKPOINT_VERSION" -ge 0 ]
 
         EXPECTED_IMAGE_ID="$(docker image inspect "$NEW_IMAGE" --format '{{.Id}}')"
         RUNNING_IMAGE_ID="$(docker inspect "$NEW_CONTAINER" --format '{{.Image}}')"
