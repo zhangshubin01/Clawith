@@ -119,6 +119,30 @@ async def test_list_files_allows_empty_workspace_root(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_list_files_reports_recursive_directory_total_size(monkeypatch):
+    agent_id = uuid.uuid4()
+    storage = PrefixOnlyStorage({
+        f"{agent_id}/skills/web-research/SKILL.md": b"skill-body",
+        f"{agent_id}/skills/web-research/scripts/run.py": b"print('ok')",
+        f"{agent_id}/skills/web-research/references/guide.md": b"guide",
+    })
+    monkeypatch.setattr(files, "get_storage_backend", lambda: storage)
+
+    async def allow_access(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(files, "check_agent_access", allow_access)
+    user = SimpleNamespace(tenant_id=None)
+
+    result = await files.list_files(agent_id, path="skills", current_user=user, db=None)
+
+    assert len(result) == 1
+    assert result[0].name == "web-research"
+    assert result[0].is_dir is True
+    assert result[0].size == len(b"skill-body") + len(b"print('ok')") + len(b"guide")
+
+
+@pytest.mark.asyncio
 async def test_read_file_returns_version_token(monkeypatch):
     agent_id = uuid.uuid4()
     storage = PrefixOnlyStorage({f"{agent_id}/workspace/note.md": b"# Note\n"})
