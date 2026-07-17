@@ -48,3 +48,12 @@ test('an older read response cannot clear a newer unseen realtime message', () =
     /latestRealtimeMessageId === undefined[\s\S]*?readState\.last_read_message_id === latestRealtimeMessageId[\s\S]*?unread_count: 0/,
   );
 });
+
+test('active group runs render planning and named agent animations without tool details', () => {
+  assert.match(messageStream, /isPlanning: boolean/);
+  assert.match(messageStream, /runningAgents: Array<\{ id: string; name: string \}>/);
+  assert.match(messageStream, /group-run-indicator/);
+  assert.match(messageStream, /任务规划中/);
+  assert.match(messageStream, /\{\{name\}\}运行中/);
+  assert.doesNotMatch(messageStream, /tool_call|toolName|toolResult/);
+});

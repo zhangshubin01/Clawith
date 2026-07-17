@@ -58,6 +58,21 @@ class _Transaction:
         return False
 
 
+def test_attach_cursor_requires_stable_timezone_position() -> None:
+    event_id = uuid.uuid4()
+    cursor = WebSocketChatHandler._event_cursor(
+        f"2026-07-17T10:00:00+00:00|{event_id}"
+    )
+    assert cursor == RuntimeEventCursor(
+        datetime(2026, 7, 17, 10, 0, tzinfo=UTC),
+        event_id,
+    )
+    with pytest.raises(ChatRuntimeIntakeError, match="timezone"):
+        WebSocketChatHandler._event_cursor(
+            f"2026-07-17T10:00:00|{event_id}"
+        )
+
+
 class _AsyncContext:
     def __init__(self, value: object) -> None:
         self.value = value

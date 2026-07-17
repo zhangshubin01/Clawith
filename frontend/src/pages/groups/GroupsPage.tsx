@@ -79,7 +79,6 @@ export default function GroupsPage() {
     const [messages, setMessages] = useState<GroupMessage[]>([]);
     const [hasMore, setHasMore] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
-    const [trackedRunIds, setTrackedRunIds] = useState<string[]>([]);
     const [cancellingRuns, setCancellingRuns] = useState(false);
     // One nav rail now: a tree of groups with their sessions nested underneath. It collapses to a
     // stub, and the side panel stays out of the way until asked for.
@@ -168,30 +167,36 @@ export default function GroupsPage() {
 
     const activeSession = sessions.find((session) => session.id === sessionId);
 
-    const { data: trackedRunStates = [], refetch: refetchTrackedRuns } = useQuery({
-        queryKey: ['group-run-states', groupId, sessionId, trackedRunIds],
-        queryFn: () => Promise.all(
-            trackedRunIds.map((runId) => groupApi.runState(groupId!, sessionId!, runId)),
-        ),
-        enabled: Boolean(groupId && sessionId && trackedRunIds.length > 0),
+    const { data: activeRunStates = [], refetch: refetchActiveRuns } = useQuery({
+        queryKey: ['group-active-runs', groupId, sessionId],
+        queryFn: () => groupApi.activeRuns(groupId!, sessionId!),
+        enabled: Boolean(activeGroup && activeSession),
         retry: false,
         refetchInterval: (query) => (
             query.state.data?.some((run) => run.can_cancel) ? 1000 : false
         ),
     });
-    const activeRunIds = trackedRunStates
+    const activeRunIds = activeRunStates
         .filter((run) => run.can_cancel)
         .map((run) => run.run_id);
-
-    useEffect(() => {
-        setTrackedRunIds([]);
-    }, [sessionId]);
-
-    useEffect(() => {
-        if (trackedRunStates.length > 0 && activeRunIds.length === 0) {
-            setTrackedRunIds([]);
-        }
-    }, [activeRunIds.length, trackedRunStates.length]);
+    const isPlanning = activeRunStates.some(
+        (run) => run.can_cancel && run.system_role === 'group_planning',
+    );
+    const runningAgents = useMemo(() => {
+        const membersByAgentId = new Map(
+            members
+                .filter((member) => member.participant_type === 'agent')
+                .map((member) => [member.participant_ref_id, member]),
+        );
+        const seen = new Set<string>();
+        return activeRunStates.flatMap((run) => {
+            if (!run.can_cancel || !run.agent_id || seen.has(run.agent_id)) return [];
+            const member = membersByAgentId.get(run.agent_id);
+            if (!member) return [];
+            seen.add(run.agent_id);
+            return [{ id: run.agent_id, name: member.display_name }];
+        });
+    }, [activeRunStates, members]);
 
     const me = useMemo(
         () => members.find(
@@ -281,6 +286,13 @@ export default function GroupsPage() {
         const activityGroupId = activeGroup?.id;
         if (!activityGroupId) return;
 
+        if (!activity.sessionId || activity.sessionId === sessionId) {
+            void queryClient.invalidateQueries({
+                queryKey: ['group-active-runs', activityGroupId, sessionId],
+                exact: true,
+            });
+        }
+
         const { message, sessionId: activitySessionId } = activity;
         const isUnreadForMe = Boolean(
             message
@@ -330,7 +342,7 @@ export default function GroupsPage() {
                 exact: true,
             });
         }, 150);
-    }, [activeGroup?.id, me, queryClient]);
+    }, [activeGroup?.id, me, queryClient, sessionId]);
 
     useEffect(() => {
         appliedRealtimeMessageIdsRef.current.clear();
@@ -445,9 +457,7 @@ export default function GroupsPage() {
                 message_id: createRandomUUID(),
             });
             setMessages((previous) => mergeMessages(previous, [intake.message]));
-            if (intake.run_ids.length > 0) {
-                setTrackedRunIds((current) => [...new Set([...current, ...intake.run_ids])]);
-            }
+            if (intake.run_ids.length > 0) void refetchActiveRuns();
 
             // Planning can fail before any agent starts — say so instead of leaving a silent gap.
             if (intake.error_code) {
@@ -468,7 +478,7 @@ export default function GroupsPage() {
             await Promise.all(
                 activeRunIds.map((runId) => groupApi.cancelRun(groupId, sessionId, runId)),
             );
-            await refetchTrackedRuns();
+            await refetchActiveRuns();
             toast.info(t('groups.cancelAccepted', '已请求停止当前运行'));
         } catch (error: any) {
             toast.error(error?.message ?? t('groups.cancelFailed', '停止运行失败'));
@@ -770,6 +780,8 @@ export default function GroupsPage() {
                             myParticipantId={me?.participant_id}
                             hasMore={hasMore}
                             loadingMore={loadingMore}
+                            isPlanning={isPlanning}
+                            runningAgents={runningAgents}
                             onLoadMore={() => void loadMore()}
                             onLatestMessageSeen={markLatestMessageSeen}
                         />

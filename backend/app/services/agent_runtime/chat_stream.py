@@ -110,6 +110,43 @@ async def stream_web_chat_run(
         latest_cursor = _cursor(event)
         payload = event.payload
 
+        activity_type = payload.get("activity_type")
+        packet_position = {
+            "run_id": str(handle.run_id),
+            "event_id": str(event.event_id),
+            "event_cursor": f"{event.created_at.isoformat()}|{event.event_id}",
+        }
+        if event.event_type == "status_changed" and activity_type == "thinking":
+            content = _text(payload.get("content"))
+            if content is not None:
+                await send_packet({"type": "thinking", "content": content, **packet_position})
+            continue
+        if event.event_type == "status_changed" and activity_type == "assistant_progress":
+            content = _text(payload.get("content"))
+            if content is not None:
+                await send_packet({"type": "chunk", "content": content, **packet_position})
+            continue
+        if event.event_type == "status_changed" and activity_type == "tool_call":
+            tool_name = _text(payload.get("name"))
+            call_id = _text(payload.get("call_id"))
+            tool_status = payload.get("status")
+            if tool_name is not None and call_id is not None and tool_status in {"running", "done"}:
+                await send_packet(
+                    {
+                        "type": "tool_call",
+                        "name": tool_name,
+                        "call_id": call_id,
+                        "args": payload.get("args") if isinstance(payload.get("args"), dict) else {},
+                        "status": tool_status,
+                        "result": str(payload.get("result") or ""),
+                        "reasoning_content": str(payload.get("reasoning_content") or ""),
+                        "execution_status": payload.get("execution_status"),
+                        "error_code": payload.get("error_code"),
+                        **packet_position,
+                    }
+                )
+            continue
+
         if event.event_type == "waiting_started" and payload.get("waiting_type") == "user":
             waiting_correlation_id = _text(payload.get("correlation_id"))
             if waiting_correlation_id is None:

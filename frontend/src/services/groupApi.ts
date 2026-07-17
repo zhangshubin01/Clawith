@@ -115,6 +115,9 @@ export const groupApi = {
     runState: (groupId: string, sessionId: string, runId: string) =>
         fetchJson<GroupRunState>(`/groups/${groupId}/sessions/${sessionId}/runs/${runId}`),
 
+    activeRuns: (groupId: string, sessionId: string) =>
+        fetchJson<GroupRunState[]>(`/groups/${groupId}/sessions/${sessionId}/runs`),
+
     cancelRun: (groupId: string, sessionId: string, runId: string) =>
         fetchJson<GroupRunState>(
             `/groups/${groupId}/sessions/${sessionId}/runs/${runId}/cancel`,

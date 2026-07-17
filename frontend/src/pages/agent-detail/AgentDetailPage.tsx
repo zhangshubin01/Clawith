@@ -2378,6 +2378,7 @@ export default function AgentDetailPage() {
     const reconnectDisabledRef = useRef<Record<SessionRuntimeKey, boolean>>({});
     const sessionUiStateRef = useRef<Record<SessionRuntimeKey, { isWaiting: boolean; isStreaming: boolean }>>({});
     const sessionActiveRunRef = useRef<Record<SessionRuntimeKey, SessionActiveRun | null>>({});
+    const runtimeEventCursorRef = useRef<Record<SessionRuntimeKey, string>>({});
     const [activeRun, setActiveRun] = useState<SessionActiveRun | null>(null);
     const [reconcilingExecutionId, setReconcilingExecutionId] = useState<string | null>(null);
     const [messagesLoadedRuntimeKey, setMessagesLoadedRuntimeKey] = useState<string | null>(null);
@@ -2407,6 +2408,7 @@ export default function AgentDetailPage() {
                 content: message.content || '',
                 ...(message.toolName && {
                     toolName: message.toolName,
+                    toolCallId: message.toolCallId,
                     toolArgs: message.toolArgs,
                     toolStatus: message.toolStatus,
                     toolResult: message.toolResult,
@@ -2480,7 +2482,7 @@ export default function AgentDetailPage() {
                         sessionActiveRunRef.current[buildSessionRuntimeKey(agentId, sessionId)] || null,
                     ),
                 );
-                return;
+                return null;
             }
             const payload = await response.json();
             const next = sessionActiveRunFromResponse(payload);
@@ -2492,7 +2494,7 @@ export default function AgentDetailPage() {
                         sessionActiveRunRef.current[buildSessionRuntimeKey(agentId, sessionId)] || null,
                     ),
                 );
-                return;
+                return null;
             }
             const previous = sessionActiveRunRef.current[
                 buildSessionRuntimeKey(agentId, sessionId)
@@ -2507,6 +2509,7 @@ export default function AgentDetailPage() {
             ) {
                 setRuntimeStateLoadedRuntimeKey(buildSessionRuntimeKey(agentId, sessionId));
             }
+            return next;
         } catch {
             applySessionActiveRun(
                 agentId,
@@ -2515,6 +2518,7 @@ export default function AgentDetailPage() {
                     sessionActiveRunRef.current[buildSessionRuntimeKey(agentId, sessionId)] || null,
                 ),
             );
+            return null;
         }
     };
 
@@ -2731,7 +2735,7 @@ export default function AgentDetailPage() {
             if (activeSessionIdRef.current !== sess.id) return;
             const preParsed = msgs.map((m: any) => parseChatMsg({
                 role: m.role, content: m.content || '',
-                ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
+                ...(m.toolName && { toolName: m.toolName, toolCallId: m.toolCallId, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
                 ...(m.thinking && { thinking: m.thinking }),
                 ...(m.created_at && { timestamp: m.created_at }),
                 ...(m.id && { id: m.id }),
@@ -2876,13 +2880,28 @@ export default function AgentDetailPage() {
     const upsertToolCallMessage = (toolMsg: ChatMsg) => {
         setChatMessages(prev => {
             const incomingTarget = getToolTargetKey(toolMsg.toolArgs);
+            if (toolMsg.toolCallId) {
+                const exactIdx = prev.findIndex(
+                    (msg) => msg.role === 'tool_call' && msg.toolCallId === toolMsg.toolCallId,
+                );
+                if (exactIdx >= 0) {
+                    const existing = prev[exactIdx];
+                    // A replay can start at the beginning of a Run after page reload.
+                    // Never downgrade the settled canonical history row back to running.
+                    if (existing.toolStatus === 'done' && toolMsg.toolStatus === 'running') return prev;
+                    return [
+                        ...prev.slice(0, exactIdx),
+                        { ...existing, ...toolMsg },
+                        ...prev.slice(exactIdx + 1),
+                    ];
+                }
+            }
             const sameTool = (msg: ChatMsg) => (
                 msg.role === 'tool_call'
                 && msg.toolName === toolMsg.toolName
                 && msg.toolStatus === 'running'
                 && (
-                    (!!toolMsg.toolCallId && !!msg.toolCallId && msg.toolCallId === toolMsg.toolCallId)
-                    || (!!incomingTarget && getToolTargetKey(msg.toolArgs) === incomingTarget)
+                    (!!incomingTarget && getToolTargetKey(msg.toolArgs) === incomingTarget)
                     || (!toolMsg.toolCallId && !incomingTarget)
                 )
             );
@@ -3262,7 +3281,15 @@ export default function AgentDetailPage() {
                 wsRef.current = ws;
                 setWsConnected(true);
             }
-            void fetchSessionRuntimeState(agentId, sessionId);
+            void fetchSessionRuntimeState(agentId, sessionId).then((active) => {
+                if (!active?.canCancel || ws.readyState !== WebSocket.OPEN) return;
+                const cursor = runtimeEventCursorRef.current[`${key}:${active.runId}`];
+                ws.send(JSON.stringify({
+                    type: 'attach_run',
+                    run_id: active.runId,
+                    ...(cursor ? { cursor } : {}),
+                }));
+            });
             if (pendingChatSendRef.current?.runtimeKey === key) {
                 const pending = pendingChatSendRef.current;
                 pendingChatSendRef.current = null;
@@ -3296,6 +3323,9 @@ export default function AgentDetailPage() {
         };
         ws.onmessage = (e) => {
             const d = JSON.parse(e.data);
+            if (typeof d.event_cursor === 'string' && d.event_cursor && d.run_id) {
+                runtimeEventCursorRef.current[`${key}:${String(d.run_id)}`] = d.event_cursor;
+            }
             // A completed or already-running pair-scoped onboarding attempt
             // releases the local waiting indicator and refreshes Runtime truth.
             if (d.type === 'onboarded' || d.type === 'onboarding_pending') {
@@ -3915,7 +3945,7 @@ export default function AgentDetailPage() {
             }
             const preParsed = msgs.map((m: any) => parseChatMsg({
                 role: m.role, content: m.content || '',
-                ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
+                ...(m.toolName && { toolName: m.toolName, toolCallId: m.toolCallId, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
                 ...(m.thinking && { thinking: m.thinking }),
                 ...(m.created_at && { timestamp: m.created_at }),
                 ...(m.id && { id: m.id }),
@@ -3961,7 +3991,7 @@ export default function AgentDetailPage() {
             }
             const preParsed = msgs.map((m: any) => parseChatMsg({
                 role: m.role, content: m.content || '',
-                ...(m.toolName && { toolName: m.toolName, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
+                ...(m.toolName && { toolName: m.toolName, toolCallId: m.toolCallId, toolArgs: m.toolArgs, toolStatus: m.toolStatus, toolResult: m.toolResult, toolThinking: m.toolThinking }),
                 ...(m.thinking && { thinking: m.thinking }),
                 ...(m.created_at && { timestamp: m.created_at }),
                 ...(m.id && { id: m.id }),

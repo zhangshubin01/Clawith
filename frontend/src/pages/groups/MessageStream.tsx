@@ -11,6 +11,8 @@ interface MessageStreamProps {
     myParticipantId?: string;
     hasMore: boolean;
     loadingMore: boolean;
+    isPlanning: boolean;
+    runningAgents: Array<{ id: string; name: string }>;
     onLoadMore: () => void;
     onLatestMessageSeen: (messageId: string) => void;
 }
@@ -49,6 +51,8 @@ export default function MessageStream({
     myParticipantId,
     hasMore,
     loadingMore,
+    isPlanning,
+    runningAgents,
     onLoadMore,
     onLatestMessageSeen,
 }: MessageStreamProps) {
@@ -101,7 +105,7 @@ export default function MessageStream({
         }
         previousCountRef.current = messages.length;
         reportLatestMessageSeen();
-    }, [messages, reportLatestMessageSeen]);
+    }, [messages, isPlanning, runningAgents, reportLatestMessageSeen]);
 
     // A background tab or unfocused window is not a read. Re-check when the user returns.
     useEffect(() => {
@@ -186,6 +190,47 @@ export default function MessageStream({
                     </div>
                 );
             })}
+
+            {isPlanning && (
+                <div className="group-message group-run-indicator" role="status" aria-live="polite">
+                    <div className="group-avatar agent">
+                        <IconRobot size={15} stroke={1.6} />
+                    </div>
+                    <div className="group-message-body">
+                        <div className="group-message-meta">
+                            <span className="group-message-sender">
+                                {t('groups.taskPlanning', '任务规划中')}
+                            </span>
+                        </div>
+                        <div className="group-message-bubble group-run-indicator-bubble">
+                            <span /><span /><span />
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {runningAgents.map((agent) => (
+                <div
+                    className="group-message group-run-indicator"
+                    key={agent.id}
+                    role="status"
+                    aria-live="polite"
+                >
+                    <div className="group-avatar agent">
+                        <IconRobot size={15} stroke={1.6} />
+                    </div>
+                    <div className="group-message-body">
+                        <div className="group-message-meta">
+                            <span className="group-message-sender">
+                                {t('groups.namedAgentRunning', '{{name}}运行中', { name: agent.name })}
+                            </span>
+                        </div>
+                        <div className="group-message-bubble group-run-indicator-bubble">
+                            <span /><span /><span />
+                        </div>
+                    </div>
+                </div>
+            ))}
 
             <div ref={bottomRef} />
         </div>

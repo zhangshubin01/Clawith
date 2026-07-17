@@ -81,6 +81,8 @@ export interface GroupRunState {
     run_id: string;
     status: string;
     can_cancel: boolean;
+    agent_id: string | null;
+    system_role: string | null;
 }
 
 export interface GroupTextFile {

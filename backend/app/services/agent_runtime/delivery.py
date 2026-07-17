@@ -80,6 +80,7 @@ class DeliveryRequest:
     group_handoff_intent: JsonObject | None = None
     failure_code: str | None = None
     failure_message: str | None = None
+    thinking: str | None = None
 
     @property
     def idempotency_key(self) -> str:
@@ -918,6 +919,7 @@ async def deliver_runtime_message(
             user_id=session.user_id if session.session_type == "direct" else None,
             role="system" if participant is None else "assistant",
             content=_safe_message_content(run, request),
+            thinking=request.thinking if session.session_type == "direct" else None,
             conversation_id=str(session.id),
             participant_id=participant.id if participant is not None else None,
             mentions=[],

@@ -11,9 +11,11 @@ from typing import Protocol, cast
 import uuid
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 
 from app.config import get_settings
 from app.models.agent import Agent
+from app.models.agent_run_event import AgentRunEvent
 from app.models.agent_tool_execution import AgentToolExecution
 from app.services.agent_runtime.a2a_runtime import (
     RuntimeA2AService,
@@ -82,6 +84,35 @@ _HEARTBEAT_PLAZA_LIMITS = {
     "plaza_create_post": 1,
     "plaza_add_comment": 2,
 }
+
+
+async def _insert_runtime_activity(
+    db,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    key: str,
+    summary: str,
+    payload: dict,
+) -> None:
+    """Commit one idempotent observation beside the durable Tool Ledger fact."""
+    await db.execute(
+        insert(AgentRunEvent)
+        .values(
+            id=uuid.uuid5(run_id, f"runtime-activity:{key}"),
+            tenant_id=tenant_id,
+            run_id=run_id,
+            agent_id=None,
+            event_type="status_changed",
+            summary=summary,
+            payload=payload,
+            artifact_refs=[],
+            idempotency_key=key,
+            source_checkpoint_id=None,
+            created_at=datetime.now(UTC),
+        )
+        .on_conflict_do_nothing()
+    )
 
 
 class ToolExecutor(Protocol):
@@ -507,10 +538,12 @@ class RuntimeToolStepService:
         arguments: dict,
         policy: ToolPolicy,
         lease_owner: str,
+        reasoning_content: str = "",
+        assistant_content: str = "",
     ) -> ToolExecutionReservation:
         async with self._session_factory() as db:
             async with db.begin():
-                return await reserve_tool_execution(
+                reservation = await reserve_tool_execution(
                     db,
                     tenant_id=tenant_id,
                     run_id=run_id,
@@ -532,6 +565,51 @@ class RuntimeToolStepService:
                         and policy.retry_policy == "safe"
                     ),
                 )
+                if reasoning_content.strip():
+                    await _insert_runtime_activity(
+                        db,
+                        tenant_id=tenant_id,
+                        run_id=run_id,
+                        key=f"activity:thinking:{assistant_message_id}",
+                        summary="Runtime model reasoning available",
+                        payload={
+                            "status": "running",
+                            "activity_type": "thinking",
+                            "content": reasoning_content.strip(),
+                            "message_id": assistant_message_id,
+                        },
+                    )
+                if assistant_content.strip():
+                    await _insert_runtime_activity(
+                        db,
+                        tenant_id=tenant_id,
+                        run_id=run_id,
+                        key=f"activity:progress:{assistant_message_id}",
+                        summary="Runtime model progress available",
+                        payload={
+                            "status": "running",
+                            "activity_type": "assistant_progress",
+                            "content": assistant_content.strip(),
+                            "message_id": assistant_message_id,
+                        },
+                    )
+                await _insert_runtime_activity(
+                    db,
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    key=f"activity:tool:{call_id}:running",
+                    summary=f"Runtime tool {tool_name} started",
+                    payload={
+                        "status": "running",
+                        "activity_type": "tool_call",
+                        "call_id": call_id,
+                        "name": tool_name,
+                        "args": dict(reservation.execution.sanitized_arguments or {}),
+                        "reasoning_content": reasoning_content.strip(),
+                        "assistant_message_id": assistant_message_id,
+                    },
+                )
+                return reservation
 
     async def _settle_outcome(
         self,
@@ -690,6 +768,22 @@ class RuntimeToolStepService:
                         result_summary=normalized.result_summary,
                         metadata=normalized.metadata,
                     )
+                    await _insert_runtime_activity(
+                        db,
+                        tenant_id=tenant_id,
+                        run_id=reservation.execution.run_id,
+                        key=f"activity:tool:{reservation.execution.tool_call_id}:pending",
+                        summary=f"Runtime tool {reservation.execution.tool_name} pending",
+                        payload={
+                            "status": "running",
+                            "activity_type": "tool_call",
+                            "call_id": reservation.execution.tool_call_id,
+                            "name": reservation.execution.tool_name,
+                            "args": dict(reservation.execution.sanitized_arguments or {}),
+                            "result": execution.result_summary or "",
+                            "execution_status": "pending",
+                        },
+                    )
             return replace(
                 normalized,
                 result_summary=execution.result_summary,
@@ -784,6 +878,29 @@ class RuntimeToolStepService:
                         evidence_refs=normalized.evidence_refs,
                         metadata=normalized.metadata,
                     )
+                await _insert_runtime_activity(
+                    db,
+                    tenant_id=tenant_id,
+                    run_id=reservation.execution.run_id,
+                    key=(
+                        f"activity:tool:{reservation.execution.tool_call_id}:"
+                        f"{normalized.status}"
+                    ),
+                    summary=(
+                        f"Runtime tool {reservation.execution.tool_name} "
+                        f"{normalized.status}"
+                    ),
+                    payload={
+                        "status": "done",
+                        "activity_type": "tool_call",
+                        "call_id": reservation.execution.tool_call_id,
+                        "name": reservation.execution.tool_name,
+                        "args": dict(reservation.execution.sanitized_arguments or {}),
+                        "result": execution.result_summary or "",
+                        "execution_status": normalized.status,
+                        "error_code": normalized.error_code,
+                    },
+                )
         return replace(
             normalized,
             result_summary=execution.result_summary,
@@ -935,6 +1052,24 @@ class RuntimeToolStepService:
             run_id = uuid.UUID(context.run_id)
             agent = await self._agent(context)
             assistant_message_id = _assistant_message_id(state, tool_calls)
+            assistant_message = next(
+                (
+                    message
+                    for message in runtime_messages_as_json(state)
+                    if message.get("id") == assistant_message_id
+                ),
+                {},
+            )
+            reasoning_content = (
+                str(assistant_message.get("reasoning_content") or "")
+                if isinstance(assistant_message, Mapping)
+                else ""
+            )
+            assistant_content = (
+                str(assistant_message.get("content") or "")
+                if isinstance(assistant_message, Mapping)
+                else ""
+            )
             allowed_names = _allowed_tool_names(
                 with_group_runtime_tools(
                     await self._tool_provider(agent.id),
@@ -969,6 +1104,8 @@ class RuntimeToolStepService:
                     arguments=arguments,
                     policy=policy,
                     lease_owner=lease_owner,
+                    reasoning_content=reasoning_content,
+                    assistant_content=assistant_content,
                 )
                 if reservation.reusable_result is not None:
                     if reservation.reusable_result.status == "pending":
@@ -989,6 +1126,26 @@ class RuntimeToolStepService:
                             outcome=reservation.reusable_result,
                         )
                     )
+                    async with self._session_factory() as db:
+                        async with db.begin():
+                            reused = reservation.reusable_result
+                            await _insert_runtime_activity(
+                                db,
+                                tenant_id=tenant_id,
+                                run_id=run_id,
+                                key=f"activity:tool:{call_id}:{reused.status}",
+                                summary=f"Runtime tool {tool_name} {reused.status}",
+                                payload={
+                                    "status": "done",
+                                    "activity_type": "tool_call",
+                                    "call_id": call_id,
+                                    "name": tool_name,
+                                    "args": dict(reservation.execution.sanitized_arguments or {}),
+                                    "result": reused.result_summary or "",
+                                    "execution_status": reused.status,
+                                    "error_code": reused.error_code,
+                                },
+                            )
                     if tool_name == "send_message_to_agent" and self._a2a_service:
                         waiting_request = a2a_waiting_request(
                             source_run_id=run_id,

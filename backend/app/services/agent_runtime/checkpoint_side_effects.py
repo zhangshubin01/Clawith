@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+import json
 from typing import Protocol, cast
 import uuid
 
@@ -14,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.models.agent_run import AgentRun
 from app.models.agent_run_event import AgentRunEvent
+from app.models.audit import ChatMessage
 from app.services.agent_runtime.command_worker import (
     CheckpointObservation,
     RuntimeCommandRecord,
@@ -26,6 +28,9 @@ from app.services.agent_runtime.delivery import (
     DeliveryRequest,
     deliver_runtime_message,
 )
+from app.services.agent_runtime.state import runtime_messages_as_json
+from app.services.agent_runtime.tool_execution import sanitize_tool_arguments
+from app.services.builtin_tool_definitions import builtin_sensitive_paths
 from app.services.group_realtime import publish_stored_group_message
 from app.services.experience_retrieval import record_experience_citations
 
@@ -179,6 +184,20 @@ def _terminal_group_handoff(
     return dict(raw_handoff)
 
 
+def _terminal_thinking(
+    run: RuntimeRunRecord,
+    checkpoint: CheckpointObservation,
+) -> str | None:
+    for message in reversed(runtime_messages_as_json(checkpoint.state)):
+        if (
+            message.get("role") == "assistant"
+            and message.get("runtime_run_id") == str(run.run_id)
+            and message.get("runtime_intent") == "finish"
+        ):
+            return _text_field(message.get("reasoning_content"))
+    return None
+
+
 def delivery_from_checkpoint(
     run: RuntimeRunRecord,
     checkpoint: CheckpointObservation,
@@ -204,6 +223,7 @@ def delivery_from_checkpoint(
         group_handoff_intent=_terminal_group_handoff(checkpoint),
         failure_code=failure_code,
         failure_message=failure_message,
+        thinking=_terminal_thinking(run, checkpoint),
     )
 
 
@@ -228,6 +248,209 @@ def _event_payload(checkpoint: CheckpointObservation) -> dict:
     return payload
 
 
+def _tool_arguments(call: Mapping[str, object], tool_name: str) -> dict:
+    function = call.get("function")
+    raw = function.get("arguments") if isinstance(function, Mapping) else None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw = {"raw": raw}
+    if not isinstance(raw, dict):
+        raw = {}
+    return sanitize_tool_arguments(
+        raw,
+        sensitive_paths=builtin_sensitive_paths(tool_name),
+    )
+
+
+def _runtime_observation_events(
+    run: RuntimeRunRecord,
+    checkpoint: CheckpointObservation,
+) -> tuple[list[tuple[str, str, dict, str, str | None]], dict[str, dict]]:
+    """Derive replayable Web Chat activity from stable Runtime messages.
+
+    These remain ``status_changed`` product events so the durable event schema
+    stays backward compatible. ``activity_type`` is the Web Chat projection
+    discriminator; idempotency keys are based on stable message/tool-call IDs.
+    """
+    events: list[tuple[str, str, dict, str, str | None]] = []
+    calls: dict[str, dict] = {}
+    messages = runtime_messages_as_json(checkpoint.state)
+
+    for message in messages:
+        if message.get("role") != "assistant" or message.get("runtime_run_id") != str(run.run_id):
+            continue
+        message_id = message.get("id")
+        if not isinstance(message_id, str) or not message_id:
+            continue
+        reasoning = _text_field(message.get("reasoning_content"))
+        if reasoning is not None:
+            events.append(
+                (
+                    "status_changed",
+                    "Runtime model reasoning available",
+                    {
+                        "status": "running",
+                        "activity_type": "thinking",
+                        "content": reasoning,
+                        "message_id": message_id,
+                    },
+                    f"activity:thinking:{message_id}",
+                    None,
+                )
+            )
+        content = _text_field(message.get("content"))
+        runtime_intent = message.get("runtime_intent")
+        if content is not None and runtime_intent not in {"finish", "wait"}:
+            events.append(
+                (
+                    "status_changed",
+                    "Runtime model progress available",
+                    {
+                        "status": "running",
+                        "activity_type": "assistant_progress",
+                        "content": content,
+                        "message_id": message_id,
+                    },
+                    f"activity:progress:{message_id}",
+                    None,
+                )
+            )
+        raw_calls = message.get("tool_calls")
+        if not isinstance(raw_calls, list):
+            continue
+        for raw_call in raw_calls:
+            if not isinstance(raw_call, Mapping):
+                continue
+            call_id = _text_field(raw_call.get("id"))
+            function = raw_call.get("function")
+            tool_name = _text_field(function.get("name")) if isinstance(function, Mapping) else None
+            if call_id is None or tool_name is None:
+                continue
+            detail = {
+                "call_id": call_id,
+                "name": tool_name,
+                "args": _tool_arguments(raw_call, tool_name),
+                "reasoning_content": reasoning or "",
+                "assistant_message_id": message_id,
+            }
+            calls[call_id] = detail
+            events.append(
+                (
+                    "status_changed",
+                    f"Runtime tool {tool_name} started",
+                    {
+                        "status": "running",
+                        "activity_type": "tool_call",
+                        **detail,
+                    },
+                    f"activity:tool:{call_id}:running",
+                    None,
+                )
+            )
+
+    for message in messages:
+        if message.get("role") not in {"tool", "tool_result"}:
+            continue
+        call_id = _text_field(message.get("tool_call_id") or message.get("call_id"))
+        if call_id is None or call_id not in calls:
+            continue
+        execution_status = _text_field(message.get("execution_status")) or "succeeded"
+        ui_status = "running" if execution_status == "pending" else "done"
+        result = str(message.get("content") or "")
+        error_code = _text_field(message.get("error_code"))
+        payload = {
+            "status": ui_status,
+            "activity_type": "tool_call",
+            **calls[call_id],
+            "result": result,
+            "execution_status": execution_status,
+        }
+        if error_code is not None:
+            payload["error_code"] = error_code
+        events.append(
+            (
+                "status_changed",
+                f"Runtime tool {calls[call_id]['name']} {execution_status}",
+                payload,
+                f"activity:tool:{call_id}:{execution_status}",
+                None,
+            )
+        )
+    return events, calls
+
+
+async def _record_direct_tool_history(
+    db,
+    *,
+    run: RuntimeRunRecord,
+    checkpoint: CheckpointObservation,
+    calls: Mapping[str, dict],
+) -> None:
+    """Persist settled direct-chat tools for refresh and reconnect recovery."""
+    if run.session_id is None or run.agent_id is None or not calls:
+        return
+    run_result = await db.execute(
+        select(AgentRun).where(
+            AgentRun.tenant_id == run.tenant_id,
+            AgentRun.id == run.run_id,
+        )
+    )
+    stored = run_result.scalar_one_or_none()
+    if (
+        stored is None
+        or stored.origin_user_id is None
+        or not isinstance(stored.delivery_target, dict)
+        or stored.delivery_target.get("kind") != "direct"
+    ):
+        return
+    created_at = checkpoint.created_at or datetime.now(UTC)
+    for message in runtime_messages_as_json(checkpoint.state):
+        if message.get("role") not in {"tool", "tool_result"}:
+            continue
+        call_id = _text_field(message.get("tool_call_id") or message.get("call_id"))
+        if call_id is None or call_id not in calls:
+            continue
+        execution_status = _text_field(message.get("execution_status")) or "succeeded"
+        if execution_status == "pending":
+            continue
+        detail = calls[call_id]
+        content = json.dumps(
+            {
+                "name": detail["name"],
+                "args": detail["args"],
+                "status": "done",
+                "execution_status": execution_status,
+                "result": str(message.get("content") or ""),
+                "tool_call_id": call_id,
+                "reasoning_content": detail.get("reasoning_content") or "",
+                **(
+                    {"error_code": message["error_code"]}
+                    if isinstance(message.get("error_code"), str)
+                    else {}
+                ),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+        await db.execute(
+            insert(ChatMessage)
+            .values(
+                id=uuid.uuid5(run.run_id, f"chat-tool:{call_id}"),
+                agent_id=uuid.UUID(run.agent_id),
+                user_id=stored.origin_user_id,
+                role="tool_call",
+                content=content,
+                conversation_id=run.session_id,
+                participant_id=None,
+                mentions=[],
+                created_at=created_at,
+            )
+            .on_conflict_do_nothing()
+        )
+
+
 async def _record_lifecycle_events(
     db,
     *,
@@ -250,6 +473,14 @@ async def _record_lifecycle_events(
             )
         )
     else:
+        observation_events, calls = _runtime_observation_events(run, checkpoint)
+        events.extend(observation_events)
+        await _record_direct_tool_history(
+            db,
+            run=run,
+            checkpoint=checkpoint,
+            calls=calls,
+        )
         if command.command_type == "resume":
             events.append(
                 (

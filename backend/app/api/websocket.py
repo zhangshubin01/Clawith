@@ -35,7 +35,7 @@ from app.services.agent_runtime.chat_stream import (
     ChatRuntimeStreamOutcome,
     stream_web_chat_run,
 )
-from app.services.agent_runtime.contracts import CancelRunCommand, RunHandle
+from app.services.agent_runtime.contracts import CancelRunCommand, RunHandle, RuntimeEventCursor
 from app.services.agent_runtime.run_state_reader import RunStateReadError, open_run_state_reader
 from app.services.chat_session_service import ensure_primary_platform_session
 from app.services.llm.utils import convert_chat_messages_to_llm_format
@@ -464,6 +464,20 @@ class WebSocketChatHandler:
                         continue
                     await self._handle_cancel_packet(data)
                     continue
+                if data.get("type") == "attach_run":
+                    attached = await self._attach_runtime_run(data)
+                    if attached is None:
+                        continue
+                    outcome, queued_messages = await self._run_runtime_and_stream(
+                        attached,
+                        user_content="",
+                    )
+                    pending_runs.extend(queued_messages)
+                    if outcome is not None:
+                        self.conversation.append(
+                            {"role": "assistant", "content": outcome.content}
+                        )
+                    continue
                 accepted = await self._accept_client_message(data)
                 if accepted is None:
                     continue
@@ -489,6 +503,107 @@ class WebSocketChatHandler:
                         accepted.runtime.onboarding_target_phase
                     )
             continue
+
+    @staticmethod
+    def _event_cursor(value: object) -> RuntimeEventCursor | None:
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str) or "|" not in value:
+            raise ChatRuntimeIntakeError(
+                "invalid_event_cursor",
+                "attach_run cursor must be '<created_at>|<event_id>'",
+            )
+        created_at_raw, event_id_raw = value.rsplit("|", 1)
+        try:
+            created_at = datetime.fromisoformat(created_at_raw)
+            event_id = uuid.UUID(event_id_raw)
+        except (TypeError, ValueError) as exc:
+            raise ChatRuntimeIntakeError(
+                "invalid_event_cursor",
+                "attach_run cursor is invalid",
+            ) from exc
+        if created_at.tzinfo is None:
+            raise ChatRuntimeIntakeError(
+                "invalid_event_cursor",
+                "attach_run cursor timestamp must include a timezone",
+            )
+        return RuntimeEventCursor(created_at, event_id)
+
+    async def _attach_runtime_run(self, data: dict) -> ChatRuntimeIntake | None:
+        """Reattach this exact Direct Chat socket to an already-running Run."""
+        if self.user is None or self.agent is None or self.conv_id is None:
+            return None
+        try:
+            run_id = self._optional_client_uuid(data.get("run_id"), field="run_id")
+            if run_id is None:
+                raise ChatRuntimeIntakeError("missing_run_id", "attach_run requires run_id")
+            after = self._event_cursor(data.get("cursor"))
+            session_id = uuid.UUID(self.conv_id)
+        except (ChatRuntimeIntakeError, ValueError) as exc:
+            code = getattr(exc, "code", "invalid_chat_session")
+            await self.websocket.send_json({"type": "error", "content": str(exc), "code": code})
+            return None
+
+        async with async_session() as db:
+            result = await db.execute(
+                select(AgentRun).where(
+                    AgentRun.tenant_id == self.agent.tenant_id,
+                    AgentRun.id == run_id,
+                    AgentRun.agent_id == self.agent_id,
+                    AgentRun.session_id == session_id,
+                    AgentRun.origin_user_id == self.user.id,
+                    AgentRun.source_type == "chat",
+                    AgentRun.run_kind == "foreground",
+                    AgentRun.runtime_type == "langgraph",
+                    AgentRun.runtime_thread_id == str(session_id),
+                    AgentRun.scheduling_lane_key
+                    == f"direct_chat_thread:{self.agent.tenant_id}:{session_id}",
+                    AgentRun.lane_held.is_(True),
+                )
+            )
+            run = result.scalar_one_or_none()
+            if run is None:
+                await self.websocket.send_json(
+                    {
+                        "type": "error",
+                        "content": "Run is not active in this Direct Chat session.",
+                        "code": "chat_attach_scope_mismatch",
+                    }
+                )
+                return None
+            command_result = await db.execute(
+                select(AgentRunCommand)
+                .where(
+                    AgentRunCommand.tenant_id == run.tenant_id,
+                    AgentRunCommand.run_id == run.id,
+                )
+                .order_by(AgentRunCommand.created_at.desc(), AgentRunCommand.id.desc())
+                .limit(1)
+            )
+            command = command_result.scalar_one_or_none()
+            if command is None:
+                await self.websocket.send_json(
+                    {"type": "error", "content": "Run command is unavailable.", "code": "chat_attach_command_missing"}
+                )
+                return None
+        source_id = run.source_id or ""
+        try:
+            message_id = uuid.UUID(source_id)
+        except ValueError:
+            message_id = uuid.uuid5(run.id, "attached-chat-message")
+        return ChatRuntimeIntake(
+            handle=RunHandle(
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                thread_id=run.runtime_thread_id,
+                command_id=command.id,
+                runtime_type="langgraph",
+                created=False,
+            ),
+            message_id=message_id,
+            resumed=False,
+            stream_after=after,
+        )
 
     async def _accept_client_message(
         self,

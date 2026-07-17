@@ -2,6 +2,7 @@
 
 from collections import deque
 from datetime import UTC, datetime
+import json
 from types import SimpleNamespace
 import uuid
 
@@ -590,6 +591,51 @@ async def test_non_object_tool_payload_remains_renderable(monkeypatch):
         }
     ]
     assert db.committed is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_tool_history_returns_stable_call_identity(monkeypatch):
+    current_user = _actor(role="org_admin")
+    agent = _agent(current_user, creator_id=uuid.uuid4())
+    session = _session(agent, current_user.id)
+    message_id = uuid.uuid4()
+    created_at = datetime(2026, 7, 17, 10, 30, tzinfo=UTC)
+    message = SimpleNamespace(
+        id=message_id,
+        role="tool_call",
+        content=json.dumps(
+            {
+                "name": "read_file",
+                "args": {"path": "README.md"},
+                "status": "done",
+                "result": "contents",
+                "tool_call_id": "call-1",
+                "reasoning_content": "Inspect the file",
+            }
+        ),
+        created_at=created_at,
+        participant_id=None,
+        thinking=None,
+    )
+    db = RecordingDB(DummyResult([session]), DummyResult([message]))
+
+    async def fake_check_agent_access(_db, _user, _agent_id):
+        return agent, "use"
+
+    monkeypatch.setattr(chat_sessions_api, "check_agent_access", fake_check_agent_access)
+
+    messages = await chat_sessions_api.get_session_messages(
+        agent_id=agent.id,
+        session_id=session.id,
+        current_user=current_user,
+        db=db,
+    )
+
+    assert messages[0]["toolName"] == "read_file"
+    assert messages[0]["toolCallId"] == "call-1"
+    assert messages[0]["toolStatus"] == "done"
+    assert messages[0]["toolResult"] == "contents"
+    assert messages[0]["toolThinking"] == "Inspect the file"
 
 
 @pytest.mark.asyncio

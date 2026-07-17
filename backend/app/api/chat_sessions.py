@@ -848,6 +848,7 @@ async def get_session_messages(
                 entry["toolStatus"] = data.get("status", "done")
                 entry["toolResult"] = data.get("result", "")
                 entry["toolThinking"] = data.get("reasoning_content", "")
+                entry["toolCallId"] = data.get("tool_call_id") or ""
         if getattr(message, "thinking", None):
             entry["thinking"] = message.thinking
         if sender_name:

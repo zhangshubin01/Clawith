@@ -59,9 +59,14 @@ test('toast context methods keep stable identities across toast renders', () => 
   assert.match(toastProvider, /\}\), \[show\]\);/);
 });
 
-test('group composer shows explicit cancellation only for tracked cancellable runs', () => {
-  assert.match(groupsPage, /trackedRunIds/);
-  assert.match(groupsPage, /groupApi\.runState/);
+test('group composer and stream use session-wide active runs', () => {
+  assert.match(groupsPage, /groupApi\.activeRuns/);
+  assert.match(groupsPage, /\['group-active-runs', groupId, sessionId\]/);
   assert.match(groupsPage, /groupApi\.cancelRun/);
   assert.match(groupsPage, /canCancel=\{activeRunIds\.length > 0\}/);
+  assert.match(groupsPage, /run\.system_role === 'group_planning'/);
+  assert.match(groupsPage, /member\.participant_ref_id/);
+  assert.match(groupsPage, /name: member\.display_name/);
+  assert.match(groupsPage, /isPlanning=\{isPlanning\}/);
+  assert.match(groupsPage, /runningAgents=\{runningAgents\}/);
 });

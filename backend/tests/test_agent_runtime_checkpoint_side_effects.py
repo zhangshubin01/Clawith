@@ -170,6 +170,22 @@ async def test_completed_checkpoint_delivers_without_projection_round_trip() -> 
             "delivery_request": {"content": "verified"},
         }
     )
+    checkpoint = replace(
+        checkpoint,
+        state={
+            **checkpoint.state,
+            "messages": [
+                {
+                    "id": "assistant-final",
+                    "role": "assistant",
+                    "content": "verified",
+                    "runtime_run_id": str(run.run_id),
+                    "runtime_intent": "finish",
+                    "reasoning_content": "Validated the evidence",
+                }
+            ],
+        },
+    )
     handler = RuntimeCheckpointSideEffects(
         session_factory=_SessionFactory(),  # type: ignore[arg-type]
     )
@@ -183,6 +199,7 @@ async def test_completed_checkpoint_delivers_without_projection_round_trip() -> 
     request = deliver.await_args.args[1]
     assert request.content == "verified"
     assert request.checkpoint_id == "checkpoint-1"
+    assert request.thinking == "Validated the evidence"
 
 
 @pytest.mark.asyncio
@@ -233,6 +250,69 @@ async def test_resume_terminal_checkpoint_projects_resume_and_terminal_events() 
         "resumed",
         "run_completed",
     ]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_projects_replayable_tool_activity_with_redacted_arguments() -> None:
+    run, command, checkpoint = _records(lifecycle={"final_answer": "done"})
+    checkpoint = replace(
+        checkpoint,
+        state={
+            **checkpoint.state,
+            "messages": [
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": "",
+                    "runtime_run_id": str(run.run_id),
+                    "reasoning_content": "Inspect the file",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": '{"path":"README.md","api_key":"secret"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "id": "tool-result-1",
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "read_file",
+                    "content": "contents",
+                    "execution_status": "succeeded",
+                },
+            ],
+        },
+    )
+    sessions = _SessionFactory("not_required")
+
+    await RuntimeCheckpointSideEffects(
+        session_factory=sessions,  # type: ignore[arg-type]
+    ).handle(run=run, command=command, checkpoint=checkpoint)
+
+    compiled = [
+        statement.compile(dialect=postgresql.dialect()).params
+        for statement in sessions.sessions[0].statements
+    ]
+    activities = [
+        params["payload"]
+        for params in compiled
+        if params.get("event_type") == "status_changed"
+        and isinstance(params.get("payload"), dict)
+        and params["payload"].get("activity_type")
+    ]
+    assert [activity["activity_type"] for activity in activities] == [
+        "thinking",
+        "tool_call",
+        "tool_call",
+    ]
+    assert activities[1]["status"] == "running"
+    assert activities[2]["status"] == "done"
+    assert activities[2]["result"] == "contents"
+    assert activities[1]["args"]["api_key"] == "[REDACTED]"
 
 
 @pytest.mark.asyncio

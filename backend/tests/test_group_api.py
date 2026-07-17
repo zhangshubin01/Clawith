@@ -99,6 +99,7 @@ def test_group_router_exposes_management_and_read_state_boundaries() -> None:
     assert ("POST", "/api/groups/{group_id}/sessions/{session_id}/read") in routes
     assert ("GET", "/api/groups/{group_id}/sessions/{session_id}/messages") in routes
     assert ("POST", "/api/groups/{group_id}/sessions/{session_id}/messages") in routes
+    assert ("GET", "/api/groups/{group_id}/sessions/{session_id}/runs") in routes
     assert ("GET", "/api/groups/{group_id}/sessions/{session_id}/runs/{run_id}") in routes
     assert ("POST", "/api/groups/{group_id}/sessions/{session_id}/runs/{run_id}/cancel") in routes
     assert ("GET", "/api/groups/{group_id}/announcement") in routes
@@ -116,6 +117,70 @@ def test_group_router_exposes_management_and_read_state_boundaries() -> None:
 
 def test_group_invite_write_contract_only_accepts_participant_id() -> None:
     assert set(groups_api.InviteGroupMemberIn.model_fields) == {"participant_id"}
+
+
+@pytest.mark.asyncio
+async def test_active_group_runs_use_exact_checkpoint_status(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    user = _user(tenant_id)
+    participant = _participant(user)
+    group = _group(tenant_id, participant.id)
+    session = _session(tenant_id, group.id, participant.id)
+    agent_id = uuid.uuid4()
+    running = SimpleNamespace(id=uuid.uuid4(), agent_id=agent_id, system_role=None)
+    planning = SimpleNamespace(id=uuid.uuid4(), agent_id=None, system_role="group_planning")
+    terminal = SimpleNamespace(id=uuid.uuid4(), agent_id=uuid.uuid4(), system_role=None)
+
+    class _Scalars:
+        def all(self):
+            return [running, planning, terminal]
+
+    class _Result:
+        def scalars(self):
+            return _Scalars()
+
+    class _DB(_RecordingDB):
+        async def execute(self, _statement):
+            return _Result()
+
+    class _Reader:
+        async def get_run_state(self, _tenant_id, run_id):
+            return SimpleNamespace(
+                execution_status="completed" if run_id == terminal.id else "running"
+            )
+
+    @asynccontextmanager
+    async def fake_reader(_db):
+        yield _Reader()
+
+    async def fake_participant(_db, _user):
+        return participant
+
+    async def fake_authorize(*_args, **_kwargs):
+        return session
+
+    monkeypatch.setattr(groups_api, "_current_participant", fake_participant)
+    monkeypatch.setattr(groups_api, "_open_run_state_reader", fake_reader)
+    monkeypatch.setattr(
+        groups_api.group_chat_service,
+        "authorize_group_session",
+        fake_authorize,
+    )
+
+    result = await groups_api.list_active_group_runs(
+        group.id,
+        session.id,
+        current_user=user,
+        db=_DB(),
+    )
+
+    assert [item.run_id for item in result] == [running.id, planning.id]
+    assert result[0].status == "running"
+    assert result[0].can_cancel is True
+    assert result[0].agent_id == agent_id
+    assert result[0].system_role is None
+    assert result[1].agent_id is None
+    assert result[1].system_role == "group_planning"
 
 
 @pytest.mark.asyncio

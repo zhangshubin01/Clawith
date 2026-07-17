@@ -153,6 +153,101 @@ async def test_completed_delivery_maps_to_existing_done_packet() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_observation_events_restore_thinking_and_tool_packets() -> None:
+    handle = _handle()
+    agent_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    message = ChatMessage(
+        id=uuid.uuid4(),
+        agent_id=agent_id,
+        user_id=user_id,
+        role="assistant",
+        content="Finished result",
+        conversation_id=str(session_id),
+        mentions=[],
+    )
+    events = [
+        _event(
+            handle,
+            "status_changed",
+            position=1,
+            payload={
+                "activity_type": "thinking",
+                "status": "running",
+                "content": "I should inspect the file.",
+            },
+        ),
+        _event(
+            handle,
+            "status_changed",
+            position=2,
+            payload={
+                "activity_type": "tool_call",
+                "status": "running",
+                "name": "read_file",
+                "call_id": "call-1",
+                "args": {"path": "README.md"},
+                "reasoning_content": "I should inspect the file.",
+            },
+        ),
+        _event(
+            handle,
+            "status_changed",
+            position=3,
+            payload={
+                "activity_type": "tool_call",
+                "status": "done",
+                "name": "read_file",
+                "call_id": "call-1",
+                "args": {"path": "README.md"},
+                "result": "contents",
+                "reasoning_content": "I should inspect the file.",
+                "execution_status": "succeeded",
+            },
+        ),
+        _event(handle, "run_completed", position=4, payload={"status": "completed"}),
+        _event(
+            handle,
+            "delivery_succeeded",
+            position=5,
+            payload={
+                "delivery_kind": "terminal",
+                "lifecycle_status": "completed",
+                "message_id": str(message.id),
+            },
+        ),
+    ]
+    packets: list[dict] = []
+
+    async def send(packet: dict) -> None:
+        packets.append(packet)
+
+    await stream_web_chat_run(
+        handle=handle,
+        session_factory=_SessionFactory(_Session(message)),  # type: ignore[arg-type]
+        send_packet=send,
+        agent_id=agent_id,
+        session_id=session_id,
+        user_id=user_id,
+        event_source=_EventSource(events),
+    )
+
+    assert [packet["type"] for packet in packets] == [
+        "thinking",
+        "tool_call",
+        "tool_call",
+        "runtime_status",
+        "done",
+    ]
+    assert packets[1]["call_id"] == packets[2]["call_id"] == "call-1"
+    assert packets[1]["status"] == "running"
+    assert packets[2]["status"] == "done"
+    assert packets[2]["result"] == "contents"
+    assert packets[2]["event_cursor"].endswith(f"|{events[2].event_id}")
+
+
+@pytest.mark.asyncio
 async def test_waiting_delivery_returns_resume_identity_and_honors_cursor() -> None:
     handle = _handle()
     agent_id = uuid.uuid4()

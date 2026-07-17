@@ -185,6 +185,7 @@ def _terminal_request(
     original_target_outcome: str = "not_attempted",
     failure_code: str | None = None,
     failure_message: str | None = None,
+    thinking: str | None = None,
 ) -> DeliveryRequest:
     return DeliveryRequest(
         tenant_id=run.tenant_id,
@@ -196,6 +197,7 @@ def _terminal_request(
         original_target_outcome=original_target_outcome,  # type: ignore[arg-type]
         failure_code=failure_code,
         failure_message=failure_message,
+        thinking=thinking,
     )
 
 
@@ -260,7 +262,11 @@ async def test_direct_delivery_accepts_the_session_scoped_langgraph_thread() -> 
 
     receipt = await deliver_runtime_message(
         db,
-        _terminal_request(run, content="Same conversation, next Run"),
+        _terminal_request(
+            run,
+            content="Same conversation, next Run",
+            thinking="Checked the requested scope",
+        ),
         clock=lambda: NOW,
     )
 
@@ -269,6 +275,7 @@ async def test_direct_delivery_accepts_the_session_scoped_langgraph_thread() -> 
     assert receipt.status == "delivered"
     assert receipt.actual_session_id == session.id
     assert _added(db, ChatMessage)[0].conversation_id == str(session.id)
+    assert _added(db, ChatMessage)[0].thinking == "Checked the requested scope"
 
 
 @pytest.mark.asyncio

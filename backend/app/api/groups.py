@@ -8,13 +8,14 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
+from app.models.agent_run_event import AgentRunEvent
 from app.models.audit import AuditLog, ChatMessage
 from app.models.group import GroupMember
 from app.models.participant import Participant
@@ -154,6 +155,8 @@ class GroupRunStateOut(BaseModel):
     run_id: uuid.UUID
     status: str
     can_cancel: bool
+    agent_id: uuid.UUID | None = None
+    system_role: str | None = None
 
 
 class GroupTextFileIn(BaseModel):
@@ -969,6 +972,72 @@ async def create_group_message(
 
 
 @router.get(
+    "/{group_id}/sessions/{session_id}/runs",
+    response_model=list[GroupRunStateOut],
+)
+async def list_active_group_runs(
+    group_id: uuid.UUID,
+    session_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return exact non-terminal Runs that should animate this group Session."""
+    tenant_id = _tenant_id(current_user)
+    participant = await _current_participant(db, current_user)
+    try:
+        await group_chat_service.authorize_group_session(
+            db,
+            tenant_id=tenant_id,
+            group_id=group_id,
+            session_id=session_id,
+            participant_id=participant.id,
+            human_only=True,
+        )
+    except GroupChatServiceError as exc:
+        raise _translate_domain_error(exc) from exc
+
+    terminal_event = exists(
+        select(AgentRunEvent.id).where(
+            AgentRunEvent.tenant_id == tenant_id,
+            AgentRunEvent.run_id == AgentRun.id,
+            AgentRunEvent.event_type.in_(("run_completed", "run_failed", "run_cancelled")),
+        )
+    )
+    result = await db.execute(
+        select(AgentRun)
+        .where(
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.session_id == session_id,
+            AgentRun.source_type == "chat",
+            AgentRun.runtime_type == "langgraph",
+            ~terminal_event,
+        )
+        .order_by(AgentRun.created_at, AgentRun.id)
+    )
+    candidates = list(result.scalars().all())
+    active: list[GroupRunStateOut] = []
+    async with _open_run_state_reader(db) as reader:
+        for run in candidates:
+            try:
+                view = await reader.get_run_state(tenant_id, run.id)
+            except RunStateReadError:
+                continue
+            execution_status = view.execution_status or "created"
+            if execution_status in {"completed", "failed", "cancelled"}:
+                continue
+            active.append(
+                GroupRunStateOut(
+                    run_id=run.id,
+                    status=execution_status,
+                    can_cancel=True,
+                    agent_id=run.agent_id,
+                    system_role=run.system_role,
+                )
+            )
+    return active
+
+
+@router.get(
     "/{group_id}/sessions/{session_id}/runs/{run_id}",
     response_model=GroupRunStateOut,
 )
@@ -1002,6 +1071,8 @@ async def get_group_run_state(
         run_id=run.id,
         status=execution_status,
         can_cancel=execution_status not in {"completed", "failed", "cancelled"},
+        agent_id=run.agent_id,
+        system_role=run.system_role,
     )
 
 
@@ -1046,7 +1117,13 @@ async def cancel_group_run(
             actor_user_id=current_user.id,
         )
     )
-    return GroupRunStateOut(run_id=run.id, status="cancelling", can_cancel=False)
+    return GroupRunStateOut(
+        run_id=run.id,
+        status="cancelling",
+        can_cancel=False,
+        agent_id=run.agent_id,
+        system_role=run.system_role,
+    )
 
 
 @router.get("/{group_id}/announcement", response_model=GroupTextFileOut)
