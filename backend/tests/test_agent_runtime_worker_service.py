@@ -79,16 +79,31 @@ class _Worker:
 
 
 class _Session:
+    def __init__(self) -> None:
+        self.statements: list[object] = []
+
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, traceback):
         return False
 
+    def begin(self):
+        return self
+
+    async def execute(self, statement):
+        self.statements.append(statement)
+        return type("MutationResult", (), {"rowcount": 0})()
+
 
 class _SessionFactory:
+    def __init__(self) -> None:
+        self.sessions: list[_Session] = []
+
     def __call__(self) -> _Session:
-        return _Session()
+        session = _Session()
+        self.sessions.append(session)
+        return session
 
 
 class _Engine:
@@ -324,6 +339,7 @@ def test_component_builder_installs_current_agent_and_planning_graphs() -> None:
 @pytest.mark.asyncio
 async def test_worker_context_keeps_supplied_checkpointer_open() -> None:
     timeline: list[str] = []
+    session_factory = _SessionFactory()
 
     @asynccontextmanager
     async def manager():
@@ -334,7 +350,7 @@ async def test_worker_context_keeps_supplied_checkpointer_open() -> None:
     async with runtime_worker_context(
         settings=_settings(),
         checkpointer_manager=manager(),
-        session_factory=_SessionFactory(),  # type: ignore[arg-type]
+        session_factory=session_factory,  # type: ignore[arg-type]
         lock_engine=_Engine(),  # type: ignore[arg-type]
         claimant="worker-test",
         verify_schema=False,
@@ -346,6 +362,8 @@ async def test_worker_context_keeps_supplied_checkpointer_open() -> None:
         "worker_active",
         "checkpointer_exit",
     ]
+    assert len(session_factory.sessions) == 1
+    assert len(session_factory.sessions[0].statements) == 1
 
 
 @pytest.mark.asyncio

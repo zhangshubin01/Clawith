@@ -635,6 +635,62 @@ async def test_exhausted_start_is_claimed_for_quarantine_without_holding_lane():
 
 
 @pytest.mark.asyncio
+async def test_rejecting_start_atomically_releases_held_lane():
+    now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    tenant_id = uuid.uuid4()
+    run = _existing_run(
+        _registration(
+            tenant_id=tenant_id,
+            scheduling_lane_key=f"group_mention:{tenant_id}:{uuid.uuid4()}",
+            scheduling_position_created_at=now,
+            scheduling_position_id=uuid.uuid4(),
+        )
+    )
+    run.lane_held = True
+    run.lane_claimed_at = now
+    command = _command(
+        tenant_id=tenant_id,
+        run_id=run.id,
+        command_type="start",
+        status="claimed",
+        claimant="worker-1",
+        attempt_count=5,
+    )
+    db = _FakeSession(command, run)
+
+    rejected = await persistence.mark_command_rejected(
+        db,
+        tenant_id=tenant_id,
+        command_id=command.id,
+        claimant="worker-1",
+        error_code="reconciliation_required",
+        clock=lambda: now,
+    )
+
+    assert rejected.status == "rejected"
+    assert rejected.error_code == "reconciliation_required"
+    assert run.lane_held is False
+    assert run.lane_claimed_at is None
+    assert db.flush_count == 1
+
+
+def test_rejected_start_lane_repair_targets_only_abandoned_holders() -> None:
+    statement = persistence._release_rejected_start_lanes_statement()
+    sql = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "UPDATE agent_runs SET lane_held=false, lane_claimed_at=NULL" in sql
+    assert "agent_runs.lane_held IS true" in sql
+    assert "agent_run_commands.command_type = 'start'" in sql
+    assert "agent_run_commands.status = 'rejected'" in sql
+    assert "agent_run_commands.run_id = agent_runs.id" in sql
+
+
+@pytest.mark.asyncio
 async def test_applied_and_rejected_transitions_require_the_current_claimant():
     now = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
     tenant_id = uuid.uuid4()

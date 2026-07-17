@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 import uuid
 
-from sqlalchemy import and_, exists, or_, select, tuple_
+from sqlalchemy import and_, exists, or_, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -862,19 +862,74 @@ async def mark_command_rejected(
     error_code: str,
     clock: Callable[[], datetime] | None = None,
 ) -> AgentRunCommand:
-    """Reject a claimed command with a stable, non-sensitive error code."""
+    """Reject a claimed command and release an abandoned start lane atomically."""
     _require_text(error_code, field="error_code", max_length=100)
     command = await _get_locked_command(db, tenant_id=tenant_id, command_id=command_id)
-    if command.status == "rejected" and command.claimed_by == claimant and command.error_code == error_code:
-        return command
-    _require_claimant(command, claimant)
-    command.status = "rejected"
-    command.applied_checkpoint_id = None
-    command.error_code = error_code
-    command.claim_expires_at = None
-    command.applied_at = (clock or (lambda: datetime.now(UTC)))()
-    await db.flush()
+    already_rejected = (
+        command.status == "rejected"
+        and command.claimed_by == claimant
+        and command.error_code == error_code
+    )
+    if not already_rejected:
+        _require_claimant(command, claimant)
+        command.status = "rejected"
+        command.applied_checkpoint_id = None
+        command.error_code = error_code
+        command.claim_expires_at = None
+        command.applied_at = (clock or (lambda: datetime.now(UTC)))()
+
+    lane_released = False
+    if command.command_type == "start":
+        run_result = await db.execute(
+            select(AgentRun)
+            .where(
+                AgentRun.tenant_id == tenant_id,
+                AgentRun.id == command.run_id,
+            )
+            .with_for_update()
+        )
+        run = run_result.scalar_one_or_none()
+        if run is None:
+            raise RuntimePersistenceError(
+                "run_not_found",
+                "rejected start command Run does not exist in its tenant",
+            )
+        if run.lane_held:
+            run.lane_held = False
+            run.lane_claimed_at = None
+            lane_released = True
+
+    if not already_rejected or lane_released:
+        await db.flush()
     return command
+
+
+def _release_rejected_start_lanes_statement():
+    rejected_start = exists(
+        select(AgentRunCommand.id).where(
+            AgentRunCommand.tenant_id == AgentRun.tenant_id,
+            AgentRunCommand.run_id == AgentRun.id,
+            AgentRunCommand.command_type == "start",
+            AgentRunCommand.status == "rejected",
+        )
+    )
+    return (
+        update(AgentRun)
+        .where(
+            AgentRun.lane_held.is_(True),
+            rejected_start,
+        )
+        .values(
+            lane_held=False,
+            lane_claimed_at=None,
+        )
+    )
+
+
+async def release_rejected_start_lanes(db: AsyncSession) -> int:
+    """Repair lanes left behind by start rejections from older workers."""
+    result = await db.execute(_release_rejected_start_lanes_statement())
+    return max(result.rowcount or 0, 0)
 
 
 async def renew_command_claim(

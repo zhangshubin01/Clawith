@@ -190,6 +190,7 @@ class RunStateReader:
         observation: CheckpointObservation | None,
         control_status: LifecycleStatus | None,
         fallback_status: LifecycleStatus | None,
+        control_error_code: str | None = None,
     ) -> RunView:
         lifecycle: Mapping[str, object] = {}
         if observation is not None:
@@ -236,7 +237,7 @@ class RunStateReader:
             ),
             waiting_correlation_id=_text(waiting_map.get("correlation_id")),
             result_summary=_summary(lifecycle.get("result_summary")),
-            error_code=_text(error_map.get("code")),
+            error_code=_text(error_map.get("code")) or _text(control_error_code),
             last_error=_text(error_map.get("message")) or _text(lifecycle.get("reason")),
             verification_result=verification_result,
             delivery_status=cast(DeliveryStatus, run.delivery_status),
@@ -290,6 +291,14 @@ class RunStateReader:
                 if command.command_type in {"start", "resume"}
                 and command.status == "applied"
                 and command.applied_checkpoint_id is not None
+            ),
+            None,
+        )
+        rejected_start = next(
+            (
+                command
+                for command in reversed(commands)
+                if command.command_type == "start" and command.status == "rejected"
             ),
             None,
         )
@@ -348,6 +357,15 @@ class RunStateReader:
                 observation=applied_observation,
                 control_status=None,
                 fallback_status=None,
+            )
+
+        if rejected_start is not None:
+            return self._view(
+                run,
+                observation=None,
+                control_status="failed",
+                fallback_status="failed",
+                control_error_code=rejected_start.error_code,
             )
 
         return self._view(

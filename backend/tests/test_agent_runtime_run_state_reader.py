@@ -356,3 +356,21 @@ async def test_pending_resume_without_checkpoint_keeps_prior_applied_wait_visibl
     assert view.execution_status == "waiting_user"
     assert view.waiting_correlation_id == "confirm-1"
     assert view.applied_checkpoint_id == "checkpoint-waiting"
+
+
+@pytest.mark.asyncio
+async def test_rejected_start_without_checkpoint_is_a_failed_control_boundary() -> None:
+    run, start, registry = _records()
+    start.status = "rejected"
+    start.applied_checkpoint_id = None
+    start.error_code = "reconciliation_required"
+    compiled = _Compiled({})
+
+    view = await RunStateReader(
+        _Session(run, [start]),  # type: ignore[arg-type]
+        graph_registry=_registry(compiled),
+    ).get_run_state(run.tenant_id, run.id)
+
+    assert view.execution_status == "failed"
+    assert view.error_code == "reconciliation_required"
+    assert view.applied_checkpoint_id is None

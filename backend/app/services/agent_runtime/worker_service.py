@@ -70,6 +70,7 @@ from app.services.agent_runtime.planning import (
     RuntimeNodeExecutorRouter,
 )
 from app.services.agent_runtime.planning_scheduler import PlanningCheckpointScheduler
+from app.services.agent_runtime.persistence import release_rejected_start_lanes
 from app.services.agent_runtime.product_reconciler import (
     ProductReconcileResult,
     RuntimeProductReconciler,
@@ -568,6 +569,14 @@ async def runtime_worker_context(
         lock_engine = lock_engine or engine
     if verify_schema:
         await assert_runtime_schema_ready(lock_engine, settings=runtime_settings)
+    async with session_factory() as db:
+        async with db.begin():
+            repaired_lanes = await release_rejected_start_lanes(db)
+    if repaired_lanes:
+        logger.warning(
+            "Released scheduling lanes abandoned by rejected start commands",
+            extra={"repaired_lane_count": repaired_lanes},
+        )
     manager = checkpointer_manager or create_checkpointer(runtime_settings)
     async with manager as checkpointer:
         yield build_runtime_worker_components(
