@@ -173,6 +173,81 @@ def _sql(statement) -> str:
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("confirmed_status", "expected_error_code"),
+    [
+        ("failed", "externally_confirmed_not_applied"),
+        ("succeeded", "externally_confirmed_applied"),
+    ],
+)
+async def test_unknown_conditional_write_can_be_reconciled_by_user(
+    confirmed_status: str,
+    expected_error_code: str,
+) -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    execution = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="unknown",
+        effect="write",
+        retry_policy="conditional",
+    )
+    execution.tool_name = "write_file"
+    execution.completed_at = _NOW
+    db = _FakeSession(execution)
+
+    result = await tool_execution.reconcile_unknown_tool_execution(
+        db,  # type: ignore[arg-type]
+        tenant_id=tenant_id,
+        run_id=run_id,
+        execution_id=execution.id,
+        confirmed_status=confirmed_status,  # type: ignore[arg-type]
+        confirmed_by_user_id=user_id,
+        note="Confirmed from the Direct Chat UI.",
+        clock=lambda: _NOW + timedelta(minutes=1),
+    )
+
+    assert result.status == confirmed_status
+    assert result.result_metadata["external_reconciliation"] is True
+    assert result.result_metadata["reconciled_by_user_id"] == str(user_id)
+    assert result.result_metadata["error_code"] == expected_error_code
+    assert result.result_metadata["retryable"] is False
+    assert result.lease_owner is None
+    assert db.flush_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_reconciliation_rejects_unsupported_tool() -> None:
+    tenant_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    execution = _execution(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        status="unknown",
+        effect="external_write",
+        retry_policy="never",
+    )
+    db = _FakeSession(execution)
+
+    with pytest.raises(
+        tool_execution.ToolExecutionError,
+        match="only supported for conditional write_file",
+    ):
+        await tool_execution.reconcile_unknown_tool_execution(
+            db,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            run_id=run_id,
+            execution_id=execution.id,
+            confirmed_status="failed",
+            confirmed_by_user_id=uuid.uuid4(),
+            note="not applied",
+            clock=lambda: _NOW,
+        )
+
+
 def test_argument_fingerprint_is_canonical_and_rejects_non_json_values():
     first = tool_execution.fingerprint_arguments({"message": "你好", "nested": {"b": 2, "a": 1}})
     second = tool_execution.fingerprint_arguments({"nested": {"a": 1, "b": 2}, "message": "你好"})

@@ -7271,6 +7271,46 @@ select:focus {
   border-color: var(--border-strong);
   box-shadow: 0 0 0 3px rgba(58, 58, 66, 0.08);
 }
+
+.chat-tool-reconciliation {
+  margin: 8px;
+  padding: 10px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.chat-tool-reconciliation__title,
+.chat-tool-reconciliation__detail,
+.chat-tool-reconciliation__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-tool-reconciliation__title {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.chat-tool-reconciliation__detail {
+  align-items: flex-start;
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.chat-tool-reconciliation__actions {
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.chat-tool-reconciliation__unsupported {
+  margin-top: 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
 [data-theme="dark"] .chat-composer:focus-within {
   border-color: rgba(255, 255, 255, 0.18);
   box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08);

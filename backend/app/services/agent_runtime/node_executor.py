@@ -1031,6 +1031,21 @@ class DeterministicRuntimeNodeExecutor:
             "runtime_run_id": context.run_id,
         })
         pending_calls = _tool_calls(cast(RuntimeLifecycle, lifecycle))
+        if waiting_status == "waiting_user" and pending_calls:
+            deferred = lifecycle.get("deferred_resume_messages", [])
+            if not isinstance(deferred, list) or any(
+                not isinstance(message, Mapping) for message in deferred
+            ):
+                raise RuntimeNodeTransitionError(
+                    "invalid_deferred_resume_messages",
+                    "deferred resume messages must be an array of objects",
+                )
+            lifecycle["deferred_resume_messages"] = [
+                *[dict(message) for message in deferred],
+                dict(resume_message),
+            ]
+            lifecycle["next_route"] = "tool"
+            return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
         if waiting_status == "waiting_external" and not pending_calls:
             recovered_poll_call = _async_poll_call_from_resume(resume_value)
             if recovered_poll_call is not None:

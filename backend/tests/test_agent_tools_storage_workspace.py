@@ -129,6 +129,26 @@ async def test_agent_file_tools_use_storage_paths(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_read_file_outcome_rejects_binary_spreadsheet(monkeypatch):
+    agent_id = uuid.uuid4()
+    storage = MemoryStorageBackend({
+        f"{agent_id}/workspace/inventory.xlsx": b"PK\x03\x04binary workbook",
+    })
+    monkeypatch.setattr(agent_tools, "get_storage_backend", lambda: storage)
+
+    outcome = await agent_tools._read_file_outcome(
+        agent_id,
+        {"path": "workspace/inventory.xlsx"},
+        tenant_id=None,
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.error_code == "workspace_binary_file_unsupported"
+    assert outcome.retryable is False
+    assert "text files only" in (outcome.result_summary or "")
+
+
+@pytest.mark.asyncio
 async def test_temp_workspace_materializes_only_requested_paths(monkeypatch):
     agent_id = uuid.uuid4()
     storage = MemoryStorageBackend({

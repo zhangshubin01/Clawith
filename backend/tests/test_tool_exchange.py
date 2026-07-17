@@ -310,6 +310,15 @@ def test_missing_stable_message_or_call_ids_fail_closed(messages):
     ),
     [
         ("not_started", {}, "retry_model", True, False, False, False),
+        (
+            "not_started",
+            {"cancelled_before_execution": True},
+            "summarize",
+            False,
+            False,
+            False,
+            True,
+        ),
         ("succeeded", {"result_ref": "artifact://done"}, "summarize", True, False, False, True),
         ("started", {}, "block_reconcile", False, True, False, False),
         ("unknown", {"may_have_side_effect": True}, "require_confirmation", False, True, True, False),

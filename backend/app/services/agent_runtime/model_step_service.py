@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import asdict, replace
 import json
+import random
+import re
 from typing import Protocol, cast
 import uuid
 
+from loguru import logger
 from sqlalchemy import select
 
 from app.models.agent import Agent
+from app.models.agent_run_command import AgentRunCommand
 from app.models.agent_tool_execution import AgentToolExecution
 from app.models.llm import LLMModel
 from app.services.agent_context import build_agent_context
@@ -36,6 +41,7 @@ from app.services.agent_runtime.state import (
     JsonValue,
     RuntimeContext,
     RuntimeGraphState,
+    runtime_messages_as_json,
 )
 from app.services.agent_runtime.run_compactor import RunCompactInputs
 from app.services.agent_runtime.tool_result_store import (
@@ -51,6 +57,7 @@ from app.services.llm.client import LLMMessage
 from app.services.llm.failover import FailoverErrorType, classify_error
 from app.services.llm.finish import (
     FINISH_TOOL_DEFINITION,
+    content_claims_group_handoff,
     find_finish_call,
     group_finish_tool_definition,
     parse_tool_arguments,
@@ -62,6 +69,10 @@ from app.services.llm.utils import get_max_tokens
 _ACTIVE_AGENT_STATUSES = frozenset({"creating", "running", "idle"})
 _LEDGER_METADATA_KEY = "__clawith_tool_execution__"
 _RUNTIME_WAIT_TOOL_NAME = "wait"
+_DEFAULT_MODEL_RETRY_ATTEMPTS = 3
+_DEFAULT_MODEL_RETRY_BASE_DELAY_SECONDS = 1.0
+_DEFAULT_MODEL_RETRY_MAX_DELAY_SECONDS = 8.0
+_DEFAULT_MODEL_RETRY_JITTER_RATIO = 0.2
 _AGENTBAY_SCREENSHOT_TOOL_NAMES = frozenset(
     {
         "agentbay_browser_screenshot",
@@ -69,6 +80,11 @@ _AGENTBAY_SCREENSHOT_TOOL_NAMES = frozenset(
         "agentbay_computer_precision_screenshot",
     }
 )
+
+
+def _retry_http_status(error: Exception) -> str:
+    match = re.search(r"(?<!\d)(408|429|500|502|503|504)(?!\d)", str(error))
+    return match.group(1) if match else "unknown"
 _RUNTIME_WAIT_TOOL_DEFINITION: dict = {
     "type": "function",
     "function": {
@@ -299,6 +315,42 @@ def _ledger(executions: Sequence[AgentToolExecution]) -> dict[str, JsonObject]:
             "request_ref": execution.request_ref,
         }
     return result
+
+
+def _prior_incomplete_tool_calls(
+    state: RuntimeGraphState,
+    *,
+    current_run_id: uuid.UUID,
+) -> dict[uuid.UUID, tuple[JsonObject, ...]]:
+    """Find unresolved proposals owned by prior Runs on the shared Thread."""
+    messages = runtime_messages_as_json(state)
+    result_call_ids = {
+        str(message.get("tool_call_id") or message.get("call_id"))
+        for message in messages
+        if message.get("role") in {"tool", "tool_result"}
+        and isinstance(message.get("tool_call_id") or message.get("call_id"), str)
+    }
+    unresolved: dict[uuid.UUID, list[JsonObject]] = {}
+    for message in messages:
+        if message.get("role") != "assistant" or not isinstance(message.get("tool_calls"), list):
+            continue
+        raw_run_id = message.get("runtime_run_id")
+        if not isinstance(raw_run_id, str):
+            continue
+        try:
+            run_id = uuid.UUID(raw_run_id)
+        except ValueError:
+            continue
+        if run_id == current_run_id:
+            continue
+        for raw_call in cast(list[object], message["tool_calls"]):
+            if not isinstance(raw_call, Mapping):
+                continue
+            call = cast(JsonObject, dict(raw_call))
+            call_id = call.get("id")
+            if isinstance(call_id, str) and call_id not in result_call_ids:
+                unresolved.setdefault(run_id, []).append(call)
+    return {run_id: tuple(calls) for run_id, calls in unresolved.items()}
 
 
 def _not_empty(value: JsonValue) -> bool:
@@ -596,6 +648,18 @@ def _parse_step(
     if not step.tool_calls:
         content = (step.content or "").strip()
         if content:
+            if allow_group_handoff and content_claims_group_handoff(content):
+                return _repair(
+                    state,
+                    context,
+                    step,
+                    "The response explicitly claims a Group handoff, but it did "
+                    "not call `finish` with structured `mention_participant_ids`. "
+                    "If another Agent must continue, call `group_query_members` "
+                    "and retry with every stable target ID in one `finish` call. "
+                    "Otherwise remove the handoff claim. Text alone never routes work.",
+                    repair_code="invalid_finish",
+                )
             return ModelStepResult(
                 intent="finish",
                 assistant_message=_assistant_message(
@@ -759,6 +823,11 @@ class RuntimeModelStepService:
         tool_provider: ToolProvider = get_runtime_agent_tools_for_llm,
         prompt_builder: PromptBuilder = build_agent_context,
         tool_result_store: ToolResultStore | None = None,
+        model_retry_attempts: int = _DEFAULT_MODEL_RETRY_ATTEMPTS,
+        model_retry_base_delay_seconds: float = _DEFAULT_MODEL_RETRY_BASE_DELAY_SECONDS,
+        model_retry_max_delay_seconds: float = _DEFAULT_MODEL_RETRY_MAX_DELAY_SECONDS,
+        model_retry_jitter_ratio: float = _DEFAULT_MODEL_RETRY_JITTER_RATIO,
+        retry_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._session_factory = session_factory
         self._context_builder = context_builder
@@ -768,10 +837,25 @@ class RuntimeModelStepService:
         self._tool_result_store = tool_result_store or ToolResultStore(
             session_factory=session_factory
         )
+        self._model_retry_attempts = max(0, model_retry_attempts)
+        self._model_retry_base_delay_seconds = max(
+            0.0,
+            model_retry_base_delay_seconds,
+        )
+        self._model_retry_max_delay_seconds = max(
+            self._model_retry_base_delay_seconds,
+            model_retry_max_delay_seconds,
+        )
+        self._model_retry_jitter_ratio = min(
+            1.0,
+            max(0.0, model_retry_jitter_ratio),
+        )
+        self._retry_sleep = retry_sleep
 
     async def _load(
         self,
         context: RuntimeContext,
+        state: RuntimeGraphState,
     ) -> tuple[LLMModel, Agent, dict[str, JsonObject]]:
         try:
             tenant_id = uuid.UUID(context.tenant_id)
@@ -783,6 +867,7 @@ class RuntimeModelStepService:
                 "invalid_runtime_identity",
                 "Runtime Context contains an invalid UUID",
             ) from exc
+        prior_incomplete = _prior_incomplete_tool_calls(state, current_run_id=run_id)
         async with self._session_factory() as db:
             model_result = await db.execute(select(LLMModel).where(LLMModel.id == model_id))
             model = model_result.scalar_one_or_none()
@@ -800,6 +885,25 @@ class RuntimeModelStepService:
                 )
             )
             executions = list(ledger_result.scalars().all())
+            cancelled_run_ids: set[uuid.UUID] = set()
+            if prior_incomplete:
+                cancelled_result = await db.execute(
+                    select(AgentRunCommand.run_id).where(
+                        AgentRunCommand.tenant_id == tenant_id,
+                        AgentRunCommand.run_id.in_(tuple(prior_incomplete)),
+                        AgentRunCommand.command_type == "cancel",
+                        AgentRunCommand.status == "applied",
+                    )
+                )
+                cancelled_run_ids = set(cancelled_result.scalars().all())
+                if cancelled_run_ids:
+                    prior_execution_result = await db.execute(
+                        select(AgentToolExecution).where(
+                            AgentToolExecution.tenant_id == tenant_id,
+                            AgentToolExecution.run_id.in_(tuple(cancelled_run_ids)),
+                        )
+                    )
+                    executions.extend(prior_execution_result.scalars().all())
         if (
             model is None
             or not model.enabled
@@ -819,7 +923,22 @@ class RuntimeModelStepService:
                 "agent_unavailable",
                 "Runtime Agent is unavailable in the requested tenant",
             )
-        return model, agent, _ledger(executions)
+        ledger = _ledger(executions)
+        for cancelled_run_id in cancelled_run_ids:
+            for call in prior_incomplete.get(cancelled_run_id, ()):
+                call_id = call.get("id")
+                if not isinstance(call_id, str) or call_id in ledger:
+                    continue
+                ledger[call_id] = {
+                    "status": "not_started",
+                    "tool_name": _tool_name(call) or "unknown_tool",
+                    "side_effect_classification": "read",
+                    "retry_policy": "safe",
+                    "may_have_side_effect": False,
+                    "cancelled_before_execution": True,
+                    "result_summary": "Cancelled before tool execution started.",
+                }
+        return model, agent, ledger
 
     async def _fallback_model(
         self,
@@ -849,7 +968,7 @@ class RuntimeModelStepService:
         context: RuntimeContext,
     ) -> RunCompactInputs:
         """Profile the exact business request shape used by the Compact node."""
-        model, agent, ledger = await self._load(context)
+        model, agent, ledger = await self._load(context, state)
         allow_user_wait = not _is_group_agent_run(state)
         application_tools = (
             with_group_runtime_tools(
@@ -1119,13 +1238,94 @@ class RuntimeModelStepService:
             supports_vision=bool(model.supports_vision),
         )
 
+    async def _call_prepared_with_retry(
+        self,
+        *,
+        model: LLMModel,
+        agent: Agent,
+        messages: list[LLMMessage],
+        tools: list[dict],
+    ) -> LLMCompletionStep:
+        """Retry only transient provider failures before model failover."""
+        total_attempts = self._model_retry_attempts + 1
+        for attempt in range(1, total_attempts + 1):
+            try:
+                return await self._call_prepared(
+                    model=model,
+                    agent=agent,
+                    messages=messages,
+                    tools=tools,
+                )
+            except Exception as exc:
+                classification = classify_error(exc)
+                if (
+                    classification != FailoverErrorType.RETRYABLE
+                    or attempt >= total_attempts
+                ):
+                    if classification == FailoverErrorType.RETRYABLE:
+                        logger.warning(
+                            "[RuntimeModelRetry] exhausted provider={} model={} "
+                            "attempts={} error_type={} http_status={} classification={}",
+                            model.provider,
+                            model.model,
+                            total_attempts,
+                            type(exc).__name__,
+                            _retry_http_status(exc),
+                            classification.value,
+                        )
+                    raise
+
+                base_delay = min(
+                    self._model_retry_base_delay_seconds * (2 ** (attempt - 1)),
+                    self._model_retry_max_delay_seconds,
+                )
+                jitter = random.uniform(
+                    1.0 - self._model_retry_jitter_ratio,
+                    1.0 + self._model_retry_jitter_ratio,
+                )
+                delay = base_delay * jitter
+                logger.warning(
+                    "[RuntimeModelRetry] provider={} model={} attempt={}/{} "
+                    "error_type={} http_status={} classification={} backoff_seconds={:.3f}",
+                    model.provider,
+                    model.model,
+                    attempt,
+                    total_attempts,
+                    type(exc).__name__,
+                    _retry_http_status(exc),
+                    classification.value,
+                    delay,
+                )
+                await self._retry_sleep(delay)
+
+        raise AssertionError("model retry loop exhausted without an exception")
+
+    def _provider_retry_wait(
+        self,
+        *,
+        context: RuntimeContext,
+        model: LLMModel,
+    ) -> ModelStepResult:
+        attempts = self._model_retry_attempts + 1
+        return ModelStepResult(
+            intent="wait",
+            waiting_request={
+                "waiting_type": "user",
+                "reason": (
+                    f"Model provider remained unavailable after {attempts} attempts. "
+                    "The Run checkpoint is preserved; resume to retry the model call."
+                ),
+                "correlation_id": f"model-provider-retry:{context.run_id}:{model.id}",
+            },
+        )
+
     async def complete_once(
         self,
         state: RuntimeGraphState,
         context: RuntimeContext,
     ) -> ModelStepResult:
         try:
-            model, agent, ledger = await self._load(context)
+            model, agent, ledger = await self._load(context, state)
             allow_user_wait = not _is_group_agent_run(state)
             application_tools = (
                 with_group_runtime_tools(
@@ -1176,7 +1376,7 @@ class RuntimeModelStepService:
             failed_over_from: LLMModel | None = None
             active_allowed_names = allowed_names
             try:
-                step = await self._call_prepared(
+                step = await self._call_prepared_with_retry(
                     model=model,
                     agent=agent,
                     messages=prepared,
@@ -1195,10 +1395,10 @@ class RuntimeModelStepService:
                     primary_model=model,
                 )
                 if fallback is None:
-                    raise RuntimeModelCallError(
-                        "model_call_failed",
-                        "Runtime primary model call failed and no usable fallback is configured",
-                    ) from primary_error
+                    return self._provider_retry_wait(
+                        context=context,
+                        model=model,
+                    )
                 fallback_application_tools = _application_tools_for_model(
                     available_application_tools,
                     supports_vision=bool(fallback.supports_vision),
@@ -1241,13 +1441,18 @@ class RuntimeModelStepService:
                 if isinstance(fallback_prepared, ModelStepResult):
                     return fallback_prepared
                 try:
-                    step = await self._call_prepared(
+                    step = await self._call_prepared_with_retry(
                         model=fallback,
                         agent=agent,
                         messages=fallback_prepared,
                         tools=fallback_tools,
                     )
                 except Exception as fallback_error:
+                    if classify_error(fallback_error) == FailoverErrorType.RETRYABLE:
+                        return self._provider_retry_wait(
+                            context=context,
+                            model=fallback,
+                        )
                     raise RuntimeModelCallError(
                         "model_failover_failed",
                         "Runtime fallback model call also failed",

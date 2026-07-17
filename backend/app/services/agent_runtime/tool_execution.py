@@ -127,6 +127,12 @@ _RESULT_METADATA_KEYS = frozenset(
         "async_poll_correlation_id",
         "async_poll_call_id",
         "async_poll_scheduled",
+        "external_reconciliation",
+        "reconciled_by_user_id",
+        "reconciled_at",
+        "reconciliation_note",
+        "original_status",
+        "original_completed_at",
     }
 )
 _SENSITIVE_KEYS = frozenset(
@@ -1811,3 +1817,105 @@ async def mark_tool_execution_unknown(
         metadata=metadata,
         clock=clock,
     )
+
+
+async def reconcile_unknown_tool_execution(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    confirmed_status: Literal["succeeded", "failed"],
+    confirmed_by_user_id: uuid.UUID,
+    note: str,
+    clock: Callable[[], datetime] | None = None,
+) -> AgentToolExecution:
+    """Settle one unknown receipt from an explicit, audited human confirmation."""
+    normalized_note, _, _, _ = _normalize_text(note, redact=True)
+    normalized_note = normalized_note.strip()
+    if not normalized_note:
+        raise ToolExecutionError(
+            "invalid_tool_reconciliation",
+            "a reconciliation note is required",
+        )
+    if len(normalized_note) > 2_000:
+        raise ToolExecutionError(
+            "invalid_tool_reconciliation",
+            "reconciliation note exceeds its storage limit",
+        )
+
+    execution = await _get_locked_execution(
+        db,
+        tenant_id=tenant_id,
+        execution_id=execution_id,
+    )
+    if execution.run_id != run_id:
+        raise ToolExecutionError(
+            "tool_execution_scope_mismatch",
+            "tool execution does not belong to the requested run",
+        )
+    effect, retry_policy = _execution_metadata(execution)
+    if (
+        execution.tool_name != "write_file"
+        or effect != "write"
+        or retry_policy != "conditional"
+    ):
+        raise ToolExecutionError(
+            "tool_execution_reconciliation_not_supported",
+            "manual reconciliation is only supported for conditional write_file receipts",
+        )
+
+    prior_metadata = (
+        execution.result_metadata
+        if isinstance(execution.result_metadata, dict)
+        else {}
+    )
+    already_confirmed = prior_metadata.get("external_reconciliation") is True
+    if execution.status != "unknown":
+        if execution.status == confirmed_status and already_confirmed:
+            return execution
+        raise ToolExecutionError(
+            "tool_execution_reconciliation_conflict",
+            f"tool execution cannot be reconciled from status {execution.status}",
+        )
+
+    reconciled_at = (clock or (lambda: datetime.now(UTC)))()
+    original_completed_at = execution.completed_at
+    error_code = (
+        "externally_confirmed_applied"
+        if confirmed_status == "succeeded"
+        else "externally_confirmed_not_applied"
+    )
+    summary = (
+        f"User confirmed that the prior {execution.tool_name} operation took "
+        "effect. Do not repeat it."
+        if confirmed_status == "succeeded"
+        else f"User confirmed that the prior {execution.tool_name} operation "
+        "did not take effect. A new tool call may retry it safely."
+    )
+    execution.status = confirmed_status
+    execution.result_summary = summary
+    if confirmed_status == "failed":
+        execution.result_ref = None
+    execution.result_metadata = _bounded_result_metadata(
+        {
+            **prior_metadata,
+            "error_code": error_code,
+            "retryable": False,
+            "external_reconciliation": True,
+            "reconciled_by_user_id": str(confirmed_by_user_id),
+            "reconciled_at": reconciled_at.isoformat(),
+            "reconciliation_note": normalized_note,
+            "original_status": "unknown",
+            "original_completed_at": (
+                original_completed_at.isoformat()
+                if original_completed_at is not None
+                else None
+            ),
+        }
+    )
+    execution.lease_owner = None
+    execution.lease_expires_at = None
+    execution.completed_at = reconciled_at
+    await db.flush()
+    return execution

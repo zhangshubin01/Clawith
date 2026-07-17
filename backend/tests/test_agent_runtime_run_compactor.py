@@ -558,6 +558,38 @@ async def test_started_exchange_is_retained_and_never_crossed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancelled_not_started_exchange_can_enter_summary() -> None:
+    messages = [
+        _normal("old-safe", "old " * 300),
+        _assistant("assistant-cancelled", "call-cancelled"),
+        {**_normal("current", "exact"), "runtime_input": "current"},
+    ]
+    state, context, tenant_id = _state(messages)
+
+    async def complete(*_args, **_kwargs):
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+        ledger={
+            "call-cancelled": {
+                "status": "not_started",
+                "tool_name": "lookup",
+                "cancelled_before_execution": True,
+                "may_have_side_effect": False,
+            }
+        },
+    ).compact_if_needed(state, context)
+
+    assert result.covered_through_message_id == "assistant-cancelled"
+    assert result.recent_messages is not None
+    assert [message["id"] for message in result.recent_messages] == ["current"]
+
+
+@pytest.mark.asyncio
 async def test_oversized_settled_exchange_enters_summary_as_facts_and_refs() -> None:
     messages = [
         _assistant("assistant-tools", "call-1"),

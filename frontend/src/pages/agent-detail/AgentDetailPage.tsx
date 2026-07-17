@@ -67,6 +67,7 @@ import {
     sessionRuntimeStateResponseIsValid,
     terminalAssistantMessageAlreadyPresent,
     type SessionActiveRun,
+    type ToolReconciliation,
     waitingSessionActiveRunHint,
 } from './sessionRuntimeState';
 import { onboardingKickoffKey, shouldKickoffOnboarding } from './onboardingKickoff';
@@ -2363,6 +2364,7 @@ export default function AgentDetailPage() {
     const sessionUiStateRef = useRef<Record<SessionRuntimeKey, { isWaiting: boolean; isStreaming: boolean }>>({});
     const sessionActiveRunRef = useRef<Record<SessionRuntimeKey, SessionActiveRun | null>>({});
     const [activeRun, setActiveRun] = useState<SessionActiveRun | null>(null);
+    const [reconcilingExecutionId, setReconcilingExecutionId] = useState<string | null>(null);
     const [messagesLoadedRuntimeKey, setMessagesLoadedRuntimeKey] = useState<string | null>(null);
     const [runtimeStateLoadedRuntimeKey, setRuntimeStateLoadedRuntimeKey] = useState<string | null>(null);
     const activeSessionIdRef = useRef<string | null>(null);
@@ -3649,6 +3651,74 @@ export default function AgentDetailPage() {
         window.setTimeout(() => {
             void fetchSessionRuntimeState(runtimeAgentId, runtimeSessionId);
         }, 1000);
+    };
+
+    const handleToolReconciliation = async (
+        reconciliation: ToolReconciliation,
+        outcome: 'applied' | 'not_applied',
+    ) => {
+        if (!id || !activeSession?.id || !activeRun?.correlationId) return;
+        const correlationId = activeRun.correlationId;
+        const applied = outcome === 'applied';
+        const confirmation = applied
+            ? t('agent.chat.reconcileAppliedConfirm', '确认该操作已经生效，并且不得重复执行？')
+            : t('agent.chat.reconcileNotAppliedConfirm', '确认该操作没有生效，可以让 Agent 重新决定是否重试？');
+        if (!window.confirm(confirmation)) return;
+
+        const run = activeRun;
+        const sessionId = String(activeSession.id);
+        const runtimeKey = buildSessionRuntimeKey(id, sessionId);
+        setReconcilingExecutionId(reconciliation.executionId);
+        try {
+            const response = await fetch(
+                `/api/agents/${id}/sessions/${sessionId}/runs/${run.runId}/tool-executions/${reconciliation.executionId}/reconcile`,
+                {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${localStorage.getItem('token')}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        outcome,
+                        correlation_id: correlationId,
+                        note: applied
+                            ? 'User confirmed in Direct Chat that the operation took effect.'
+                            : 'User confirmed in Direct Chat that the operation did not take effect.',
+                    }),
+                },
+            );
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({}));
+                throw new Error(body?.detail || `HTTP ${response.status}`);
+            }
+
+            const userMsg = applied
+                ? t('agent.chat.reconcileAppliedMessage', '我确认这次工具操作已经生效，请继续，且不要重复执行该操作。')
+                : t('agent.chat.reconcileNotAppliedMessage', '我确认这次工具操作没有生效，请消费失败结果后继续，并重新决定是否需要新的工具调用。');
+            const pending: PendingChatMessage = {
+                runtimeKey,
+                contentForLLM: userMsg,
+                userMsg,
+                fileName: '',
+                modelId: effectiveChatModelId,
+                resumeRunId: run.runId,
+                resumeCorrelationId: correlationId,
+            };
+            const socket = wsMapRef.current[runtimeKey];
+            if (socket?.readyState === WebSocket.OPEN) {
+                dispatchChatMessage(socket, runtimeKey, pending);
+            } else {
+                pendingChatSendRef.current = pending;
+                if (token) ensureSessionSocket(activeSession, id, token);
+            }
+        } catch (error) {
+            toast.error(t('agent.chat.reconcileFailed', '工具结果确认失败'), {
+                details: error instanceof Error ? error.message : String(error),
+            });
+            void fetchSessionRuntimeState(id, sessionId);
+        } finally {
+            setReconcilingExecutionId(null);
+        }
     };
 
     useEffect(() => {
@@ -6907,6 +6977,42 @@ export default function AgentDetailPage() {
                                             ) : null}
                                             <div ref={chatInputAreaRef} className="chat-input-area" style={{ flexShrink: 0 }}>
                                                 <div className="chat-composer">
+                                                    {activeRun?.pendingToolReconciliations.map((reconciliation) => (
+                                                        <div className="chat-tool-reconciliation" key={reconciliation.executionId}>
+                                                            <div className="chat-tool-reconciliation__title">
+                                                                <IconAlertTriangle size={16} />
+                                                                {t('agent.chat.reconcileTitle', '工具执行结果需要确认')}
+                                                            </div>
+                                                            <div className="chat-tool-reconciliation__detail">
+                                                                <code>{reconciliation.toolName}</code>
+                                                                <span>{reconciliation.resultSummary || reconciliation.errorCode || t('agent.chat.reconcileUnknown', '该操作可能已生效，也可能未生效。')}</span>
+                                                            </div>
+                                                            {reconciliation.canReconcile ? (
+                                                                <div className="chat-tool-reconciliation__actions">
+                                                                    <button
+                                                                        type="button"
+                                                                        className="btn btn-secondary"
+                                                                        disabled={reconcilingExecutionId !== null}
+                                                                        onClick={() => void handleToolReconciliation(reconciliation, 'not_applied')}
+                                                                    >
+                                                                        {t('agent.chat.reconcileNotApplied', '确认未生效，可继续')}
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="btn btn-primary"
+                                                                        disabled={reconcilingExecutionId !== null}
+                                                                        onClick={() => void handleToolReconciliation(reconciliation, 'applied')}
+                                                                    >
+                                                                        {t('agent.chat.reconcileApplied', '确认已生效，继续')}
+                                                                    </button>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="chat-tool-reconciliation__unsupported">
+                                                                    {t('agent.chat.reconcileUnsupported', '此工具暂不支持在前端安全结算，请联系管理员。')}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    ))}
                                                     {(chatUploadDrafts.length > 0 || attachedFiles.length > 0) && (
                                                         <div className="chat-composer-attachments">
                                                             {chatUploadDrafts.map((draft) => (
@@ -6975,7 +7081,7 @@ export default function AgentDetailPage() {
                                                         <textarea
                                                             ref={chatInputRef}
                                                             className="chat-input"
-                                                            disabled={showNoModelState}
+                                                            disabled={showNoModelState || !!activeRun?.pendingToolReconciliations.length}
                                                             value={chatInput}
                                                             onChange={e => {
                                                                 setChatInput(e.target.value);
@@ -7007,7 +7113,7 @@ export default function AgentDetailPage() {
                                                             type="button"
                                                             className="chat-composer-btn"
                                                             onClick={() => fileInputRef.current?.click()}
-                                                            disabled={showNoModelState || !wsConnected || chatUploadDrafts.length > 0 || attachedFiles.length >= 10}
+                                                            disabled={showNoModelState || !wsConnected || chatUploadDrafts.length > 0 || attachedFiles.length >= 10 || !!activeRun?.pendingToolReconciliations.length}
                                                             title={t('agent.workspace.uploadFile')}
                                                         >
                                                             <IconPaperclip size={16} stroke={1.75} />

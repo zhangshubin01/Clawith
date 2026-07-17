@@ -258,6 +258,8 @@ def _service(
         completion=completion,
         tool_provider=_tools,
         prompt_builder=_prompt,
+        model_retry_base_delay_seconds=0,
+        model_retry_jitter_ratio=0,
     )
 
 
@@ -274,6 +276,8 @@ def _failover_service(
         completion=completion,
         tool_provider=_tools,
         prompt_builder=_prompt,
+        model_retry_base_delay_seconds=0,
+        model_retry_jitter_ratio=0,
     )
 
 
@@ -361,6 +365,98 @@ async def test_normal_tool_proposal_is_stable_and_does_not_execute_in_model_step
     assert calls[0][1][-1].content == "Please inspect the file"
     assert len(builder.calls) == 2
     assert builder.calls[1]["run_message_token_budget"] > 0
+
+
+@pytest.mark.asyncio
+async def test_new_run_treats_unreceived_calls_from_cancelled_prior_run_as_not_started() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    context = _context(state)
+    prior_run_id = uuid.uuid4()
+    state["messages"] = [
+        {
+            "id": "prior-assistant",
+            "role": "assistant",
+            "runtime_run_id": str(prior_run_id),
+            "tool_calls": [
+                {
+                    "id": "cancelled-call",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"stale.md"}',
+                    },
+                }
+            ],
+            "content": "",
+        },
+        {
+            "id": "current-input",
+            "role": "user",
+            "runtime_input": "current",
+            "runtime_run_id": context.run_id,
+            "content": "Continue from the ledger",
+        },
+    ]
+    state.pop("registry")
+    builder = _ContextBuilder(_build())
+
+    class _CancelledPriorRunDB:
+        def __init__(self) -> None:
+            self.results = iter(
+                (
+                    _Result([model]),
+                    _Result([agent]),
+                    _Result(),
+                    _Result([prior_run_id]),
+                    _Result(),
+                )
+            )
+
+        async def execute(self, statement):
+            del statement
+            return next(self.results)
+
+    @asynccontextmanager
+    async def session_factory():
+        yield _CancelledPriorRunDB()
+
+    async def complete(_model_arg, _messages, **_kwargs):
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(
+                {
+                    "id": "finish-recovered-run",
+                    "type": "function",
+                    "function": {
+                        "name": "finish",
+                        "arguments": '{"content":"recovered"}',
+                    },
+                },
+            ),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(),
+        )
+
+    service = RuntimeModelStepService(
+        session_factory=session_factory,
+        context_builder=builder,  # type: ignore[arg-type]
+        completion=complete,
+        tool_provider=_tools,
+        prompt_builder=_prompt,
+    )
+    result = await service.complete_once(state, context)
+
+    assert result.intent == "finish"
+    assert len(builder.calls) == 2
+    for call in builder.calls:
+        recovered = call["tool_execution_ledger"]["cancelled-call"]
+        assert recovered["status"] == "not_started"
+        assert recovered["may_have_side_effect"] is False
+        assert recovered["cancelled_before_execution"] is True
 
 
 @pytest.mark.asyncio
@@ -1337,7 +1433,7 @@ async def test_non_group_finish_cannot_bypass_group_handoff_field() -> None:
 
 
 @pytest.mark.asyncio
-async def test_group_plain_text_finishes_without_parsing_textual_mentions() -> None:
+async def test_group_plain_text_handoff_claim_is_repaired_without_routing_text() -> None:
     tenant_id = uuid.uuid4()
     model = _model(tenant_id)
     agent = _agent(tenant_id)
@@ -1371,8 +1467,9 @@ async def test_group_plain_text_finishes_without_parsing_textual_mentions() -> N
             complete,
         ).complete_once(state, _context(state))
 
-    assert result.intent == "finish"
-    assert result.finish_content == "Review complete. @Alice can continue."
+    assert result.intent == "text"
+    assert result.repair_code == "invalid_finish"
+    assert "mention_participant_ids" in (result.repair_instruction or "")
     assert result.finish_mention_participant_ids == ()
     assert result.finish_delivery_intent is None
     preflight.assert_not_awaited()
@@ -2007,7 +2104,7 @@ async def test_retryable_primary_error_rebuilds_budget_for_fallback_once() -> No
 
     assert result.intent == "finish"
     assert result.finish_content == "Fallback answer"
-    assert called_models == [model.id, fallback.id]
+    assert called_models == [model.id, model.id, model.id, model.id, fallback.id]
     assert len(builder.calls) == 4
     primary_budget = builder.calls[1]["run_message_token_budget"]
     fallback_budget = builder.calls[3]["run_message_token_budget"]
@@ -2015,6 +2112,54 @@ async def test_retryable_primary_error_rebuilds_budget_for_fallback_once() -> No
     assert result.assistant_message is not None
     assert result.assistant_message["runtime_model_id"] == str(fallback.id)
     assert result.assistant_message["runtime_failover_from_model_id"] == str(model.id)
+
+
+@pytest.mark.asyncio
+async def test_retryable_primary_error_recovers_on_same_model_before_fallback() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    fallback = _model(tenant_id)
+    agent = _agent(tenant_id)
+    agent.fallback_model_id = fallback.id
+    state = _state(tenant_id, model, agent)
+    called_models: list[uuid.UUID] = []
+
+    async def complete(model_arg, *args, **kwargs):
+        del args, kwargs
+        called_models.append(model_arg.id)
+        if len(called_models) < 3:
+            raise RuntimeError("HTTP 502 Bad Gateway")
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(
+                {
+                    "id": "finish-primary-retry",
+                    "type": "function",
+                    "function": {
+                        "name": "finish",
+                        "arguments": '{"content":"Recovered answer"}',
+                    },
+                },
+            ),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=12),
+        )
+
+    result = await _failover_service(
+        model,
+        fallback,
+        agent,
+        _ContextBuilder(_build()),
+        complete,
+    ).complete_once(state, _context(state))
+
+    assert result.intent == "finish"
+    assert result.finish_content == "Recovered answer"
+    assert called_models == [model.id, model.id, model.id]
+    assert result.assistant_message is not None
+    assert result.assistant_message["runtime_model_id"] == str(model.id)
+    assert "runtime_failover_from_model_id" not in result.assistant_message
 
 
 @pytest.mark.asyncio
@@ -2045,3 +2190,32 @@ async def test_non_retryable_primary_error_never_calls_configured_fallback() -> 
     assert result.error is not None
     assert result.error["code"] == "model_call_failed"
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_retryable_primary_error_without_fallback_pauses_for_resume() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    calls = 0
+
+    async def complete(*args, **kwargs):
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        raise RuntimeError("HTTP 502 Bad Gateway")
+
+    result = await _service(
+        model,
+        agent,
+        _ContextBuilder(_build()),
+        complete,
+    ).complete_once(state, _context(state))
+
+    assert result.intent == "wait"
+    assert result.waiting_request is not None
+    assert result.waiting_request["waiting_type"] == "user"
+    assert str(result.waiting_request["correlation_id"]).startswith("model-provider-retry:")
+    assert "4 attempts" in str(result.waiting_request["reason"])
+    assert calls == 4

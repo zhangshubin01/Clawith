@@ -377,6 +377,47 @@ async def test_running_context_stops_daemon_before_closing_checkpointer() -> Non
 
 
 @pytest.mark.asyncio
+async def test_running_context_starts_configured_command_concurrency() -> None:
+    started: list[str] = []
+    all_started = asyncio.Event()
+
+    async def record_daemon_start(_daemon, stop: asyncio.Event) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        started.append(task.get_name())
+        if len(started) == 3:
+            all_started.set()
+        await stop.wait()
+
+    @asynccontextmanager
+    async def manager():
+        yield InMemorySaver()
+
+    settings = Settings(
+        _env_file=None,
+        AGENT_RUNTIME_GRAPH_NAME="worker_service_test",
+        AGENT_RUNTIME_GRAPH_VERSION="v1",
+        AGENT_RUNTIME_COMMAND_CONCURRENCY=3,
+    )
+    with patch.object(RuntimeCommandDaemon, "run", new=record_daemon_start):
+        async with running_runtime_worker_context(
+            settings=settings,
+            checkpointer_manager=manager(),
+            session_factory=_SessionFactory(),  # type: ignore[arg-type]
+            lock_engine=_Engine(),  # type: ignore[arg-type]
+            claimant="worker-test",
+            verify_schema=False,
+        ):
+            await asyncio.wait_for(all_started.wait(), timeout=1)
+
+    assert sorted(started) == [
+        "agent-runtime-command-worker-1",
+        "agent-runtime-command-worker-2",
+        "agent-runtime-command-worker-3",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_schema_readiness_requires_every_product_table() -> None:
     with (
         patch(

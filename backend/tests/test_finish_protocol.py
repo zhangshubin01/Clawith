@@ -159,6 +159,60 @@ def test_group_finish_parser_accepts_only_bounded_stable_participant_ids() -> No
     assert "UUID" in (invalid_id.error or "")
 
 
+@pytest.mark.parametrize(
+    "content",
+    (
+        "## Stage complete - Handoff to the integrator",
+        "## 阶段完成 - Handoff 给整合者",
+        "本轮已完成，后续工作交接给质量复核 Agent。",
+        "Review complete. @Alice can continue.",
+    ),
+)
+def test_group_finish_repairs_explicit_text_handoff_without_structured_mentions(
+    content: str,
+) -> None:
+    from app.services.llm.finish import find_finish_call
+
+    parsed = find_finish_call(
+        [
+            {
+                "id": "call_text_only_handoff",
+                "function": {
+                    "name": "finish",
+                    "arguments": {"content": content},
+                },
+            }
+        ],
+        allow_group_mentions=True,
+    )
+
+    assert parsed is not None and parsed.valid is False
+    assert "mention_participant_ids" in (parsed.error or "")
+    assert "Text alone never routes work" in (parsed.error or "")
+
+
+def test_group_finish_allows_explicit_no_handoff_completion() -> None:
+    from app.services.llm.finish import find_finish_call
+
+    parsed = find_finish_call(
+        [
+            {
+                "id": "call_no_handoff",
+                "function": {
+                    "name": "finish",
+                    "arguments": {
+                        "content": "Task complete. No handoff is needed.",
+                    },
+                },
+            }
+        ],
+        allow_group_mentions=True,
+    )
+
+    assert parsed is not None and parsed.valid is True
+    assert parsed.mention_participant_ids == ()
+
+
 def test_non_group_finish_rejects_group_or_unknown_bypass_fields() -> None:
     from app.services.llm.finish import find_finish_call
 

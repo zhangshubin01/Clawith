@@ -415,6 +415,30 @@ def _resolve_incomplete_exchange(
             blocked=True,
         )
 
+    cancelled_before_execution = bool(missing_call_ids) and all(
+        missing_statuses.get(call_id) == "not_started"
+        and ledger.get(call_id, {}).get("cancelled_before_execution") is True
+        for call_id in missing_call_ids
+    )
+    if cancelled_before_execution:
+        summary = _summary_for_exchange(
+            assistant_message_id=assistant_message_id,
+            calls=calls,
+            results=results,
+            ledger=ledger,
+            reason="cancelled_before_execution",
+        )
+        return MessageBlock(
+            kind="pending_tool_exchange",
+            messages=messages,
+            message_ids=message_ids,
+            assistant_message_id=assistant_message_id,
+            call_ids=call_ids,
+            missing_call_ids=missing_call_ids,
+            action="summarize",
+            compaction_summary=summary,
+        )
+
     has_execution_fact = bool(results) or any(
         status == "succeeded" for status in missing_statuses.values()
     )

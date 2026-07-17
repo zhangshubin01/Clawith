@@ -38,7 +38,7 @@ _BUILTIN_TOOL_SOURCE = [
     {
         "name": "read_file",
         "display_name": "Read File",
-        "description": "Read file contents from the workspace. Can read soul.md, memory/memory.md, skills/, and enterprise_info/. Focus is stored in system tools, not focus.md. Use offset and limit for reading large files in chunks.",
+        "description": "Read UTF-8 text file contents from the workspace. This tool does not parse binary files such as XLSX, DOCX, PPTX, PDF, images, or archives; use read_document for supported office documents. Can read soul.md, memory/memory.md, skills/, and enterprise_info/. Focus is stored in system tools, not focus.md. Use offset and limit for reading large text files in chunks.",
         "category": "file",
         "icon": "📄",
         "is_default": True,

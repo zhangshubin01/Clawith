@@ -6,10 +6,10 @@ import json
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import String, and_, cast, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +19,8 @@ from app.database import get_db
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.agent_run_command import AgentRunCommand
-from app.models.audit import ChatMessage
+from app.models.agent_tool_execution import AgentToolExecution
+from app.models.audit import AuditLog, ChatMessage
 from app.models.chat_session import ChatSession
 from app.models.participant import Participant
 from app.models.user import Identity, User
@@ -30,6 +31,10 @@ from app.services.chat_session_service import (
 from app.services.agent_runtime.run_state_reader import (
     RunStateReadError,
     open_run_state_reader as _open_run_state_reader,
+)
+from app.services.agent_runtime.tool_execution import (
+    ToolExecutionError,
+    reconcile_unknown_tool_execution,
 )
 from app.services.participant_identity import get_or_create_user_participant
 
@@ -145,6 +150,30 @@ class ActiveRunOut(BaseModel):
     model_step_count: int = 0
     can_resume: bool = False
     can_cancel: bool = False
+    pending_tool_reconciliations: list["PendingToolReconciliationOut"] = Field(
+        default_factory=list
+    )
+
+
+class PendingToolReconciliationOut(BaseModel):
+    execution_id: str
+    tool_call_id: str
+    tool_name: str
+    result_summary: str | None = None
+    error_code: str | None = None
+    can_reconcile: bool = False
+
+
+class ReconcileToolExecutionIn(BaseModel):
+    outcome: Literal["applied", "not_applied"]
+    correlation_id: str
+    note: str
+
+
+class ReconcileToolExecutionOut(BaseModel):
+    execution_id: str
+    status: Literal["succeeded", "failed"]
+    result_summary: str
 
 
 class SessionRuntimeStateOut(BaseModel):
@@ -461,8 +490,19 @@ async def get_session_runtime_state(
             .limit(1)
         )
         resume_inflight = inflight_resume_result.scalar_one_or_none() is not None
+        reconciliation_result = await db.execute(
+            select(AgentToolExecution)
+            .where(
+                AgentToolExecution.tenant_id == tenant_id,
+                AgentToolExecution.run_id == run.id,
+                AgentToolExecution.status == "unknown",
+            )
+            .order_by(AgentToolExecution.started_at, AgentToolExecution.id)
+        )
+        pending_reconciliations = list(reconciliation_result.scalars().all())
     else:
         resume_inflight = False
+        pending_reconciliations = []
 
     inflight_cancel_result = await db.execute(
         select(AgentRunCommand.id)
@@ -491,9 +531,138 @@ async def get_session_runtime_state(
                 view.execution_status == "waiting_user"
                 and not resume_inflight
                 and not cancel_inflight
+                and not pending_reconciliations
             ),
             can_cancel=not terminal and not cancel_inflight,
+            pending_tool_reconciliations=[
+                PendingToolReconciliationOut(
+                    execution_id=str(execution.id),
+                    tool_call_id=execution.tool_call_id,
+                    tool_name=execution.tool_name,
+                    result_summary=execution.result_summary,
+                    error_code=(
+                        execution.result_metadata.get("error_code")
+                        if isinstance(execution.result_metadata, dict)
+                        and isinstance(execution.result_metadata.get("error_code"), str)
+                        else None
+                    ),
+                    can_reconcile=(
+                        execution.tool_name == "write_file"
+                        and execution.effect == "write"
+                        and execution.retry_policy == "conditional"
+                    ),
+                )
+                for execution in pending_reconciliations
+            ],
         )
+    )
+
+
+@router.post(
+    "/{agent_id}/sessions/{session_id}/runs/{run_id}/tool-executions/{execution_id}/reconcile",
+    response_model=ReconcileToolExecutionOut,
+)
+async def reconcile_direct_tool_execution(
+    agent_id: uuid.UUID,
+    session_id: uuid.UUID,
+    run_id: uuid.UUID,
+    execution_id: uuid.UUID,
+    body: ReconcileToolExecutionIn,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ReconcileToolExecutionOut:
+    """Settle a Direct Chat unknown receipt before the user resumes its Run."""
+    agent, tenant_id = await _check_direct_agent_access(db, current_user, agent_id)
+    session_result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.tenant_id == tenant_id,
+            ChatSession.agent_id == agent_id,
+            ChatSession.user_id == current_user.id,
+            ChatSession.session_type == "direct",
+            ChatSession.group_id.is_(None),
+            ChatSession.source_channel == "web",
+            ChatSession.deleted_at.is_(None),
+        )
+    )
+    if session_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+
+    run_result = await db.execute(
+        select(AgentRun).where(
+            AgentRun.id == run_id,
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.agent_id == agent_id,
+            AgentRun.session_id == session_id,
+            AgentRun.origin_user_id == current_user.id,
+            AgentRun.source_type == "chat",
+            AgentRun.run_kind == "foreground",
+            AgentRun.runtime_type == "langgraph",
+            AgentRun.runtime_thread_id == str(session_id),
+            AgentRun.lane_held.is_(True),
+        )
+    )
+    run = run_result.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Active Run not found")
+
+    try:
+        async with _open_run_state_reader(db) as reader:
+            view = await reader.get_run_state(tenant_id, run_id)
+    except RunStateReadError as exc:
+        raise HTTPException(status_code=409, detail=exc.code) from exc
+    if view.execution_status != "waiting_user":
+        raise HTTPException(status_code=409, detail="run_is_not_waiting_for_user")
+    if (
+        view.waiting_correlation_id is None
+        or view.waiting_correlation_id != body.correlation_id.strip()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="tool_reconciliation_correlation_mismatch",
+        )
+
+    note = body.note.strip()
+    if not note:
+        raise HTTPException(status_code=422, detail="reconciliation_note_required")
+    try:
+        execution = await reconcile_unknown_tool_execution(
+            db,
+            tenant_id=tenant_id,
+            run_id=run_id,
+            execution_id=execution_id,
+            confirmed_status=(
+                "succeeded" if body.outcome == "applied" else "failed"
+            ),
+            confirmed_by_user_id=current_user.id,
+            note=note,
+        )
+    except ToolExecutionError as exc:
+        status_code = 404 if exc.code == "tool_execution_not_found" else 409
+        raise HTTPException(status_code=status_code, detail=exc.code) from exc
+
+    db.add(
+        AuditLog(
+            user_id=current_user.id,
+            agent_id=agent.id,
+            action="runtime_tool_execution_reconciled",
+            details={
+                "tenant_id": str(tenant_id),
+                "session_id": str(session_id),
+                "run_id": str(run_id),
+                "execution_id": str(execution_id),
+                "tool_name": execution.tool_name,
+                "confirmed_outcome": body.outcome,
+                "status": execution.status,
+                "note": note[:2_000],
+            },
+        )
+    )
+    await db.commit()
+    return ReconcileToolExecutionOut(
+        execution_id=str(execution.id),
+        status=execution.status,  # type: ignore[arg-type]
+        result_summary=execution.result_summary or "",
     )
 
 

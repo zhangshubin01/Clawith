@@ -129,6 +129,10 @@ class Settings(BaseSettings):
     AGENT_RUNTIME_GRAPH_VERSION: str = "v1"
     LANGGRAPH_CHECKPOINT_DATABASE_URL: str | None = None
     LANGGRAPH_AES_KEY: str | None = None
+    # Maximum number of Agent Run commands executed concurrently by one
+    # Runtime worker process. Thread/lane locks still serialize conflicting
+    # Runs; this is the shared capacity across all eligible Agents.
+    AGENT_RUNTIME_COMMAND_CONCURRENCY: int = Field(default=10, gt=0, le=100)
     AGENT_RUNTIME_COMMAND_CLAIM_TTL_SECONDS: int = Field(default=60, gt=0)
     AGENT_RUNTIME_COMMAND_CLAIM_RENEW_SECONDS: int = Field(default=20, gt=0)
     AGENT_RUNTIME_COMMAND_MAX_ATTEMPTS: int = Field(default=5, gt=0)

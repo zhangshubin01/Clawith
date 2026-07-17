@@ -99,6 +99,53 @@ TOOL_MATERIALIZE_MAX_TOTAL_BYTES = 100 * 1024 * 1024
 TEMP_WORKSPACE_DEFAULT_PATHS = ["workspace", "memory", "skills", "focus.md", "soul.md", "HEARTBEAT.md"]
 MAX_EXEC_STDOUT_CAPTURE_BYTES = 1_000_000
 MAX_EXEC_STDERR_CAPTURE_BYTES = 500_000
+_READ_FILE_BINARY_EXTENSIONS = frozenset(
+    {
+        ".7z",
+        ".avi",
+        ".bin",
+        ".bmp",
+        ".doc",
+        ".docx",
+        ".exe",
+        ".gif",
+        ".gz",
+        ".ico",
+        ".jpeg",
+        ".jpg",
+        ".mov",
+        ".mp3",
+        ".mp4",
+        ".pdf",
+        ".png",
+        ".ppt",
+        ".pptx",
+        ".rar",
+        ".tar",
+        ".wav",
+        ".webp",
+        ".xls",
+        ".xlsb",
+        ".xlsm",
+        ".xlsx",
+        ".zip",
+    }
+)
+
+
+def _read_file_binary_extension(path: str) -> str | None:
+    suffix = Path(path.strip()).suffix.lower()
+    return suffix if suffix in _READ_FILE_BINARY_EXTENSIONS else None
+
+
+def _read_file_binary_error(path: str) -> str | None:
+    suffix = _read_file_binary_extension(path)
+    if suffix is None:
+        return None
+    return (
+        f"read_file supports text files only; binary file type '{suffix}' "
+        "must be opened with read_document instead."
+    )
 
 
 def _observability_arguments(tool_name: str, arguments: dict) -> dict:
@@ -1972,6 +2019,12 @@ async def _read_file_outcome(
         return _typed_failure(
             "Focus is structured data; use list_focus_items.",
             "focus_file_path_removed",
+        )
+    binary_error = _read_file_binary_error(path)
+    if binary_error is not None:
+        return _typed_failure(
+            binary_error,
+            "workspace_binary_file_unsupported",
         )
     try:
         offset = int(arguments.get("offset", 0))
@@ -6332,6 +6385,9 @@ async def _storage_read_file(
     offset: int = 0,
     limit: int = 2000,
 ) -> str:
+    binary_error = _read_file_binary_error(rel_path)
+    if binary_error is not None:
+        return binary_error
     storage = get_storage_backend()
     storage_key, normalized, _ = _tool_storage_key(agent_id, rel_path, tenant_id)
     if not normalized:
@@ -6524,6 +6580,10 @@ def _read_file(ws: Path, rel_path: str, tenant_id: str | None = None, offset: in
     Returns:
         File content with line numbers, or error message
     """
+    binary_error = _read_file_binary_error(rel_path)
+    if binary_error is not None:
+        return binary_error
+
     try:
         file_path = _resolve_tool_source_path(ws, rel_path, tenant_id=tenant_id)
     except ValueError as exc:

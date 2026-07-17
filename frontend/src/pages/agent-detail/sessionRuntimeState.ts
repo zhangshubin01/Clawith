@@ -1,3 +1,12 @@
+export type ToolReconciliation = {
+    executionId: string;
+    toolCallId: string;
+    toolName: string;
+    resultSummary?: string | null;
+    errorCode?: string | null;
+    canReconcile: boolean;
+};
+
 export type SessionActiveRun = {
     runId: string;
     threadId: string;
@@ -9,6 +18,7 @@ export type SessionActiveRun = {
     modelStepCount: number;
     canResume: boolean;
     canCancel: boolean;
+    pendingToolReconciliations: ToolReconciliation[];
 };
 
 const record = (value: unknown): Record<string, unknown> | null =>
@@ -47,6 +57,25 @@ export const sessionActiveRunFromResponse = (payload: unknown): SessionActiveRun
         && Number.isInteger(rawStepCount)
         && rawStepCount >= 0
     ) ? rawStepCount : 0;
+    const rawReconciliations = raw.pending_tool_reconciliations;
+    if (rawReconciliations != null && !Array.isArray(rawReconciliations)) return null;
+    const pendingToolReconciliations: ToolReconciliation[] = [];
+    for (const value of rawReconciliations || []) {
+        const item = record(value);
+        if (!item) return null;
+        const executionId = requiredText(item.execution_id);
+        const toolCallId = requiredText(item.tool_call_id);
+        const toolName = requiredText(item.tool_name);
+        if (!executionId || !toolCallId || !toolName) return null;
+        pendingToolReconciliations.push({
+            executionId,
+            toolCallId,
+            toolName,
+            resultSummary: optionalText(item.result_summary),
+            errorCode: optionalText(item.error_code),
+            canReconcile: item.can_reconcile === true,
+        });
+    }
 
     return {
         runId,
@@ -64,6 +93,7 @@ export const sessionActiveRunFromResponse = (payload: unknown): SessionActiveRun
             && correlationId !== null
         ),
         canCancel: raw.can_cancel === true && !terminal,
+        pendingToolReconciliations,
     };
 };
 
@@ -82,6 +112,10 @@ export const failClosedSessionActiveRun = (
     ...current,
     canResume: false,
     canCancel: false,
+    pendingToolReconciliations: (current.pendingToolReconciliations || []).map((item) => ({
+        ...item,
+        canReconcile: false,
+    })),
 } : null;
 
 export const runtimeCompletionNeedsMessageRefresh = (
@@ -127,4 +161,5 @@ export const waitingSessionActiveRunHint = ({
     modelStepCount: current?.modelStepCount || 0,
     canResume: false,
     canCancel: false,
+    pendingToolReconciliations: current?.pendingToolReconciliations || [],
 });

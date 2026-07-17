@@ -21,6 +21,7 @@ const waitingRun = {
   modelStepCount: 2,
   canResume: true,
   canCancel: true,
+  pendingToolReconciliations: [],
 };
 
 test('runtime-state request failure preserves display identity but disables actions', () => {
@@ -128,6 +129,49 @@ test('only a valid persisted runtime-state response grants actions', () => {
     })?.canResume,
     false,
   );
+});
+
+test('unknown write reconciliation is parsed strictly and disables plain resume', () => {
+  const parsed = sessionActiveRunFromResponse({
+    active_run: {
+      run_id: 'run-1',
+      thread_id: 'session-1',
+      session_id: 'session-1',
+      status: 'waiting_user',
+      waiting_type: 'user',
+      correlation_id: 'confirm-1',
+      model_step_count: 3,
+      can_resume: false,
+      can_cancel: true,
+      pending_tool_reconciliations: [{
+        execution_id: 'execution-1',
+        tool_call_id: 'call-1',
+        tool_name: 'write_file',
+        result_summary: 'outcome unknown',
+        error_code: 'workspace_write_outcome_unknown',
+        can_reconcile: true,
+      }],
+    },
+  });
+
+  assert.equal(parsed?.canResume, false);
+  assert.deepEqual(parsed?.pendingToolReconciliations, [{
+    executionId: 'execution-1',
+    toolCallId: 'call-1',
+    toolName: 'write_file',
+    resultSummary: 'outcome unknown',
+    errorCode: 'workspace_write_outcome_unknown',
+    canReconcile: true,
+  }]);
+  assert.equal(sessionActiveRunFromResponse({
+    active_run: {
+      run_id: 'run-1',
+      thread_id: 'session-1',
+      session_id: 'session-1',
+      status: 'waiting_user',
+      pending_tool_reconciliations: [{ execution_id: 'execution-1' }],
+    },
+  }), null);
 });
 
 test('onboarding only treats an authoritative runtime-state payload as loaded', () => {

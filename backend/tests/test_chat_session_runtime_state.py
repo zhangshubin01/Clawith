@@ -15,6 +15,7 @@ from app.api.chat_sessions import get_session_runtime_state
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.agent_run_command import AgentRunCommand
+from app.models.agent_tool_execution import AgentToolExecution
 from app.models.chat_session import ChatSession
 from app.models.user import User
 from app.services.agent_runtime.contracts import RunView
@@ -151,6 +152,7 @@ async def test_runtime_state_returns_exact_waiting_lane_holder() -> None:
         _Result(scalar=session),
         _Result(values=[run]),
         _Result(scalar=None),
+        _Result(values=[]),
         _Result(scalar=None),
     )
 
@@ -181,6 +183,62 @@ async def test_runtime_state_returns_exact_waiting_lane_holder() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_state_exposes_unknown_write_and_blocks_plain_resume() -> None:
+    agent, user, session, run = _records()
+    reader = SimpleNamespace(get_run_state=AsyncMock(return_value=_view(run)))
+    execution = AgentToolExecution(
+        id=uuid.uuid4(),
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        tool_call_id="call-write-1",
+        tool_name="write_file",
+        assistant_message_id="assistant-1",
+        arguments_hash="hash",
+        sanitized_arguments={},
+        effect="write",
+        retry_policy="conditional",
+        attempt_count=1,
+        status="unknown",
+        result_summary="Workspace write outcome is unknown.",
+        result_metadata={"error_code": "workspace_write_outcome_unknown"},
+        started_at=run.created_at,
+        completed_at=run.updated_at,
+    )
+    db = _Session(
+        _Result(scalar=session),
+        _Result(values=[run]),
+        _Result(scalar=None),
+        _Result(values=[execution]),
+        _Result(scalar=None),
+    )
+
+    with (
+        patch(
+            "app.api.chat_sessions.check_agent_access",
+            new=AsyncMock(return_value=(agent, None)),
+        ),
+        patch(
+            "app.api.chat_sessions._open_run_state_reader",
+            return_value=_ReaderContext(reader),
+        ),
+    ):
+        response = await get_session_runtime_state(
+            agent.id,
+            session.id,
+            current_user=user,
+            db=db,  # type: ignore[arg-type]
+        )
+
+    assert response.active_run is not None
+    assert response.active_run.can_resume is False
+    assert len(response.active_run.pending_tool_reconciliations) == 1
+    pending = response.active_run.pending_tool_reconciliations[0]
+    assert pending.execution_id == str(execution.id)
+    assert pending.tool_name == "write_file"
+    assert pending.can_reconcile is True
+
+
+@pytest.mark.asyncio
 async def test_runtime_state_disables_resume_and_cancel_while_cancel_is_inflight() -> None:
     agent, user, session, run = _records()
     reader = SimpleNamespace(get_run_state=AsyncMock(return_value=_view(run)))
@@ -200,6 +258,7 @@ async def test_runtime_state_disables_resume_and_cancel_while_cancel_is_inflight
         _Result(scalar=session),
         _Result(values=[run]),
         _Result(scalar=None),
+        _Result(values=[]),
         _Result(scalar=cancel.id),
     )
 

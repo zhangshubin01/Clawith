@@ -709,6 +709,80 @@ async def test_wait_interrupt_resumes_the_same_run_and_then_finishes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_user_resume_with_pending_tool_returns_to_tool_before_model() -> None:
+    run_id = uuid.uuid4()
+    tools = ToolService(
+        ToolStepResult(
+            messages=(
+                {
+                    "id": "tool-result-1",
+                    "role": "tool",
+                    "tool_call_id": "call-write-1",
+                    "name": "write_file",
+                    "content": "The prior write did not take effect.",
+                    "execution_status": "failed",
+                },
+            ),
+        )
+    )
+    executor = _executor(ModelService(), tools=tools)
+    state = _state(run_id)
+    pending_call: JsonObject = {
+        "id": "call-write-1",
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "arguments": '{"path":"result.md","content":"done"}',
+        },
+    }
+    state["lifecycle"].update(
+        {
+            "status": "waiting_user",
+            "next_route": "wait",
+            "pending_tool_calls": [pending_call],
+            "waiting_request": {
+                "waiting_type": "user",
+                "correlation_id": "tool-confirm-1",
+            },
+        }
+    )
+
+    update = await executor.execute(
+        "wait",
+        state,
+        _context(run_id, executor, "command-reconcile"),
+        resume_value={
+            "resume_type": "user_input",
+            "payload": {"content": "The write did not take effect."},
+        },
+    )
+
+    assert update["lifecycle"]["status"] == "running"
+    assert update["lifecycle"]["next_route"] == "tool"
+    assert update["lifecycle"]["pending_tool_calls"] == [pending_call]
+    assert "messages" not in update
+    assert update["lifecycle"]["deferred_resume_messages"][0]["content"] == (
+        "The write did not take effect."
+    )
+
+    tool_state = cast(
+        RuntimeGraphState,
+        {**state, "lifecycle": update["lifecycle"]},
+    )
+    tool_update = await executor.execute(
+        "tool",
+        tool_state,
+        _context(run_id, executor, "command-reconcile"),
+    )
+
+    assert [message["role"] for message in tool_update["messages"]] == [
+        "tool",
+        "user",
+    ]
+    assert tool_update["lifecycle"]["deferred_resume_messages"] == []
+
+
+@pytest.mark.asyncio
 async def test_external_timer_resume_executes_pending_poll_before_model() -> None:
     run_id = uuid.uuid4()
     poll_call: JsonObject = {
