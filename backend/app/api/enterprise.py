@@ -9,7 +9,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request
 from pydantic import BaseModel
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,8 +35,8 @@ from app.services.llm.finish import FINISH_TOOL_DEFINITION, find_finish_call
 from app.services.platform_service import platform_service
 from app.services.sso_service import sso_service
 from app.services.agent_runtime.runtime_model_settings import (
-    RUNTIME_MODEL_SETTING_KEY,
     resolve_runtime_model_settings,
+    runtime_model_setting_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -898,16 +898,31 @@ class RuntimeModelSettingsUpdate(BaseModel):
     compact_model_id: uuid.UUID
 
 
-async def _runtime_model_settings_payload(db: AsyncSession) -> dict:
+def _runtime_settings_tenant_id(current_user: User, requested_tenant_id: str | None) -> uuid.UUID:
+    raw_tenant_id = requested_tenant_id or current_user.tenant_id
+    if raw_tenant_id is None:
+        raise HTTPException(status_code=422, detail="A tenant must be selected")
+    try:
+        tenant_id = uuid.UUID(str(raw_tenant_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid tenant ID") from exc
+    if not _is_platform_admin_user(current_user):
+        if current_user.role != "org_admin" or current_user.tenant_id != tenant_id:
+            raise HTTPException(status_code=403, detail="Cannot manage another tenant's Runtime models")
+    return tenant_id
+
+
+async def _runtime_model_settings_payload(db: AsyncSession, *, tenant_id: uuid.UUID) -> dict:
     configured = await resolve_runtime_model_settings(
         db,
+        tenant_id=tenant_id,
         environment_planning_model_id=settings.MULTI_AGENT_PLANNING_MODEL_ID,
         environment_compact_model_id=settings.MULTI_AGENT_COMPACT_MODEL_ID,
     )
     result = await db.execute(
         select(LLMModel)
         .where(
-            LLMModel.tenant_id.is_(None),
+            or_(LLMModel.tenant_id.is_(None), LLMModel.tenant_id == tenant_id),
             LLMModel.enabled.is_(True),
             LLMModel.supports_tool_calling.is_(True),
         )
@@ -923,6 +938,7 @@ async def _runtime_model_settings_payload(db: AsyncSession) -> dict:
         for model in result.scalars().all()
     ]
     return {
+        "tenant_id": str(tenant_id),
         "planning_model_id": (
             str(configured.planning_model_id) if configured.planning_model_id else None
         ),
@@ -937,24 +953,24 @@ async def _runtime_model_settings_payload(db: AsyncSession) -> dict:
 
 @router.get("/runtime-model-settings")
 async def get_runtime_model_settings(
+    tenant_id: str | None = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return shared Runtime model choices to platform administrators."""
-    if not _is_platform_admin_user(current_user):
-        raise HTTPException(status_code=403, detail="Only platform admin can view Runtime model settings")
-    return await _runtime_model_settings_payload(db)
+    """Return the selected tenant's eligible Group Runtime model choices."""
+    resolved_tenant_id = _runtime_settings_tenant_id(current_user, tenant_id)
+    return await _runtime_model_settings_payload(db, tenant_id=resolved_tenant_id)
 
 
 @router.put("/runtime-model-settings")
 async def update_runtime_model_settings(
     data: RuntimeModelSettingsUpdate,
+    tenant_id: str | None = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Persist platform models used by planning and compaction, effective immediately."""
-    if not _is_platform_admin_user(current_user):
-        raise HTTPException(status_code=403, detail="Only platform admin can modify Runtime model settings")
+    """Persist tenant-scoped Group Runtime models, effective immediately."""
+    resolved_tenant_id = _runtime_settings_tenant_id(current_user, tenant_id)
 
     requested_ids = {data.planning_model_id, data.compact_model_id}
     result = await db.execute(select(LLMModel).where(LLMModel.id.in_(requested_ids)))
@@ -963,8 +979,8 @@ async def update_runtime_model_settings(
         model = models.get(model_id)
         if model is None:
             raise HTTPException(status_code=422, detail=f"Model {model_id} does not exist")
-        if model.tenant_id is not None:
-            raise HTTPException(status_code=422, detail=f"Model {model_id} is not a platform model")
+        if model.tenant_id not in {None, resolved_tenant_id}:
+            raise HTTPException(status_code=422, detail=f"Model {model_id} belongs to another tenant")
         if not model.enabled:
             raise HTTPException(status_code=422, detail=f"Model {model_id} is disabled")
         if model.supports_tool_calling is not True:
@@ -974,7 +990,9 @@ async def update_runtime_model_settings(
             )
 
     result = await db.execute(
-        select(SystemSetting).where(SystemSetting.key == RUNTIME_MODEL_SETTING_KEY)
+        select(SystemSetting).where(
+            SystemSetting.key == runtime_model_setting_key(resolved_tenant_id)
+        )
     )
     setting = result.scalar_one_or_none()
     value = {
@@ -984,9 +1002,9 @@ async def update_runtime_model_settings(
     if setting:
         setting.value = value
     else:
-        db.add(SystemSetting(key=RUNTIME_MODEL_SETTING_KEY, value=value))
+        db.add(SystemSetting(key=runtime_model_setting_key(resolved_tenant_id), value=value))
     await db.commit()
-    return await _runtime_model_settings_payload(db)
+    return await _runtime_model_settings_payload(db, tenant_id=resolved_tenant_id)
 
 
 @router.get("/system-settings/notification_bar/public")
@@ -1640,8 +1658,6 @@ async def list_org_departments(
     }
 
 
-
-from sqlalchemy import or_
 
 @router.get("/org/members")
 async def list_org_members(

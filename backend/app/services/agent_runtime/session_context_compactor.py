@@ -309,7 +309,11 @@ class LLMSessionContextCompactor:
                     "Session Compact target no longer exists",
                 )
             if session.session_type == "group":
-                model = await resolve_multi_agent_compact_model(db, self._settings)
+                model = await resolve_multi_agent_compact_model(
+                    db,
+                    self._settings,
+                    tenant_id=request.tenant_id,
+                )
                 return CompactModelSelection(
                     primary=model,
                     usage_agent_id=None,

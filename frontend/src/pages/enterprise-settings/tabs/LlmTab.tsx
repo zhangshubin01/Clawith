@@ -37,6 +37,7 @@ interface LLMProviderSpec {
 }
 
 interface RuntimeModelSettings {
+    tenant_id: string;
     planning_model_id: string | null;
     compact_model_id: string | null;
     planning_source: 'database' | 'environment';
@@ -107,11 +108,14 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
         queryFn: () => fetchJson<LLMProviderSpec[]>('/enterprise/llm-providers'),
     });
     const providerOptions = providerSpecs.length > 0 ? providerSpecs : FALLBACK_LLM_PROVIDERS;
-    const isPlatformAdmin = currentUser?.role === 'platform_admin' || !!currentUser?.is_platform_admin;
+    const canManageRuntimeModels = currentUser?.role === 'platform_admin'
+        || currentUser?.role === 'org_admin'
+        || !!currentUser?.is_platform_admin;
+    const runtimeModelSettingsUrl = `/enterprise/runtime-model-settings${selectedTenantId ? `?tenant_id=${selectedTenantId}` : ''}`;
     const { data: runtimeModelSettings } = useQuery({
-        queryKey: ['runtime-model-settings'],
-        queryFn: () => fetchJson<RuntimeModelSettings>('/enterprise/runtime-model-settings'),
-        enabled: isPlatformAdmin,
+        queryKey: ['runtime-model-settings', selectedTenantId],
+        queryFn: () => fetchJson<RuntimeModelSettings>(runtimeModelSettingsUrl),
+        enabled: canManageRuntimeModels,
     });
     useEffect(() => {
         if (!runtimeModelSettings) return;
@@ -121,12 +125,12 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
         });
     }, [runtimeModelSettings]);
     const saveRuntimeModelSettings = useMutation({
-        mutationFn: () => fetchJson<RuntimeModelSettings>('/enterprise/runtime-model-settings', {
+        mutationFn: () => fetchJson<RuntimeModelSettings>(runtimeModelSettingsUrl, {
             method: 'PUT',
             body: JSON.stringify(runtimeModelForm),
         }),
         onSuccess: (data) => {
-            qc.setQueryData(['runtime-model-settings'], data);
+            qc.setQueryData(['runtime-model-settings', selectedTenantId], data);
             toast.success(t('enterprise.llm.runtimeModelsSaved', '运行时模型配置已更新'));
         },
         onError: (err: any) => {
@@ -292,19 +296,19 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
 
     return (
         <div>
-            {isPlatformAdmin && runtimeModelSettings && (
+            {canManageRuntimeModels && runtimeModelSettings && (
                 <div className="card" style={{ marginBottom: '16px' }}>
                     <div style={{ marginBottom: '14px' }}>
                         <div style={{ fontWeight: 600, fontSize: '15px' }}>
                             {t('enterprise.llm.runtimeModelsTitle', '多智能体运行时模型')}
                         </div>
                         <div style={{ marginTop: '4px', color: 'var(--text-tertiary)', fontSize: '12px' }}>
-                            {t('enterprise.llm.runtimeModelsHint', '群聊规划器和群聊上下文处理只能使用已启用且通过原生工具调用测试的平台模型。保存后立即生效。')}
+                            {t('enterprise.llm.runtimeModelsHint', '可使用当前公司的模型或平台模型；候选模型必须已启用并通过原生工具调用测试。保存后立即生效。')}
                         </div>
                     </div>
                     {runtimeModelSettings.candidates.length === 0 ? (
                         <div style={{ color: 'var(--warning)', fontSize: '13px' }}>
-                            {t('enterprise.llm.noRuntimeModelCandidates', '暂无可用平台模型，请先创建平台模型并完成 Agent 兼容性测试。')}
+                            {t('enterprise.llm.noRuntimeModelCandidates', '暂无可用模型，请先为当前公司或平台创建模型并完成 Agent 兼容性测试。')}
                         </div>
                     ) : (
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr)) auto', gap: '12px', alignItems: 'end' }}>
@@ -315,7 +319,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                                     value={runtimeModelForm.planning_model_id}
                                     onChange={(event) => setRuntimeModelForm((current) => ({ ...current, planning_model_id: event.target.value }))}
                                 >
-                                    <option value="" disabled>{t('enterprise.llm.selectPlatformModel', '请选择平台模型')}</option>
+                                    <option value="" disabled>{t('enterprise.llm.selectRuntimeModel', '请选择模型')}</option>
                                     {runtimeModelSettings.candidates.map((model) => (
                                         <option key={model.id} value={model.id}>{model.label} · {model.provider}/{model.model}</option>
                                     ))}
@@ -328,7 +332,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                                     value={runtimeModelForm.compact_model_id}
                                     onChange={(event) => setRuntimeModelForm((current) => ({ ...current, compact_model_id: event.target.value }))}
                                 >
-                                    <option value="" disabled>{t('enterprise.llm.selectPlatformModel', '请选择平台模型')}</option>
+                                    <option value="" disabled>{t('enterprise.llm.selectRuntimeModel', '请选择模型')}</option>
                                     {runtimeModelSettings.candidates.map((model) => (
                                         <option key={model.id} value={model.id}>{model.label} · {model.provider}/{model.model}</option>
                                     ))}

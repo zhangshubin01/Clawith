@@ -249,20 +249,49 @@ async def resolve_platform_model(
     return model
 
 
+async def resolve_group_model(
+    db: AsyncSession,
+    model_id: uuid.UUID | None,
+    *,
+    tenant_id: uuid.UUID,
+    setting_name: str,
+) -> LLMModel:
+    """Resolve one enabled model owned by the Group tenant or the platform."""
+    if model_id is None:
+        raise PlatformModelConfigurationError(setting_name, "is not configured")
+
+    result = await db.execute(select(LLMModel).where(LLMModel.id == model_id))
+    model = result.scalar_one_or_none()
+    if model is None:
+        raise PlatformModelConfigurationError(setting_name, f"model {model_id} does not exist")
+    if not model.enabled:
+        raise PlatformModelConfigurationError(setting_name, f"model {model_id} is disabled")
+    if model.tenant_id not in {None, tenant_id}:
+        raise PlatformModelConfigurationError(
+            setting_name,
+            f"model {model_id} belongs to another tenant",
+        )
+    return model
+
+
 async def resolve_multi_agent_compact_model(
     db: AsyncSession,
     settings: Settings | None = None,
+    *,
+    tenant_id: uuid.UUID,
 ) -> LLMModel:
-    """Resolve ``MULTI_AGENT_COMPACT_MODEL_ID`` as a platform model."""
+    """Resolve the Group tenant's context model with environment fallback."""
     runtime_settings = settings or get_settings()
     configured = await resolve_runtime_model_settings(
         db,
+        tenant_id=tenant_id,
         environment_planning_model_id=runtime_settings.MULTI_AGENT_PLANNING_MODEL_ID,
         environment_compact_model_id=runtime_settings.MULTI_AGENT_COMPACT_MODEL_ID,
     )
-    return await resolve_platform_model(
+    return await resolve_group_model(
         db,
         configured.compact_model_id,
+        tenant_id=tenant_id,
         setting_name="MULTI_AGENT_COMPACT_MODEL_ID",
     )
 
@@ -270,16 +299,20 @@ async def resolve_multi_agent_compact_model(
 async def resolve_multi_agent_planning_model(
     db: AsyncSession,
     settings: Settings | None = None,
+    *,
+    tenant_id: uuid.UUID,
 ) -> LLMModel:
-    """Resolve ``MULTI_AGENT_PLANNING_MODEL_ID`` as a platform model."""
+    """Resolve the Group tenant's planning model with environment fallback."""
     runtime_settings = settings or get_settings()
     configured = await resolve_runtime_model_settings(
         db,
+        tenant_id=tenant_id,
         environment_planning_model_id=runtime_settings.MULTI_AGENT_PLANNING_MODEL_ID,
         environment_compact_model_id=runtime_settings.MULTI_AGENT_COMPACT_MODEL_ID,
     )
-    return await resolve_platform_model(
+    return await resolve_group_model(
         db,
         configured.planning_model_id,
+        tenant_id=tenant_id,
         setting_name="MULTI_AGENT_PLANNING_MODEL_ID",
     )

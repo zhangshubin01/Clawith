@@ -36,6 +36,12 @@ class _Result:
     def scalar_one_or_none(self) -> LLMModel | SystemSetting | None:
         return self.model
 
+    def scalars(self) -> "_Result":
+        return self
+
+    def all(self) -> list[LLMModel | SystemSetting]:
+        return [self.model] if self.model is not None else []
+
 
 class _Session:
     def __init__(
@@ -276,6 +282,7 @@ async def test_platform_model_resolution_rejects_unusable_models(
 
 @pytest.mark.asyncio
 async def test_global_runtime_model_resolvers_accept_only_enabled_platform_models() -> None:
+    tenant_id = uuid.uuid4()
     compact_id = uuid.uuid4()
     planning_id = uuid.uuid4()
     model = _model(tenant_id=None, enabled=True)
@@ -286,8 +293,8 @@ async def test_global_runtime_model_resolvers_accept_only_enabled_platform_model
     )
     session = _Session(model)
 
-    assert await resolve_multi_agent_compact_model(session, settings) is model  # type: ignore[arg-type]
-    assert await resolve_multi_agent_planning_model(session, settings) is model  # type: ignore[arg-type]
+    assert await resolve_multi_agent_compact_model(session, settings, tenant_id=tenant_id) is model  # type: ignore[arg-type]
+    assert await resolve_multi_agent_planning_model(session, settings, tenant_id=tenant_id) is model  # type: ignore[arg-type]
     assert len(session.statements) == 4
     assert settings.AGENT_RUNTIME_SUMMARY_THRESHOLD_RATIO == 0.85
     assert settings.AGENT_RUNTIME_MODEL_CAPABILITY_REFRESH_SECONDS == 86400
@@ -297,6 +304,7 @@ async def test_global_runtime_model_resolvers_accept_only_enabled_platform_model
 
 @pytest.mark.asyncio
 async def test_database_runtime_model_choices_override_environment_fallbacks() -> None:
+    tenant_id = uuid.uuid4()
     environment_compact_id = uuid.uuid4()
     environment_planning_id = uuid.uuid4()
     database_model_id = uuid.uuid4()
@@ -315,5 +323,43 @@ async def test_database_runtime_model_choices_override_environment_fallbacks() -
     )
     session = _Session(model, setting)
 
-    assert await resolve_multi_agent_compact_model(session, settings) is model  # type: ignore[arg-type]
-    assert await resolve_multi_agent_planning_model(session, settings) is model  # type: ignore[arg-type]
+    assert await resolve_multi_agent_compact_model(session, settings, tenant_id=tenant_id) is model  # type: ignore[arg-type]
+    assert await resolve_multi_agent_planning_model(session, settings, tenant_id=tenant_id) is model  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_group_runtime_model_resolvers_accept_same_tenant_models() -> None:
+    tenant_id = uuid.uuid4()
+    model_id = uuid.uuid4()
+    model = _model(id=model_id, tenant_id=tenant_id, enabled=True)
+    setting = SystemSetting(
+        key=f"multi_agent_runtime_models:{tenant_id}",
+        value={
+            "compact_model_id": str(model_id),
+            "planning_model_id": str(model_id),
+        },
+    )
+    session = _Session(model, setting)
+    settings = Settings(_env_file=None)
+
+    assert await resolve_multi_agent_compact_model(session, settings, tenant_id=tenant_id) is model  # type: ignore[arg-type]
+    assert await resolve_multi_agent_planning_model(session, settings, tenant_id=tenant_id) is model  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_group_runtime_model_resolvers_reject_cross_tenant_models() -> None:
+    tenant_id = uuid.uuid4()
+    model_id = uuid.uuid4()
+    model = _model(id=model_id, tenant_id=uuid.uuid4(), enabled=True)
+    setting = SystemSetting(
+        key=f"multi_agent_runtime_models:{tenant_id}",
+        value={"planning_model_id": str(model_id)},
+    )
+    session = _Session(model, setting)
+
+    with pytest.raises(PlatformModelConfigurationError, match="another tenant"):
+        await resolve_multi_agent_planning_model(
+            session,  # type: ignore[arg-type]
+            Settings(_env_file=None),
+            tenant_id=tenant_id,
+        )

@@ -51,12 +51,18 @@ def _model(model_id: uuid.UUID, **overrides: object) -> LLMModel:
 
 
 @pytest.mark.asyncio
-async def test_runtime_model_settings_are_platform_admin_only() -> None:
+async def test_runtime_model_settings_are_company_admin_only() -> None:
     session = _ModelSession([])
+    tenant_id = uuid.uuid4()
 
     with pytest.raises(HTTPException) as exc_info:
         await get_runtime_model_settings(
-            current_user=SimpleNamespace(role="org_admin", identity=None),  # type: ignore[arg-type]
+            tenant_id=str(tenant_id),
+            current_user=SimpleNamespace(
+                role="agent_admin",
+                identity=None,
+                tenant_id=tenant_id,
+            ),  # type: ignore[arg-type]
             db=session,  # type: ignore[arg-type]
         )
 
@@ -77,6 +83,7 @@ async def test_runtime_model_settings_reject_ineligible_models(
     overrides: dict[str, object],
 ) -> None:
     model_id = uuid.uuid4()
+    tenant_id = uuid.uuid4()
     session = _ModelSession([_model(model_id, **overrides)])
 
     with pytest.raises(HTTPException) as exc_info:
@@ -85,7 +92,12 @@ async def test_runtime_model_settings_reject_ineligible_models(
                 planning_model_id=model_id,
                 compact_model_id=model_id,
             ),
-            current_user=SimpleNamespace(role="platform_admin", identity=None),  # type: ignore[arg-type]
+            tenant_id=str(tenant_id),
+            current_user=SimpleNamespace(
+                role="platform_admin",
+                identity=None,
+                tenant_id=tenant_id,
+            ),  # type: ignore[arg-type]
             db=session,  # type: ignore[arg-type]
         )
 

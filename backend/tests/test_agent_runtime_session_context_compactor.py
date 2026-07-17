@@ -183,7 +183,7 @@ async def test_compact_accepts_only_the_commit_tool_and_sets_code_owned_watermar
 
 
 @pytest.mark.asyncio
-async def test_group_compact_resolves_only_the_platform_compact_model(monkeypatch) -> None:
+async def test_group_compact_resolves_the_tenant_scoped_context_model(monkeypatch) -> None:
     request = _request()
     group_session = ChatSession(
         id=request.session_id,
@@ -201,8 +201,8 @@ async def test_group_compact_resolves_only_the_platform_compact_model(monkeypatc
     db = _DB(group_session)
     resolver_calls = []
 
-    async def resolve(db_arg, settings_arg):
-        resolver_calls.append((db_arg, settings_arg))
+    async def resolve(db_arg, settings_arg, *, tenant_id):
+        resolver_calls.append((db_arg, settings_arg, tenant_id))
         return platform_model
 
     monkeypatch.setattr(
@@ -219,7 +219,7 @@ async def test_group_compact_resolves_only_the_platform_compact_model(monkeypatc
 
     assert selection.primary is platform_model
     assert selection.usage_agent_id is None
-    assert resolver_calls == [(db, settings)]
+    assert resolver_calls == [(db, settings, request.tenant_id)]
     assert db.calls == 1
 
 
