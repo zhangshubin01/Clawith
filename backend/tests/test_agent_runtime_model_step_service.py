@@ -1299,6 +1299,13 @@ async def test_group_snapshot_adds_only_current_group_tools_and_platform_rules()
     assert "first call `group_query_members`" in group_system_prompt
     assert "exactly one `finish` call" in group_system_prompt
     assert "all intended target IDs" in group_system_prompt
+    assert "do not narrate what you are about to do" in group_system_prompt
+    assert "do not emit another progress message" in group_system_prompt
+    assert "must directly call `finish` exactly once" in group_system_prompt
+    assert "does not send a group message and is invalid" in group_system_prompt
+    assert "repair response must be exactly one native `finish` tool call" in group_system_prompt
+    assert '"wake A and ask A to wake B"' in group_system_prompt
+    assert "this Run should mention A only" in group_system_prompt
     assert "one child Run per mentioned participant" in group_system_prompt
     assert "cannot add another mention target" in group_system_prompt
     assert "every intended recipient" in group_system_prompt
