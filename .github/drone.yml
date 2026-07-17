@@ -156,7 +156,8 @@ steps:
       - name: docker-socket
         path: /var/run/docker.sock
     commands:
-      - echo "Skipping deploy test"
+      - chmod +x .github/scripts/ci_deploy_test.sh
+      - .github/scripts/ci_deploy_test.sh
 
   # --------------------------------------------------------
   # Step 4: 本地升级测试 (Upgrade Test)
