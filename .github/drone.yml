@@ -238,14 +238,14 @@ steps:
         echo "checkpoint version=$CHECKPOINT_VERSION"
         [ "$CHECKPOINT_VERSION" -ge 0 ]
 
-        BACKEND_ID="$(compose ps -q backend)"
-        EXPECTED_IMAGE_ID="$(docker image inspect "clawith-backend:$IMAGE_TAG" --format '{{.Id}}')"
-        RUNNING_IMAGE_ID="$(docker inspect "$BACKEND_ID" --format '{{.Image}}')"
+        BACKEND_ID=$(compose ps -q backend | tr -d '\r')
+        EXPECTED_IMAGE_ID=$(docker image inspect "clawith-backend:$IMAGE_TAG" --format '{{.Id}}' | tr -d '\r')
+        RUNNING_IMAGE_ID=$(docker inspect "$BACKEND_ID" --format '{{.Image}}' | tr -d '\r')
         [ "$RUNNING_IMAGE_ID" = "$EXPECTED_IMAGE_ID" ]
         docker image inspect "clawith-backend:$IMAGE_TAG" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' > /tmp/backend_revision
         [ "$(cat /tmp/backend_revision)" = "$DRONE_COMMIT" ]
 
-        UVICORN_COUNT="$(docker top "$BACKEND_ID" -eo args 2>/dev/null | grep -c '[u]vicorn app.main:app' || true)"
+        UVICORN_COUNT=$(docker top "$BACKEND_ID" -eo args 2>/dev/null | grep -c '[u]vicorn app.main:app' || true)
         if [ "$UVICORN_COUNT" -gt 0 ]; then
           echo "✅ Uvicorn worker 运行状态正常 (数量: $UVICORN_COUNT)"
         else
@@ -411,13 +411,13 @@ steps:
         echo "checkpoint version=$CHECKPOINT_VERSION"
         [ "$CHECKPOINT_VERSION" -ge 0 ]
 
-        EXPECTED_IMAGE_ID="$(docker image inspect "$NEW_IMAGE" --format '{{.Id}}')"
-        RUNNING_IMAGE_ID="$(docker inspect "$NEW_CONTAINER" --format '{{.Image}}')"
+        EXPECTED_IMAGE_ID=$(docker image inspect "$NEW_IMAGE" --format '{{.Id}}' | tr -d '\r')
+        RUNNING_IMAGE_ID=$(docker inspect "$NEW_CONTAINER" --format '{{.Image}}' | tr -d '\r')
         [ "$RUNNING_IMAGE_ID" = "$EXPECTED_IMAGE_ID" ]
         docker image inspect "$NEW_IMAGE" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' > /tmp/new_revision
         [ "$(cat /tmp/new_revision)" = "$DRONE_COMMIT" ]
 
-        UVICORN_COUNT="$(docker top "$NEW_CONTAINER" -eo args 2>/dev/null | grep -c '[u]vicorn app.main:app' || true)"
+        UVICORN_COUNT=$(docker top "$NEW_CONTAINER" -eo args 2>/dev/null | grep -c '[u]vicorn app.main:app' || true)
         if [ "$UVICORN_COUNT" -gt 0 ]; then
           echo "✅ Uvicorn worker 运行状态正常 (数量: $UVICORN_COUNT)"
         else
