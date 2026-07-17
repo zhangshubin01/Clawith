@@ -2,6 +2,12 @@ import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import FileBrowser, { type FileBrowserApi } from '../../components/FileBrowser';
 import { groupApi } from '../../services/groupApi';
+import {
+    GROUP_WORKSPACE_UPLOAD_ACCEPT,
+    GroupWorkspaceUploadError,
+    groupWorkspaceUploadPath,
+    readGroupWorkspaceTextUpload,
+} from './groupWorkspaceUpload';
 import { createVersionedFileAdapter } from './versionedFileAdapter';
 
 /**
@@ -14,8 +20,14 @@ export default function GroupWorkspaceTab({ groupId }: { groupId: string }) {
     const api = useMemo<FileBrowserApi>(() => {
         const versioned = createVersionedFileAdapter({
             read: (path) => groupApi.workspaceFile(groupId, path),
-            write: (path, content, expectedVersionToken) =>
-                groupApi.saveWorkspaceFile(groupId, path, content, expectedVersionToken),
+            write: (path, content, expectedVersionToken, requireAbsent) =>
+                groupApi.saveWorkspaceFile(
+                    groupId,
+                    path,
+                    content,
+                    expectedVersionToken,
+                    requireAbsent,
+                ),
             delete: (path, expectedVersionToken) =>
                 groupApi.deleteWorkspaceFile(groupId, path, expectedVersionToken),
         });
@@ -23,7 +35,7 @@ export default function GroupWorkspaceTab({ groupId }: { groupId: string }) {
             list: async (path: string) => {
                 const entries = await groupApi.workspace(groupId, path);
                 return entries.map((entry) => {
-                    if (!entry.is_dir) versioned.remember(entry.path, entry.version_token);
+                    versioned.remember(entry.path, entry.version_token);
                     return {
                         name: entry.name,
                         path: entry.path,
@@ -35,8 +47,39 @@ export default function GroupWorkspaceTab({ groupId }: { groupId: string }) {
             read: versioned.read,
             write: versioned.write,
             delete: versioned.delete,
+            upload: async (file, currentPath, onProgress) => {
+                try {
+                    const path = groupWorkspaceUploadPath(currentPath, file.name);
+                    onProgress?.(10);
+                    const content = await readGroupWorkspaceTextUpload(file);
+                    onProgress?.(40);
+
+                    const snapshot = versioned.snapshot(path);
+
+                    const saved = await groupApi.saveWorkspaceFile(
+                        groupId,
+                        path,
+                        content,
+                        snapshot.versionToken,
+                        !snapshot.known,
+                    );
+                    versioned.remember(path, saved.version_token);
+                    onProgress?.(100);
+                    return saved;
+                } catch (error) {
+                    if (error instanceof GroupWorkspaceUploadError) {
+                        const message = error.code === 'invalid_name'
+                            ? t('groups.workspaceUploadInvalidName', '文件名不能包含路径分隔符')
+                            : error.code === 'unsupported_type'
+                                ? t('groups.workspaceUploadTextOnly', '群文件区当前只支持 UTF-8 文本文件')
+                                : t('groups.workspaceUploadInvalidUtf8', '文件不是有效的 UTF-8 文本，未上传')
+                        throw new Error(message);
+                    }
+                    throw error;
+                }
+            },
         };
-    }, [groupId]);
+    }, [groupId, t]);
 
     return (
         <div className="group-workspace-tab">
@@ -45,8 +88,9 @@ export default function GroupWorkspaceTab({ groupId }: { groupId: string }) {
             </div>
             <FileBrowser
                 api={api}
+                uploadAccept={GROUP_WORKSPACE_UPLOAD_ACCEPT}
                 features={{
-                    upload: false,
+                    upload: true,
                     newFile: true,
                     newFolder: true,
                     edit: true,

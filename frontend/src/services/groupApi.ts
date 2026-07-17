@@ -176,12 +176,14 @@ export const groupApi = {
         path: string,
         content: string,
         expectedVersionToken?: string | null,
+        requireAbsent = false,
     ) =>
         fetchJson<GroupTextFile>(`/groups/${groupId}/workspace/file${qs({ path })}`, {
             method: 'PUT',
             body: JSON.stringify({
                 content,
                 expected_version_token: expectedVersionToken ?? null,
+                require_absent: requireAbsent,
             }),
         }),
 

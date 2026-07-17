@@ -161,6 +161,12 @@ class GroupTextFileIn(BaseModel):
     expected_version_token: str | None = None
 
 
+class GroupWorkspaceFileIn(GroupTextFileIn):
+    """Workspace-only write conditions; fixed announcement/memory files stay narrow."""
+
+    require_absent: bool = False
+
+
 class GroupTextFileOut(BaseModel):
     path: str
     content: str
@@ -300,7 +306,7 @@ def _translate_file_error(exc: GroupFileServiceError) -> HTTPException:
         status_code = status.HTTP_404_NOT_FOUND
     elif exc.code in {"group_memory_write_denied"}:
         status_code = status.HTTP_403_FORBIDDEN
-    elif exc.code == "group_file_conflict":
+    elif exc.code in {"group_file_conflict", "group_workspace_directory_not_empty"}:
         status_code = status.HTTP_409_CONFLICT
     else:
         status_code = status.HTTP_400_BAD_REQUEST
@@ -1284,7 +1290,7 @@ async def get_group_workspace_file(
 @router.put("/{group_id}/workspace/file", response_model=GroupTextFileOut)
 async def put_group_workspace_file(
     group_id: uuid.UUID,
-    body: GroupTextFileIn,
+    body: GroupWorkspaceFileIn,
     path: Annotated[str, Query(min_length=1, max_length=500)],
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -1300,6 +1306,7 @@ async def put_group_workspace_file(
             path=path,
             content=body.content,
             expected_version_token=body.expected_version_token,
+            require_absent=body.require_absent,
         )
     except GroupChatServiceError as exc:
         raise _translate_domain_error(exc) from exc

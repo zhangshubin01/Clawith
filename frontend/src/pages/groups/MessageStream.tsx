@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { IconRobot } from '@tabler/icons-react';
 import MarkdownRenderer from '../../components/MarkdownRenderer';
@@ -12,6 +12,7 @@ interface MessageStreamProps {
     hasMore: boolean;
     loadingMore: boolean;
     onLoadMore: () => void;
+    onLatestMessageSeen: (messageId: string) => void;
 }
 
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' });
@@ -49,6 +50,7 @@ export default function MessageStream({
     hasMore,
     loadingMore,
     onLoadMore,
+    onLatestMessageSeen,
 }: MessageStreamProps) {
     const { t } = useTranslation();
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -56,6 +58,20 @@ export default function MessageStream({
     const pinnedToBottomRef = useRef(true);
     const previousHeightRef = useRef(0);
     const previousCountRef = useRef(0);
+    const latestMessageId = messages.length > 0 ? messages[messages.length - 1].id : undefined;
+
+    const reportLatestMessageSeen = useCallback(() => {
+        const stream = scrollRef.current;
+        const bottom = bottomRef.current;
+        if (!stream || !bottom || !latestMessageId) return;
+        if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
+
+        // Reaching the bottom sentinel proves the newest rendered message is in the visible stream.
+        const streamRect = stream.getBoundingClientRect();
+        const bottomRect = bottom.getBoundingClientRect();
+        if (bottomRect.top < streamRect.top || bottomRect.bottom > streamRect.bottom + 1) return;
+        onLatestMessageSeen(latestMessageId);
+    }, [latestMessageId, onLatestMessageSeen]);
 
     const memberByParticipant = new Map(members.map((member) => [member.participant_id, member]));
 
@@ -64,6 +80,7 @@ export default function MessageStream({
         if (!node) return;
         const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
         pinnedToBottomRef.current = distanceFromBottom < 80;
+        reportLatestMessageSeen();
         if (node.scrollTop < 60 && hasMore && !loadingMore) {
             previousHeightRef.current = node.scrollHeight;
             onLoadMore();
@@ -83,7 +100,20 @@ export default function MessageStream({
             bottomRef.current?.scrollIntoView({ block: 'end' });
         }
         previousCountRef.current = messages.length;
-    }, [messages]);
+        reportLatestMessageSeen();
+    }, [messages, reportLatestMessageSeen]);
+
+    // A background tab or unfocused window is not a read. Re-check when the user returns.
+    useEffect(() => {
+        const checkVisibility = () => reportLatestMessageSeen();
+        document.addEventListener('visibilitychange', checkVisibility);
+        window.addEventListener('focus', checkVisibility);
+        checkVisibility();
+        return () => {
+            document.removeEventListener('visibilitychange', checkVisibility);
+            window.removeEventListener('focus', checkVisibility);
+        };
+    }, [reportLatestMessageSeen]);
 
     // A different session starts a different scroll history.
     useEffect(() => {

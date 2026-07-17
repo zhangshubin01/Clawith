@@ -685,7 +685,8 @@
       "upload": {
         "success": "上传成功",
         "failed": "上传失败",
-        "uploading": "上传中..."
+        "uploading": "上传中...",
+        "unsupported": "不支持的文件类型：{{name}}"
       },
       "approvals": {
         "title": "审批",
@@ -2276,6 +2277,9 @@
     "announcementPlaceholder": "写下群目标、协作规则和对智能体的要求...",
     "workspace": "文件",
     "workspaceNote": "群 workspace 是全群共享的文件区，群内所有会话共用同一份。智能体的产物也会放在这里。",
+    "workspaceUploadTextOnly": "群文件区当前只支持 UTF-8 文本文件。",
+    "workspaceUploadInvalidName": "文件名不能包含路径分隔符。",
+    "workspaceUploadInvalidUtf8": "文件不是有效的 UTF-8 文本，未上传。",
     "memory": "记忆",
     "memoryNote": "这是该智能体在本群的长期记忆，只在它于本群被 @ 时加载。",
     "memoryPlaceholder": "这个智能体在本群需要长期记住的内容...",

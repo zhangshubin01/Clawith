@@ -9,6 +9,11 @@ import pytest
 from app.models.participant import Participant
 from app.models.workspace import WorkspaceFileRevision
 from app.services import group_file_service
+from app.services.storage_runtime.base import (
+    ConditionalWriteResult,
+    StorageEntry,
+    StorageVersion,
+)
 from app.services.storage_runtime.local import LocalStorageBackend
 
 
@@ -164,6 +169,194 @@ async def test_group_workspace_rejects_traversal_and_stale_writes(
         )
     assert conflict.value.code == "group_file_conflict"
     assert len(db.added) == revision_count
+
+
+@pytest.mark.asyncio
+async def test_group_workspace_create_can_require_the_path_to_be_absent(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    tenant_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    actor = _participant("user")
+    db = _RecordingDB()
+    storage = _stub_storage_and_authorization(monkeypatch, tmp_path, actor)
+
+    await group_file_service.write_workspace_file(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor.id,
+        path="notes.md",
+        content="existing",
+    )
+
+    with pytest.raises(group_file_service.GroupFileServiceError) as conflict:
+        await group_file_service.write_workspace_file(
+            db,
+            tenant_id=tenant_id,
+            group_id=group_id,
+            actor_participant_id=actor.id,
+            path="notes.md",
+            content="upload",
+            require_absent=True,
+        )
+
+    assert conflict.value.code == "group_file_conflict"
+    assert await storage.read_text(f"groups/{group_id}/workspace/notes.md") == "existing"
+
+
+@pytest.mark.asyncio
+async def test_group_workspace_deletes_empty_directory_but_rejects_non_empty_directory(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    tenant_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    actor = _participant("user")
+    db = _RecordingDB()
+    storage = _stub_storage_and_authorization(monkeypatch, tmp_path, actor)
+
+    await group_file_service.write_workspace_file(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor.id,
+        path="empty/.gitkeep",
+        content="",
+    )
+    empty_entry = (await group_file_service.list_workspace(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor.id,
+    ))[0]
+    assert empty_entry.is_dir is True
+    assert empty_entry.version_token
+
+    await group_file_service.delete_workspace_file(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor.id,
+        path=empty_entry.path,
+        expected_version_token=empty_entry.version_token,
+    )
+    assert await storage.exists(f"groups/{group_id}/workspace/empty") is False
+
+    await group_file_service.write_workspace_file(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor.id,
+        path="full/file.md",
+        content="keep me",
+    )
+    full_entry = (await group_file_service.list_workspace(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor.id,
+    ))[0]
+
+    with pytest.raises(group_file_service.GroupFileServiceError) as not_empty:
+        await group_file_service.delete_workspace_file(
+            db,
+            tenant_id=tenant_id,
+            group_id=group_id,
+            actor_participant_id=actor.id,
+            path=full_entry.path,
+            expected_version_token=full_entry.version_token,
+        )
+
+    assert not_empty.value.code == "group_workspace_directory_not_empty"
+    assert await storage.read_text(f"groups/{group_id}/workspace/full/file.md") == "keep me"
+
+
+@pytest.mark.asyncio
+async def test_group_workspace_virtual_directory_delete_never_recurses_over_new_object(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    actor = _participant("user")
+    db = _RecordingDB()
+    directory_key = f"groups/{group_id}/workspace/empty"
+    marker_key = f"{directory_key}/.gitkeep"
+    arrived_key = f"{directory_key}/arrived.md"
+
+    class _VirtualObjectStore:
+        def __init__(self) -> None:
+            self.objects = {marker_key: "marker-v1"}
+            self.injected = False
+
+        async def is_dir(self, key: str) -> bool:
+            prefix = key.rstrip("/") + "/"
+            return any(object_key.startswith(prefix) for object_key in self.objects)
+
+        async def list_dir(self, key: str):
+            assert key == directory_key
+            entries = [
+                StorageEntry(
+                    name=".gitkeep",
+                    key=marker_key,
+                    is_dir=False,
+                    etag="marker-v1",
+                )
+            ]
+            if not self.injected:
+                self.injected = True
+                self.objects[arrived_key] = "arrived-v1"
+            return entries
+
+        async def get_version(self, key: str) -> StorageVersion:
+            token = self.objects.get(key)
+            return StorageVersion(
+                key=key,
+                exists=token is not None,
+                is_dir=False,
+                etag=token or "",
+            )
+
+        async def delete_if_match(self, key: str, *, condition):
+            current = await self.get_version(key)
+            if condition.version_token != current.token:
+                return ConditionalWriteResult(
+                    ok=False,
+                    conflict=True,
+                    current_version=current,
+                )
+            self.objects.pop(key, None)
+            return ConditionalWriteResult(
+                ok=True,
+                current_version=await self.get_version(key),
+            )
+
+    storage = _VirtualObjectStore()
+
+    async def authorize(_db, **_kwargs):
+        return None, None, actor
+
+    monkeypatch.setattr(group_file_service, "get_storage_backend", lambda: storage)
+    monkeypatch.setattr(
+        group_file_service.group_chat_service,
+        "authorize_group_member",
+        authorize,
+    )
+
+    with pytest.raises(group_file_service.GroupFileServiceError) as conflict:
+        await group_file_service.delete_workspace_file(
+            db,
+            tenant_id=tenant_id,
+            group_id=group_id,
+            actor_participant_id=actor.id,
+            path="empty",
+            expected_version_token="marker-v1",
+        )
+
+    assert conflict.value.code == "group_file_conflict"
+    assert arrived_key in storage.objects
+    assert marker_key not in storage.objects
 
 
 @pytest.mark.asyncio

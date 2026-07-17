@@ -119,6 +119,44 @@ def test_group_invite_write_contract_only_accepts_participant_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_workspace_put_forwards_create_only_condition(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    user = _user(tenant_id)
+    participant = _participant(user)
+    group = _group(tenant_id, participant.id)
+    db = _RecordingDB()
+    calls = []
+
+    async def fake_participant(_db, _user):
+        return participant
+
+    async def fake_write(_db, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            path=kwargs["path"],
+            content=kwargs["content"],
+            exists=True,
+            version_token="v1",
+            modified_at="now",
+            revision_id=None,
+        )
+
+    monkeypatch.setattr(groups_api, "_current_participant", fake_participant)
+    monkeypatch.setattr(groups_api.group_file_service, "write_workspace_file", fake_write)
+
+    await groups_api.put_group_workspace_file(
+        group.id,
+        groups_api.GroupWorkspaceFileIn(content="upload", require_absent=True),
+        path="uploads/report.md",
+        current_user=user,
+        db=db,
+    )
+
+    assert calls[0]["require_absent"] is True
+    assert "require_absent" not in groups_api.GroupTextFileIn.model_fields
+
+
+@pytest.mark.asyncio
 async def test_create_group_stages_domain_change_and_audit_in_one_transaction(monkeypatch) -> None:
     tenant_id = uuid.uuid4()
     user = _user(tenant_id)

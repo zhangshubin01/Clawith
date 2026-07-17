@@ -703,7 +703,8 @@
     "upload": {
       "success": "Upload successful",
       "failed": "Upload failed",
-      "uploading": "Uploading..."
+      "uploading": "Uploading...",
+      "unsupported": "Unsupported file type: {{name}}"
     },
     "skillNames": {
       "web-research": "Web Research",
@@ -2151,6 +2152,9 @@
     "announcementPlaceholder": "Group goals, collaboration rules, what agents should do here...",
     "workspace": "Files",
     "workspaceNote": "The group workspace is shared by every session in this group. Agents drop their outputs here too.",
+    "workspaceUploadTextOnly": "The group workspace currently accepts UTF-8 text files only.",
+    "workspaceUploadInvalidName": "File names cannot contain path separators.",
+    "workspaceUploadInvalidUtf8": "The file is not valid UTF-8 text and was not uploaded.",
     "memory": "Memory",
     "memoryNote": "This agent's long-term memory for this group. It is loaded only when the agent is mentioned here.",
     "memoryPlaceholder": "What this agent should remember in this group...",

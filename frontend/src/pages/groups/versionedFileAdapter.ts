@@ -9,6 +9,7 @@ interface VersionedFileOperations {
         path: string,
         content: string,
         expectedVersionToken: string | null,
+        requireAbsent: boolean,
     ) => Promise<VersionedTextFile>;
     delete: (path: string, expectedVersionToken: string | null) => Promise<unknown>;
 }
@@ -27,13 +28,24 @@ export function createVersionedFileAdapter(operations: VersionedFileOperations) 
 
     return {
         remember,
+        snapshot(path: string) {
+            return versions.has(path)
+                ? { known: true, versionToken: versions.get(path) ?? null }
+                : { known: false, versionToken: null };
+        },
         async read(path: string) {
             const file = await operations.read(path);
             remember(path, file.version_token);
             return { content: file.content };
         },
         async write(path: string, content: string) {
-            const file = await operations.write(path, content, versions.get(path) ?? null);
+            const known = versions.has(path);
+            const file = await operations.write(
+                path,
+                content,
+                versions.get(path) ?? null,
+                !known,
+            );
             remember(path, file.version_token);
             return file;
         },

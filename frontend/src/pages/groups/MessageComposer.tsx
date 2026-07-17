@@ -2,6 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { IconPlayerStop, IconRobot, IconSend, IconUser } from '@tabler/icons-react';
 import type { GroupMember } from '../../types/group';
+import {
+    liveMentionParticipantIds,
+    liveMentionedAgentCount,
+    mentionReplacementEnd,
+    reconcileMentionBindings,
+    replaceMentionBinding,
+    type MentionBinding,
+    type MentionEditHint,
+} from './mentionBindings';
 
 interface MessageComposerProps {
     members: GroupMember[];
@@ -42,13 +51,14 @@ export default function MessageComposer({
     const [query, setQuery] = useState<MentionQuery | null>(null);
     const [highlighted, setHighlighted] = useState(0);
     const [sending, setSending] = useState(false);
+    const pendingEditRef = useRef<MentionEditHint | null>(null);
 
     /**
-     * Mentions the user actually picked from the dropdown. The backend resolves mentions from this
-     * list, not by parsing the text, so a name typed by hand never wakes an agent. On send we keep
-     * only the ones whose `@name` survived further editing.
+     * One stable participant identity per mention occurrence picked from the dropdown. Text ranges
+     * move with edits around them and are discarded if their exact token is edited or deleted.
+     * The backend never resolves a participant from display text, so hand-typed names stay plain.
      */
-    const [picked, setPicked] = useState<GroupMember[]>([]);
+    const [mentionBindings, setMentionBindings] = useState<MentionBinding[]>([]);
 
     const candidates = useMemo(() => {
         if (!query) return [];
@@ -75,17 +85,34 @@ export default function MessageComposer({
 
     const applyMention = (member: GroupMember) => {
         if (!query) return;
+        const queryEnd = query.start + 1 + query.text.length;
+        const replacementEnd = mentionReplacementEnd(
+            value,
+            mentionBindings,
+            query.start,
+            queryEnd,
+        );
         const before = value.slice(0, query.start);
-        const after = value.slice(query.start + 1 + query.text.length);
+        const after = value.slice(replacementEnd);
         const inserted = `@${member.display_name} `;
         const next = `${before}${inserted}${after}`;
+        const token = inserted.slice(0, -1);
 
         setValue(next);
-        setPicked((current) =>
-            current.some((m) => m.participant_id === member.participant_id)
-                ? current
-                : [...current, member],
-        );
+        setMentionBindings((current) => replaceMentionBinding(
+            value,
+            next,
+            current,
+            query.start,
+            replacementEnd,
+            {
+                participantId: member.participant_id,
+                participantType: member.participant_type,
+                start: before.length,
+                end: before.length + token.length,
+                text: token,
+            },
+        ));
         setQuery(null);
 
         const caret = before.length + inserted.length;
@@ -98,15 +125,13 @@ export default function MessageComposer({
     const submit = async () => {
         const content = value.trim();
         if (!content || sending || disabled) return;
-
-        // A mention the user deleted from the text should not wake its agent.
-        const live = picked.filter((member) => content.includes(`@${member.display_name}`));
+        const mentionParticipantIds = liveMentionParticipantIds(value, mentionBindings);
 
         setSending(true);
         try {
-            await onSend(content, live.map((member) => member.participant_id));
+            await onSend(content, mentionParticipantIds);
             setValue('');
-            setPicked([]);
+            setMentionBindings([]);
             setQuery(null);
         } finally {
             setSending(false);
@@ -147,9 +172,7 @@ export default function MessageComposer({
         }
     };
 
-    const agentCount = picked.filter(
-        (member) => member.participant_type === 'agent' && value.includes(`@${member.display_name}`),
-    ).length;
+    const agentCount = liveMentionedAgentCount(value, mentionBindings);
 
     return (
         <div className="group-composer">
@@ -189,9 +212,25 @@ export default function MessageComposer({
                         value={value}
                         disabled={disabled}
                         placeholder={t('groups.composerPlaceholder', '发送消息，@ 唤醒智能体')}
+                        onBeforeInput={(event) => {
+                            const target = event.currentTarget;
+                            pendingEditRef.current = {
+                                start: target.selectionStart ?? 0,
+                                end: target.selectionEnd ?? 0,
+                                inputType: (event.nativeEvent as InputEvent).inputType || '',
+                            };
+                        }}
                         onChange={(event) => {
-                            setValue(event.target.value);
-                            syncQuery(event.target.value, event.target.selectionStart ?? 0);
+                            const nextValue = event.target.value;
+                            setMentionBindings((current) => reconcileMentionBindings(
+                                value,
+                                nextValue,
+                                current,
+                                pendingEditRef.current,
+                            ));
+                            pendingEditRef.current = null;
+                            setValue(nextValue);
+                            syncQuery(nextValue, event.target.selectionStart ?? 0);
                         }}
                         onKeyUp={(event) => {
                             const target = event.target as HTMLTextAreaElement;

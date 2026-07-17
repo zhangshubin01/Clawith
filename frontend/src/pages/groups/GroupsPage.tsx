@@ -16,7 +16,11 @@ import {
     IconTrash,
 } from '@tabler/icons-react';
 import { groupApi } from '../../services/groupApi';
-import { compareCursor, useGroupRealtime } from '../../hooks/useGroupRealtime';
+import {
+    compareCursor,
+    type GroupActivity,
+    useGroupRealtime,
+} from '../../hooks/useGroupRealtime';
 import { useAuthStore } from '../../stores';
 import { useToast } from '../../components/Toast/ToastProvider';
 import { createRandomUUID } from '../../utils/randomUUID';
@@ -95,6 +99,11 @@ export default function GroupsPage() {
     const [deletingSession, setDeletingSession] = useState<GroupSession | null>(null);
     const [deletingGroup, setDeletingGroup] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
+    const groupActivityRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const appliedRealtimeMessageIdsRef = useRef<Set<string>>(new Set());
+    const latestRealtimeMessageBySessionRef = useRef<Map<string, GroupMessage>>(new Map());
+    const readRequestsRef = useRef<Set<string>>(new Set());
+    const lastReadMessageBySessionRef = useRef<Map<string, string>>(new Map());
 
     const {
         data: groups = [],
@@ -268,9 +277,71 @@ export default function GroupsPage() {
         setMessages((previous) => mergeMessages(previous, incoming));
     }, [sessionId]);
 
-    const onGroupActivity = useCallback(() => {
-        void queryClient.invalidateQueries({ queryKey: ['group-sessions', groupId] });
-    }, [queryClient, groupId]);
+    const onGroupActivity = useCallback((activity: GroupActivity) => {
+        const activityGroupId = activeGroup?.id;
+        if (!activityGroupId) return;
+
+        const { message, sessionId: activitySessionId } = activity;
+        const isUnreadForMe = Boolean(
+            message
+            && activitySessionId
+            && me
+            && message.participant_id !== me?.participant_id,
+        );
+        if (isUnreadForMe && message && activitySessionId) {
+            const previousLatest = latestRealtimeMessageBySessionRef.current.get(activitySessionId);
+            if (!previousLatest || compareCursor(message.cursor, previousLatest.cursor) > 0) {
+                latestRealtimeMessageBySessionRef.current.set(activitySessionId, message);
+            }
+        }
+        if (
+            isUnreadForMe
+            && message
+            && activitySessionId
+            && !appliedRealtimeMessageIdsRef.current.has(message.id)
+        ) {
+            appliedRealtimeMessageIdsRef.current.add(message.id);
+            if (appliedRealtimeMessageIdsRef.current.size > 1000) {
+                const oldestMessageId = appliedRealtimeMessageIdsRef.current.values().next().value;
+                if (oldestMessageId) appliedRealtimeMessageIdsRef.current.delete(oldestMessageId);
+            }
+            queryClient.setQueryData<GroupSession[]>(
+                ['group-sessions', activityGroupId],
+                (current) => current?.map((session) => (
+                    session.id === activitySessionId
+                        ? {
+                            ...session,
+                            unread_count: session.unread_count + 1,
+                            last_message_at: message.created_at,
+                        }
+                        : session
+                )),
+            );
+        }
+
+        // Coalesce a burst, then replace optimistic counts with the backend's member+session truth.
+        if (groupActivityRefreshTimerRef.current) {
+            clearTimeout(groupActivityRefreshTimerRef.current);
+        }
+        groupActivityRefreshTimerRef.current = setTimeout(() => {
+            groupActivityRefreshTimerRef.current = null;
+            void queryClient.invalidateQueries({
+                queryKey: ['group-sessions', activityGroupId],
+                exact: true,
+            });
+        }, 150);
+    }, [activeGroup?.id, me, queryClient]);
+
+    useEffect(() => {
+        appliedRealtimeMessageIdsRef.current.clear();
+        latestRealtimeMessageBySessionRef.current.clear();
+        return () => {
+            if (groupActivityRefreshTimerRef.current) {
+                clearTimeout(groupActivityRefreshTimerRef.current);
+                groupActivityRefreshTimerRef.current = null;
+            }
+        };
+    }, [groupId]);
 
     // Called for its transport side effects; the header no longer surfaces connection status.
     useGroupRealtime({
@@ -281,18 +352,54 @@ export default function GroupsPage() {
         onGroupActivity,
     });
 
-    // Reading the newest message is what clears this session's unread badge.
-    const lastMessageId = messages.length > 0 ? messages[messages.length - 1].id : undefined;
-    useEffect(() => {
-        if (!groupId || !sessionId || !lastMessageId) return;
-        const timer = setTimeout(() => {
-            void groupApi
-                .markSessionRead(groupId, sessionId, lastMessageId)
-                .then(() => refetchSessions())
-                .catch(() => undefined);
-        }, 400);
-        return () => clearTimeout(timer);
-    }, [groupId, sessionId, lastMessageId, refetchSessions]);
+    const markLatestMessageSeen = useCallback((messageId: string) => {
+        if (!activeGroup || !activeSession) return;
+        const targetGroupId = activeGroup.id;
+        const targetSessionId = activeSession.id;
+        const requestKey = `${targetSessionId}:${messageId}`;
+        if (
+            readRequestsRef.current.has(requestKey)
+            || lastReadMessageBySessionRef.current.get(targetSessionId) === messageId
+        ) return;
+
+        readRequestsRef.current.add(requestKey);
+        void groupApi.markSessionRead(targetGroupId, targetSessionId, messageId)
+            .then(async (readState) => {
+                lastReadMessageBySessionRef.current.set(
+                    targetSessionId,
+                    readState.last_read_message_id,
+                );
+                // Prevent an older in-flight sessions response from restoring the cleared badge.
+                await queryClient.cancelQueries({
+                    queryKey: ['group-sessions', targetGroupId],
+                    exact: true,
+                });
+                const latestRealtimeMessageId = latestRealtimeMessageBySessionRef.current
+                    .get(targetSessionId)?.id;
+                if (
+                    latestRealtimeMessageId === undefined
+                    || readState.last_read_message_id === latestRealtimeMessageId
+                ) {
+                    queryClient.setQueryData<GroupSession[]>(
+                        ['group-sessions', targetGroupId],
+                        (current) => current?.map((session) => (
+                            session.id === targetSessionId
+                                ? { ...session, unread_count: 0 }
+                                : session
+                        )),
+                    );
+                    if (readState.last_read_message_id === latestRealtimeMessageId) {
+                        latestRealtimeMessageBySessionRef.current.delete(targetSessionId);
+                    }
+                }
+                await queryClient.invalidateQueries({
+                    queryKey: ['group-sessions', targetGroupId],
+                    exact: true,
+                });
+            })
+            .catch(() => undefined)
+            .finally(() => readRequestsRef.current.delete(requestKey));
+    }, [activeGroup, activeSession, queryClient]);
 
     const persistToggle = (
         key: string,
@@ -586,7 +693,7 @@ export default function GroupsPage() {
                                                                     >
                                                                         <IconMessage2 size={14} stroke={1.6} />
                                                                         <span className="group-row-name">{session.title}</span>
-                                                                        {session.unread_count > 0 && session.id !== sessionId && (
+                                                                        {session.unread_count > 0 && (
                                                                             <span className="group-unread">{session.unread_count}</span>
                                                                         )}
                                                                     </button>
@@ -664,6 +771,7 @@ export default function GroupsPage() {
                             hasMore={hasMore}
                             loadingMore={loadingMore}
                             onLoadMore={() => void loadMore()}
+                            onLatestMessageSeen={markLatestMessageSeen}
                         />
 
                         <MessageComposer

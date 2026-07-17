@@ -28,6 +28,11 @@ interface GroupSocketEvent {
     message?: GroupMessage;
 }
 
+export interface GroupActivity {
+    sessionId?: string;
+    message?: GroupMessage;
+}
+
 /**
  * Compare two `<created_at ISO>|<uuid>` cursors by the (created_at, id) contract.
  *
@@ -86,8 +91,8 @@ interface UseGroupRealtimeOptions {
     getLastCursor: () => string | undefined;
     /** Ascending, may contain messages the page already has — dedupe by id on the receiving end. */
     onMessages: (sessionId: string, messages: GroupMessage[]) => void;
-    /** Something happened somewhere in the group — refresh session list unread badges. */
-    onGroupActivity?: () => void;
+    /** A committed message arrived, or the transport reconnected and needs reconciliation. */
+    onGroupActivity?: (activity: GroupActivity) => void;
     enabled?: boolean;
 }
 
@@ -123,7 +128,7 @@ export function useGroupRealtime({
             const fresh = await fetchMessagesSince(groupId, activeSession, getLastCursorRef.current());
             if (fresh.length > 0 && sessionIdRef.current === activeSession) {
                 onMessagesRef.current(activeSession, fresh);
-                onGroupActivityRef.current?.();
+                onGroupActivityRef.current?.({});
             }
         } catch {
             // A failed catch-up is not fatal: the next tick or reconnect tries again.
@@ -174,6 +179,8 @@ export function useGroupRealtime({
                     pollTimer = null;
                 }
                 setStatus('live');
+                // Hidden sessions are not cursor-backfilled, so reconcile their unread counts too.
+                onGroupActivityRef.current?.({});
                 // Close whatever gap opened while the socket was down.
                 void catchUp();
             };
@@ -189,7 +196,10 @@ export function useGroupRealtime({
                 if (payload.type !== 'message.created' || !payload.message || !payload.session_id) {
                     return;
                 }
-                onGroupActivityRef.current?.();
+                onGroupActivityRef.current?.({
+                    sessionId: payload.session_id,
+                    message: payload.message,
+                });
                 if (payload.session_id === sessionIdRef.current) {
                     onMessagesRef.current(payload.session_id, [payload.message]);
                 }

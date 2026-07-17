@@ -17,7 +17,7 @@ from app.models.group import GroupMember
 from app.models.participant import Participant
 from app.services import group_chat_service
 from app.services.storage import get_storage_backend, normalize_storage_key
-from app.services.storage_runtime.base import StorageEntry, WriteCondition
+from app.services.storage_runtime.base import StorageEntry, StorageVersion, WriteCondition
 from app.services.workspace_collaboration import (
     content_hash,
     finalize_group_runtime_revision,
@@ -140,6 +140,23 @@ def _entry_version(entry: StorageEntry) -> str | None:
         or entry.content_hash
         or (f"{entry.modified_at}:{entry.size}" if entry.modified_at else None)
     )
+
+
+async def _workspace_entry_version(
+    storage,
+    entry: StorageEntry,
+    version: StorageVersion,
+) -> str | None:
+    """Resolve a stable token for files and marker-backed logical directories."""
+    if version.exists:
+        return version.token
+    if entry.is_dir:
+        marker = await storage.get_version(
+            normalize_storage_key(f"{entry.key}/.gitkeep")
+        )
+        if marker.exists and not marker.is_dir:
+            return marker.token
+    return None
 
 
 def _validate_text(content: str) -> str:
@@ -498,11 +515,22 @@ async def _write_text(
     content: str,
     actor: Participant,
     expected_version_token: str | None,
+    require_absent: bool = False,
     session_id: uuid.UUID | None,
 ) -> GroupTextFile:
     storage = get_storage_backend()
     content = _validate_text(content)
+    if require_absent and expected_version_token is not None:
+        raise GroupFileServiceError(
+            "group_file_write_condition_invalid",
+            "A create-only write cannot also provide a version token",
+        )
     current = await storage.get_version(key)
+    if require_absent and current.exists:
+        raise GroupFileServiceError(
+            "group_file_conflict",
+            "Group file already exists at this path",
+        )
     before = (
         await storage.read_text(key, encoding="utf-8", errors="replace")
         if current.exists and not current.is_dir
@@ -512,9 +540,13 @@ async def _write_text(
         key,
         content.encode("utf-8"),
         condition=(
-            WriteCondition(version_token=expected_version_token)
-            if expected_version_token is not None
-            else None
+            WriteCondition(require_absent=True)
+            if require_absent
+            else (
+                WriteCondition(version_token=expected_version_token)
+                if expected_version_token is not None
+                else None
+            )
         ),
         content_type="text/plain; charset=utf-8",
     )
@@ -772,6 +804,10 @@ async def list_workspace(
     prefix = normalize_storage_key(f"{_group_root(group_id)}/workspace").rstrip("/") + "/"
     output = []
     for entry in await storage.list_dir(key):
+        # Local storage already hides folder markers; keep object-store listings
+        # on the same logical workspace contract.
+        if entry.name == ".gitkeep":
+            continue
         version = await storage.get_version(entry.key)
         relative = normalize_storage_key(entry.key).removeprefix(prefix)
         output.append(
@@ -781,7 +817,7 @@ async def list_workspace(
                 is_dir=entry.is_dir,
                 size=version.size,
                 modified_at=version.modified_at,
-                version_token=version.token if version.exists else None,
+                version_token=await _workspace_entry_version(storage, entry, version),
             )
         )
     return tuple(output)
@@ -812,6 +848,8 @@ async def index_workspace(
     while pending and len(output) < limit:
         current = pending.pop(0)
         for entry in await storage.list_dir(current):
+            if entry.name == ".gitkeep":
+                continue
             version = await storage.get_version(entry.key)
             relative = normalize_storage_key(entry.key).removeprefix(prefix)
             output.append(
@@ -821,7 +859,7 @@ async def index_workspace(
                     is_dir=entry.is_dir,
                     size=version.size,
                     modified_at=version.modified_at,
-                    version_token=version.token if version.exists else None,
+                    version_token=await _workspace_entry_version(storage, entry, version),
                 )
             )
             if entry.is_dir:
@@ -863,6 +901,7 @@ async def write_workspace_file(
     path: str,
     content: str,
     expected_version_token: str | None = None,
+    require_absent: bool = False,
     session_id: uuid.UUID | None = None,
 ) -> GroupTextFile:
     """Create or replace one group workspace text file."""
@@ -882,7 +921,88 @@ async def write_workspace_file(
         content=content,
         actor=actor,
         expected_version_token=expected_version_token,
+        require_absent=require_absent,
         session_id=session_id,
+    )
+
+
+async def _delete_empty_workspace_directory(
+    db: AsyncSession,
+    *,
+    group_id: uuid.UUID,
+    key: str,
+    normalized_path: str,
+    actor: Participant,
+    expected_version_token: str | None,
+    session_id: uuid.UUID | None,
+) -> None:
+    """Delete an empty logical directory without recursively discarding files."""
+    storage = get_storage_backend()
+    entries = await storage.list_dir(key)
+    non_marker_entries = [entry for entry in entries if entry.name != ".gitkeep"]
+    if non_marker_entries:
+        raise GroupFileServiceError(
+            "group_workspace_directory_not_empty",
+            "Delete the files inside this group workspace folder first",
+        )
+
+    current = await storage.get_version(key)
+    marker_key = normalize_storage_key(f"{key}/.gitkeep")
+    marker = await storage.get_version(marker_key)
+    current_token = current.token if current.exists and current.is_dir else (
+        marker.token if marker.exists and not marker.is_dir else None
+    )
+    if (
+        expected_version_token is not None
+        and current_token != expected_version_token
+    ):
+        raise GroupFileServiceError(
+            "group_file_conflict",
+            "Group folder changed before this delete completed",
+        )
+
+    if current.exists and current.is_dir:
+        result = await storage.delete_if_match(
+            key,
+            condition=(
+                WriteCondition(version_token=current_token)
+                if current_token is not None
+                else None
+            ),
+        )
+    elif marker.exists and not marker.is_dir:
+        # Object stores represent a folder only by its children. Delete only the
+        # versioned marker; never call delete_tree, which could erase a file that
+        # arrived after the emptiness check.
+        result = await storage.delete_if_match(
+            marker_key,
+            condition=WriteCondition(version_token=marker.token),
+        )
+    else:
+        raise GroupFileServiceError("group_file_not_found", "Group folder not found")
+    if not result.ok:
+        raise GroupFileServiceError(
+            "group_file_conflict",
+            "Group folder changed before this delete completed",
+        )
+    if await storage.is_dir(key):
+        # A concurrent object-store write survives the marker delete and turns
+        # the operation into a visible conflict instead of a false success.
+        raise GroupFileServiceError(
+            "group_file_conflict",
+            "Group folder changed before this delete completed",
+        )
+
+    await record_group_revision(
+        db,
+        group_id=group_id,
+        path=_revision_path("workspace", normalized_path),
+        operation="delete",
+        actor_type=actor.type,
+        actor_id=actor.ref_id,
+        before_content=None,
+        after_content=None,
+        session_id=str(session_id) if session_id is not None else None,
     )
 
 
@@ -896,7 +1016,7 @@ async def delete_workspace_file(
     expected_version_token: str | None = None,
     session_id: uuid.UUID | None = None,
 ) -> None:
-    """Delete one ordinary group workspace file."""
+    """Delete one group workspace text file or empty directory."""
     actor = await _authorize_actor(
         db,
         tenant_id=tenant_id,
@@ -904,6 +1024,18 @@ async def delete_workspace_file(
         actor_participant_id=actor_participant_id,
     )
     normalized, key = _workspace_key(group_id, path, allow_empty=False)
+    storage = get_storage_backend()
+    if await storage.is_dir(key):
+        await _delete_empty_workspace_directory(
+            db,
+            group_id=group_id,
+            key=key,
+            normalized_path=normalized,
+            actor=actor,
+            expected_version_token=expected_version_token,
+            session_id=session_id,
+        )
+        return
     await _delete_text(
         db,
         group_id=group_id,
