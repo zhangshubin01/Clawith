@@ -42,8 +42,6 @@ _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _TARGET_KINDS = frozenset({"session", "primary_user_session", "direct", "group"})
 _BACKGROUND_FALLBACK_KIND = "background"
 _PLANNING_ROLE = "group_planning"
-_SAFE_RUNTIME_FAILURE = "任务执行未完成，请重试；如果问题持续，请联系管理员。"
-_SAFE_PLANNING_FAILURE = "任务规划未完成，请重试或改为单 Agent 处理。"
 _SAFE_CANCELLED = "任务已取消。"
 
 
@@ -80,6 +78,8 @@ class DeliveryRequest:
     interrupt_id: str | None = None
     original_target_outcome: OriginalTargetOutcome = "not_attempted"
     group_handoff_intent: JsonObject | None = None
+    failure_code: str | None = None
+    failure_message: str | None = None
 
     @property
     def idempotency_key(self) -> str:
@@ -167,6 +167,8 @@ def _validate_request(request: DeliveryRequest) -> None:
             or request.lifecycle_status is not None
             or request.interrupt_id is not None
             or request.group_handoff_intent is not None
+            or request.failure_code is not None
+            or request.failure_message is not None
         ):
             raise DeliveryServiceError(
                 "invalid_delivery_request",
@@ -187,6 +189,11 @@ def _validate_request(request: DeliveryRequest) -> None:
             raise DeliveryServiceError(
                 "invalid_delivery_request",
                 "waiting delivery cannot carry a Group handoff intent",
+            )
+        if request.failure_code is not None or request.failure_message is not None:
+            raise DeliveryServiceError(
+                "invalid_delivery_request",
+                "waiting delivery cannot carry terminal failure metadata",
             )
         return
 
@@ -211,6 +218,13 @@ def _validate_request(request: DeliveryRequest) -> None:
                 "invalid_delivery_request",
                 "only completed terminal delivery can carry a Group handoff intent",
             )
+    if request.lifecycle_status != "failed" and (
+        request.failure_code is not None or request.failure_message is not None
+    ):
+        raise DeliveryServiceError(
+            "invalid_delivery_request",
+            "only failed terminal delivery can carry failure metadata",
+        )
 
 
 def _uuid_value(
@@ -568,11 +582,42 @@ async def _validate_actual_target(
     return participant
 
 
+def _safe_failure_field(value: str | None, *, fallback: str) -> str:
+    if not isinstance(value, str):
+        return fallback
+    normalized = value.strip()
+    if not normalized or len(normalized) > 200:
+        return fallback
+    if not all(character.isalnum() or character in "_-." for character in normalized):
+        return fallback
+    return normalized
+
+
+def _safe_failure_content(run: AgentRun, request: DeliveryRequest) -> str:
+    code = _safe_failure_field(request.failure_code, fallback="runtime_failed")
+    message = (
+        request.failure_message.strip()
+        if isinstance(request.failure_message, str) and request.failure_message.strip()
+        else "后端未提供详细错误信息"
+    )
+    headline = (
+        "任务规划未完成。"
+        if run.run_kind == "orchestration" and run.system_role == _PLANNING_ROLE
+        else "任务执行未完成。"
+    )
+    return "\n".join(
+        (
+            headline,
+            f"错误：{message}",
+            f"错误码：{code}",
+            f"Run ID：{run.id}",
+        )
+    )
+
+
 def _safe_message_content(run: AgentRun, request: DeliveryRequest) -> str:
     if request.kind == "terminal" and request.lifecycle_status == "failed":
-        if run.run_kind == "orchestration" and run.system_role == _PLANNING_ROLE:
-            return _SAFE_PLANNING_FAILURE
-        return _SAFE_RUNTIME_FAILURE
+        return _safe_failure_content(run, request)
     if request.kind == "terminal" and request.lifecycle_status == "cancelled":
         return _SAFE_CANCELLED
     return request.content.strip()

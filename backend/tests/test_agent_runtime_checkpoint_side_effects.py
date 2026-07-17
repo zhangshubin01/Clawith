@@ -374,6 +374,25 @@ def test_waiting_delivery_uses_correlation_id_and_prompt() -> None:
     assert delivery.interrupt_id == "confirm-1"
 
 
+def test_failed_delivery_preserves_backend_error_fields() -> None:
+    run, _, checkpoint = _records(
+        status="failed",
+        lifecycle={
+            "reason": "model_call_failed",
+            "error": {
+                "code": "model_call_failed",
+                "message": "HTTP 429 Too Many Requests",
+            },
+        },
+    )
+
+    delivery = delivery_from_checkpoint(run, checkpoint)
+
+    assert delivery is not None
+    assert delivery.failure_code == "model_call_failed"
+    assert delivery.failure_message == "HTTP 429 Too Many Requests"
+
+
 def test_completed_planning_root_has_no_public_delivery() -> None:
     run, _, checkpoint = _records(lifecycle={"final_answer": "internal"})
     planning_run = replace(

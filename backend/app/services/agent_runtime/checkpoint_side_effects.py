@@ -154,6 +154,14 @@ def _terminal_content(checkpoint: CheckpointObservation, *, status: str) -> str:
     return final_answer or ""
 
 
+def _failure_metadata(checkpoint: CheckpointObservation) -> tuple[str | None, str | None]:
+    lifecycle = checkpoint.state["lifecycle"]
+    error = lifecycle.get("error")
+    if not isinstance(error, Mapping):
+        return None, None
+    return _text_field(error.get("code")), _text_field(error.get("message"))
+
+
 def _terminal_group_handoff(
     checkpoint: CheckpointObservation,
 ) -> dict | None:
@@ -183,6 +191,9 @@ def delivery_from_checkpoint(
         return _waiting_delivery(run, checkpoint)
     if status not in _TERMINAL_STATUSES:
         return None
+    failure_code, failure_message = (
+        _failure_metadata(checkpoint) if status == "failed" else (None, None)
+    )
     return DeliveryRequest(
         tenant_id=run.tenant_id,
         run_id=run.run_id,
@@ -191,6 +202,8 @@ def delivery_from_checkpoint(
         checkpoint_id=checkpoint.checkpoint_id,
         lifecycle_status=cast(DeliveryLifecycleStatus, status),
         group_handoff_intent=_terminal_group_handoff(checkpoint),
+        failure_code=failure_code,
+        failure_message=failure_message,
     )
 
 
@@ -353,6 +366,24 @@ class RuntimeCheckpointSideEffects:
                 interrupts=(),
             )
         authoritative_status = product_checkpoint.state["lifecycle"]["status"]
+        if authoritative_status == "failed":
+            lifecycle = product_checkpoint.state["lifecycle"]
+            error = lifecycle.get("error")
+            error_code = _text_field(error.get("code")) if isinstance(error, Mapping) else None
+            error_message = (
+                _text_field(error.get("message")) if isinstance(error, Mapping) else None
+            )
+            logger.error(
+                "[RuntimeFailure] run_id={} agent_id={} command_id={} checkpoint_id={} "
+                "reason={} error_code={} error_message={!r}",
+                run.run_id,
+                run.agent_id,
+                command.id,
+                product_checkpoint.checkpoint_id,
+                _text_field(lifecycle.get("reason")),
+                error_code,
+                error_message,
+            )
 
         errors: list[Exception] = []
         delivery = delivery_from_checkpoint(run, product_checkpoint)

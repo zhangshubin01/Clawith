@@ -1383,10 +1383,24 @@ class RuntimeModelStepService:
                     tools=tools,
                 )
             except Exception as primary_error:
-                if classify_error(primary_error) != FailoverErrorType.RETRYABLE:
+                primary_classification = classify_error(primary_error)
+                if primary_classification != FailoverErrorType.RETRYABLE:
+                    logger.error(
+                        "[RuntimeModelFailure] run_id={} agent_id={} stage=primary "
+                        "provider={} model={} classification={} http_status={} "
+                        "error_type={} error_message={!r}",
+                        context.run_id,
+                        agent.id,
+                        model.provider,
+                        model.model,
+                        primary_classification.value,
+                        _retry_http_status(primary_error),
+                        type(primary_error).__name__,
+                        str(primary_error),
+                    )
                     raise RuntimeModelCallError(
                         "model_call_failed",
-                        "Runtime primary model call failed without safe failover",
+                        str(primary_error) or type(primary_error).__name__,
                     ) from primary_error
                 tenant_id = uuid.UUID(context.tenant_id)
                 fallback = await self._fallback_model(
@@ -1448,14 +1462,28 @@ class RuntimeModelStepService:
                         tools=fallback_tools,
                     )
                 except Exception as fallback_error:
-                    if classify_error(fallback_error) == FailoverErrorType.RETRYABLE:
+                    fallback_classification = classify_error(fallback_error)
+                    if fallback_classification == FailoverErrorType.RETRYABLE:
                         return self._provider_retry_wait(
                             context=context,
                             model=fallback,
                         )
+                    logger.error(
+                        "[RuntimeModelFailure] run_id={} agent_id={} stage=fallback "
+                        "provider={} model={} classification={} http_status={} "
+                        "error_type={} error_message={!r}",
+                        context.run_id,
+                        agent.id,
+                        fallback.provider,
+                        fallback.model,
+                        fallback_classification.value,
+                        _retry_http_status(fallback_error),
+                        type(fallback_error).__name__,
+                        str(fallback_error),
+                    )
                     raise RuntimeModelCallError(
                         "model_failover_failed",
-                        "Runtime fallback model call also failed",
+                        str(fallback_error) or type(fallback_error).__name__,
                     ) from fallback_error
                 actual_model = fallback
                 failed_over_from = model
@@ -1514,11 +1542,29 @@ class RuntimeModelStepService:
                 result = replace(result, assistant_message=assistant_message)
             return result
         except (ContextBuildError, ModelCapabilityError, RuntimeModelCallError) as exc:
+            logger.error(
+                "[RuntimeModelStepFailure] run_id={} agent_id={} error_code={} "
+                "error_type={} error_message={!r}",
+                context.run_id,
+                context.agent_id,
+                exc.code,
+                type(exc).__name__,
+                str(exc),
+            )
             return _error(exc.code, str(exc))
         except Exception as exc:
+            logger.error(
+                "[RuntimeModelStepFailure] run_id={} agent_id={} error_code={} "
+                "error_type={} error_message={!r}",
+                context.run_id,
+                context.agent_id,
+                "model_call_failed",
+                type(exc).__name__,
+                str(exc),
+            )
             return _error(
                 "model_call_failed",
-                f"Runtime model step failed: {type(exc).__name__}",
+                str(exc) or type(exc).__name__,
             )
 
 

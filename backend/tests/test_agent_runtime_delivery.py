@@ -183,6 +183,8 @@ def _terminal_request(
     status: str = "completed",
     content: str = "Done",
     original_target_outcome: str = "not_attempted",
+    failure_code: str | None = None,
+    failure_message: str | None = None,
 ) -> DeliveryRequest:
     return DeliveryRequest(
         tenant_id=run.tenant_id,
@@ -192,6 +194,8 @@ def _terminal_request(
         checkpoint_id="checkpoint-terminal",
         lifecycle_status=status,  # type: ignore[arg-type]
         original_target_outcome=original_target_outcome,  # type: ignore[arg-type]
+        failure_code=failure_code,
+        failure_message=failure_message,
     )
 
 
@@ -890,7 +894,7 @@ async def test_unknown_original_outcome_never_switches_to_a_primary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_planning_failure_uses_system_identity_and_redacted_content() -> None:
+async def test_planning_failure_uses_system_identity_and_backend_error_fields() -> None:
     tenant_id = uuid.uuid4()
     group_id = uuid.uuid4()
     session = _session(
@@ -913,6 +917,8 @@ async def test_planning_failure_uses_system_identity_and_redacted_content() -> N
             run,
             status="failed",
             content="postgres://admin:secret@db /private/path traceback",
+            failure_code="planning_model_call_failed",
+            failure_message="HTTP 429 Too Many Requests",
         ),
         clock=lambda: NOW,
     )
@@ -923,10 +929,59 @@ async def test_planning_failure_uses_system_identity_and_redacted_content() -> N
     assert message.role == "system"
     assert message.agent_id is None
     assert message.participant_id is None
-    assert message.content == "任务规划未完成，请重试或改为单 Agent 处理。"
+    assert message.content == (
+        "任务规划未完成。\n"
+        "错误：HTTP 429 Too Many Requests\n"
+        "错误码：planning_model_call_failed\n"
+        f"Run ID：{run.id}"
+    )
     assert "secret" not in message.content
     assert "traceback" not in message.content
     assert _added(db, AgentRunEvent)[0].event_type == "delivery_succeeded"
+
+
+@pytest.mark.asyncio
+async def test_runtime_failure_delivers_backend_error_code_and_run_id() -> None:
+    tenant_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    session = _session(tenant_id=tenant_id, agent_id=None, group_id=group_id)
+    run = _run(tenant_id=tenant_id, session=session, agent_id=agent_id)
+    participant = _participant(agent_id)
+    membership = GroupMember(
+        group_id=group_id,
+        participant_id=participant.id,
+        role="member",
+        removed_at=None,
+    )
+    db = _RecordingDB(
+        run,
+        None,
+        session,
+        _agent(tenant_id, agent_id),
+        participant,
+        _group(tenant_id, group_id),
+        membership,
+    )
+
+    receipt = await deliver_runtime_message(
+        db,
+        _terminal_request(
+            run,
+            status="failed",
+            failure_code="model_call_failed",
+            failure_message="HTTP 429 Too Many Requests",
+        ),
+        clock=lambda: NOW,
+    )
+
+    assert receipt.status == "delivered"
+    assert _added(db, ChatMessage)[0].content == (
+        "任务执行未完成。\n"
+        "错误：HTTP 429 Too Many Requests\n"
+        "错误码：model_call_failed\n"
+        f"Run ID：{run.id}"
+    )
 
 
 @pytest.mark.asyncio
