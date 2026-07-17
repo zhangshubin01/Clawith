@@ -65,9 +65,10 @@ def _context(
     *,
     model_id: uuid.UUID | None = None,
     run_id: uuid.UUID | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> RuntimeContext:
     return RuntimeContext(
-        tenant_id=str(uuid.uuid4()),
+        tenant_id=str(tenant_id or uuid.uuid4()),
         run_id=str(run_id or uuid.uuid4()),
         command_id=str(uuid.uuid4()),
         executor=cast(RuntimeNodeExecutor, object()),
@@ -269,6 +270,65 @@ async def test_planning_model_uses_the_pinned_platform_model_without_tools() -> 
     assert "digital employee in Clawith" not in planning_prompt
     assert "call `finish`" not in planning_prompt
     assert "call `wait`" not in planning_prompt
+
+
+@pytest.mark.asyncio
+async def test_planning_model_accepts_a_model_owned_by_the_group_tenant() -> None:
+    tenant_id = uuid.uuid4()
+    first, second = uuid.uuid4(), uuid.uuid4()
+    model = LLMModel(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        provider="openai",
+        model="tenant-planning-model",
+        api_key_encrypted="encrypted",
+        label="Tenant Planning",
+        enabled=True,
+        max_output_tokens=2048,
+        max_input_tokens=64_000,
+    )
+
+    async def complete(_model, _messages, **_kwargs):
+        return LLMCompletionStep(
+            content=json.dumps(_plan(first)),
+            tool_calls=(),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(),
+        )
+
+    result = await PlanningModelService(
+        session_factory=_session_factory(model),  # type: ignore[arg-type]
+        completion=complete,
+    ).complete_once(
+        _state((first, second)),
+        _context(model_id=model.id, tenant_id=tenant_id),
+    )
+
+    assert result.plan == _plan(first)
+
+
+@pytest.mark.asyncio
+async def test_planning_model_rejects_a_model_owned_by_another_tenant() -> None:
+    model = LLMModel(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        provider="openai",
+        model="foreign-planning-model",
+        api_key_encrypted="encrypted",
+        label="Foreign Planning",
+        enabled=True,
+        max_output_tokens=2048,
+        max_input_tokens=64_000,
+    )
+    result = await PlanningModelService(
+        session_factory=_session_factory(model),  # type: ignore[arg-type]
+    ).complete_once(
+        _state((uuid.uuid4(), uuid.uuid4())),
+        _context(model_id=model.id, tenant_id=uuid.uuid4()),
+    )
+
+    assert result.error_code == "planning_model_unavailable"
 
 
 @pytest.mark.asyncio

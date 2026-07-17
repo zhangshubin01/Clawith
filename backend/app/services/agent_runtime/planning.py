@@ -274,7 +274,7 @@ def _parse_json_output(content: str | None) -> object:
 
 
 class PlanningModelService:
-    """Call the pinned platform model once with no tools or fallback model."""
+    """Call the pinned Group-tenant or platform model without fallback."""
 
     def __init__(
         self,
@@ -288,6 +288,7 @@ class PlanningModelService:
     async def _load_model(self, context: RuntimeContext) -> LLMModel:
         try:
             model_id = uuid.UUID(context.model_id)
+            tenant_id = uuid.UUID(context.tenant_id)
         except ValueError as exc:
             raise PlanningContractError(
                 "planning_model_unavailable",
@@ -296,10 +297,10 @@ class PlanningModelService:
         async with self._session_factory() as db:
             result = await db.execute(select(LLMModel).where(LLMModel.id == model_id))
             model = result.scalar_one_or_none()
-        if model is None or not model.enabled or model.tenant_id is not None:
+        if model is None or not model.enabled or model.tenant_id not in {None, tenant_id}:
             raise PlanningContractError(
                 "planning_model_unavailable",
-                "Pinned Planning model is not an enabled platform model",
+                "Pinned Planning model is not enabled for this Group tenant",
             )
         try:
             ModelCapabilityResolver.request_input_limit(
