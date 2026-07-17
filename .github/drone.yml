@@ -498,6 +498,7 @@ trigger:
     - release
     - ci/test-drone  # 临时添加，测试完成后删除
     - ci/test-drone-3010  # 本次 3010 隔离与升级流程验证
+    - feature/unified-chat-directory-pr760-regression
   event:
     - push
     - pull_request
