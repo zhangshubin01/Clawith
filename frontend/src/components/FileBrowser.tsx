@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { IconDownload, IconEdit, IconFolder, IconFolderPlus, IconTrash, IconUpload } from '@tabler/icons-react';
 import MarkdownRenderer from './MarkdownRenderer';
 import { useDropZone } from '../hooks/useDropZone';
+import { formatFileSize } from '../utils/formatFileSize';
 
 // ─── Types ─────────────────────────────────────────────
 
@@ -592,7 +593,7 @@ export default function FileBrowser({
                                 <span style={{ fontWeight: 500, fontSize: '13px' }}>{fileFilter?.includes('.md') ? f.name.replace('.md', '') : f.name}</span>
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                {f.size != null && <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{(f.size / 1024).toFixed(1)} KB</span>}
+                                {f.size != null && <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{formatFileSize(f.size)}</span>}
                                 {!f.is_dir && api.downloadUrl && (
                                     <a href={api.downloadUrl(f.path || `${currentPath}/${f.name}`)} download
                                         onClick={(e) => e.stopPropagation()}

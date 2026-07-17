@@ -159,6 +159,22 @@ async def _workspace_entry_version(
     return None
 
 
+async def _workspace_directory_size(storage, directory_key: str) -> int:
+    """Return the total byte size of every file below one logical directory."""
+    total = 0
+    pending = [directory_key]
+    while pending:
+        current = pending.pop()
+        for entry in await storage.list_dir(current):
+            if entry.name == ".gitkeep":
+                continue
+            if entry.is_dir:
+                pending.append(entry.key)
+            else:
+                total += entry.size
+    return total
+
+
 def _validate_text(content: str) -> str:
     if "\x00" in content:
         raise GroupFileServiceError(
@@ -815,7 +831,11 @@ async def list_workspace(
                 path=relative,
                 name=entry.name,
                 is_dir=entry.is_dir,
-                size=version.size,
+                size=(
+                    await _workspace_directory_size(storage, entry.key)
+                    if entry.is_dir
+                    else version.size
+                ),
                 modified_at=version.modified_at,
                 version_token=await _workspace_entry_version(storage, entry, version),
             )

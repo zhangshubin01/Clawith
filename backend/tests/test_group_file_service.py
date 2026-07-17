@@ -125,6 +125,43 @@ async def test_group_workspace_uses_fixed_storage_prefix_and_group_revision(
 
 
 @pytest.mark.asyncio
+async def test_group_workspace_directory_size_includes_all_descendant_files(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    tenant_id = uuid.uuid4()
+    group_id = uuid.uuid4()
+    actor = _participant("user")
+    db = _RecordingDB()
+    _stub_storage_and_authorization(monkeypatch, tmp_path, actor)
+
+    for path, content in (
+        ("reports/summary.md", "abc"),
+        ("reports/archive/details.md", "12345"),
+        ("outside.md", "not part of reports"),
+    ):
+        await group_file_service.write_workspace_file(
+            db,
+            tenant_id=tenant_id,
+            group_id=group_id,
+            actor_participant_id=actor.id,
+            path=path,
+            content=content,
+        )
+
+    entries = await group_file_service.list_workspace(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor.id,
+    )
+
+    reports = next(entry for entry in entries if entry.path == "reports")
+    assert reports.is_dir is True
+    assert reports.size == 8
+
+
+@pytest.mark.asyncio
 async def test_group_workspace_rejects_traversal_and_stale_writes(
     monkeypatch,
     tmp_path,

@@ -143,34 +143,43 @@ class S3StorageBackend(StorageBackend):
         if prefix:
             prefix += "/"
         client = self._client_or_raise()
-        response = await asyncio.to_thread(
-            client.list_objects_v2,
-            Bucket=self.bucket,
-            Prefix=prefix,
-            Delimiter="/",
-        )
         entries: list[StorageEntry] = []
-        for item in response.get("CommonPrefixes", []):
-            raw = item.get("Prefix", "").rstrip("/")
-            rel = _strip_prefix(raw, self.prefix)
-            name = rel.split("/")[-1]
-            entries.append(StorageEntry(name=name, key=rel, is_dir=True))
-        for item in response.get("Contents", []):
-            raw = item.get("Key", "")
-            if not raw or raw == prefix:
-                continue
-            rel = _strip_prefix(raw, self.prefix)
-            name = rel.split("/")[-1]
-            entries.append(
-                StorageEntry(
-                    name=name,
-                    key=rel,
-                    is_dir=False,
-                    size=int(item.get("Size", 0)),
-                    modified_at=str(item.get("LastModified") or ""),
-                    etag=_clean_etag(item.get("ETag")),
+        continuation_token: str | None = None
+        while True:
+            request: dict[str, Any] = {
+                "Bucket": self.bucket,
+                "Prefix": prefix,
+                "Delimiter": "/",
+            }
+            if continuation_token:
+                request["ContinuationToken"] = continuation_token
+            response = await asyncio.to_thread(client.list_objects_v2, **request)
+            for item in response.get("CommonPrefixes", []):
+                raw = item.get("Prefix", "").rstrip("/")
+                rel = _strip_prefix(raw, self.prefix)
+                name = rel.split("/")[-1]
+                entries.append(StorageEntry(name=name, key=rel, is_dir=True))
+            for item in response.get("Contents", []):
+                raw = item.get("Key", "")
+                if not raw or raw == prefix:
+                    continue
+                rel = _strip_prefix(raw, self.prefix)
+                name = rel.split("/")[-1]
+                entries.append(
+                    StorageEntry(
+                        name=name,
+                        key=rel,
+                        is_dir=False,
+                        size=int(item.get("Size", 0)),
+                        modified_at=str(item.get("LastModified") or ""),
+                        etag=_clean_etag(item.get("ETag")),
+                    )
                 )
-            )
+            if not response.get("IsTruncated"):
+                break
+            continuation_token = response.get("NextContinuationToken")
+            if not continuation_token:
+                break
         return sorted(entries, key=lambda entry: (not entry.is_dir, entry.name))
 
     async def read_bytes(self, key: str) -> bytes:
