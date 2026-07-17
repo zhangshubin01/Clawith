@@ -166,6 +166,8 @@ export default function GroupsPage() {
     }, [groups, sessionsByGroup]);
 
     const activeSession = sessions.find((session) => session.id === sessionId);
+    const activeGroupId = activeGroup?.id;
+    const activeSessionId = activeSession?.id;
 
     const { data: activeRunStates = [], refetch: refetchActiveRuns } = useQuery({
         queryKey: ['group-active-runs', groupId, sessionId],
@@ -245,7 +247,7 @@ export default function GroupsPage() {
 
     // Load the newest page whenever the session changes.
     useEffect(() => {
-        if (!activeGroup || !activeSession) {
+        if (!activeGroupId || !activeSessionId) {
             setMessages([]);
             setHasMore(false);
             return;
@@ -254,7 +256,7 @@ export default function GroupsPage() {
         setMessages([]);
         setHasMore(false);
         void groupApi
-            .messages(activeGroup.id, activeSession.id, { limit: HISTORY_PAGE_SIZE })
+            .messages(activeGroupId, activeSessionId, { limit: HISTORY_PAGE_SIZE })
             .then((page) => {
                 if (cancelled) return;
                 // Merge rather than replace: a pushed message can land while this page is in flight.
@@ -267,7 +269,7 @@ export default function GroupsPage() {
         return () => {
             cancelled = true;
         };
-    }, [activeGroup, activeSession, groupId, sessionId, toast, t]);
+    }, [activeGroupId, activeSessionId, toast, t]);
 
     const messagesRef = useRef(messages);
     messagesRef.current = messages;

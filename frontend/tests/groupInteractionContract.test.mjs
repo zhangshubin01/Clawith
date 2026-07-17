@@ -53,6 +53,19 @@ test('an inaccessible group route is not used as a message or member fetch scope
   assert.match(groupsPage, /navigate\('\/groups', \{ replace: true \}\)/);
 });
 
+test('session metadata refresh does not clear and reload the visible message stream', () => {
+  assert.match(groupsPage, /const activeGroupId = activeGroup\?\.id/);
+  assert.match(groupsPage, /const activeSessionId = activeSession\?\.id/);
+  assert.match(
+    groupsPage,
+    /groupApi[\s\S]*?\.messages\(activeGroupId, activeSessionId,[\s\S]*?\}, \[activeGroupId, activeSessionId, toast, t\]\);/,
+  );
+  assert.doesNotMatch(
+    groupsPage,
+    /\}, \[activeGroup, activeSession, groupId, sessionId, toast, t\]\);/,
+  );
+});
+
 test('toast context methods keep stable identities across toast renders', () => {
   assert.match(toastProvider, /useMemo/);
   assert.match(toastProvider, /const value: ToastContextValue = useMemo\(/);
