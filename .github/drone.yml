@@ -231,9 +231,10 @@ steps:
         compose exec -T backend alembic current --check-heads
 
         echo "检查目标版本 checkpoint schema"
-        compose exec -T postgres psql -U clawith -d clawith \
-          -Atc "SELECT COALESCE(MAX(v)::text, '') FROM langgraph_checkpoint.checkpoint_migrations;" \
-          | grep -Eq '^[0-9]+$'
+        CHECKPOINT_VERSION="$(compose exec -T postgres psql -U clawith -d clawith -Atc 'SELECT COALESCE(MAX(v), -1) FROM langgraph_checkpoint.checkpoint_migrations;')"
+        case "$CHECKPOINT_VERSION" in
+          ''|-1|*[!0-9]*) echo "Checkpoint schema 未正确初始化 version=$CHECKPOINT_VERSION"; exit 1 ;;
+        esac
 
         BACKEND_ID="$(compose ps -q backend)"
         EXPECTED_IMAGE_ID="$(docker image inspect "clawith-backend:$IMAGE_TAG" --format '{{.Id}}')"
