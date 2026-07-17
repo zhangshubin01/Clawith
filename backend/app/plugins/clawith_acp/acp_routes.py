@@ -56,6 +56,10 @@ ACP_OVERLAP_BASE_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file", "write_file", "edit_file", "delete_file",
     "find_file", "search_text", "list_files", "move_file",
     "find_files", "search_files",
+    # ACP IDE 专属工具 — 基础工具中存在同名但实现不同的工具，须过滤避免重名
+    "execute_command", "safe_delete",
+    "git_status", "git_diff", "git_stage", "git_commit",
+    "build_project", "file_structure",
     "tree",
     "execute_bash",
 })

@@ -23,6 +23,26 @@ from loguru import logger
 from app.core.logging_config import get_trace_id
 
 
+def _get_socket_options() -> list[tuple]:
+    """获取跨平台 TCP keepalive socket 选项。
+
+    TCP_KEEPIDLE 和 TCP_USER_TIMEOUT 是 Linux 专属常量，macOS 上不存在。
+    macOS 上用 TCP_KEEPALIVE 替代 TCP_KEEPIDLE，跳过不支持 TCP_USER_TIMEOUT。
+    """
+    import platform
+    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    if platform.system() == "Darwin":
+        # macOS: TCP_KEEPALIVE 等价 Linux TCP_KEEPIDLE，单位相同（秒）
+        options.append((socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, 60))
+    else:
+        options.append((socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60))  # type: ignore[attr-defined]
+        # TCP_USER_TIMEOUT 仅在 Linux 可用（>=2.6.37）
+        options.append((socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000))  # type: ignore[attr-defined]
+    options.append((socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10))
+    options.append((socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3))
+    return options
+
+
 def _create_ssl_context() -> ssl.SSLContext:
     """创建 SSL context，只使用 certifi 证书包，避开 macOS Keychain 沙箱限制。
 
@@ -333,13 +353,7 @@ class OpenAICompatibleClient(LLMClient):
                 ),
                 transport=httpx.AsyncHTTPTransport(
                     retries=3,
-                    socket_options=[
-                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
-                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
-                    ],
+                    socket_options=_get_socket_options(),
                 ),
                 http2=False,
             )
@@ -803,13 +817,7 @@ class OpenAIResponsesClient(LLMClient):
                 ),
                 transport=httpx.AsyncHTTPTransport(
                     retries=3,
-                    socket_options=[
-                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
-                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
-                    ],
+                    socket_options=_get_socket_options(),
                 ),
                 http2=False,
             )
@@ -1201,13 +1209,7 @@ class GeminiClient(LLMClient):
                 ),
                 transport=httpx.AsyncHTTPTransport(
                     retries=3,
-                    socket_options=[
-                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
-                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
-                    ],
+                    socket_options=_get_socket_options(),
                 ),
                 http2=False,
             )
@@ -1732,13 +1734,7 @@ class AnthropicClient(LLMClient):
                 ),
                 transport=httpx.AsyncHTTPTransport(
                     retries=3,
-                    socket_options=[
-                        (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
-                        (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
-                        (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 90000),
-                    ],
+                    socket_options=_get_socket_options(),
                 ),
                 http2=False,
             )
