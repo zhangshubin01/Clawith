@@ -120,6 +120,8 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
     });
     const [err, setErr] = useState('');
     const isNew = !draft.id;
+    const isRevisionSource = draft.status === 'published' || draft.status === 'retired';
+    const canDelete = draft.status === 'draft' || draft.status === 'retired';
 
     const buildPayload = (): Draft => ({
         title: form.title, body: form.body, applicability: form.applicability, tags: form.tags,
@@ -131,6 +133,7 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
         mutationFn: async () => {
             const payload = buildPayload();
             if (isNew) return experienceApi.create(payload);
+            if (isRevisionSource) return experienceApi.createRevision(draft.id!, payload);
             return experienceApi.update(draft.id!, payload);
         },
         onSuccess: onSaved,
@@ -141,8 +144,15 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
         // Calls the API directly (not the `save` mutation) so onSaved fires once, not twice.
         mutationFn: async () => {
             const payload = buildPayload();
-            const id = isNew ? (await experienceApi.create(payload)).id : draft.id!;
-            if (!isNew) await experienceApi.update(id, payload);
+            let id: string;
+            if (isNew) {
+                id = (await experienceApi.create(payload)).id;
+            } else if (isRevisionSource) {
+                id = (await experienceApi.createRevision(draft.id!, payload)).id;
+            } else {
+                id = draft.id!;
+                await experienceApi.update(id, payload);
+            }
             return experienceApi.publish(id);
         },
         onSuccess: onSaved,
@@ -155,7 +165,8 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
         onError: (e: any) => setErr(String(e?.message || e)),
     });
     const handleDelete = () => {
-        if (window.confirm('确定删除这条草稿？此操作不可撤销。')) del.mutate();
+        const label = draft.status === 'retired' ? '这条已下架经验' : '这条草稿';
+        if (window.confirm(`确定删除${label}？此操作不可撤销。`)) del.mutate();
     };
 
     // Publish gate (P0-3): a title, a body with actual prose, and applicability filled in.
@@ -166,7 +177,10 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
     const header = (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <h2 style={{ margin: 0, fontSize: 18, color: 'var(--text-primary)' }}>
-                {isNew ? '新建经验草稿' : '审核 / 编辑草稿'}
+                {isNew ? '新建经验草稿'
+                    : draft.status === 'published' ? '编辑经验'
+                    : draft.status === 'retired' ? '编辑已下架经验'
+                    : '审核 / 编辑草稿'}
             </h2>
             <button onClick={onClose} style={{ ...secondaryBtn, padding: '4px 10px' }}>✕</button>
         </div>
@@ -182,10 +196,10 @@ export function DraftEditor({ draft, onClose, onSaved, onDeleted, docked, autoEx
                     title={canPublish ? '' : '标题、正文、适用条件与失效信号均须填写'}>
                     确认入库（发布）
                 </button>
-                {!isNew && onDeleted && (
+                {canDelete && onDeleted && (
                     <button onClick={handleDelete} disabled={del.isPending}
                         style={{ ...secondaryBtn, color: 'var(--error)', borderColor: 'var(--error)', marginLeft: 'auto' }}>
-                        删除
+                        {draft.status === 'retired' ? '永久删除' : '删除草稿'}
                     </button>
                 )}
             </div>

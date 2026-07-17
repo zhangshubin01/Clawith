@@ -38,6 +38,7 @@ class RecordingDB:
         self.responses = deque(responses)
         self.statements = []
         self.added = []
+        self.deleted = []
         self.committed = False
 
     async def execute(self, statement):
@@ -48,6 +49,9 @@ class RecordingDB:
 
     def add(self, value):
         self.added.append(value)
+
+    async def delete(self, value):
+        self.deleted.append(value)
 
     async def commit(self):
         self.committed = True
@@ -111,6 +115,10 @@ def _entry(
     *,
     status="published",
     created_by=None,
+    draft_of_id=None,
+    title="Regression entry",
+    body="Body",
+    applicability="Use this in regression tests",
     visibility_scope="company",
     visibility_scope_id=None,
     origin_agent_id=None,
@@ -119,10 +127,11 @@ def _entry(
     now = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
     return ExperienceEntry(
         id=uuid.uuid4(),
+        draft_of_id=draft_of_id,
         tenant_id=tenant_id,
-        title="Regression entry",
-        body="Body",
-        applicability="Use this in regression tests",
+        title=title,
+        body=body,
+        applicability=applicability,
         status=status,
         tags=list(tags or []),
         visibility_scope=visibility_scope,
@@ -337,6 +346,80 @@ async def test_create_ignores_legacy_private_visibility_input(monkeypatch):
     created = db.added[0]
     assert created.visibility_scope == "company"
     assert created.visibility_scope_id is None
+
+
+@pytest.mark.asyncio
+async def test_editing_a_published_entry_creates_an_independent_revision_draft(monkeypatch):
+    current_user = _user()
+    source = _entry(current_user.tenant_id, created_by=current_user.id)
+    db = RecordingDB(DummyResult([source]))
+    monkeypatch.setattr(experience_api, "async_session", AsyncSessionFactory(db))
+
+    result = await experience_api.create_revision_draft(
+        source.id,
+        experience_api.EntryUpdate(title="Edited title", body="Edited body"),
+        current_user=current_user,
+    )
+
+    revision = db.added[0]
+    assert result.id == revision.id
+    assert revision.id != source.id
+    assert revision.draft_of_id == source.id
+    assert revision.status == "draft"
+    assert revision.title == "Edited title"
+    assert revision.body == "Edited body"
+    assert source.status == "published"
+    assert source.title == "Regression entry"
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_revision_draft_does_not_delete_its_published_source(monkeypatch):
+    current_user = _user()
+    source = _entry(current_user.tenant_id, created_by=current_user.id)
+    revision = _entry(
+        current_user.tenant_id,
+        status="draft",
+        created_by=current_user.id,
+        draft_of_id=source.id,
+    )
+    db = RecordingDB(DummyResult([revision]))
+    monkeypatch.setattr(experience_api, "async_session", AsyncSessionFactory(db))
+
+    result = await experience_api.delete_entry(revision.id, current_user=current_user)
+
+    assert result == {"deleted": True}
+    assert db.deleted == [revision]
+    assert source not in db.deleted
+    assert source.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_publishing_a_revision_updates_the_source_id_and_removes_the_draft(monkeypatch):
+    current_user = _user()
+    source = _entry(current_user.tenant_id, created_by=current_user.id)
+    revision = _entry(
+        current_user.tenant_id,
+        status="draft",
+        created_by=current_user.id,
+        draft_of_id=source.id,
+        title="Edited title",
+        body="Edited body",
+        applicability="Edited applicability",
+        tags=["edited"],
+    )
+    db = RecordingDB(DummyResult([revision]), DummyResult([source]))
+    monkeypatch.setattr(experience_api, "async_session", AsyncSessionFactory(db))
+
+    result = await experience_api.publish_entry(revision.id, current_user=current_user)
+
+    assert result.id == source.id
+    assert source.title == "Edited title"
+    assert source.body == "Edited body"
+    assert source.applicability == "Edited applicability"
+    assert source.tags == ["edited"]
+    assert source.status == "published"
+    assert source.retired_at is None
+    assert db.deleted == [revision]
 
 
 @pytest.mark.asyncio

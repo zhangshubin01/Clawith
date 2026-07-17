@@ -16,7 +16,7 @@ problem→solution story).
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -35,6 +35,18 @@ class ExperienceEntry(Base):
     __tablename__ = "experience_entries"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # A draft created while editing a published/retired entry. Publishing the
+    # draft copies its content back onto this stable source id, then removes the
+    # draft. References and adoption stats therefore stay attached to the source.
+    draft_of_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "experience_entries.id",
+            name="fk_experience_entries_draft_of_id",
+            ondelete="SET NULL",
+        ),
+        index=True,
+    )
     tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
 
     # ── P0-3: all three required to publish ──

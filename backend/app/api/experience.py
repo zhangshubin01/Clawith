@@ -66,6 +66,7 @@ class EntryUpdate(BaseModel):
 
 class EntryOut(BaseModel):
     id: uuid.UUID
+    draft_of_id: uuid.UUID | None
     tenant_id: uuid.UUID | None
     title: str
     body: str
@@ -506,6 +507,54 @@ async def get_entry(entry_id: uuid.UUID, current_user: User = Depends(get_curren
         return out
 
 
+@router.post("/entries/{entry_id}/draft", response_model=EntryOut)
+async def create_revision_draft(
+    entry_id: uuid.UUID,
+    body: EntryUpdate,
+    current_user: User = Depends(get_current_user),
+):
+    """Create an independent draft while keeping a published source live.
+
+    The draft points back to the stable source entry. Deleting it only removes
+    the draft; publishing it atomically updates the source and preserves the
+    source id, references, and adoption history.
+    """
+    async with async_session() as db:
+        source = await _get_entry_scoped(db, entry_id, current_user)
+        agent_creator = await _agent_creator_id(db, source.origin_agent_id)
+        if not _can_edit(current_user, source, agent_creator):
+            raise HTTPException(403, "Not allowed to edit this entry")
+        if source.status == "draft":
+            raise HTTPException(409, "草稿请直接编辑，无需再创建草稿版本")
+
+        data = body.model_dump(exclude_unset=True)
+        title = data.get("title", source.title)
+        content = data.get("body", source.body)
+        applicability = data.get("applicability", source.applicability)
+        tags = data.get("tags", source.tags)
+        revision = ExperienceEntry(
+            draft_of_id=source.id,
+            tenant_id=source.tenant_id,
+            title=(title or "")[:200],
+            body=content or "",
+            applicability=applicability or "",
+            tags=_norm_tags(tags or []),
+            status="draft",
+            visibility_scope="company",
+            visibility_scope_id=None,
+            # Editing a legacy import is how it becomes a normal Experience
+            # draft; the source keeps its stable id when this is published.
+            origin="chat" if source.origin == "legacy_plaza" else source.origin,
+            origin_session_id=source.origin_session_id,
+            origin_agent_id=source.origin_agent_id,
+            created_by=current_user.id,
+        )
+        db.add(revision)
+        await db.commit()
+        await db.refresh(revision)
+        return EntryOut.model_validate(revision)
+
+
 @router.patch("/entries/{entry_id}", response_model=EntryOut)
 async def update_entry(entry_id: uuid.UUID, body: EntryUpdate, current_user: User = Depends(get_current_user)):
     """Edit any field. Allowed for admins and the entry's initiator (P0-2 / P0-5)."""
@@ -555,6 +604,35 @@ async def publish_entry(entry_id: uuid.UUID, current_user: User = Depends(get_cu
         missing = [label for field, label in REQUIRED_PARTS if not (getattr(entry, field) or "").strip()]
         if missing:
             raise HTTPException(422, f"无法发布 — 以下必填项为空：{'、'.join(missing)}")
+
+        if entry.draft_of_id:
+            source = await _get_entry_scoped(db, entry.draft_of_id, current_user)
+            agent_creator = await _agent_creator_id(db, source.origin_agent_id)
+            if not _can_edit(current_user, source, agent_creator):
+                raise HTTPException(403, "Not allowed to replace this entry")
+            if source.status not in ("published", "retired"):
+                raise HTTPException(409, "草稿对应的原经验已不再可更新")
+
+            source.title = entry.title
+            source.body = entry.body
+            source.applicability = entry.applicability
+            source.tags = _norm_tags(entry.tags)
+            source.visibility_scope = "company"
+            source.visibility_scope_id = None
+            source.origin = entry.origin
+            source.status = "published"
+            source.retired_at = None
+            source.reviewed_by = current_user.id
+            source.last_reviewed_at = datetime.now(timezone.utc)
+            await db.delete(entry)
+            await db.commit()
+            await db.refresh(source)
+            logger.info(
+                f"Experience revision {entry_id} published into source {source.id} "
+                f"by {current_user.id}"
+            )
+            return EntryOut.model_validate(source)
+
         # Published Experience is tenant-wide. Normalize legacy private metadata
         # whenever an entry crosses the publication boundary.
         entry.visibility_scope = "company"

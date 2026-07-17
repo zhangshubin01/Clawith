@@ -440,6 +440,7 @@ _PRECREATED_PHASE_OBJECTS = {
     "experience_library": {
         "table:experience_entries",
         "table:experience_references",
+        "index:ix_experience_entries_draft_of_id",
         "index:ix_experience_entries_tenant_id",
         "index:ix_experience_entries_status",
         "index:ix_experience_entries_visibility_scope",
@@ -984,6 +985,7 @@ def _upgrade_experience_library() -> None:
     op.create_table(
         "experience_entries",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("draft_of_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("tenant_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("title", sa.String(length=200), nullable=False),
         sa.Column("body", sa.Text(), nullable=False),
@@ -1011,9 +1013,16 @@ def _upgrade_experience_library() -> None:
             server_default=sa.func.now(),
             nullable=False,
         ),
+        sa.ForeignKeyConstraint(
+            ["draft_of_id"],
+            ["experience_entries.id"],
+            name="fk_experience_entries_draft_of_id",
+            ondelete="SET NULL",
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
     for name, columns in {
+        "ix_experience_entries_draft_of_id": ["draft_of_id"],
         "ix_experience_entries_tenant_id": ["tenant_id"],
         "ix_experience_entries_status": ["status"],
         "ix_experience_entries_visibility_scope": ["visibility_scope"],

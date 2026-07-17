@@ -595,6 +595,8 @@ export const controlApi = {
 // ─── Experience Library ───────────────────────────────
 export interface ExperienceEntry {
     id: string;
+    // Set only for an edit draft derived from a published/retired source entry.
+    draft_of_id: string | null;
     tenant_id: string | null;
     title: string;
     body: string;           // 正文 — free-form markdown
@@ -640,6 +642,8 @@ export const experienceApi = {
             '/experience/distill', { method: 'POST', body: JSON.stringify(data) }),
     create: (data: Partial<ExperienceEntry>) =>
         request<ExperienceEntry>('/experience/entries', { method: 'POST', body: JSON.stringify(data) }),
+    createRevision: (id: string, data: Partial<ExperienceEntry>) =>
+        request<ExperienceEntry>(`/experience/entries/${id}/draft`, { method: 'POST', body: JSON.stringify(data) }),
     update: (id: string, data: Partial<ExperienceEntry>) =>
         request<ExperienceEntry>(`/experience/entries/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     publish: (id: string) =>
