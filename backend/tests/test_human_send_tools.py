@@ -132,6 +132,152 @@ async def test_send_channel_message_uses_target_member_id_and_dispatches_channel
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_type", "outcome_helper"),
+    [
+        ("dingtalk", "_send_dingtalk_message_outcome"),
+        ("wecom", "_send_wecom_message_outcome"),
+    ],
+)
+async def test_runtime_channel_message_dispatches_typed_provider_outcome(
+    provider_type,
+    outcome_helper,
+):
+    agent_id = uuid.uuid4()
+    member = _make_member(external_id="provider-user")
+    target = SimpleNamespace(
+        member=member,
+        provider_type=provider_type,
+        platform_user=None,
+    )
+    expected = agent_tools.ToolExecutionOutcome(
+        status="succeeded",
+        result_summary="provider accepted",
+        result_ref=None,
+    )
+
+    with (
+        patch(
+            "app.services.agent_tools._resolve_roster_human_target",
+            new_callable=AsyncMock,
+            return_value=(target, None),
+        ),
+        patch(
+            f"app.services.agent_tools.{outcome_helper}",
+            new_callable=AsyncMock,
+            return_value=expected,
+        ) as mock_send,
+    ):
+        outcome = await agent_tools._send_channel_message_outcome(
+            agent_id,
+            {
+                "target_member_id": str(member.id),
+                "channel": provider_type,
+                "message": "hi",
+            },
+        )
+
+    assert outcome is expected
+    mock_send.assert_awaited_once_with(agent_id, member.name, "hi", member)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_result", "expected_status", "expected_error_code"),
+    [
+        ({"errcode": 0, "processQueryKey": "receipt-1"}, "succeeded", None),
+        ({"errcode": 40035, "errmsg": "invalid user"}, "failed", "dingtalk_message_rejected"),
+        ({"errcode": -1, "errmsg": "timeout"}, "unknown", "dingtalk_message_outcome_unknown"),
+    ],
+)
+async def test_dingtalk_proactive_send_returns_typed_outcome(
+    provider_result,
+    expected_status,
+    expected_error_code,
+):
+    config = SimpleNamespace(
+        app_id="ding-app",
+        app_secret="ding-secret",
+        extra_config={"agent_id": "ding-agent"},
+    )
+    member = _make_member(external_id="dt_1")
+    db = RecordingDB([DummyResult(scalar_value=config)])
+
+    with (
+        patch("app.services.agent_tools.async_session") as mock_session_ctx,
+        patch(
+            "app.services.dingtalk_service.send_dingtalk_message",
+            new_callable=AsyncMock,
+            return_value=provider_result,
+        ) as mock_send,
+    ):
+        mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=db)
+        mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        outcome = await agent_tools._send_dingtalk_message_outcome(
+            uuid.uuid4(),
+            member.name,
+            "hi",
+            member,
+        )
+
+    assert outcome.status == expected_status
+    assert outcome.error_code == expected_error_code
+    mock_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_result", "expected_status", "expected_error_code"),
+    [
+        ({"errcode": 0, "msgid": "message-1"}, "succeeded", None),
+        ({"errcode": 60111, "errmsg": "invalid user"}, "failed", "wecom_message_rejected"),
+        ({"errcode": -1, "errmsg": "timeout"}, "unknown", "wecom_message_outcome_unknown"),
+    ],
+)
+async def test_wecom_proactive_send_returns_typed_outcome_and_agent_id(
+    provider_result,
+    expected_status,
+    expected_error_code,
+):
+    config = SimpleNamespace(
+        app_id="wecom-corp",
+        app_secret="wecom-secret",
+        extra_config={"wecom_agent_id": "1000002"},
+    )
+    member = _make_member(external_id="wx_1")
+    db = RecordingDB([DummyResult(scalar_value=config)])
+
+    with (
+        patch("app.services.agent_tools.async_session") as mock_session_ctx,
+        patch(
+            "app.services.wecom_service.send_wecom_message",
+            new_callable=AsyncMock,
+            return_value=provider_result,
+        ) as mock_send,
+    ):
+        mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=db)
+        mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        outcome = await agent_tools._send_wecom_message_outcome(
+            uuid.uuid4(),
+            member.name,
+            "hi",
+            member,
+        )
+
+    assert outcome.status == expected_status
+    assert outcome.error_code == expected_error_code
+    mock_send.assert_awaited_once_with(
+        "wecom-corp",
+        "wecom-secret",
+        "wx_1",
+        "hi",
+        agent_id="1000002",
+    )
+
+
+@pytest.mark.asyncio
 async def test_send_feishu_message_legacy_user_id_is_rejected():
     agent_id = uuid.uuid4()
 

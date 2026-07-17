@@ -8511,11 +8511,11 @@ async def _send_channel_message_outcome(
             target_member,
         )
     if provider_type == "dingtalk":
-        return await _send_dingtalk_message(
+        return await _send_dingtalk_message_outcome(
             agent_id, display_name, message_text, target_member
         )
     if provider_type == "wecom":
-        return await _send_wecom_message(
+        return await _send_wecom_message_outcome(
             agent_id, display_name, message_text, target_member
         )
     if provider_type == "slack":
@@ -8536,100 +8536,250 @@ async def _send_channel_message_outcome(
     )
 
 
+async def _sync_proactive_channel_history(
+    db,
+    *,
+    agent_id: uuid.UUID,
+    target_member: "OrgMember",
+    member_name: str,
+    message_text: str,
+    source_channel: str,
+    external_user_id: str,
+) -> None:
+    """Best-effort product sync after the provider confirmed a proactive send."""
+    try:
+        agent_result = await db.execute(
+            select(AgentModel).where(AgentModel.id == agent_id)
+        )
+        agent = agent_result.scalar_one_or_none()
+        platform_user = await get_platform_user_by_org_member(
+            db=db,
+            org_member=target_member,
+            agent_tenant_id=agent.tenant_id if agent else None,
+        )
+        session = await find_or_create_channel_session(
+            db=db,
+            agent_id=agent_id,
+            user_id=platform_user.id,
+            external_conv_id=f"{source_channel}_p2p_{external_user_id}",
+            source_channel=source_channel,
+            first_message_title=message_text[:30],
+        )
+        db.add(
+            ChatMessage(
+                agent_id=agent_id,
+                user_id=platform_user.id,
+                role="assistant",
+                content=message_text,
+                conversation_id=str(session.id),
+            )
+        )
+        session.last_message_at = datetime.now(timezone.utc)
+        await db.commit()
+        logger.info(
+            "[{}] Proactive message saved to session {}",
+            source_channel,
+            session.id,
+        )
+    except Exception as exc:
+        # Provider success is authoritative. A local history-sync failure must
+        # never downgrade it or authorize another external send.
+        logger.error(
+            "[{}] Confirmed send to {} but failed to sync history: {}",
+            source_channel,
+            member_name,
+            type(exc).__name__,
+        )
+
+
+async def _send_dingtalk_message_outcome(
+    agent_id: uuid.UUID,
+    member_name: str,
+    message_text: str,
+    target_member: "OrgMember",
+) -> ToolExecutionOutcome:
+    """Send through DingTalk and preserve a typed external-write outcome."""
+    from app.services.dingtalk_service import send_dingtalk_message
+
+    try:
+        async with async_session() as db:
+            config_result = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "dingtalk",
+                    ChannelConfig.is_configured.is_(True),
+                )
+            )
+            config = config_result.scalar_one_or_none()
+            if not config:
+                return _typed_failure(
+                    "This Agent has no DingTalk channel configured.",
+                    "dingtalk_channel_not_configured",
+                )
+
+            user_id = (target_member.external_id or "").strip()
+            if not user_id:
+                user_id = (target_member.unionid or target_member.open_id or "").strip()
+                if not user_id:
+                    return _typed_failure(
+                        f"{member_name} has no linked DingTalk user_id.",
+                        "dingtalk_recipient_not_linked",
+                    )
+
+            logger.info(f"[DingTalk] Sending to user_id: {user_id}")
+            provider_agent_id = (
+                str((config.extra_config or {}).get("agent_id") or "").strip()
+                or None
+            )
+            try:
+                result = await send_dingtalk_message(
+                    app_id=config.app_id,
+                    app_secret=config.app_secret,
+                    user_id=user_id,
+                    message=message_text,
+                    agent_id=provider_agent_id,
+                )
+            except Exception:
+                return _typed_unknown(
+                    "DingTalk message outcome is unknown; reconcile before retrying.",
+                    "dingtalk_message_outcome_unknown",
+                )
+
+            if not isinstance(result, Mapping) or result.get("errcode") in {None, -1}:
+                return _typed_unknown(
+                    "DingTalk message outcome is unknown; reconcile before retrying.",
+                    "dingtalk_message_outcome_unknown",
+                )
+            if result.get("errcode") != 0:
+                return _typed_failure(
+                    f"DingTalk rejected the message: {result.get('errmsg') or 'unknown error'} "
+                    f"(code {result.get('errcode')}).",
+                    "dingtalk_message_rejected",
+                )
+
+            await _sync_proactive_channel_history(
+                db,
+                agent_id=agent_id,
+                target_member=target_member,
+                member_name=member_name,
+                message_text=message_text,
+                source_channel="dingtalk",
+                external_user_id=user_id,
+            )
+            return _typed_success(f"Successfully sent message to {member_name} via DingTalk.")
+    except Exception as exc:
+        logger.exception("[DingTalk] Message setup failed")
+        return _typed_failure(
+            f"DingTalk message could not be prepared: {type(exc).__name__}.",
+            "dingtalk_message_setup_failed",
+        )
+
+
 async def _send_dingtalk_message(
     agent_id: uuid.UUID,
     member_name: str,
     message_text: str,
     target_member: "OrgMember",
 ) -> str:
-    """Send message via DingTalk channel using Open API."""
-    from app.services.dingtalk_service import send_dingtalk_message
+    """Legacy display adapter; Durable Runtime uses the typed provider helper."""
+    outcome = await _send_dingtalk_message_outcome(
+        agent_id,
+        member_name,
+        message_text,
+        target_member,
+    )
+    return _legacy_tool_outcome_text(
+        outcome,
+        fallback="DingTalk message did not return a summary.",
+    )
 
+
+async def _send_wecom_message_outcome(
+    agent_id: uuid.UUID,
+    member_name: str,
+    message_text: str,
+    target_member: "OrgMember",
+) -> ToolExecutionOutcome:
+    """Send through WeCom and preserve a typed external-write outcome."""
+    from app.services.wecom_service import send_wecom_message
 
     try:
         async with async_session() as db:
-            # 1. Get DingTalk channel config
             config_result = await db.execute(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
-                    ChannelConfig.channel_type == "dingtalk",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.channel_type == "wecom",
+                    ChannelConfig.is_configured.is_(True),
                 )
             )
             config = config_result.scalar_one_or_none()
             if not config:
-                return "❌ This agent has no DingTalk channel configured"
+                return _typed_failure(
+                    "This Agent has no WeCom channel configured.",
+                    "wecom_channel_not_configured",
+                )
 
-            # 2. Get recipient's user_id (external_id)
-            user_id = target_member.external_id
+            user_id = (target_member.external_id or "").strip()
             if not user_id:
-                # Try to use unionid or openid as fallback
-                user_id = target_member.unionid or target_member.open_id
+                user_id = (target_member.open_id or "").strip()
                 if not user_id:
-                    return f"❌ {member_name} has no DingTalk user_id"
+                    return _typed_failure(
+                        f"{member_name} has no linked WeCom user_id.",
+                        "wecom_recipient_not_linked",
+                    )
 
-            logger.info(f"[DingTalk] Sending to user_id: {user_id}")
+            provider_agent_id = str(
+                (config.extra_config or {}).get("wecom_agent_id") or ""
+            ).strip()
+            if not provider_agent_id:
+                return _typed_failure(
+                    "This Agent's WeCom channel has no application AgentID.",
+                    "wecom_agent_id_missing",
+                )
 
-            # Get agent_id from extra_config (required for DingTalk API)
-            agent_id_dingtalk = config.extra_config.get("agent_id") if config.extra_config else None
+            logger.info(f"[WeCom] Sending to user_id: {user_id}")
+            try:
+                result = await send_wecom_message(
+                    config.app_id,
+                    config.app_secret,
+                    user_id,
+                    message_text,
+                    agent_id=provider_agent_id,
+                )
+            except Exception:
+                return _typed_unknown(
+                    "WeCom message outcome is unknown; reconcile before retrying.",
+                    "wecom_message_outcome_unknown",
+                )
 
-            # 3. Send message via DingTalk service
-            result = await send_dingtalk_message(
-                app_id=config.app_id,
-                app_secret=config.app_secret,
-                user_id=user_id,
-                message=message_text,
-                agent_id=agent_id_dingtalk,
+            if not isinstance(result, Mapping) or result.get("errcode") in {None, -1}:
+                return _typed_unknown(
+                    "WeCom message outcome is unknown; reconcile before retrying.",
+                    "wecom_message_outcome_unknown",
+                )
+            if result.get("errcode") != 0:
+                return _typed_failure(
+                    f"WeCom rejected the message: {result.get('errmsg') or 'unknown error'} "
+                    f"(code {result.get('errcode')}).",
+                    "wecom_message_rejected",
+                )
+
+            await _sync_proactive_channel_history(
+                db,
+                agent_id=agent_id,
+                target_member=target_member,
+                member_name=member_name,
+                message_text=message_text,
+                source_channel="wecom",
+                external_user_id=user_id,
             )
-
-            if result.get("errcode") == 0:
-                try:
-                    # Get agent tenant context
-                    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-                    agent_obj = agent_r.scalar_one_or_none()
-
-
-                    # Get or create platform user from OrgMember (unified logic)
-                    platform_user = await get_platform_user_by_org_member(
-                        db=db,
-                        org_member=target_member,
-                        agent_tenant_id=agent_obj.tenant_id if agent_obj else None,
-                    )
-
-
-                    conv_id = f"dingtalk_p2p_{user_id}"
-                    # 2. Get/Create session
-                    sess = await find_or_create_channel_session(
-                        db=db,
-                        agent_id=agent_id,
-                        user_id=platform_user.id,
-                        external_conv_id=conv_id,
-                        source_channel="dingtalk",
-                        first_message_title=message_text[:30],
-                    )
-                    # 3. Save assistant message
-                    db.add(ChatMessage(
-                        agent_id=agent_id,
-                        user_id=platform_user.id,
-                        role="assistant",
-                        content=message_text,
-                        conversation_id=str(sess.id),
-                    ))
-                    sess.last_message_at = datetime.now(timezone.utc)
-                    await db.commit()
-                    logger.info(f"[DingTalk] Proactive message saved to session {sess.id}")
-                except Exception as ex:
-                    logger.error(f"[DingTalk] Failed to save proactive message to session: {ex}")
-
-                return f"✅ Message sent to {member_name} via DingTalk"
-            else:
-                errmsg = result.get("errmsg", "Unknown error")
-                logger.error(f"[DingTalk] Send failed: {result}")
-                return f"❌ DingTalk send failed: {errmsg}"
-
-    except Exception as e:
-        logger.exception("[DingTalk] Error")
-        return f"❌ DingTalk message error: {str(e)[:200]}"
+            return _typed_success(f"Successfully sent message to {member_name} via WeCom.")
+    except Exception as exc:
+        logger.exception("[WeCom] Message setup failed")
+        return _typed_failure(
+            f"WeCom message could not be prepared: {type(exc).__name__}.",
+            "wecom_message_setup_failed",
+        )
 
 
 async def _send_wecom_message(
@@ -8638,88 +8788,17 @@ async def _send_wecom_message(
     message_text: str,
     target_member: "OrgMember",
 ) -> str:
-    """Send message via WeCom channel using Open API."""
-    from app.services.wecom_service import send_wecom_message
-
-
-    try:
-        async with async_session() as db:
-            # 1. Get WeCom channel config
-            config_result = await db.execute(
-                select(ChannelConfig).where(
-                    ChannelConfig.agent_id == agent_id,
-                    ChannelConfig.channel_type == "wecom",
-                    ChannelConfig.is_configured == True,
-                )
-            )
-            config = config_result.scalar_one_or_none()
-            if not config:
-                return "❌ This agent has no WeCom channel configured"
-
-            # 2. Get recipient's user_id
-            user_id = target_member.external_id
-            if not user_id:
-                user_id = target_member.open_id
-                if not user_id:
-                    return f"❌ {member_name} has no WeCom user_id"
-
-            logger.info(f"[WeCom] Sending to user_id: {user_id}")
-
-            # 3. Send message via WeCom service
-            result = await send_wecom_message(
-                config.app_id,
-                config.app_secret,
-                user_id,
-                message_text,
-            )
-
-            if result.get("errcode") == 0:
-                # Save proactive message to session so it appears in UI
-                try:
-
-                    # Get agent tenant context
-                    agent_r = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
-                    agent = agent_r.scalar_one_or_none()
-
-
-                    # Get or create platform user from OrgMember (unified logic)
-                    platform_user = await get_platform_user_by_org_member(
-                        db=db,
-                        org_member=target_member,
-                        agent_tenant_id=agent.tenant_id if agent else None,
-                    )
-
-                    conv_id = f"wecom_p2p_{user_id}"
-                    sess = await find_or_create_channel_session(
-                        db=db,
-                        agent_id=agent_id,
-                        user_id=platform_user.id,
-                        external_conv_id=conv_id,
-                        source_channel="wecom",
-                        first_message_title=message_text[:30],
-                    )
-                    db.add(ChatMessage(
-                        agent_id=agent_id,
-                        user_id=platform_user.id,
-                        role="assistant",
-                        content=message_text,
-                        conversation_id=str(sess.id),
-                    ))
-                    sess.last_message_at = datetime.now(timezone.utc)
-                    await db.commit()
-                    logger.info(f"[WeCom] Proactive message saved to session {sess.id}")
-                except Exception as ex:
-                    logger.error(f"[WeCom] Failed to save proactive message to session: {ex}")
-
-                return f"✅ Message sent to {member_name} via WeCom"
-            else:
-                errmsg = result.get("errmsg", "Unknown error")
-                logger.error(f"[WeCom] Send failed: {result}")
-                return f"❌ WeCom send failed: {errmsg}"
-
-    except Exception as e:
-        logger.exception("[WeCom] Error")
-        return f"❌ WeCom message error: {str(e)[:200]}"
+    """Legacy display adapter; Durable Runtime uses the typed provider helper."""
+    outcome = await _send_wecom_message_outcome(
+        agent_id,
+        member_name,
+        message_text,
+        target_member,
+    )
+    return _legacy_tool_outcome_text(
+        outcome,
+        fallback="WeCom message did not return a summary.",
+    )
 
 async def _send_slack_message(
     agent_id: uuid.UUID,
