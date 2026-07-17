@@ -370,34 +370,9 @@ steps:
           exit 1
         fi
 
-        echo "执行目标版本 Alembic 和 LangGraph checkpoint setup"
-        docker run --rm \
-          --network "$NETWORK" \
-          --entrypoint /bin/bash \
-          -e DATABASE_URL=postgresql+asyncpg://clawith:clawith@postgres:5432/clawith \
-          -e REDIS_URL=redis://redis:6379/0 \
-          -e SECRET_KEY=ci-test-secret \
-          -e JWT_SECRET_KEY=ci-test-jwt-secret \
-          "$NEW_IMAGE" -lc 'alembic upgrade head && python -m app.scripts.setup_langgraph_checkpoints'
+        docker run --rm --network "$NETWORK" --entrypoint /bin/bash -e DATABASE_URL=postgresql+asyncpg://clawith:clawith@postgres:5432/clawith -e REDIS_URL=redis://redis:6379/0 -e SECRET_KEY=ci-test-secret -e JWT_SECRET_KEY=ci-test-jwt-secret "$NEW_IMAGE" -lc 'alembic upgrade head && python -m app.scripts.setup_langgraph_checkpoints'
 
-        docker run -d \
-          --name "$NEW_CONTAINER" \
-          --network "$NETWORK" \
-          --network-alias backend \
-          -v "$WORKSPACE_VOLUME:/data/agents" \
-          -e DATABASE_URL=postgresql+asyncpg://clawith:clawith@postgres:5432/clawith \
-          -e REDIS_URL=redis://redis:6379/0 \
-          -e AGENT_DATA_DIR=/data/agents \
-          -e AGENT_TEMPLATE_DIR=/app/agent_template \
-          -e STORAGE_LOCAL_ROOT=/data/agents \
-          -e SECRET_KEY=ci-test-secret \
-          -e JWT_SECRET_KEY=ci-test-jwt-secret \
-          -e CORS_ORIGINS='["*"]' \
-          -e PROCESS_ROLE=api,worker \
-          -e INSTANCE_ID="$PROJECT-backend-new" \
-          -e AGENT_RUNTIME_V2_ENABLED=true \
-          -e AGENT_RUNTIME_COMMAND_CONCURRENCY=10 \
-          "$NEW_IMAGE" >/dev/null
+        docker run -d --name "$NEW_CONTAINER" --network "$NETWORK" --network-alias backend -v "$WORKSPACE_VOLUME:/data/agents" -e DATABASE_URL=postgresql+asyncpg://clawith:clawith@postgres:5432/clawith -e REDIS_URL=redis://redis:6379/0 -e AGENT_DATA_DIR=/data/agents -e AGENT_TEMPLATE_DIR=/app/agent_template -e STORAGE_LOCAL_ROOT=/data/agents -e SECRET_KEY=ci-test-secret -e JWT_SECRET_KEY=ci-test-jwt-secret -e CORS_ORIGINS='["*"]' -e PROCESS_ROLE=api,worker -e INSTANCE_ID="$PROJECT-backend-new" -e AGENT_RUNTIME_V2_ENABLED=true -e AGENT_RUNTIME_COMMAND_CONCURRENCY=10 "$NEW_IMAGE" >/dev/null
         wait_healthy "$NEW_CONTAINER"
 
         if ! docker logs --tail=500 "$NEW_CONTAINER" | grep -q "durable Agent Runtime worker started"; then
