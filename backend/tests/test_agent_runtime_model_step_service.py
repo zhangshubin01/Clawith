@@ -14,6 +14,7 @@ from app.services.agent_runtime.context_builder import RuntimeContextBuild
 from app.services.agent_runtime.group_handoff import GroupAgentHandoffIntent
 from app.services.agent_runtime.group_handoff import GroupAgentHandoffError
 from app.services.agent_runtime.model_step_service import RuntimeModelStepService
+from app.services.agent_runtime.model_step_service import _visible_mention_names
 from app.services.agent_runtime.state import (
     RunInputSnapshots,
     RunRegistrySnapshot,
@@ -1398,6 +1399,72 @@ async def test_group_finish_mentions_are_preflighted_before_becoming_finish_inte
     assert preflight.await_args.kwargs["mention_participant_ids"] == (
         str(target_participant_id),
     )
+
+
+def test_visible_mention_names_ignore_code_links_and_longer_member_names() -> None:
+    assert _visible_mention_names(
+        "@Anna please review; `@Ann` and [@Ann](https://example.com) are examples.",
+        ("Ann", "Anna"),
+    ) == ("Anna",)
+
+
+@pytest.mark.asyncio
+async def test_group_finish_repairs_visible_agent_mention_without_structured_id() -> None:
+    tenant_id = uuid.uuid4()
+    model = _model(tenant_id)
+    agent = _agent(tenant_id)
+    state = _state(tenant_id, model, agent)
+    state["snapshots"] = RunInputSnapshots(
+        session_context={"version": 1, "summary": "shared"},
+        session_context_version=1,
+        recent_session_messages=state["snapshots"].recent_session_messages,
+        related_run_summaries=(),
+        initial_input={"group_context": {"group": {"group_id": str(uuid.uuid4())}}},
+    )
+
+    async def complete(*args, **kwargs):
+        del args, kwargs
+        return LLMCompletionStep(
+            content="",
+            tool_calls=(
+                {
+                    "id": "finish-visible-mention-without-id",
+                    "type": "function",
+                    "function": {
+                        "name": "finish",
+                        "arguments": {"content": "@Target Agent please reply."},
+                    },
+                },
+            ),
+            reasoning_content=None,
+            retry_instruction=None,
+            usage=TokenUsage(total_tokens=10),
+        )
+
+    with (
+        patch(
+            "app.services.agent_runtime.model_step_service._missing_visible_group_mentions",
+            new=AsyncMock(return_value=("Target Agent",)),
+        ),
+        patch(
+            "app.services.agent_runtime.model_step_service.preflight_group_agent_handoff",
+            new=AsyncMock(),
+        ) as preflight,
+    ):
+        result = await _service(
+            model,
+            agent,
+            _ContextBuilder(_build(initial_input=state["snapshots"].initial_input)),
+            complete,
+        ).complete_once(state, _context(state))
+
+    assert result.intent == "text"
+    assert result.repair_code == "invalid_finish"
+    assert "@Target Agent" in (result.repair_instruction or "")
+    assert "mention_participant_ids" in (result.repair_instruction or "")
+    assert result.finish_content is None
+    assert result.finish_delivery_intent is None
+    preflight.assert_not_awaited()
 
 
 @pytest.mark.asyncio

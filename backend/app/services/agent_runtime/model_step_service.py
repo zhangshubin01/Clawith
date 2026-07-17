@@ -14,11 +14,14 @@ import uuid
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent import Agent
 from app.models.agent_run_command import AgentRunCommand
 from app.models.agent_tool_execution import AgentToolExecution
 from app.models.llm import LLMModel
+from app.models.group import GroupMember
+from app.models.participant import Participant
 from app.services.agent_context import build_agent_context
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.context_builder import (
@@ -80,6 +83,72 @@ _AGENTBAY_SCREENSHOT_TOOL_NAMES = frozenset(
         "agentbay_computer_precision_screenshot",
     }
 )
+
+
+def _visible_mention_names(content: str, member_names: Sequence[str]) -> tuple[str, ...]:
+    visible_text = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+    visible_text = re.sub(r"`[^`]*`", "", visible_text)
+    visible_text = re.sub(r"!?\[[^\]]*\]\([^)]+\)", "", visible_text)
+    matches: list[tuple[int, int, str]] = []
+    for name in sorted(set(member_names), key=len, reverse=True):
+        marker = f"@{name}"
+        start = 0
+        while True:
+            index = visible_text.find(marker, start)
+            if index < 0:
+                break
+            end = index + len(marker)
+            start = end
+            if end < len(visible_text) and (
+                visible_text[end].isalnum() or visible_text[end] in {"_", "-"}
+            ):
+                continue
+            if any(index < prior_end and end > prior_start for prior_start, prior_end, _ in matches):
+                continue
+            matches.append((index, end, name))
+    return tuple(dict.fromkeys(name for _, _, name in sorted(matches)))
+
+
+async def _missing_visible_group_mentions(
+    db: AsyncSession,
+    *,
+    state: RuntimeGraphState,
+    content: str,
+    mention_participant_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    if "@" not in content:
+        return ()
+    initial_input = state["snapshots"].initial_input
+    raw_group_id = initial_input.get("group_id")
+    if raw_group_id is None:
+        group_context = initial_input.get("group_context")
+        group = group_context.get("group") if isinstance(group_context, Mapping) else None
+        raw_group_id = group.get("group_id") if isinstance(group, Mapping) else None
+    try:
+        group_id = uuid.UUID(str(raw_group_id))
+    except (TypeError, ValueError):
+        return ()
+
+    result = await db.execute(
+        select(Participant.id, Participant.display_name)
+        .join(GroupMember, GroupMember.participant_id == Participant.id)
+        .where(
+            GroupMember.group_id == group_id,
+            GroupMember.removed_at.is_(None),
+            Participant.type == "agent",
+        )
+    )
+    participants_by_name: dict[str, set[str]] = {}
+    for participant_id, display_name in result.all():
+        participants_by_name.setdefault(display_name, set()).add(str(participant_id))
+
+    provided_ids = set(mention_participant_ids)
+    visible_names = _visible_mention_names(content, tuple(participants_by_name))
+    return tuple(
+        name
+        for name in visible_names
+        if participants_by_name[name].isdisjoint(provided_ids)
+    )
 
 
 def _retry_http_status(error: Exception) -> str:
@@ -1500,21 +1569,44 @@ class RuntimeModelStepService:
                 allow_user_wait=allow_user_wait,
                 allow_group_handoff=not allow_user_wait,
             )
-            if (
-                result.intent == "finish"
-                and result.finish_mention_participant_ids
-            ):
+            if result.intent == "finish" and not allow_user_wait:
                 try:
                     async with self._session_factory() as db:
-                        intent = await preflight_group_agent_handoff(
+                        missing_mentions = await _missing_visible_group_mentions(
                             db,
                             state=state,
-                            context=context,
                             content=result.finish_content or "",
-                            mention_participant_ids=(
-                                result.finish_mention_participant_ids
-                            ),
+                            mention_participant_ids=result.finish_mention_participant_ids,
                         )
+                        if missing_mentions:
+                            names = ", ".join(f"@{name}" for name in missing_mentions)
+                            result = _repair(
+                                state,
+                                context,
+                                step,
+                                (
+                                    "The public group reply contains visible Agent "
+                                    f"mention(s) without structured routing: {names}. "
+                                    "No public message was created. Query Group members "
+                                    "if needed, then retry `finish` with every matching "
+                                    "stable participant ID in `mention_participant_ids`."
+                                ),
+                                repair_code="invalid_finish",
+                            )
+                        elif result.finish_mention_participant_ids:
+                            intent = await preflight_group_agent_handoff(
+                                db,
+                                state=state,
+                                context=context,
+                                content=result.finish_content or "",
+                                mention_participant_ids=(
+                                    result.finish_mention_participant_ids
+                                ),
+                            )
+                            result = replace(
+                                result,
+                                finish_delivery_intent=intent.payload(),
+                            )
                 except GroupAgentHandoffError as exc:
                     if exc.repairable:
                         result = _repair(
@@ -1530,11 +1622,6 @@ class RuntimeModelStepService:
                         )
                     else:
                         result = _error(exc.code, str(exc))
-                else:
-                    result = replace(
-                        result,
-                        finish_delivery_intent=intent.payload(),
-                    )
             if result.assistant_message is not None:
                 assistant_message = dict(result.assistant_message)
                 assistant_message["runtime_model_id"] = str(actual_model.id)
