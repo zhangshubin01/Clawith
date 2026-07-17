@@ -181,7 +181,12 @@ export default function MessageStream({
                             </div>
                             <div className="group-message-bubble">
                                 {isAgent
-                                    ? <MarkdownRenderer content={message.content} />
+                                    ? <MarkdownRenderer
+                                        content={message.content}
+                                        mentionNames={message.mentions
+                                            .map((mention) => mention.display_name)
+                                            .filter((name): name is string => Boolean(name))}
+                                    />
                                     : <span className="group-message-text">
                                         {renderContentWithMentions(message.content, message.mentions)}
                                     </span>}
@@ -223,6 +228,9 @@ export default function MessageStream({
                         <div className="group-message-meta">
                             <span className="group-message-sender">
                                 {agent.name}
+                            </span>
+                            <span className="group-badge-agent">
+                                {t('groups.agentBadge', '智能体')}
                             </span>
                         </div>
                         <div className="group-message-bubble group-run-indicator-bubble">

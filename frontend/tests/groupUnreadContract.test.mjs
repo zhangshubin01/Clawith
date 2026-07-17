@@ -55,6 +55,17 @@ test('active group runs render planning and named agent animations without tool 
   assert.match(messageStream, /group-run-indicator/);
   assert.match(messageStream, /任务规划中/);
   assert.match(messageStream, /\{agent\.name\}/);
+  assert.equal((messageStream.match(/className="group-badge-agent"/g) ?? []).length, 2);
   assert.doesNotMatch(messageStream, /\{\{name\}\}运行中/);
   assert.doesNotMatch(messageStream, /tool_call|toolName|toolResult/);
+});
+
+test('agent group messages pass structured mention names into markdown rendering', () => {
+  const markdownRenderer = readFileSync(
+    new URL('../src/components/MarkdownRenderer.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.match(messageStream, /mentionNames=\{message\.mentions/);
+  assert.match(markdownRenderer, /mentionNames\?: readonly string\[\]/);
+  assert.match(markdownRenderer, /class="group-mention-chip"/);
 });

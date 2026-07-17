@@ -1286,7 +1286,8 @@ async def test_group_snapshot_adds_only_current_group_tools_and_platform_rules()
     assert "call, check in with, ask, consult, involve" in group_system_prompt
     assert "Write only the business-facing words" in group_system_prompt
     assert "Never expose or explain Tool Schema" in group_system_prompt
-    assert "directly address every target by display name" in group_system_prompt
+    assert "literal `@display name`" in group_system_prompt
+    assert "matching literal `@display name` makes the mention visible" in group_system_prompt
     assert "concrete question, request, or responsibility" in group_system_prompt
     assert "Do not merely announce that you mentioned someone" in group_system_prompt
     assert "There is no separate current-group send-message tool" in group_system_prompt
@@ -1301,6 +1302,8 @@ async def test_group_snapshot_adds_only_current_group_tools_and_platform_rules()
     assert "textual `@name` or display name" in group_system_prompt
     assert "omit `mention_participant_ids`" in group_system_prompt
     assert "using your own role and voice" in group_system_prompt
+    assert "answer only the part addressed to you" in group_system_prompt
+    assert "answer on behalf of other mentioned participants" in group_system_prompt
     assert "Do not repeat the source Agent's message" in group_system_prompt
     assert "mention the same targets again unless" in group_system_prompt
     assert "Dynamic context" not in str(calls[0][0][0].content)

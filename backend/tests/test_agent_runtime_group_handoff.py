@@ -586,7 +586,12 @@ async def test_atomic_apply_creates_public_message_and_one_new_child_per_target(
     assert all(command.parent_run_id == source_run.id for command in commands)
     assert all(command.root_run_id == source_run.root_run_id for command in commands)
     assert all(command.source_id == str(message.id) for command in commands)
-    assert all(command.goal == message.content for command in commands)
+    assert all(command.goal == command.payload["current_responsibility"] for command in commands)
+    assert first.display_name in commands[0].goal
+    assert second.display_name in commands[1].goal
+    assert all("Respond in the current group as yourself only" in command.goal for command in commands)
+    assert all("Do not repeat or forward the source message" in command.goal for command in commands)
+    assert all(f"Source message:\n{message.content}" in command.goal for command in commands)
     assert all(command.payload["mode"] == "enforced" for command in commands)
     assert all(
         command.payload["plan_prompt"]

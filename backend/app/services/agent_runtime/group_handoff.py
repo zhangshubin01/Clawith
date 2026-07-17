@@ -709,6 +709,13 @@ def _handoff_child_command(
     source_execution_id = (
         f"group_mention:{intent.trigger_message_id}:agent:{target.agent.id}"
     )
+    target_name = target.display_name or target.agent.name
+    current_responsibility = (
+        f"You are {target_name}. Respond in the current group as yourself only to "
+        "the request addressed to you in the source message below. Do not repeat "
+        "or forward the source message, and do not answer on behalf of any other "
+        f"mentioned participant.\n\nSource message:\n{content}"
+    )
     payload: JsonObject = {
         "message_id": str(intent.trigger_message_id),
         "group_id": str(intent.group_id),
@@ -718,7 +725,7 @@ def _handoff_child_command(
         "target_participant_id": str(target.participant_id),
         "source_channel": scope.session.source_channel,
         "source_run_id": str(source_run.id),
-        "current_responsibility": content,
+        "current_responsibility": current_responsibility,
         "context_cutoff": {
             "message_id": str(intent.trigger_message_id),
             "created_at": intent.cutoff_created_at.isoformat(),
@@ -735,7 +742,7 @@ def _handoff_child_command(
         source_type="chat",
         source_id=str(intent.trigger_message_id),
         source_execution_id=source_execution_id,
-        goal=content,
+        goal=current_responsibility,
         run_kind="delegated",
         model_id=target.model.id,
         scheduling_lane_key=(

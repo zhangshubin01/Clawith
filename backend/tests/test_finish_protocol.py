@@ -113,7 +113,7 @@ def test_finish_tool_schema_is_default_and_requires_content():
         "description"
     ]
     assert "not limited to ownership transfer" in mention_schema["description"]
-    assert "address each target by display name" in mention_schema["description"]
+    assert "each target as the literal @display name" in mention_schema["description"]
     assert "concrete question or request" in mention_schema["description"]
     assert "never explain IDs, tools, routing, Runtime, or child Runs" in mention_schema[
         "description"
