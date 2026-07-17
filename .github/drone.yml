@@ -231,9 +231,7 @@ steps:
         compose exec -T backend alembic current --check-heads
 
         echo "检查目标版本 checkpoint schema"
-        echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" \
-          | compose exec -T postgres psql -U clawith -d clawith -At \
-          | tr -d '\r' > /tmp/checkpoint_version
+        echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" | compose exec -T postgres psql -U clawith -d clawith -At | tr -d '\r' > /tmp/checkpoint_version
         CHECKPOINT_VERSION=$(cat /tmp/checkpoint_version)
         echo "checkpoint version=$CHECKPOINT_VERSION"
         [ "$CHECKPOINT_VERSION" -ge 0 ]
@@ -351,8 +349,7 @@ steps:
         wait_healthy "$OLD_CONTAINER"
 
         docker exec "$OLD_CONTAINER" /bin/bash -lc 'printf "%s\n" "workspace-before-upgrade" > /data/agents/.ci-upgrade-sentinel'
-        compose exec -T postgres psql -U clawith -d clawith -v ON_ERROR_STOP=1 -c \
-          "CREATE TABLE ci_upgrade_sentinel (id integer PRIMARY KEY, value text NOT NULL); INSERT INTO ci_upgrade_sentinel VALUES (1, 'database-before-upgrade');"
+        compose exec -T postgres psql -U clawith -d clawith -v ON_ERROR_STOP=1 -c "CREATE TABLE ci_upgrade_sentinel (id integer PRIMARY KEY, value text NOT NULL); INSERT INTO ci_upgrade_sentinel VALUES (1, 'database-before-upgrade');"
 
         docker stop --time 30 "$OLD_CONTAINER" >/dev/null
         docker rm "$OLD_CONTAINER" >/dev/null
@@ -404,9 +401,7 @@ steps:
         docker exec "$NEW_CONTAINER" alembic current --check-heads
 
         echo "检查升级后 checkpoint schema"
-        echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" \
-          | compose exec -T postgres psql -U clawith -d clawith -At \
-          | tr -d '\r' > /tmp/checkpoint_version
+        echo "SELECT COALESCE(MAX(v),-1) FROM langgraph_checkpoint.checkpoint_migrations" | compose exec -T postgres psql -U clawith -d clawith -At | tr -d '\r' > /tmp/checkpoint_version
         CHECKPOINT_VERSION=$(cat /tmp/checkpoint_version)
         echo "checkpoint version=$CHECKPOINT_VERSION"
         [ "$CHECKPOINT_VERSION" -ge 0 ]
