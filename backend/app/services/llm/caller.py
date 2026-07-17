@@ -979,7 +979,7 @@ async def _process_tool_call(
             })
         except Exception as _cb_err:
             logger.warning("[LLM] on_tool_call 回调失败: {}", _cb_err)  # pass on_output for execute_code streaming
-    _on_output = on_code_output if tool_name in ("execute_code", "execute_code_e2b") else None
+    _on_output = on_code_output if tool_name in ("execute_code", "execute_code_e2b", "android_compile") else None
     if tool_name in WORKSPACE_WRITE_TOOLS:
         async with workspace_write_lock(session_id):
             result = await execute_tool(

@@ -32,7 +32,7 @@ from app.services.trigger_runtime import (
     mark_trigger_executions_failed,
 )
 
-_DEBUG_LOG_PATH = "/Users/shubinzhang/Documents/agent/.cursor/debug-5f0250.log"
+_DEBUG_LOG_PATH = "/tmp/clawith-trigger-debug.log"
 
 
 def _debug_log_5f0250(location: str, message: str, data: dict, hypothesis_id: str) -> None:

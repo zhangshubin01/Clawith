@@ -78,7 +78,7 @@ _PERIODIC_FLUSH_SEC = 0.06
 _ACP_A2A_OBS_LOG = os.getenv(
     "DEBUG_SESSION_LOG_PATH",
     "/data/agents/.debug/debug-f3071f.log" if os.path.isdir("/data/agents")
-    else "/Users/shubinzhang/Documents/agent/.cursor/debug-f3071f.log",
+    else "/tmp/clawith-debug.log",
 )
 
 

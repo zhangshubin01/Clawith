@@ -16,7 +16,7 @@ RUN_ID = os.getenv("DEBUG_SESSION_RUN_ID", "backend-observe")
 LOG_PATH = Path(
     os.getenv(
         "DEBUG_SESSION_LOG_PATH",
-        "/Users/shubinzhang/Documents/agent/.cursor/debug-17de78.log",
+        "/tmp/clawith-debug.log",
     ),
 )
 INGEST_URLS: tuple[str, ...] = tuple(

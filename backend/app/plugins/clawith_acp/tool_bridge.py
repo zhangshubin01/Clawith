@@ -272,7 +272,7 @@ _FAILED_PATH_BLOCK = 3
 current_acp_handler: ContextVar[Any | None] = ContextVar("current_acp_handler", default=None)
 
 # region agent log
-_AGENT_DEBUG_LOG_PATH = "/Users/shubinzhang/Documents/agent/.cursor/debug-9e9222.log"
+_AGENT_DEBUG_LOG_PATH = "/tmp/clawith-agent-debug.log"
 _AGENT_DEBUG_SESSION_ID = "9e9222"
 
 
@@ -1282,7 +1282,7 @@ def _maybe_invalidate_list_cache(handler, tool_name: str, path: str) -> None:
 
 
 
-_FIND_FILES_DEBUG_LOG = "/Users/shubinzhang/Documents/agent/.cursor/debug-17de78.log"
+_FIND_FILES_DEBUG_LOG = "/tmp/clawith-debug.log"
 _FIND_FILES_DEBUG_SESSION = "17de78"
 
 

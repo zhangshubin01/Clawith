@@ -63,6 +63,48 @@ def _global_builtin_config(tool_data: dict) -> dict:
 
 # Builtin tool definitions — these map to the hardcoded AGENT_TOOLS
 BUILTIN_TOOLS = [
+    {
+        "name": "android_compile",
+        "display_name": "Android Compile",
+        "description": "在 Docker 容器中编译 Android 项目。自动使用项目独立的 Gradle 缓存，共享全局 JDK 和 Android SDK 缓存。支持 JDK 11/17/21 切换。",
+        "category": "build",
+        "icon": "🤖",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "project_path": {
+                    "type": "string",
+                    "description": "Android 项目根目录路径（包含 gradlew 的目录）",
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Gradle 任务名称",
+                    "default": "assembleDebug",
+                },
+                "java_version": {
+                    "type": "string",
+                    "enum": ["11", "17", "21"],
+                    "description": "JDK 版本，默认 17",
+                    "default": "17",
+                },
+                "project_name": {
+                    "type": "string",
+                    "description": "项目名称，用于 Gradle 缓存卷隔离。默认取目录名。",
+                },
+            },
+            "required": ["project_path"],
+        },
+        "config": {
+            "sandbox_type": "android-build",
+            "default_timeout": 600,
+            "max_timeout": 1800,
+            "memory_limit": "8g",
+            "cpu_limit": "4.0",
+            "allow_network": True,
+        },
+        "config_schema": {},
+    },
     FINISH_TOOL_SEED,
     {
         "name": "list_files",

@@ -26,6 +26,7 @@ WORKDIR /app
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         libpq5 curl shadowsocks-libev gosu bubblewrap \
+        git git-lfs \
         libcairo2 libpango-1.0-0 libpangocairo-1.0-0 \
         libgdk-pixbuf-2.0-0 shared-mime-info pango1.0-tools \
         fonts-wqy-microhei fonts-wqy-zenhei && \

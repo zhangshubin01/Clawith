@@ -20,7 +20,7 @@ SERIAL_ALWAYS: frozenset[str] = frozenset({
     "write_file", "edit_file", "delete_file", "safe_delete", "move_file",
     "refactor_rename", "reformat_code", "optimize_imports", "convert_java_to_kotlin",
     "apply_quickfix", "build_project", "sync_files", "ide_screenshot", "screenshot",
-    "execute_command", "run_in_terminal", "execute_code", "execute_code_e2b",
+    "execute_command", "run_in_terminal", "execute_code", "execute_code_e2b", "android_compile",
     "git_stage", "git_commit",
     "upsert_focus_item", "complete_focus_item",
     "set_trigger", "update_trigger", "cancel_trigger",

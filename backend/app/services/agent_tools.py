@@ -3289,6 +3289,52 @@ async def execute_tool(
                 lambda temp_ws: _execute_code(agent_id, temp_ws, arguments, tool_name=tool_name, on_output=on_output),
                 sync_back=True,
             )
+        elif tool_name == "android_compile":
+            task = arguments.get("task", "assembleDebug")
+            java_version = arguments.get("java_version", "17")
+            requested_path = arguments.get("project_path", "")
+
+            # 基于 agent 持久工作区解析绝对路径（非临时目录！）
+            # _agent_workspace_root → /data/agents/{id}，加 /workspace → /data/agents/{id}/workspace
+            # 安全：默认挂载 workspace 子目录，避免暴露 soul.md/memory.md 到构建容器
+            agent_ws = _agent_workspace_root(agent_id) / "workspace"
+            ws_resolved = str(agent_ws.resolve())
+            if not requested_path or requested_path.strip("./") == "":
+                project_path = str(agent_ws)
+            elif requested_path.startswith(ws_resolved):
+                project_path = requested_path  # 已在正确路径下
+            elif requested_path.startswith("/"):
+                clean = requested_path.lstrip("/")
+                if clean.startswith("workspace/"):
+                    clean = clean[len("workspace/"):]
+                project_path = str(agent_ws / clean)
+            else:
+                if requested_path.startswith("workspace/"):
+                    requested_path = requested_path[len("workspace/"):]
+                project_path = str(agent_ws / requested_path)
+
+            # 安全检查：防路径遍历
+            if ".." in project_path or not project_path.startswith(ws_resolved):
+                result = f"❌ 路径无效: {requested_path}"
+                return result
+
+            code = (
+                f'echo "sdk.dir=/opt/android-sdk" > local.properties && '
+                f"chmod +x ./gradlew && ./gradlew {task}"
+            )
+            logger.info(
+                f"[DirectTool] Android compile project={project_path} task={task} jdk={java_version}"
+            )
+            # 不使用 _run_with_temp_workspace，直接在持久工作区执行（无需 sync_back）
+            result = await _execute_code(
+                agent_id, agent_ws,
+                {"code": code, "language": "bash", "timeout": arguments.get("timeout", 600)},
+                tool_name=tool_name, on_output=on_output,
+                project_path=project_path,
+                gradle_task=task,
+                java_version=java_version,
+                project_name=Path(project_path).name,  # 从路径自动推导，不依赖 Agent 传参避免多卷
+            )
         elif tool_name == "upload_image":
             file_path = (arguments.get("file_path") or "").strip()
             result = await _run_with_temp_workspace(
@@ -3600,11 +3646,11 @@ async def _web_search(arguments: dict, agent_id: uuid.UUID | None = None) -> str
         return f"❌ Search error ({engine}): {str(e)[:200]}"
 
 
-_TOOL_PHASE_DEBUG_LOG = "/Users/shubinzhang/Documents/agent/.cursor/debug-b6cea0.log"
+_TOOL_PHASE_DEBUG_LOG = "/tmp/clawith-tool-phase.log"
 _A2A_OBS_DEBUG_LOG = os.getenv(
     "DEBUG_SESSION_LOG_PATH",
     "/data/agents/.debug/debug-f3071f.log" if os.path.isdir("/data/agents")
-    else "/Users/shubinzhang/Documents/agent/.cursor/debug-f3071f.log",
+    else "/tmp/clawith-debug.log",
 )
 _A2A_OBS_SESSION_ID = "f3071f"
 
@@ -4689,7 +4735,7 @@ async def _execute_mcp_tool(tool_name: str, arguments: dict, agent_id=None) -> s
                 # 返回可用工具列表引导 LLM 使用正确工具名, 避免反复生成幻觉调用
                 known_names = sorted(set(
                     t.mcp_tool_name for t in (await db.execute(
-                        select(Tool).where(Tool.type == "mcp")
+                        select(Tool).where(Tool.type == "mcp", Tool.mcp_tool_name.isnot(None))
                     )).scalars().all()
                 ))[:30]
                 return (
@@ -8385,6 +8431,7 @@ async def _execute_code(
     *,
     tool_name: str = "execute_code",
     on_output=None,
+    **kwargs,  # 透传给 sandbox backend（如 android_compile 的 project_path/gradle_task/java_version）
 ) -> str:
     """Execute code using the configured sandbox backend.
 
@@ -8444,6 +8491,7 @@ async def _execute_code(
             work_dir=str(work_dir),
             on_output=on_output,
             agent_id=agent_id,
+            **kwargs,  # 透传 android_compile 专用参数: project_path, gradle_task, java_version
         )
 
         # Format result for user display
