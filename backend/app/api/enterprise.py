@@ -34,6 +34,10 @@ from app.services.llm import get_provider_manifest, get_model_api_key, create_ll
 from app.services.llm.finish import FINISH_TOOL_DEFINITION, find_finish_call
 from app.services.platform_service import platform_service
 from app.services.sso_service import sso_service
+from app.services.agent_runtime.runtime_model_settings import (
+    RUNTIME_MODEL_SETTING_KEY,
+    resolve_runtime_model_settings,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/enterprise", tags=["enterprise"])
@@ -887,6 +891,102 @@ from app.models.system_settings import SystemSetting
 
 class SettingUpdate(BaseModel):
     value: dict
+
+
+class RuntimeModelSettingsUpdate(BaseModel):
+    planning_model_id: uuid.UUID
+    compact_model_id: uuid.UUID
+
+
+async def _runtime_model_settings_payload(db: AsyncSession) -> dict:
+    configured = await resolve_runtime_model_settings(
+        db,
+        environment_planning_model_id=settings.MULTI_AGENT_PLANNING_MODEL_ID,
+        environment_compact_model_id=settings.MULTI_AGENT_COMPACT_MODEL_ID,
+    )
+    result = await db.execute(
+        select(LLMModel)
+        .where(
+            LLMModel.tenant_id.is_(None),
+            LLMModel.enabled.is_(True),
+            LLMModel.supports_tool_calling.is_(True),
+        )
+        .order_by(LLMModel.created_at.desc())
+    )
+    candidates = [
+        {
+            "id": str(model.id),
+            "label": model.label,
+            "provider": model.provider,
+            "model": model.model,
+        }
+        for model in result.scalars().all()
+    ]
+    return {
+        "planning_model_id": (
+            str(configured.planning_model_id) if configured.planning_model_id else None
+        ),
+        "compact_model_id": (
+            str(configured.compact_model_id) if configured.compact_model_id else None
+        ),
+        "planning_source": configured.planning_source,
+        "compact_source": configured.compact_source,
+        "candidates": candidates,
+    }
+
+
+@router.get("/runtime-model-settings")
+async def get_runtime_model_settings(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return shared Runtime model choices to platform administrators."""
+    if not _is_platform_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Only platform admin can view Runtime model settings")
+    return await _runtime_model_settings_payload(db)
+
+
+@router.put("/runtime-model-settings")
+async def update_runtime_model_settings(
+    data: RuntimeModelSettingsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist platform models used by planning and compaction, effective immediately."""
+    if not _is_platform_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Only platform admin can modify Runtime model settings")
+
+    requested_ids = {data.planning_model_id, data.compact_model_id}
+    result = await db.execute(select(LLMModel).where(LLMModel.id.in_(requested_ids)))
+    models = {model.id: model for model in result.scalars().all()}
+    for model_id in requested_ids:
+        model = models.get(model_id)
+        if model is None:
+            raise HTTPException(status_code=422, detail=f"Model {model_id} does not exist")
+        if model.tenant_id is not None:
+            raise HTTPException(status_code=422, detail=f"Model {model_id} is not a platform model")
+        if not model.enabled:
+            raise HTTPException(status_code=422, detail=f"Model {model_id} is disabled")
+        if model.supports_tool_calling is not True:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Model {model_id} has not passed the native tool-calling test",
+            )
+
+    result = await db.execute(
+        select(SystemSetting).where(SystemSetting.key == RUNTIME_MODEL_SETTING_KEY)
+    )
+    setting = result.scalar_one_or_none()
+    value = {
+        "planning_model_id": str(data.planning_model_id),
+        "compact_model_id": str(data.compact_model_id),
+    }
+    if setting:
+        setting.value = value
+    else:
+        db.add(SystemSetting(key=RUNTIME_MODEL_SETTING_KEY, value=value))
+    await db.commit()
+    return await _runtime_model_settings_payload(db)
 
 
 @router.get("/system-settings/notification_bar/public")

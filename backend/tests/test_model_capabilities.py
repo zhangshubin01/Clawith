@@ -6,6 +6,7 @@ import pytest
 
 from app.config import Settings
 from app.models.llm import LLMModel
+from app.models.system_settings import SystemSetting
 from app.services.agent_runtime.model_capabilities import (
     ModelCapabilityError,
     ModelCapabilityResolver,
@@ -29,20 +30,27 @@ def _model(**overrides: object) -> LLMModel:
 
 
 class _Result:
-    def __init__(self, model: LLMModel | None) -> None:
+    def __init__(self, model: LLMModel | SystemSetting | None) -> None:
         self.model = model
 
-    def scalar_one_or_none(self) -> LLMModel | None:
+    def scalar_one_or_none(self) -> LLMModel | SystemSetting | None:
         return self.model
 
 
 class _Session:
-    def __init__(self, model: LLMModel | None) -> None:
+    def __init__(
+        self,
+        model: LLMModel | None,
+        runtime_setting: SystemSetting | None = None,
+    ) -> None:
         self.model = model
+        self.runtime_setting = runtime_setting
         self.statements: list[object] = []
 
     async def execute(self, statement: object) -> _Result:
         self.statements.append(statement)
+        if "system_settings" in str(statement):
+            return _Result(self.runtime_setting)
         return _Result(self.model)
 
 
@@ -280,8 +288,32 @@ async def test_global_runtime_model_resolvers_accept_only_enabled_platform_model
 
     assert await resolve_multi_agent_compact_model(session, settings) is model  # type: ignore[arg-type]
     assert await resolve_multi_agent_planning_model(session, settings) is model  # type: ignore[arg-type]
-    assert len(session.statements) == 2
+    assert len(session.statements) == 4
     assert settings.AGENT_RUNTIME_SUMMARY_THRESHOLD_RATIO == 0.85
     assert settings.AGENT_RUNTIME_MODEL_CAPABILITY_REFRESH_SECONDS == 86400
     assert settings.MULTI_AGENT_COMPACT_MODEL_ID == compact_id
     assert settings.MULTI_AGENT_PLANNING_MODEL_ID == planning_id
+
+
+@pytest.mark.asyncio
+async def test_database_runtime_model_choices_override_environment_fallbacks() -> None:
+    environment_compact_id = uuid.uuid4()
+    environment_planning_id = uuid.uuid4()
+    database_model_id = uuid.uuid4()
+    model = _model(id=database_model_id, tenant_id=None, enabled=True)
+    setting = SystemSetting(
+        key="multi_agent_runtime_models",
+        value={
+            "compact_model_id": str(database_model_id),
+            "planning_model_id": str(database_model_id),
+        },
+    )
+    settings = Settings(
+        _env_file=None,
+        MULTI_AGENT_COMPACT_MODEL_ID=environment_compact_id,
+        MULTI_AGENT_PLANNING_MODEL_ID=environment_planning_id,
+    )
+    session = _Session(model, setting)
+
+    assert await resolve_multi_agent_compact_model(session, settings) is model  # type: ignore[arg-type]
+    assert await resolve_multi_agent_planning_model(session, settings) is model  # type: ignore[arg-type]

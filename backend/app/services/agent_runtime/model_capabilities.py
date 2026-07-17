@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.models.llm import LLMModel
+from app.services.agent_runtime.runtime_model_settings import resolve_runtime_model_settings
 
 
 class ModelCapabilityError(RuntimeError):
@@ -254,9 +255,14 @@ async def resolve_multi_agent_compact_model(
 ) -> LLMModel:
     """Resolve ``MULTI_AGENT_COMPACT_MODEL_ID`` as a platform model."""
     runtime_settings = settings or get_settings()
+    configured = await resolve_runtime_model_settings(
+        db,
+        environment_planning_model_id=runtime_settings.MULTI_AGENT_PLANNING_MODEL_ID,
+        environment_compact_model_id=runtime_settings.MULTI_AGENT_COMPACT_MODEL_ID,
+    )
     return await resolve_platform_model(
         db,
-        runtime_settings.MULTI_AGENT_COMPACT_MODEL_ID,
+        configured.compact_model_id,
         setting_name="MULTI_AGENT_COMPACT_MODEL_ID",
     )
 
@@ -267,8 +273,13 @@ async def resolve_multi_agent_planning_model(
 ) -> LLMModel:
     """Resolve ``MULTI_AGENT_PLANNING_MODEL_ID`` as a platform model."""
     runtime_settings = settings or get_settings()
+    configured = await resolve_runtime_model_settings(
+        db,
+        environment_planning_model_id=runtime_settings.MULTI_AGENT_PLANNING_MODEL_ID,
+        environment_compact_model_id=runtime_settings.MULTI_AGENT_COMPACT_MODEL_ID,
+    )
     return await resolve_platform_model(
         db,
-        runtime_settings.MULTI_AGENT_PLANNING_MODEL_ID,
+        configured.planning_model_id,
         setting_name="MULTI_AGENT_PLANNING_MODEL_ID",
     )

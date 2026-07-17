@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { IconEdit } from '@tabler/icons-react';
@@ -34,6 +34,14 @@ interface LLMProviderSpec {
     default_base_url?: string | null;
     supports_tool_choice: boolean;
     default_max_tokens: number;
+}
+
+interface RuntimeModelSettings {
+    planning_model_id: string | null;
+    compact_model_id: string | null;
+    planning_source: 'database' | 'environment';
+    compact_source: 'database' | 'environment';
+    candidates: Array<Pick<LLMModel, 'id' | 'label' | 'provider' | 'model'>>;
 }
 
 const FALLBACK_LLM_PROVIDERS: LLMProviderSpec[] = [
@@ -77,6 +85,10 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
         request_timeout: '' as string,
         temperature: '' as string,
     });
+    const [runtimeModelForm, setRuntimeModelForm] = useState({
+        planning_model_id: '',
+        compact_model_id: '',
+    });
 
     const invalidateModelCaches = () => {
         qc.invalidateQueries({ queryKey: ['llm-models'] });
@@ -95,6 +107,34 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
         queryFn: () => fetchJson<LLMProviderSpec[]>('/enterprise/llm-providers'),
     });
     const providerOptions = providerSpecs.length > 0 ? providerSpecs : FALLBACK_LLM_PROVIDERS;
+    const isPlatformAdmin = currentUser?.role === 'platform_admin' || !!currentUser?.is_platform_admin;
+    const { data: runtimeModelSettings } = useQuery({
+        queryKey: ['runtime-model-settings'],
+        queryFn: () => fetchJson<RuntimeModelSettings>('/enterprise/runtime-model-settings'),
+        enabled: isPlatformAdmin,
+    });
+    useEffect(() => {
+        if (!runtimeModelSettings) return;
+        setRuntimeModelForm({
+            planning_model_id: runtimeModelSettings.planning_model_id || '',
+            compact_model_id: runtimeModelSettings.compact_model_id || '',
+        });
+    }, [runtimeModelSettings]);
+    const saveRuntimeModelSettings = useMutation({
+        mutationFn: () => fetchJson<RuntimeModelSettings>('/enterprise/runtime-model-settings', {
+            method: 'PUT',
+            body: JSON.stringify(runtimeModelForm),
+        }),
+        onSuccess: (data) => {
+            qc.setQueryData(['runtime-model-settings'], data);
+            toast.success(t('enterprise.llm.runtimeModelsSaved', '运行时模型配置已更新'));
+        },
+        onError: (err: any) => {
+            toast.error(t('enterprise.llm.runtimeModelsSaveFailed', '运行时模型配置保存失败'), {
+                details: String(err?.message || err),
+            });
+        },
+    });
 
     const addModel = useMutation({
         mutationFn: (data: any) => fetchJson(`/enterprise/llm-models${selectedTenantId ? `?tenant_id=${selectedTenantId}` : ''}`, { method: 'POST', body: JSON.stringify(data) }),
@@ -252,6 +292,65 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
 
     return (
         <div>
+            {isPlatformAdmin && runtimeModelSettings && (
+                <div className="card" style={{ marginBottom: '16px' }}>
+                    <div style={{ marginBottom: '14px' }}>
+                        <div style={{ fontWeight: 600, fontSize: '15px' }}>
+                            {t('enterprise.llm.runtimeModelsTitle', '多智能体运行时模型')}
+                        </div>
+                        <div style={{ marginTop: '4px', color: 'var(--text-tertiary)', fontSize: '12px' }}>
+                            {t('enterprise.llm.runtimeModelsHint', '群聊规划器和群聊上下文处理只能使用已启用且通过原生工具调用测试的平台模型。保存后立即生效。')}
+                        </div>
+                    </div>
+                    {runtimeModelSettings.candidates.length === 0 ? (
+                        <div style={{ color: 'var(--warning)', fontSize: '13px' }}>
+                            {t('enterprise.llm.noRuntimeModelCandidates', '暂无可用平台模型，请先创建平台模型并完成 Agent 兼容性测试。')}
+                        </div>
+                    ) : (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr)) auto', gap: '12px', alignItems: 'end' }}>
+                            <label className="form-group" style={{ margin: 0 }}>
+                                <span className="form-label">{t('enterprise.llm.planningModel', '群聊规划模型')}</span>
+                                <select
+                                    className="form-input"
+                                    value={runtimeModelForm.planning_model_id}
+                                    onChange={(event) => setRuntimeModelForm((current) => ({ ...current, planning_model_id: event.target.value }))}
+                                >
+                                    <option value="" disabled>{t('enterprise.llm.selectPlatformModel', '请选择平台模型')}</option>
+                                    {runtimeModelSettings.candidates.map((model) => (
+                                        <option key={model.id} value={model.id}>{model.label} · {model.provider}/{model.model}</option>
+                                    ))}
+                                </select>
+                            </label>
+                            <label className="form-group" style={{ margin: 0 }}>
+                                <span className="form-label">{t('enterprise.llm.compactModel', '群聊上下文模型')}</span>
+                                <select
+                                    className="form-input"
+                                    value={runtimeModelForm.compact_model_id}
+                                    onChange={(event) => setRuntimeModelForm((current) => ({ ...current, compact_model_id: event.target.value }))}
+                                >
+                                    <option value="" disabled>{t('enterprise.llm.selectPlatformModel', '请选择平台模型')}</option>
+                                    {runtimeModelSettings.candidates.map((model) => (
+                                        <option key={model.id} value={model.id}>{model.label} · {model.provider}/{model.model}</option>
+                                    ))}
+                                </select>
+                            </label>
+                            <button
+                                className="btn btn-primary"
+                                disabled={
+                                    saveRuntimeModelSettings.isPending
+                                    || !runtimeModelForm.planning_model_id
+                                    || !runtimeModelForm.compact_model_id
+                                }
+                                onClick={() => saveRuntimeModelSettings.mutate()}
+                            >
+                                {saveRuntimeModelSettings.isPending
+                                    ? t('common.saving', '保存中...')
+                                    : t('common.save', '保存')}
+                            </button>
+                        </div>
+                    )}
+                </div>
+            )}
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>
                 <button className="btn btn-primary" onClick={openCreateForm}>+ {t('enterprise.llm.addModel')}</button>
             </div>
