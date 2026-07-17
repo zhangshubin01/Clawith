@@ -29,6 +29,14 @@ test('new group sessions may use the backend default title while group names sta
   );
 });
 
+test('name prompts do not submit while an IME is still composing text', () => {
+  assert.match(promptModal, /e\.nativeEvent\.isComposing/);
+  assert.match(
+    promptModal,
+    /if \(e\.nativeEvent\.isComposing\) return;[\s\S]*?if \(e\.key === 'Enter'\) \{[\s\S]*?e\.preventDefault\(\);[\s\S]*?confirm\(\);/,
+  );
+});
+
 test('an inaccessible group route is not used as a message or member fetch scope', () => {
   assert.match(groupsPage, /isFetchedAfterMount: groupsFetchedAfterMount/);
   assert.match(groupsPage, /isRefetchError: groupsRefetchError/);

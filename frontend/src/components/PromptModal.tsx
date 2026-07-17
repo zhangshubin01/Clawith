@@ -55,8 +55,15 @@ export default function PromptModal({
                     onChange={e => setValue(e.target.value)}
                     placeholder={placeholder || ''}
                     onKeyDown={e => {
-                        if (e.key === 'Enter') confirm();
-                        if (e.key === 'Escape') onCancel();
+                        // Enter commits an IME candidate before it should submit the prompt.
+                        if (e.nativeEvent.isComposing) return;
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            confirm();
+                        } else if (e.key === 'Escape') {
+                            e.preventDefault();
+                            onCancel();
+                        }
                     }}
                     style={{ width: '100%', marginBottom: '16px' }}
                 />
