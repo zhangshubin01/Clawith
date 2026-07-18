@@ -227,7 +227,11 @@ start_backend() {
 
     # Auto-run schema migrations via alembic
     echo -e "${YELLOW}🔄 Running schema migrations...${NC}"
-    .venv/bin/alembic upgrade head 2>/dev/null || true
+    .venv/bin/alembic upgrade head
+
+    # Auto-run LangGraph checkpoint migrations (idempotent and serialized)
+    echo -e "${YELLOW}🔄 Running LangGraph checkpoint migrations...${NC}"
+    .venv/bin/python -m app.scripts.setup_langgraph_checkpoints
 
     # Auto-run data migrations (idempotent)
     echo -e "${YELLOW}🔄 Running data migrations...${NC}"
