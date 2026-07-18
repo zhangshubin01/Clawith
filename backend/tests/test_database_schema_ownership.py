@@ -55,3 +55,10 @@ def test_official_startup_paths_bootstrap_checkpoints_after_alembic():
     ) < restart_source.index(".venv/bin/uvicorn app.main:app")
     assert ".venv/bin/alembic upgrade head 2>/dev/null || true" not in restart_source
     assert f".venv/bin/{checkpoint_command} || true" not in restart_source
+    runtime_command = restart_source.index(".venv/bin/uvicorn app.main:app")
+    for fixed_runtime_setting in (
+        "AGENT_RUNTIME_V2_ENABLED=true",
+        "AGENT_RUNTIME_V2_AGENT_IDS=",
+        "AGENT_RUNTIME_V2_SOURCE_TYPES=",
+    ):
+        assert restart_source.index(fixed_runtime_setting) < runtime_command
