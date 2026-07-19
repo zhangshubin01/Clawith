@@ -28,52 +28,6 @@ if [ "$(id -u)" = '0' ]; then
         fi
     fi
 
-    # ── socat sidecar: 代理 docker.sock，root 运行 ──
-    # uvicorn (clawith 用户) 通过此代理 socket 间接访问 Docker
-    PROXY_SOCK="/var/run/doodsock.sock"
-    if [ -S /var/run/docker.sock ]; then
-        # 清理残留 socket
-        rm -f "$PROXY_SOCK"
-
-        # 读取真实 docker.sock 路径（兼容 macOS Docker Desktop 符号链接）
-        REAL_SOCK=""
-        if [ -L /var/run/docker.sock ]; then
-            REAL_SOCK=$(readlink -f /var/run/docker.sock 2>/dev/null || echo "")
-        fi
-        if [ -z "$REAL_SOCK" ]; then
-            REAL_SOCK="/var/run/docker.sock"
-        fi
-
-        # 验证 socat 版本 >= 1.8.0
-        if socat -V 2>&1 | grep -qE 'socat version [1-9]\.[8-9]|socat version [2-9]'; then
-            echo "[entrypoint] socat version check passed"
-        else
-            echo "[entrypoint] WARNING: socat version may be too old, proxy may be unstable"
-        fi
-
-        # max-children=32 防止 fork 耗尽 PID 空间
-        # backlog=1024 容纳并发 Docker API 调用
-        socat UNIX-LISTEN:"$PROXY_SOCK",fork,mode=660,user=clawith,group=clawith,backlog=1024,max-children=32 \
-              UNIX-CONNECT:"$REAL_SOCK" &
-        SOCAT_PID=$!
-
-        # 等待代理 socket 就绪，10 秒超时
-        for i in $(seq 1 100); do
-            [ -S "$PROXY_SOCK" ] && break
-            sleep 0.1
-        done
-
-        if [ -S "$PROXY_SOCK" ]; then
-            echo "[entrypoint] Docker socket proxy ready: $PROXY_SOCK -> $REAL_SOCK (socat PID=$SOCAT_PID)"
-        else
-            kill "$SOCAT_PID" 2>/dev/null || true
-            echo "[entrypoint] ERROR: socat proxy socket did not appear after 10s. Docker tools will be unavailable."
-        fi
-    else
-        echo "[entrypoint] WARNING: /var/run/docker.sock not found, Docker tools unavailable"
-    fi
-    # ── socat sidecar 结束 ──
-
     echo "[entrypoint] Dropping privileges to 'clawith' and re-executing..."
     exec gosu clawith /bin/bash "$0" "$@"
 fi

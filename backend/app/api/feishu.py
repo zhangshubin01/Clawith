@@ -250,7 +250,7 @@ async def _resolve_feishu_sender(
 
     from app.services.channel_user_service import channel_user_service
 
-    resolved_user_id = (sender_user_id or "").strip()
+    resolved_user_id = sender_user_id.strip()
     extra_info: dict = {
         "open_id": sender_open_id,
         "external_id": resolved_user_id or None,
@@ -424,7 +424,7 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
         message = event.get("message", {})
         sender = event.get("sender", {}).get("sender_id", {})
         sender_open_id = sender.get("open_id", "")
-        sender_user_id_from_event = sender.get("user_id") or ""  # tenant-stable ID, available directly in event body
+        sender_user_id_from_event = sender.get("user_id", "")  # tenant-stable ID, available directly in event body
         msg_type = message.get("message_type", "text")
         chat_type = message.get("chat_type", "p2p")  # p2p or group
         chat_id = message.get("chat_id", "")

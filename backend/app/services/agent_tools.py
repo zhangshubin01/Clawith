@@ -485,7 +485,6 @@ RUNTIME_TYPED_APPLICATION_TOOL_NAMES = frozenset(
         "send_message_to_agent",
         "execute_code",
         "execute_code_e2b",
-        "android_compile",
         "convert_csv_to_xlsx",
         "convert_html_to_pdf",
         "convert_html_to_pptx",
@@ -2594,15 +2593,7 @@ async def execute_builtin_tool_outcome(
             sync_back=True,
         )
     if tool_name in {"execute_code", "execute_code_e2b"}:
-        # 推送工具开始状态到外部频道（飞书等）
-        if session_id:
-            logger.debug(f"[Tools] Pushing tool status to channel: session={session_id} tool={tool_name} status=running")
-            from app.services.tool_stream import push_tool_status_to_channel
-            asyncio.ensure_future(
-                push_tool_status_to_channel(session_id, tool_name, "running")
-            )
-
-        result = await _run_with_temp_workspace_outcome(
+        return await _run_with_temp_workspace_outcome(
             agent_id,
             tenant_id,
             lambda temp_ws: _execute_code_outcome(
@@ -2615,55 +2606,6 @@ async def execute_builtin_tool_outcome(
             sync_back=True,
             sync_back_on_non_success=True,
         )
-
-        # 推送工具完成状态到外部频道
-        if session_id:
-            from app.services.tool_stream import push_tool_status_to_channel
-            summary = str(result) if result else ""
-            asyncio.ensure_future(
-                push_tool_status_to_channel(
-                    session_id, tool_name, "done", summary
-                )
-            )
-
-        return result
-    if tool_name == "android_compile":
-        # 创建 Redis pubsub on_output 回调，用于流式推送构建日志到前端
-        if on_output is None and session_id:
-            from app.services.tool_stream import publish_tool_output
-
-            _sid = str(session_id)
-            _aid = str(agent_id)
-
-            async def _stream_to_redis(chunk: str) -> None:
-                await publish_tool_output(_sid, _aid, chunk)
-
-            on_output = _stream_to_redis
-
-        # 推送工具开始状态到外部频道（飞书等）
-        if session_id:
-            from app.services.tool_stream import push_tool_status_to_channel
-            asyncio.ensure_future(
-                push_tool_status_to_channel(session_id, tool_name, "running")
-            )
-
-        result = await _android_compile_outcome(
-            agent_id,
-            arguments,
-            on_output=on_output,
-        )
-
-        # 推送工具完成状态到外部频道
-        if session_id:
-            from app.services.tool_stream import push_tool_status_to_channel
-            summary = str(result) if result else ""
-            asyncio.ensure_future(
-                push_tool_status_to_channel(
-                    session_id, tool_name, "done", summary
-                )
-            )
-
-        return result
     if tool_name == "read_webpage":
         return await _read_webpage_outcome(arguments)
     if tool_name == "upload_image":
@@ -9892,116 +9834,6 @@ def _check_code_safety(language: str, code: str, allow_network: bool = False) ->
                     return f"❌ Blocked: network operation not allowed ({pattern})"
 
     return None
-
-
-async def _android_compile_outcome(
-    agent_id: uuid.UUID | None,
-    arguments: dict,
-    *,
-    on_output=None,
-) -> ToolExecutionOutcome:
-    """处理 android_compile 工具调用，直接在 Docker 容器中编译 Android 项目。
-
-    Args:
-        agent_id: 当前 Agent 的 UUID。
-        arguments: 工具调用参数 (project_path, task, java_version)。
-        on_output: 用于流式传输构建日志的可选回调。
-    """
-    project_path = arguments.get("project_path", "")
-    task = arguments.get("task", "assembleDebug")
-    java_version = str(arguments.get("java_version", "17"))
-
-    if not project_path or not isinstance(project_path, str):
-        return _typed_failure(
-            "project_path is required for android_compile.",
-            "invalid_tool_arguments",
-        )
-
-    # 路径边界检查（防止 workspace 逃逸）
-    from app.services.workspace_paths import resolve_path_within_root, WorkspacePathError
-
-    ws = _agent_workspace_root(agent_id)
-    try:
-        full_path = resolve_path_within_root(ws, project_path, label="project_path")
-    except WorkspacePathError:
-        return _typed_failure(
-            "Invalid android project path.",
-            "path_traversal_denied",
-        )
-    if not (full_path / "gradlew").exists() and not (full_path / "gradlew.bat").exists():
-        return _typed_failure(
-            "Android project path does not contain gradlew.",
-            "android_project_not_found",
-        )
-
-    # 沙箱路由（直接传递 Android 专用 kwargs，不走 _execute_code_outcome）
-    from app.config import get_sandbox_config
-    from app.services.sandbox.config import SandboxConfig
-    from app.services.sandbox.registry import get_sandbox_backend
-
-    tool_config = await _get_tool_config(agent_id, "android_compile")
-    fallback_config = get_sandbox_config()
-    sandbox_config = SandboxConfig.from_dict(tool_config or {}, fallback_config)
-    timeout = min(1800, sandbox_config.max_timeout)
-    backend = get_sandbox_backend(sandbox_config)
-
-    try:
-        result = await backend.execute(
-            code="",
-            language="bash",
-            timeout=timeout,
-            work_dir=str(full_path),
-            project_path=str(full_path),
-            gradle_task=task,
-            java_version=java_version,
-            agent_id=agent_id,
-            on_output=on_output,
-        )
-    except Exception as exc:
-        logger.exception(
-            "[android_compile] Sandbox execution failed for agent={}: {}",
-            agent_id, exc,
-        )
-        return _typed_failure(
-            "Android build platform error.",
-            "sandbox_execution_failed",
-        )
-
-    if result.success and result.exit_code == 0:
-        # 扫描标准 Gradle 产物目录和项目根目录，收集所有编译产物路径
-        apk_files: list[str] = []
-        # Gradle 标准产物路径（app/build 直写宿主机 bind mount，无需 copy）
-        scan_dirs = [
-            full_path / "app" / "build" / "outputs" / "apk",
-            full_path / "app" / "build" / "outputs" / "bundle",
-        ]
-        for scan_dir in scan_dirs:
-            if not scan_dir.is_dir():
-                continue
-            for pattern in ("*.apk", "*.aab"):
-                for apk in scan_dir.rglob(pattern):
-                    apk_files.append(str(apk.relative_to(full_path)))
-        if apk_files:
-            apk_list = "\n".join(f"  - {f}" for f in apk_files)
-            abs_list = "\n".join(f"  - {full_path / f}" for f in apk_files)
-            return _typed_success(
-                f"Android build succeeded: {task}\n\n"
-                f"产物文件 ({len(apk_files)} 个):\n{apk_list}\n\n"
-                f"绝对路径:\n{abs_list}"
-            )
-        return _typed_success(
-            f"Android build succeeded: {task}\n\n"
-            f"Warning: No .apk or .aab files found. "
-            f"The build completed but check Gradle output for APK location."
-        )
-    # 提取构建错误：末尾 2000 字符，跳过空行
-    error_tail = (result.stdout or "").strip()
-    if len(error_tail) > 2000:
-        error_tail = "...(前段省略)...\n" + error_tail[-2000:]
-    return _typed_failure(
-        f"Android build failed with exit code {result.exit_code}.\n\n{error_tail}",
-        "sandbox_execution_failed",
-    )
 
 
 async def _execute_code_outcome(

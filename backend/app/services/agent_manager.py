@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import docker
 from docker.errors import DockerException, NotFound
 from loguru import logger
 from sqlalchemy import select
@@ -15,7 +16,6 @@ from app.config import get_settings
 from app.models.agent import Agent, AgentTemplate
 from app.models.llm import LLMModel
 from app.services.llm import get_model_api_key
-from app.services.sandbox.docker_client import get_docker_client
 from app.services.storage import get_storage_backend, normalize_storage_key
 
 settings = get_settings()
@@ -53,7 +53,7 @@ class AgentManager:
 
     def __init__(self):
         try:
-            self.docker_client = get_docker_client()
+            self.docker_client = docker.from_env()
         except DockerException:
             logger.warning("Docker not available — agent containers will not be managed")
             self.docker_client = None
@@ -310,9 +310,7 @@ class AgentManager:
 
         except DockerException as e:
             logger.error(f"Failed to start container for agent {agent.name}: {e}")
-            # 容器启动失败不应阻止 native agent 使用 — 降级为 idle
-            agent.status = "idle"
-            agent.last_active_at = datetime.now(timezone.utc)
+            agent.status = "error"
             return None
 
     async def stop_container(self, agent: Agent) -> bool:
