@@ -325,21 +325,6 @@ async def lifespan(app: FastAPI):
         traceback.print_exc()
 
     if _role_enabled("all", "worker"):
-        # 清理上次非正常退出遗留的 lane 锁（否则新 worker 永久阻塞）
-        try:
-            from app.database import async_session
-            from sqlalchemy import text
-            async with async_session() as db:
-                result = await db.execute(
-                    text("UPDATE agent_runs SET lane_held = false WHERE lane_held = true")
-                )
-                released = result.rowcount
-                if released:
-                    logger.info(f"[startup] Released {released} stale lane lock(s)")
-                await db.commit()
-        except Exception:
-            pass
-
         from app.services.agent_runtime.worker_service import running_runtime_worker_context
 
         await runtime_stack.enter_async_context(running_runtime_worker_context(settings=settings))
@@ -481,14 +466,8 @@ app.include_router(onboarding_router, prefix=settings.API_PREFIX)
 
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])
 async def health_check():
-    """Health check endpoint — includes Docker proxy status."""
-    docker_health = None
-    try:
-        from app.services.sandbox.docker_client import check_docker_health
-        docker_health = check_docker_health()
-    except Exception:
-        pass
-    return HealthResponse(status="ok", version=settings.APP_VERSION, docker=docker_health)
+    """Health check endpoint."""
+    return HealthResponse(status="ok", version=settings.APP_VERSION)
 
 
 # ── Version endpoint (public, no auth required) ──

@@ -5,8 +5,25 @@ from pathlib import Path
 
 from app.services.sandbox.base import BaseSandboxBackend, ExecutionResult, SandboxCapabilities
 from app.services.sandbox.config import SandboxConfig
-from app.services.sandbox.docker_client import get_docker_client
 from loguru import logger
+
+# Lazy import docker to make it optional
+_docker = None
+
+
+def _get_docker():
+    """Lazy load docker SDK."""
+    global _docker
+    if _docker is None:
+        try:
+            import docker
+            _docker = docker
+        except ImportError:
+            raise ImportError(
+                "docker package is required for docker backend. "
+                "Install it with: pip install docker"
+            )
+    return _docker
 
 
 # Language to docker image mapping
@@ -41,7 +58,8 @@ class DockerBackend(BaseSandboxBackend):
     def client(self):
         """Lazy load docker client."""
         if self._client is None:
-            self._client = get_docker_client()
+            docker_lib = _get_docker()
+            self._client = docker_lib.from_env()
         return self._client
 
     def get_capabilities(self) -> SandboxCapabilities:

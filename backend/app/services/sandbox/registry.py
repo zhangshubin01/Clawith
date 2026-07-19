@@ -1,6 +1,7 @@
 """Sandbox backend registry and factory."""
 
 from typing import Type
+from loguru import logger
 
 from app.services.sandbox.base import SandboxBackend
 from app.services.sandbox.config import SandboxConfig, SandboxType
@@ -69,7 +70,6 @@ def _register_builtin_backends() -> None:
     from app.services.sandbox.api.codesandbox_backend import CodeSandboxBackend
     from app.services.sandbox.remote.self_hosted_backend import SelfHostedBackend
     from app.services.sandbox.remote.aio_sandbox_backend import AioSandboxBackend
-    from app.services.sandbox.local.android_build_backend import AndroidBuildBackend
 
     _BACKEND_REGISTRY[SandboxType.SUBPROCESS] = SubprocessBackend
     _BACKEND_REGISTRY[SandboxType.DOCKER] = DockerBackend
@@ -78,7 +78,6 @@ def _register_builtin_backends() -> None:
     _BACKEND_REGISTRY[SandboxType.CODEDANDBOX] = CodeSandboxBackend
     _BACKEND_REGISTRY[SandboxType.SELF_HOSTED] = SelfHostedBackend
     _BACKEND_REGISTRY[SandboxType.AIO_SANDBOX] = AioSandboxBackend
-    _BACKEND_REGISTRY[SandboxType.ANDROID_BUILD] = AndroidBuildBackend
 
 
 # Register built-in backends on module import

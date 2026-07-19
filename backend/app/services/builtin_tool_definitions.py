@@ -2665,32 +2665,6 @@ _BUILTIN_TOOL_SOURCE = [
         "config": {},
         "config_schema": {},
     },
-    {
-        "name": "android_compile",
-        "display_name": "Android Compile",
-        "description": (
-            "编译 Android 项目。在预配置 Docker 容器中运行（含 JDK 17、Android SDK、Gradle 8.5），"
-            "无需本地安装任何 Android 开发环境。自动使用全局 Gradle 缓存和 Android SDK 缓存加速编译。"
-            "支持 JDK 11/17/21 切换。编译完成后 APK 产物自动复制到项目根目录。"
-            "【重要】不要用 execute_code 或 terminal 运行 gradlew — 本地环境没有 Android SDK，"
-            "必须用本工具在 Docker 容器中编译。"
-        ),
-        "category": "build",
-        "icon": "🤖",
-        "is_default": False,
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "project_path": {"type": "string", "description": "Android 项目根目录路径（包含 gradlew 的目录）。例如 workspace/calculator-android/"},
-                "task": {"type": "string", "description": "Gradle 任务名称，默认 assembleDebug。编译完成后 APK 自动出现在项目根目录下。", "default": "assembleDebug"},
-                "java_version": {"type": "string", "enum": ["11", "17", "21"], "description": "JDK 版本，默认 17", "default": "17"},
-                "project_name": {"type": "string", "description": "项目名称，用于缓存隔离。默认从路径推导。"},
-            },
-            "required": ["project_path"],
-        },
-        "config": {"sandbox_type": "android-build", "default_timeout": 600, "max_timeout": 1800, "memory_limit": "8g", "cpu_limit": "4.0", "allow_network": True},
-        "config_schema": {},
-    },
 ]
 
 # ── AgentBay Tools ──────────────────────────────────────────────────────────
