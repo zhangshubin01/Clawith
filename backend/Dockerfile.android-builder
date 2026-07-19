@@ -58,7 +58,7 @@ RUN git config --global --add safe.directory /workspace && \
     git lfs install --system
 
 # ─── 第六层：入口脚本 ───
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/android-builder/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /workspace
