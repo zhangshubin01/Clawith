@@ -402,7 +402,7 @@ async def _process_tool_call(
             pass
 
     # Execute tool — pass on_output for execute_code streaming
-    _on_output = on_code_output if tool_name in ("execute_code", "execute_code_e2b") else None
+    _on_output = on_code_output if tool_name in ("execute_code", "execute_code_e2b", "android_compile") else None
     result = await execute_tool(
         tool_name, args,
         agent_id=agent_id,
@@ -929,6 +929,11 @@ async def call_agent_llm(
         messages.extend(history[-10:])
     messages.append({"role": "user", "content": user_text})
 
+    # 构建日志流式回调 — 通过 Redis pubsub 推送到前端"代码与执行"面板
+    async def _on_code_output(output: str) -> None:
+        from app.services.tool_stream import publish_tool_output
+        await publish_tool_output(session_id, str(agent_id), output)
+
     # Use unified call_llm_with_failover
     try:
         reply = await call_llm_with_failover(
@@ -943,6 +948,7 @@ async def call_agent_llm(
             on_chunk=on_chunk,
             on_thinking=on_thinking,
             supports_vision=supports_vision or getattr(primary_model, 'supports_vision', False),
+            on_code_output=_on_code_output,
         )
         return reply
     except Exception as e:

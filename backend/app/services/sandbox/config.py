@@ -3,7 +3,7 @@
 from loguru import logger
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SandboxType(str, Enum):
@@ -16,6 +16,7 @@ class SandboxType(str, Enum):
     CODEDANDBOX = "codesandbox"
     SELF_HOSTED = "self_hosted"
     AIO_SANDBOX = "aio_sandbox"
+    ANDROID_BUILD = "android-build"
 
 
 class SandboxConfig(BaseModel):
@@ -40,20 +41,19 @@ class SandboxConfig(BaseModel):
 
     # Language mapping for API sandboxes
     # Maps our internal language names to API-specific language IDs
-    language_mapping: dict[str, str] = Field(default_factory=lambda: {
-        "python": "python",
-        "bash": "bash",
-        "node": "javascript",
-        "javascript": "javascript",
-    })
+    language_mapping: dict[str, str] = Field(
+        default_factory=lambda: {
+            "python": "python",
+            "bash": "bash",
+            "node": "javascript",
+            "javascript": "javascript",
+        }
+    )
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
     @classmethod
-    def from_dict(
-        cls, config: dict, fallback_config: Optional["SandboxConfig"] = None
-    ) -> "SandboxConfig":
+    def from_dict(cls, config: dict, fallback_config: Optional["SandboxConfig"] = None) -> "SandboxConfig":
         """从 dict 构建 SandboxConfig，支持字段级 fallback。
 
         Args:
@@ -63,6 +63,7 @@ class SandboxConfig(BaseModel):
         Returns:
             SandboxConfig 实例
         """
+
         def get_value(key: str, default=None, encrypt: bool = False):
             """获取配置值，优先从 config 读取，缺失则使用 fallback。"""
             value = config.get(key)

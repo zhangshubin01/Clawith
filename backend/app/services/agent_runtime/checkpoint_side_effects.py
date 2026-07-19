@@ -151,12 +151,27 @@ def _terminal_content(checkpoint: CheckpointObservation, *, status: str) -> str:
     if requested is not None:
         return requested
     final_answer = _text_field(lifecycle.get("final_answer"))
-    if status == "completed" and final_answer is None:
+    if final_answer is not None:
+        return final_answer
+    # 无 final_answer 时从 checkpoint messages 提取工具结果作为回答
+    # 处理 deepseek-v4-flash 等模型在工具循环中只产 tool_calls 不产文本的场景
+    if status == "completed":
+        messages = runtime_messages_as_json(checkpoint.state)
+        tool_results = [
+            m for m in reversed(messages)
+            if m.get("role") == "tool" and m.get("content")
+        ]
+        if tool_results:
+            last = tool_results[0]
+            tool_name = last.get("name", "tool")
+            content = _text_field(last.get("content")) or ""
+            return f"**{tool_name}** 执行结果：\n\n{content[:1000]}"
         raise RuntimeCheckpointSideEffectError(
             "missing_terminal_content",
             "completed checkpoint has no user-visible answer",
         )
-    return final_answer or ""
+    # status 非 completed（failed/cancelled）：返回空字符串
+    return ""
 
 
 def _failure_metadata(checkpoint: CheckpointObservation) -> tuple[str | None, str | None]:
@@ -208,6 +223,10 @@ def delivery_from_checkpoint(
         return None
     if status == "waiting_user":
         return _waiting_delivery(run, checkpoint)
+    # 通道 runtime（飞书等）工具循环结束后停在 waiting_external，
+    # 无法像 WebSocket 端一样 auto-resume。将其视为 completed 投递。
+    if status == "waiting_external":
+        status = "completed"
     if status not in _TERMINAL_STATUSES:
         return None
     failure_code, failure_message = (

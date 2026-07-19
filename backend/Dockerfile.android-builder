@@ -1,0 +1,66 @@
+# clawith-android-builder/Dockerfile
+# 瘦基础镜像：不含 JDK，仅 OS + 工具链
+# 构建: docker build -t clawith-android-builder:latest .
+# 大小目标: ~300MB（压缩后 ~120MB）
+
+FROM --platform=linux/amd64 debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    ANDROID_HOME=/opt/android-sdk \
+    JDK_CACHE_DIR=/opt/jdks \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+ENV PATH="${PATH}:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools" \
+    ANDROID_SDK_ROOT="${ANDROID_HOME}"
+
+# ─── 第一层：系统依赖（不含 JDK） ───
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+    git git-lfs \
+    wget unzip curl ca-certificates \
+    fontconfig libfreetype6 \
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# ─── 第二层：Android SDK 命令行工具 ───
+ARG CMDLINE_TOOLS_VERSION=14742923
+ARG CMDLINE_TOOLS_URL=https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip
+
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
+    wget -q --progress=dot:giga ${CMDLINE_TOOLS_URL} -O /tmp/android_tools.zip && \
+    unzip -q /tmp/android_tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
+    mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
+    rm -f /tmp/android_tools.zip
+
+# ─── 第三层：SDK 许可证（不在镜像中固化，走全局卷） ───
+# 策略：镜像不固化许可证。宿主机每月执行一次许可证更新脚本，
+# 所有容器通过 global_android_sdk 卷共享生效，无需重建镜像。
+# 许可证更新脚本见 android_sdk_license_update.sh。
+
+# ─── 第四层：预安装常用 SDK 组件（减少首次编译时间） ───
+# 新旧版本并存：老项目用旧版，新项目命中最新版
+RUN sdkmanager --install \
+    "platform-tools" \
+    "build-tools;36.0.0" \
+    "build-tools;34.0.0" \
+    "build-tools;33.0.0" \
+    "build-tools;30.0.3" \
+    "platforms;android-36" \
+    "platforms;android-34" \
+    "platforms;android-33" \
+    "platforms;android-30" \
+    2>&1 || echo "[WARN] 部分 SDK 组件下载失败，运行时 AGP 会自动补全"
+
+# ─── 第五层：Git 全局配置 ───
+# 注：LFS 文件正常检出还需要仓库已提交包含 LFS 追踪规则的 .gitattributes
+RUN git config --global --add safe.directory /workspace && \
+    git lfs install --system
+
+# ─── 第六层：入口脚本 ───
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["bash"]
