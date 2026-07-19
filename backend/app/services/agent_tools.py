@@ -9994,8 +9994,12 @@ async def _android_compile_outcome(
             f"Warning: No .apk or .aab files found. "
             f"The build completed but check Gradle output for APK location."
         )
+    # 提取构建错误：末尾 2000 字符，跳过空行
+    error_tail = (result.stdout or "").strip()
+    if len(error_tail) > 2000:
+        error_tail = "...(前段省略)...\n" + error_tail[-2000:]
     return _typed_failure(
-        f"Android build failed with exit code {result.exit_code}.",
+        f"Android build failed with exit code {result.exit_code}.\n\n{error_tail}",
         "sandbox_execution_failed",
     )
 
