@@ -19,7 +19,7 @@ RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
     git git-lfs \
     wget unzip curl ca-certificates \
-    fontconfig libfreetype6 \
+    fontconfig libfreetype6 util-linux \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
