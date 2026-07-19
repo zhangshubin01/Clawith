@@ -262,7 +262,7 @@ async def stream_web_chat_run(
                             {
                                 "type": "agentbay_live",
                                 "env": "code",
-                                "output": f"[{tool_name}] 执行中...\n",
+                                "output": f"\n[{tool_name}] 执行中...\n",
                                 "stream": "stdout",
                             }
                         )
@@ -286,7 +286,7 @@ async def stream_web_chat_run(
                                 {
                                     "type": "agentbay_live",
                                     "env": "code",
-                                    "output": f"\n--- 构建完成 ---\n{result_text}",
+                                    "output": f"\n--- 构建完成 ---\n{result_text}\n",
                                     "stream": "stdout",
                                 }
                             )
