@@ -66,16 +66,18 @@ services:
       MULTI_AGENT_COMPACT_MODEL_ID: ${MULTI_AGENT_COMPACT_MODEL_ID:-}
       # Password reset token lifetime in minutes (default: 30)
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
+    ports:
+      - "8008:8000"
     volumes:
       - ./backend/agent_data:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
     privileged: true
+    group_add:
+      - "0"  # root 组（docker.sock 属主），clawith 用户通过此组访问 Docker
     cap_add:
       - SYS_ADMIN
-    security_opt:
-      - seccomp=unconfined
-      - apparmor=unconfined
+    # security_opt 移除: seccomp/apparmor 在 macOS/OrbStack 不可用
     networks:
       - default
     depends_on:
