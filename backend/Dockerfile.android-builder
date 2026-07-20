@@ -17,7 +17,7 @@ ENV PATH="${PATH}:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platf
 # ─── 第一层：系统依赖（不含 JDK） ───
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
-    git git-lfs \
+    git git-lfs gosu \
     wget unzip curl ca-certificates \
     fontconfig libfreetype6 \
     && apt-get clean && \
@@ -57,8 +57,8 @@ RUN sdkmanager --install \
 RUN git config --global --add safe.directory /workspace && \
     git lfs install --system
 
-# ─── 第六层：入口脚本 ───
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# ─── 第六层：入口脚本（仅 JDK 初始化 + Git 凭证注入） ───
+COPY docker/android-builder/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /workspace

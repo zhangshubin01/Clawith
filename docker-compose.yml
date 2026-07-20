@@ -105,10 +105,10 @@ volumes:
   # 复用原 clawith-agent 项目的数据卷（external 避免 compose 项目名变更告警）
   pgdata:
     external: true
-    name: clawith-agent_pgdata
+    name: clawith_pgdata
   redisdata:
     external: true
-    name: clawith-agent_redisdata
+    name: clawith_redisdata
 
 
 networks:
