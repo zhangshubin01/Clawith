@@ -124,7 +124,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
         self,
         code: str,
         language: str,
-        timeout: int = 600,
+        timeout: int = 1800,
         work_dir: str | None = None,
         **kwargs
     ) -> ExecutionResult:
@@ -205,12 +205,8 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 mem_limit=mem_limit,
                 cpu_quota=400000,
                 cpu_period=100000,
-                # tmpfs 内存盘：build 产物写入内存，减少 SSD 磨损
-                tmpfs={
-                    "/workspace/app/build": "rw,exec,noatime,size=4g",
-                    "/workspace/build": "rw,exec,noatime,size=2g",
-                    "/workspace/.gradle": "rw,noatime,size=1g",
-                },
+                # build 产物直接写入 workspace（agent workspace），
+                # 利用 Docker bind mount 持久化到宿主机，保留增量编译缓存。
                 network_mode="bridge",
                 remove=False,
             )

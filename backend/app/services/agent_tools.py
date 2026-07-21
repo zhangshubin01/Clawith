@@ -3328,7 +3328,7 @@ async def execute_tool(
             # 不使用 _run_with_temp_workspace，直接在持久工作区执行（无需 sync_back）
             result = await _execute_code(
                 agent_id, agent_ws,
-                {"code": code, "language": "bash", "timeout": arguments.get("timeout", 600)},
+                {"code": code, "language": "bash", "timeout": arguments.get("timeout", 1800)},
                 tool_name=tool_name, on_output=on_output,
                 project_path=project_path,
                 gradle_task=task,
@@ -11624,6 +11624,29 @@ async def _feishu_user_search(agent_id: uuid.UUID, arguments: dict) -> str:
     if not app_id or not app_secret:
         return "❌ Agent has no Feishu channel configured."
 
+    # ── Load local contacts cache (populated when users message the bot) ──────
+    _cached_users = []
+    import pathlib as _cache_pl
+    _cache_file = _cache_pl.Path("/data/workspaces") / str(agent_id) / "feishu_contacts_cache.json"
+    try:
+        if _cache_file.exists():
+            _cached_data = _json.loads(_cache_file.read_text())
+            _cached_users = _cached_data.get("users", [])
+    except Exception:
+        pass
+    # Search cache by display_name or user_id
+    for _cu in _cached_users:
+        _dn = (_cu.get("display_name") or "").lower()
+        _uid = (_cu.get("user_id") or "").lower()
+        if name.lower() in _dn or name.lower() in _uid:
+            _lines = [f"🔍 从本地缓存找到匹配「{name}」的用户：", f"• **{_cu.get('display_name', '')}**"]
+            if _cu.get("user_id"):
+                _lines.append(f"  user_id: `{_cu['user_id']}`")
+            if _cu.get("open_id"):
+                _lines.append(f"  open_id: `{_cu['open_id']}`")
+            if _cu.get("email"):
+                _lines.append(f"  邮箱: {_cu['email']}")
+            return "\n".join(_lines)
 
     # ── Cache miss: try OrgMember table first (has user_id from org sync) ──────
     try:

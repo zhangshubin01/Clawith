@@ -52,6 +52,7 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-jwt-secret}
       PROCESS_ROLE: all
       CORS_ORIGINS: '["*"]'
+      ACP_TOOL_TIMEOUT_SECONDS: "1800"
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       SS_CONFIG_FILE: /data/ss-nodes.json
