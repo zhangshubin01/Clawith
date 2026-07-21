@@ -247,18 +247,40 @@ class AndroidBuildBackend(BaseSandboxBackend):
             stream_task = asyncio.ensure_future(asyncio.to_thread(_stream_logs))
 
             async def _drain_queue():
-                """主协程消费队列：收集日志 + 推送 WebSocket。"""
+                """主协程消费队列：批量收集日志（100ms 窗口），合并后推送 WebSocket。
+
+                Docker 的 json-file log driver 按行分帧，container.logs(stream=True)
+                每帧一个 chunk。逐帧推 WebSocket 会导致前端消息间产生空行。
+                100ms 批量缓冲合并相邻 chunk，消除消息边界产生的视觉空行。
+                """
                 loop = asyncio.get_running_loop()
+                batch: list[bytes] = []
+                last_flush = time.time()
+                BATCH_INTERVAL = 0.1  # 100ms 批处理窗口
+
+                async def _flush_batch():
+                    nonlocal last_flush
+                    if not batch:
+                        return
+                    merged = b"".join(batch)
+                    batch.clear()
+                    last_flush = time.time()
+                    if on_output:
+                        try:
+                            await on_output(merged.decode("utf-8", errors="replace"))
+                        except Exception as e:
+                            logger.warning(f"[AndroidBuild] on_output 回调异常: {e}")
+
                 while True:
                     chunk = await loop.run_in_executor(None, output_queue.get)
                     if chunk is None:
+                        await _flush_batch()
                         break
                     stdout_buf.extend(chunk)
                     if on_output:
-                        try:
-                            await on_output(chunk.decode("utf-8", errors="replace"))
-                        except Exception as e:
-                            logger.warning(f"[AndroidBuild] on_output 回调异常: {e}")
+                        batch.append(chunk)
+                        if time.time() - last_flush >= BATCH_INTERVAL:
+                            await _flush_batch()
 
             drain_task = asyncio.create_task(_drain_queue())
 
