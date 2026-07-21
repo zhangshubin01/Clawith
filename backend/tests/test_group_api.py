@@ -112,6 +112,8 @@ def test_group_router_exposes_management_and_read_state_boundaries() -> None:
     assert ("GET", "/api/groups/{group_id}/workspace/file") in routes
     assert ("PUT", "/api/groups/{group_id}/workspace/file") in routes
     assert ("DELETE", "/api/groups/{group_id}/workspace/file") in routes
+    assert ("POST", "/api/groups/{group_id}/workspace/upload") in routes
+    assert ("GET", "/api/groups/{group_id}/workspace/download") in routes
     assert ("PATCH", "/api/groups/{group_id}/members/{member_id}") not in routes
 
 
@@ -219,6 +221,110 @@ async def test_workspace_put_forwards_create_only_condition(monkeypatch) -> None
 
     assert calls[0]["require_absent"] is True
     assert "require_absent" not in groups_api.GroupTextFileIn.model_fields
+
+
+@pytest.mark.asyncio
+async def test_workspace_binary_upload_preserves_conditions_and_stages_audit(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    user = _user(tenant_id)
+    participant = _participant(user)
+    group = _group(tenant_id, participant.id)
+    db = _RecordingDB()
+    calls = []
+
+    async def fake_participant(_db, _user):
+        return participant
+
+    async def fake_write(_db, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            path=kwargs["path"],
+            content=kwargs["content"],
+            version_token="binary-v1",
+            modified_at="now",
+            revision_id=uuid.uuid4(),
+        )
+
+    class _Upload:
+        async def read(self):
+            return b"%PDF-1.7\n\x00payload"
+
+    monkeypatch.setattr(groups_api, "_current_participant", fake_participant)
+    monkeypatch.setattr(groups_api.group_file_service, "write_workspace_binary_file", fake_write)
+
+    result = await groups_api.upload_group_workspace_file(
+        group.id,
+        path="reports/final.pdf",
+        file=_Upload(),
+        expected_version_token="binary-v0",
+        require_absent=False,
+        current_user=user,
+        db=db,
+    )
+
+    assert result.path == "reports/final.pdf"
+    assert result.size == len(b"%PDF-1.7\n\x00payload")
+    assert calls == [
+        {
+            "tenant_id": tenant_id,
+            "group_id": group.id,
+            "actor_participant_id": participant.id,
+            "path": "reports/final.pdf",
+            "content": b"%PDF-1.7\n\x00payload",
+            "content_type": "application/pdf",
+            "expected_version_token": "binary-v0",
+            "require_absent": False,
+        }
+    ]
+    audit = next(value for value in db.added if isinstance(value, AuditLog))
+    assert audit.action == "group:workspace_write"
+    assert audit.details["path"] == "reports/final.pdf"
+
+
+@pytest.mark.asyncio
+async def test_workspace_download_returns_exact_bytes_after_group_authorization(monkeypatch) -> None:
+    tenant_id = uuid.uuid4()
+    user = _user(tenant_id)
+    participant = _participant(user)
+    group = _group(tenant_id, participant.id)
+    db = _RecordingDB()
+    calls = []
+
+    async def fake_download_user(**kwargs):
+        assert kwargs["token"] == "download-token"
+        return user
+
+    async def fake_participant(_db, _user):
+        return participant
+
+    async def fake_read(_db, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(path="images/chart.png", content=b"\x89PNG\r\n")
+
+    monkeypatch.setattr(groups_api, "_download_user", fake_download_user)
+    monkeypatch.setattr(groups_api, "_current_participant", fake_participant)
+    monkeypatch.setattr(groups_api.group_file_service, "read_workspace_binary_file", fake_read)
+
+    response = await groups_api.download_group_workspace_file(
+        group.id,
+        path="images/chart.png",
+        token="download-token",
+        inline=True,
+        credentials=None,
+        db=db,
+    )
+
+    assert response.body == b"\x89PNG\r\n"
+    assert response.media_type == "image/png"
+    assert response.headers["content-disposition"].startswith("inline;")
+    assert calls == [
+        {
+            "tenant_id": tenant_id,
+            "group_id": group.id,
+            "actor_participant_id": participant.id,
+            "path": "images/chart.png",
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -17,8 +17,15 @@ from app.models.group import GroupMember
 from app.models.participant import Participant
 from app.services import group_chat_service
 from app.services.storage import get_storage_backend, normalize_storage_key
-from app.services.storage_runtime.base import StorageEntry, StorageVersion, WriteCondition
+from app.services.storage_runtime.base import (
+    StorageEntry,
+    StorageVersion,
+    WriteCondition,
+    content_hash_bytes,
+)
 from app.services.workspace_collaboration import (
+    BINARY_REVISION_EXTENSIONS,
+    MAX_REVISION_TEXT_BYTES,
     content_hash,
     finalize_group_runtime_revision,
     get_group_runtime_revision,
@@ -44,6 +51,17 @@ class GroupTextFile:
     content: str
     exists: bool
     version_token: str | None
+    modified_at: str | None
+    revision_id: uuid.UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GroupBinaryFile:
+    """Business-level view of one group workspace binary file."""
+
+    path: str
+    content: bytes
+    version_token: str
     modified_at: str | None
     revision_id: uuid.UUID | None = None
 
@@ -182,6 +200,23 @@ def _validate_text(content: str) -> str:
             "Group text files cannot contain NUL bytes",
         )
     return content
+
+
+async def _revision_text(storage, key: str, business_path: str) -> str | None:
+    """Return exact revision text without decoding binary data into database TEXT."""
+    raw = await storage.read_bytes(key)
+    filename = business_path.rsplit("/", 1)[-1]
+    suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if (
+        suffix in BINARY_REVISION_EXTENSIONS
+        or len(raw) > MAX_REVISION_TEXT_BYTES
+        or b"\x00" in raw
+    ):
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def _runtime_revision_path(path: str) -> str:
@@ -548,7 +583,7 @@ async def _write_text(
             "Group file already exists at this path",
         )
     before = (
-        await storage.read_text(key, encoding="utf-8", errors="replace")
+        await _revision_text(storage, key, business_path)
         if current.exists and not current.is_dir
         else None
     )
@@ -607,7 +642,7 @@ async def _delete_text(
     current = await storage.get_version(key)
     if not current.exists or current.is_dir:
         raise GroupFileServiceError("group_file_not_found", "Group file not found")
-    before = await storage.read_text(key, encoding="utf-8", errors="replace")
+    before = await _revision_text(storage, key, revision_path)
     result = await storage.delete_if_match(
         key,
         condition=(
@@ -912,6 +947,36 @@ async def read_workspace_file(
     )
 
 
+async def read_workspace_binary_file(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    group_id: uuid.UUID,
+    actor_participant_id: uuid.UUID,
+    path: str,
+) -> GroupBinaryFile:
+    """Read one group workspace file as exact bytes."""
+    await _authorize_actor(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor_participant_id,
+    )
+    normalized, key = _workspace_key(group_id, path, allow_empty=False)
+    storage = get_storage_backend()
+    version = await storage.get_version(key)
+    if not version.exists:
+        raise GroupFileServiceError("group_file_not_found", "Group file not found")
+    if version.is_dir:
+        raise GroupFileServiceError("group_file_not_readable", "Path is a directory")
+    return GroupBinaryFile(
+        path=normalized,
+        content=await storage.read_bytes(key),
+        version_token=version.token,
+        modified_at=version.modified_at or None,
+    )
+
+
 async def write_workspace_file(
     db: AsyncSession,
     *,
@@ -943,6 +1008,82 @@ async def write_workspace_file(
         expected_version_token=expected_version_token,
         require_absent=require_absent,
         session_id=session_id,
+    )
+
+
+async def write_workspace_binary_file(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    group_id: uuid.UUID,
+    actor_participant_id: uuid.UUID,
+    path: str,
+    content: bytes,
+    content_type: str,
+    expected_version_token: str | None = None,
+    require_absent: bool = False,
+    session_id: uuid.UUID | None = None,
+) -> GroupBinaryFile:
+    """Create or replace one group workspace file without text transcoding."""
+    actor = await _authorize_actor(
+        db,
+        tenant_id=tenant_id,
+        group_id=group_id,
+        actor_participant_id=actor_participant_id,
+    )
+    normalized, key = _workspace_key(group_id, path, allow_empty=False)
+    if require_absent and expected_version_token is not None:
+        raise GroupFileServiceError(
+            "group_file_write_condition_invalid",
+            "A create-only write cannot also provide a version token",
+        )
+    storage = get_storage_backend()
+    current = await storage.get_version(key)
+    if current.is_dir:
+        raise GroupFileServiceError("group_file_conflict", "Group path is a directory")
+    before = (
+        await _revision_text(storage, key, normalized)
+        if current.exists and not current.is_dir
+        else None
+    )
+    result = await storage.write_bytes_if_match(
+        key,
+        content,
+        condition=(
+            WriteCondition(require_absent=True)
+            if require_absent
+            else (
+                WriteCondition(version_token=expected_version_token)
+                if expected_version_token is not None
+                else None
+            )
+        ),
+        content_type=content_type,
+    )
+    if not result.ok:
+        raise GroupFileServiceError(
+            "group_file_conflict",
+            "Group file changed before this write completed",
+        )
+    revision = await record_group_revision(
+        db,
+        group_id=group_id,
+        path=_revision_path("workspace", normalized),
+        operation="write",
+        actor_type=actor.type,
+        actor_id=actor.ref_id,
+        before_content=before,
+        after_content=None,
+        content_hash_override=content_hash_bytes(content),
+        session_id=str(session_id) if session_id is not None else None,
+    )
+    updated = result.current_version or await storage.get_version(key)
+    return GroupBinaryFile(
+        path=normalized,
+        content=content,
+        version_token=updated.token,
+        modified_at=updated.modified_at or None,
+        revision_id=revision.id if revision is not None else None,
     )
 
 
@@ -1069,6 +1210,7 @@ async def delete_workspace_file(
 
 __all__ = [
     "GroupFileServiceError",
+    "GroupBinaryFile",
     "GroupTextFile",
     "GroupWorkspaceEntry",
     "delete_agent_memory",
@@ -1078,7 +1220,9 @@ __all__ = [
     "read_agent_memory",
     "read_announcement",
     "read_workspace_file",
+    "read_workspace_binary_file",
     "write_agent_memory",
     "write_announcement",
     "write_workspace_file",
+    "write_workspace_binary_file",
 ]
