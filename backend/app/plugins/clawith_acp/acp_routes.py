@@ -42,6 +42,7 @@ ACP_METHOD_MAP: dict[str, str] = {
     "git_commit": "git/commit",
     "ide/screenshot": "ide/screenshot",
     "ide_screenshot": "ide/screenshot",
+    "download_image": "fs/download_image",
 }
 
 # hooks 分发用：含 storage 别名（实际参数由 intercept handler 构建）
@@ -62,6 +63,7 @@ ACP_OVERLAP_BASE_TOOL_NAMES: frozenset[str] = frozenset({
     "build_project", "file_structure",
     "tree",
     "execute_bash",
+    "download_image",  # 基础工具与 IDE 代理重名，ACP 活跃时过滤基础版
 })
 
 

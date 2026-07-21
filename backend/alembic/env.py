@@ -58,7 +58,15 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection):
-    context.configure(connection=connection, target_metadata=target_metadata)
+    # transaction_per_migration=True 让每个迁移在独立事务中提交。
+    # 这对使用 CREATE INDEX CONCURRENTLY（在独立 AUTOCOMMIT 连接上执行）的
+    # 迁移是必需的：建表迁移必须先提交，索引迁移的独立连接才能看到该表，
+    # 否则会报 UndefinedTableError（例如 chat_messages 不存在）。
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        transaction_per_migration=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
