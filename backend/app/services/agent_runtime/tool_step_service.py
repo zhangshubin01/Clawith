@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import time
 from typing import Protocol, cast
 import uuid
 
@@ -76,14 +77,21 @@ from app.services.builtin_tool_definitions import (
     builtin_policy,
     builtin_sensitive_paths,
 )
+
 _CONTROL_TOOL_NAMES = frozenset({"finish", "wait"})
-_HEARTBEAT_PRIVATE_PLAZA_TOOLS = frozenset(
-    {"plaza_get_new_posts", "plaza_create_post", "plaza_add_comment"}
-)
+_HEARTBEAT_PRIVATE_PLAZA_TOOLS = frozenset({"plaza_get_new_posts", "plaza_create_post", "plaza_add_comment"})
 _HEARTBEAT_PLAZA_LIMITS = {
     "plaza_create_post": 1,
     "plaza_add_comment": 2,
 }
+
+_STREAM_OUTPUT_TOOL_NAMES = frozenset(
+    {
+        "execute_code",
+        "execute_code_e2b",
+        "android_compile",
+    }
+)
 
 
 async def _insert_runtime_activity(
@@ -329,15 +337,11 @@ def _async_poll_schedule_metadata(
             "invalid_async_tool_outcome",
             "pending async poll instructions are invalid",
         )
-    due_at = (clock or (lambda: datetime.now(UTC)))() + timedelta(
-        milliseconds=interval_ms
-    )
+    due_at = (clock or (lambda: datetime.now(UTC)))() + timedelta(milliseconds=interval_ms)
     return {
         **metadata,
         "async_poll_due_at": due_at.isoformat(),
-        "async_poll_correlation_id": str(
-            uuid.uuid5(run_id, f"async-poll:{execution_id}")
-        ),
+        "async_poll_correlation_id": str(uuid.uuid5(run_id, f"async-poll:{execution_id}")),
         "async_poll_call_id": f"async-poll:{execution_id}",
         "async_poll_scheduled": False,
     }
@@ -359,17 +363,9 @@ def _async_pending_step_result(
     metadata = outcome.metadata
     operation = metadata.get("async_operation") if isinstance(metadata, dict) else None
     poll = operation.get("poll") if isinstance(operation, Mapping) else None
-    operation_key = (
-        operation.get("operation_key") if isinstance(operation, Mapping) else None
-    )
-    correlation_id = (
-        metadata.get("async_poll_correlation_id")
-        if isinstance(metadata, dict)
-        else None
-    )
-    poll_call_id = (
-        metadata.get("async_poll_call_id") if isinstance(metadata, dict) else None
-    )
+    operation_key = operation.get("operation_key") if isinstance(operation, Mapping) else None
+    correlation_id = metadata.get("async_poll_correlation_id") if isinstance(metadata, dict) else None
+    poll_call_id = metadata.get("async_poll_call_id") if isinstance(metadata, dict) else None
     if (
         not isinstance(poll, Mapping)
         or not isinstance(operation_key, str)
@@ -456,10 +452,7 @@ def _heartbeat_blocked_summary(
     is_private = (getattr(agent, "access_mode", None) or "company") != "company"
     if is_private and tool_name in _HEARTBEAT_PRIVATE_PLAZA_TOOLS:
         return "[BLOCKED] Private heartbeat Agents cannot use Agent Plaza."
-    return (
-        f"[BLOCKED] Heartbeat limit reached for {tool_name} "
-        f"(maximum {limit})."
-    )
+    return f"[BLOCKED] Heartbeat limit reached for {tool_name} (maximum {limit})."
 
 
 class RuntimeToolStepService:
@@ -484,21 +477,15 @@ class RuntimeToolStepService:
         self._cancel_source = cancel_source
         self._tool_provider = tool_provider
         self._tool_executor = tool_executor
-        self._group_tool_service = group_tool_service or GroupRuntimeToolService(
-            session_factory=session_factory
-        )
+        self._group_tool_service = group_tool_service or GroupRuntimeToolService(session_factory=session_factory)
         self._a2a_service = a2a_service
-        self._tool_result_store = tool_result_store or ToolResultStore(
-            session_factory=session_factory
-        )
+        self._tool_result_store = tool_result_store or ToolResultStore(session_factory=session_factory)
         self._tool_result_reconciler = tool_result_reconciler or ToolResultReconciler(
             session_factory=session_factory,
             result_store=self._tool_result_store,
         )
         self._lease_ttl_seconds = lease_ttl_seconds
-        self._inline_result_max_bytes = (
-            get_settings().AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES
-        )
+        self._inline_result_max_bytes = get_settings().AGENT_RUNTIME_TOOL_RESULT_INLINE_MAX_BYTES
 
     async def _agent(
         self,
@@ -560,10 +547,7 @@ class RuntimeToolStepService:
                     retry_policy=cast(str, policy.retry_policy),  # type: ignore[arg-type]
                     lease_owner=lease_owner,
                     lease_ttl_seconds=self._lease_ttl_seconds,
-                    resume_safe_read=(
-                        policy.side_effect_classification == "read"
-                        and policy.retry_policy == "safe"
-                    ),
+                    resume_safe_read=(policy.side_effect_classification == "read" and policy.retry_policy == "safe"),
                 )
                 if reasoning_content.strip():
                     await _insert_runtime_activity(
@@ -631,9 +615,7 @@ class RuntimeToolStepService:
                 receipt = await self._tool_result_store.write_binary(
                     reservation.execution,
                     normalized.private_binary,
-                    mime_type=str(
-                        normalized.metadata.get("mime_type") or "image/png"
-                    ),
+                    mime_type=str(normalized.metadata.get("mime_type") or "image/png"),
                 )
                 receipt_ref = getattr(receipt, "ref", None)
                 if not isinstance(receipt_ref, str) or not receipt_ref:
@@ -642,21 +624,16 @@ class RuntimeToolStepService:
                 mime_type = getattr(receipt, "mime_type", None)
                 size = getattr(receipt, "size", None)
                 if not isinstance(content_hash, str):
-                    content_hash = hashlib.sha256(
-                        normalized.private_binary
-                    ).hexdigest()
+                    content_hash = hashlib.sha256(normalized.private_binary).hexdigest()
                 if not isinstance(mime_type, str):
-                    mime_type = str(
-                        normalized.metadata.get("mime_type") or "image/png"
-                    )
+                    mime_type = str(normalized.metadata.get("mime_type") or "image/png")
                 if not isinstance(size, int):
                     size = len(normalized.private_binary)
             except Exception as exc:
                 normalized = ToolExecutionOutcome(
                     status="failed",
                     result_summary=(
-                        "Tool screenshot could not be archived privately; "
-                        "the provider call will not be repeated."
+                        "Tool screenshot could not be archived privately; the provider call will not be repeated."
                     ),
                     result_ref=None,
                     error_code="tool_binary_archive_failed",
@@ -671,11 +648,7 @@ class RuntimeToolStepService:
             else:
                 normalized = replace(
                     normalized,
-                    evidence_refs=tuple(
-                        dict.fromkeys(
-                            (*normalized.evidence_refs, receipt_ref)
-                        )
-                    ),
+                    evidence_refs=tuple(dict.fromkeys((*normalized.evidence_refs, receipt_ref))),
                     metadata={
                         **normalized.metadata,
                         "content_hash": content_hash,
@@ -701,10 +674,7 @@ class RuntimeToolStepService:
                 if policy.side_effect_classification == "read":
                     normalized = ToolExecutionOutcome(
                         status="failed",
-                        result_summary=(
-                            "Tool result could not be archived; the provider "
-                            "call will not be repeated."
-                        ),
+                        result_summary=("Tool result could not be archived; the provider call will not be repeated."),
                         result_ref=None,
                         error_code="tool_result_archive_failed",
                         retryable=False,
@@ -737,9 +707,7 @@ class RuntimeToolStepService:
         raw_attempt_count = getattr(reservation.execution, "attempt_count", 1)
         attempt_count = (
             raw_attempt_count
-            if isinstance(raw_attempt_count, int)
-            and not isinstance(raw_attempt_count, bool)
-            and raw_attempt_count >= 1
+            if isinstance(raw_attempt_count, int) and not isinstance(raw_attempt_count, bool) and raw_attempt_count >= 1
             else 1
         )
         normalized = replace(
@@ -812,9 +780,7 @@ class RuntimeToolStepService:
             )
         if normalized.retryable:
             last_error_code = normalized.error_code
-            prior_summary = normalized.result_summary or (
-                "The safe read tool failed without a reusable result."
-            )
+            prior_summary = normalized.result_summary or ("The safe read tool failed without a reusable result.")
             normalized = replace(
                 normalized,
                 result_summary=(
@@ -882,14 +848,8 @@ class RuntimeToolStepService:
                     db,
                     tenant_id=tenant_id,
                     run_id=reservation.execution.run_id,
-                    key=(
-                        f"activity:tool:{reservation.execution.tool_call_id}:"
-                        f"{normalized.status}"
-                    ),
-                    summary=(
-                        f"Runtime tool {reservation.execution.tool_name} "
-                        f"{normalized.status}"
-                    ),
+                    key=(f"activity:tool:{reservation.execution.tool_call_id}:{normalized.status}"),
+                    summary=(f"Runtime tool {reservation.execution.tool_name} {normalized.status}"),
                     payload={
                         "status": "done",
                         "activity_type": "tool_call",
@@ -933,9 +893,8 @@ class RuntimeToolStepService:
         policy: ToolPolicy,
         exc: Exception,
     ) -> ToolExecutionOutcome:
-        known_failure = (
-            policy.side_effect_classification == "read"
-            or isinstance(exc, (GroupRuntimeToolError, ToolExecutionError))
+        known_failure = policy.side_effect_classification == "read" or isinstance(
+            exc, (GroupRuntimeToolError, ToolExecutionError)
         )
         return await self._settle_outcome(
             tenant_id=tenant_id,
@@ -984,8 +943,7 @@ class RuntimeToolStepService:
             )
         error_code = normalized.error_code or "tool_outcome_unknown"
         error_message = normalized.result_summary or (
-            "Tool outcome is unknown; confirm the external result before starting "
-            "a new Group Run."
+            "Tool outcome is unknown; confirm the external result before starting a new Group Run."
         )
         return ToolStepResult(
             messages=(
@@ -1053,22 +1011,14 @@ class RuntimeToolStepService:
             agent = await self._agent(context)
             assistant_message_id = _assistant_message_id(state, tool_calls)
             assistant_message = next(
-                (
-                    message
-                    for message in runtime_messages_as_json(state)
-                    if message.get("id") == assistant_message_id
-                ),
+                (message for message in runtime_messages_as_json(state) if message.get("id") == assistant_message_id),
                 {},
             )
             reasoning_content = (
-                str(assistant_message.get("reasoning_content") or "")
-                if isinstance(assistant_message, Mapping)
-                else ""
+                str(assistant_message.get("reasoning_content") or "") if isinstance(assistant_message, Mapping) else ""
             )
             assistant_content = (
-                str(assistant_message.get("content") or "")
-                if isinstance(assistant_message, Mapping)
-                else ""
+                str(assistant_message.get("content") or "") if isinstance(assistant_message, Mapping) else ""
             )
             allowed_names = _allowed_tool_names(
                 with_group_runtime_tools(
@@ -1171,19 +1121,9 @@ class RuntimeToolStepService:
                             )
                         )
                         continue
-                    if (
-                        reservation.error_code
-                        == "safe_read_result_reconciliation_required"
-                    ):
-                        reconciliation = (
-                            await self._tool_result_reconciler.reconcile_candidate(
-                                reservation.execution
-                            )
-                        )
-                        if (
-                            reconciliation.status == "reconciled"
-                            and reconciliation.outcome is not None
-                        ):
+                    if reservation.error_code == "safe_read_result_reconciliation_required":
+                        reconciliation = await self._tool_result_reconciler.reconcile_candidate(reservation.execution)
+                        if reconciliation.status == "reconciled" and reconciliation.outcome is not None:
                             messages.append(
                                 _result_message(
                                     run_id=run_id,
@@ -1197,16 +1137,11 @@ class RuntimeToolStepService:
                             try:
                                 async with self._session_factory() as db:
                                     async with db.begin():
-                                        execution = (
-                                            await mark_expired_safe_read_result_unavailable(
-                                                db,
-                                                tenant_id=tenant_id,
-                                                execution_id=reservation.execution.id,
-                                                probe_error_code=(
-                                                    reconciliation.error_code
-                                                    or "tool_result_unavailable"
-                                                ),
-                                            )
+                                        execution = await mark_expired_safe_read_result_unavailable(
+                                            db,
+                                            tenant_id=tenant_id,
+                                            execution_id=reservation.execution.id,
+                                            probe_error_code=(reconciliation.error_code or "tool_result_unavailable"),
                                         )
                             except Exception as exc:
                                 raise ToolExecutionReconciliationPending(
@@ -1242,10 +1177,7 @@ class RuntimeToolStepService:
                             "A safe read attempt still owns the active receipt",
                             defer_without_attempt=True,
                         )
-                    if (
-                        tool_name in GROUP_WORKSPACE_MUTATION_TOOL_NAMES
-                        and reservation.execution.status == "started"
-                    ):
+                    if tool_name in GROUP_WORKSPACE_MUTATION_TOOL_NAMES and reservation.execution.status == "started":
                         takeover = await self._takeover_for_reconciliation(
                             tenant_id=tenant_id,
                             reservation=reservation,
@@ -1284,16 +1216,14 @@ class RuntimeToolStepService:
                                 code="group_workspace_fence_unavailable",
                                 defer_without_attempt=True,
                             )
-                        outcome = (
-                            await self._group_tool_service.reconcile_workspace_operation(
-                                state,
-                                context,
-                                agent,
-                                tool_name,
-                                arguments,
-                                operation_id=reservation.execution.id,
-                                lease_owner=lease_owner,
-                            )
+                        outcome = await self._group_tool_service.reconcile_workspace_operation(
+                            state,
+                            context,
+                            agent,
+                            tool_name,
+                            arguments,
+                            operation_id=reservation.execution.id,
+                            lease_owner=lease_owner,
                         )
                         outcome = await self._settle_outcome(
                             tenant_id=tenant_id,
@@ -1321,10 +1251,7 @@ class RuntimeToolStepService:
                             )
                         )
                         continue
-                    if (
-                        _is_group_agent_run(state)
-                        and reservation.requires_confirmation
-                    ):
+                    if _is_group_agent_run(state) and reservation.requires_confirmation:
                         return self._group_unknown_failure(
                             run_id=run_id,
                             call_id=call_id,
@@ -1346,10 +1273,7 @@ class RuntimeToolStepService:
                     )
 
                 canonical_cross_space_action = builtin_cross_space_action(tool_name)
-                if (
-                    _is_group_agent_run(state)
-                    and canonical_cross_space_action is not None
-                ):
+                if _is_group_agent_run(state) and canonical_cross_space_action is not None:
                     outcome = await self._settle_outcome(
                         tenant_id=tenant_id,
                         reservation=reservation,
@@ -1362,9 +1286,7 @@ class RuntimeToolStepService:
                                 "human-approved grant; no provider action was executed."
                             ),
                             result_ref=None,
-                            error_code=(
-                                "group_cross_space_confirmation_required"
-                            ),
+                            error_code=("group_cross_space_confirmation_required"),
                             retryable=False,
                             metadata={
                                 "canonical_action": canonical_cross_space_action,
@@ -1383,11 +1305,7 @@ class RuntimeToolStepService:
 
                 if tool_name == "send_message_to_agent" and self._a2a_service:
                     try:
-                        actor_user_id = (
-                            uuid.UUID(context.actor_user_id)
-                            if context.actor_user_id
-                            else None
-                        )
+                        actor_user_id = uuid.UUID(context.actor_user_id) if context.actor_user_id else None
                         a2a_result = await self._a2a_service.execute(
                             tenant_id=tenant_id,
                             source_run_id=run_id,
@@ -1429,10 +1347,7 @@ class RuntimeToolStepService:
                             )
                     else:
                         if a2a_result is not None:
-                            if (
-                                _is_group_agent_run(state)
-                                and a2a_result.outcome.status == "unknown"
-                            ):
+                            if _is_group_agent_run(state) and a2a_result.outcome.status == "unknown":
                                 return self._group_unknown_failure(
                                     run_id=run_id,
                                     call_id=call_id,
@@ -1514,9 +1429,48 @@ class RuntimeToolStepService:
                     else:
                         agentbay_run_token = None
                         if tool_name.startswith("agentbay_"):
-                            agentbay_run_token = agentbay_run_scope_id.set(
-                                context.run_id
-                            )
+                            agentbay_run_token = agentbay_run_scope_id.set(context.run_id)
+                        on_output_callback = None
+                        if tool_name in _STREAM_OUTPUT_TOOL_NAMES:
+                            _output_buf: list[str] = []
+                            _output_seq = [0]
+                            _last_flush = [time.monotonic()]
+
+                            async def _tool_on_output(text: str, stream: str = "stdout") -> None:
+                                _output_buf.append(text)
+                                now = time.monotonic()
+                                if len(_output_buf) >= 10 or now - _last_flush[0] >= 0.5:
+                                    _output_seq[0] += 1
+                                    async with self._session_factory() as db:
+                                        await db.execute(
+                                            insert(AgentRunEvent)
+                                            .values(
+                                                id=uuid.uuid5(
+                                                    run_id, f"activity:tool:{call_id}:output:{_output_seq[0]}"
+                                                ),
+                                                tenant_id=tenant_id,
+                                                run_id=run_id,
+                                                event_type="status_changed",
+                                                summary=f"Runtime tool {tool_name} output",
+                                                payload={
+                                                    "status": "running",
+                                                    "activity_type": "tool_output",
+                                                    "call_id": call_id,
+                                                    "name": tool_name,
+                                                    "content": "".join(_output_buf),
+                                                    "stream": stream,
+                                                    "output_seq": _output_seq[0],
+                                                },
+                                                idempotency_key=f"activity:tool:{call_id}:output:{_output_seq[0]}",
+                                            )
+                                            .on_conflict_do_nothing()
+                                        )
+                                        await db.commit()
+                                    _output_buf.clear()
+                                    _last_flush[0] = now
+
+                            on_output_callback = _tool_on_output
+
                         try:
                             raw_result = await self._tool_executor(
                                 tool_name,
@@ -1524,6 +1478,7 @@ class RuntimeToolStepService:
                                 agent.id,
                                 context.actor_user_id and uuid.UUID(context.actor_user_id) or agent.creator_id,
                                 context.session_id or "",
+                                on_output=on_output_callback,
                             )
                         finally:
                             if agentbay_run_token is not None:
@@ -1564,14 +1519,9 @@ class RuntimeToolStepService:
                         proposed_outcome = raw_result
                     else:
                         proposed_outcome = ToolExecutionOutcome(
-                            status=(
-                                "failed"
-                                if policy.side_effect_classification == "read"
-                                else "unknown"
-                            ),
+                            status=("failed" if policy.side_effect_classification == "read" else "unknown"),
                             result_summary=(
-                                "Tool handler returned an untyped result; its "
-                                "business outcome was not accepted."
+                                "Tool handler returned an untyped result; its business outcome was not accepted."
                             ),
                             result_ref=None,
                             error_code="untyped_tool_outcome",
