@@ -9,6 +9,7 @@ import uuid
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from app.core.logging_config import set_trace_id
 from app.services.agent_runtime.checkpoint_side_effects import (
     RuntimeCheckpointSideEffectError,
     RuntimeCheckpointSideEffects,
@@ -394,6 +395,85 @@ async def test_terminal_realtime_publish_runs_after_delivery_commit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rejected_start_projects_terminal_event_and_failure_delivery() -> None:
+    run, command, _ = _records(command_type="start")
+    db = _Session("pending")
+    receipt = DeliveryReceipt(
+        tenant_id=run.tenant_id,
+        run_id=run.run_id,
+        idempotency_key=f"run:{run.run_id}:terminal:failed",
+        status="delivered",
+        delivery_kind="terminal",
+        checkpoint_id=f"command-rejected:{command.id}",
+        message_id=uuid.uuid4(),
+        requested_session_id=uuid.uuid4(),
+        actual_session_id=uuid.uuid4(),
+        fallback_reason=None,
+        error_code=None,
+    )
+    handler = RuntimeCheckpointSideEffects(
+        session_factory=_SessionFactory(),  # type: ignore[arg-type]
+    )
+    set_trace_id("rejected-worker-trace")
+
+    with patch(
+        "app.services.agent_runtime.checkpoint_side_effects.deliver_runtime_message",
+        new=AsyncMock(return_value=receipt),
+    ) as deliver:
+        await handler.handle_rejection(
+            db=db,  # type: ignore[arg-type]
+            run=run,
+            command=command,
+            error_code="reconciliation_required",
+            error_message="Runtime could not reconcile the command after repeated attempts.",
+        )
+
+    event = db.statements[0].compile(dialect=postgresql.dialect()).params
+    assert event["event_type"] == "run_failed"
+    assert event["payload"] == {
+        "status": "failed",
+        "error_code": "reconciliation_required",
+        "error_message": (
+            "Runtime could not reconcile the command after repeated attempts."
+        ),
+        "stage": "execution",
+        "command_id": str(command.id),
+        "trace_id": "rejected-worker-trace",
+    }
+    request = deliver.await_args.args[1]
+    assert request.lifecycle_status == "failed"
+    assert request.failure_code == "reconciliation_required"
+    assert request.failure_message == event["payload"]["error_message"]
+    assert request.checkpoint_id == f"command-rejected:{command.id}"
+
+
+@pytest.mark.asyncio
+async def test_rejected_non_chat_start_does_not_project_chat_terminal_products() -> None:
+    run, command, _ = _records(command_type="start")
+    run = replace(run, source_type="task")
+    db = _Session("pending")
+    handler = RuntimeCheckpointSideEffects(
+        session_factory=_SessionFactory(),  # type: ignore[arg-type]
+    )
+
+    with patch(
+        "app.services.agent_runtime.checkpoint_side_effects.deliver_runtime_message",
+        new=AsyncMock(),
+    ) as deliver:
+        result = await handler.handle_rejection(
+            db=db,  # type: ignore[arg-type]
+            run=run,
+            command=command,
+            error_code="reconciliation_required",
+            error_message="Runtime could not reconcile the command after repeated attempts.",
+        )
+
+    assert result is None
+    assert db.statements == []
+    deliver.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cancel_uses_control_disposition_without_mutating_preserved_checkpoint() -> None:
     run, command, checkpoint = _records(
         status="waiting_user",
@@ -471,6 +551,32 @@ def test_failed_delivery_preserves_backend_error_fields() -> None:
     assert delivery is not None
     assert delivery.failure_code == "model_call_failed"
     assert delivery.failure_message == "HTTP 429 Too Many Requests"
+
+
+@pytest.mark.asyncio
+async def test_failed_lifecycle_event_persists_the_worker_trace() -> None:
+    run, command, checkpoint = _records(
+        status="failed",
+        lifecycle={
+            "reason": "model_call_failed",
+            "error": {
+                "code": "model_call_failed",
+                "message": "HTTP 429 Too Many Requests",
+            },
+        },
+    )
+    sessions = _SessionFactory("not_required")
+    set_trace_id("failure-worker-trace")
+
+    await RuntimeCheckpointSideEffects(
+        session_factory=sessions,  # type: ignore[arg-type]
+    ).handle(run=run, command=command, checkpoint=checkpoint)
+
+    event = sessions.sessions[0].statements[0].compile(
+        dialect=postgresql.dialect()
+    ).params
+    assert event["event_type"] == "run_failed"
+    assert event["payload"]["trace_id"] == "failure-worker-trace"
 
 
 def test_completed_planning_root_has_no_public_delivery() -> None:

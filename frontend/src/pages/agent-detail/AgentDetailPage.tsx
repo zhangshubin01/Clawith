@@ -62,16 +62,22 @@ import AgentDirectory from './AgentDirectory';
 import { useAgentDetailRoute } from './hooks/useAgentDetailRoute';
 import {
     failClosedSessionActiveRun,
+    mergeTerminalAssistantMessage,
     runtimeCompletionNeedsMessageRefresh,
     sessionActiveRunFromResponse,
     sessionRuntimeStateResponseIsValid,
-    terminalAssistantMessageAlreadyPresent,
     type SessionActiveRun,
     type ToolReconciliation,
     waitingSessionActiveRunHint,
 } from './sessionRuntimeState';
 import { onboardingKickoffKey, shouldKickoffOnboarding } from './onboardingKickoff';
 import { fetchAuth } from './utils/fetchAuth';
+import {
+    formatRuntimeErrorDiagnostics,
+    normalizeRuntimeError,
+    runtimeErrorDisablesReconnect,
+    runtimeErrorMarksAgentExpired,
+} from '../../services/runtimeError';
 
 const WORKSPACE_TOOLS = new Set([
     'write_file',
@@ -2417,6 +2423,9 @@ export default function AgentDetailPage() {
                 ...(message.thinking && { thinking: message.thinking }),
                 ...(message.created_at && { timestamp: message.created_at }),
                 ...(message.id && { id: message.id }),
+                ...(message.runtime_error && {
+                    runtimeError: normalizeRuntimeError({ error: message.runtime_error }),
+                }),
             }));
             setChatMessages(parsed);
             setChatOldestTimestamp(
@@ -2739,6 +2748,9 @@ export default function AgentDetailPage() {
                 ...(m.thinking && { thinking: m.thinking }),
                 ...(m.created_at && { timestamp: m.created_at }),
                 ...(m.id && { id: m.id }),
+                ...(m.runtime_error && {
+                    runtimeError: normalizeRuntimeError({ error: m.runtime_error }),
+                }),
             }));
 
             // Set the oldest message timestamp for cursor-based pagination
@@ -2856,7 +2868,7 @@ export default function AgentDetailPage() {
         } catch (e: any) { toast.error(t('common.error.saveFailed', '保存失败'), { details: String(e?.message || e) }); }
         setExpirySaving(false);
     };
-    interface ChatMsg { id?: string; role: 'user' | 'assistant' | 'tool_call'; content: string; fileName?: string; toolName?: string; toolCallId?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; toolThinking?: string; thinking?: string; imageUrl?: string; timestamp?: string; }
+    interface ChatMsg { id?: string; role: 'user' | 'assistant' | 'tool_call'; content: string; fileName?: string; toolName?: string; toolCallId?: string; toolArgs?: any; toolStatus?: 'running' | 'done'; toolResult?: string; toolThinking?: string; thinking?: string; imageUrl?: string; timestamp?: string; runtimeError?: ReturnType<typeof normalizeRuntimeError>; }
     const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
     const getToolTargetKey = (args: any): string => {
         if (!args) return '';
@@ -3588,10 +3600,14 @@ export default function AgentDetailPage() {
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
                     const thinking = (last && last.role === 'assistant' && (last as any)._streaming) ? last.thinking : undefined;
+                    const runtimeError = d.error || d.delivery_error || d.runtime_status === 'failed'
+                        ? normalizeRuntimeError(d)
+                        : null;
                     const terminalMessage = parseChatMsg({
                         ...(d.message_id && { id: String(d.message_id) }),
                         role: 'assistant',
                         content: d.content,
+                        ...(runtimeError && { runtimeError }),
                         thinking,
                         timestamp: new Date().toISOString(),
                     });
@@ -3601,8 +3617,7 @@ export default function AgentDetailPage() {
                     // that ordering, refreshSessionMessages already installed
                     // the canonical row, so appending the packet would render
                     // the same answer twice until the next page reload.
-                    if (terminalAssistantMessageAlreadyPresent(prev, d.message_id, d.content)) return prev;
-                    return [...prev, terminalMessage];
+                    return mergeTerminalAssistantMessage(prev, terminalMessage);
                 });
                 const currentSessionId = activeSessionIdRef.current ? String(activeSessionIdRef.current) : '';
                 if (currentSessionId) clearUnreadForSession(currentSessionId);
@@ -3612,22 +3627,17 @@ export default function AgentDetailPage() {
                 }
                 queryClient.invalidateQueries({ queryKey: ['agents'] });
             } else if (d.type === 'error' || d.type === 'quota_exceeded') {
-                const msg = d.content || d.detail || d.message || 'Request denied';
-                const isNoModelError = msg.includes('no LLM model') || msg.includes('No model');
-                if (isNoModelError) {
+                const runtimeError = normalizeRuntimeError(d);
+                if (runtimeErrorDisablesReconnect(runtimeError)) {
                     reconnectDisabledRef.current[key] = true;
-                    return;
                 }
                 setChatMessages(prev => {
                     const last = prev[prev.length - 1];
-                    const warningText = `Warning: ${msg}`;
+                    const warningText = `Warning: ${runtimeError.message}`;
                     if (last && last.role === 'assistant' && last.content === warningText) return prev;
-                    return [...prev, parseChatMsg({ role: 'assistant', content: warningText })];
+                    return [...prev, parseChatMsg({ role: 'assistant', content: warningText, runtimeError })];
                 });
-                if (msg.includes('expired') || msg.includes('Setup failed')) {
-                    reconnectDisabledRef.current[key] = true;
-                    if (msg.includes('expired')) setAgentExpired(true);
-                }
+                if (runtimeErrorMarksAgentExpired(runtimeError)) setAgentExpired(true);
             } else if (d.type === 'trigger_notification') {
                 const targetSessionId = d.session_id ? String(d.session_id) : '';
                 const currentSessionId = activeSessionIdRef.current ? String(activeSessionIdRef.current) : '';
@@ -3963,6 +3973,9 @@ export default function AgentDetailPage() {
                 ...(m.thinking && { thinking: m.thinking }),
                 ...(m.created_at && { timestamp: m.created_at }),
                 ...(m.id && { id: m.id }),
+                ...(m.runtime_error && {
+                    runtimeError: normalizeRuntimeError({ error: m.runtime_error }),
+                }),
             }));
             // Save current scroll position
             const el = historyContainerRef.current;
@@ -4009,6 +4022,9 @@ export default function AgentDetailPage() {
                 ...(m.thinking && { thinking: m.thinking }),
                 ...(m.created_at && { timestamp: m.created_at }),
                 ...(m.id && { id: m.id }),
+                ...(m.runtime_error && {
+                    runtimeError: normalizeRuntimeError({ error: m.runtime_error }),
+                }),
             }));
             // Save current scroll position
             const el = chatContainerRef.current;
@@ -4086,6 +4102,9 @@ export default function AgentDetailPage() {
         const resolvedSenderLabel = msg.sender_name || senderLabel;
         const resolvedAvatarText = avatarText || (resolvedSenderLabel ? resolvedSenderLabel[0] : (isLeft ? 'A' : 'U'));
         const showSenderLabel = !!resolvedSenderLabel && (forceSenderLabel || !!msg.sender_name);
+        const runtimeDiagnostics = msg.runtimeError
+            ? formatRuntimeErrorDiagnostics(msg.runtimeError)
+            : '';
 
         // Parse [image_data:data:image/...;base64,...] markers from user message content.
         // The backend persists these markers in the DB to preserve multimodal context
@@ -4176,6 +4195,11 @@ export default function AgentDetailPage() {
                                 ) : (
                                     <>
                                         <MarkdownRenderer content={displayContent} />
+                                        {runtimeDiagnostics && (
+                                            <div style={{ marginTop: '8px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                                                {runtimeDiagnostics}
+                                            </div>
+                                        )}
                                         {expCiteIds.length > 0 && <ExperienceCitations ids={expCiteIds} />}
                                     </>
                                 )

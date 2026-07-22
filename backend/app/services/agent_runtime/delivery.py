@@ -10,6 +10,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging_config import get_trace_id
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
 from app.models.agent_run_event import AgentRunEvent
@@ -746,6 +747,11 @@ def _add_event(
         if request.group_handoff_intent is not None
         else None
     )
+    if request.lifecycle_status == "failed":
+        payload["failure_code"] = request.failure_code
+        payload["failure_message"] = request.failure_message
+    if trace_id := get_trace_id():
+        payload["trace_id"] = trace_id
     db.add(
         AgentRunEvent(
             id=_event_id(run.id, request.idempotency_key),

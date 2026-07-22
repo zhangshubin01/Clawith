@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,6 +15,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_access_token, get_current_user
+from app.core.error_contract import build_error_object, get_request_trace_id
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.agent_run import AgentRun
@@ -149,12 +150,24 @@ class GroupMessageOut(BaseModel):
     cursor: str
 
 
+class GroupErrorOut(BaseModel):
+    code: str
+    message: str
+    trace_id: str
+    run_id: uuid.UUID | None = None
+    agent_id: uuid.UUID | None = None
+    stage: Literal["planning", "execution", "delivery"] | None = None
+    details: Any | None = None
+    retryable: bool | None = None
+
+
 class GroupMessageIntakeOut(BaseModel):
     message: GroupMessageOut
     dispatch_kind: str
     run_ids: list[uuid.UUID]
     created: bool
     error_code: str | None = None
+    error: GroupErrorOut | None = None
 
 
 class GroupRunStateOut(BaseModel):
@@ -978,6 +991,7 @@ async def create_group_message(
     group_id: uuid.UUID,
     session_id: uuid.UUID,
     body: CreateGroupMessageIn,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1009,12 +1023,23 @@ async def create_group_message(
             session_id=session_id,
             message=realtime_message.model_dump(mode="json"),
         )
+    error = None
+    if intake.error_code is not None:
+        error = GroupErrorOut(
+            **build_error_object(
+                code=intake.error_code,
+                message=intake.error_message or "多 Agent 任务规划暂时不可用",
+                trace_id=get_request_trace_id(request),
+            ),
+            stage="planning",
+        )
     return GroupMessageIntakeOut(
         message=messages[0],
         dispatch_kind=intake.dispatch_kind,
         run_ids=[handle.run_id for handle in intake.run_handles],
         created=intake.created,
         error_code=intake.error_code,
+        error=error,
     )
 
 
