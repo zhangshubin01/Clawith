@@ -169,13 +169,7 @@ class AcpSessionManager:
             if result and sess:
                 from app.services.llm.history_hydrate import hydrate_history_tool_results
 
-                result = await hydrate_history_tool_results(
-                    result,
-                    session_id=session_id,
-                    agent_id=sess.agent_id,
-                    ctx_path="acp",
-                    ctx_window=ctx_window,
-                )
+                result = await hydrate_history_tool_results(result)
             self._history_cache[session_id] = (time.monotonic(), result)
             logger.info(
                 f"[ACP] load_history_for_llm: session={session_id} "
