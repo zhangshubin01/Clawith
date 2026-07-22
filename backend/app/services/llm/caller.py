@@ -29,6 +29,7 @@ from app.services.token_tracker import (
     extract_token_usage,
     estimate_token_usage_from_chars,
 )
+from app.services.llm.multimodal_content import estimate_multimodal_tokens
 
 from .client import LLMError
 from .failover import classify_error, FailoverErrorType
@@ -167,9 +168,24 @@ def _usage_from_response_or_estimate(response, api_messages: list[LLMMessage]) -
     usage = extract_token_usage(response.usage)
     if usage:
         return usage
-    round_chars = sum(len(m.content or '') if isinstance(m.content, str) else 0 for m in api_messages)
-    round_chars += len(response.content or '')
-    return estimate_token_usage_from_chars(round_chars)
+    input_tokens = estimate_multimodal_tokens(
+        [
+            {
+                "role": message.role,
+                "content": message.content,
+            }
+            for message in api_messages
+        ],
+        chars_per_token=3,
+    )
+    output_usage = estimate_token_usage_from_chars(len(response.content or ""))
+    total_tokens = input_tokens + output_usage.total_tokens
+    return TokenUsage(
+        total_tokens=total_tokens,
+        input_tokens=input_tokens,
+        output_tokens=output_usage.total_tokens,
+        estimated_tokens=total_tokens,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -223,52 +239,24 @@ async def _get_user_name(user_id) -> str | None:
 def _convert_messages_for_vision(
     api_messages: list, supports_vision: bool
 ) -> list:
-    """Convert image markers to vision format if supported, or strip them."""
-    import re as _re_v
+    """Normalize image content for vision models or strip it for text models."""
     import copy
 
-    # Deep copy to avoid modifying the original list in place
+    from app.services.llm.multimodal_content import (
+        parse_multimodal_content,
+        text_only_multimodal_content,
+    )
+
     new_messages = copy.deepcopy(api_messages)
-
-    if supports_vision:
-        # Vision format: convert image markers in strings to OpenAI Vision API list format
-        for i, msg in enumerate(new_messages):
-            if msg.role != "user" or not msg.content or not isinstance(msg.content, str):
-                continue
-            
-            content_str = msg.content
-            pattern = r'\[image_data:(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)\]'
-            images = _re_v.findall(pattern, content_str)
-            
-            if not images:
-                continue
-
-            text = _re_v.sub(pattern, '', content_str).strip()
-            parts = [{"type": "image_url", "image_url": {"url": img}} for img in images]
-            if text:
-                # Per OpenAI spec, text part should come after image parts
-                parts.append({"type": "text", "text": text})
-            
-            new_messages[i] = type(msg)(role=msg.role, content=parts, tool_calls=msg.tool_calls, tool_call_id=msg.tool_call_id)
-    else:
-        # Non-vision format: ensure content is a string for all roles, stripping image data.
-        _img_marker_pattern = r'\[image_data:data:image/[^;]+;base64,[A-Za-z0-9+/=]+\]'
-        for i, msg in enumerate(new_messages):
-            
-            if isinstance(msg.content, list):
-                # It's a list, join all text parts. This handles user messages
-                # with vision content and tool messages from vision_inject.
-                text_parts = [part.get("text", "") for part in msg.content if part.get("type") == "text"]
-                content_str = "\n".join(text_parts).strip()
-                new_messages[i] = type(msg)(role=msg.role, content=content_str, tool_calls=msg.tool_calls, tool_call_id=msg.tool_call_id)
-
-            elif isinstance(msg.content, str) and "[image_data:" in msg.content:
-                # It's a string with image markers, strip them
-                _n_imgs = len(_re_v.findall(_img_marker_pattern, msg.content))
-                cleaned = _re_v.sub(_img_marker_pattern, '', msg.content).strip()
-                if _n_imgs > 0:
-                    cleaned += f"\n[用户发送了 {_n_imgs} 张图片，但当前模型不支持视觉，无法查看图片内容]"
-                new_messages[i] = type(msg)(role=msg.role, content=cleaned, tool_calls=msg.tool_calls, tool_call_id=msg.tool_call_id)
+    for message in new_messages:
+        content = message.content
+        if not isinstance(content, (str, list)):
+            continue
+        message.content = (
+            parse_multimodal_content(content)
+            if supports_vision
+            else text_only_multimodal_content(content)
+        )
 
     return new_messages
 

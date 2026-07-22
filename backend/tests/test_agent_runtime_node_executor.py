@@ -25,6 +25,10 @@ from app.services.agent_runtime.node_executor import (
     ToolStepResult,
     VerificationResult,
 )
+from app.services.agent_runtime.run_compactor import (
+    RunCompactorError,
+    TransientRunCompactorError,
+)
 from app.services.agent_runtime.state import (
     JsonObject,
     JsonValue,
@@ -204,6 +208,21 @@ class RunCompactor:
         return self.result
 
 
+class FailingRunCompactor:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+
+    async def compact_if_needed(
+        self,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+    ) -> RunCompactResult:
+        del state, context
+        self.calls += 1
+        raise self.error
+
+
 class Verifier:
     def __init__(self, *results: VerificationResult) -> None:
         self.results = deque(results)
@@ -319,7 +338,7 @@ def _executor(
     *,
     cancel: CancelSource | None = None,
     tools: ToolService | None = None,
-    run_compactor: RunCompactor | None = None,
+    run_compactor: RunCompactor | FailingRunCompactor | None = None,
     verifier: Verifier | None = None,
     max_verification_repairs: int = 2,
 ) -> DeterministicRuntimeNodeExecutor:
@@ -402,6 +421,86 @@ async def test_compact_is_rejected_outside_the_pre_model_running_boundary() -> N
 
     assert raised.value.code == "invalid_compact_status"
     assert compactor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_deterministic_compact_error_commits_a_failed_terminal_lifecycle() -> None:
+    run_id = uuid.uuid4()
+    executor = _executor(
+        ModelService(),
+        run_compactor=FailingRunCompactor(
+            RunCompactorError(
+                "input_exceeds_model_context",
+                "The exact current input exceeds the model context window",
+            )
+        ),
+    )
+    state = _state(run_id)
+    state["lifecycle"]["next_route"] = "compact"
+
+    update = await executor.execute(
+        "compact",
+        state,
+        _context(run_id, executor, "command-compact"),
+    )
+
+    assert update["lifecycle"]["status"] == "failed"
+    assert update["lifecycle"]["next_route"] == "terminal"
+    assert update["lifecycle"]["reason"] == "input_exceeds_model_context"
+    assert update["lifecycle"]["error"]["code"] == "input_exceeds_model_context"
+
+
+@pytest.mark.asyncio
+async def test_graph_commits_deterministic_compact_failure_without_retry() -> None:
+    run_id = uuid.uuid4()
+    compactor = FailingRunCompactor(
+        RunCompactorError(
+            "input_exceeds_model_context",
+            "The exact current input exceeds the model context window",
+        )
+    )
+    executor = _executor(ModelService(), run_compactor=compactor)
+    state = _state(run_id)
+    state["lifecycle"]["next_route"] = "compact"
+    graph = build_agent_runtime_graph(
+        checkpointer=InMemorySaver(),
+        settings=_settings(),
+    )
+
+    result = await graph.compiled.ainvoke(
+        state,
+        runtime_thread_config(run_id),
+        context=_context(run_id, executor, "command-compact"),
+    )
+
+    assert result["lifecycle"]["status"] == "failed"
+    assert result["lifecycle"]["next_route"] == "terminal"
+    assert result["lifecycle"]["error"]["code"] == "input_exceeds_model_context"
+    assert compactor.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_compact_error_still_escapes_for_langgraph_retry() -> None:
+    run_id = uuid.uuid4()
+    error = TransientRunCompactorError(
+        "thread_compact_provider_transient",
+        "Compact provider was temporarily unavailable",
+    )
+    executor = _executor(
+        ModelService(),
+        run_compactor=FailingRunCompactor(error),
+    )
+    state = _state(run_id)
+    state["lifecycle"]["next_route"] = "compact"
+
+    with pytest.raises(TransientRunCompactorError) as raised:
+        await executor.execute(
+            "compact",
+            state,
+            _context(run_id, executor, "command-compact"),
+        )
+
+    assert raised.value is error
 
 
 def _context(

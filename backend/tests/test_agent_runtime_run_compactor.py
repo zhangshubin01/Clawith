@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 
@@ -25,6 +26,12 @@ from app.services.agent_runtime.state import (
 from app.services.llm.single_step import LLMCompletionStep
 from app.services.llm.finish import FINISH_PROTOCOL_REMINDER
 from app.services.token_tracker import TokenUsage
+
+
+_TINY_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
+    "x8AAusB9Wl2ZQAAAABJRU5ErkJggg=="
+)
 
 
 def _settings() -> Settings:
@@ -275,6 +282,41 @@ async def test_at_eighty_percent_compacts_prefix_and_keeps_current_input_exact()
     assert result.recent_messages[-1]["content"] == "EXACT CURRENT INPUT"
     assert result.recent_messages[-1]["runtime_input"] == "current"
     assert result.covered_through_message_id != "current"
+
+
+@pytest.mark.asyncio
+async def test_large_image_base64_is_excluded_from_recent_budget_and_compact_prompt() -> None:
+    padded_png = base64.b64encode(
+        base64.b64decode(_TINY_PNG_BASE64) + b"x" * (64 * 1024)
+    ).decode("ascii")
+    marker = f"[image_data:data:image/png;base64,{padded_png}] inspect"
+    messages = [
+        _normal("old", "old completed history " * 300),
+        {
+            **_normal("current", marker),
+            "runtime_input": "current",
+        },
+    ]
+    state, context, tenant_id = _state(messages)
+    payloads: list[dict] = []
+
+    async def complete(_model, prompt, **_kwargs):
+        payloads.append(json.loads(prompt[1].content))
+        return _step()
+
+    result = await _service(
+        model=_model(tenant_id),
+        completion=complete,
+        effective_budget=1_000,
+        current_tokens=900,
+    ).compact_if_needed(state, context)
+
+    assert result.compacted is True
+    assert result.recent_messages is not None
+    assert result.recent_messages[-1]["content"] == marker
+    serialized = json.dumps(payloads, ensure_ascii=False)
+    assert "base64," not in serialized
+    assert "image omitted from compact prompt" in serialized
 
 
 @pytest.mark.asyncio

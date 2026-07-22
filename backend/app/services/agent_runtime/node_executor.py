@@ -22,6 +22,7 @@ from app.services.agent_runtime.state import (
     runtime_messages_as_json,
 )
 from app.services.llm.finish import FINISH_PROTOCOL_REMINDER
+from app.services.llm.multimodal_content import parse_multimodal_content
 
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -377,13 +378,13 @@ def _message_for_channel(message: JsonObject) -> JsonObject:
     return cast(JsonObject, normalized)
 
 
-def _resume_message_content(resume_value: Mapping[str, JsonValue]) -> str:
+def _resume_message_content(resume_value: Mapping[str, JsonValue]) -> str | list:
     resume_type = resume_value.get("resume_type")
     payload = resume_value.get("payload")
     if resume_type == "user_input" and isinstance(payload, Mapping):
         content = payload.get("content")
-        if isinstance(content, str):
-            return content
+        if isinstance(content, (str, list)):
+            return parse_multimodal_content(content)
     return json.dumps(
         resume_value,
         ensure_ascii=False,
@@ -513,10 +514,25 @@ class DeterministicRuntimeNodeExecutor:
                 "invalid_compact_status",
                 "Thread Compact may run only immediately before a business model call",
             )
-        result = await self._run_compactor.compact_if_needed(
-            state,
-            context,
-        )
+        try:
+            result = await self._run_compactor.compact_if_needed(
+                state,
+                context,
+            )
+        except Exception as exc:
+            if not getattr(exc, "is_deterministic_compact_error", False):
+                raise
+            code = getattr(exc, "code", "thread_compact_failed")
+            safe_code = code if isinstance(code, str) and code else "thread_compact_failed"
+            lifecycle.update(
+                {
+                    "status": "failed",
+                    "next_route": "terminal",
+                    "reason": safe_code,
+                    "error": _error(safe_code, str(exc)),
+                }
+            )
+            return {"lifecycle": cast(RuntimeLifecycle, lifecycle)}
         update: RuntimeStateUpdate = {}
         if result.compacted:
             if (
