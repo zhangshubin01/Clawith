@@ -9,6 +9,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loguru import logger
+
+from app.config import get_settings
+
+settings = get_settings()
+
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent, AgentPermission, AgentTemplate
@@ -162,11 +168,16 @@ async def _create_personal_assistant(
     from app.api.relationships import _regenerate_relationships_file
     await _regenerate_relationships_file(db, agent.id)
 
-    try:
-        await agent_manager.start_container(db, agent)
-    except Exception:
-        agent.status = "error"
-        raise
+    # V2 Runtime 模式下 Agent 由 worker_service 管理，不需要独立 Docker 容器
+    if settings.AGENT_RUNTIME_V2_ENABLED:
+        agent.status = "idle"
+        logger.info(f"[onboarding] Agent {agent.name} set to idle (V2 Runtime)")
+    else:
+        try:
+            await agent_manager.start_container(db, agent)
+        except Exception:
+            agent.status = "error"
+            raise
 
     await db.flush()
     return agent

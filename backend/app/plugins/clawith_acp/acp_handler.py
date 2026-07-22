@@ -469,6 +469,7 @@ class AcpHandler:
         session_id = await self.session_mgr.create(
             user_id=self.user_id,
             agent_id=self.agent_id,
+            tenant_id=str(agent.tenant_id),
             cwd=cwd,
         )
         self.session_id = session_id

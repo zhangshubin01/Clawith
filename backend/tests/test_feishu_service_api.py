@@ -34,6 +34,7 @@ class _FakeAsyncClient:
 
 @pytest.mark.asyncio
 async def test_send_message_raises_when_business_code_nonzero(monkeypatch):
+    feishu_service_module._shared_client = None  # reset shared client
     monkeypatch.setattr(
         feishu_service_module.httpx,
         "AsyncClient",
@@ -53,6 +54,7 @@ async def test_send_message_raises_when_business_code_nonzero(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_patch_message_raises_when_business_code_nonzero(monkeypatch):
+    feishu_service_module._shared_client = None  # reset shared client
     monkeypatch.setattr(
         feishu_service_module.httpx,
         "AsyncClient",

@@ -557,6 +557,7 @@ class PaginatedResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str
+    docker: dict | None = None
 
 
 # ─── Gateway (OpenClaw) ─────────────────────────────────

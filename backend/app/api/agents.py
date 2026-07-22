@@ -394,7 +394,23 @@ async def _background_agent_setup(
                     f"[create_agent] background MCP pre-install for '{server_id}' on agent {agent_id} raised: {e}"
                 )
 
-    # 5. Start container and Hook OKR Agent
+    # 5. Start container (V1 only) and Hook OKR Agent
+    # V2 Runtime 模式下 Agent 由 worker_service 管理，不需要独立 Docker 容器
+    if settings.AGENT_RUNTIME_V2_ENABLED:
+        try:
+            async with async_session() as db:
+                agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
+                agent = agent_result.scalar_one_or_none()
+                if agent:
+                    agent.status = "idle"
+                    if agent.tenant_id:
+                        await hook_new_agent(db, agent.id, agent.tenant_id)
+                    await db.commit()
+                    logger.info(f"[background_agent_setup] Agent {agent.name} set to idle (V2 Runtime)")
+        except Exception as e:
+            logger.exception(f"Error during V2 agent finalization for {agent_id}: {e}")
+        return
+
     try:
         async with async_session() as db:
             agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))

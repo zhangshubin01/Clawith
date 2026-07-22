@@ -303,16 +303,22 @@ run_docker_mode() {
     if [ "$FORCE_SOURCE" = true ]; then
         return 1
     fi
-    # Only switch to Docker mode when there are RUNNING Clawith containers
-    if command -v docker &>/dev/null && docker ps --filter 'name=clawith' --filter 'status=running' -q 2>/dev/null | grep -q .; then
+    # Only switch to Docker mode when there are RUNNING Clawith containers.
+    # 用 docker compose ls 判断，精确匹配项目名，避免误判。
+    # 优先读 .env 中的 COMPOSE_PROJECT_NAME，无则用父目录名推导。
+    if command -v docker &>/dev/null && docker compose ls 2>/dev/null | grep -q '^clawith'; then
         echo -e "${YELLOW}Detected running Docker containers. Starting in Docker mode...${NC}"
         echo -e "  ${YELLOW}Tip: use --source to force source (non-Docker) mode.${NC}"
-        DIR_NAME=$(basename "$(dirname "$ROOT")")
-        [ -z "$DIR_NAME" ] && DIR_NAME="custom"
 
-        PROJECT_NAME="clawith-${DIR_NAME}"
-        echo -e "  Using project name: ${GREEN}$PROJECT_NAME${NC}"
-        export COMPOSE_PROJECT_NAME="$PROJECT_NAME"
+        # 项目名：优先 .env 的 COMPOSE_PROJECT_NAME（load_env 已设置），否则从目录推导
+        if [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
+            DIR_NAME=$(basename "$(dirname "$ROOT")")
+            [ -z "$DIR_NAME" ] && DIR_NAME="custom"
+            COMPOSE_PROJECT_NAME="clawith-${DIR_NAME}"
+        fi
+        export COMPOSE_PROJECT_NAME
+
+        echo -e "  Using project name: ${GREEN}$COMPOSE_PROJECT_NAME${NC}"
 
         cd "$ROOT"
 

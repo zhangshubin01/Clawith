@@ -147,6 +147,24 @@ async def stream_web_chat_run(
                 )
             continue
 
+        if event.event_type == "status_changed" and activity_type == "tool_output":
+            content = _text(payload.get("content"))
+            stream = payload.get("stream", "stdout")
+            call_id = _text(payload.get("call_id"))
+            if content is not None and call_id is not None:
+                await send_packet(
+                    {
+                        "type": "agentbay_live",
+                        "env": "code",
+                        "output": content,
+                        "stream": stream,
+                        "call_id": call_id,
+                        "name": payload.get("name"),
+                        **packet_position,
+                    }
+                )
+            continue
+
         if event.event_type == "waiting_started" and payload.get("waiting_type") == "user":
             waiting_correlation_id = _text(payload.get("correlation_id"))
             if waiting_correlation_id is None:
@@ -194,9 +212,7 @@ async def stream_web_chat_run(
         status = terminal_status or receipt_status
         if delivery_kind == "waiting":
             status = "waiting_user"
-            waiting_correlation_id = waiting_correlation_id or _text(
-                payload.get("correlation_id")
-            )
+            waiting_correlation_id = waiting_correlation_id or _text(payload.get("correlation_id"))
             if waiting_correlation_id is None:
                 raise ChatRuntimeStreamError(
                     "runtime_wait_correlation_missing",

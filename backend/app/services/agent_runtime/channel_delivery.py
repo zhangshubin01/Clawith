@@ -176,6 +176,8 @@ def stage_channel_delivery(
 
 def _safe_error(exc: Exception) -> tuple[str, str]:
     code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        code = str(code)
     if not isinstance(code, str) or not code.strip():
         code = type(exc).__name__ or "channel_send_failed"
     message = _BEARER_RE.sub("Bearer [redacted]", str(exc))

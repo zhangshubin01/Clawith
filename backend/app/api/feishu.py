@@ -1,9 +1,17 @@
 """Feishu OAuth and Channel API routes."""
 
+import base64
+import hashlib
+import json
+import re
+import time as _time
 import uuid
+from collections import OrderedDict, defaultdict
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,8 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.permissions import check_agent_access, is_agent_creator
 from app.core.security import get_current_user
 from app.database import async_session as _async_session, get_db
+from app.config import get_settings
 from app.models.channel_config import ChannelConfig
 from app.models.user import User
+
+_settings = get_settings()
 from app.schemas.schemas import ChannelConfigCreate, ChannelConfigOut, TokenResponse, UserOut
 from app.services.agent_runtime.channel_chat import (
     channel_message_id,
@@ -21,6 +32,88 @@ from app.services.agent_runtime.channel_chat import (
 from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
 from app.services.feishu_service import feishu_service
 from app.services.storage import store_agent_upload
+
+
+class DedupStore:
+    """LRU 去重存储，带 TTL 和 FIFO 驱逐。替代旧的 _event_dedup set。"""
+
+    def __init__(self, ttl_seconds: int = 30 * 60, max_size: int = 1000):
+        self._ttl = ttl_seconds
+        self._max = max_size
+        self._store: OrderedDict[str, float] = OrderedDict()
+
+    def is_duplicate(self, event_id: str) -> bool:
+        self._expire()
+        return event_id in self._store
+
+    def mark_seen(self, event_id: str) -> None:
+        self._expire()
+        if event_id in self._store:
+            self._store.move_to_end(event_id)
+            return
+        if len(self._store) >= self._max:
+            self._store.popitem(last=False)
+        self._store[event_id] = _time.monotonic()
+        self._store.move_to_end(event_id)
+
+    def _expire(self) -> None:
+        cutoff = _time.monotonic() - self._ttl
+        # 遍历所有条目驱逐过期项。不能仅从左侧弹出，因为 mark_seen 的 move_to_end
+        # 会将最近访问的旧条目移到右侧，导致左侧新条目被误驱逐。
+        expired = [k for k, v in self._store.items() if v < cutoff]
+        for k in expired:
+            del self._store[k]
+
+
+class ProcessingLock:
+    """防止同一消息被并发处理。asyncio 单线程安全。5 分钟 TTL 防死锁。"""
+
+    def __init__(self, ttl_seconds: int = 300):
+        self._ttl = ttl_seconds
+        self._locks: dict[str, float] = {}
+
+    def try_acquire(self, event_id: str) -> bool:
+        self._sweep()
+        if event_id in self._locks:
+            return False
+        self._locks[event_id] = _time.monotonic()
+        return True
+
+    def release(self, event_id: str) -> None:
+        self._locks.pop(event_id, None)
+
+    def _sweep(self) -> None:
+        cutoff = _time.monotonic() - self._ttl
+        stale = [k for k, v in self._locks.items() if v < cutoff]
+        for k in stale:
+            self._locks.pop(k, None)
+
+
+class PerAgentRateLimiter:
+    """滑动窗口速率限制器。"""
+
+    def __init__(self, max_per_second: int = 10):
+        self._max = max_per_second
+        self._windows: dict[str, list[float]] = defaultdict(list)
+
+    def check(self, agent_id: str) -> bool:
+        now = _time.monotonic()
+        window = self._windows[agent_id]
+        while window and window[0] < now - 1.0:
+            window.pop(0)
+        if not window:
+            del self._windows[agent_id]
+            return True
+        if len(window) >= self._max:
+            return False
+        window.append(now)
+        return True
+
+
+_event_dedup = DedupStore()
+_event_lock = ProcessingLock()
+_ratelimiter = PerAgentRateLimiter()
+
 
 router = APIRouter(tags=["feishu"])
 
@@ -161,7 +254,11 @@ async def configure_channel(
             asyncio.create_task(feishu_ws_manager.start_client(agent_id, existing.app_id, existing.app_secret))
         else:
             asyncio.create_task(feishu_ws_manager.stop_client(agent_id))
-        
+
+        # Phase 1: 通知 FeishuChannelManager 热更新
+        from app.services.feishu_channel_manager import feishu_channel_manager
+        asyncio.create_task(feishu_channel_manager.reload(agent_id))
+
         return ChannelConfigOut.model_validate(existing)
 
     config = ChannelConfig(
@@ -183,6 +280,10 @@ async def configure_channel(
     mode = config.extra_config.get("connection_mode", "webhook")
     if mode == "websocket":
         asyncio.create_task(feishu_ws_manager.start_client(agent_id, config.app_id, config.app_secret))
+
+    # Phase 1: 通知 FeishuChannelManager 热更新
+    from app.services.feishu_channel_manager import feishu_channel_manager
+    asyncio.create_task(feishu_channel_manager.reload(agent_id))
 
     return ChannelConfigOut.model_validate(config)
 
@@ -232,6 +333,9 @@ async def delete_channel_config(
         raise HTTPException(status_code=404, detail="Channel not configured")
     await db.delete(config)
 
+    # 停止 WS 客户端（如果存在）
+    from app.services.feishu_ws import feishu_ws_manager
+    await feishu_ws_manager.stop_client(agent_id)
 
 
 # ─── Feishu Event Webhook ───────────────────────────────
@@ -246,9 +350,8 @@ async def _resolve_feishu_sender(
     sender_user_id: str,
 ):
     """Resolve the stable tenant user while preserving Feishu identifiers."""
-    import httpx
-
     from app.services.channel_user_service import channel_user_service
+    from app.services.feishu_service import feishu_service
 
     resolved_user_id = sender_user_id.strip()
     extra_info: dict = {
@@ -256,43 +359,39 @@ async def _resolve_feishu_sender(
         "external_id": resolved_user_id or None,
     }
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            token_response = await client.post(
-                "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
-                json={"app_id": config.app_id, "app_secret": config.app_secret},
+        app_token = await feishu_service.get_app_access_token(config.app_id, config.app_secret)
+        if app_token:
+            client = feishu_service._get_client()
+            user_response = await client.get(
+                f"{_settings.FEISHU_DOMAIN}/open-apis/contact/v3/users/{sender_open_id}",
+                params={"user_id_type": "open_id"},
+                headers={"Authorization": f"Bearer {app_token}"},
             )
-            app_token = token_response.json().get("app_access_token", "")
-            if app_token:
-                user_response = await client.get(
-                    f"https://open.feishu.cn/open-apis/contact/v3/users/{sender_open_id}",
-                    params={"user_id_type": "open_id"},
-                    headers={"Authorization": f"Bearer {app_token}"},
+            payload = user_response.json()
+            if payload.get("code") == 0:
+                user_info = payload.get("data", {}).get("user", {})
+                resolved_user_id = user_info.get("user_id") or resolved_user_id
+                raw_avatar = user_info.get("avatar")
+                avatar_url = (
+                    raw_avatar.get("avatar_240")
+                    or raw_avatar.get("avatar_640")
+                    or raw_avatar.get("avatar_origin")
+                    or ""
+                    if isinstance(raw_avatar, dict)
+                    else raw_avatar or ""
                 )
-                payload = user_response.json()
-                if payload.get("code") == 0:
-                    user_info = payload.get("data", {}).get("user", {})
-                    resolved_user_id = user_info.get("user_id") or resolved_user_id
-                    raw_avatar = user_info.get("avatar")
-                    avatar_url = (
-                        raw_avatar.get("avatar_240")
-                        or raw_avatar.get("avatar_640")
-                        or raw_avatar.get("avatar_origin")
-                        or ""
-                        if isinstance(raw_avatar, dict)
-                        else raw_avatar or ""
-                    )
-                    extra_info = {
-                        "name": user_info.get("name"),
-                        "email": user_info.get("email")
-                        or user_info.get("enterprise_email"),
-                        "mobile": user_info.get("mobile"),
-                        "avatar_url": avatar_url,
-                        "external_id": resolved_user_id or None,
-                        "unionid": user_info.get("union_id"),
-                        "open_id": sender_open_id,
-                    }
+                extra_info = {
+                    "name": user_info.get("name"),
+                    "email": user_info.get("email")
+                    or user_info.get("enterprise_email"),
+                    "mobile": user_info.get("mobile"),
+                    "avatar_url": avatar_url,
+                    "external_id": resolved_user_id or None,
+                    "unionid": user_info.get("union_id"),
+                    "open_id": sender_open_id,
+                }
     except Exception as exc:
-        logger.warning(f"[Feishu] Sender enrichment failed: {exc}")
+        logger.warning(f"[Feishu] Sender enrichment failed: {type(exc).__name__}")
 
     return await channel_user_service.resolve_channel_user(
         db=db,
@@ -375,19 +474,65 @@ async def _accept_feishu_runtime_message(
     return intake
 
 
-# Simple in-memory dedup to avoid processing retried events
-_processed_events: set[str] = set()
-
-
 @router.post("/channel/feishu/{agent_id}/webhook")
 async def feishu_event_webhook(
     agent_id: uuid.UUID,
     request: Request,
 ):
-    """Handle Feishu event callback for a specific agent's bot."""
-    body = await request.json()
+    """Handle Feishu event callback via lark-channel-sdk."""
+    from app.services.feishu_channel_manager import feishu_channel_manager
 
-    # Handle verification challenge
+    # Phase 0(i): 速率限制
+    if not _ratelimiter.check(str(agent_id)):
+        return JSONResponse(status_code=429, content={"code": -1, "msg": "too many requests"})
+
+    channel = feishu_channel_manager.get(agent_id)
+    if channel is not None:
+        try:
+            # SDK 路径：handle_webhook_request 处理解密+验签+challenge+事件路由
+            status_code, body_bytes = await channel.handle_webhook_request(
+                headers=dict(request.headers),
+                body=await request.body(),
+            )
+            return Response(status_code=status_code, content=body_bytes, media_type="application/json")
+        except Exception:
+            logger.warning("[Feishu] SDK 路径异常，回退降级路径", exc_info=True)
+
+    # 降级路径：Channel 未初始化或 SDK 异常时使用
+    body_bytes = await request.body()
+
+    # Phase 0(a): AES-CBC 解密
+    async with _async_session() as db:
+        result = await db.execute(
+            select(ChannelConfig).where(
+                ChannelConfig.agent_id == agent_id,
+                ChannelConfig.channel_type == "feishu",
+            )
+        )
+        config = result.scalar_one_or_none()
+
+    encrypt_key = config.encrypt_key if config else None
+
+    if encrypt_key:
+        try:
+            body_dict = json.loads(body_bytes)
+            encrypted = body_dict.get("encrypt")
+            if encrypted:
+                key = hashlib.sha256(encrypt_key.encode()).digest()
+                raw = base64.b64decode(encrypted)
+                iv = raw[:16]
+                ciphertext = raw[16:]
+                cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+                decryptor = cipher.decryptor()
+                decrypted = decryptor.update(ciphertext) + decryptor.finalize()
+                pad_len = decrypted[-1]
+                body_bytes = decrypted[:-pad_len]
+        except Exception:
+            logger.warning("[Feishu] Webhook AES 解密失败，拒绝处理")
+            return JSONResponse(status_code=400, content={"code": -1, "msg": "decrypt failed"})
+
+    body = json.loads(body_bytes)
+
     if "challenge" in body:
         return {"challenge": body["challenge"]}
 
@@ -399,176 +544,170 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
     logger.info(f"[Feishu] Event processing for {agent_id}: event_type={body.get('header', {}).get('event_type', 'N/A')}")
 
     # Deduplicate — Feishu retries on slow responses
-    # Only mark as processed AFTER successful handling so retries work on crash
     event_id = body.get("header", {}).get("event_id", "")
-    if event_id in _processed_events:
+    if _event_dedup.is_duplicate(event_id):
         return {"code": 0, "msg": "already processed"}
+    if not _event_lock.try_acquire(event_id):
+        return {"code": 0, "msg": "already processing"}
 
-    # Load channel credentials before parsing the provider event.
-    async with _async_session() as db:
-        result = await db.execute(
-            select(ChannelConfig).where(
-                ChannelConfig.agent_id == agent_id,
-                ChannelConfig.channel_type == "feishu",
+    try:
+        _event_dedup.mark_seen(event_id)
+
+        # Load channel credentials before parsing the provider event.
+        async with _async_session() as db:
+            result = await db.execute(
+                select(ChannelConfig).where(
+                    ChannelConfig.agent_id == agent_id,
+                    ChannelConfig.channel_type == "feishu",
+                )
             )
-        )
-        config = result.scalar_one_or_none()
-    if not config:
-        return {"code": 1, "msg": "Channel not found"}
+            config = result.scalar_one_or_none()
+        if not config:
+            return {"code": 1, "msg": "Channel not found"}
 
-    # Handle events
-    event = body.get("event", {})
-    event_type = body.get("header", {}).get("event_type", "")
+        # Handle events
+        event = body.get("event", {})
+        event_type = body.get("header", {}).get("event_type", "")
 
-    if event_type == "im.message.receive_v1":
-        message = event.get("message", {})
-        sender = event.get("sender", {}).get("sender_id", {})
-        sender_open_id = sender.get("open_id", "")
-        sender_user_id_from_event = sender.get("user_id", "")  # tenant-stable ID, available directly in event body
-        msg_type = message.get("message_type", "text")
-        chat_type = message.get("chat_type", "p2p")  # p2p or group
-        chat_id = message.get("chat_id", "")
+        if event_type == "im.message.receive_v1":
+            message = event.get("message", {})
+            sender = event.get("sender", {}).get("sender_id", {})
+            sender_open_id = sender.get("open_id", "")
+            sender_user_id_from_event = sender.get("user_id", "")  # tenant-stable ID, available directly in event body
+            msg_type = message.get("message_type", "text")
+            chat_type = message.get("chat_type", "p2p")  # p2p or group
+            chat_id = message.get("chat_id", "")
 
-        logger.info(f"[Feishu] Received {msg_type} message, chat_type={chat_type}, open_id={sender_open_id!r}, user_id_from_event={sender_user_id_from_event!r}")
+            logger.info(f"[Feishu] Received {msg_type} message, chat_type={chat_type}, open_id={sender_open_id!r}, user_id_from_event={sender_user_id_from_event!r}")
 
-        # ── Normalize post (rich text) → extract text + schedule image downloads ──
-        if msg_type == "post":
-            import json as _json_post
-            _post_body = _json_post.loads(message.get("content", "{}"))
-            # Feishu post content: {"title": "...", "content": [[{"tag":"text","text":"..."},...],...]}
-            # The content may be nested under a locale key like "zh_cn"
-            _paragraphs = _post_body.get("content", [])
-            if not _paragraphs:
-                # Try locale keys (zh_cn, en_us, etc.)
-                for _locale_key, _locale_val in _post_body.items():
-                    if isinstance(_locale_val, dict) and "content" in _locale_val:
-                        _paragraphs = _locale_val["content"]
-                        break
-            _text_parts = []
-            _post_image_keys = []
-            for _para in _paragraphs:
-                _line_parts = []
-                for _elem in _para:
-                    _tag = _elem.get("tag")
-                    if _tag == "text":
-                        _line_parts.append(_elem.get("text", ""))
-                    elif _tag == "a":
-                        _href = _elem.get("href", "")
-                        _link_text = _elem.get("text", "")
-                        _line_parts.append(f"{_link_text} ({_href})" if _href else _link_text)
-                    elif _tag == "img":
-                        _ik = _elem.get("image_key", "")
-                        if _ik:
-                            _post_image_keys.append(_ik)
-                if _line_parts:
-                    _text_parts.append("".join(_line_parts))
-            _extracted_text = "\n".join(_text_parts).strip()
-            # Download images and embed as base64 for vision-capable models
-            _image_markers = []
-            if _post_image_keys:
-                import base64 as _b64
-                _msg_id = message.get("message_id", "")
-                for _ik in _post_image_keys:
-                    try:
-                        _img_bytes = await feishu_service.download_message_resource(
-                            config.app_id, config.app_secret, _msg_id, _ik, "image"
-                        )
-                        _, _workspace_path, _save_path = await store_agent_upload(
-                            agent_id,
-                            f"image_{_ik[-8:]}.jpg",
-                            _img_bytes,
-                            content_type="image/jpeg",
-                        )
-                        logger.info(f"[Feishu] Saved post image to {_workspace_path} ({len(_img_bytes)} bytes)")
-                        # Embed as base64 marker for vision models
-                        _b64_data = _b64.b64encode(_img_bytes).decode("ascii")
-                        _image_markers.append(f"[image_data:data:image/jpeg;base64,{_b64_data}]")
-                    except Exception as _dl_err:
-                        logger.error(f"[Feishu] Failed to download post image {_ik}: {_dl_err}")
-            # Build final text with embedded images
-            if not _extracted_text and _image_markers:
-                _extracted_text = "[用户发送了图片，请看图片内容]"
-            _final_content = _extracted_text
-            if _image_markers:
-                _final_content += "\n" + "\n".join(_image_markers)
-            # Rewrite as text message so existing handler processes it
-            message["content"] = _json_post.dumps({"text": _final_content})
-            msg_type = "text"
-            logger.info(f"[Feishu] Normalized post → text='{_extracted_text[:100]}', images={len(_image_markers)}")
+            # ── Normalize post (rich text) → extract text + schedule image downloads ──
+            if msg_type == "post":
+                _post_body = json.loads(message.get("content", "{}"))
+                # Feishu post content: {"title": "...", "content": [[{"tag":"text","text":"..."},...],...]}
+                # The content may be nested under a locale key like "zh_cn"
+                _paragraphs = _post_body.get("content", [])
+                if not _paragraphs:
+                    # Try locale keys (zh_cn, en_us, etc.)
+                    for _locale_key, _locale_val in _post_body.items():
+                        if isinstance(_locale_val, dict) and "content" in _locale_val:
+                            _paragraphs = _locale_val["content"]
+                            break
+                _text_parts = []
+                _post_image_keys = []
+                for _para in _paragraphs:
+                    _line_parts = []
+                    for _elem in _para:
+                        _tag = _elem.get("tag")
+                        if _tag == "text":
+                            _line_parts.append(_elem.get("text", ""))
+                        elif _tag == "a":
+                            _href = _elem.get("href", "")
+                            _link_text = _elem.get("text", "")
+                            _line_parts.append(f"{_link_text} ({_href})" if _href else _link_text)
+                        elif _tag == "img":
+                            _ik = _elem.get("image_key", "")
+                            if _ik:
+                                _post_image_keys.append(_ik)
+                    if _line_parts:
+                        _text_parts.append("".join(_line_parts))
+                _extracted_text = "\n".join(_text_parts).strip()
+                # Download images and embed as base64 for vision-capable models
+                _image_markers = []
+                if _post_image_keys:
+                    _msg_id = message.get("message_id", "")
+                    for _ik in _post_image_keys:
+                        try:
+                            _img_bytes = await feishu_service.download_message_resource(
+                                config.app_id, config.app_secret, _msg_id, _ik, "image"
+                            )
+                            _, _workspace_path, _save_path = await store_agent_upload(
+                                agent_id,
+                                f"image_{_ik[-8:]}.jpg",
+                                _img_bytes,
+                                content_type="image/jpeg",
+                            )
+                            logger.info(f"[Feishu] Saved post image to {_workspace_path} ({len(_img_bytes)} bytes)")
+                            # Embed as base64 marker for vision models
+                            _b64_data = base64.b64encode(_img_bytes).decode("ascii")
+                            _image_markers.append(f"[image_data:data:image/jpeg;base64,{_b64_data}]")
+                        except Exception as _dl_err:
+                            logger.error(f"[Feishu] Failed to download post image {_ik}: {_dl_err}")
+                # Build final text with embedded images
+                if not _extracted_text and _image_markers:
+                    _extracted_text = "[用户发送了图片，请看图片内容]"
+                _final_content = _extracted_text
+                if _image_markers:
+                    _final_content += "\n" + "\n".join(_image_markers)
+                # Rewrite as text message so existing handler processes it
+                message["content"] = json.dumps({"text": _final_content})
+                msg_type = "text"
+                logger.info(f"[Feishu] Normalized post → text='{_extracted_text[:100]}', images={len(_image_markers)}")
 
-        if msg_type in ("file", "image"):
-            attachment = await _accept_feishu_file_runtime(
-                agent_id=agent_id,
-                config=config,
-                message=message,
-                sender_open_id=sender_open_id,
-                sender_user_id=sender_user_id_from_event,
-                chat_type=chat_type,
-                chat_id=chat_id,
-                external_event_id=event_id or message.get("message_id"),
-            )
-            if attachment is not None:
-                if event_id:
-                    _processed_events.add(event_id)
-                    if len(_processed_events) > 1000:
-                        _processed_events.clear()
+            if msg_type in ("file", "image"):
+                attachment = await _accept_feishu_file_runtime(
+                    agent_id=agent_id,
+                    config=config,
+                    message=message,
+                    sender_open_id=sender_open_id,
+                    sender_user_id=sender_user_id_from_event,
+                    chat_type=chat_type,
+                    chat_id=chat_id,
+                    external_event_id=event_id or message.get("message_id"),
+                )
+                if attachment is not None:
+                    pass  # dedup handled by outer try/finally
+                return {"code": 0, "msg": "ok"}
+
+            if msg_type != "text":
+                return {"code": 0, "msg": "unsupported message type"}
+
+            content = json.loads(message.get("content", "{}"))
+            user_text = re.sub(r"@_user_\d+", "", content.get("text", "")).strip()
+            if not user_text:
+                return {"code": 0, "msg": "empty message after stripping mentions"}
+
+            display_content = re.sub(
+                r"\[image_data:data:image/[^;]+;base64,[A-Za-z0-9+/=]+\]",
+                "",
+                user_text,
+            ).strip()
+            if not display_content and "[image_data:" in user_text:
+                display_content = "[图片]"
+
+            try:
+                await _accept_feishu_runtime_message(
+                    agent_id=agent_id,
+                    config=config,
+                    sender_open_id=sender_open_id,
+                    sender_user_id=sender_user_id_from_event,
+                    chat_type=chat_type,
+                    chat_id=chat_id,
+                    content=user_text,
+                    display_content=display_content,
+                    external_event_id=event_id or message.get("message_id"),
+                )
+            except Exception as exc:
+                from app.services.channel_user_service import ChannelUserResolutionError
+
+                if not isinstance(exc, ChannelUserResolutionError):
+                    raise
+                logger.warning(f"[Feishu] Sender resolution refused: {exc}")
+                reply_target = chat_id if chat_type == "group" else sender_open_id
+                receive_id_type = "chat_id" if chat_type == "group" else "open_id"
+                await feishu_service.send_message(
+                    config.app_id,
+                    config.app_secret,
+                    reply_target,
+                    "text",
+                    json.dumps({"text": _USER_RESOLUTION_ERROR_TIP}),
+                    receive_id_type=receive_id_type,
+                )
+                return {"code": 0, "msg": "user_resolution_skipped"}
+
             return {"code": 0, "msg": "ok"}
-
-        if msg_type != "text":
-            return {"code": 0, "msg": "unsupported message type"}
-
-        import json
-        import re
-
-        content = json.loads(message.get("content", "{}"))
-        user_text = re.sub(r"@_user_\d+", "", content.get("text", "")).strip()
-        if not user_text:
-            return {"code": 0, "msg": "empty message after stripping mentions"}
-
-        display_content = re.sub(
-            r"\[image_data:data:image/[^;]+;base64,[A-Za-z0-9+/=]+\]",
-            "",
-            user_text,
-        ).strip()
-        if not display_content and "[image_data:" in user_text:
-            display_content = "[图片]"
-
-        try:
-            await _accept_feishu_runtime_message(
-                agent_id=agent_id,
-                config=config,
-                sender_open_id=sender_open_id,
-                sender_user_id=sender_user_id_from_event,
-                chat_type=chat_type,
-                chat_id=chat_id,
-                content=user_text,
-                display_content=display_content,
-                external_event_id=event_id or message.get("message_id"),
-            )
-        except Exception as exc:
-            from app.services.channel_user_service import ChannelUserResolutionError
-
-            if not isinstance(exc, ChannelUserResolutionError):
-                raise
-            logger.warning(f"[Feishu] Sender resolution refused: {exc}")
-            reply_target = chat_id if chat_type == "group" else sender_open_id
-            receive_id_type = "chat_id" if chat_type == "group" else "open_id"
-            await feishu_service.send_message(
-                config.app_id,
-                config.app_secret,
-                reply_target,
-                "text",
-                json.dumps({"text": _USER_RESOLUTION_ERROR_TIP}),
-                receive_id_type=receive_id_type,
-            )
-            return {"code": 0, "msg": "user_resolution_skipped"}
-
-        if event_id:
-            _processed_events.add(event_id)
-            if len(_processed_events) > 1000:
-                _processed_events.clear()
         return {"code": 0, "msg": "ok"}
-    return {"code": 0, "msg": "ok"}
+    finally:
+        _event_lock.release(event_id)
 
 
 async def _accept_feishu_file_runtime(
@@ -583,9 +722,6 @@ async def _accept_feishu_file_runtime(
     external_event_id: str | None,
 ) -> ChatRuntimeIntake | None:
     """Download a Feishu resource, then durably attach it to the Runtime."""
-    import base64
-    import json
-
     message_type = message.get("message_type", "file")
     provider_message_id = message.get("message_id", "")
     content = json.loads(message.get("content", "{}"))
