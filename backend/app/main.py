@@ -413,6 +413,10 @@ from app.api.agentbay_control import router as agentbay_control_router
 from app.api.okr import router as okr_router
 from app.api.onboarding import router as onboarding_router
 
+# ACP IDE 插件
+from app.api.ide_plugin import router as ide_plugin_router
+from app.plugins.clawith_acp.router import router as acp_router
+
 app.include_router(auth_router, prefix=settings.API_PREFIX)
 app.include_router(agents_router, prefix=settings.API_PREFIX)
 app.include_router(tasks_router, prefix=settings.API_PREFIX)
@@ -454,6 +458,8 @@ app.include_router(notification_router, prefix=settings.API_PREFIX)
 app.include_router(webhooks_router)  # Public endpoint, no API prefix
 app.include_router(ws_router)
 app.include_router(group_ws_router)
+app.include_router(ide_plugin_router)
+app.include_router(acp_router)
 app.include_router(gateway_router, prefix=settings.API_PREFIX)
 app.include_router(admin_router, prefix=settings.API_PREFIX)
 app.include_router(pages_router, prefix=settings.API_PREFIX)
@@ -466,8 +472,14 @@ app.include_router(onboarding_router, prefix=settings.API_PREFIX)
 
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])
 async def health_check():
-    """Health check endpoint."""
-    return HealthResponse(status="ok", version=settings.APP_VERSION)
+    """Health check endpoint — includes Docker proxy status."""
+    docker_health = None
+    try:
+        from app.services.sandbox.docker_client import check_docker_health
+        docker_health = check_docker_health()
+    except Exception:
+        pass
+    return HealthResponse(status="ok", version=settings.APP_VERSION, docker=docker_health)
 
 
 # ── Version endpoint (public, no auth required) ──

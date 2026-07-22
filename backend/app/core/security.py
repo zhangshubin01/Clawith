@@ -224,3 +224,45 @@ def require_role(*allowed_roles: str):
             )
         return current_user
     return _check
+
+
+async def verify_api_key_or_token(token: str | None) -> uuid.UUID:
+    """验证 JWT token 或 API Key，返回 user_id。
+
+    ACP WebSocket 端点 /ws/acp 的认证函数。
+    优先级：JWT Bearer token → Agent API Key
+    """
+    if not token:
+        raise HTTPException(status_code=401, detail="缺少认证凭据")
+
+    # 1. JWT Bearer token
+    try:
+        payload = decode_access_token(token)
+        user_id = payload.get("sub")
+        if user_id:
+            return uuid.UUID(user_id)
+    except HTTPException:
+        pass
+
+    # 2. Agent API Key（plaintext + hash 双模式）
+    from app.api.gateway import _hash_key
+    from app.database import async_session
+    from app.models.agent import Agent
+    from sqlalchemy.exc import SQLAlchemyError
+
+    try:
+        async with async_session() as db:
+            key_hash = _hash_key(token)
+            result = await db.execute(
+                select(Agent).where(
+                    Agent.api_key_hash.in_([token, key_hash]),
+                    Agent.status != "error",
+                )
+            )
+            agent = result.scalar_one_or_none()
+            if agent and agent.creator_id:
+                return agent.creator_id
+    except (ValueError, SQLAlchemyError):
+        pass
+
+    raise HTTPException(status_code=401, detail="无效的认证凭据")
