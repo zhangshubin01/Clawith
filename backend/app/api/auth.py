@@ -8,11 +8,15 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from loguru import logger
 from app.core.security import (
     create_access_token,
+    decode_access_token,
     get_authenticated_user,
     get_current_user,
     hash_password_async,
     verify_password_async,
 )
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+auth_security = HTTPBearer()
 from app.dao import identity_dao, system_setting_dao, tenant_dao, user_dao
 from app.database import transaction
 from app.models.user import User
@@ -832,6 +836,23 @@ async def change_password(
         tx_identity.password_hash = new_hash
 
     return {"ok": True}
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token(
+    credentials: HTTPAuthorizationCredentials = Depends(auth_security),
+):
+    """刷新 JWT token — IDE 插件每 10 分钟调用一次。
+
+    解码当前 JWT，颁发相同 sub + role 的新 token。
+    """
+    payload = decode_access_token(credentials.credentials)
+    user_id = payload.get("sub")
+    role = payload.get("role", "org_admin")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    new_token = create_access_token(user_id, role)
+    return {"access_token": new_token, "token_type": "bearer"}
 
 
 # ─── SSO/OAuth Endpoints ─────────────────────────────────────────────
