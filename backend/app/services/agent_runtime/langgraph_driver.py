@@ -406,6 +406,7 @@ class LangGraphRuntimeDriver:
             command_id=command.id,
             checkpoint_id=(checkpoint.checkpoint_id if checkpoint is not None else None),
         )
+        config["recursion_limit"] = 150  # 默认25不够，50轮 LLM 循环需 ~100 步
         context = _runtime_context(run, command, self._node_executor)
 
         if (
