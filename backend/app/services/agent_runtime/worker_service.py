@@ -325,6 +325,7 @@ def build_runtime_worker_components(
             session_factory=session_factory,
         ),
         post_checkpoint_handler=post_checkpoint_handler,
+        rejection_handler=post_checkpoint_handler,
         claimant=resolved_claimant,
         settings=runtime_settings,
     )

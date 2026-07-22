@@ -30,6 +30,7 @@ from app.services.agent_runtime.contracts import (
     RunHandle,
     RuntimeEventCursor,
 )
+from app.services.quota_guard import QuotaExceeded
 
 
 class _WebSocket:
@@ -490,15 +491,109 @@ async def test_disabled_runtime_fails_closed_without_legacy_execution() -> None:
         with pytest.raises(WebSocketDisconnect):
             await handler.message_loop()
 
-    assert websocket.sent == [
-        {
-            "type": "error",
-            "content": "Durable Runtime is not enabled for native Web Chat.",
-            "code": "runtime_disabled",
-        }
-    ]
+    assert len(websocket.sent) == 1
+    packet = websocket.sent[0]
+    assert packet["content"] == "Durable Runtime is not enabled for native Web Chat."
+    assert packet["code"] == "runtime_disabled"
+    assert packet["stage"] == "intake"
+    assert packet["trace_id"]
+    assert packet["error"]["message"] == packet["content"]
+    assert packet["error"]["agent_id"] == str(handler.agent_id)
     legacy_save.assert_not_awaited()
     assert not hasattr(handler, "_run_llm_and_stream")
+
+
+@pytest.mark.asyncio
+async def test_known_runtime_intake_error_preserves_safe_message_and_code() -> None:
+    websocket = _WebSocket()
+    handler = _handler(websocket)
+    model = SimpleNamespace(id=uuid.uuid4())
+
+    with (
+        patch.object(handler, "_resolve_effective_model", new=AsyncMock(return_value=model)),
+        patch.object(handler, "_check_quotas", new=AsyncMock(return_value=True)),
+        patch.object(
+            handler,
+            "_enqueue_runtime_chat",
+            new=AsyncMock(
+                side_effect=ChatRuntimeIntakeError(
+                    "direct_chat_lane_busy",
+                    "This Direct Chat already has an active Run",
+                )
+            ),
+        ),
+    ):
+        accepted = await handler._accept_client_message({"content": "hello"})
+
+    assert accepted is None
+    packet = websocket.sent[-1]
+    assert packet["content"] == "This Direct Chat already has an active Run"
+    assert packet["code"] == "direct_chat_lane_busy"
+    assert packet["error"]["message"] == packet["content"]
+    assert packet["error"]["trace_id"] == packet["trace_id"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_message_id_returns_canonical_error_without_unbound_run() -> None:
+    websocket = _WebSocket()
+    handler = _handler(websocket)
+
+    accepted = await handler._accept_client_message(
+        {"content": "hello", "message_id": "not-a-uuid"}
+    )
+
+    assert accepted is None
+    packet = websocket.sent[-1]
+    assert packet["code"] == "invalid_message_id"
+    assert packet["run_id"] is None
+    assert packet["error"]["code"] == packet["code"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_runtime_intake_error_is_safe_and_traceable() -> None:
+    websocket = _WebSocket()
+    handler = _handler(websocket)
+    model = SimpleNamespace(id=uuid.uuid4())
+
+    with (
+        patch.object(handler, "_resolve_effective_model", new=AsyncMock(return_value=model)),
+        patch.object(handler, "_check_quotas", new=AsyncMock(return_value=True)),
+        patch.object(
+            handler,
+            "_enqueue_runtime_chat",
+            new=AsyncMock(side_effect=RuntimeError("database password leaked")),
+        ),
+    ):
+        accepted = await handler._accept_client_message({"content": "hello"})
+
+    assert accepted is None
+    packet = websocket.sent[-1]
+    assert packet["code"] == "runtime_intake_failed"
+    assert packet["content"] == "Message could not be accepted by the durable Runtime."
+    assert "password" not in packet["content"]
+    assert packet["trace_id"]
+    assert packet["error"]["trace_id"] == packet["trace_id"]
+
+
+@pytest.mark.asyncio
+async def test_quota_done_packet_keeps_legacy_shape_and_exposes_error_context() -> None:
+    websocket = _WebSocket()
+    handler = _handler(websocket)
+
+    with patch(
+        "app.api.websocket.check_conversation_quota",
+        new=AsyncMock(side_effect=QuotaExceeded("Daily quota reached")),
+    ):
+        accepted = await handler._check_quotas()
+
+    assert accepted is False
+    packet = websocket.sent[-1]
+    assert packet["type"] == "done"
+    assert packet["role"] == "assistant"
+    assert packet["content"] == "⚠️ Daily quota reached"
+    assert packet["code"] == "quota_exceeded"
+    assert packet["error"]["stage"] == "intake"
+    assert packet["error"]["trace_id"] == packet["trace_id"]
 
 
 @pytest.mark.asyncio
@@ -800,6 +895,19 @@ async def test_cancel_without_run_id_fails_closed() -> None:
 
     cancel.assert_not_awaited()
     assert websocket.sent[0]["code"] == "missing_cancel_run_id"
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_invalid_run_id_returns_canonical_error() -> None:
+    websocket = _WebSocket()
+    handler = _handler(websocket)
+
+    await handler._handle_cancel_packet({"type": "abort", "run_id": "not-a-uuid"})
+
+    packet = websocket.sent[-1]
+    assert packet["code"] == "invalid_run_id"
+    assert packet["run_id"] is None
+    assert packet["error"]["code"] == packet["code"]
 
 
 @pytest.mark.asyncio

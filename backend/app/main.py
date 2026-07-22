@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from app.config import get_settings
+from app.core.error_contract import register_error_handlers
 from app.core.events import close_redis
 from app.core.logging_config import configure_logging, intercept_standard_logging
 from app.core.middleware import TraceIdMiddleware
@@ -349,6 +350,7 @@ app = FastAPI(
     version=settings.APP_VERSION,
     lifespan=lifespan,
 )
+register_error_handlers(app)
 
 # Add TraceIdMiddleware first so it's executed for all requests
 app.add_middleware(TraceIdMiddleware)

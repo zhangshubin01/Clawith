@@ -6,6 +6,7 @@ import { useDialog } from '../../../components/Dialog/DialogProvider';
 import { useToast } from '../../../components/Toast/ToastProvider';
 import { useAuthStore } from '../../../stores';
 import { fetchJson } from '../utils/fetchJson';
+import { ApiError } from '../../../services/api';
 
 interface LLMModel {
     id: string;
@@ -190,24 +191,21 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
     const deleteModel = useMutation({
         mutationFn: async ({ id }: { id: string; force?: boolean }) => {
             const url = `/enterprise/llm-models/${id}`;
-            const res = await fetch(`/api${url}`, {
-                method: 'DELETE',
-                headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
-            });
-            if (res.status === 409) {
-                const data = await res.json();
-                const agents = data.detail?.agents || [];
+            try {
+                await fetchJson(url, { method: 'DELETE' });
+            } catch (error) {
+                if (!(error instanceof ApiError) || error.status !== 409) throw error;
+                const detail = error.detail && typeof error.detail === 'object'
+                    ? error.detail as Record<string, unknown>
+                    : {};
+                const agents = Array.isArray(detail.agents) ? detail.agents : [];
                 const msg = `该模型正在被 ${agents.length} 个数字员工使用：\n\n${agents.join(', ')}\n\n仍要删除吗？（对应的模型配置会被清空）`;
                 if (await dialog.confirm(msg, { title: t('common.dialog.deleteModel'), danger: true, confirmLabel: t('common.confirmActions.forceDelete') })) {
-                    const r2 = await fetch(`/api/enterprise/llm-models/${id}?force=true`, {
+                    await fetchJson(`/enterprise/llm-models/${id}?force=true`, {
                         method: 'DELETE',
-                        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
                     });
-                    if (!r2.ok && r2.status !== 204) throw new Error('Delete failed');
                 }
-                return;
             }
-            if (!res.ok && res.status !== 204) throw new Error('Delete failed');
         },
         onSuccess: () => invalidateModelCaches(),
     });

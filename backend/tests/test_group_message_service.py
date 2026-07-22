@@ -470,6 +470,9 @@ async def test_missing_planning_model_persists_one_visible_idempotent_failure() 
     assert intake.dispatch_kind == "planning"
     assert intake.run_handles == ()
     assert intake.error_code == "planning_model_unavailable"
+    assert intake.error_message == (
+        "多 Agent 规划模型未配置或当前不可用，请联系管理员检查运行时模型设置。"
+    )
     start_run.assert_not_awaited()
     assert len(db.added) == 2
     public_message, failure_message = db.added
@@ -482,7 +485,12 @@ async def test_missing_planning_model_persists_one_visible_idempotent_failure() 
     )
     assert failure_message.role == "system"
     assert failure_message.participant_id is None
-    assert failure_message.content == "任务规划未完成，请重试或改为单 Agent 处理。"
+    assert failure_message.content == (
+        "任务规划未完成。\n"
+        "错误：多 Agent 规划模型未配置或当前不可用，请联系管理员检查运行时模型设置。\n"
+        "错误码：planning_model_unavailable"
+    )
+    assert "MULTI_AGENT_PLANNING_MODEL_ID" not in failure_message.content
     assert failure_message.created_at == NOW.replace(microsecond=1)
 
 

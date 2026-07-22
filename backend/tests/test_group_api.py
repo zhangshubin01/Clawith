@@ -416,7 +416,8 @@ async def test_create_message_commits_before_realtime_publish(monkeypatch) -> No
             dispatch_kind="none",
             run_handles=(),
             created=True,
-            error_code=None,
+            error_code="planning_model_unavailable",
+            error_message="Planning model is not configured",
         )
 
     async def fake_outputs(_db, _messages):
@@ -438,11 +439,20 @@ async def test_create_message_commits_before_realtime_publish(monkeypatch) -> No
         group.id,
         session.id,
         groups_api.CreateGroupMessageIn(content="hello"),
+        request=SimpleNamespace(state=SimpleNamespace(trace_id="group-trace-123")),
         current_user=user,
         db=db,
     )
 
     assert result.message == output
+    assert result.error_code == "planning_model_unavailable"
+    assert result.error is not None
+    assert result.error.model_dump(exclude_none=True) == {
+        "code": "planning_model_unavailable",
+        "message": "Planning model is not configured",
+        "trace_id": "group-trace-123",
+        "stage": "planning",
+    }
     assert events == [
         "commit",
         f"publish:{output.cursor}",

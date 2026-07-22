@@ -83,3 +83,9 @@ test('group composer and stream use session-wide active runs', () => {
   assert.match(groupsPage, /isPlanning=\{isPlanning\}/);
   assert.match(groupsPage, /runningAgents=\{runningAgents\}/);
 });
+
+test('group planning failures preserve the backend message and diagnostics', () => {
+  assert.match(groupsPage, /intake\.error\?\.message/);
+  assert.match(groupsPage, /intake\.error\?\.trace_id/);
+  assert.match(groupsPage, /intake\.error\?\.code \?\? intake\.error_code/);
+});

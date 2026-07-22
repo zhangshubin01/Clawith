@@ -12,7 +12,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.logging_config import set_trace_id
+from app.core.logging_config import get_trace_id, new_trace_id, set_trace_id
 from app.core.permissions import check_agent_access, is_agent_expired
 from app.core.security import decode_access_token
 from app.database import async_session
@@ -158,6 +158,42 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _runtime_error_packet(
+    *,
+    code: str,
+    message: str,
+    agent_id: uuid.UUID,
+    stage: str,
+    run_id: uuid.UUID | None = None,
+    trace_id: str | None = None,
+    **legacy: object,
+) -> dict:
+    """Build the canonical Runtime error context without breaking legacy WS fields."""
+    resolved_trace_id = trace_id or get_trace_id() or new_trace_id()
+    run_id_text = str(run_id) if run_id is not None else None
+    agent_id_text = str(agent_id)
+    error = {
+        "code": code,
+        "message": message,
+        "run_id": run_id_text,
+        "agent_id": agent_id_text,
+        "stage": stage,
+        "trace_id": resolved_trace_id,
+    }
+    return {
+        "type": "error",
+        "content": message,
+        "message": message,
+        "code": code,
+        "run_id": run_id_text,
+        "agent_id": agent_id_text,
+        "stage": stage,
+        "trace_id": resolved_trace_id,
+        "error": error,
+        **legacy,
+    }
+
+
 async def maybe_mark_session_read_for_active_viewer(
     db: AsyncSession,
     *,
@@ -226,6 +262,7 @@ class WebSocketChatHandler:
 
     async def run(self):
         """Main entry point for handling the lifecycle of the WebSocket connection."""
+        set_trace_id(uuid.uuid4().hex[:12])
         try:
             # 1. Setup session (Authentication, permissions, loading models, history, etc.)
             success = await self.setup()
@@ -252,7 +289,14 @@ class WebSocketChatHandler:
             payload = decode_access_token(self.token)
             user_id = uuid.UUID(payload["sub"])
         except Exception:
-            await self.websocket.send_json({"type": "error", "content": "Authentication failed"})
+            await self.websocket.send_json(
+                _runtime_error_packet(
+                    code="authentication_failed",
+                    message="Authentication failed",
+                    agent_id=self.agent_id,
+                    stage="request",
+                )
+            )
             await self.websocket.close(code=4001)
             return False
 
@@ -262,7 +306,14 @@ class WebSocketChatHandler:
                 self.user = result.scalar_one_or_none()
                 if not self.user:
                     logger.error("[WS] User not found")
-                    await self.websocket.send_json({"type": "error", "content": "User not found"})
+                    await self.websocket.send_json(
+                        _runtime_error_packet(
+                            code="user_not_found",
+                            message="User not found",
+                            agent_id=self.agent_id,
+                            stage="request",
+                        )
+                    )
                     await self.websocket.close(code=4001)
                     return False
 
@@ -270,10 +321,12 @@ class WebSocketChatHandler:
                 self.agent, _ = await check_agent_access(db, self.user, self.agent_id)
                 if is_agent_expired(self.agent):
                     await self.websocket.send_json(
-                        {
-                            "type": "error",
-                            "content": "This Agent has expired and is off duty. Please contact your admin to extend its service.",
-                        }
+                        _runtime_error_packet(
+                            code="agent_expired",
+                            message="This Agent has expired and is off duty. Please contact your admin to extend its service.",
+                            agent_id=self.agent_id,
+                            stage="request",
+                        )
                     )
                     await self.websocket.close(code=4003)
                     return False
@@ -301,7 +354,14 @@ class WebSocketChatHandler:
 
         except Exception as e:
             logger.exception(f"[WS] Setup error: {e}")
-            await self.websocket.send_json({"type": "error", "content": "Setup failed"})
+            await self.websocket.send_json(
+                _runtime_error_packet(
+                    code="setup_failed",
+                    message="Setup failed",
+                    agent_id=self.agent_id,
+                    stage="request",
+                )
+            )
             await self.websocket.close(code=4002)
             return False
 
@@ -347,11 +407,12 @@ class WebSocketChatHandler:
         """Resolves existing session or creates a new one."""
         if self.agent is None or self.agent.tenant_id is None:
             await self.websocket.send_json(
-                {
-                    "type": "error",
-                    "content": "Agent chat scope is unavailable",
-                    "code": "chat_connection_not_ready",
-                }
+                _runtime_error_packet(
+                    code="chat_connection_not_ready",
+                    message="Agent chat scope is unavailable",
+                    agent_id=self.agent_id,
+                    stage="request",
+                )
             )
             await self.websocket.close(code=4002)
             return None
@@ -360,11 +421,12 @@ class WebSocketChatHandler:
                 session_id = uuid.UUID(self.session_id_param)
             except (ValueError, TypeError):
                 await self.websocket.send_json(
-                    {
-                        "type": "error",
-                        "content": "Invalid chat session",
-                        "code": "invalid_chat_session",
-                    }
+                    _runtime_error_packet(
+                        code="invalid_chat_session",
+                        message="Invalid chat session",
+                        agent_id=self.agent_id,
+                        stage="request",
+                    )
                 )
                 await self.websocket.close(code=4002)
                 return None
@@ -394,11 +456,12 @@ class WebSocketChatHandler:
                 or existing.deleted_at is not None
             ):
                 await self.websocket.send_json(
-                    {
-                        "type": "error",
-                        "content": "Not authorized for this session",
-                        "code": "chat_session_scope_mismatch",
-                    }
+                    _runtime_error_packet(
+                        code="chat_session_scope_mismatch",
+                        message="Not authorized for this session",
+                        agent_id=self.agent_id,
+                        stage="request",
+                    )
                 )
                 await self.websocket.close(code=4002)
                 return None
@@ -541,7 +604,14 @@ class WebSocketChatHandler:
             session_id = uuid.UUID(self.conv_id)
         except (ChatRuntimeIntakeError, ValueError) as exc:
             code = getattr(exc, "code", "invalid_chat_session")
-            await self.websocket.send_json({"type": "error", "content": str(exc), "code": code})
+            await self.websocket.send_json(
+                _runtime_error_packet(
+                    code=code,
+                    message=str(exc),
+                    agent_id=self.agent_id,
+                    stage="intake",
+                )
+            )
             return None
 
         async with async_session() as db:
@@ -564,11 +634,13 @@ class WebSocketChatHandler:
             run = result.scalar_one_or_none()
             if run is None:
                 await self.websocket.send_json(
-                    {
-                        "type": "error",
-                        "content": "Run is not active in this Direct Chat session.",
-                        "code": "chat_attach_scope_mismatch",
-                    }
+                    _runtime_error_packet(
+                        code="chat_attach_scope_mismatch",
+                        message="Run is not active in this Direct Chat session.",
+                        agent_id=self.agent_id,
+                        stage="intake",
+                        run_id=run_id,
+                    )
                 )
                 return None
             command_result = await db.execute(
@@ -583,7 +655,13 @@ class WebSocketChatHandler:
             command = command_result.scalar_one_or_none()
             if command is None:
                 await self.websocket.send_json(
-                    {"type": "error", "content": "Run command is unavailable.", "code": "chat_attach_command_missing"}
+                    _runtime_error_packet(
+                        code="chat_attach_command_missing",
+                        message="Run command is unavailable.",
+                        agent_id=self.agent_id,
+                        stage="intake",
+                        run_id=run_id,
+                    )
                 )
                 return None
         source_id = run.source_id or ""
@@ -610,7 +688,7 @@ class WebSocketChatHandler:
         data: dict,
     ) -> AcceptedWebChatMessage | None:
         """Validate and durably enqueue one explicit client input."""
-        set_trace_id(str(uuid.uuid4())[:12])
+        set_trace_id(uuid.uuid4().hex[:12])
         content = data.get("content", "")
         display_content = data.get("display_content", "")
         file_name = data.get("file_name", "")
@@ -629,6 +707,7 @@ class WebSocketChatHandler:
                 return None
             content = "Please begin the onboarding."
 
+        resume_run_id: uuid.UUID | None = None
         try:
             message_id = self._optional_client_uuid(
                 data.get("message_id"),
@@ -640,7 +719,13 @@ class WebSocketChatHandler:
             )
         except ChatRuntimeIntakeError as exc:
             await self.websocket.send_json(
-                {"type": "error", "content": str(exc), "code": exc.code}
+                _runtime_error_packet(
+                    code=exc.code,
+                    message=str(exc),
+                    agent_id=self.agent_id,
+                    stage="intake",
+                    run_id=resume_run_id,
+                )
             )
             return None
         resume_correlation_id = data.get("correlation_id")
@@ -649,11 +734,13 @@ class WebSocketChatHandler:
             str,
         ):
             await self.websocket.send_json(
-                {
-                    "type": "error",
-                    "content": "correlation_id must be a string",
-                    "code": "invalid_chat_resume_correlation",
-                }
+                _runtime_error_packet(
+                    code="invalid_chat_resume_correlation",
+                    message="correlation_id must be a string",
+                    agent_id=self.agent_id,
+                    stage="intake",
+                    run_id=resume_run_id,
+                )
             )
             return None
 
@@ -672,15 +759,18 @@ class WebSocketChatHandler:
             await self._route_openclaw(content)
             return None
         if effective_llm_model is None:
+            message = (
+                f"{self.agent_name} has no enabled LLM model configured. "
+                "Select a model in Agent Settings."
+            )
             await self.websocket.send_json(
-                {
-                    "type": "error",
-                    "content": (
-                        f"{self.agent_name} has no enabled LLM model configured. "
-                        "Select a model in Agent Settings."
-                    ),
-                    "code": "model_unavailable",
-                }
+                _runtime_error_packet(
+                    code="model_unavailable",
+                    message=message,
+                    agent_id=self.agent_id,
+                    stage="intake",
+                    run_id=resume_run_id,
+                )
             )
             return None
 
@@ -699,7 +789,13 @@ class WebSocketChatHandler:
         except ChatRuntimeIntakeError as exc:
             logger.warning(f"[WS] Runtime chat intake rejected ({exc.code}): {exc}")
             await self.websocket.send_json(
-                {"type": "error", "content": str(exc), "code": exc.code}
+                _runtime_error_packet(
+                    code=exc.code,
+                    message=str(exc),
+                    agent_id=self.agent_id,
+                    stage="intake",
+                    run_id=resume_run_id,
+                )
             )
             return None
         except Exception as exc:
@@ -715,20 +811,24 @@ class WebSocketChatHandler:
                 return None
             logger.exception(f"[WS] Runtime chat intake failed ({error_code}): {exc}")
             await self.websocket.send_json(
-                {
-                    "type": "error",
-                    "content": "Message could not be accepted by the durable Runtime.",
-                    "code": error_code,
-                }
+                _runtime_error_packet(
+                    code="runtime_intake_failed",
+                    message="Message could not be accepted by the durable Runtime.",
+                    agent_id=self.agent_id,
+                    stage="intake",
+                    run_id=resume_run_id,
+                )
             )
             return None
         if web_intake is None:
             await self.websocket.send_json(
-                {
-                    "type": "error",
-                    "content": "Durable Runtime is not enabled for native Web Chat.",
-                    "code": "runtime_disabled",
-                }
+                _runtime_error_packet(
+                    code="runtime_disabled",
+                    message="Durable Runtime is not enabled for native Web Chat.",
+                    agent_id=self.agent_id,
+                    stage="intake",
+                    run_id=resume_run_id,
+                )
             )
             return None
         return AcceptedWebChatMessage(
@@ -939,6 +1039,7 @@ class WebSocketChatHandler:
         *,
         expected_run_id: uuid.UUID | None = None,
     ) -> None:
+        run_id: uuid.UUID | None = None
         try:
             run_id = self._optional_client_uuid(data.get("run_id"), field="run_id")
             if run_id is None:
@@ -954,17 +1055,25 @@ class WebSocketChatHandler:
             handle = await self._cancel_runtime_run(run_id)
         except ChatRuntimeIntakeError as exc:
             await self.websocket.send_json(
-                {"type": "error", "content": str(exc), "code": exc.code}
+                _runtime_error_packet(
+                    code=exc.code,
+                    message=str(exc),
+                    agent_id=self.agent_id,
+                    stage="execution",
+                    run_id=run_id,
+                )
             )
             return
         except Exception as exc:
             logger.warning(f"[WS] Runtime cancel enqueue failed: {exc}")
             await self.websocket.send_json(
-                {
-                    "type": "error",
-                    "content": "Cancellation could not be accepted.",
-                    "code": getattr(exc, "code", "runtime_cancel_failed"),
-                }
+                _runtime_error_packet(
+                    code="runtime_cancel_failed",
+                    message="Cancellation could not be accepted.",
+                    agent_id=self.agent_id,
+                    stage="execution",
+                    run_id=run_id,
+                )
             )
             return
         await self.websocket.send_json(
@@ -998,6 +1107,7 @@ class WebSocketChatHandler:
                 session_id=session_id,
                 user_id=self.user.id,
                 after=intake.stream_after,
+                trace_id=get_trace_id() or None,
             ),
             name=f"web-chat-runtime-{intake.handle.run_id}",
         )
@@ -1046,12 +1156,13 @@ class WebSocketChatHandler:
                 except (asyncio.CancelledError, Exception):
                     pass
             await self.websocket.send_json(
-                {
-                    "type": "error",
-                    "content": "Runtime execution continues, but its live event stream was interrupted.",
-                    "code": getattr(exc, "code", "runtime_stream_failed"),
-                    "run_id": str(intake.handle.run_id),
-                }
+                _runtime_error_packet(
+                    code=getattr(exc, "code", "runtime_stream_failed"),
+                    message="Runtime execution continues, but its live event stream was interrupted.",
+                    agent_id=self.agent_id,
+                    stage="stream",
+                    run_id=intake.handle.run_id,
+                )
             )
             return None, queued_messages
 
@@ -1233,10 +1344,28 @@ class WebSocketChatHandler:
             await check_agent_expired(self.agent_id)
             return True
         except QuotaExceeded as qe:
-            await self.websocket.send_json({"type": "done", "role": "assistant", "content": f"⚠️ {qe.message}"})
+            await self.websocket.send_json(
+                _runtime_error_packet(
+                    code="quota_exceeded",
+                    message=f"⚠️ {qe.message}",
+                    agent_id=self.agent_id,
+                    stage="intake",
+                    type="done",
+                    role="assistant",
+                )
+            )
             return False
         except AgentExpired as ae:
-            await self.websocket.send_json({"type": "done", "role": "assistant", "content": f"⚠️ {ae.message}"})
+            await self.websocket.send_json(
+                _runtime_error_packet(
+                    code="agent_expired",
+                    message=f"⚠️ {ae.message}",
+                    agent_id=self.agent_id,
+                    stage="intake",
+                    type="done",
+                    role="assistant",
+                )
+            )
             return False
 
     async def _save_user_message(self, content: str, display_content: str, file_name: str, is_onboarding_trigger: bool):

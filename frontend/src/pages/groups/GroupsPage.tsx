@@ -462,10 +462,15 @@ export default function GroupsPage() {
             if (intake.run_ids.length > 0) void refetchActiveRuns();
 
             // Planning can fail before any agent starts — say so instead of leaving a silent gap.
-            if (intake.error_code) {
-                toast.warning(t('groups.dispatchWarning', '智能体唤醒未完成：{{code}}', {
-                    code: intake.error_code,
-                }));
+            if (intake.error || intake.error_code) {
+                const code = intake.error?.code ?? intake.error_code;
+                const message = intake.error?.message
+                    ?? t('groups.dispatchWarning', '智能体唤醒未完成');
+                const diagnostics = [
+                    code ? `Code: ${code}` : null,
+                    intake.error?.trace_id ? `Trace: ${intake.error.trace_id}` : null,
+                ].filter(Boolean).join(' · ');
+                toast.warning(diagnostics ? `${message} (${diagnostics})` : message);
             }
         } catch (error: any) {
             toast.error(error?.message ?? t('groups.sendFailed', '发送失败'));
