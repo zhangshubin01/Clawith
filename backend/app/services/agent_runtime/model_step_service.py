@@ -65,6 +65,12 @@ from app.services.llm.finish import (
     group_finish_tool_definition,
     parse_tool_arguments,
 )
+from app.services.llm.multimodal_content import (
+    MultimodalContentError,
+    estimate_multimodal_tokens,
+    multimodal_context_stats,
+    parse_multimodal_content,
+)
 from app.services.llm.single_step import LLMCompletionStep, complete_llm_once
 from app.services.llm.utils import get_max_tokens
 
@@ -257,18 +263,37 @@ def _error(code: str, message: str) -> ModelStepResult:
 
 
 def _estimate_tokens(value: object) -> int:
-    serialized = json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        default=str,
-    )
-    return max((len(serialized) + 2) // 3, 1)
+    return estimate_multimodal_tokens(value, chars_per_token=3)
 
 
 def _message_token_counter(messages: Sequence[Mapping[str, object]]) -> int:
     return _estimate_tokens(messages)
+
+
+def _log_provider_request_start(
+    *,
+    context: RuntimeContext,
+    model: LLMModel,
+    agent: Agent,
+    messages: Sequence[LLMMessage],
+    stage: str,
+) -> None:
+    stats = multimodal_context_stats(
+        [message.content for message in messages if message.content is not None]
+    )
+    logger.info(
+        "[RuntimeModelRequest] run_id={} agent_id={} model_id={} stage={} "
+        "provider={} model={} image_count={} image_bytes={} image_context_tokens={}",
+        context.run_id,
+        agent.id,
+        model.id,
+        stage,
+        model.provider,
+        model.model,
+        stats.image_count,
+        stats.decoded_bytes,
+        stats.image_context_tokens,
+    )
 
 
 def _tool_name(tool: Mapping[str, object]) -> str | None:
@@ -510,7 +535,7 @@ def _runtime_sections(build: RuntimeContextBuild) -> JsonObject:
 
 def _message_content(value: JsonValue) -> str | list:
     if isinstance(value, (str, list)):
-        return value
+        return parse_multimodal_content(value)
     return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
@@ -532,17 +557,17 @@ def _model_message_content(raw: Mapping[str, object], build: RuntimeContextBuild
         if (
             isinstance(initial_message_id, str)
             and raw.get("id") == initial_message_id
-            and isinstance(input_content, str)
+            and isinstance(input_content, (str, list))
         ):
-            return input_content
+            return parse_multimodal_content(input_content)
 
         if raw.get("runtime_input") == "resume" and isinstance(content, Mapping):
             resume_type = content.get("resume_type")
             payload = content.get("payload")
             if resume_type == "user_input" and isinstance(payload, Mapping):
                 resumed_content = payload.get("content")
-                if isinstance(resumed_content, str):
-                    return resumed_content
+                if isinstance(resumed_content, (str, list)):
+                    return parse_multimodal_content(resumed_content)
     return _message_content(content)
 
 
@@ -643,8 +668,13 @@ def _prompt_messages(
         append_history(deferred_current)
     if not initial_message_seen:
         input_content = build.initial_input.get("input_content")
-        if isinstance(input_content, str):
-            messages.append(LLMMessage(role="user", content=input_content))
+        if isinstance(input_content, (str, list)):
+            messages.append(
+                LLMMessage(
+                    role="user",
+                    content=parse_multimodal_content(input_content),
+                )
+            )
             initial_message_seen = True
     if not initial_message_seen:
         directive = _current_run_directive(build)
@@ -1454,6 +1484,13 @@ class RuntimeModelStepService:
             failed_over_from: LLMModel | None = None
             active_allowed_names = allowed_names
             try:
+                _log_provider_request_start(
+                    context=context,
+                    model=model,
+                    agent=agent,
+                    messages=prepared,
+                    stage="primary",
+                )
                 step = await self._call_prepared_with_retry(
                     model=model,
                     agent=agent,
@@ -1533,6 +1570,13 @@ class RuntimeModelStepService:
                 if isinstance(fallback_prepared, ModelStepResult):
                     return fallback_prepared
                 try:
+                    _log_provider_request_start(
+                        context=context,
+                        model=fallback,
+                        agent=agent,
+                        messages=fallback_prepared,
+                        stage="fallback",
+                    )
                     step = await self._call_prepared_with_retry(
                         model=fallback,
                         agent=agent,
@@ -1637,7 +1681,12 @@ class RuntimeModelStepService:
                     )
                 result = replace(result, assistant_message=assistant_message)
             return result
-        except (ContextBuildError, ModelCapabilityError, RuntimeModelCallError) as exc:
+        except (
+            ContextBuildError,
+            ModelCapabilityError,
+            MultimodalContentError,
+            RuntimeModelCallError,
+        ) as exc:
             logger.error(
                 "[RuntimeModelStepFailure] run_id={} agent_id={} error_code={} "
                 "error_type={} error_message={!r}",

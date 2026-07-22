@@ -1,5 +1,6 @@
 """Runtime model-step adapter tests."""
 
+import base64
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -14,6 +15,8 @@ from app.services.agent_runtime.context_builder import RuntimeContextBuild
 from app.services.agent_runtime.group_handoff import GroupAgentHandoffIntent
 from app.services.agent_runtime.group_handoff import GroupAgentHandoffError
 from app.services.agent_runtime.model_step_service import RuntimeModelStepService
+from app.services.agent_runtime.model_step_service import _message_token_counter
+from app.services.agent_runtime.model_step_service import _prompt_messages
 from app.services.agent_runtime.model_step_service import _visible_mention_names
 from app.services.agent_runtime.state import (
     RunInputSnapshots,
@@ -24,6 +27,13 @@ from app.services.agent_runtime.state import (
 from app.services.llm.single_step import LLMCompletionStep
 from app.services.llm.finish import FINISH_PROTOCOL_REMINDER
 from app.services.token_tracker import TokenUsage
+
+
+_TINY_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/"
+    "x8AAusB9Wl2ZQAAAABJRU5ErkJggg=="
+)
+_TINY_PNG_DATA_URL = f"data:image/png;base64,{_TINY_PNG_BASE64}"
 
 
 class _Result:
@@ -224,6 +234,67 @@ def _runtime_data_message(messages):
     ]
     assert len(matches) == 1
     return matches[0]
+
+
+def test_prompt_messages_compatibly_parse_legacy_image_checkpoint() -> None:
+    marker = f"[image_data:{_TINY_PNG_DATA_URL}] Inspect it"
+    build = _build(
+        current_run={"run_id": str(uuid.uuid4()), "goal": "Inspect"},
+        recent_session_messages_snapshot=(),
+        recent_thread_messages=(
+            {
+                "id": "current-image",
+                "role": "user",
+                "content": marker,
+                "runtime_input": "current",
+            },
+        ),
+        initial_input={
+            "message_id": "current-image",
+            "input_content": marker,
+        },
+    )
+
+    messages = _prompt_messages(
+        static_prompt="Static",
+        dynamic_prompt="Dynamic",
+        build=build,
+    )
+
+    assert messages[-1].content == [
+        {
+            "type": "image_url",
+            "image_url": {"url": _TINY_PNG_DATA_URL},
+        },
+        {"type": "text", "text": "Inspect it"},
+    ]
+
+
+def test_message_budget_does_not_treat_large_base64_as_text_tokens() -> None:
+    padded_png = base64.b64encode(
+        base64.b64decode(_TINY_PNG_BASE64) + b"x" * (1024 * 1024)
+    ).decode("ascii")
+    small = _message_token_counter(
+        [
+            {
+                "role": "user",
+                "content": f"[image_data:{_TINY_PNG_DATA_URL}] inspect",
+            }
+        ]
+    )
+    large = _message_token_counter(
+        [
+            {
+                "role": "user",
+                "content": (
+                    f"[image_data:data:image/png;base64,{padded_png}] inspect"
+                ),
+            }
+        ]
+    )
+
+    assert large < 500
+    assert abs(large - small) < 10
 
 
 def _context(state: RuntimeGraphState) -> RuntimeContext:
