@@ -10,11 +10,14 @@ services:
       POSTGRES_DB: clawith
     volumes:
       - pgdata:/var/lib/postgresql/data
+    shm_size: 256m
+    command: ${PG_COMMAND:-}
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U clawith" ]
-      interval: 5s
+      interval: 15s
       timeout: 5s
-      retries: 5
+      retries: 3
+      start_period: 30s
 
   redis:
     image: redis:7-alpine
@@ -23,11 +26,13 @@ services:
       - default
     volumes:
       - redisdata:/data
+    command: ${REDIS_COMMAND:-redis-server}
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
   backend:
     build:
@@ -63,15 +68,15 @@ services:
       # Password reset token lifetime in minutes (default: 30)
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
     volumes:
-      - ./backend/agent_data:/data/agents
+      - agentdata:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
     privileged: true
+    group_add:
+      - "0"  # root 组（docker.sock 属主），clawith 用户通过此组访问 Docker
     cap_add:
       - SYS_ADMIN
-    security_opt:
-      - seccomp=unconfined
-      - apparmor=unconfined
+    # security_opt 移除: seccomp/apparmor 在 macOS/OrbStack 不可用
     networks:
       - default
     depends_on:
@@ -103,6 +108,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  agentdata:
 
 
 networks:

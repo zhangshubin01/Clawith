@@ -145,6 +145,7 @@ async def lifespan(app: FastAPI):
     from app.services.wecom_stream import wecom_stream_manager
     from app.services.wechat_channel import wechat_poll_manager
     from app.services.discord_gateway import discord_gateway_manager
+    from app.services.feishu_channel_manager import feishu_channel_manager
 
     runtime_stack = AsyncExitStack()
 
@@ -308,6 +309,7 @@ async def lifespan(app: FastAPI):
         if _role_enabled("all", "connector"):
             task_specs.extend([
                 ("feishu_ws", feishu_ws_manager.start_all()),
+                ("feishu_channel", feishu_channel_manager.start_all()),
                 ("dingtalk_stream", dingtalk_stream_manager.start_all()),
                 ("wecom_stream", wecom_stream_manager.start_all()),
                 ("wechat_poll", wechat_poll_manager.start_all()),
@@ -340,6 +342,7 @@ async def lifespan(app: FastAPI):
         # Runtime shutdown cancels the active command task before closing its
         # Checkpointer, which releases the advisory lock and claim heartbeat.
         await runtime_stack.aclose()
+        await feishu_channel_manager.stop_all()
         await realtime_router.stop()
         await close_redis()
 

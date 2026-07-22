@@ -22,6 +22,8 @@ RUN if [ -n "$CLAWITH_PIP_INDEX_URL" ] && [ -n "$CLAWITH_PIP_TRUSTED_HOST" ]; th
     else \
         pip install --no-cache-dir . uv; \
     fi
+# lark-channel-sdk 仅在公共 PyPI 发布，清华镜像未同步
+RUN pip install --no-cache-dir lark-channel-sdk>=1.2.0
 
 # ─── Production ─────────────────────────────────────────
 FROM python:3.12-slim AS production

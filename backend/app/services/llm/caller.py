@@ -621,18 +621,17 @@ async def call_llm(
                     await client.close()
                     return _token_limit_msg
 
+        async def _noop_chunk(_text: str) -> None:
+            return None
+
         try:
             # Use streaming API for real-time responses
-            async def _buffer_chunk(_text: str) -> None:
-                # Final user-facing text must come through finish(content=...).
-                return None
-
             response = await client.stream(
                 messages=api_messages,
                 tools=tools_for_llm if tools_for_llm else None,
                 temperature=model.temperature,
                 max_tokens=max_tokens,
-                on_chunk=_buffer_chunk,
+                on_chunk=on_chunk if on_chunk else _noop_chunk,
                 on_tool_delta=on_tool_delta,
                 on_thinking=on_thinking,
             )
@@ -667,6 +666,18 @@ async def call_llm(
 
         # Execute tool calls
         logger.info(f"[LLM] Round {round_i+1}: {len(response.tool_calls)} tool call(s)")
+        
+        # 飞书流式桥接：通知工具调用
+        if not on_chunk and agent_id:
+            try:
+                from app.services.feishu_stream_bridge import get_active_bridge
+                _tb = get_active_bridge(str(agent_id))
+                if _tb is not None:
+                    import asyncio as _asyncio
+                    for tc in response.tool_calls:
+                        _asyncio.create_task(_tb.feed_tool_event("call", tc.get("function", {}).get("name", "tool")))
+            except ImportError:
+                pass
         sanitized_tool_calls, retry_instruction = _sanitize_tool_calls_for_context(response.tool_calls)
         if retry_instruction:
             if "invalid_tool_call" in _protocol_repairs:

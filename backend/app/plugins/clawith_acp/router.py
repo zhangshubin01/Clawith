@@ -22,9 +22,9 @@ async def acp_endpoint(websocket: WebSocket):
     认证: JWT Bearer token (header) 或 API Key (query param).
     Security: Origin 检查防止跨站 WebSocket 劫持 (CSWSH).
     """
-    # Origin 白名单检查 (ACP 客户端不发送 Origin → "null")
+    # Origin 白名单检查 (IDE 插件 Ktor 客户端不发送 Origin 头 → 空字符串)
     origin = websocket.headers.get("origin", "")
-    allowed_origins = {"null", "http://localhost", "http://127.0.0.1"}
+    allowed_origins = {"", "null", "http://localhost", "http://127.0.0.1"}
     if origin not in allowed_origins:
         logger.warning(f"[ACP] 连接被拒绝: 非法 Origin={origin}")
         await websocket.close(code=4003, reason="Forbidden: invalid origin")

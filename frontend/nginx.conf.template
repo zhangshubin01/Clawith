@@ -4,6 +4,13 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Gzip 压缩（SPA JS/CSS 资源可减少 60-80% 传输体积）
+    gzip on;
+    gzip_vary on;
+    gzip_types application/javascript text/css application/json image/svg+xml text/html text/plain;
+    gzip_min_length 1000;
+    gzip_comp_level 5;
+
     resolver 127.0.0.11 ipv6=off valid=30s;
     set $api_upstream http://${API_UPSTREAM};
 

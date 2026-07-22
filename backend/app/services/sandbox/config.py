@@ -16,6 +16,7 @@ class SandboxType(str, Enum):
     CODEDANDBOX = "codesandbox"
     SELF_HOSTED = "self_hosted"
     AIO_SANDBOX = "aio_sandbox"
+    ANDROID_BUILD = "android-build"
 
 
 class SandboxConfig(BaseModel):

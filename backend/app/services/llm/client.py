@@ -284,6 +284,14 @@ ToolCallback = Callable[[dict], Coroutine[Any, Any, None]]
 ThinkingCallback = Callable[[str], Coroutine[Any, Any, None]]
 
 
+# Phase 2: 飞书流式桥接 — LLM stream() 回调注入 token（stream 方法入参不传 agent_id，
+# 所以 stream 回调通过 _active_bridges_by_agent dict 查找，由 single_step.py 的
+# complete_llm_once 负责判断 bridge 活跃时改用 stream()）
+def _wrap_on_chunk_with_feishu_bridge(on_chunk: ChunkCallback | None) -> ChunkCallback | None:
+    """如果 on_chunk 已被 single_step.py 注入 bridge feed_token，直接返回。"""
+    return on_chunk
+
+
 # ============================================================================
 # Base Client Interface
 # ============================================================================
@@ -676,6 +684,7 @@ class OpenAICompatibleClient(LLMClient):
         **kwargs: Any,
     ) -> LLMResponse:
         """Streaming completion."""
+        on_chunk = _wrap_on_chunk_with_feishu_bridge(on_chunk)
         url = f"{self._normalize_base_url()}/chat/completions"
         payload = self._build_payload(messages, tools, temperature, max_tokens, stream=True, **kwargs)
         full_content = ""
@@ -1871,6 +1880,8 @@ class AnthropicClient(LLMClient):
         **kwargs: Any,
     ) -> LLMResponse:
         """Streaming completion."""
+        on_chunk = _wrap_on_chunk_with_feishu_bridge(on_chunk)
+
         url = f"{self._normalize_base_url()}/v1/messages"
         payload = self._build_payload(messages, tools, temperature, max_tokens, stream=True, **kwargs)
 

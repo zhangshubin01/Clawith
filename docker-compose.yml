@@ -10,11 +10,16 @@ services:
       POSTGRES_DB: clawith
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # M1/8GB 调优参数（通过 ${PG_TUNING:-default} 控制）
+    # 设为 "m1" 使用 M1 保守参数，默认不覆盖 PG 内置值
+    command: ${PG_COMMAND:-}
+    shm_size: 256m
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U clawith" ]
-      interval: 5s
+      interval: 15s
       timeout: 5s
-      retries: 5
+      retries: 3
+      start_period: 30s
 
   redis:
     image: redis:7-alpine
@@ -23,11 +28,14 @@ services:
       - default
     volumes:
       - redisdata:/data
+    # M1/8GB: 设置 REDIS_COMMAND="redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru --maxmemory-samples 10 --save '' --appendonly no --activedefrag yes"
+    command: ${REDIS_COMMAND:-redis-server}
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
   backend:
     build:
@@ -35,7 +43,18 @@ services:
       args:
         CLAWITH_PIP_INDEX_URL: ${CLAWITH_PIP_INDEX_URL:-}
         CLAWITH_PIP_TRUSTED_HOST: ${CLAWITH_PIP_TRUSTED_HOST:-}
+    platform: ${CLAWITH_PLATFORM:-}
     restart: unless-stopped
+    # M1/8GB 资源限制（通过 COMPOSE_RESOURCES 环境变量控制，默认无限制）
+    # M1 设置: COMPOSE_RESOURCES=true
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKEND_MEMORY_LIMIT:-4g}
+          cpus: '${BACKEND_CPU_LIMIT:-4}'
+        reservations:
+          memory: ${BACKEND_MEMORY_RESERVATION:-256m}
+          cpus: '${BACKEND_CPU_RESERVATION:-1}'
     command: ["/bin/bash", "/app/entrypoint.sh"]
     environment:
       DATABASE_URL: postgresql+asyncpg://clawith:clawith@postgres:5432/clawith
@@ -67,9 +86,9 @@ services:
       # Password reset token lifetime in minutes (default: 30)
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
     ports:
-      - "8008:8000"
+      - "${BACKEND_PORT:-8008}:8000"
     volumes:
-      - ./backend/agent_data:/data/agents
+      - agentdata:/data/agents
       - /var/run/docker.sock:/var/run/docker.sock
       - ./ss-nodes.json:/data/ss-nodes.json:ro
     privileged: true
@@ -92,6 +111,7 @@ services:
         max-file: "3"
   frontend:
     build: ./frontend
+    platform: ${CLAWITH_PLATFORM:-}
     restart: unless-stopped
     ports:
       - "${FRONTEND_PORT:-3008}:3000"
@@ -109,6 +129,7 @@ services:
 volumes:
   pgdata:
   redisdata:
+  agentdata:
 
 
 networks:

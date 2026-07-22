@@ -1070,7 +1070,47 @@ _BUILTIN_TOOL_SOURCE = [
             ]
         },
     },
-
+    # ── Android 编译工具 ────────────────────────────────────────────────────
+    {
+        "name": "android_compile",
+        "display_name": "Android 编译",
+        "description": "在 Docker 容器中编译 Android 项目，生成 APK/AAB 产物",
+        "category": "code",
+        "icon": "📱",
+        "is_default": False,
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "project_path": {
+                    "type": "string",
+                    "description": "Android 项目在 workspace 中的相对路径",
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Gradle 构建任务",
+                    "default": "assembleDebug",
+                },
+                "java_version": {
+                    "type": "string",
+                    "description": "JDK 版本",
+                    "default": "17",
+                    "enum": ["11", "17", "21"],
+                },
+            },
+            "required": ["project_path"],
+        },
+        "config": {
+            "sandbox_type": "android-build",
+            "max_timeout": 1800,
+        },
+        "config_schema": {
+            "fields": [
+                {"key": "max_timeout", "label": "超时(秒)", "type": "number", "default": 1800},
+                {"key": "java_version", "label": "JDK版本", "type": "select", "default": "17",
+                 "options": [{"value": "11", "label": "11"}, {"value": "17", "label": "17"}, {"value": "21", "label": "21"}]},
+            ],
+        },
+    },
     {
         "name": "upload_image",
         "display_name": "Upload Image",
@@ -3867,6 +3907,7 @@ _TIMEOUT_SECONDS: dict[str, int] = {
     "generate_image_openai": 120,
     "generate_image_google": 120,
     "generate_image_custom": 120,
+    "android_compile": 1800,
 }
 
 
@@ -3875,6 +3916,8 @@ def _policy_for_name(name: str) -> tuple[str, str, bool]:
         return "read", "safe", True
     if name in _LOCAL_WRITE_TOOL_NAMES:
         return "write", "conditional", False
+    if name == "android_compile":
+        return "write", "never", False
     return "external_write", "never", False
 
 
@@ -3888,6 +3931,8 @@ def _readiness(definition: Mapping[str, Any]) -> str:
         return "local"
     if name == "execute_code_e2b":
         return "e2b_configuration"
+    if name == "android_compile":
+        return "local"
     if name in _FEISHU_TOOL_NAMES:
         return "feishu_channel"
     if name in _EMAIL_TOOL_NAMES:

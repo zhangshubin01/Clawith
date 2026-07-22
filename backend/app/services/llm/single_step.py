@@ -53,7 +53,35 @@ async def complete_llm_once(
         base_url=model.base_url,
         timeout=_get_model_timeout(model),
     )
-    try:
+    # Phase 2: 飞书流式桥接 — 全局 dict 查找（跨 asyncio task 安全）
+    _bridge = None
+    if agent_id is not None:
+        try:
+            from app.services.feishu_stream_bridge import get_active_bridge
+            _bridge = get_active_bridge(str(agent_id))
+            from loguru import logger
+            logger.info("[Feishu-Stream] complete_llm_once: agent_id={}, has_bridge={}", str(agent_id), _bridge is not None)
+        except ImportError:
+            pass
+
+    if _bridge is not None:
+        from loguru import logger
+        logger.info("[Feishu-Stream] LLM bridge active, using stream() for token-by-token output")
+        try:
+            response = await client.stream(
+                messages=api_messages,
+                tools=tools or None,
+                temperature=model.temperature,
+                max_tokens=get_max_tokens(
+                    model.provider,
+                    model.model,
+                    getattr(model, "max_output_tokens", None),
+                ),
+                on_chunk=_bridge.feed_token,
+            )
+        finally:
+            await _bridge.feed_complete()
+    else:
         response = await client.complete(
             messages=api_messages,
             tools=tools or None,
@@ -64,8 +92,10 @@ async def complete_llm_once(
                 getattr(model, "max_output_tokens", None),
             ),
         )
-    finally:
+    try:
         await client.close()
+    except Exception:
+        pass
 
     usage = _usage_from_response_or_estimate(response, api_messages)
     if agent_id is not None and usage.total_tokens > 0:

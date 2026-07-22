@@ -2560,7 +2560,8 @@ async def _android_compile_outcome(
             )
         return _typed_success(f"Android build succeeded: {task}\n(no APK/AAB found)")
 
-    error_tail = (result.stdout or "").strip()
+    # Gradle 编译错误在 stderr，构建进度在 stdout。两者都返回以便 LLM 诊断
+    error_tail = (result.stderr or result.stdout or "").strip()
     if len(error_tail) > 2000:
         error_tail = "...(前段省略)...\n" + error_tail[-2000:]
     return _typed_failure(

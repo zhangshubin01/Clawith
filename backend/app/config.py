@@ -169,6 +169,7 @@ class Settings(BaseSettings):
     FEISHU_APP_ID: str = ""
     FEISHU_APP_SECRET: str = ""
     FEISHU_REDIRECT_URI: str = ""
+    FEISHU_DOMAIN: str = "https://open.feishu.cn"  # 飞书用 open.feishu.cn，Lark 国际版用 open.larksuite.com
     PUBLIC_BASE_URL: str = ""
     HTTP_PROXY: str = ""
 
