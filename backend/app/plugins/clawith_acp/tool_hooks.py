@@ -973,7 +973,7 @@ def install_acp_tool_hooks() -> None:
                 return result
 
         # terminal 工具 → ACP（policy 路由 blocking / streaming）
-        if tool_name in ("execute_command", "bash"):
+        if tool_name in ("acp_execute_command", "acp_bash"):
             from .terminal_policy import TerminalMode, effective_terminal_mode, resolve_terminal_policy
             from .tool_bridge import _try_acp_terminal, _try_acp_terminal_streaming
 
