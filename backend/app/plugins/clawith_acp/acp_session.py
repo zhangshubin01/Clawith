@@ -165,9 +165,7 @@ class AcpSessionManager:
                 .limit(raw_limit)
             )
             rows = list(reversed(hr.scalars().all()))
-            result = convert_chat_messages_to_llm_format(
-                rows, ctx_window=ctx_window, path="acp",
-            )
+            result = convert_chat_messages_to_llm_format(rows)
             if result and sess:
                 from app.services.llm.history_hydrate import hydrate_history_tool_results
 

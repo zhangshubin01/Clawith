@@ -485,6 +485,7 @@ RUNTIME_TYPED_APPLICATION_TOOL_NAMES = frozenset(
         "send_message_to_agent",
         "execute_code",
         "execute_code_e2b",
+        "android_compile",
         "convert_csv_to_xlsx",
         "convert_html_to_pdf",
         "convert_html_to_pptx",
@@ -2474,6 +2475,100 @@ async def _edit_file_outcome(
     )
 
 
+# ── Android 编译工具 ───────────────────────────────────────────────────────
+async def _android_compile_outcome(
+    agent_id: uuid.UUID | None,
+    arguments: dict,
+    *,
+    on_output=None,
+) -> ToolExecutionOutcome:
+    """在 Docker 沙箱中编译 Android 项目，返回产物路径或错误信息。"""
+    project_path = arguments.get("project_path", "")
+    task = arguments.get("task", "assembleDebug")
+    java_version = str(arguments.get("java_version", "17"))
+
+    if not project_path or not isinstance(project_path, str):
+        return _typed_failure("project_path required", "invalid_tool_arguments")
+
+    # 路径边界检查：防止目录穿越
+    from app.services.workspace_paths import resolve_path_within_root, WorkspacePathError
+
+    ws = _agent_workspace_root(agent_id)
+    try:
+        full_path = resolve_path_within_root(ws, project_path, label="project_path")
+    except WorkspacePathError:
+        return _typed_failure("Invalid project path", "path_traversal_denied")
+
+    if not (full_path / "gradlew").exists() and not (full_path / "gradlew.bat").exists():
+        return _typed_failure("gradlew not found", "android_project_not_found")
+
+    # 沙箱路由：合并四层配置（builtin → DB → env）
+    from app.config import get_sandbox_config
+    from app.services.sandbox.config import SandboxConfig, SandboxType
+    from app.services.sandbox.registry import get_sandbox_backend
+
+    tool_config = await _get_tool_config(agent_id, "android_compile")
+    fallback_config = get_sandbox_config()
+    merged_config = {**(tool_config or {}), "sandbox_type": "android-build"}
+    sandbox_config = SandboxConfig.from_dict(merged_config, fallback_config)
+    timeout = min(1800, sandbox_config.max_timeout)
+    backend = get_sandbox_backend(sandbox_config)
+
+    try:
+        result = await backend.execute(
+            code="",
+            language="bash",
+            timeout=timeout,
+            work_dir=str(full_path),
+            project_path=str(full_path),
+            gradle_task=task,
+            java_version=java_version,
+            on_output=on_output,
+        )
+    except Exception as exc:
+        logger.exception("[android_compile] sandbox failed agent={}: {}", agent_id, exc)
+        return _typed_failure("Android build platform error", "sandbox_execution_failed")
+
+    # 结果处理
+    if result.success and result.exit_code == 0:
+        apk_files: list[str] = []
+        for scan_dir in [full_path / "app/build/outputs/apk",
+                          full_path / "app/build/outputs/bundle"]:
+            if not scan_dir.is_dir():
+                continue
+            try:
+                for pattern in ("*.apk", "*.aab"):
+                    for f in scan_dir.rglob(pattern):
+                        apk_files.append(str(f.relative_to(full_path)))
+            except (OSError, PermissionError):
+                logger.warning("[android_compile] scan error: {}", scan_dir)
+
+        # 标准路径未找到 → 递归扫描全项目（覆盖多模块/自定义 buildDir）
+        if not apk_files:
+            for pattern in ("*.apk", "*.aab"):
+                try:
+                    for f in full_path.rglob(f"**/build/outputs/**/{pattern}"):
+                        apk_files.append(str(f.relative_to(full_path)))
+                except (OSError, PermissionError):
+                    pass
+
+        if apk_files:
+            return _typed_success(
+                f"Android build succeeded: {task}\n\n"
+                f"产物 ({len(apk_files)} 个):\n"
+                + "\n".join(f"  - {f}" for f in apk_files)
+            )
+        return _typed_success(f"Android build succeeded: {task}\n(no APK/AAB found)")
+
+    error_tail = (result.stdout or "").strip()
+    if len(error_tail) > 2000:
+        error_tail = "...(前段省略)...\n" + error_tail[-2000:]
+    return _typed_failure(
+        f"Android build failed (exit {result.exit_code}).\n\n{error_tail}",
+        "sandbox_execution_failed",
+    )
+
+
 async def execute_builtin_tool_outcome(
     tool_name: str,
     arguments: dict,
@@ -2605,6 +2700,12 @@ async def execute_builtin_tool_outcome(
             ),
             sync_back=True,
             sync_back_on_non_success=True,
+        )
+    if tool_name == "android_compile":
+        return await _android_compile_outcome(
+            agent_id,
+            arguments,
+            on_output=on_output,
         )
     if tool_name == "read_webpage":
         return await _read_webpage_outcome(arguments)
@@ -24496,3 +24597,50 @@ async def _neon_create_database(agent_id: uuid.UUID, arguments: dict) -> str:
         outcome,
         fallback="Neon database creation returned no summary.",
     )
+
+
+# ─── ACP 自主权闸门 ──────────────────────────────────────────────
+
+_TOOL_AUTONOMY_MAP: dict[str, str] = {
+    "write_file": "write_workspace_files",
+    "edit_file": "write_workspace_files",
+    "delete_file": "delete_files",
+    "execute_code": "execute_code",
+    "execute_command": "execute_code",
+}
+
+
+async def check_tool_autonomy(
+    tool_name: str,
+    args: dict,
+    agent_id: uuid.UUID,
+    user_id: uuid.UUID,
+    *,
+    notify: bool = False,
+) -> str | None:
+    """检查工具调用是否需要自主权审批。返回 None 表示允许，返回字符串表示阻止原因。
+
+    ACP 路径下的工具自主权闸门。IDE 插件端的 DeletePermissionRow 已处理删除审批，
+    此处仅处理写文件和执行代码两类高风险操作的审批检查。
+    """
+    category = _TOOL_AUTONOMY_MAP.get(tool_name)
+    if category is None:
+        return None  # ACP 只检查已注册的写/执行操作
+
+    from app.models.agent import Agent
+    from app.database import async_session
+    from sqlalchemy import select
+
+    async with async_session() as db:
+        result = await db.execute(select(Agent).where(Agent.id == agent_id))
+        agent = result.scalar_one_or_none()
+
+    if agent is None:
+        return f"Agent {agent_id} not found"
+
+    # 检查 Agent 自主策略是否允许此操作
+    policy = agent.autonomy_policy or {}
+    allowed = policy.get(category, True)
+    if allowed:
+        return None
+    return f"Autonomy policy blocks {tool_name} (category: {category})"
