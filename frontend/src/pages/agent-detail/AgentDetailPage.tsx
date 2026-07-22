@@ -6371,7 +6371,7 @@ export default function AgentDetailPage() {
                             write: (p, c) => fileApi.write(id!, p, c),
                             delete: (p) => fileApi.delete(id!, p),
                             upload: (file, path, onProgress) => fileApi.upload(id!, file, path + '/', onProgress),
-                            downloadUrl: (p) => fileApi.downloadUrl(id!, p),
+                            downloadUrl: (p, options) => fileApi.downloadUrl(id!, p, options),
                         };
                         return <FileBrowser api={adapter} rootPath="workspace" features={{ upload: canManage, newFile: canManage, newFolder: canManage, edit: canManage, delete: canManage, directoryNavigation: true }} />;
                     })()

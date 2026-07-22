@@ -2152,7 +2152,7 @@
     "announcementPlaceholder": "Group goals, collaboration rules, what agents should do here...",
     "workspace": "Files",
     "workspaceNote": "The group workspace is shared by every session in this group. Agents drop their outputs here too.",
-    "workspaceUploadTextOnly": "The group workspace currently accepts UTF-8 text files only.",
+    "workspaceUploadUnsupported": "The group workspace does not support this file format.",
     "workspaceUploadInvalidName": "File names cannot contain path separators.",
     "workspaceUploadInvalidUtf8": "The file is not valid UTF-8 text and was not uploaded.",
     "memory": "Memory",
