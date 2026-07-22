@@ -38,7 +38,7 @@ class AcpSessionManager:
         if self._history_cache.pop(session_id, None) is not None:
             logger.debug("[ACP] history cache invalidated session={}", session_id[:8])
 
-    async def create(self, user_id: str, agent_id: str, cwd: str = "") -> str:
+    async def create(self, user_id: str, agent_id: str, tenant_id: str, cwd: str = "") -> str:
         """创建新会话 — source_channel="acp", project_path=cwd。"""
         session_id = str(uuid.uuid4())
 
@@ -47,11 +47,11 @@ class AcpSessionManager:
                 id=session_id,
                 user_id=user_id,
                 agent_id=agent_id,
-                title="ACP 会话",
-                project_path=cwd,           # ChatSession.cwd → project_path
+                tenant_id=uuid.UUID(tenant_id),
+                title=cwd or "ACP 会话",
+                session_type="direct",
                 source_channel="acp",
-                client_type="ide_acp",
-                created_at=datetime.now(timezone.utc),
+                is_group=False,
             )
             db.add(session)
             await db.commit()
@@ -108,7 +108,7 @@ class AcpSessionManager:
             )
             return {
                 "agent_id": str(session.agent_id),
-                "cwd": session.project_path or "",  # ChatSession.project_path
+                "cwd": session.title or "",  # acp_session 将 cwd 存储在 title 字段
                 "history": history,
                 "historyHasTools": tool_call_count > 0,
                 "tool_call_count": tool_call_count,
