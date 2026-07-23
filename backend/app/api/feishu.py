@@ -22,6 +22,10 @@ from app.services.agent_runtime.chat_intake import ChatRuntimeIntake
 from app.services.feishu_service import feishu_service
 from app.services.llm.model_resolution import active_agent_model_candidates
 from app.services.storage import store_agent_upload
+from app.config import get_settings
+
+settings = get_settings()
+_FEISHU_BASE = settings.FEISHU_DOMAIN
 
 router = APIRouter(tags=["feishu"])
 
@@ -159,7 +163,7 @@ async def configure_channel(
         import asyncio
         mode = existing.extra_config.get("connection_mode", "webhook")
         if mode == "websocket":
-            asyncio.create_task(feishu_ws_manager.start_client(agent_id, existing.app_id, existing.app_secret))
+            asyncio.create_task(feishu_ws_manager.start_client(agent_id, existing.app_id, existing.app_secret, domain=_FEISHU_BASE))
         else:
             asyncio.create_task(feishu_ws_manager.stop_client(agent_id))
         
@@ -183,7 +187,7 @@ async def configure_channel(
     import asyncio
     mode = config.extra_config.get("connection_mode", "webhook")
     if mode == "websocket":
-        asyncio.create_task(feishu_ws_manager.start_client(agent_id, config.app_id, config.app_secret))
+        asyncio.create_task(feishu_ws_manager.start_client(agent_id, config.app_id, config.app_secret, domain=_FEISHU_BASE))
 
     return ChannelConfigOut.model_validate(config)
 
@@ -259,13 +263,13 @@ async def _resolve_feishu_sender(
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             token_response = await client.post(
-                "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
+                f"{_FEISHU_BASE}/open-apis/auth/v3/app_access_token/internal",
                 json={"app_id": config.app_id, "app_secret": config.app_secret},
             )
             app_token = token_response.json().get("app_access_token", "")
             if app_token:
                 user_response = await client.get(
-                    f"https://open.feishu.cn/open-apis/contact/v3/users/{sender_open_id}",
+                    f"{_FEISHU_BASE}/open-apis/contact/v3/users/{sender_open_id}",
                     params={"user_id_type": "open_id"},
                     headers={"Authorization": f"Bearer {app_token}"},
                 )

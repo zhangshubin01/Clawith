@@ -22,10 +22,11 @@ from app.models.identity import IdentityProvider
 
 settings = get_settings()
 
-FEISHU_TOKEN_URL = "https://open.feishu.cn/open-apis/authen/v1/oidc/access_token"
-FEISHU_USER_INFO_URL = "https://open.feishu.cn/open-apis/authen/v1/user_info"
-FEISHU_APP_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
-FEISHU_SEND_MSG_URL = "https://open.feishu.cn/open-apis/im/v1/messages"
+_FEISHU_BASE = settings.FEISHU_DOMAIN
+FEISHU_TOKEN_URL = ff"{_FEISHU_BASE}/open-apis/authen/v1/oidc/access_token"
+FEISHU_USER_INFO_URL = ff"{_FEISHU_BASE}/open-apis/authen/v1/user_info"
+FEISHU_APP_TOKEN_URL = ff"{_FEISHU_BASE}/open-apis/auth/v3/app_access_token/internal"
+FEISHU_SEND_MSG_URL = ff"{_FEISHU_BASE}/open-apis/im/v1/messages"
 
 class FeishuAPIError(RuntimeError):
     """Structured Feishu API error that preserves provider-returned details."""
@@ -397,7 +398,7 @@ class FeishuService:
             app_token = token_resp.json().get("app_access_token", "")
 
             resp = await client.patch(
-                f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}",
+                f"{_FEISHU_BASE}/open-apis/im/v1/messages/{message_id}",
                 json={
                     "content": content,
                 },
@@ -430,7 +431,7 @@ class FeishuService:
                 body["mobiles"] = [mobile]
 
             resp = await client.post(
-                "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id",
+                f"{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
                 json=body,
                 headers={"Authorization": f"Bearer {app_token}"},
                 params={"user_id_type": "open_id"},
@@ -470,7 +471,7 @@ class FeishuService:
                 body["mobiles"] = [mobile]
 
             resp = await client.post(
-                "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id",
+                f"{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
                 json=body,
                 headers={"Authorization": f"Bearer {app_token}"},
                 params={"user_id_type": "user_id"},
@@ -525,7 +526,7 @@ class FeishuService:
             })
             app_token = token_resp.json().get("app_access_token", "")
             resp = await client.get(
-                f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/resources/{file_key}",
+                f"{_FEISHU_BASE}/open-apis/im/v1/messages/{message_id}/resources/{file_key}",
                 params={"type": resource_type},
                 headers={"Authorization": f"Bearer {app_token}"},
             )
@@ -560,7 +561,7 @@ class FeishuService:
             if ext in (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".txt", ".md"):
                 feishu_file_type = "stream"
             upload_resp = await client.post(
-                "https://open.feishu.cn/open-apis/im/v1/files",
+                f"{_FEISHU_BASE}/open-apis/im/v1/files",
                 files={"file": (fp.name, file_bytes, "application/octet-stream")},
                 data={"file_type": feishu_file_type, "file_name": fp.name},
                 headers=headers,
@@ -608,7 +609,7 @@ class FeishuService:
         tenant_token = await self.get_tenant_access_token(app_id, app_secret)
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
-                f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables",
+                f"{_FEISHU_BASE}/open-apis/bitable/v1/apps/{app_token}/tables",
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
             return self._parse_api_response(
@@ -621,7 +622,7 @@ class FeishuService:
         tenant_token = await self.get_tenant_access_token(app_id, app_secret)
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
-                f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields",
+                f"{_FEISHU_BASE}/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields",
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
             return self._parse_api_response(
@@ -650,7 +651,7 @@ class FeishuService:
             params["page_token"] = page_token
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
+                f"{_FEISHU_BASE}/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search",
                 json=body,
                 params=params,
                 headers={"Authorization": f"Bearer {tenant_token}"}
@@ -665,7 +666,7 @@ class FeishuService:
         tenant_token = await self.get_tenant_access_token(app_id, app_secret)
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records",
+                f"{_FEISHU_BASE}/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records",
                 json={"fields": fields},
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -679,7 +680,7 @@ class FeishuService:
         tenant_token = await self.get_tenant_access_token(app_id, app_secret)
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.put(
-                f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
+                f"{_FEISHU_BASE}/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
                 json={"fields": fields},
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -693,7 +694,7 @@ class FeishuService:
         tenant_token = await self.get_tenant_access_token(app_id, app_secret)
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.delete(
-                f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
+                f"{_FEISHU_BASE}/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}",
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
             return self._parse_api_response(
@@ -719,7 +720,7 @@ class FeishuService:
             body["folder_token"] = folder_token
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                "https://open.feishu.cn/open-apis/bitable/v1/apps",
+                f"{_FEISHU_BASE}/open-apis/bitable/v1/apps",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"},
             )
@@ -735,7 +736,7 @@ class FeishuService:
         tenant_token = await self.get_tenant_access_token(app_id, app_secret)
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
-                f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/raw_content",
+                f"{_FEISHU_BASE}/open-apis/docx/v1/documents/{document_id}/raw_content",
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
             return self._parse_api_response(resp, stage="doc_read")
@@ -748,7 +749,7 @@ class FeishuService:
             body["folder_token"] = folder_token
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                "https://open.feishu.cn/open-apis/docx/v1/documents",
+                f"{_FEISHU_BASE}/open-apis/docx/v1/documents",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -776,7 +777,7 @@ class FeishuService:
         }
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children",
+                f"{_FEISHU_BASE}/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -787,7 +788,7 @@ class FeishuService:
         tenant_token = await self.get_tenant_access_token(app_id, app_secret)
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(
-                f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks/{block_id}/children",
+                f"{_FEISHU_BASE}/open-apis/docx/v1/documents/{document_id}/blocks/{block_id}/children",
                 json={"children": blocks},
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -804,7 +805,7 @@ class FeishuService:
         }
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                "https://open.feishu.cn/open-apis/approval/v4/instances",
+                f"{_FEISHU_BASE}/open-apis/approval/v4/instances",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -818,7 +819,7 @@ class FeishuService:
             body["status"] = status
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                "https://open.feishu.cn/open-apis/approval/v4/instances/query",
+                f"{_FEISHU_BASE}/open-apis/approval/v4/instances/query",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -829,7 +830,7 @@ class FeishuService:
         tenant_token = await self.get_tenant_access_token(app_id, app_secret)
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
-                f"https://open.feishu.cn/open-apis/approval/v4/instances/{instance_id}",
+                f"{_FEISHU_BASE}/open-apis/approval/v4/instances/{instance_id}",
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
             return resp.json()
