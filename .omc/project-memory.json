@@ -141,8 +141,8 @@
   "hotPaths": [
     {
       "path": "backend/app/api/feishu.py",
-      "accessCount": 196,
-      "lastAccessed": 1784817653841,
+      "accessCount": 206,
+      "lastAccessed": 1784822600238,
       "type": "file"
     },
     {
@@ -159,8 +159,8 @@
     },
     {
       "path": "backend/app/services/feishu_ws.py",
-      "accessCount": 79,
-      "lastAccessed": 1784817045725,
+      "accessCount": 80,
+      "lastAccessed": 1784822434308,
       "type": "file"
     },
     {
@@ -225,8 +225,8 @@
     },
     {
       "path": "backend/app/services/agent_runtime/channel_chat.py",
-      "accessCount": 16,
-      "lastAccessed": 1784795489390,
+      "accessCount": 17,
+      "lastAccessed": 1784822520419,
       "type": "file"
     },
     {
@@ -249,14 +249,14 @@
     },
     {
       "path": "backend/app/services/agent_runtime/chat_intake.py",
-      "accessCount": 11,
-      "lastAccessed": 1784795501731,
+      "accessCount": 12,
+      "lastAccessed": 1784822541974,
       "type": "file"
     },
     {
       "path": "backend/app/services/channel_user_service.py",
-      "accessCount": 9,
-      "lastAccessed": 1784771223673,
+      "accessCount": 10,
+      "lastAccessed": 1784817926164,
       "type": "file"
     },
     {
