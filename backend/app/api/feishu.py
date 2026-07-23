@@ -24,8 +24,8 @@ from app.services.llm.model_resolution import active_agent_model_candidates
 from app.services.storage import store_agent_upload
 from app.config import get_settings
 
-settings = get_settings()
-_FEISHU_BASE = settings.FEISHU_DOMAIN
+_settings = get_settings()
+_FEISHU_BASE = _settings.FEISHU_DOMAIN
 
 router = APIRouter(tags=["feishu"])
 
@@ -324,9 +324,7 @@ async def _accept_feishu_runtime_message(
     from app.models.agent import Agent
     from app.services.channel_session import find_or_create_channel_session
 
-    logger.info(f"[Feishu-Runtime] _accept_feishu_runtime_message START: agent={agent_id}, sender={sender_user_id!r}")
     async with _async_session() as db:
-        logger.info(f"[Feishu-Runtime] DB session opened, querying agent {agent_id}")
         agent_result = await db.execute(
             select(Agent).where(
                 Agent.id == agent_id,
@@ -545,7 +543,6 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
         if not display_content and "[image_data:" in user_text:
             display_content = "[图片]"
 
-        logger.info(f"[Feishu] Dispatching to runtime: content={user_text[:80]!r}, sender={sender_user_id_from_event!r}, chat_type={chat_type}")
         try:
             await _accept_feishu_runtime_message(
                 agent_id=agent_id,
@@ -558,7 +555,6 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
                 display_content=display_content,
                 external_event_id=event_id or message.get("message_id"),
             )
-            logger.info(f"[Feishu] Runtime intake OK for agent {agent_id}")
         except Exception as exc:
             from app.services.channel_user_service import ChannelUserResolutionError
 

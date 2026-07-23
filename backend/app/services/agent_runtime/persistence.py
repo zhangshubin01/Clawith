@@ -932,6 +932,38 @@ async def release_rejected_start_lanes(db: AsyncSession) -> int:
     return max(result.rowcount or 0, 0)
 
 
+def _release_completed_start_lanes_statement():
+    """Releases lanes held by completed (applied/rejected) start commands."""
+    completed_start = exists(
+        select(AgentRunCommand.id).where(
+            AgentRunCommand.tenant_id == AgentRun.tenant_id,
+            AgentRunCommand.run_id == AgentRun.id,
+            AgentRunCommand.command_type == "start",
+            AgentRunCommand.status.in_(("applied", "rejected")),
+        )
+    )
+    return (
+        update(AgentRun)
+        .where(
+            AgentRun.lane_held.is_(True),
+            completed_start,
+        )
+        .values(
+            lane_held=False,
+            lane_claimed_at=None,
+        )
+    )
+
+
+async def release_completed_start_lanes(db: AsyncSession) -> int:
+    """Release scheduling lanes held by completed start commands.
+
+    修复因 daemon 重启/崩溃导致已 applied 命令仍持有通道锁的问题。
+    """
+    result = await db.execute(_release_completed_start_lanes_statement())
+    return max(result.rowcount or 0, 0)
+
+
 async def renew_command_claim(
     db: AsyncSession,
     *,
