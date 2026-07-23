@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"docker exec clawith-backend-1 ls /app/app/services/feishu_channel_manager.py /app/app/services/feishu_stream_bridge.py /app/app/services/credential_crypto.py 2>&1\",\"description\":\"Verify ne...",
+  "error": "Exit code 2\n/app/app/services/credential_crypto.py\nls: cannot access '/app/app/services/feishu_channel_manager.py': No such file or directory\nls: cannot access '/app/app/services/feishu_stream_bridge.py': No such file or directory",
+  "timestamp": "2026-07-22T08:46:31.076Z",
+  "retry_count": 1
+}

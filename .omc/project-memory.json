@@ -1,0 +1,444 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1784732785966,
+  "projectRoot": "/Users/shubinzhang/Documents/agent/Clawith",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "assets",
+      "docs"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "assets": {
+      "path": "assets",
+      "purpose": "Static assets",
+      "fileCount": 3,
+      "lastAccessed": 1784732785944,
+      "keyFiles": [
+        "Clawith_QRcode.png",
+        "Clawith_slogan.png",
+        "slogan.png"
+      ]
+    },
+    "backend": {
+      "path": "backend",
+      "purpose": null,
+      "fileCount": 15,
+      "lastAccessed": 1784732785944,
+      "keyFiles": [
+        "ALEMBIC_GUIDELINES.md",
+        "Dockerfile",
+        "Dockerfile.android-builder",
+        "VERSION",
+        "agentbay.log"
+      ]
+    },
+    "backups": {
+      "path": "backups",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1784732785945,
+      "keyFiles": []
+    },
+    "clawith_acp": {
+      "path": "clawith_acp",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1784732785945,
+      "keyFiles": []
+    },
+    "deploy": {
+      "path": "deploy",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1784732785945,
+      "keyFiles": [
+        "docker-compose-multi.yml",
+        "docker-compose.yml"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 16,
+      "lastAccessed": 1784732785945,
+      "keyFiles": [
+        "P1-压缩空档修复-plan.md",
+        "acp-architecture-analysis.md",
+        "android-compile-bugfix-plan.md",
+        "android-compile-implementation-plan.md",
+        "android-docker-build-environment.md"
+      ]
+    },
+    "frontend": {
+      "path": "frontend",
+      "purpose": null,
+      "fileCount": 9,
+      "lastAccessed": 1784732785946,
+      "keyFiles": [
+        "Dockerfile",
+        "VERSION",
+        "index.html",
+        "nginx.conf.template",
+        "package-lock.json"
+      ]
+    },
+    "helm": {
+      "path": "helm",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1784732785946,
+      "keyFiles": [
+        "QUICKSTART.md",
+        "QUICKSTART_EN.md"
+      ]
+    },
+    "frontend/dist": {
+      "path": "frontend/dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 16,
+      "lastAccessed": 1784732785949,
+      "keyFiles": [
+        "atlassian.png",
+        "dingtalk.png",
+        "discord.png"
+      ]
+    },
+    "frontend/node_modules": {
+      "path": "frontend/node_modules",
+      "purpose": "Dependencies",
+      "fileCount": 1,
+      "lastAccessed": 1784732785952,
+      "keyFiles": []
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "backend/app/api/feishu.py",
+      "accessCount": 196,
+      "lastAccessed": 1784817653841,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/feishu_service.py",
+      "accessCount": 147,
+      "lastAccessed": 1784817593188,
+      "type": "file"
+    },
+    {
+      "path": "docs/feishu-channel-research.md",
+      "accessCount": 106,
+      "lastAccessed": 1784772619866,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/feishu_ws.py",
+      "accessCount": 79,
+      "lastAccessed": 1784817045725,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/main.py",
+      "accessCount": 69,
+      "lastAccessed": 1784795495446,
+      "type": "file"
+    },
+    {
+      "path": "docs/acp-architecture-analysis.md",
+      "accessCount": 50,
+      "lastAccessed": 1784702814961,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_tools.py",
+      "accessCount": 47,
+      "lastAccessed": 1784771974880,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/plugins/clawith_acp/acp_handler.py",
+      "accessCount": 41,
+      "lastAccessed": 1784777391462,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/tool_step_service.py",
+      "accessCount": 41,
+      "lastAccessed": 1784800469576,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/plugins/clawith_acp/tool_bridge.py",
+      "accessCount": 31,
+      "lastAccessed": 1784705784946,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/channel_provider_delivery.py",
+      "accessCount": 30,
+      "lastAccessed": 1784792527594,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/models/channel_config.py",
+      "accessCount": 23,
+      "lastAccessed": 1784773082278,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/core/security.py",
+      "accessCount": 22,
+      "lastAccessed": 1784772672509,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/plugins/clawith_acp/tool_hooks.py",
+      "accessCount": 17,
+      "lastAccessed": 1784705745767,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/channel_chat.py",
+      "accessCount": 16,
+      "lastAccessed": 1784795489390,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/plugins/clawith_acp/acp_session.py",
+      "accessCount": 15,
+      "lastAccessed": 1784706140318,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/plugins/clawith_acp/router.py",
+      "accessCount": 13,
+      "lastAccessed": 1784702840569,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/config.py",
+      "accessCount": 12,
+      "lastAccessed": 1784771514472,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/chat_intake.py",
+      "accessCount": 11,
+      "lastAccessed": 1784795501731,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/channel_user_service.py",
+      "accessCount": 9,
+      "lastAccessed": 1784771223673,
+      "type": "file"
+    },
+    {
+      "path": "docker-compose.yml",
+      "accessCount": 9,
+      "lastAccessed": 1784817455077,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/plugins/clawith_acp/acp_routes.py",
+      "accessCount": 8,
+      "lastAccessed": 1784705328759,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/tool_execution.py",
+      "accessCount": 8,
+      "lastAccessed": 1784777289467,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/channel_delivery.py",
+      "accessCount": 7,
+      "lastAccessed": 1784770933369,
+      "type": "file"
+    },
+    {
+      "path": "backend/Dockerfile",
+      "accessCount": 6,
+      "lastAccessed": 1784733413388,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/plugins/clawith_acp/__init__.py",
+      "accessCount": 5,
+      "lastAccessed": 1784702945611,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/langgraph_driver.py",
+      "accessCount": 5,
+      "lastAccessed": 1784704805184,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/llm/utils.py",
+      "accessCount": 4,
+      "lastAccessed": 1784702938153,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/checkpointer.py",
+      "accessCount": 4,
+      "lastAccessed": 1784705001680,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/api/gateway.py",
+      "accessCount": 4,
+      "lastAccessed": 1784771996755,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/models/agent_tool_execution.py",
+      "accessCount": 3,
+      "lastAccessed": 1784640329934,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/models/agent_run.py",
+      "accessCount": 3,
+      "lastAccessed": 1784795471736,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/models/agent_run_event.py",
+      "accessCount": 3,
+      "lastAccessed": 1784795506309,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/experience_retrieval.py",
+      "accessCount": 2,
+      "lastAccessed": 1784638858116,
+      "type": "file"
+    },
+    {
+      "path": "backend/.dockerignore",
+      "accessCount": 2,
+      "lastAccessed": 1784639006660,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/graph.py",
+      "accessCount": 2,
+      "lastAccessed": 1784639804828,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/models/chat_session.py",
+      "accessCount": 2,
+      "lastAccessed": 1784640410659,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_context.py",
+      "accessCount": 1,
+      "lastAccessed": 1784638848767,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/skill_seeder.py",
+      "accessCount": 1,
+      "lastAccessed": 1784638849169,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/a2a_runtime.py",
+      "accessCount": 1,
+      "lastAccessed": 1784638849356,
+      "type": "file"
+    },
+    {
+      "path": "frontend/Dockerfile",
+      "accessCount": 1,
+      "lastAccessed": 1784638932465,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/agent_runtime/state.py",
+      "accessCount": 1,
+      "lastAccessed": 1784639541256,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/core/permissions.py",
+      "accessCount": 1,
+      "lastAccessed": 1784639610246,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/database.py",
+      "accessCount": 1,
+      "lastAccessed": 1784640315993,
+      "type": "file"
+    },
+    {
+      "path": "backend/.venv/lib/python3.14/site-packages/lark_oapi/channel/auth/token_store.py",
+      "accessCount": 1,
+      "lastAccessed": 1784640575948,
+      "type": "file"
+    },
+    {
+      "path": "backend/.venv/lib/python3.14/site-packages/lark_oapi/channel/auth/__init__.py",
+      "accessCount": 1,
+      "lastAccessed": 1784640576329,
+      "type": "file"
+    },
+    {
+      "path": "backend/.venv/lib/python3.14/site-packages/lark_oapi/channel/channel.py",
+      "accessCount": 1,
+      "lastAccessed": 1784640576830,
+      "type": "file"
+    },
+    {
+      "path": "backend/.venv/lib/python3.14/site-packages/lark_oapi/channel/_api_helpers.py",
+      "accessCount": 1,
+      "lastAccessed": 1784640582489,
+      "type": "file"
+    },
+    {
+      "path": "backend/.venv/lib/python3.14/site-packages/lark_oapi/channel/safety/dedup_cache.py",
+      "accessCount": 1,
+      "lastAccessed": 1784640582955,
+      "type": "file"
+    },
+    {
+      "path": "backend/.venv/lib/python3.14/site-packages/lark_oapi/channel/driver.py",
+      "accessCount": 1,
+      "lastAccessed": 1784640583321,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"echo \\\"=== encrypt_key 状态 ===\\\" && docker exec clawith-postgres-1 psql -U clawith -d clawith -c \\\"SELECT agent_id, encrypt_key is not null as has_encrypt_key, verification_token is not nul...",
+  "error": "Exit code 1\n=== encrypt_key 状态 ===\n               agent_id               | has_encrypt_key | has_verification \n--------------------------------------+-----------------+------------------\n 8560a5ce-a976-4b14-abf1-546269a272ac | f               | f\n(1 row)\n\n=== 切换到 webhook 模式 ===\nERROR:  function jsonb_set(json, unknown, unknown) does not exist\nLINE 1: UPDATE channel_configs SET extra_config = jsonb_set(extra_co...\n                                                  ^\nHINT:  No function matches the ...",
+  "timestamp": "2026-07-22T11:36:44.839Z",
+  "retry_count": 1
+}

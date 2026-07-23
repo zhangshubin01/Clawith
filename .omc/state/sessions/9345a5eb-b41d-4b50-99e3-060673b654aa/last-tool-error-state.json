@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"docker logs clawith-backend-1 --tail 20 2>&1\",\"description\":\"Check backend startup complete and healthy\"}",
+  "error": "Exit code 1\nError response from daemon: No such container: clawith-backend-1",
+  "timestamp": "2026-07-22T07:32:21.765Z",
+  "retry_count": 1
+}

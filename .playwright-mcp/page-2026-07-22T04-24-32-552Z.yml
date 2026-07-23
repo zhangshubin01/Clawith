@@ -1,0 +1,34 @@
+- generic [ref=f1e3]:
+  - generic [ref=f1e7]:
+    - generic [ref=f1e8]:
+      - link [ref=f1e11] [cursor=pointer]:
+        - /url: https://open.feishu.cn/?lang=zh-CN
+        - img "lark" [ref=f1e12]
+      - menu [ref=f1e13]:
+        - menuitem [ref=f1e14] [cursor=pointer]:
+          - link "客户案例" [ref=f1e16]:
+            - /url: https://open.feishu.cn/solutions?lang=zh-CN
+        - menuitem [ref=f1e17] [cursor=pointer]:
+          - link "应用中心" [ref=f1e19]:
+            - /url: https://app.feishu.cn/?lang=zh-CN
+        - menuitem "开发文档" [ref=f1e20] [cursor=pointer]:
+          - link "开发文档" [ref=f1e22]:
+            - /url: /document
+        - menuitem [ref=f1e24] [cursor=pointer]:
+          - link "智能助手" [ref=f1e26]:
+            - /url: https://open.feishu.cn/app/ai/playground?from=nav&lang=zh-CN
+        - menuitem [ref=f1e27] [cursor=pointer]:
+          - link "更新日志" [ref=f1e29]:
+            - /url: /changelog
+    - generic [ref=f1e30]:
+      - textbox [ref=f1e41]:
+        - /placeholder: 你可以输入关键词，或直接输入问题
+      - menu [ref=f1e46]:
+        - menuitem [ref=f1e47] [cursor=pointer]:
+          - link "开发者后台" [ref=f1e49]:
+            - /url: https://open.feishu.cn/app?lang=zh-CN
+      - button "登录" [ref=f1e56] [cursor=pointer]
+  - generic:
+    - generic: 技术支持
+    - generic: 收起
+  - generic [ref=f1e59]: 展开

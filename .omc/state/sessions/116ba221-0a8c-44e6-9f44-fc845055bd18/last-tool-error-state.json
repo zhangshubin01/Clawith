@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"ls /Users/shubinzhang/Documents/agent/Clawith/.codegraph/ 2>/dev/null\",\"description\":\"Check codegraph dir contents\"}",
+  "error": "Exit code 1",
+  "timestamp": "2026-07-21T06:34:11.008Z",
+  "retry_count": 2
+}

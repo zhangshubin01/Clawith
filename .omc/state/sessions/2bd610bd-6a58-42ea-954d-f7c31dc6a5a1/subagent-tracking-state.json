@@ -1,0 +1,379 @@
+{
+  "agents": [
+    {
+      "agent_id": "ad554bb1669476074",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-21T06:31:57.936Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T06:31:57.936Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "ad52527ad873edc7c",
+      "agent_type": "Explore",
+      "started_at": "2026-07-21T07:01:19.743Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T07:03:23.998Z",
+      "duration_ms": 124255
+    },
+    {
+      "agent_id": "a0427eaa253afdc62",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-21T07:08:36.842Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T07:08:36.842Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "a28054d7d5b66ae96",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-21T07:21:11.965Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T07:21:11.965Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "aa13a1099fc334ce0",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-21T12:32:24.477Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T12:32:24.477Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "a628970f6754287cc",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-21T12:56:16.776Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T12:56:16.776Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "ae506ee7d9a81970a",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T12:58:05.356Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T12:59:46.020Z",
+      "duration_ms": 100664
+    },
+    {
+      "agent_id": "a1ef80bdfd284f78b",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T12:58:05.412Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:00:41.648Z",
+      "duration_ms": 156236
+    },
+    {
+      "agent_id": "a400dcb406d4f043f",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T12:58:05.466Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T12:59:32.533Z",
+      "duration_ms": 87067
+    },
+    {
+      "agent_id": "afcdc5bb19a2db67c",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T12:58:05.527Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:00:28.026Z",
+      "duration_ms": 142499
+    },
+    {
+      "agent_id": "a38cc1bcc689021a8",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:00:41.845Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:02:29.856Z",
+      "duration_ms": 108011
+    },
+    {
+      "agent_id": "a3aebbae9e4a8c9dc",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:00:41.901Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:02:57.178Z",
+      "duration_ms": 135277
+    },
+    {
+      "agent_id": "a6d49fd4f82b7ce7b",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:02:57.353Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:04:48.235Z",
+      "duration_ms": 110882
+    },
+    {
+      "agent_id": "a729dd3cf02ec4768",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:11:49.338Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:15:39.789Z",
+      "duration_ms": 230451
+    },
+    {
+      "agent_id": "a007f8d7bed2df129",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:11:49.392Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:15:51.093Z",
+      "duration_ms": 241701
+    },
+    {
+      "agent_id": "a66c3d1ee50265036",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:11:49.456Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:14:38.372Z",
+      "duration_ms": 168916
+    },
+    {
+      "agent_id": "a7eed8b435e300ba7",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:15:51.286Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:20:00.120Z",
+      "duration_ms": 248834
+    },
+    {
+      "agent_id": "a7bd2b57d8ea1ca22",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:20:00.299Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:21:40.661Z",
+      "duration_ms": 100362
+    },
+    {
+      "agent_id": "a3270b6b6ba3e210b",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:24:17.825Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:25:23.740Z",
+      "duration_ms": 65915
+    },
+    {
+      "agent_id": "a7c688e89aa3f1945",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:24:17.880Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:28:30.343Z",
+      "duration_ms": 252463
+    },
+    {
+      "agent_id": "a1a71ce082f624b0f",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:24:17.934Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:24:49.200Z",
+      "duration_ms": 31266
+    },
+    {
+      "agent_id": "a11242001fbca52ba",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:28:30.539Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:28:45.296Z",
+      "duration_ms": 14757
+    },
+    {
+      "agent_id": "a5461cfc99467e5a8",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:31:42.064Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:33:31.366Z",
+      "duration_ms": 109302
+    },
+    {
+      "agent_id": "a64f943e1de3ada51",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:31:42.115Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:33:30.476Z",
+      "duration_ms": 108361
+    },
+    {
+      "agent_id": "a908f6227a3fd419c",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:35:21.005Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:37:43.287Z",
+      "duration_ms": 142282
+    },
+    {
+      "agent_id": "a958a3cda1daa14c3",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:35:21.060Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:38:35.820Z",
+      "duration_ms": 194760
+    },
+    {
+      "agent_id": "a0c2a7a16621c7325",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-21T13:35:21.122Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:36:17.480Z",
+      "duration_ms": 56358
+    },
+    {
+      "agent_id": "aedcc7d759649fde9",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-21T13:43:05.104Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-21T13:43:05.104Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "aa4f94576d96f1a5e",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-22T04:13:10.409Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T04:16:20.726Z",
+      "duration_ms": 190317
+    },
+    {
+      "agent_id": "aa0859f6ca4243b96",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-22T04:13:10.476Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T04:17:07.670Z",
+      "duration_ms": 237194
+    },
+    {
+      "agent_id": "afedaeec93d39dfd7",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-22T04:20:53.464Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T04:23:08.379Z",
+      "duration_ms": 134915
+    },
+    {
+      "agent_id": "a7dfbd127b850b6cf",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-22T04:27:22.475Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T04:27:22.475Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "a3421aea0da368cf1",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-22T06:15:55.885Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T06:15:55.885Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "a470e18b0b85223da",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-22T06:30:59.319Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T06:30:59.319Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "abbcc1458350f3490",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-22T06:46:46.035Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T06:48:52.533Z",
+      "duration_ms": 126498
+    },
+    {
+      "agent_id": "ace5d86ee363b3113",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-22T06:46:46.087Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T06:49:01.669Z",
+      "duration_ms": 135582
+    },
+    {
+      "agent_id": "a2a2dda3ae67e752e",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-22T06:46:46.100Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T06:51:06.166Z",
+      "duration_ms": 260066
+    },
+    {
+      "agent_id": "a5e6fbc1c90b85920",
+      "agent_type": "workflow-subagent",
+      "started_at": "2026-07-22T06:46:46.152Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T06:50:40.906Z",
+      "duration_ms": 234754
+    },
+    {
+      "agent_id": "a8c180088af640c23",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-22T07:46:28.011Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-22T07:46:28.011Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    }
+  ],
+  "total_spawned": 19,
+  "total_completed": 41,
+  "total_failed": 0,
+  "last_updated": "2026-07-22T07:46:28.114Z"
+}
