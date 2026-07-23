@@ -28,10 +28,6 @@ if [ "$(id -u)" = '0' ]; then
         fi
     fi
 
-    # 允许 non-root 用户 clawith 访问 Docker socket
-    if [ -S /var/run/docker.sock ]; then
-        chmod 666 /var/run/docker.sock 2>/dev/null || true
-    fi
     echo "[entrypoint] Dropping privileges to 'clawith' and re-executing..."
     exec gosu clawith /bin/bash "$0" "$@"
 fi
