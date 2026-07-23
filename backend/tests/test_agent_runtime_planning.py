@@ -272,6 +272,12 @@ async def test_planning_model_uses_the_pinned_platform_model_without_tools() -> 
     assert "call `finish`" not in planning_prompt
     assert "call `wait`" not in planning_prompt
     assert "Use the simplest plan" in planning_prompt
+    assert "silently rewrite user_goal into clear directives" in planning_prompt
+    assert "Bind an instruction after an @mentioned Agent to that Agent" in planning_prompt
+    assert '"@A write a poem @B then translate it"' in planning_prompt
+    assert "never resolve ambiguity by moving work to a different Agent" in planning_prompt
+    assert "repeat this normalization from the original user_goal" in planning_prompt
+    assert "Do not merely repair JSON syntax" in planning_prompt
     assert "greeting or check-in" in planning_prompt
     assert "Never create a handoff from an Agent to itself" in planning_prompt
     assert "Each assigned Agent must author its own public group reply" in planning_prompt
