@@ -214,6 +214,7 @@ class FeishuWSManager:
         app_id: str,
         app_secret: str,
         stop_existing: bool = True,
+        domain: str = "https://open.feishu.cn",
     ):
         """Spawns a WebSocket client fully asynchronously inside FastAPI's loop."""
         if not _HAS_LARK:
@@ -256,6 +257,7 @@ class FeishuWSManager:
             event_handler=event_handler,
             log_level=lark.LogLevel.INFO,
             auto_reconnect=True,
+            domain=domain,
         )
         self._clients[agent_id] = client
 
@@ -374,13 +376,17 @@ class FeishuWSManager:
             )
             configs = result.scalars().all()
 
+        from app.config import get_settings
+        settings = get_settings()
+
         for config in configs:
             extra = config.extra_config or {}
             mode = extra.get("connection_mode", "webhook")
+            domain = extra.get("domain") or settings.FEISHU_DOMAIN
             if mode == "websocket":
                 if config.app_id and config.app_secret:
                     await self.start_client(
-                        config.agent_id, config.app_id, config.app_secret, stop_existing=False
+                        config.agent_id, config.app_id, config.app_secret, stop_existing=False, domain=domain,
                     )
                 else:
                     logger.warning(f"[Feishu WS] Skipping agent {config.agent_id}: missing credentials")
