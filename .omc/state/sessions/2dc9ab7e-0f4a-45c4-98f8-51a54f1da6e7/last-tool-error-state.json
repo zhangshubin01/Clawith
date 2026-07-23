@@ -1,7 +1,7 @@
 {
   "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"docker exec clawith-agent-postgres-1 psql -U clawith -d clawith -c \\\"SELECT app_id, encrypt_key, verification_token, domain FROM channel_configs WHERE agent_id = '62bc9c81-1d49-4706-b3ec-a...",
-  "error": "Exit code 1\nERROR:  column \"domain\" does not exist\nLINE 1: SELECT app_id, encrypt_key, verification_token, domain FROM ...\n                                                        ^",
-  "timestamp": "2026-07-23T14:29:51.344Z",
-  "retry_count": 1
+  "tool_input_preview": "{\"command\":\"docker exec clawith-agent-backend-1 python -c \\\"\\nfrom app.config import get_settings\\nfrom app.services.agent_runtime.rollout import decide_runtime_v2\\ns = get_settings()\\nprint('V2 enabl...",
+  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 3, in <module>\nModuleNotFoundError: No module named 'app.services.agent_runtime.rollout'",
+  "timestamp": "2026-07-23T16:02:56.160Z",
+  "retry_count": 3
 }
