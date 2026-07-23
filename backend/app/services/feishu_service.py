@@ -431,7 +431,7 @@ class FeishuService:
                 body["mobiles"] = [mobile]
 
             resp = await client.post(
-                f"{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
+                "{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
                 json=body,
                 headers={"Authorization": f"Bearer {app_token}"},
                 params={"user_id_type": "open_id"},
@@ -471,7 +471,7 @@ class FeishuService:
                 body["mobiles"] = [mobile]
 
             resp = await client.post(
-                f"{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
+                "{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
                 json=body,
                 headers={"Authorization": f"Bearer {app_token}"},
                 params={"user_id_type": "user_id"},
@@ -561,7 +561,7 @@ class FeishuService:
             if ext in (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".txt", ".md"):
                 feishu_file_type = "stream"
             upload_resp = await client.post(
-                f"{_FEISHU_BASE}/open-apis/im/v1/files",
+                "{_FEISHU_BASE}/open-apis/im/v1/files",
                 files={"file": (fp.name, file_bytes, "application/octet-stream")},
                 data={"file_type": feishu_file_type, "file_name": fp.name},
                 headers=headers,
@@ -720,7 +720,7 @@ class FeishuService:
             body["folder_token"] = folder_token
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                f"{_FEISHU_BASE}/open-apis/bitable/v1/apps",
+                "{_FEISHU_BASE}/open-apis/bitable/v1/apps",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"},
             )
@@ -749,7 +749,7 @@ class FeishuService:
             body["folder_token"] = folder_token
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                f"{_FEISHU_BASE}/open-apis/docx/v1/documents",
+                "{_FEISHU_BASE}/open-apis/docx/v1/documents",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -805,7 +805,7 @@ class FeishuService:
         }
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                f"{_FEISHU_BASE}/open-apis/approval/v4/instances",
+                "{_FEISHU_BASE}/open-apis/approval/v4/instances",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -819,7 +819,7 @@ class FeishuService:
             body["status"] = status
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                f"{_FEISHU_BASE}/open-apis/approval/v4/instances/query",
+                "{_FEISHU_BASE}/open-apis/approval/v4/instances/query",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
