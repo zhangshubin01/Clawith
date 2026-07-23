@@ -23,10 +23,10 @@ from app.models.identity import IdentityProvider
 settings = get_settings()
 
 _FEISHU_BASE = settings.FEISHU_DOMAIN
-FEISHU_TOKEN_URL = ff"{_FEISHU_BASE}/open-apis/authen/v1/oidc/access_token"
-FEISHU_USER_INFO_URL = ff"{_FEISHU_BASE}/open-apis/authen/v1/user_info"
-FEISHU_APP_TOKEN_URL = ff"{_FEISHU_BASE}/open-apis/auth/v3/app_access_token/internal"
-FEISHU_SEND_MSG_URL = ff"{_FEISHU_BASE}/open-apis/im/v1/messages"
+FEISHU_TOKEN_URL = f"{_FEISHU_BASE}/open-apis/authen/v1/oidc/access_token"
+FEISHU_USER_INFO_URL = f"{_FEISHU_BASE}/open-apis/authen/v1/user_info"
+FEISHU_APP_TOKEN_URL = f"{_FEISHU_BASE}/open-apis/auth/v3/app_access_token/internal"
+FEISHU_SEND_MSG_URL = f"{_FEISHU_BASE}/open-apis/im/v1/messages"
 
 class FeishuAPIError(RuntimeError):
     """Structured Feishu API error that preserves provider-returned details."""

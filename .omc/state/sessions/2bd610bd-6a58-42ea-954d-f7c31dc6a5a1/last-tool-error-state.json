@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"docker compose up -d --build backend 2>&1 | tail -2 && sleep 8 && docker compose exec backend python3 -c \\\"\\nimport asyncio,uuid\\nasync def r():\\n    from app.plugins.clawith_acp.acp_sessi...",
+  "error": "Exit code 1\n Container clawith-backend-1 Starting \n Container clawith-backend-1 Started \nTraceback (most recent call last):\n  File \"<string>\", line 13, in <module>\n  File \"/usr/local/lib/python3.12/asyncio/runners.py\", line 195, in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/...",
+  "timestamp": "2026-07-22T07:42:45.448Z",
+  "retry_count": 1
+}

@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"curl -s http://localhost:8008/api/health 2>&1\",\"description\":\"Backend health raw output\"}",
+  "error": "Exit code 7",
+  "timestamp": "2026-07-23T02:40:16.419Z",
+  "retry_count": 2
+}

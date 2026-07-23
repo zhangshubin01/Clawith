@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "jobId": "36779456-6c35-460c-9fbf-c17928d806eb",
+  "sessionId": "222730e7-f386-4f20-b9c3-168b919687dd",
+  "scopeKey": "b763a9b4d9820bc1874fa8736c5d09bc140bd4ac358295d83602c2b8b1dc1e3c",
+  "revision": 9,
+  "createdAt": "2026-07-22T17:11:19.988Z",
+  "updatedAt": "2026-07-22T17:14:06.065Z",
+  "producerGraceExpiresAt": "2026-07-22T17:11:49.988Z",
+  "bestEffortDeadlineAt": "2026-07-22T17:11:29.988Z",
+  "producers": {
+    "core": {
+      "state": "no-op",
+      "sealedAt": "2026-07-22T17:14:06.016Z",
+      "sealedBy": "recovery"
+    },
+    "wiki": {
+      "state": "sealed",
+      "intentKey": "4c8e0cd976a4147a2898c09a246cfdb8d969b02cf1847d20000c9b7aff41ba2e",
+      "payloadDigest": "4c8e0cd976a4147a2898c09a246cfdb8d969b02cf1847d20000c9b7aff41ba2e",
+      "sealedAt": "2026-07-22T17:11:19.988Z",
+      "sealedBy": "wiki-producer"
+    }
+  },
+  "actions": {
+    "foreground-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "expired",
+      "attempts": 0,
+      "idempotencyKey": "febf6dba2f2536433960a07f7cedce72e946b43ced0896570df80f017b8914d2",
+      "payload": {},
+      "budgetMs": 9000,
+      "lastOutcomeCode": "required-core-producer-absent"
+    },
+    "wiki-capture": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "expired",
+      "attempts": 0,
+      "idempotencyKey": "1719cd1ef5b51e0269b78c4cb8c9308c9c1f7b82fd1c067fc034c060f23863f5",
+      "payload": {
+        "kind": "wiki-session-end-capture",
+        "root": "/Users/shubinzhang/Documents/agent/Clawith",
+        "sessionId": "222730e7-f386-4f20-b9c3-168b919687dd",
+        "filename": "session-log-2026-07-22-cfaa92f5.md",
+        "capturedAt": "2026-07-22T17:11:19.987Z",
+        "captureKey": "9849906cd80562a35781eda362893ce38173e7892ff7ff8570533321c3163511"
+      },
+      "budgetMs": 9000,
+      "lastOutcomeCode": "required-deadline-expired"
+    },
+    "team-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "expired",
+      "attempts": 0,
+      "idempotencyKey": "cee6ac31df545408e1e822247ac249b3f8182a98a5fe8e448ae3b251e55bdee1",
+      "payload": {},
+      "budgetMs": 9000,
+      "lastOutcomeCode": "required-core-producer-absent"
+    },
+    "python-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "expired",
+      "attempts": 0,
+      "idempotencyKey": "1f1370c4ac056606059d517e2f106b602d8cbcb04587b3fcc5f3b9f89e649cd0",
+      "payload": {},
+      "budgetMs": 9000,
+      "lastOutcomeCode": "required-core-producer-absent"
+    },
+    "reply-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "expired",
+      "attempts": 0,
+      "idempotencyKey": "0b3a8b47c28b26d56aca004d4f572b96c118f16819c0d35162418816f9a5420a",
+      "payload": {},
+      "budgetMs": 9000,
+      "lastOutcomeCode": "required-core-producer-absent"
+    },
+    "callback": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "expired",
+      "attempts": 0,
+      "idempotencyKey": "d068ede2655bf89e0c0950e087d0603d7dcf45538e94f20a654d08c6f4841895",
+      "payload": {},
+      "budgetMs": 2000,
+      "lastOutcomeCode": "best-effort-core-producer-absent"
+    },
+    "notification": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "expired",
+      "attempts": 0,
+      "idempotencyKey": "89c0438ff63097ce04beb60efb87292ff68a7af350a0ee331f3de9dbf42d62fc",
+      "payload": {},
+      "budgetMs": 2000,
+      "lastOutcomeCode": "best-effort-core-producer-absent"
+    },
+    "openclaw": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "expired",
+      "attempts": 0,
+      "idempotencyKey": "31fe8f6e1cf204e27006de511df257326fdd98655122ca437013e8779ffc735b",
+      "payload": {},
+      "budgetMs": 2000,
+      "lastOutcomeCode": "best-effort-core-producer-absent"
+    }
+  },
+  "owner": null,
+  "phase": "complete",
+  "completion": {
+    "completedAt": "2026-07-22T17:14:06.037Z",
+    "terminalDigest": "e8fb8f11baa81c33d0bde7aa07cfefca4ebc104d1f562e885cf2c448f3db3076",
+    "terminalRevision": 8
+  }
+}

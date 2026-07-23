@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"docker exec clawith-agent-postgres-1 psql -U clawith -d clawith -c \\\"SELECT app_id, encrypt_key, verification_token, domain FROM channel_configs WHERE agent_id = '62bc9c81-1d49-4706-b3ec-a...",
+  "error": "Exit code 1\nERROR:  column \"domain\" does not exist\nLINE 1: SELECT app_id, encrypt_key, verification_token, domain FROM ...\n                                                        ^",
+  "timestamp": "2026-07-23T14:29:51.344Z",
+  "retry_count": 1
+}
