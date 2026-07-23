@@ -312,7 +312,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                             {t('enterprise.llm.runtimeModelsTitle', '多智能体运行时模型')}
                         </div>
                         <div style={{ marginTop: '4px', color: 'var(--text-tertiary)', fontSize: '12px' }}>
-                            {t('enterprise.llm.runtimeModelsHint', '可使用当前公司的模型或平台模型；候选模型必须已启用并通过原生工具调用测试。保存后立即生效。')}
+                            {t('enterprise.llm.runtimeModelsHint', '可使用当前公司或平台已保存且启用的模型；工具测试结果仅作诊断，不影响选择。保存后立即生效。')}
                         </div>
                     </div>
                     {runtimeModelSettings.candidates.length === 0 ? (
@@ -584,7 +584,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                                     ) : m.supports_tool_calling === false ? (
                                         <span
                                             className="badge"
-                                            title={m.tool_calling_error || t('enterprise.llm.toolsUnavailableTitle', 'The model connected but did not return a valid native finish tool call.')}
+                                            title={m.tool_calling_error || t('enterprise.llm.toolsUnavailableTitle', 'The tool probe failed, but the saved enabled model remains available.')}
                                             style={{ background: 'rgba(239,68,68,0.15)', color: 'rgb(239,68,68)', fontSize: '10px' }}
                                         >
                                             {t('enterprise.llm.toolsUnavailable', 'Tools unavailable')}
@@ -592,7 +592,7 @@ export default function LlmTab({ selectedTenantId }: LlmTabProps) {
                                     ) : (
                                         <span
                                             className="badge"
-                                            title={m.tool_calling_error || t('enterprise.llm.toolsUnverifiedTitle', 'Run the model test before using this model in Agent Runtime.')}
+                                            title={m.tool_calling_error || t('enterprise.llm.toolsUnverifiedTitle', 'Tool support has not been tested; the saved enabled model remains available.')}
                                             style={{ background: 'rgba(245,158,11,0.15)', color: 'rgb(245,158,11)', fontSize: '10px' }}
                                         >
                                             {t('enterprise.llm.toolsUnverified', 'Tools unverified')}

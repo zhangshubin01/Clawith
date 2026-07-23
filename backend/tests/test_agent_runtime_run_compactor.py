@@ -250,6 +250,30 @@ async def test_missing_complete_business_request_budget_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalid_compact_model_budget_is_a_deterministic_runtime_error() -> None:
+    state, context, tenant_id = _state(
+        [_normal("old", "old " * 300), _normal("current")]
+    )
+    model = _model(tenant_id)
+    model.max_input_tokens = None
+    model.context_window_tokens_override = model.max_output_tokens
+
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("invalid compact budget must fail before model use")
+
+    with pytest.raises(RunCompactorError) as raised:
+        await _service(
+            model=model,
+            completion=forbidden,
+            effective_budget=1_000,
+            current_tokens=800,
+        ).compact_if_needed(state, context)
+
+    assert raised.value.code == "invalid_request_budget"
+    assert raised.value.is_deterministic_compact_error is True
+
+
+@pytest.mark.asyncio
 async def test_at_eighty_percent_compacts_prefix_and_keeps_current_input_exact() -> None:
     messages = [
         *[_normal(f"old-{index}", "old history " * 12) for index in range(8)],

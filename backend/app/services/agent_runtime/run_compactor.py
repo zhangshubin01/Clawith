@@ -10,7 +10,10 @@ import uuid
 
 from app.config import Settings, get_settings
 from app.models.llm import LLMModel
-from app.services.agent_runtime.model_capabilities import ModelCapabilityResolver
+from app.services.agent_runtime.model_capabilities import (
+    ModelCapabilityError,
+    ModelCapabilityResolver,
+)
 from app.services.agent_runtime.node_executor import RunCompactResult
 from app.services.agent_runtime.state import (
     JsonObject,
@@ -535,15 +538,18 @@ class RuntimeRunCompactorService:
             model.model,
             model.max_output_tokens,
         )
-        return ModelCapabilityResolver.runtime_budget(
-            model,
-            requested_max_output_tokens=requested_output,
-            static_prompt_tokens=_estimate_tokens(_SYSTEM_PROMPT),
-            tool_schema_tokens=_estimate_tokens(_COMPACT_TOOL),
-            reserved_runtime_tokens=2048,
-            safety_margin_tokens=256,
-            settings=self._settings,
-        )
+        try:
+            return ModelCapabilityResolver.runtime_budget(
+                model,
+                requested_max_output_tokens=requested_output,
+                static_prompt_tokens=_estimate_tokens(_SYSTEM_PROMPT),
+                tool_schema_tokens=_estimate_tokens(_COMPACT_TOOL),
+                reserved_runtime_tokens=2048,
+                safety_margin_tokens=256,
+                settings=self._settings,
+            )
+        except ModelCapabilityError as exc:
+            raise RunCompactorError(exc.code, str(exc)) from exc
 
     async def _compact_batches(
         self,

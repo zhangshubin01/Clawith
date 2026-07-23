@@ -31,9 +31,11 @@ test('company admins can select planning and group context models', () => {
   assert.match(source, /群聊上下文模型/);
 });
 
-test('runtime model choices are restricted to tenant-safe backend candidates', () => {
+test('runtime model choices use tenant-safe candidates without treating tool probes as a gate', () => {
   assert.match(source, /runtimeModelSettings\.candidates\.map/);
-  assert.match(source, /当前公司的模型或平台模型/);
+  assert.match(source, /当前公司或平台已保存且启用的模型/);
+  assert.match(source, /工具测试结果仅作诊断，不影响选择/);
+  assert.doesNotMatch(source, /候选模型必须已启用并通过原生工具调用测试/);
   assert.match(source, /保存后立即生效/);
 });
 
