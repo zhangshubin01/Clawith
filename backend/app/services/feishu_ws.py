@@ -1,9 +1,4 @@
-"""Feishu WebSocket Long Connection Manager.
-
-[DEPRECATED] Phase 3: 此文件已被 feishu_channel_manager.py 替代。
-WebSocket 模式已迁移到 webhook 模式 (lark-channel-sdk)。
-保留此文件仅用于 Phase 4 彻底删除前的兼容期。
-"""
+"""Feishu WebSocket Long Connection Manager."""
 
 import asyncio
 import json
@@ -190,6 +185,7 @@ class FeishuWSManager:
                     if hasattr(data, "event"):
                         body_dict["event"] = data.event
                     elif hasattr(data, "content") and isinstance(getattr(data, "content"), str):
+                        import json
                         try:
                             body_dict["event"] = json.loads(data.content)
                         except json.JSONDecodeError:
@@ -204,56 +200,10 @@ class FeishuWSManager:
             event_type = body_dict.get("header", {}).get("event_type", "unknown")
             logger.info(f"[Feishu WS] Event received for agent {agent_id}: {event_type}")
 
-            # 使用流式管道处理消息
-            msg_text = body_dict.get("event", {}).get("message", {}).get("content", "{}")
-            try:
-                msg_content = json.loads(msg_text) if isinstance(msg_text, str) else msg_text
-                user_text = msg_content.get("text", "") if isinstance(msg_content, dict) else str(msg_text)
-            except (json.JSONDecodeError, TypeError):
-                user_text = str(msg_text)
+            # Import here to avoid circular dependencies
+            from app.api.feishu import process_feishu_event
 
-            chat_id = body_dict.get("event", {}).get("message", {}).get("chat_id", "")
-            message_id = body_dict.get("event", {}).get("message", {}).get("message_id", "")
-            chat_type = body_dict.get("event", {}).get("message", {}).get("chat_type", "p2p")
-
-            # Phase 2: 全局 dict 注入 + markdown 流式卡片
-            from app.services.feishu_channel_manager import feishu_channel_manager
-            from app.services.feishu_stream_bridge import (
-                FeishuStreamBridge, set_active_bridge, clear_active_bridge,
-            )
-            import asyncio as _asyncio
-
-            channel = await feishu_channel_manager.get_or_create_ws_channel(agent_id)
-
-            bridge = FeishuStreamBridge()
-            feishu_channel_manager.register_bridge(chat_id, bridge)
-            set_active_bridge(str(agent_id), bridge)
-
-            _stream_started: _asyncio.Task | None = None
-
-            try:
-                if channel:
-                    _stream_started = _asyncio.create_task(
-                        bridge.start_stream(channel, chat_id,
-                            reply_to=message_id if chat_type == "group" else None)
-                    )
-
-                from app.api.feishu import process_feishu_event
-                await process_feishu_event(agent_id, body_dict)
-
-                if _stream_started:
-                    await _stream_started
-
-                if channel:
-                    await bridge.wait_complete(timeout=180)
-
-            except Exception as e:
-                logger.exception(f"[Feishu WS] Stream processing error for {agent_id}: {e}")
-                clear_active_bridge(str(agent_id))
-                await bridge.cancel()
-                feishu_channel_manager.unregister_bridge(chat_id)
-            # ponytail: finally 不清除 bridge —— process_feishu_event 仅是异步入队，
-            # Runtime 后台 worker 后续才调 LLM。bridge 由下次 set_active_bridge 覆盖或自然替换。
+            await process_feishu_event(agent_id, body_dict)
 
         except Exception as e:
             logger.exception(f"[Feishu WS] Error processing event for {agent_id}: {e}")
@@ -306,7 +256,6 @@ class FeishuWSManager:
             event_handler=event_handler,
             log_level=lark.LogLevel.INFO,
             auto_reconnect=True,
-            domain=getattr(lark.core.const, "LARK_DOMAIN", "https://open.larksuite.com"),
         )
         self._clients[agent_id] = client
 

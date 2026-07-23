@@ -46,44 +46,6 @@ def _chunks(text: str, limit: int) -> list[str]:
     return [text[index : index + limit] for index in range(0, len(text), limit)] or [""]
 
 
-def _split_safe(text: str, byte_limit: int = 30720) -> list[str]:
-    """字节预算安全分片：绝不截断在 markdown code fence 内部。
-
-    先用字节偏移找到大致边界，再退回到最近的段落/行边界。
-    如果在 code fence 内，则自动关闭并重开 fence。
-    """
-    chunks: list[str] = []
-    remaining = text
-
-    while len(remaining.encode("utf-8")) > byte_limit:
-        chunk_bytes = remaining.encode("utf-8")[:byte_limit]
-        # 退回到最近换行
-        last_nl = chunk_bytes.rfind(b'\n')
-        if last_nl > byte_limit * 0.7:
-            chunk_bytes = chunk_bytes[:last_nl]
-        char_count = len(chunk_bytes.decode("utf-8", errors="replace"))
-        chunk_text = remaining[:char_count]
-
-        # 检测 code fence 边界
-        fence_start = chunk_text.rfind("```")
-        fence_end = chunk_text.rfind("```", fence_start + 3) if fence_start >= 0 else -1
-        if fence_start >= 0 and (fence_end < fence_start):
-            # 截断落在 code fence 内部，关闭并重开
-            # 提取 fence 语言标记
-            fence_line_end = chunk_text.find('\n', fence_start)
-            lang = chunk_text[fence_start+3:fence_line_end].strip() if fence_line_end > 0 else ""
-            chunk_text = chunk_text[:fence_start] + "\n```\n"
-            remaining = "```" + lang + "\n" + remaining[char_count:]
-        else:
-            remaining = remaining[char_count:].lstrip('\n')
-
-        chunks.append(chunk_text)
-
-    if remaining.strip():
-        chunks.append(remaining)
-    return chunks or [text]
-
-
 def _provider_error(channel: str, response: httpx.Response, payload: object | None = None) -> None:
     detail = payload if payload is not None else response.text[:300]
     raise ChannelProviderDeliveryError(
@@ -146,14 +108,6 @@ class DatabaseChannelDeliverySender:
     ) -> ChannelSendResult:
         from app.services.feishu_service import feishu_service
 
-        # Phase 2: bridge 活跃时跳过文本发送（流式卡片已承载回复）
-        try:
-            from app.services.feishu_stream_bridge import get_active_bridge
-            if get_active_bridge(str(envelope.agent_id)):
-                return ChannelSendResult()
-        except ImportError:
-            pass
-
         receive_id = _required(envelope.target, "receive_id")
         receive_id_type = _required(envelope.target, "receive_id_type")
         if receive_id_type not in {"open_id", "user_id", "chat_id"}:
@@ -161,20 +115,6 @@ class DatabaseChannelDeliverySender:
                 "channel_target_invalid",
                 "Unsupported Feishu receive_id_type",
             )
-        # 飞书文本消息限制 30KB，超长安全分片发送
-        content_bytes = envelope.content.encode("utf-8")
-        if len(content_bytes) > 30720:
-            chunks = _split_safe(envelope.content, byte_limit=30720)
-            for i, chunk in enumerate(chunks):
-                await feishu_service.send_message(
-                    config.app_id, config.app_secret,
-                    receive_id, "text",
-                    json.dumps({"text": chunk}, ensure_ascii=False),
-                    receive_id_type=receive_id_type,
-                    stage="runtime_channel_delivery",
-                )
-            return ChannelSendResult()
-
         response = await feishu_service.send_message(
             config.app_id,
             config.app_secret,
