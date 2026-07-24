@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 from typing import Any, Dict, Optional
 import uuid
 
@@ -134,6 +135,7 @@ class FeishuWSManager:
         self._tasks: Dict[uuid.UUID, asyncio.Task] = {}
         self._credentials: Dict[uuid.UUID, tuple[str, str]] = {}
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._last_event_times: Dict[uuid.UUID, float] = {}  # 事件超时检测
 
     def _create_event_handler(self, agent_id: uuid.UUID) -> lark.EventDispatcherHandler:
         """Create an event dispatcher for a specific agent."""
@@ -170,6 +172,7 @@ class FeishuWSManager:
         """Handle im.message.receive_v1 events from Feishu WebSocket asynchronously."""
         try:
             event_type = body_dict.get("header", {}).get("event_type", "unknown")
+            self._last_event_times[agent_id] = asyncio.get_running_loop().time()
             logger.info(f"[Feishu-WS] Event received for agent {agent_id}: {event_type}")
 
             # Import here to avoid circular dependencies
@@ -262,6 +265,8 @@ class FeishuWSManager:
         async def _run_async_client():
             _bind_lark_ws_loop()
             _ping_task: Optional[asyncio.Task] = None
+            _last_event_time: float = 0.0  # 最后收到事件的时间戳（Unix）
+            _EVENT_TIMEOUT = int(os.getenv("FEISHU_WS_EVENT_TIMEOUT_SECONDS", "900"))
             try:
                 logger.info(f"[Feishu-WS] Connecting for agent {agent_id}")
                 _ping_task = await _do_full_connect()
@@ -287,7 +292,20 @@ class FeishuWSManager:
                     conn_dead = conn is None or (hasattr(conn, "closed") and conn.closed)
                     ping_dead = _ping_task is not None and _ping_task.done() and not _ping_task.cancelled()
 
-                    if conn_dead or ping_dead:
+                    # 事件超时检测：接收循环可能静默终止但连接/ping 正常（僵尸连接）
+                    _now = asyncio.get_running_loop().time()
+                    _last_evt = self._last_event_times.get(agent_id, 0.0)
+                    event_timeout = (
+                        _last_evt > 0
+                        and (_now - _last_evt) > _EVENT_TIMEOUT
+                    )
+                    if event_timeout:
+                        logger.warning(
+                            f"[Feishu-WS] Event timeout for agent {agent_id} "
+                            f"({int(_now - _last_evt)}s since last event, threshold={_EVENT_TIMEOUT}s)"
+                        )
+
+                    if conn_dead or ping_dead or event_timeout:
                         _unhealthy_streak += 1
                         if not _was_disconnected:
                             logger.warning(
@@ -311,6 +329,7 @@ class FeishuWSManager:
                             _unhealthy_streak = 0
                             _was_disconnected = False
                             _last_conn_id = getattr(client, "_conn_id", None)
+                            self._last_event_times[agent_id] = asyncio.get_running_loop().time()
                             logger.info(
                                 f"[Feishu-WS] Reconnected for agent {agent_id} "
                                 f"(conn_id={_last_conn_id})"

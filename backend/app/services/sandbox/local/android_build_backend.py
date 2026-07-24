@@ -155,7 +155,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
         env = {
             "JAVA_VERSION": java_version,
             "GRADLE_OPTS": (
-                "-Dorg.gradle.daemon=false "
+                "-Dorg.gradle.daemon=true "
                 "-Dorg.gradle.jvmargs=-Xmx4096m "
                 "-XX:MaxMetaspaceSize=1g "
                 "-XX:+HeapDumpOnOutOfMemoryError "
@@ -194,9 +194,10 @@ class AndroidBuildBackend(BaseSandboxBackend):
                     "bash", "-c",
                     f'echo "sdk.dir=/opt/android-sdk" > local.properties '
                     f"&& chmod +x ./gradlew "
-                    f"&& ./gradlew {gradle_task} "
-                    f"&& cp -r app/build/outputs/apk /workspace/apk-output 2>/dev/null || true "
-                    f"&& sleep 5",
+                    f"&& rm -f /root/.gradle/daemon/*/registry*.lock /root/.gradle/daemon/*/registry*.bin "
+                    f"&& set -e; ./gradlew {gradle_task}; EXIT=$?; "
+                    f"cp -r app/build/outputs/apk /workspace/apk-output 2>/dev/null || true; "
+                    f"exit $EXIT",
                 ],
                 detach=True,
                 volumes=volumes,

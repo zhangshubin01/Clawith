@@ -17,7 +17,7 @@ ENV PATH="${PATH}:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platf
 # ─── 第一层：系统依赖（不含 JDK） ───
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
-    git git-lfs gosu \
+    git git-lfs gosu procps \
     wget unzip curl ca-certificates \
     fontconfig libfreetype6 \
     && apt-get clean && \

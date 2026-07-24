@@ -1,6 +1,7 @@
 """Feishu OAuth and Channel API routes."""
 
 import asyncio
+import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -26,7 +27,10 @@ router = APIRouter(tags=["feishu"])
 
 # Default LLM timeout for Feishu channel (fallback when model has no request_timeout set).
 # The per-model request_timeout field takes precedence — see _get_llm_timeout().
-_LLM_TIMEOUT_SECONDS_DEFAULT = 180.0
+try:
+    _LLM_TIMEOUT_SECONDS_DEFAULT = float(os.getenv("FEISHU_LLM_TIMEOUT_SECONDS", "600"))
+except (ValueError, TypeError):
+    _LLM_TIMEOUT_SECONDS_DEFAULT = 600.0
 
 # Number of tool status lines to keep visible in the Feishu card.
 # Shows the last N non-running lines plus any active "running" entry.
@@ -472,6 +476,7 @@ async def delete_channel_config(
 
 # Simple in-memory dedup to avoid processing retried events
 _processed_events: set[str] = set()
+_content_dedup: dict[str, float] = {}  # content dedup: key → timestamp
 
 
 @router.post("/channel/feishu/{agent_id}/webhook")
@@ -499,10 +504,24 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
     logger.info(f"[Feishu] Event processing for {agent_id}: event_type={body.get('header', {}).get('event_type', 'N/A')}")
 
     # Deduplicate — Feishu retries on slow responses
-    # Only mark as processed AFTER successful handling so retries work on crash
+    # Strategy: event_id dedup (fast) + content dedup (handles retransmission with new IDs)
     event_id = body.get("header", {}).get("event_id", "")
     if event_id in _processed_events:
         return {"code": 0, "msg": "already processed"}
+
+    # Content dedup: same user + same text within 30s window
+    _event = body.get("event", {})
+    _msg = _event.get("message", {})
+    _sender = _event.get("sender", {}).get("sender_id", {})
+    _sender_id = _sender.get("open_id", "") or _sender.get("user_id", "")
+    _msg_text = _msg.get("content", "") if _msg.get("message_type") == "text" else ""
+    _content_key = f"{agent_id}:{_sender_id}:{_msg_text}" if _msg_text else ""
+    _now = time.time()
+    if _content_key and _content_key in _content_dedup:
+        _last_time = _content_dedup[_content_key]
+        if _now - _last_time < 30:
+            logger.info(f"[Feishu] Dedup (content): agent={agent_id} sender={_sender_id} text_len={len(_msg_text)}")
+            return {"code": 0, "msg": "already processed (content dedup)"}
 
     # ── Phase 1: Short transaction — load config + agent/model for LLM ──
     async with _async_session() as db:
@@ -519,12 +538,16 @@ async def process_feishu_event(agent_id: uuid.UUID, body: dict):
     if not config:
         return {"code": 1, "msg": "Channel not found"}
 
-    # Mark event as processed after config is loaded successfully
+    # Mark event as processed after config loads successfully (deferred to avoid
+    # permanent message loss on transient DB failures).
     if event_id:
         _processed_events.add(event_id)
-        # Keep set bounded
         if len(_processed_events) > 1000:
             _processed_events.clear()
+    if _content_key:
+        _content_dedup[_content_key] = _now
+        if len(_content_dedup) > 500:
+            _content_dedup.clear()
 
     # Handle events
     event = body.get("event", {})
@@ -1760,13 +1783,9 @@ async def _call_llm_with_config(
                 )
                 return f"⚠️ Model response timed out (>{int(_fb_timeout)}s). Please retry or shorten your request."
             except Exception as e2:
-                import traceback
-                traceback.print_exc()
                 return f"⚠️ Model error: Primary Timeout | Fallback: {str(e2)[:80]}"
         return f"⚠️ Model response timed out (>{int(_timeout)}s). Please retry or shorten your request."
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         error_msg = str(e) or repr(e)
         logger.error(f"[LLM] Primary model error: {error_msg}")
         if fallback_model:
@@ -1797,7 +1816,6 @@ async def _call_llm_with_config(
                 )
                 return f"⚠️ Model error: Primary: {str(e)[:80]} | Fallback Timeout"
             except Exception as e2:
-                traceback.print_exc()
                 return f"⚠️ Model error: Primary: {str(e)[:80]} | Fallback: {str(e2)[:80]}"
         return f"⚠️ 调用模型出错: {error_msg[:150]}"
     finally:
