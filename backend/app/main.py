@@ -405,6 +405,8 @@ from app.api.wecom import router as wecom_router
 from app.api.wechat import router as wechat_router
 from app.api.teams import router as teams_router
 from app.api.triggers import router as triggers_router
+from app.api.ide_plugin import router as ide_plugin_router
+from app.plugins.clawith_acp.router import router as acp_router
 from app.api.focus import router as focus_router
 
 from app.api.atlassian import router as atlassian_router
@@ -468,6 +470,8 @@ app.include_router(credentials_router, prefix=settings.API_PREFIX)
 app.include_router(agentbay_control_router, prefix=settings.API_PREFIX)
 app.include_router(okr_router)  # OKR — self-prefixed at /api/okr
 app.include_router(onboarding_router, prefix=settings.API_PREFIX)
+app.include_router(acp_router)
+app.include_router(ide_plugin_router)
 
 
 @app.get("/api/health", response_model=HealthResponse, tags=["health"])
