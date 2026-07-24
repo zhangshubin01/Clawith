@@ -794,7 +794,6 @@ class AcpHandler:
                     agent_id=self.agent_id,
                     user_id=self.user_id,
                     session_id=self.session_id or "",
-                    cancel_event=self._cancel_event,
                     on_chunk=push_chunk,
                     on_thinking=self._thinking_for_acp,
                     on_tool_call=on_tool_call,
