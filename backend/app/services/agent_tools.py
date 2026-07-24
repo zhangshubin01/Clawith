@@ -274,12 +274,12 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
                     tenant_config = await get_tenant_tool_config(db, agent_tenant_id, db_tool_name, config_schema)
                 # Merge: agent overrides global
                 merged = {**base_config, **tenant_config, **(agent_config or {})}
-                if merged:
-                    # Decrypt with schema awareness
-                    merged = _decrypt_sensitive_fields(merged, config_schema)
-                    logger.info(f"[ToolConfig] DB merged config for {tool_name}, agent_id={agent_id}")
-                    _set_cached_tool_config(agent_id, tool_name, merged)
-                    return merged
+                # Decrypt with schema awareness whether merged is empty or not —
+                # a present agent_tool row is authoritative even with no overrides.
+                merged = _decrypt_sensitive_fields(merged, config_schema)
+                logger.info(f"[ToolConfig] DB merged config for {tool_name}, agent_id={agent_id}")
+                _set_cached_tool_config(agent_id, tool_name, merged)
+                return merged
 
         # 2. Fallback to global config only
         result = await db.execute(select(Tool).where(Tool.name == tool_name))
@@ -292,8 +292,10 @@ async def _get_tool_config(agent_id: Optional[uuid.UUID], tool_name: str) -> Opt
             merged = {**base_config, **tenant_config}
         else:
             merged = {}
-        if tool and merged:
-            # Decrypt with schema awareness
+        if tool:
+            # Decrypt with schema awareness (merged may be empty when the
+            # tool row exists but has no config — still return it so callers
+            # get a definitive answer instead of falling through to None).
             decrypted = _decrypt_sensitive_fields(merged, tool.config_schema)
             logger.info(f"[ToolConfig] DB global config for {tool_name}")
             _set_cached_tool_config(agent_id, tool_name, decrypted)
