@@ -1,6 +1,6 @@
 """Allow distinct delivery receipts from one Runtime checkpoint.
 
-Revision ID: allow_multiple_checkpoint_deliveries
+Revision ID: allow_checkpoint_deliveries
 Revises: add_agent_model_deleted_at
 Create Date: 2026-07-24 13:00:00
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "allow_multiple_checkpoint_deliveries"
+revision: str = "allow_checkpoint_deliveries"
 down_revision: str | None = "add_agent_model_deleted_at"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
