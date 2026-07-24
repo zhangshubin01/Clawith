@@ -28,6 +28,31 @@ if [ "$(id -u)" = '0' ]; then
         fi
     fi
 
+    # Grant clawith access to the Docker socket via its owning group.
+    # docker-compose mounts /var/run/docker.sock and adds its group via
+    # group_add, but gosu strips supplementary groups the target user is
+    # not a member of in /etc/group. We detect the socket's actual GID,
+    # ensure a matching group exists, and add clawith to it.
+    if [ -S /var/run/docker.sock ]; then
+        SOCK_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo "")
+        if [ -z "$SOCK_GID" ]; then
+            echo "[entrypoint] WARNING: Cannot determine docker.sock GID — skipping Docker access setup"
+        elif [ "$SOCK_GID" = "0" ]; then
+            SOCK_GROUP="root"
+        else
+            # Non-root group — create if missing and add clawith
+            if ! getent group "$SOCK_GID" >/dev/null 2>&1; then
+                echo "[entrypoint] Creating group gid=$SOCK_GID for Docker socket access..."
+                groupadd -g "$SOCK_GID" docker_sock_group
+            fi
+            SOCK_GROUP=$(getent group "$SOCK_GID" | cut -d: -f1)
+        fi
+        if [ -n "${SOCK_GROUP:-}" ] && ! id -nG clawith 2>/dev/null | grep -qwF "$SOCK_GROUP"; then
+            echo "[entrypoint] Adding clawith to '$SOCK_GROUP' group for Docker socket access..."
+            usermod -a -G "$SOCK_GROUP" clawith
+        fi
+    fi
+
     echo "[entrypoint] Dropping privileges to 'clawith' and re-executing..."
     exec gosu clawith /bin/bash "$0" "$@"
 fi
