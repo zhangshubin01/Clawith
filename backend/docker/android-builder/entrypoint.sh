@@ -128,6 +128,20 @@ select_java
 
 echo "[INFO] JAVA_HOME=$JAVA_HOME ($(java -version 2>&1 | head -1))"
 
+# ─── P5 Fix 1: 每次容器启动写入 sqlite-jdbc 版本强制脚本 ───
+# 解决 Room KSP DatabaseVerifier 在 aarch64 Linux 的原生库缺失
+# 必须运行时写入（非镜像层），因为 ~/.gradle 被 Gradle 卷覆盖
+mkdir -p /home/builduser/.gradle/init.d
+cat > /home/builduser/.gradle/init.d/sqlite-jdbc-aarch64.gradle << 'GRADLE_SCRIPT'
+allprojects {
+    configurations.all {
+        resolutionStrategy {
+            force "org.xerial:sqlite-jdbc:3.53.2.0"
+        }
+    }
+}
+GRADLE_SCRIPT
+
 # ─── tmpfs 加速编译热区 ───
 # 将 app/build/intermediates 符号链接到 /dev/shm/intermediates（tmpfs 挂载点）
 # 编译过程中临时文件不落盘，减少 IO 开销并避免 read_only rootfs 冲突
