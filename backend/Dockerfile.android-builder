@@ -39,7 +39,7 @@ RUN dpkg --add-architecture amd64 && \
     rm -rf /var/lib/apt/lists/*
 
 # ─── 第二层：Android cmdline-tools（运行时 SDKeyError 下载 SDK 到共享卷） ───
-ARG CMDLINE_TOOLS_VERSION=14742923
+ARG CMDLINE_TOOLS_VERSION=15859902
 ARG CMDLINE_TOOLS_URL=https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip
 
 RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
