@@ -12,6 +12,25 @@ trap 'rm -rf "${TMP_DIR:-}"' EXIT
 JDK_CACHE_DIR="${JDK_CACHE_DIR:-/opt/jdks}"
 JAVA_VERSION="${JAVA_VERSION:-17}"
 
+# ─── JDK 多版本回退（P4） ───
+# 如果指定版本的 JDK 目录不存在，回退到最新可用 JDK
+select_java() {
+    local target="${JDK_CACHE_DIR}/jdk-${JAVA_VERSION}"
+    if [ -d "$target" ]; then
+        export JAVA_HOME="$target"
+    else
+        local fallback=$(ls -d "${JDK_CACHE_DIR}"/jdk-* 2>/dev/null | sort -t- -k2 -n | tail -1)
+        if [ -n "$fallback" ]; then
+            echo "[entrypoint] JDK ${JAVA_VERSION} 不可用，回退到: $fallback"
+            export JAVA_HOME="$fallback"
+        else
+            echo "[entrypoint] 错误: 无可用 JDK"
+            exit 1
+        fi
+    fi
+    export PATH="${JAVA_HOME}/bin:${PATH}"
+}
+
 # ─── 自动检测容器架构，ARM64 原生镜像用 aarch64 JDK ───
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -104,8 +123,8 @@ else
     echo "[INFO] JDK $JAVA_VERSION 命中共享缓存 → ${JDK_HOME}"
 fi
 
-export JAVA_HOME="${JDK_HOME}"
-export PATH="${JAVA_HOME}/bin:${PATH}"
+# P4: 使用 select_java 回退逻辑
+select_java
 
 echo "[INFO] JAVA_HOME=$JAVA_HOME ($(java -version 2>&1 | head -1))"
 

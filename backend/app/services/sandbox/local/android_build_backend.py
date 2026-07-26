@@ -98,20 +98,34 @@ class AndroidBuildBackend(BaseSandboxBackend):
         return self._client
 
     def _resolve_host_path(self, container_path: str) -> str:
-        """将容器内 /data/agents/... 翻译为宿主机绝对路径。
+        """将容器内路径翻译为宿主机绝对路径，防止符号链接穿越和 .. 组件绕过。
 
-        Docker-in-Docker 场景：后端容器通过 docker.sock 启动构建容器，
-        绑定挂载的源路径由宿主机 Docker 守护进程解析，必须是宿主机路径。
+        安全要求：解析真实路径后验证仍在 agent_data_root 内。
         """
         if not self._host_agent_data_root:
-            return container_path  # 本地开发，路径直接可用
+            return container_path
         prefix = "/data/agents"
-        if container_path.startswith(prefix):
-            return self._host_agent_data_root + container_path[len(prefix):]
-        logger.info(
-            f"[AndroidBuild] path not under /data/agents, may fail: {container_path}"
-        )
-        return container_path
+        if not container_path.startswith(prefix):
+            logger.info(
+                f"[AndroidBuild] path not under /data/agents, may fail: {container_path}"
+            )
+            return container_path
+
+        try:
+            resolved = os.path.realpath(
+                self._host_agent_data_root + container_path[len(prefix):]
+            )
+            agent_data_real = os.path.realpath(self._host_agent_data_root)
+        except OSError as e:
+            logger.error(f"[AndroidBuild] 路径解析失败: {container_path} error={e}")
+            raise ValueError(f"路径解析失败: {container_path}") from e
+        if not resolved.startswith(agent_data_real + os.sep) and resolved != agent_data_real:
+            logger.error(
+                f"[AndroidBuild] 路径穿越拒绝: {container_path} resolved={resolved}"
+            )
+            raise ValueError(f"路径穿越检测: {container_path}")
+
+        return resolved
 
     def get_capabilities(self) -> SandboxCapabilities:
         return SandboxCapabilities(
@@ -130,6 +144,44 @@ class AndroidBuildBackend(BaseSandboxBackend):
         except Exception as e:
             logger.opt(exception=True).error("[AndroidBuild] health_check 失败：Docker daemon 不可用")
             return False
+
+    async def _check_gradle_cache_size(self):
+        """异步检查 Gradle 缓存卷大小，记录调试日志。"""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "run", "--rm",
+                "-v", f"{self.GRADLE_CACHE_VOLUME}:/cache",
+                "alpine:latest", "du", "-sh", "/cache",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            logger.debug(f"[AndroidBuild] gradle cache size: {stdout.decode().strip()}")
+        except asyncio.TimeoutError:
+            logger.warning("[AndroidBuild] 缓存大小检查超时")
+        except Exception:
+            pass  # GC 检查失败不影响构建
+
+    async def _check_sdk_version_drift(self, container) -> bool:
+        """比较镜像 SDK 版本与卷中版本，检测漂移。"""
+        try:
+            exec_result = await asyncio.to_thread(
+                container.exec_run,
+                "cat /opt/android-sdk/.image_version 2>/dev/null || echo 'unknown'"
+            )
+            volume_version = exec_result.output.decode().strip()
+            image = await asyncio.to_thread(
+                self.client.images.get, self.DEFAULT_IMAGE
+            )
+            image_version = image.labels.get("clawith.sdk-version", "unknown")
+            if volume_version != image_version and volume_version != "unknown":
+                logger.warning(
+                    f"[AndroidBuild] SDK 版本漂移: 卷={volume_version} 镜像={image_version}"
+                    f" 建议: docker volume rm {self.VOLUME_SDK}"
+                )
+                return False
+            return True
+        except Exception:
+            return True  # 检测失败不阻塞构建
 
     async def execute(
         self,
@@ -199,12 +251,11 @@ class AndroidBuildBackend(BaseSandboxBackend):
                     "-Dorg.gradle.caching=true "
                     "-Dorg.gradle.parallel=true "
                     "-Dorg.gradle.workers.max=4 "
-                    "-Dkotlin.compiler.execution.strategy=in-process"
+                    "-Dorg.gradle.kotlin.daemon.jvmargs=-Xmx2048m "
+                    "-Dkotlin.compiler.execution.strategy=in-process "
+                    "-Dorg.gradle.warning.mode=all"
                 ),
             }
-            if git_username and git_token:
-                env["GIT_USERNAME"] = git_username
-                env["GIT_TOKEN"] = git_token
             # 签名密钥密码从 kwargs 透传
             for key in ("KEY_STORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD"):
                 if key.lower() in kwargs:
@@ -218,14 +269,53 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 gradle_volume: {"bind": "/home/builduser/.gradle", "mode": "rw"},
             }
 
-            # 堆内存按任务类型调整
-            mem_limit = "8g"
+            # 堆内存按任务类型动态调整（从 kwargs 透传，默认 8g）
+            import re
+            mem_limit = str(kwargs.get("mem_limit", "8g"))
+            if not re.match(r'^\d+[bBkKmMgG]$', mem_limit):
+                logger.warning(f"[AndroidBuild] 无效 mem_limit 格式: {mem_limit}，使用默认值 8g")
+                mem_limit = "8g"
+            # OOM 重试时自动扩容
+            if kwargs.get("retry_after_oom"):
+                mem_limit = "12g"
+                logger.info(f"[AndroidBuild] OOM 重试: mem_limit -> {mem_limit}")
+
+            # Git 凭据通过 tmpfs 文件注入（避免环境变量在 docker inspect 中泄漏）
+            if git_username and git_token:
+                git_credential_cmd = (
+                    f'(umask 077 && echo "https://{shlex.quote(git_username)}:{shlex.quote(git_token)}@github.com"'
+                    f' > /tmp/.git-credentials) && '
+                    f'git config --global credential.helper "store --file /tmp/.git-credentials" && '
+                )
+            else:
+                git_credential_cmd = ""
 
             try:
+                # 确保构建镜像存在，缺失时自动拉取
+                try:
+                    self.client.images.get(self.DEFAULT_IMAGE)
+                except errors.ImageNotFound:
+                    logger.info(f"[AndroidBuild] 拉取镜像: {self.DEFAULT_IMAGE}")
+                    try:
+                        await asyncio.to_thread(
+                            self.client.images.pull,
+                            self.DEFAULT_IMAGE.split(":")[0],
+                            tag=self.DEFAULT_IMAGE.split(":")[1] if ":" in self.DEFAULT_IMAGE else "latest",
+                        )
+                    except Exception as e:
+                        logger.error(f"[AndroidBuild] 镜像拉取失败: {e}")
+                        return ExecutionResult(
+                            success=False, stdout="", stderr="",
+                            exit_code=1, duration_ms=0,
+                            error=f"构建镜像不可用: {self.DEFAULT_IMAGE}",
+                        )
+
                 container = self.client.containers.run(
                     image=self.DEFAULT_IMAGE,
                     command=[
                         "bash", "-c",
+                        # Git 凭据注入（tmpfs 文件，容器退出自动销毁）
+                        f"{git_credential_cmd}"
                         # 接受 Android SDK 许可协议（CI/CD 标准做法）
                         f"yes | sdkmanager --licenses >/dev/null 2>&1 || true; "
                         f'echo "sdk.dir=/opt/android-sdk" > local.properties '
@@ -260,6 +350,9 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 logger.info(
                     f"[AndroidBuild] container_start id={container.id[:12]}"
                 )
+
+                # 检测 SDK 版本漂移（容器启动后立即检查）
+                await self._check_sdk_version_drift(container)
 
                 on_output = kwargs.get("on_output")
                 stdout_buf = bytearray()
@@ -345,11 +438,18 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 # 等待队列消费完毕
                 await drain_task
 
-                stdout = stdout_buf.decode("utf-8", errors="replace")
+                # 异步检查 Gradle 缓存大小（不阻塞返回）
+                asyncio.ensure_future(self._check_gradle_cache_size())
 
-                # 保留末尾输出（Gradle 编译错误关键信息在末尾）
-                if len(stdout) > 50000:
-                    stdout = "...(前段省略)..." + stdout[-50000:]
+                # 先截取 bytes 再 decode，避免对大 buffer 做全量 UTF-8 解码
+                _MAX_RESULT_BYTES = self._MAX_STDOUT_CAPTURE
+                _MAX_RESULT_CHARS = 50000
+                if len(stdout_buf) > _MAX_RESULT_BYTES:
+                    tail = stdout_buf[-_MAX_RESULT_BYTES:]
+                    stdout = tail.decode("utf-8", errors="replace")[-_MAX_RESULT_CHARS:]
+                    stdout = "...(前段省略)..." + stdout
+                else:
+                    stdout = stdout_buf.decode("utf-8", errors="replace")
 
                 exit_code_val = result.get("StatusCode", 1)
                 duration_ms = int((time.time() - start_time) * 1000)
