@@ -263,7 +263,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
                     "-Dorg.gradle.parallel=true "
                     "-Dorg.gradle.workers.max=4 "
                     "-Dorg.gradle.kotlin.daemon.jvmargs=-Xmx2048m "
-                    "-Dkotlin.compiler.execution.strategy=in-process "
+                    "-Dkotlin.compiler.execution.strategy=out-of-process "
                     "-Dorg.gradle.warning.mode=all"
                 ),
             }

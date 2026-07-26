@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-07-26T17:59:35.081Z",
+  "updatedAt": "2026-07-26T18:21:48.709Z",
   "missions": [
     {
       "id": "session:cbb71598-7723-48ca-aaa7-479211c5ffe2:none",
@@ -7,7 +7,7 @@
       "name": "none",
       "objective": "Session mission",
       "createdAt": "2026-07-26T12:58:40.947Z",
-      "updatedAt": "2026-07-26T17:59:35.081Z",
+      "updatedAt": "2026-07-26T18:21:48.709Z",
       "status": "done",
       "workerCount": 19,
       "taskCounts": {
@@ -27,7 +27,7 @@
           "currentStep": null,
           "latestUpdate": "completed",
           "completedSummary": null,
-          "updatedAt": "2026-07-26T17:59:35.081Z"
+          "updatedAt": "2026-07-26T18:21:48.709Z"
         },
         {
           "name": "p3-review-2-sec:ap3-rev",
@@ -282,6 +282,14 @@
           "agent": "p3-review-1-py:ap3-rev",
           "detail": "completed",
           "sourceKey": "session-stop:a98e4d1ba2148c814"
+        },
+        {
+          "id": "session-stop:a16811535758dc397:2026-07-26T18:21:48.709Z",
+          "at": "2026-07-26T18:21:48.709Z",
+          "kind": "completion",
+          "agent": "p3-review-1-py:ap3-rev",
+          "detail": "completed",
+          "sourceKey": "session-stop:a16811535758dc397"
         }
       ]
     }
