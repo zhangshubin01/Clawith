@@ -84,6 +84,12 @@ RUN mkdir -p /home/builduser/.gradle/init.d && \
     }' > /home/builduser/.gradle/init.d/sqlite-jdbc-aarch64.gradle && \
     chown -R builduser:builduser /home/builduser/.gradle
 
+# ─── P5 Fix 1: sqlite-jdbc aarch64 原生库 → 系统库路径 ───
+# Room KSP DatabaseVerifier 加载 sqlite-jdbc, SQLiteJDBCLoader 搜索
+# /usr/lib64:/lib64:/lib:/usr/lib. 将 .so 放入 /usr/lib/ 后所有 JVM 自动发现.
+# 无论哪个 sqlite-jdbc 版本 (3.41.2.2 ~ 3.53.2.0) 都能找到.
+COPY docker/android-builder/libsqlitejdbc.so /usr/lib/libsqlitejdbc.so
+
 # ─── 第六层：Git 全局配置 ───
 RUN git config --global --add safe.directory /workspace
 

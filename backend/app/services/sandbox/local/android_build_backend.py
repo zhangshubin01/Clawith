@@ -263,7 +263,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
                     "-Dorg.gradle.parallel=true "
                     "-Dorg.gradle.workers.max=4 "
                     "-Dorg.gradle.kotlin.daemon.jvmargs=-Xmx2048m "
-                    "-Dkotlin.compiler.execution.strategy=out-of-process "
+                    "-Dkotlin.compiler.execution.strategy=in-process "
                     "-Dorg.gradle.warning.mode=all"
                 ),
             }
@@ -331,8 +331,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         f"yes | sdkmanager --licenses >/dev/null 2>&1 || true; "
                         f'echo "sdk.dir=/opt/android-sdk" > local.properties '
                         f"&& chmod +x ./gradlew "
-                        f"&& printf 'allprojects{{ configurations.matching{{ it.name.startsWith(\"ksp\") }}.all{{ resolutionStrategy{{ force \"org.xerial:sqlite-jdbc:3.53.2.0\" }} }} }}' > /tmp/gradle-init.gradle && "
-                        f"./gradlew --no-daemon --no-configuration-cache --console=plain --init-script /tmp/gradle-init.gradle {shlex.quote(str(gradle_task))} ",
+                        f"&& ./gradlew --no-daemon --console=plain {shlex.quote(str(gradle_task))} ",
                     ],
                     detach=True,
                     volumes=volumes,
