@@ -11,7 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     HOME=/home/builduser \
-    GRADLE_USER_HOME=/home/builduser/.gradle
+    GRADLE_USER_HOME=/home/builduser/.gradle \
+    ANDROID_USER_HOME=/home/builduser/.android
 
 ENV PATH="${PATH}:${ANDROID_HOME}/platform-tools" \
     ANDROID_SDK_ROOT="${ANDROID_HOME}"
@@ -48,36 +49,13 @@ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
     mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
     rm -f /tmp/android_tools.zip
 
-# SDK 版本标记（P4: 用于运行时漂移检测）
-RUN echo "${CMDLINE_TOOLS_VERSION}" > /opt/android-sdk/.image_version
+# SDK 版本标记（P4: 运行时漂移检测依赖 LABEL，卷内文件由 AGP 写入）
 LABEL clawith.sdk-version="${CMDLINE_TOOLS_VERSION}"
 
 # 接受 SDK 许可证（写入 $ANDROID_HOME/licenses/，卷初始化时复制到共享卷）
+# SDK 组件 (platforms/build-tools/NDK) 由 AGP 运行时下载到共享卷，不在镜像中预装
+# 原因: 共享卷挂载到 /opt/android-sdk，镜像层文件被卷覆盖
 RUN yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
-
-# ─── P5 Fix 4: 预安装常用 SDK 组件（减少运行时下载） ───
-# AGP 8.x 最小需求: platforms;android-34, build-tools;34.0.0
-RUN yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install \
-    "platforms;android-34" \
-    "platforms;android-35" \
-    "build-tools;34.0.0" \
-    "build-tools;35.0.0" \
-    "platform-tools" \
-    || echo "WARNING: sdkmanager --install failed, AGP will download SDK components at runtime"
-LABEL clawith.sdk-platforms="34,35"
-LABEL clawith.sdk-build-tools="34.0.0,35.0.0"
-
-# ─── P5 Fix 5: NDK 支持 ───
-ARG NDK_VERSION=27.0.12077973
-RUN yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install \
-    "ndk;${NDK_VERSION}" \
-    || echo "WARNING: NDK install failed, projects with native code will fail at CMake configure"
-ENV ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}
-ENV ANDROID_NDK=${ANDROID_HOME}/ndk/${NDK_VERSION}
-
-# ─── P5 Fix 9: 清理 sdkmanager 运行时临时文件 ───
-RUN rm -rf /tmp/* /var/tmp/* && \
-    rm -rf ${ANDROID_HOME}/.temp ${ANDROID_HOME}/.downloadIntermediates 2>/dev/null || true
 
 # ─── 第三层：清理 JDK 构建依赖（缩小运行时镜像） ───
 # JDK 运行时由 entrypoint.sh 的重试下载到共享卷
