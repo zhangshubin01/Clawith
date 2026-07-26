@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "entries": {
+    "466399dafa2d20f60587180bad0a07358eb7f2bce724df0ff682f038ad33f5ad": {
+      "last_emitted_at_ms": 1785070439121,
+      "message": "Read multiple files in parallel when possible for faster analysis."
+    },
+    "79a93d4a2f8f50b95f852280616242fee1855dc99a3c75211917f55e72e95fae": {
+      "last_emitted_at_ms": 1785070431551,
+      "message": "Use parallel execution for independent tasks. Use run_in_background for long operations (npm install, builds, tests)."
+    },
+    "445ed27a3872b681d98190bae61ccb84954e1bc4e140df5370be958dee776b3a": {
+      "last_emitted_at_ms": 1785070416390,
+      "message": "Verify changes work after editing. Test functionality before marking complete."
+    },
+    "028ba0a3c4e6ce8cbdf7f48dd7f2e67f54084808ac8176d849e9129ed140201d": {
+      "last_emitted_at_ms": 1785069509543,
+      "message": "Spawning agent: oh-my-claudecode:test-engineer (inherit) [BACKGROUND] | Task: P3最终测试"
+    },
+    "6d04894d4a62b59e3bda19b1a5e7128128a63ef24832ba777c3d34741b119ae2": {
+      "last_emitted_at_ms": 1785069508253,
+      "message": "Spawning agent: ecc:code-simplifier (inherit) [BACKGROUND] | Task: P3最终简化"
+    },
+    "a27ca8ed2a7aeab52089788b645cda3871880c40a6157740197cad6c039cc360": {
+      "last_emitted_at_ms": 1785069507087,
+      "message": "Spawning agent: pr-review-toolkit:code-reviewer (inherit) [BACKGROUND] | Task: P3最终merge-ready"
+    },
+    "0e548be72c033e59226b4f32e00028fba4dcc6a6d599e010d58dea32d8089625": {
+      "last_emitted_at_ms": 1785069505763,
+      "message": "Spawning agent: oh-my-claudecode:critic (inherit) [BACKGROUND] | Task: P3最终业界对标"
+    },
+    "68d61ad5092c0d90b3d3ddfd2a3d4c771544163948edc50b1cf8a908908f6cf7": {
+      "last_emitted_at_ms": 1785069504406,
+      "message": "Spawning agent: ecc:code-reviewer (inherit) [BACKGROUND] | Task: P3最终可读性"
+    },
+    "ebf2843cfc8179164c9ce7f21504fb23caf68d0c56f565ef27f12bbdb31b1505": {
+      "last_emitted_at_ms": 1785069503042,
+      "message": "Spawning agent: ecc:performance-optimizer (inherit) [BACKGROUND] | Task: P3最终性能"
+    },
+    "d4af141f43d15a4e1fee53f45d08851837da442b60d4d231e89679874369adb2": {
+      "last_emitted_at_ms": 1785069501769,
+      "message": "Spawning agent: ecc:silent-failure-hunter (inherit) [BACKGROUND] | Task: P3最终异常处理"
+    },
+    "d7298e7f112522c41facda17a70f36df5802264b8f9343a14704e6a279b14819": {
+      "last_emitted_at_ms": 1785069500564,
+      "message": "Spawning agent: ecc:architect (inherit) [BACKGROUND] | Task: P3最终架构"
+    },
+    "43381d48264469f3f048b8f8a01229fd7bcd7fb488f3883c1e2db4a3e4f0c180": {
+      "last_emitted_at_ms": 1785069499377,
+      "message": "Spawning agent: ecc:security-reviewer (inherit) [BACKGROUND] | Task: P3最终安全"
+    },
+    "47f74207173c7fef8f58bd86ceed935762102bef523c414b9e72f6d47a6ac964": {
+      "last_emitted_at_ms": 1785069498116,
+      "message": "Spawning agent: ecc:python-reviewer (inherit) [BACKGROUND] | Task: P3最终代码质量"
+    },
+    "459c54e5f35d6a58dcd90d2aecc21fa6d1f35d241bc5b134c506f87dc7b6d67b": {
+      "last_emitted_at_ms": 1785069107182,
+      "message": "Combine searches in parallel when investigating multiple patterns."
+    },
+    "6beb043ea1f06625ce6a2dff9d4c9246d7cfabcace5c4e03cce9235b2c5249fb": {
+      "last_emitted_at_ms": 1785069104366,
+      "message": "Spawning agent: oh-my-claudecode:test-engineer (inherit) [BACKGROUND] | Task: P3测试审查"
+    },
+    "8244e764a9992d5cbaf33471ff3aa352575da8c43175e9bf726d7db576dccfff": {
+      "last_emitted_at_ms": 1785069102234,
+      "message": "Spawning agent: ecc:code-simplifier (inherit) [BACKGROUND] | Task: P3简化审查"
+    },
+    "6cf731a606796ac02cd07846aad38fe64482680deeb0e294fc1d6517dfba0a1d": {
+      "last_emitted_at_ms": 1785069100513,
+      "message": "Spawning agent: pr-review-toolkit:code-reviewer (inherit) [BACKGROUND] | Task: P3 merge-ready审查"
+    },
+    "5e85b26561b3d48ff2f0d01eeac67d360b3a7508dd9c2b99c864ac1b1963d3d5": {
+      "last_emitted_at_ms": 1785069098783,
+      "message": "Spawning agent: oh-my-claudecode:critic (inherit) [BACKGROUND] | Task: P3业界对标"
+    },
+    "1cff5efefc5a763db5e1ed5ffcf75e40167f56b7e91c81882efcd55cf6ede092": {
+      "last_emitted_at_ms": 1785069096042,
+      "message": "Spawning agent: ecc:code-reviewer (inherit) [BACKGROUND] | Task: P3可读性审查"
+    },
+    "507f6c244cde1f346d8b32c4cfab45afb1998bc1686efc0b5ce9ba07ef02eee7": {
+      "last_emitted_at_ms": 1785069094163,
+      "message": "Spawning agent: ecc:performance-optimizer (inherit) [BACKGROUND] | Task: P3性能审查"
+    },
+    "372ec7bee15696e323b269cbff481c0c4a7bdf90c2fdc9b1496c749d8ac515c1": {
+      "last_emitted_at_ms": 1785069091607,
+      "message": "Spawning agent: ecc:silent-failure-hunter (inherit) [BACKGROUND] | Task: P3异常处理审查"
+    },
+    "edb6e42d0a35d600f47bf2dd9210e4a35c06bd34aa444b5e2538108c73383b31": {
+      "last_emitted_at_ms": 1785069089130,
+      "message": "Spawning agent: ecc:architect (inherit) [BACKGROUND] | Task: P3架构审查"
+    },
+    "9a10fa2365647a99c66362c0086247afe8bd4f7724d96d55eda60c2bf14105ae": {
+      "last_emitted_at_ms": 1785069086673,
+      "message": "Spawning agent: ecc:security-reviewer (inherit) [BACKGROUND] | Task: P3安全审查"
+    },
+    "e2514127ce4386928d5f0fb748675a85e7b6389e69f9e37aa55c71a016b31cef": {
+      "last_emitted_at_ms": 1785069084034,
+      "message": "Spawning agent: ecc:python-reviewer (inherit) [BACKGROUND] | Task: P3代码质量审查"
+    },
+    "39559d8ee833dad6ea10348aee1b0403260f3cf95574437e552ea23095813b2e": {
+      "last_emitted_at_ms": 1785068695663,
+      "message": "Spawning agent: ecc:architect (inherit) [BACKGROUND] | Task: P3架构重评"
+    },
+    "c5a671e7b01a1320b0e7538e23ef3ad1bc046b55e2b06d40588fd3438b2f0192": {
+      "last_emitted_at_ms": 1785068684538,
+      "message": "Spawning agent: oh-my-claudecode:test-engineer (inherit) [BACKGROUND] | Task: P3测试策略重评"
+    },
+    "d5c750e3d922c2618f8d5489fe2c6eceabb27861ce1435862f12ba8b470378d5": {
+      "last_emitted_at_ms": 1785068160657,
+      "message": "Spawning agent: ecc:code-reviewer (inherit) [BACKGROUND] | Task: P3代码可读性"
+    },
+    "a8af3b88f74e75cb3befc27b2d4d691e772c191824bb6971ea49ec80b4cd0c7b": {
+      "last_emitted_at_ms": 1785068154436,
+      "message": "Spawning agent: ecc:python-reviewer (inherit) [BACKGROUND] | Task: P3 Python代码质量"
+    },
+    "d30f844b69b1308b7ec0be93466c32bc2ab7a99a2c84c042d1e164ddccbb2a0e": {
+      "last_emitted_at_ms": 1785067734929,
+      "message": "Spawning agent: ecc:code-reviewer (inherit) [BACKGROUND] | Task: P3综合最终评分"
+    },
+    "ceaae40e4923f95d07a1886674d10ace055c54b5cbe132fc31746da082153afa": {
+      "last_emitted_at_ms": 1785067733530,
+      "message": "Spawning agent: ecc:architect (inherit) [BACKGROUND] | Task: P3架构+可维护性"
+    },
+    "48e0285bf9a7760476e855e283b3c4f5b365c32e5308ed351bd2b1f4f4376261": {
+      "last_emitted_at_ms": 1785067731764,
+      "message": "Spawning agent: pr-review-toolkit:code-reviewer (inherit) [BACKGROUND] | Task: P3方案vs代码对账"
+    },
+    "3895b57a4045a27f5362391b753a51625fe3695003cc129281ee9ae22321b52c": {
+      "last_emitted_at_ms": 1785067729647,
+      "message": "Spawning agent: ecc:code-simplifier (inherit) [BACKGROUND] | Task: P3代码质量+简化审查"
+    },
+    "4d412cb3ac3e2b1cd7dbdf1c83ff8aea0433ed02c14c2a6833ae7020c057e71d": {
+      "last_emitted_at_ms": 1785067727510,
+      "message": "Spawning agent: ecc:security-reviewer (inherit) [BACKGROUND] | Task: P3安全+正确性审查"
+    },
+    "c43cd1fff5f560836852d5d0c4caafdd0ee439d93269279f3e045b1b4d9857ca": {
+      "last_emitted_at_ms": 1785066970968,
+      "message": "Spawning agent: ecc:security-reviewer (inherit) [BACKGROUND] | Task: 安全+质量终审"
+    },
+    "b118f4b7a984ff36407e79289a073cb312f67aabd76b9bbf2bc255351d16a7f1": {
+      "last_emitted_at_ms": 1785066969489,
+      "message": "Spawning agent: ecc:code-simplifier (inherit) [BACKGROUND] | Task: 技能简化审查"
+    },
+    "4a589900c7e423fd25b310aa8fc02564d484999c63372b46bc8bcc0686ef891e": {
+      "last_emitted_at_ms": 1785066967170,
+      "message": "Spawning agent: oh-my-claudecode:critic (inherit) [BACKGROUND] | Task: 技能实用性+实战检验"
+    },
+    "4c4f655fe64ed9a6880686e6ec61dcb9930394ffe001c77a342e9723adb04984": {
+      "last_emitted_at_ms": 1785066964684,
+      "message": "Spawning agent: ecc:architect (inherit) [BACKGROUND] | Task: 技能结构完整性审查"
+    },
+    "fef40cc55128677ac35cbf509188de107190c1a6e09b51ec32efd939ef5609e3": {
+      "last_emitted_at_ms": 1785066962659,
+      "message": "Spawning agent: ecc:code-reviewer (inherit) [BACKGROUND] | Task: 技能触发准确性审查"
+    }
+  },
+  "updated_at": "2026-07-26T12:53:59.121Z"
+}

@@ -329,7 +329,10 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         f"yes | sdkmanager --licenses >/dev/null 2>&1 || true; "
                         f'echo "sdk.dir=/opt/android-sdk" > local.properties '
                         f"&& chmod +x ./gradlew "
-                        f"&& ./gradlew --no-daemon --console=plain {shlex.quote(str(gradle_task))} ",
+                        f"&& mkdir -p /tmp/gradle-init && cat > /tmp/gradle-init/sqlite-jdbc.gradle << 'EOF' && "
+                        f"allprojects {{ configurations.all {{ resolutionStrategy {{ force 'org.xerial:sqlite-jdbc:3.53.2.0' }} }} }}"
+                        f"EOF "
+                        f"./gradlew --no-daemon --console=plain --init-script /tmp/gradle-init/sqlite-jdbc.gradle {shlex.quote(str(gradle_task))} ",
                     ],
                     detach=True,
                     volumes=volumes,

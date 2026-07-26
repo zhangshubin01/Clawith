@@ -1,0 +1,7 @@
+{
+  "tool_name": "mcp__ccr-local-web__web_fetch",
+  "tool_input_preview": "{\"url\":\"https://langchain-ai.github.io/langgraph/how-tos/local-studio/\"}",
+  "error": "Fetch failed with status 404: <!doctype html>\n<html lang=\"en\">\n<head>\n    <meta charset=\"utf-8\">\n    <title>Redirecting to LangGraph Documentation</title>\n    <link rel=\"canonical\" href=\"https://docs.langchain.com/oss/python/langgraph/overview\">\n    <meta name=\"robots\" content=\"noindex\">\n    <script>\n        // Catchall redirect for any unmapped paths\n        window.location.replace(\"https://docs.langchain.com/oss/python/langgraph/overview\");\n    </script>\n    <meta http-equiv=\"refresh\" content=...",
+  "timestamp": "2026-07-25T18:08:33.198Z",
+  "retry_count": 1
+}
