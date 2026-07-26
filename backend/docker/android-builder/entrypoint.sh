@@ -165,7 +165,12 @@ fi
 # ─── 产物路径输出（供 agent_tools.py 解析） ───
 # 编译完成后输出 APK/AAB 路径列表，覆盖多模块和自定义 buildDir 项目
 echo "=== APK_OUTPUT_PATHS ==="
-find . -path "*/build/outputs/*" \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null || true
+APKS=$(find . -path "*/build/outputs/*" \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null)
+if [ -n "$APKS" ]; then
+    echo "$APKS"
+else
+    echo "NO_APK_FOUND"
+fi
 echo "=== END_APK_OUTPUT_PATHS ==="
 
 exec "$@"

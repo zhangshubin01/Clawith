@@ -1,0 +1,24 @@
+name: Build Android Builder Image
+
+on:
+  push:
+    paths:
+      - 'backend/Dockerfile.android-builder'
+      - 'backend/docker/android-builder/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: |
+          docker build -f backend/Dockerfile.android-builder \
+            -t ghcr.io/${{ github.repository }}/clawith-devbox-android:latest \
+            -t ghcr.io/${{ github.repository }}/clawith-devbox-android:${{ github.sha }} \
+            backend/
+      - name: Push to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker push ghcr.io/${{ github.repository }}/clawith-devbox-android:latest
+          docker push ghcr.io/${{ github.repository }}/clawith-devbox-android:${{ github.sha }}

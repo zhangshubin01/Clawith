@@ -80,6 +80,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
     _BUILD_MAX_CONCURRENT = 2
     # stdout 缓冲上限，防止异常构建（如无限循环日志）撑爆内存
     _MAX_STDOUT_CAPTURE = 5_000_000  # 5MB
+    _GRADLE_CACHE_MODULE_DIRS_MAX = 500        # modules-2 目录数阈值
 
     # 模块级信号量 — get_sandbox_backend() 每次创建新实例，实例级 Semaphore 无效
     _build_semaphore = asyncio.Semaphore(_BUILD_MAX_CONCURRENT)
@@ -145,28 +146,34 @@ class AndroidBuildBackend(BaseSandboxBackend):
             logger.opt(exception=True).error("[AndroidBuild] health_check 失败：Docker daemon 不可用")
             return False
 
-    async def _check_gradle_cache_size(self):
-        """异步检查 Gradle 缓存卷大小，记录调试日志。"""
+    async def _enforce_gradle_cache_quota(self):
+        """Gradle 依赖缓存目录数超过阈值时告警（清理由 Gradle 内置 30 天 GC 处理）。"""
         try:
             proc = await asyncio.create_subprocess_exec(
                 "docker", "run", "--rm",
                 "-v", f"{self.GRADLE_CACHE_VOLUME}:/cache",
-                "alpine:latest", "du", "-sh", "/cache",
+                "alpine:latest", "sh", "-c",
+                "find /cache/caches/modules-2 -mindepth 3 -maxdepth 3 -type d | wc -l",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-            logger.debug(f"[AndroidBuild] gradle cache size: {stdout.decode().strip()}")
-        except asyncio.TimeoutError:
-            logger.warning("[AndroidBuild] 缓存大小检查超时")
-        except Exception:
-            pass  # GC 检查失败不影响构建
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+            dir_count = int(stdout.decode().strip() or "0")
+            if dir_count > self._GRADLE_CACHE_MODULE_DIRS_MAX:
+                logger.warning(
+                    f"[AndroidBuild] Gradle 依赖缓存目录数 {dir_count} > {self._GRADLE_CACHE_MODULE_DIRS_MAX}"
+                    f"（Gradle 内置 GC 将驱逐 30 天未访问缓存）"
+                )
+            else:
+                logger.debug(f"[AndroidBuild] gradle module dirs={dir_count}")
+        except (asyncio.TimeoutError, ValueError, ProcessLookupError):
+            pass  # 超时/解析失败/容器不存在 — 不影响构建
 
     async def _check_sdk_version_drift(self, container) -> bool:
         """比较镜像 SDK 版本与卷中版本，检测漂移。"""
         try:
             exec_result = await asyncio.to_thread(
                 container.exec_run,
-                "cat /opt/android-sdk/.image_version 2>/dev/null || echo 'unknown'"
+                ["sh", "-c", "test -f /opt/android-sdk/.image_version && cat /opt/android-sdk/.image_version || echo unknown"],
             )
             volume_version = exec_result.output.decode().strip()
             image = await asyncio.to_thread(
@@ -193,6 +200,8 @@ class AndroidBuildBackend(BaseSandboxBackend):
     ) -> ExecutionResult:
         """在 Docker 容器中执行 Android 项目编译（并发控制入口）。"""
         async with AndroidBuildBackend._build_semaphore:
+            from app.services.sandbox.local import android_build_metrics
+            android_build_metrics.record_build_start()
             start_time = time.time()
 
             # 提取参数
@@ -337,6 +346,11 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         "/dev/shm": "rw,noexec,nosuid,size=1g",
                         "/tmp": "rw,noexec,nosuid,size=1g",
                         "/home/builduser/.android": "rw,noexec,nosuid,size=128m",
+                        # P5 Fix 2: tmpfs 覆盖冲突缓存子目录（优先级高于 volume）
+                        # modules-2/ (依赖 JAR) 和 wrapper/dists/ (Gradle 发行版) 由全局卷持久化
+                        "/home/builduser/.gradle/caches/build-cache-1": "rw,exec,noatime,size=1g",
+                        "/home/builduser/.gradle/caches/journal-1": "rw,noexec,nosuid,size=128m",
+                        "/home/builduser/.gradle/kotlin-daemon": "rw,noexec,nosuid,size=256m",
                     },
                     network_mode="bridge",
                     remove=False,
@@ -426,8 +440,12 @@ class AndroidBuildBackend(BaseSandboxBackend):
                     logger.warning(
                         f"[AndroidBuild] done timeout duration={duration_ms}ms limit={timeout}s"
                     )
-                    # 保留部分输出 — stdout_buf 中可能已有编译进度，空输出无法诊断
-                    partial = stdout_buf.decode("utf-8", errors="replace")[-50000:] if stdout_buf else ""
+                    # 保留部分输出 — bytes-first 截取优化（P5 Fix 6）
+                    if stdout_buf:
+                        tail = stdout_buf[-self._MAX_STDOUT_CAPTURE:]
+                        partial = tail.decode("utf-8", errors="replace")[-50000:]
+                    else:
+                        partial = ""
                     return ExecutionResult(
                         success=False, stdout=partial, stderr="",
                         exit_code=124,
@@ -439,7 +457,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 await drain_task
 
                 # 异步检查 Gradle 缓存大小（不阻塞返回）
-                asyncio.ensure_future(self._check_gradle_cache_size())
+                asyncio.ensure_future(self._enforce_gradle_cache_quota())
 
                 # 先截取 bytes 再 decode，避免对大 buffer 做全量 UTF-8 解码
                 _MAX_RESULT_BYTES = self._MAX_STDOUT_CAPTURE
@@ -476,6 +494,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
                     error=f"构建错误: {str(e)[:200]}",
                 )
             finally:
+                android_build_metrics.record_build_end()
                 # 确保清理：所有路径（成功/超时/异常）统一收尾
                 try:
                     if 'drain_task' in locals():

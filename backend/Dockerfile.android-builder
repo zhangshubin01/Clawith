@@ -55,6 +55,30 @@ LABEL clawith.sdk-version="${CMDLINE_TOOLS_VERSION}"
 # 接受 SDK 许可证（写入 $ANDROID_HOME/licenses/，卷初始化时复制到共享卷）
 RUN yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
 
+# ─── P5 Fix 4: 预安装常用 SDK 组件（减少运行时下载） ───
+# AGP 8.x 最小需求: platforms;android-34, build-tools;34.0.0
+RUN yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install \
+    "platforms;android-34" \
+    "platforms;android-35" \
+    "build-tools;34.0.0" \
+    "build-tools;35.0.0" \
+    "platform-tools" \
+    || echo "WARNING: sdkmanager --install failed, AGP will download SDK components at runtime"
+LABEL clawith.sdk-platforms="34,35"
+LABEL clawith.sdk-build-tools="34.0.0,35.0.0"
+
+# ─── P5 Fix 5: NDK 支持 ───
+ARG NDK_VERSION=27.0.12077973
+RUN yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --install \
+    "ndk;${NDK_VERSION}" \
+    || echo "WARNING: NDK install failed, projects with native code will fail at CMake configure"
+ENV ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}
+ENV ANDROID_NDK=${ANDROID_HOME}/ndk/${NDK_VERSION}
+
+# ─── P5 Fix 9: 清理 sdkmanager 运行时临时文件 ───
+RUN rm -rf /tmp/* /var/tmp/* && \
+    rm -rf ${ANDROID_HOME}/.temp ${ANDROID_HOME}/.downloadIntermediates 2>/dev/null || true
+
 # ─── 第三层：清理 JDK 构建依赖（缩小运行时镜像） ───
 # JDK 运行时由 entrypoint.sh 的重试下载到共享卷
 # cmdline-tools 保留以便运行时首次构建时下载 SDK 组件到共享卷
@@ -67,6 +91,20 @@ RUN apt-get remove -y --purge default-jdk-headless ca-certificates-java && \
 RUN groupadd -r builduser -g 1000 && useradd -r -g builduser -u 1000 builduser && \
     mkdir -p /opt/jdks /opt/android-sdk /home/builduser/.gradle && \
     chown -R builduser:builduser /opt/jdks /opt/android-sdk /home/builduser/.gradle
+
+# ─── P5 Fix 1: 全局强制 sqlite-jdbc aarch64 兼容版本 ───
+# 解决 Room KSP DatabaseVerifier 在 ARM64 容器的原生库缺失问题
+# 参考: https://issuetracker.google.com/issues/174695268
+# 必须在 useradd builduser + chown 之后执行，确保文件所有权正确
+RUN mkdir -p /home/builduser/.gradle/init.d && \
+    echo 'allprojects { \
+        configurations.all { \
+            resolutionStrategy { \
+                force "org.xerial:sqlite-jdbc:3.53.2.0" \
+            } \
+        } \
+    }' > /home/builduser/.gradle/init.d/sqlite-jdbc-aarch64.gradle && \
+    chown -R builduser:builduser /home/builduser/.gradle
 
 # ─── 第六层：Git 全局配置 ───
 RUN git config --global --add safe.directory /workspace
