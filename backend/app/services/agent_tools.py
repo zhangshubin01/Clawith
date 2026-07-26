@@ -14,7 +14,7 @@ The agent reads/writes these files directly. No per-concept tools needed.
 import asyncio
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import fnmatch
 import hashlib
 import json
@@ -28,8 +28,9 @@ import unicodedata
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Any, cast
+from typing import Literal, Optional, Any, cast
 import re
+import shlex
 
 from loguru import logger
 from sqlalchemy import select, or_
@@ -2491,6 +2492,252 @@ async def _edit_file_outcome(
 
 
 # ── Android 编译工具 ───────────────────────────────────────────────────────
+
+# ── Android 编译错误提取 dataclass ──
+
+
+@dataclass(frozen=True)
+class _BuildError:
+    """单条编译错误的结构化表示。"""
+
+    category: Literal["error", "warning"]
+    file: str  # 正则保证非空；AAPT2/Gradle 系统错误时为空字符串
+    line: int | None
+    column: int | None
+    message: str
+
+
+@dataclass
+class _BuildErrorSummary:
+    """编译错误汇总。errors/warnings 为可变 list 因解析循环逐行追加。"""
+
+    errors: list[_BuildError] = field(default_factory=list)
+    warnings: list[_BuildError] = field(default_factory=list)
+    total_error_count: int = 0
+    total_warning_count: int = 0
+    unrecognized_lines: int = 0  # 未识别错误行计数
+
+
+# ── 截断常量 ──
+_BUILD_HEAD_CHARS = 1200  # ~10% — FAILURE 行 + What went wrong
+_BUILD_TAIL_CHARS = 10800  # ~90% — 编译错误 + 堆栈
+_BUILD_MAX_STRUCTURED_ERRORS = 50
+
+# Kotlin 错误格式: e: /path/file.kt: (8, 13): message
+_KOTLIN_ERROR_RE = re.compile(
+    r"^([ew]):\s*(?:file://)?([^\s:]+):\s*\(?(\d+)(?:[,:\s]+(\d+))?\)?(?::\s+|\s+)(.*)"
+)
+
+# Javac 错误格式: /path/File.java:8: error: message
+# 扩展名包含 .xml/.aidl 覆盖 Android 资源文件错误
+_JAVAC_ERROR_RE = re.compile(
+    r"^(\S+?\.(?:java|kt|xml|aidl|gradle|kts)):(\d+):\s*(error|warning):\s*(.*)"
+)
+
+# AAPT2 / AGP / Gradle 兜底: error: message
+#   前置可选 file:line:col: 前缀 (AAPT2 格式: /path/strings.xml:8:3: error: ...)
+_GENERAL_ERROR_RE = re.compile(
+    r"^(?:(?:\S+):(?:\d+):(?:\d+):\s*)?(?:error|Error|ERROR):\s*(.*)"
+)
+
+# 英文 + 中文 Gradle summary: "27 errors, 5 warnings" / "27 个错误, 5 个警告"
+_BUILD_SUMMARY_RE = re.compile(
+    r"(\d+)\s*(?:errors?|个错误|エラー)[,;\s]+(\d+)\s*(?:warnings?|个警告|警告)"
+)
+
+
+def _is_likely_error_line(line: str) -> bool:
+    """判断一行是否可能是未被正则覆盖的错误行。
+
+    用于统计 unrecognized_lines, 帮助 LLM 判断是否有未被结构化解析的错误。
+    """
+    # --quiet 已消除 > Task :xxx 进度行; 但 > Could not / > R8: / > ninja: 等
+    # 是 Gradle 错误块内的子级详情, 必须保留。仅过滤明确的任务进度前缀。
+    noise_prefixes = (
+        "> Task ", "> Configure ", "> Transforming ", "Download", "Welcome",
+        "Deprecated", "Note:", "注:", "BUILD SUCCESSFUL",
+    )
+    if line.startswith(noise_prefixes):
+        return False
+    error_keywords = (
+        "error", "Error", "错误", "FAILED", "failed", "failure",
+        "exception", "Exception", "Could not", "Cannot",
+        "unresolved", "Unresolved", "not found",
+    )
+    return any(kw in line for kw in error_keywords)
+
+
+def _parse_android_build_errors(output: str) -> _BuildErrorSummary:
+    """从 Gradle 输出中提取结构化编译错误。
+
+    处理三种编译器输出格式：
+    - Kotlin (kotlinc): e: file: (line, col): message
+    - Java (javac):      file:line: error: message
+    - AAPT2/Gradle 系统:  error: message
+
+    返回 _BuildErrorSummary, 包含去重后的错误列表。
+    """
+    if not isinstance(output, str):
+        return _BuildErrorSummary()
+
+    summary = _BuildErrorSummary()
+    seen: set[tuple[str, int | None, int | None]] = set()
+
+    for line in output.splitlines():
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+
+        matched = False
+
+        # Kotlin 格式
+        m = _KOTLIN_ERROR_RE.match(line_stripped)
+        if m:
+            matched = True
+            category: Literal["error", "warning"] = "error" if m.group(1) == "e" else "warning"
+            filepath = m.group(2)
+            line_no = int(m.group(3)) if m.group(3).isdigit() else None
+            col_no = int(m.group(4)) if m.group(4) and m.group(4).isdigit() else None
+            message = m.group(5).strip()
+            dedup_key = (filepath, line_no, col_no)
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            err = _BuildError(category=category, file=filepath, line=line_no, column=col_no, message=message)
+            if category == "error":
+                summary.errors.append(err)
+            else:
+                summary.warnings.append(err)
+
+        # Javac 格式
+        if not matched:
+            m = _JAVAC_ERROR_RE.match(line_stripped)
+            if m:
+                matched = True
+                filepath = m.group(1)
+                line_no = int(m.group(2)) if m.group(2).isdigit() else None
+                category = "error" if m.group(3) == "error" else "warning"
+                message = m.group(4).strip()
+                dedup_key = (filepath, line_no, None)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+                err = _BuildError(category=category, file=filepath, line=line_no, column=None, message=message)
+                if category == "error":
+                    summary.errors.append(err)
+                else:
+                    summary.warnings.append(err)
+
+        # AAPT2 / Gradle 系统错误兜底 — 此分支不引入去重, 因 file="" 不是有意义的去重键
+        if not matched:
+            m = _GENERAL_ERROR_RE.match(line_stripped)
+            if m:
+                matched = True
+                message = m.group(1).strip()
+                if message:
+                    err = _BuildError(category="error", file="", line=None, column=None, message=message)
+                    summary.errors.append(err)
+
+        # 统计未识别行
+        if not matched and _is_likely_error_line(line_stripped):
+            summary.unrecognized_lines += 1
+
+    # 中文兼容的 Gradle summary 提取
+    summary_match = _BUILD_SUMMARY_RE.search(output[-3000:])
+    if summary_match:
+        summary.total_error_count = int(summary_match.group(1))
+        summary.total_warning_count = int(summary_match.group(2))
+    else:
+        summary.total_error_count = len(summary.errors)
+        summary.total_warning_count = len(summary.warnings)
+
+    return summary
+
+
+def _format_android_build_failure(
+    exit_code: int,
+    output: str,
+    errors: _BuildErrorSummary,
+    duration_ms: int,
+    gradle_task: str = "",
+) -> str:
+    """格式化 Android 编译失败消息。
+
+    策略 (基于 Vercel Academy / OpenCode / Roo Code 最佳实践):
+    1. 结构化错误放在最前 — LLM 第一眼看到关键信息
+    2. --quiet 已消除 task 进度, head 仅保留 FAILURE/What went wrong
+    3. 10:90 head/tail, 标注截断信息
+    4. 提供可执行的 gradle 重新运行命令
+    """
+    output = output or ""
+    parts: list[str] = []
+    output_len = len(output)
+
+    # ── 第一部分: 构建概况 ──
+    parts.append(f"Android build failed (exit {exit_code}, 耗时 {duration_ms}ms)")
+    parts.append(f"Parsed: {errors.total_error_count} errors, {errors.total_warning_count} warnings")
+    if errors.unrecognized_lines > 0:
+        parts.append(
+            f"⚠ 注意: {errors.unrecognized_lines} 行错误信息未被结构化解析 (AAPT2/D8/Gradle 系统错误)"
+        )
+
+    # ── 第二部分: 结构化错误列表 ──
+    if errors.errors:
+        shown = errors.errors[:_BUILD_MAX_STRUCTURED_ERRORS]
+        parts.append(f"\n── 编译错误 ({len(shown)} shown) ──")
+        for i, e in enumerate(shown, 1):
+            loc = f"{e.file}:{e.line}" if e.file else "?"
+            if e.column is not None:
+                loc += f":{e.column}"
+            parts.append(f"  {i}. [{loc}] {e.message}")
+        if len(errors.errors) > _BUILD_MAX_STRUCTURED_ERRORS:
+            parts.append(f"  ... (还有 {len(errors.errors) - _BUILD_MAX_STRUCTURED_ERRORS} 个错误未显示)")
+
+    if errors.warnings:
+        shown_w = errors.warnings[:_BUILD_MAX_STRUCTURED_ERRORS // 2]
+        parts.append(f"\n── 编译警告 ({len(shown_w)} shown) ──")
+        for i, w in enumerate(shown_w, 1):
+            loc = f"{w.file}:{w.line}" if w.file else "?"
+            if w.column is not None:
+                loc += f":{w.column}"
+            parts.append(f"  {i}. [{loc}] {w.message}")
+        if len(errors.warnings) > _BUILD_MAX_STRUCTURED_ERRORS // 2:
+            parts.append(
+                f"  ... (还有 {len(errors.warnings) - _BUILD_MAX_STRUCTURED_ERRORS // 2} 个警告)"
+            )
+
+    # ── 第三部分: 原始输出 (head/tail) ──
+    display_total = _BUILD_HEAD_CHARS + _BUILD_TAIL_CHARS
+    if output_len <= display_total:
+        parts.append(f"\n── 原始编译输出 ({output_len} 字符) ──")
+        parts.append(output.rstrip())
+    else:
+        head = output[:_BUILD_HEAD_CHARS]
+        tail = output[-_BUILD_TAIL_CHARS:]
+        skipped = output_len - display_total
+        parts.append(
+            f"\n── 原始编译输出 (截断: {output_len} → {display_total} 字符) ──"
+        )
+        parts.append(f"(省略 {skipped} 字符中间段)")
+        parts.append(head.rstrip())
+        parts.append(f"... [省略 {skipped} 字符] ...")
+        parts.append(tail.rstrip())
+
+    # ── 第四部分: 截断恢复信息 ──
+    if output_len > display_total and gradle_task:
+        cmd = f"./gradlew --no-daemon --quiet --stacktrace {shlex.quote(gradle_task)}"
+        parts.append(
+            f"\n(输出共 {output_len} 字符, 截断: 头 {_BUILD_HEAD_CHARS} + 尾 {_BUILD_TAIL_CHARS} 字符. "
+            f"如需完整输出: execute_code 运行 `{cmd}`)"
+        )
+    elif output_len > display_total:
+        parts.append(
+            f"\n(输出共 {output_len} 字符, 截断: 头 {_BUILD_HEAD_CHARS} + 尾 {_BUILD_TAIL_CHARS} 字符)"
+        )
+
+    return "\n".join(parts)
+
+
 async def _android_compile_outcome(
     agent_id: uuid.UUID | None,
     arguments: dict,
@@ -2541,7 +2788,7 @@ async def _android_compile_outcome(
             on_output=on_output,
         )
     except Exception as exc:
-        logger.exception("[android_compile] sandbox failed agent={}: {}", agent_id, exc)
+        logger.exception("[AndroidBuild] sandbox failed agent={}: {}", agent_id, exc)
         return _typed_failure("Android build platform error", "sandbox_execution_failed")
 
     # 结果处理
@@ -2556,7 +2803,7 @@ async def _android_compile_outcome(
                     for f in scan_dir.rglob(pattern):
                         apk_files.append(str(f.relative_to(full_path)))
             except (OSError, PermissionError):
-                logger.warning("[android_compile] scan error: {}", scan_dir)
+                logger.warning("[AndroidBuild] scan error: {}", scan_dir)
 
         # 标准路径未找到 → 递归扫描全项目（覆盖多模块/自定义 buildDir）
         if not apk_files:
@@ -2575,13 +2822,32 @@ async def _android_compile_outcome(
             )
         return _typed_success(f"Android build succeeded: {task}\n(no APK/AAB found)")
 
-    # Gradle 编译错误在 stderr，构建进度在 stdout。两者都返回以便 LLM 诊断
-    error_tail = (result.stderr or result.stdout or "").strip()
-    if len(error_tail) > 2000:
-        error_tail = "...(前段省略)...\n" + error_tail[-2000:]
+    # 合并 stdout + stderr，结构化提取 + 智能截断
+    output = (result.stdout or "") + (result.stderr or "")
+    if not output.strip():
+        # 没有编译输出时优先返回 sandbox 层的 error (如镜像缺失、Docker 异常)
+        output = result.error or "(no output captured)"
+
+    errors = _parse_android_build_errors(output)
+    formatted = _format_android_build_failure(
+        exit_code=result.exit_code,
+        output=output,
+        errors=errors,
+        duration_ms=result.duration_ms,
+        gradle_task=task,
+    )
     return _typed_failure(
-        f"Android build failed (exit {result.exit_code}).\n\n{error_tail}",
+        formatted,
         "sandbox_execution_failed",
+        metadata={
+            "exit_code": result.exit_code,
+            "error_count": errors.total_error_count,
+            "warning_count": errors.total_warning_count,
+            "unrecognized_lines": errors.unrecognized_lines,
+            "structured_errors_shown": min(len(errors.errors), _BUILD_MAX_STRUCTURED_ERRORS),
+            "total_output_chars": len(output),
+            "duration_ms": result.duration_ms,
+        },
     )
 
 
