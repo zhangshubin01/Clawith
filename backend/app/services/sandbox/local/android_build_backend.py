@@ -39,10 +39,10 @@ def _detect_host_agent_data_root() -> str:
         client = get_docker_client()
         info = client.containers.get(hostname)
     except errors.NotFound:
-        logger.warning(f"[AndroidBuild] container {hostname} not found via docker.sock")
+        logger.error(f"[AndroidBuild] container {hostname} not found via docker.sock")
         return ""
     except Exception as e:
-        logger.warning(f"[AndroidBuild] docker.sock unavailable: {e}")
+        logger.error(f"[AndroidBuild] docker.sock unavailable: {e}")
         return ""
 
     for m in info.attrs.get("Mounts", []):
@@ -52,7 +52,7 @@ def _detect_host_agent_data_root() -> str:
             logger.info(f"[AndroidBuild] detected host path: {host_path}")
             return host_path
 
-    logger.warning("[AndroidBuild] /data/agents mount not found in container info")
+    logger.error("[AndroidBuild] /data/agents mount not found in container info")
     return ""
 
 
@@ -72,7 +72,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
     VOLUME_JDK = "global_jdk_cache"
     VOLUME_SDK = "global_android_sdk"
 
-    # 全局共享 Gradle 缓存卷（SERIAL_ALWAYS 无并发锁冲突）
+    # 全局共享 Gradle 缓存卷（进程内 Semaphore(2)，多副本部署需分布式协调）
     GRADLE_CACHE_VOLUME = "gradle_cache_global"
 
     # 单 worker 级并发限制。多 worker (uvicorn --workers N) 下全局并发 = N × 2。
@@ -106,7 +106,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
         prefix = "/data/agents"
         if container_path.startswith(prefix):
             return self._host_agent_data_root + container_path[len(prefix):]
-        logger.warning(
+        logger.info(
             f"[AndroidBuild] path not under /data/agents, may fail: {container_path}"
         )
         return container_path
