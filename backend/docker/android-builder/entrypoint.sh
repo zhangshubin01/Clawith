@@ -123,7 +123,7 @@ else
     echo "[INFO] JDK $JAVA_VERSION 命中共享缓存 → ${JDK_HOME}"
 fi
 
-# P4: 使用 select_java 回退逻辑
+# P5: select_java 统一设置 JAVA_HOME + PATH（带回退）
 select_java
 
 echo "[INFO] JAVA_HOME=$JAVA_HOME ($(java -version 2>&1 | head -1))"
