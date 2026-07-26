@@ -48,6 +48,10 @@ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
     mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
     rm -f /tmp/android_tools.zip
 
+# SDK 版本标记（P4: 用于运行时漂移检测）
+RUN echo "${CMDLINE_TOOLS_VERSION}" > /opt/android-sdk/.image_version
+LABEL clawith.sdk-version="${CMDLINE_TOOLS_VERSION}"
+
 # 接受 SDK 许可证（写入 $ANDROID_HOME/licenses/，卷初始化时复制到共享卷）
 RUN yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
 
