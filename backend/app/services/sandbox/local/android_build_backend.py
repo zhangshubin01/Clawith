@@ -332,7 +332,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         f'echo "sdk.dir=/opt/android-sdk" > local.properties '
                         f"&& chmod +x ./gradlew "
                         f"&& printf 'allprojects{{ configurations.matching{{ it.name.startsWith(\"ksp\") }}.all{{ resolutionStrategy{{ force \"org.xerial:sqlite-jdbc:3.53.2.0\" }} }} }}' > /tmp/gradle-init.gradle && "
-                        f"./gradlew --no-daemon --console=plain --init-script /tmp/gradle-init.gradle {shlex.quote(str(gradle_task))} ",
+                        f"./gradlew --no-daemon --no-configuration-cache --console=plain --init-script /tmp/gradle-init.gradle {shlex.quote(str(gradle_task))} ",
                     ],
                     detach=True,
                     volumes=volumes,
