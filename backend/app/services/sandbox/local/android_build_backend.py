@@ -75,13 +75,16 @@ class AndroidBuildBackend(BaseSandboxBackend):
     # 全局共享 Gradle 缓存卷（SERIAL_ALWAYS 无并发锁冲突）
     GRADLE_CACHE_VOLUME = "gradle_cache_global"
 
-    # 最大并发构建数
+    # 单 worker 级并发限制。多 worker (uvicorn --workers N) 下全局并发 = N × 2。
+    # 如需全局上限，改为 Redis 分布式信号量 (aioredlock)。
     _BUILD_MAX_CONCURRENT = 2
+
+    # 模块级信号量 — get_sandbox_backend() 每次创建新实例，实例级 Semaphore 无效
+    _build_semaphore = asyncio.Semaphore(_BUILD_MAX_CONCURRENT)
 
     def __init__(self, config: SandboxConfig):
         self.config = config
         self._client = None
-        self._build_semaphore = asyncio.Semaphore(self._BUILD_MAX_CONCURRENT)
         # 运行时自动检测宿主机路径（零配置，换电脑自动适配）
         self._host_agent_data_root = _detect_host_agent_data_root()
 
@@ -133,18 +136,23 @@ class AndroidBuildBackend(BaseSandboxBackend):
         work_dir: str | None = None,
         **kwargs
     ) -> ExecutionResult:
-        """在 Docker 容器中执行 Android 项目编译。"""
-        start_time = time.time()
+        """在 Docker 容器中执行 Android 项目编译（并发控制入口）。"""
+        async with AndroidBuildBackend._build_semaphore:
+            start_time = time.time()
 
-        # 提取参数
-        project_path = kwargs.get("project_path", work_dir or "/workspace")
-        java_version = str(kwargs.get("java_version", "17"))
-        git_username = kwargs.get("git_username", "")
-        git_token = kwargs.get("git_token", "")
-        gradle_task = kwargs.get("gradle_task", "assembleDebug")
+            # 提取参数
+            project_path = kwargs.get("project_path", work_dir or "/workspace")
+            java_version = str(kwargs.get("java_version", "17"))
+            git_username = kwargs.get("git_username", "")
+            git_token = kwargs.get("git_token", "")
+            gradle_task = kwargs.get("gradle_task", "assembleDebug")
 
-        # 将容器内路径翻译为宿主机路径
-        host_project_path = self._resolve_host_path(str(project_path))
+            logger.info(
+                f"[AndroidBuild] start project={Path(project_path).name} task={gradle_task} jdk={java_version} timeout={timeout}s"
+            )
+
+            # 将容器内路径翻译为宿主机路径
+            host_project_path = self._resolve_host_path(str(project_path))
 
         # 全局共享 Gradle 缓存卷（SERIAL_ALWAYS 保证无并发）
         gradle_volume = self.GRADLE_CACHE_VOLUME
@@ -194,7 +202,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
         }
 
         # 堆内存按任务类型调整
-        mem_limit = "8g" if "Release" in str(gradle_task) else "6g"
+        mem_limit = "8g"
 
         try:
             container = self.client.containers.run(
@@ -205,8 +213,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
                     f"yes | sdkmanager --licenses >/dev/null 2>&1 || true; "
                     f'echo "sdk.dir=/opt/android-sdk" > local.properties '
                     f"&& chmod +x ./gradlew "
-                    f"&& ./gradlew --no-daemon --console=plain {shlex.quote(str(gradle_task))} "
-                    f"&& sleep 5",
+                    f"&& ./gradlew --no-daemon --console=plain {shlex.quote(str(gradle_task))} ",
                 ],
                 detach=True,
                 volumes=volumes,
@@ -220,7 +227,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 # /dev/shm 和 /tmp 也挂 tmpfs 避免容器默认的 64M shm 溢出
                 tmpfs={
                     "/workspace/build": "rw,exec,noatime,size=2g",
-                    "/dev/shm": "rw,noexec,nosuid,size=256m",
+                    "/dev/shm": "rw,noexec,nosuid,size=1g",
                     "/tmp": "rw,noexec,nosuid,size=1g",
                     "/home/builduser/.android": "rw,noexec,nosuid,size=128m",
                 },
@@ -229,6 +236,10 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 security_opt=["no-new-privileges:true"],
                 user="builduser",
                 read_only=True,
+            )
+
+            logger.info(
+                f"[AndroidBuild] container_start id={container.id[:12]}"
             )
 
             on_output = kwargs.get("on_output")
@@ -292,8 +303,10 @@ class AndroidBuildBackend(BaseSandboxBackend):
             except asyncio.TimeoutError:
                 drain_task.cancel()
                 stream_task.cancel()
-                container.kill()
-                container.remove(force=True)
+                try:
+                    container.kill()
+                except Exception:
+                    logger.warning("[AndroidBuild] 超时后容器 kill 失败", exc_info=True)
                 return ExecutionResult(
                     success=False, stdout="", stderr="",
                     exit_code=124,
@@ -312,6 +325,10 @@ class AndroidBuildBackend(BaseSandboxBackend):
 
             exit_code_val = result.get("StatusCode", 1)
             duration_ms = int((time.time() - start_time) * 1000)
+
+            logger.info(
+                f"[AndroidBuild] done exit={exit_code_val} duration={duration_ms}ms"
+            )
 
             return ExecutionResult(
                 success=exit_code_val == 0,
