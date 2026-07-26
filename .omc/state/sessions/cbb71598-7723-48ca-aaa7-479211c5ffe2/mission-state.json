@@ -1,0 +1,289 @@
+{
+  "updatedAt": "2026-07-26T17:59:35.081Z",
+  "missions": [
+    {
+      "id": "session:cbb71598-7723-48ca-aaa7-479211c5ffe2:none",
+      "source": "session",
+      "name": "none",
+      "objective": "Session mission",
+      "createdAt": "2026-07-26T12:58:40.947Z",
+      "updatedAt": "2026-07-26T17:59:35.081Z",
+      "status": "done",
+      "workerCount": 19,
+      "taskCounts": {
+        "total": 19,
+        "pending": 0,
+        "blocked": 0,
+        "inProgress": 0,
+        "completed": 19,
+        "failed": 0
+      },
+      "agents": [
+        {
+          "name": "p3-review-1-py:ap3-rev",
+          "role": "p3-review-1-py",
+          "ownership": "ap3-review-1-py-73d7fa54d1420423",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T17:59:35.081Z"
+        },
+        {
+          "name": "p3-review-2-sec:ap3-rev",
+          "role": "p3-review-2-sec",
+          "ownership": "ap3-review-2-sec-065ad5d89f96d9bb",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:01:06.281Z"
+        },
+        {
+          "name": "p3-review-3-arch:ap3-rev",
+          "role": "p3-review-3-arch",
+          "ownership": "ap3-review-3-arch-24965b6b161e217e",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:01:47.517Z"
+        },
+        {
+          "name": "p3-review-4-sfh:ap3-rev",
+          "role": "p3-review-4-sfh",
+          "ownership": "ap3-review-4-sfh-45334e9d290e0cae",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:01:50.501Z"
+        },
+        {
+          "name": "p3-review-5-perf:ap3-rev",
+          "role": "p3-review-5-perf",
+          "ownership": "ap3-review-5-perf-5d57f287f0fceb22",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:01:49.077Z"
+        },
+        {
+          "name": "p3-review-6-cr:ap3-rev",
+          "role": "p3-review-6-cr",
+          "ownership": "ap3-review-6-cr-db9671c8c7d351cc",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:01:51.547Z"
+        },
+        {
+          "name": "p3-review-7-critic:ap3-rev",
+          "role": "p3-review-7-critic",
+          "ownership": "ap3-review-7-critic-cb16878c8806b8fb",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:01:53.642Z"
+        },
+        {
+          "name": "p3-review-8-merge:ap3-rev",
+          "role": "p3-review-8-merge",
+          "ownership": "ap3-review-8-merge-e1abd20cb199f765",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:01:55.047Z"
+        },
+        {
+          "name": "p3-review-9-simp:ap3-rev",
+          "role": "p3-review-9-simp",
+          "ownership": "ap3-review-9-simp-a7bc39d45388f86e",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:02:03.440Z"
+        },
+        {
+          "name": "p3-review-10-test:ap3-rev",
+          "role": "p3-review-10-test",
+          "ownership": "ap3-review-10-test-5d48fb1dbf11b692",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:01:59.095Z"
+        },
+        {
+          "name": "doc-issues-scanner:adoc-is",
+          "role": "doc-issues-scanner",
+          "ownership": "adoc-issues-scanner-aee82e9e7c2c8136",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:17:12.453Z"
+        },
+        {
+          "name": "p4-review-sec:ap4-rev",
+          "role": "p4-review-sec",
+          "ownership": "ap4-review-sec-07b7944cdb559ebe",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:28:00.098Z"
+        },
+        {
+          "name": "p4-review-sfh:ap4-rev",
+          "role": "p4-review-sfh",
+          "ownership": "ap4-review-sfh-1e65ac6bb8b27c42",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:28:05.039Z"
+        },
+        {
+          "name": "doc-cleanup-scanner:adoc-cl",
+          "role": "doc-cleanup-scanner",
+          "ownership": "adoc-cleanup-scanner-628fbbd8c2df5102",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T13:58:48.152Z"
+        },
+        {
+          "name": "sk-eval-architect:ask-eva",
+          "role": "sk-eval-architect",
+          "ownership": "ask-eval-architect-1fc291f60ba50997",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T16:02:26.856Z"
+        },
+        {
+          "name": "sk-eval-simplifier:ask-eva",
+          "role": "sk-eval-simplifier",
+          "ownership": "ask-eval-simplifier-09111709428de1a9",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T16:02:23.076Z"
+        },
+        {
+          "name": "sk-eval-sfh:ask-eva",
+          "role": "sk-eval-sfh",
+          "ownership": "ask-eval-sfh-0955814b4304aa7c",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T16:02:52.683Z"
+        },
+        {
+          "name": "sk-eval-critic:ask-eva",
+          "role": "sk-eval-critic",
+          "ownership": "ask-eval-critic-bc9a35fab05acf5e",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T16:02:32.185Z"
+        },
+        {
+          "name": "sk-eval-security:ask-eva",
+          "role": "sk-eval-security",
+          "ownership": "ask-eval-security-41050ac64fd61ebd",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-26T16:02:36.831Z"
+        }
+      ],
+      "timeline": [
+        {
+          "id": "session-start:ask-eval-critic-bc9a35fab05acf5e:2026-07-26T16:02:21.684Z",
+          "at": "2026-07-26T16:02:21.684Z",
+          "kind": "update",
+          "agent": "sk-eval-critic:ask-eva",
+          "detail": "started sk-eval-critic:ask-eva",
+          "sourceKey": "session-start:ask-eval-critic-bc9a35fab05acf5e"
+        },
+        {
+          "id": "session-stop:ask-eval-simplifier-09111709428de1a9:2026-07-26T16:02:23.076Z",
+          "at": "2026-07-26T16:02:23.076Z",
+          "kind": "completion",
+          "agent": "sk-eval-simplifier:ask-eva",
+          "detail": "completed",
+          "sourceKey": "session-stop:ask-eval-simplifier-09111709428de1a9"
+        },
+        {
+          "id": "session-start:ask-eval-security-41050ac64fd61ebd:2026-07-26T16:02:23.938Z",
+          "at": "2026-07-26T16:02:23.938Z",
+          "kind": "update",
+          "agent": "sk-eval-security:ask-eva",
+          "detail": "started sk-eval-security:ask-eva",
+          "sourceKey": "session-start:ask-eval-security-41050ac64fd61ebd"
+        },
+        {
+          "id": "session-stop:ask-eval-architect-1fc291f60ba50997:2026-07-26T16:02:26.856Z",
+          "at": "2026-07-26T16:02:26.856Z",
+          "kind": "completion",
+          "agent": "sk-eval-architect:ask-eva",
+          "detail": "completed",
+          "sourceKey": "session-stop:ask-eval-architect-1fc291f60ba50997"
+        },
+        {
+          "id": "session-stop:ask-eval-critic-bc9a35fab05acf5e:2026-07-26T16:02:32.185Z",
+          "at": "2026-07-26T16:02:32.185Z",
+          "kind": "completion",
+          "agent": "sk-eval-critic:ask-eva",
+          "detail": "completed",
+          "sourceKey": "session-stop:ask-eval-critic-bc9a35fab05acf5e"
+        },
+        {
+          "id": "session-stop:ask-eval-security-41050ac64fd61ebd:2026-07-26T16:02:36.831Z",
+          "at": "2026-07-26T16:02:36.831Z",
+          "kind": "completion",
+          "agent": "sk-eval-security:ask-eva",
+          "detail": "completed",
+          "sourceKey": "session-stop:ask-eval-security-41050ac64fd61ebd"
+        },
+        {
+          "id": "session-stop:ask-eval-sfh-0955814b4304aa7c:2026-07-26T16:02:52.683Z",
+          "at": "2026-07-26T16:02:52.683Z",
+          "kind": "completion",
+          "agent": "sk-eval-sfh:ask-eva",
+          "detail": "completed",
+          "sourceKey": "session-stop:ask-eval-sfh-0955814b4304aa7c"
+        },
+        {
+          "id": "session-stop:a43b545d44c1892f7:2026-07-26T17:51:30.406Z",
+          "at": "2026-07-26T17:51:30.406Z",
+          "kind": "completion",
+          "agent": "p3-review-1-py:ap3-rev",
+          "detail": "completed",
+          "sourceKey": "session-stop:a43b545d44c1892f7"
+        },
+        {
+          "id": "session-stop:a98e4d1ba2148c814:2026-07-26T17:59:35.081Z",
+          "at": "2026-07-26T17:59:35.081Z",
+          "kind": "completion",
+          "agent": "p3-review-1-py:ap3-rev",
+          "detail": "completed",
+          "sourceKey": "session-stop:a98e4d1ba2148c814"
+        }
+      ]
+    }
+  ]
+}

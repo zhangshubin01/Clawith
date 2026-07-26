@@ -1,0 +1,15 @@
+{"t":0,"agent":"a860eb8","agent_type":"Explore","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a251723","agent_type":"Explore","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a35cd11","agent_type":"Explore","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a251723","agent_type":"Explore","event":"agent_stop","success":true,"duration_ms":99992}
+{"t":0,"agent":"a35cd11","agent_type":"Explore","event":"agent_stop","success":true,"duration_ms":101985}
+{"t":0,"agent":"a860eb8","agent_type":"Explore","event":"agent_stop","success":true,"duration_ms":130118}
+{"t":0,"agent":"a3e2c51","agent_type":"Explore","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"af86ecb","agent_type":"Explore","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"aed20fb","agent_type":"Explore","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a1414ab","agent_type":"Explore","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"aed20fb","agent_type":"Explore","event":"agent_stop","success":true,"duration_ms":72061}
+{"t":0,"agent":"af86ecb","agent_type":"Explore","event":"agent_stop","success":true,"duration_ms":94997}
+{"t":0,"agent":"a1414ab","agent_type":"Explore","event":"agent_stop","success":true,"duration_ms":116017}
+{"t":0,"agent":"a3e2c51","agent_type":"Explore","event":"agent_stop","success":true,"duration_ms":204077}
+{"t":0,"agent":"aacecc5","agent_type":"untracked-native-fork","event":"agent_stop","success":true,"synthetic":true,"telemetry_status":"unmatched_stop","reason":"SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."}

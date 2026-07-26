@@ -1,0 +1,7 @@
+{
+  "tool_name": "mcp__ccr-local-web__web_search",
+  "tool_input_preview": "{\"query\":\"飞书 机器人 多应用 单应用多Bot 方案对比\",\"max_results\":10}",
+  "error": "No search results found. Set CCR_WEB_SEARCH_API_URL or CCR_WEB_SEARCH_COMMAND for a stronger search backend.",
+  "timestamp": "2026-07-26T01:44:44.821Z",
+  "retry_count": 1
+}

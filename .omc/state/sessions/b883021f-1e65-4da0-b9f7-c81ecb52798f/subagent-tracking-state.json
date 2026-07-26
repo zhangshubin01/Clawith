@@ -1,0 +1,366 @@
+{
+  "agents": [
+    {
+      "agent_id": "adf3794509dbd4996",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-25T12:05:59.670Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T12:05:59.670Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "aa63a58795f15f559",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-25T15:07:06.434Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T15:07:06.434Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "af7b8d81a5067a78c",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-25T15:51:33.467Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T15:51:33.467Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "aab6962797d104e26",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-25T16:03:33.183Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T16:03:33.183Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "ab571138188baf8c4",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-25T16:09:05.174Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T16:09:05.174Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "a9fe9014f85d884e3",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-25T17:13:09.789Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:13:09.789Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "af688563269e357a9",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-25T17:27:38.438Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:27:38.438Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "afb8cd71fbfb05305",
+      "agent_type": "ecc:python-reviewer",
+      "started_at": "2026-07-25T17:47:49.573Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:47:52.667Z",
+      "duration_ms": 3094
+    },
+    {
+      "agent_id": "af2cb0c98309d2e9b",
+      "agent_type": "ecc:security-reviewer",
+      "started_at": "2026-07-25T17:46:33.483Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:47:58.870Z",
+      "duration_ms": 85387
+    },
+    {
+      "agent_id": "afa709e7c15742af1",
+      "agent_type": "ecc:react-reviewer",
+      "started_at": "2026-07-25T17:46:38.990Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:47:50.730Z",
+      "duration_ms": 71740
+    },
+    {
+      "agent_id": "ac1ffb5ee426b785e",
+      "agent_type": "ecc:architect",
+      "started_at": "2026-07-25T17:46:44.900Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:47:43.905Z",
+      "duration_ms": 59005
+    },
+    {
+      "agent_id": "a216b955490269b2d",
+      "agent_type": "ecc:fastapi-reviewer",
+      "started_at": "2026-07-25T17:46:51.058Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:47:51.390Z",
+      "duration_ms": 60332
+    },
+    {
+      "agent_id": "aa0809a1878f91fee",
+      "agent_type": "ecc:database-reviewer",
+      "started_at": "2026-07-25T17:46:57.187Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:47:42.157Z",
+      "duration_ms": 44970
+    },
+    {
+      "agent_id": "a3711af948db3f2a2",
+      "agent_type": "ecc:silent-failure-hunter",
+      "started_at": "2026-07-25T17:47:03.582Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:49:37.310Z",
+      "duration_ms": 153728
+    },
+    {
+      "agent_id": "a4cb1c4b66343a7a1",
+      "agent_type": "ecc:code-simplifier",
+      "started_at": "2026-07-25T17:47:08.839Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:48:41.032Z",
+      "duration_ms": 92193
+    },
+    {
+      "agent_id": "aac6fd353eadb9139",
+      "agent_type": "ecc:typescript-reviewer",
+      "started_at": "2026-07-25T17:47:15.380Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:48:30.013Z",
+      "duration_ms": 74633
+    },
+    {
+      "agent_id": "ac6c19088947a0ff9",
+      "agent_type": "ecc:performance-optimizer",
+      "started_at": "2026-07-25T17:47:22.194Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:48:52.271Z",
+      "duration_ms": 90077
+    },
+    {
+      "agent_id": "a8f4c8ad882f00e84",
+      "agent_type": "ecc:code-reviewer",
+      "started_at": "2026-07-25T17:50:58.409Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:53:24.185Z",
+      "duration_ms": 145776
+    },
+    {
+      "agent_id": "af40a082c39a37723",
+      "agent_type": "oh-my-claudecode:test-engineer",
+      "started_at": "2026-07-25T17:51:09.481Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:52:19.631Z",
+      "duration_ms": 70150
+    },
+    {
+      "agent_id": "a0062b2b802384486",
+      "agent_type": "oh-my-claudecode:verifier",
+      "started_at": "2026-07-25T17:51:15.163Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:53:21.375Z",
+      "duration_ms": 126212
+    },
+    {
+      "agent_id": "afe8fec83dd6eeb3b",
+      "agent_type": "oh-my-claudecode:critic",
+      "started_at": "2026-07-25T17:51:21.273Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:54:50.480Z",
+      "duration_ms": 209207
+    },
+    {
+      "agent_id": "aa46dd1338250f0e9",
+      "agent_type": "ecc:code-architect",
+      "started_at": "2026-07-25T17:51:27.937Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:53:32.390Z",
+      "duration_ms": 124453
+    },
+    {
+      "agent_id": "a156972de6c0298ef",
+      "agent_type": "pr-review-toolkit:code-reviewer",
+      "started_at": "2026-07-25T17:51:34.165Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:53:21.968Z",
+      "duration_ms": 107803
+    },
+    {
+      "agent_id": "a1e8350e60c4e6ce2",
+      "agent_type": "pr-review-toolkit:type-design-analyzer",
+      "started_at": "2026-07-25T17:51:39.817Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:53:10.428Z",
+      "duration_ms": 90611
+    },
+    {
+      "agent_id": "a2b9cb051b94a1a58",
+      "agent_type": "pr-review-toolkit:comment-analyzer",
+      "started_at": "2026-07-25T17:51:45.835Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:53:26.948Z",
+      "duration_ms": 101113
+    },
+    {
+      "agent_id": "adf5aaab40dcdb5a0",
+      "agent_type": "oh-my-claudecode:analyst",
+      "started_at": "2026-07-25T17:51:57.561Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:53:53.037Z",
+      "duration_ms": 115476
+    },
+    {
+      "agent_id": "a4fea8134041d40db",
+      "agent_type": "ecc:agent-evaluator",
+      "started_at": "2026-07-25T17:52:05.430Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T17:54:29.870Z",
+      "duration_ms": 144440
+    },
+    {
+      "agent_id": "ac50c7fd925431fd7",
+      "agent_type": "code-modernization:architecture-critic",
+      "started_at": "2026-07-25T18:05:54.620Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:07:53.842Z",
+      "duration_ms": 119222
+    },
+    {
+      "agent_id": "a9f27a1fc577c04aa",
+      "agent_type": "code-modernization:security-auditor",
+      "started_at": "2026-07-25T18:06:00.118Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:08:42.150Z",
+      "duration_ms": 162032
+    },
+    {
+      "agent_id": "af250a5c339b130bf",
+      "agent_type": "pr-review-toolkit:silent-failure-hunter",
+      "started_at": "2026-07-25T18:06:07.702Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:09:12.897Z",
+      "duration_ms": 185195
+    },
+    {
+      "agent_id": "abac9c73d3df5cf40",
+      "agent_type": "pr-review-toolkit:code-simplifier",
+      "started_at": "2026-07-25T18:06:13.382Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:09:39.584Z",
+      "duration_ms": 206202
+    },
+    {
+      "agent_id": "a275f2e46c1cc96e8",
+      "agent_type": "pr-review-toolkit:pr-test-analyzer",
+      "started_at": "2026-07-25T18:06:18.386Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:07:31.666Z",
+      "duration_ms": 73280
+    },
+    {
+      "agent_id": "a5df6a9e1abc57d3b",
+      "agent_type": "oh-my-claudecode:tracer",
+      "started_at": "2026-07-25T18:06:24.361Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:07:50.527Z",
+      "duration_ms": 86166
+    },
+    {
+      "agent_id": "a4af9f6494ab39e0a",
+      "agent_type": "ecc:spec-miner",
+      "started_at": "2026-07-25T18:06:30.003Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:08:11.556Z",
+      "duration_ms": 101553
+    },
+    {
+      "agent_id": "a2310bd477f53958b",
+      "agent_type": "oh-my-claudecode:architect",
+      "started_at": "2026-07-25T18:06:39.552Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:08:24.994Z",
+      "duration_ms": 105442
+    },
+    {
+      "agent_id": "a143da08e41fd76da",
+      "agent_type": "code-modernization:test-engineer",
+      "started_at": "2026-07-25T18:06:45.800Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:08:36.106Z",
+      "duration_ms": 110306
+    },
+    {
+      "agent_id": "a5ff549c53851032d",
+      "agent_type": "ecc:build-error-resolver",
+      "started_at": "2026-07-25T18:06:52.914Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:08:42.963Z",
+      "duration_ms": 110049
+    },
+    {
+      "agent_id": "a1e2b2e9b777e25b1",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-25T18:13:03.205Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-25T18:13:03.205Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    }
+  ],
+  "total_spawned": 31,
+  "total_completed": 39,
+  "total_failed": 0,
+  "last_updated": "2026-07-25T18:13:03.308Z"
+}

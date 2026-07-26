@@ -1,5 +1,13 @@
 # ACP 架构深度分析 & 生产级修复方案
 
+> **状态汇总** (更新于 2026-07-26)
+> - **Phase 0 (紧急修复)**: ✅ **已全部完成** — `verify_api_key_or_token`, `base.py`, WebSocket keepalive, `auth/refresh`, `ide_plugin.py`, Origin 守卫, router 注册, `tool_execution_policy.py`, `history_hydrate.py`
+> - **Phase 6 (acp_ 前缀重命名)**: ✅ **已完成** — 全部 35+ 工具名改为 `acp_` 前缀, `ACP_METHOD_MAP`/`ACP_TOOL_MAP`/`ACP_KIND_MAP` 同步更新
+> - **Phase 1 (消除重复)**: ❌ 未开始 — Phase 6 完成，已就绪
+> - **Phase 2 (可观测层提取)**: ❌ 未开始
+> - **Phase 3 (猴子补丁清理)**: ❌ 未开始
+> - **Phase 7 (_ACP_ 命名统一)**: ❌ 未开始
+>
 > 分析日期：2026-07-21 | 分支：feature/user-api-key-shubin
 
 ## 1. 架构全景
@@ -303,8 +311,8 @@ _caller_mod.get_agent_tools_for_llm = _acp_aware_get_tools
 ### 阶段执行顺序（审查修正后）
 
 ```
-Phase 0  → 紧急修复（verify_api_key_or_token + base.py + keepalive）
-Phase 6  → acp_ 前缀重命名（先让工具名不再冲突）
+Phase 0  → ✅ 已完成（verify_api_key_or_token + base.py + keepalive + auth/refresh + ide_plugin.py + 其余紧急修复）
+Phase 6  → ✅ 已完成（acp_ 前缀重命名 — 工具名不再冲突）
 Phase 1  → 消除重复（安全删除 ACP_OVERLAP_BASE_TOOL_NAMES）
 Phase 2  → 提取 ToolExecutionObserver（ACP + 标准路径共用）
 Phase 3  → 清理猴子补丁 + 拆分 tool_bridge
@@ -319,17 +327,17 @@ Phase 7  → _ACP_ 命名统一（可选，低优先级）
 
 | 修复 | 位置 | 改动量 |
 |------|------|--------|
-| `verify_api_key_or_token()` | `app/core/security.py` | ~60 行新增 |
-| `app/plugins/base.py` | 新建 | ~30 行 |
-| WebSocket keepalive | `acp_handler.py:run()` | ~20 行 |
-| `POST /api/auth/refresh` | `app/api/auth.py` | ~15 行新增 |
-| `GET /api/ide-plugin/agents` | `app/api/ide_plugin.py` | 移植或新建 |
+| ✅ `verify_api_key_or_token()` | `app/core/security.py` | ~60 行新增 |
+| ✅ `app/plugins/base.py` | 新建 | ~30 行 |
+| ✅ WebSocket keepalive watchdog | `acp_handler.py:run()` | ~20 行 |
+| ✅ `POST /api/auth/refresh` | `app/api/auth.py` | ~15 行新增 |
+| ✅ `GET /api/ide-plugin/agents` | `app/api/ide_plugin.py` | 移植或新建 |
 
-**涵盖问题**：1-4、6-9、12-14。
+**涵盖问题**：1-4、6-9、12-14。✅ 全部完成，验证通过。
 （问题 5 分配至阶段 1，问题 10-11 分配至阶段 1，问题 15 分配至 IDE 插件侧）
-**总改动**：7 文件，~150 行。
+**总改动**：7 文件，~150 行。✅ 已全部实施。
 
-> ⚠️ 2.1 节代码示例中已知 `except Exception` 过宽、`CLWITH_API_KEY` 返回任意用户、无 `hmac.compare_digest` 等问题——已在 9.2 节列出修复建议，执行阶段 0 时应同时修正。
+> ⚠️ 2.1 节代码示例中已知问题已在实施过程中修正：`verify_api_key_or_token` 使用特定异常类型（`ValueError, SQLAlchemyError`）替代 `except Exception`；共享 API Key 路径已移除（仅保留 JWT + Agent API Key 两路径）。
 
 **非阶段 0 的问题分配**：
 
@@ -368,8 +376,8 @@ Phase 7  → _ACP_ 命名统一（可选，低优先级）
 
 | 阶段 | 新增行 | 删除行 | 文件数 |
 |------|--------|--------|--------|
-| 阶段 0 | ~150 | 0 | 7 |
-| 阶段 6 (acp_ 前缀) | ~40 | ~40 | 3 |
+| ✅ 阶段 0 | ~150 | 0 | 7 | 已完成 |
+| ✅ 阶段 6 (acp_ 前缀) | ~40 | ~40 | 3 | 已完成 |
 | 阶段 1 | ~80 | ~800 | 4 |
 | 阶段 2 | ~150 | ~20 | 3 |
 | 阶段 3 | ~500 | ~1600 | 6 |
@@ -491,6 +499,8 @@ git checkout feature/user-api-key -- \
 
 
 ## 6. ACP 工具添加 acp_ 前缀（命名空间隔离）
+
+> ✅ **已完成**：所有 35+ 工具已重命名为 `acp_` 前缀，`acp_routes.py` / `tool_hooks.py` / `acp_handler.py` 已同步更新。
 
 ### 6.1 当前问题
 

@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"git diff backend/app/services/sandbox/local/android_build_backend.py --stat 2>&1\",\"description\":\"Show diff for android_build_backend only\"}",
+  "error": "Exit code 128\nfatal: option '--stat' must come before non-option arguments",
+  "timestamp": "2026-07-26T13:17:08.325Z",
+  "retry_count": 1
+}

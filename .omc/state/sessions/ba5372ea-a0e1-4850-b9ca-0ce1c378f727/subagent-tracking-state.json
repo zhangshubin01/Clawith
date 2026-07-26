@@ -1,0 +1,477 @@
+{
+  "agents": [
+    {
+      "agent_id": "af98811a44e7e584d",
+      "agent_type": "oh-my-claudecode:explore",
+      "started_at": "2026-07-26T01:50:57.250Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T01:52:27.487Z",
+      "duration_ms": 90237
+    },
+    {
+      "agent_id": "a6fd787f5d80d6ff3",
+      "agent_type": "oh-my-claudecode:architect",
+      "started_at": "2026-07-26T01:51:01.334Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T01:53:07.951Z",
+      "duration_ms": 126617
+    },
+    {
+      "agent_id": "a5554408278189151",
+      "agent_type": "oh-my-claudecode:critic",
+      "started_at": "2026-07-26T01:51:06.162Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T01:54:05.509Z",
+      "duration_ms": 179347
+    },
+    {
+      "agent_id": "a44e08f395f306184",
+      "agent_type": "ecc:silent-failure-hunter",
+      "started_at": "2026-07-26T01:51:10.388Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T01:52:38.367Z",
+      "duration_ms": 87979
+    },
+    {
+      "agent_id": "ad806af4aaa4cb4b3",
+      "agent_type": "ecc:python-reviewer",
+      "started_at": "2026-07-26T01:51:14.646Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T01:52:45.388Z",
+      "duration_ms": 90742
+    },
+    {
+      "agent_id": "acce6fe1cf910c76c",
+      "agent_type": "ecc:security-reviewer",
+      "started_at": "2026-07-26T01:51:19.158Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T01:52:31.126Z",
+      "duration_ms": 71968
+    },
+    {
+      "agent_id": "a2898dcdbbd7bd449",
+      "agent_type": "ecc:performance-optimizer",
+      "started_at": "2026-07-26T01:51:24.049Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T01:52:51.309Z",
+      "duration_ms": 87260
+    },
+    {
+      "agent_id": "a3945535a393fe575",
+      "agent_type": "oh-my-claudecode:document-specialist",
+      "started_at": "2026-07-26T01:51:29.816Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T01:59:52.367Z",
+      "duration_ms": 502551
+    },
+    {
+      "agent_id": "aebb46f98453deb6e",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-26T02:03:20.265Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:03:20.265Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "a95f7d055c9966af0",
+      "agent_type": "ecc:architect",
+      "started_at": "2026-07-26T02:21:49.984Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:23:30.777Z",
+      "duration_ms": 100793
+    },
+    {
+      "agent_id": "acc763c5b5e662264",
+      "agent_type": "oh-my-claudecode:critic",
+      "started_at": "2026-07-26T02:21:55.210Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:25:10.816Z",
+      "duration_ms": 195606
+    },
+    {
+      "agent_id": "acea8cc0535c24fdc",
+      "agent_type": "ecc:python-reviewer",
+      "started_at": "2026-07-26T02:22:00.334Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:23:54.009Z",
+      "duration_ms": 113675
+    },
+    {
+      "agent_id": "a7b3fc051432b5fd2",
+      "agent_type": "ecc:silent-failure-hunter",
+      "started_at": "2026-07-26T02:22:06.441Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:23:33.404Z",
+      "duration_ms": 86963
+    },
+    {
+      "agent_id": "afc6747ba907e1248",
+      "agent_type": "ecc:security-reviewer",
+      "started_at": "2026-07-26T02:22:11.625Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:24:31.344Z",
+      "duration_ms": 139719
+    },
+    {
+      "agent_id": "a6d9f9eaa9c33843c",
+      "agent_type": "ecc:performance-optimizer",
+      "started_at": "2026-07-26T02:22:18.445Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:24:13.321Z",
+      "duration_ms": 114876
+    },
+    {
+      "agent_id": "adf912f410036e79f",
+      "agent_type": "ecc:database-reviewer",
+      "started_at": "2026-07-26T02:22:23.955Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:24:05.065Z",
+      "duration_ms": 101110
+    },
+    {
+      "agent_id": "a00137a64bc97ea8d",
+      "agent_type": "ecc:fastapi-reviewer",
+      "started_at": "2026-07-26T02:22:29.430Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:24:41.028Z",
+      "duration_ms": 131598
+    },
+    {
+      "agent_id": "a035ec33d3f10831f",
+      "agent_type": "agent-skills:code-reviewer",
+      "started_at": "2026-07-26T02:22:33.457Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:24:45.788Z",
+      "duration_ms": 132331
+    },
+    {
+      "agent_id": "a9a80f76fdd4778f2",
+      "agent_type": "oh-my-claudecode:verifier",
+      "started_at": "2026-07-26T02:22:41.900Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:23:26.148Z",
+      "duration_ms": 44248
+    },
+    {
+      "agent_id": "a74a48782690617e3",
+      "agent_type": "oh-my-claudecode:explore",
+      "started_at": "2026-07-26T02:27:45.417Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:28:44.284Z",
+      "duration_ms": 58867
+    },
+    {
+      "agent_id": "a931e953a2af799d9",
+      "agent_type": "oh-my-claudecode:explore",
+      "started_at": "2026-07-26T02:39:15.306Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:40:41.396Z",
+      "duration_ms": 86090
+    },
+    {
+      "agent_id": "a63491466dbb934fa",
+      "agent_type": "oh-my-claudecode:explore",
+      "started_at": "2026-07-26T02:39:19.357Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:40:29.184Z",
+      "duration_ms": 69827
+    },
+    {
+      "agent_id": "a13106b635ad15d37",
+      "agent_type": "oh-my-claudecode:explore",
+      "started_at": "2026-07-26T02:39:23.389Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:40:45.510Z",
+      "duration_ms": 82121
+    },
+    {
+      "agent_id": "a0b9a9fa02e8c3dc6",
+      "agent_type": "ecc:architect",
+      "started_at": "2026-07-26T02:41:10.166Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:42:06.849Z",
+      "duration_ms": 56683
+    },
+    {
+      "agent_id": "a6ae19aa3158be71b",
+      "agent_type": "oh-my-claudecode:architect",
+      "started_at": "2026-07-26T02:41:19.359Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:43:27.540Z",
+      "duration_ms": 128181
+    },
+    {
+      "agent_id": "abe53d2240bc1a176",
+      "agent_type": "oh-my-claudecode:critic",
+      "started_at": "2026-07-26T02:41:27.654Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:44:27.044Z",
+      "duration_ms": 179390
+    },
+    {
+      "agent_id": "afbb6ebd89c887c9b",
+      "agent_type": "ecc:performance-optimizer",
+      "started_at": "2026-07-26T02:41:33.923Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:46:21.649Z",
+      "duration_ms": 287726
+    },
+    {
+      "agent_id": "ac06a6b12c162a739",
+      "agent_type": "agent-skills:code-reviewer",
+      "started_at": "2026-07-26T02:41:41.542Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:44:05.627Z",
+      "duration_ms": 144085
+    },
+    {
+      "agent_id": "a980bb3cd4e4d77e8",
+      "agent_type": "oh-my-claudecode:analyst",
+      "started_at": "2026-07-26T02:41:50.793Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:43:32.127Z",
+      "duration_ms": 101334
+    },
+    {
+      "agent_id": "a96cecc3b6b8feae2",
+      "agent_type": "oh-my-claudecode:verifier",
+      "started_at": "2026-07-26T02:41:57.937Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:43:19.865Z",
+      "duration_ms": 81928
+    },
+    {
+      "agent_id": "a40e74ccca6531c47",
+      "agent_type": "ecc:security-reviewer",
+      "started_at": "2026-07-26T02:42:06.004Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:44:32.469Z",
+      "duration_ms": 146465
+    },
+    {
+      "agent_id": "ad8582cc69d678053",
+      "agent_type": "ecc:silent-failure-hunter",
+      "started_at": "2026-07-26T02:42:12.762Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:46:17.429Z",
+      "duration_ms": 244667
+    },
+    {
+      "agent_id": "a71626b30d512d1fb",
+      "agent_type": "ecc:python-reviewer",
+      "started_at": "2026-07-26T02:42:19.955Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:46:25.979Z",
+      "duration_ms": 246024
+    },
+    {
+      "agent_id": "a3f31d9e810066cdd",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-26T02:52:45.110Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T02:52:45.110Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "a499d34ed656b0c0e",
+      "agent_type": "ecc:architect",
+      "started_at": "2026-07-26T03:03:15.388Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:06:50.108Z",
+      "duration_ms": 214720
+    },
+    {
+      "agent_id": "a02675e10900f79b5",
+      "agent_type": "ecc:python-reviewer",
+      "started_at": "2026-07-26T03:03:21.821Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:06:14.179Z",
+      "duration_ms": 172358
+    },
+    {
+      "agent_id": "ae25ff97b4d3c3aa8",
+      "agent_type": "ecc:security-reviewer",
+      "started_at": "2026-07-26T03:03:27.412Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:06:04.726Z",
+      "duration_ms": 157314
+    },
+    {
+      "agent_id": "a379665d6ae8a50ca",
+      "agent_type": "ecc:silent-failure-hunter",
+      "started_at": "2026-07-26T03:03:33.941Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:08:08.866Z",
+      "duration_ms": 274925
+    },
+    {
+      "agent_id": "a9a241b2debfc8f82",
+      "agent_type": "ecc:performance-optimizer",
+      "started_at": "2026-07-26T03:03:41.392Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:06:29.002Z",
+      "duration_ms": 167610
+    },
+    {
+      "agent_id": "a801e8c47922701e8",
+      "agent_type": "agent-skills:code-reviewer",
+      "started_at": "2026-07-26T03:03:47.645Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:06:02.563Z",
+      "duration_ms": 134918
+    },
+    {
+      "agent_id": "a1ec287b11f7fe103",
+      "agent_type": "oh-my-claudecode:document-specialist",
+      "started_at": "2026-07-26T03:03:53.123Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:06:07.670Z",
+      "duration_ms": 134547
+    },
+    {
+      "agent_id": "af9d40f3ce957df37",
+      "agent_type": "oh-my-claudecode:critic",
+      "started_at": "2026-07-26T03:03:58.259Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:07:32.433Z",
+      "duration_ms": 214174
+    },
+    {
+      "agent_id": "ad15b7e4ac0b27d91",
+      "agent_type": "oh-my-claudecode:verifier",
+      "started_at": "2026-07-26T03:04:07.927Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:05:33.133Z",
+      "duration_ms": 85206
+    },
+    {
+      "agent_id": "a71051fbfec2706a1",
+      "agent_type": "oh-my-claudecode:critic",
+      "started_at": "2026-07-26T03:04:15.670Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:08:17.025Z",
+      "duration_ms": 241355
+    },
+    {
+      "agent_id": "a0737713a7f8bbc0f",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-26T03:13:05.131Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T03:13:05.131Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "a4970ef91299f3479",
+      "agent_type": "oh-my-claudecode:critic",
+      "started_at": "2026-07-26T10:20:07.905Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T10:25:45.569Z",
+      "duration_ms": 337664
+    },
+    {
+      "agent_id": "a0b6db246dd005b9d",
+      "agent_type": "ecc:python-reviewer",
+      "started_at": "2026-07-26T10:20:12.408Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T10:25:37.851Z",
+      "duration_ms": 325443
+    },
+    {
+      "agent_id": "a72c34ebddeedcba2",
+      "agent_type": "oh-my-claudecode:verifier",
+      "started_at": "2026-07-26T10:20:16.497Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T10:23:03.237Z",
+      "duration_ms": 166740
+    },
+    {
+      "agent_id": "a0b089dfc5b813a95",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-26T10:31:17.500Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T10:31:17.500Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    },
+    {
+      "agent_id": "a2ab22c0830e7c834",
+      "agent_type": "oh-my-claudecode:critic",
+      "started_at": "2026-07-26T10:33:16.601Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T10:37:05.571Z",
+      "duration_ms": 228970
+    },
+    {
+      "agent_id": "add7d924171b4469f",
+      "agent_type": "untracked-native-fork",
+      "started_at": "2026-07-26T10:42:06.206Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-26T10:42:06.206Z",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    }
+  ],
+  "total_spawned": 46,
+  "total_completed": 51,
+  "total_failed": 0,
+  "last_updated": "2026-07-26T10:42:06.309Z"
+}
