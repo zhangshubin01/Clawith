@@ -7,6 +7,7 @@
 #   4. 执行用户命令
 
 set -euo pipefail
+trap 'rm -rf "${TMP_DIR:-}"' EXIT
 
 JDK_CACHE_DIR="${JDK_CACHE_DIR:-/opt/jdks}"
 JAVA_VERSION="${JAVA_VERSION:-17}"
@@ -47,7 +48,6 @@ if [ ! -d "${JDK_HOME}/bin" ]; then
         # 回退链：Adoptium → Amazon Corretto（轻量重试）
         # Adoptium CDN 在国内偶尔不可达，Corretto 作为二级源
         JDK_FALLBACK_URLS=(
-            "$JDK_URL"
             "https://corretto.aws/downloads/latest/amazon-corretto-${JAVA_VERSION}-${ADOPTIUM_ARCH}-linux-jdk.tar.gz"
         )
         DOWNLOADED=false
@@ -67,6 +67,19 @@ if [ ! -d "${JDK_HOME}/bin" ]; then
         fi
     }
 
+    # sha256 校验（tar 之前，非阻塞：校验和下载失败时跳过）
+    curl -fsSL "${JDK_URL}.sha256.txt" -o "${TMP_DIR}/jdk.sha256" 2>/dev/null || true
+    if [ -f "${TMP_DIR}/jdk.sha256" ]; then
+        EXPECTED=$(awk '{print $1}' "${TMP_DIR}/jdk.sha256")
+        ACTUAL=$(sha256sum "${TMP_DIR}/jdk.tar.gz" | awk '{print $1}')
+        if [ "$EXPECTED" = "$ACTUAL" ] && [ -n "$EXPECTED" ]; then
+            echo "[INFO] JDK sha256 校验通过"
+        else
+            echo "[ERROR] JDK sha256 校验不匹配，文件可能损坏" >&2
+            exit 1
+        fi
+    fi
+
     tar -xzf "${TMP_DIR}/jdk.tar.gz" -C "${TMP_DIR}"
     EXTRACTED_DIR=$(ls -d "${TMP_DIR}"/jdk-* 2>/dev/null | head -1)
     if [ -z "$EXTRACTED_DIR" ]; then
@@ -77,15 +90,16 @@ if [ ! -d "${JDK_HOME}/bin" ]; then
         echo "[ERROR] JDK 解压失败：找不到 jdk-* 或 amazon-corretto-* 目录"
         exit 1
     fi
-    # 原子重命名防并发：先 mv 到 .tmp，再 rename；失败说明被抢写
-    mv "$EXTRACTED_DIR" "${JDK_HOME}.tmp" 2>/dev/null || true
-    if mv "${JDK_HOME}.tmp" "${JDK_HOME}" 2>/dev/null; then
-        echo "[INFO] JDK $JAVA_VERSION 下载完成 → ${JDK_HOME}"
-    else
-        rm -rf "${JDK_HOME}.tmp" 2>/dev/null || true
+    # 原子重命名防并发：先检查目录是否已被其他容器创建
+    if [ -d "${JDK_HOME}" ]; then
         echo "[INFO] JDK $JAVA_VERSION 已被并发容器缓存，复用即可"
+        rm -rf "$EXTRACTED_DIR" 2>/dev/null || true
+    else
+        mv "$EXTRACTED_DIR" "${JDK_HOME}" 2>/dev/null || {
+            echo "[ERROR] JDK 安装失败" >&2; exit 1
+        }
+        echo "[INFO] JDK $JAVA_VERSION 下载完成 → ${JDK_HOME}"
     fi
-    rm -rf "${TMP_DIR}"
 else
     echo "[INFO] JDK $JAVA_VERSION 命中共享缓存 → ${JDK_HOME}"
 fi

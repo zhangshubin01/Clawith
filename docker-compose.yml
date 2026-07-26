@@ -76,6 +76,8 @@ services:
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       FEISHU_DOMAIN: ${FEISHU_DOMAIN:-https://open.feishu.cn}
       SS_CONFIG_FILE: /data/ss-nodes.json
+      # Android 构建沙箱镜像
+      DEVBOX_ANDROID_IMAGE: ${DEVBOX_ANDROID_IMAGE:-clawith-devbox-android:latest}
       # Public base URL for constructing OAuth callback URLs and email links.
       # Required when deployed behind a reverse proxy (e.g. Nginx, Cloudflare).
       # If not set, the server infers the URL from the incoming request host.
@@ -100,6 +102,7 @@ services:
     # security_opt 移除: seccomp/apparmor 在 macOS/OrbStack 不可用
     networks:
       - default
+      - openviking-shared
     depends_on:
       postgres:
         condition: service_healthy
@@ -136,3 +139,5 @@ volumes:
 networks:
   default:
     name: ${CLAWITH_DOCKER_NETWORK:-clawith_network}
+  openviking-shared:
+    external: true
