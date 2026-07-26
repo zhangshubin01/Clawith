@@ -348,9 +348,9 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         "/home/builduser/.android": "rw,noexec,nosuid,size=128m",
                         # P5 Fix 2: tmpfs 覆盖冲突缓存子目录（优先级高于 volume）
                         # modules-2/ (依赖 JAR) 和 wrapper/dists/ (Gradle 发行版) 由全局卷持久化
-                        "/home/builduser/.gradle/caches/build-cache-1": "rw,exec,noatime,size=1g",
-                        "/home/builduser/.gradle/caches/journal-1": "rw,noexec,nosuid,size=128m",
-                        "/home/builduser/.gradle/kotlin-daemon": "rw,noexec,nosuid,size=256m",
+                        "/home/builduser/.gradle/caches/build-cache-1": "rw,exec,noatime,size=1g,uid=1000,gid=1000",
+                        "/home/builduser/.gradle/caches/journal-1": "rw,noexec,nosuid,size=128m,uid=1000,gid=1000",
+                        "/home/builduser/.gradle/kotlin-daemon": "rw,noexec,nosuid,size=256m,uid=1000,gid=1000",
                     },
                     network_mode="bridge",
                     remove=False,
