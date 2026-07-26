@@ -248,6 +248,8 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 "TERM": "dumb",  # 强制 JVM 行缓冲输出（非 TTY 环境）
                 "HOME": "/home/builduser",
                 "GRADLE_USER_HOME": "/home/builduser/.gradle",
+                # sqlite-jdbc aarch64 兼容: 强制使用纯 Java 模式（KSP worker classpath 不经项目依赖解析）
+                "JAVA_TOOL_OPTIONS": "-Dsqlite.purejava=true",
                 "GRADLE_OPTS": (
                     "-Dorg.gradle.daemon=false "
                     "-Dorg.gradle.jvmargs=-Xmx4096m "
@@ -329,8 +331,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         f"yes | sdkmanager --licenses >/dev/null 2>&1 || true; "
                         f'echo "sdk.dir=/opt/android-sdk" > local.properties '
                         f"&& chmod +x ./gradlew "
-                        f"&& printf 'allprojects{{configurations.all{{resolutionStrategy{{force\"org.xerial:sqlite-jdbc:3.53.2.0\"}}}}}}' > /tmp/gradle-init.gradle && "
-                        f"./gradlew --no-daemon --console=plain --init-script /tmp/gradle-init.gradle {shlex.quote(str(gradle_task))} ",
+                        f"&& ./gradlew --no-daemon --console=plain {shlex.quote(str(gradle_task))} ",
                     ],
                     detach=True,
                     volumes=volumes,
