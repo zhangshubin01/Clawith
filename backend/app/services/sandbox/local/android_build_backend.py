@@ -66,7 +66,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
     """
 
     name = "android-build"
-    DEFAULT_IMAGE = os.getenv("DEVBOX_ANDROID_IMAGE", "clawith-android-builder:latest")
+    DEFAULT_IMAGE = os.getenv("DEVBOX_ANDROID_IMAGE", "clawith-devbox-android:latest")
 
     # 全局共享卷
     VOLUME_JDK = "global_jdk_cache"
@@ -78,6 +78,8 @@ class AndroidBuildBackend(BaseSandboxBackend):
     # 单 worker 级并发限制。多 worker (uvicorn --workers N) 下全局并发 = N × 2。
     # 如需全局上限，改为 Redis 分布式信号量 (aioredlock)。
     _BUILD_MAX_CONCURRENT = 2
+    # stdout 缓冲上限，防止异常构建（如无限循环日志）撑爆内存
+    _MAX_STDOUT_CAPTURE = 5_000_000  # 5MB
 
     # 模块级信号量 — get_sandbox_backend() 每次创建新实例，实例级 Semaphore 无效
     _build_semaphore = asyncio.Semaphore(_BUILD_MAX_CONCURRENT)
@@ -125,7 +127,8 @@ class AndroidBuildBackend(BaseSandboxBackend):
         try:
             self.client.ping()
             return True
-        except Exception:
+        except Exception as e:
+            logger.opt(exception=True).error("[AndroidBuild] health_check 失败：Docker daemon 不可用")
             return False
 
     async def execute(
@@ -162,7 +165,21 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 self.client.volumes.get(gradle_volume)
             except errors.NotFound:
                 logger.info(f"[AndroidBuild] 创建项目 Gradle 缓存卷: {gradle_volume}")
-                self.client.volumes.create(name=gradle_volume)
+                self.client.volumes.create(
+                    name=gradle_volume,
+                    labels={"managed-by": "clawith", "role": "gradle-cache"},
+                )
+
+            # 确保 SDK/JDK 卷存在（SERIAL_ALWAYS 保证无并发创建）
+            for vol in (self.VOLUME_SDK, self.VOLUME_JDK):
+                try:
+                    self.client.volumes.get(vol)
+                except errors.NotFound:
+                    logger.info(f"[AndroidBuild] 创建全局缓存卷: {vol}")
+                    self.client.volumes.create(
+                        name=vol,
+                        labels={"managed-by": "clawith", "role": "android-sdk" if vol == self.VOLUME_SDK else "jdk"},
+                    )
 
             # 环境变量
             env = {
@@ -233,6 +250,8 @@ class AndroidBuildBackend(BaseSandboxBackend):
                     },
                     network_mode="bridge",
                     remove=False,
+                    # auto_remove: Docker daemon 在容器退出后自动删除，即使 Python 进程崩溃也不残留
+                    auto_remove=True,
                     security_opt=["no-new-privileges:true"],
                     user="builduser",
                     read_only=True,
@@ -279,15 +298,18 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         if on_output:
                             try:
                                 await on_output(merged.decode("utf-8", errors="replace"))
-                            except Exception as e:
-                                logger.warning(f"[AndroidBuild] on_output 回调异常: {e}")
+                            except Exception:
+                                logger.opt(exception=True).warning("[AndroidBuild] on_output 回调异常")
 
                     while True:
                         chunk = await loop.run_in_executor(None, output_queue.get)
                         if chunk is None:
                             await _flush_batch()
                             break
-                        stdout_buf.extend(chunk)
+                        # stdout 缓冲上限保护 — on_output 始终透传，不受上限影响
+                        if len(stdout_buf) < self._MAX_STDOUT_CAPTURE:
+                            allowed = self._MAX_STDOUT_CAPTURE - len(stdout_buf)
+                            stdout_buf.extend(chunk[:allowed])
                         if on_output:
                             batch.append(chunk)
                             if time.time() - last_flush >= BATCH_INTERVAL:
@@ -307,10 +329,16 @@ class AndroidBuildBackend(BaseSandboxBackend):
                         container.kill()
                     except Exception:
                         logger.warning("[AndroidBuild] 超时后容器 kill 失败", exc_info=True)
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    logger.warning(
+                        f"[AndroidBuild] done timeout duration={duration_ms}ms limit={timeout}s"
+                    )
+                    # 保留部分输出 — stdout_buf 中可能已有编译进度，空输出无法诊断
+                    partial = stdout_buf.decode("utf-8", errors="replace")[-50000:] if stdout_buf else ""
                     return ExecutionResult(
-                        success=False, stdout="", stderr="",
+                        success=False, stdout=partial, stderr="",
                         exit_code=124,
-                        duration_ms=int((time.time() - start_time) * 1000),
+                        duration_ms=duration_ms,
                         error=f"编译超时（{timeout}s），任务: {gradle_task}",
                     )
 
@@ -362,5 +390,10 @@ class AndroidBuildBackend(BaseSandboxBackend):
                 try:
                     if 'container' in locals():
                         container.remove(force=True)
+                except errors.NotFound:
+                    pass  # auto_remove 已清理
+                except errors.APIError as e:
+                    if e.status_code not in (409,):  # 409: removal already in progress
+                        logger.warning(f"[AndroidBuild] 容器清理失败: {e}")
                 except Exception as e:
                     logger.warning(f"[AndroidBuild] 容器清理失败: {e}")
