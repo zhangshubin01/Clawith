@@ -35,7 +35,7 @@ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
         sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list; \
     fi && \
     apt-get update && \
-    apt-get install -y --no-install-recommends libpq5 curl shadowsocks-libev gosu bubblewrap libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 shared-mime-info pango1.0-tools fonts-wqy-microhei fonts-wqy-zenhei fonts-noto-cjk chromium && \
+    apt-get install -y --no-install-recommends libpq5 curl shadowsocks-libev gosu bubblewrap libcairo2 libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 shared-mime-info pango1.0-tools fonts-wqy-microhei fonts-wqy-zenhei fonts-noto-cjk chromium git && \
     fc-cache -fv && \
     rm -rf /var/lib/apt/lists/*
 
@@ -50,6 +50,8 @@ RUN useradd --create-home clawith && \
     mkdir -p /data/agents && \
     chmod +x /app/entrypoint.sh && \
     chown -R clawith:clawith /app /data
+
+RUN su - clawith -c "git config --global user.name 'Clawith Agent' && git config --global user.email 'agent@clawith.local' && git config --global safe.directory /data/agents"
 
 # Note: USER is removed to allow entrypoint.sh to fix permissions of mounted volumes
 # at runtime. The entrypoint script will drop privileges to 'clawith' after fixing permissions.
