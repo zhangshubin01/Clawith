@@ -42,7 +42,7 @@ _SIDE_EFFECT_CLASSIFICATIONS = frozenset({"read", "write", "external_write"})
 _RETRY_POLICIES = frozenset({"safe", "conditional", "never"})
 _METADATA_KEY = "__clawith_tool_execution__"
 _METADATA_VERSION = 1
-_RESULT_METADATA_MAX_BYTES = 16 * 1024
+_RESULT_METADATA_MAX_BYTES = 64 * 1024
 _RESULT_METADATA_KEYS = frozenset(
     {
         "error_code",

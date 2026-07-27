@@ -1405,6 +1405,26 @@ async def _materialize_storage_path_with_budget(
     budget: dict,
     manifest: dict[str, TempWorkspaceManifestEntry],
 ) -> None:
+    try:
+        await _materialize_storage_entry(storage, storage_key, rel_path, local_root, budget, manifest)
+    except FileNotFoundError:
+        logger.warning(
+            "[Tools] materialize skip missing: key={} rel_path={}", storage_key, rel_path
+        )
+    except Exception:
+        logger.exception(
+            "[Tools] materialize failed: key={} rel_path={}", storage_key, rel_path
+        )
+
+
+async def _materialize_storage_entry(
+    storage,
+    storage_key: str,
+    rel_path: str,
+    local_root: Path,
+    budget: dict,
+    manifest: dict[str, TempWorkspaceManifestEntry],
+) -> None:
     if await storage.is_file(storage_key):
         version = await storage.get_version(storage_key)
         if version.size > TOOL_MATERIALIZE_MAX_FILE_BYTES:
@@ -1637,6 +1657,7 @@ async def _run_with_temp_workspace_outcome(
             paths=paths,
         )
     except Exception as exc:
+        logger.exception("[Tools] workspace materialize failed: agent={}", agent_id)
         return _typed_failure(
             f"Local content could not be materialized: {type(exc).__name__}.",
             "local_content_materialize_failed",
