@@ -485,6 +485,7 @@ def _delete_autonomy_details(
     state: RuntimeGraphState,
     context: RuntimeContext,
     agent: Agent,
+    call_id: str,
     tool_name: str,
     arguments: Mapping[str, object],
 ) -> dict | None:
@@ -496,6 +497,7 @@ def _delete_autonomy_details(
         "run_id": context.run_id,
         "session_id": context.session_id,
         "workspace_scope": "agent",
+        "tool_call_id": call_id,
     }
     is_group_delete = tool_name == GROUP_DELETE_WORKSPACE_FILE or (
         tool_name == "delete_file"
@@ -1158,24 +1160,26 @@ class RuntimeToolStepService:
             ),
         )
 
-    async def _delete_autonomy_outcome(
+    async def _delete_autonomy_gate(
         self,
         *,
         state: RuntimeGraphState,
         context: RuntimeContext,
         agent: Agent,
+        call_id: str,
         tool_name: str,
         arguments: Mapping[str, object],
-    ) -> ToolExecutionOutcome | None:
+    ) -> tuple[ToolExecutionOutcome | None, JsonObject | None]:
         details = _delete_autonomy_details(
             state,
             context,
             agent,
+            call_id,
             tool_name,
             arguments,
         )
         if details is None:
-            return None
+            return None, None
         try:
             async with self._session_factory() as db:
                 async with db.begin():
@@ -1186,46 +1190,78 @@ class RuntimeToolStepService:
                         details,
                     )
         except Exception as exc:
-            return ToolExecutionOutcome(
-                status="failed",
-                result_summary=(
-                    "Workspace deletion was blocked because the autonomy "
-                    "policy check could not be completed."
+            return (
+                ToolExecutionOutcome(
+                    status="failed",
+                    result_summary=(
+                        "Workspace deletion was blocked because the autonomy "
+                        "policy check could not be completed."
+                    ),
+                    result_ref=None,
+                    error_code="tool_autonomy_check_failed",
+                    retryable=False,
+                    metadata={"error_class": type(exc).__name__},
                 ),
-                result_ref=None,
-                error_code="tool_autonomy_check_failed",
-                retryable=False,
-                metadata={"error_class": type(exc).__name__},
+                None,
             )
         if decision.get("allowed"):
-            return None
+            return None, None
         level = str(decision.get("level") or "unknown")
         approval_id = decision.get("approval_id")
-        if level == "L3" and isinstance(approval_id, str) and approval_id:
+        approval_status = decision.get("approval_status")
+        correlation_id = decision.get("correlation_id")
+        if (
+            level == "L3"
+            and approval_status == "pending"
+            and isinstance(approval_id, str)
+            and approval_id
+            and isinstance(correlation_id, str)
+            and correlation_id
+        ):
+            return None, {
+                "waiting_type": "user",
+                "correlation_id": correlation_id,
+                "reason": "tool_approval_required",
+                "question": (
+                    "Workspace deletion requires approval. "
+                    f"Approval ID: {approval_id}"
+                ),
+                "tool_call_id": call_id,
+                "approval_id": approval_id,
+            }
+        if (
+            level == "L3"
+            and approval_status == "rejected"
+            and isinstance(approval_id, str)
+            and approval_id
+        ):
             return ToolExecutionOutcome(
                 status="failed",
                 result_summary=(
-                    "Workspace deletion requires approval and was not "
-                    f"executed. Approval ID: {approval_id}"
+                    "Workspace deletion was rejected and was not executed. "
+                    f"Approval ID: {approval_id}"
                 ),
                 result_ref=None,
-                error_code="tool_approval_required",
+                error_code="tool_approval_rejected",
                 retryable=False,
                 metadata={
                     "approval_id": approval_id,
                     "autonomy_level": level,
                 },
-            )
-        return ToolExecutionOutcome(
-            status="failed",
-            result_summary=str(
-                decision.get("message")
-                or "Workspace deletion was denied by the autonomy policy."
+            ), None
+        return (
+            ToolExecutionOutcome(
+                status="failed",
+                result_summary=str(
+                    decision.get("message")
+                    or "Workspace deletion was denied by the autonomy policy."
+                ),
+                result_ref=None,
+                error_code="tool_autonomy_denied",
+                retryable=False,
+                metadata={"autonomy_level": level},
             ),
-            result_ref=None,
-            error_code="tool_autonomy_denied",
-            retryable=False,
-            metadata={"autonomy_level": level},
+            None,
         )
 
     async def execute_pending(
@@ -1342,6 +1378,22 @@ class RuntimeToolStepService:
                     raise ToolExecutionError(
                         "tool_not_enabled",
                         f"tool {tool_name!r} is not enabled for this Agent",
+                    )
+                autonomy_outcome, approval_wait = (
+                    await self._delete_autonomy_gate(
+                        state=state,
+                        context=context,
+                        agent=agent,
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                    )
+                )
+                if approval_wait is not None:
+                    return ToolStepResult(
+                        messages=tuple(messages),
+                        waiting_request=approval_wait,
+                        pending_tool_calls=tool_calls[index:],
                     )
                 policy = _policy(tool_name)
                 lease_owner = _tool_execution_lease_owner(
@@ -1602,13 +1654,6 @@ class RuntimeToolStepService:
                         pending_tool_calls=tool_calls[index:],
                     )
 
-                autonomy_outcome = await self._delete_autonomy_outcome(
-                    state=state,
-                    context=context,
-                    agent=agent,
-                    tool_name=tool_name,
-                    arguments=arguments,
-                )
                 if autonomy_outcome is not None:
                     outcome = await self._settle_outcome(
                         tenant_id=tenant_id,

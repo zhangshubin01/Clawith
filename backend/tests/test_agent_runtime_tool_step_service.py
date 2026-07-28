@@ -1513,16 +1513,21 @@ async def test_l3_private_workspace_delete_requires_approval_before_execution(
         "delete_file",
     )
     approval_id = uuid.uuid4()
+    correlation_id = f"approval:{approval_id}"
     approval_calls: list[dict] = []
-    settled_metadata: list[dict] = []
+    reservation_calls: list[dict] = []
+    execution_calls: list[dict] = []
 
     async def tools(agent_id):
         assert agent_id == agent.id
         return [{"type": "function", "function": {"name": "delete_file"}}]
 
     async def reserve(db, **kwargs):
-        del db, kwargs
+        del db
+        reservation_calls.append(kwargs)
         return _reservation(execution)
+
+    approval_status = "pending"
 
     async def check_and_enforce(db, agent_arg, action_type, details):
         del db
@@ -1534,28 +1539,50 @@ async def test_l3_private_workspace_delete_requires_approval_before_execution(
             }
         )
         return {
-            "allowed": False,
+            "allowed": approval_status == "approved",
             "level": "L3",
             "approval_id": str(approval_id),
+            "approval_status": approval_status,
+            "correlation_id": correlation_id,
             "message": "Approval requested from creator",
         }
 
-    async def mark_failed(db, **kwargs):
+    async def mark_succeeded(db, **kwargs):
         del db
-        settled_metadata.append(kwargs["metadata"])
-        execution.status = "failed"
+        execution.status = "succeeded"
         execution.result_summary = kwargs["result_summary"]
-        execution.error_code = kwargs["error_code"]
-        execution.result_metadata = kwargs["metadata"]
         return execution
 
-    async def forbidden_executor(*args, **kwargs):
-        raise AssertionError(
-            f"L3 delete reached the workspace executor: {args}, {kwargs}"
+    async def executor(
+        name,
+        arguments,
+        agent_id,
+        user_id,
+        session_id="",
+        on_output=None,
+    ):
+        execution_calls.append(
+            {
+                "name": name,
+                "arguments": arguments,
+                "agent_id": agent_id,
+                "user_id": user_id,
+                "session_id": session_id,
+                "on_output": on_output,
+            }
+        )
+        return ToolExecutionOutcome(
+            status="succeeded",
+            result_summary="✅ Deleted workspace/remove-me.md",
+            result_ref=None,
         )
 
     monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
-    monkeypatch.setattr(tool_step_service, "mark_tool_execution_failed", mark_failed)
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_succeeded",
+        mark_succeeded,
+    )
     monkeypatch.setattr(
         tool_step_service.autonomy_service,
         "check_and_enforce",
@@ -1565,16 +1592,27 @@ async def test_l3_private_workspace_delete_requires_approval_before_execution(
         session_factory=_session_factory(agent),
         cancel_source=_CancelSource(None),
         tool_provider=tools,
-        tool_executor=forbidden_executor,
+        tool_executor=executor,
     )
 
-    result = await service.execute_pending(state, context, (call,))
+    waiting = await service.execute_pending(state, context, (call,))
 
-    assert result.error is None
-    assert result.waiting_request is None
-    assert result.messages[0]["execution_status"] == "failed"
-    assert result.messages[0]["error_code"] == "tool_approval_required"
-    assert settled_metadata[0]["approval_id"] == str(approval_id)
+    assert waiting.error is None
+    assert waiting.messages == ()
+    assert waiting.pending_tool_calls == (call,)
+    assert waiting.waiting_request == {
+        "waiting_type": "user",
+        "correlation_id": correlation_id,
+        "reason": "tool_approval_required",
+        "question": (
+            "Workspace deletion requires approval. "
+            f"Approval ID: {approval_id}"
+        ),
+        "tool_call_id": "call-private-delete",
+        "approval_id": str(approval_id),
+    }
+    assert reservation_calls == []
+    assert execution_calls == []
     assert approval_calls == [
         {
             "agent": agent,
@@ -1588,10 +1626,113 @@ async def test_l3_private_workspace_delete_requires_approval_before_execution(
                     "run_id": context.run_id,
                     "session_id": context.session_id,
                     "workspace_scope": "agent",
+                    "tool_call_id": "call-private-delete",
                 },
             },
         }
     ]
+
+    approval_status = "approved"
+    resumed = await service.execute_pending(state, context, (call,))
+
+    assert resumed.error is None
+    assert resumed.waiting_request is None
+    assert resumed.pending_tool_calls == ()
+    assert resumed.messages[0]["execution_status"] == "succeeded"
+    assert resumed.messages[0]["content"] == "✅ Deleted workspace/remove-me.md"
+    assert len(reservation_calls) == 1
+    assert len(execution_calls) == 1
+    assert execution_calls[0]["name"] == "delete_file"
+    assert execution_calls[0]["arguments"] == {
+        "path": "workspace/remove-me.md"
+    }
+
+
+@pytest.mark.asyncio
+async def test_l3_private_workspace_delete_rejection_resumes_with_failed_result(
+    monkeypatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    agent = _agent(tenant_id)
+    agent.autonomy_policy = {"delete_files": "L3"}
+    call = {
+        "id": "call-rejected-delete",
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "arguments": '{"path":"workspace/keep-me.md"}',
+        },
+    }
+    state = _state(tenant_id, agent, (call,))
+    context = _context(state)
+    execution = _execution(
+        tenant_id,
+        uuid.UUID(context.run_id),
+        "call-rejected-delete",
+        "delete_file",
+    )
+    approval_id = uuid.uuid4()
+
+    async def tools(agent_id):
+        assert agent_id == agent.id
+        return [{"type": "function", "function": {"name": "delete_file"}}]
+
+    async def reject_delete(*_args, **_kwargs):
+        return {
+            "allowed": False,
+            "level": "L3",
+            "approval_id": str(approval_id),
+            "approval_status": "rejected",
+            "correlation_id": f"approval:{approval_id}",
+            "message": "Approval rejected",
+        }
+
+    async def reserve(db, **kwargs):
+        del db, kwargs
+        return _reservation(execution)
+
+    async def mark_failed(db, **kwargs):
+        del db
+        execution.status = "failed"
+        execution.result_summary = kwargs["result_summary"]
+        execution.error_code = kwargs["error_code"]
+        execution.result_metadata = kwargs["metadata"]
+        return execution
+
+    async def forbidden_executor(*args, **kwargs):
+        raise AssertionError(
+            f"Rejected delete reached the executor: {args}, {kwargs}"
+        )
+
+    monkeypatch.setattr(
+        tool_step_service.autonomy_service,
+        "check_and_enforce",
+        reject_delete,
+    )
+    monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
+    monkeypatch.setattr(
+        tool_step_service,
+        "mark_tool_execution_failed",
+        mark_failed,
+    )
+    service = tool_step_service.RuntimeToolStepService(
+        session_factory=_session_factory(agent),
+        cancel_source=_CancelSource(None),
+        tool_provider=tools,
+        tool_executor=forbidden_executor,
+    )
+
+    result = await service.execute_pending(state, context, (call,))
+
+    assert result.error is None
+    assert result.waiting_request is None
+    assert result.pending_tool_calls == ()
+    assert result.messages[0]["execution_status"] == "failed"
+    assert result.messages[0]["error_code"] == "tool_approval_rejected"
+    assert result.messages[0]["content"] == (
+        "Workspace deletion was rejected and was not executed. "
+        f"Approval ID: {approval_id}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1624,13 +1765,8 @@ async def test_l3_group_workspace_delete_preserves_group_scope_for_approval(
         },
     )
     context = _context(state)
-    execution = _execution(
-        tenant_id,
-        uuid.UUID(context.run_id),
-        "call-group-delete",
-        "delete_file",
-    )
     approval_id = uuid.uuid4()
+    correlation_id = f"approval:{approval_id}"
     captured_details: list[dict] = []
 
     async def tools(agent_id):
@@ -1638,9 +1774,9 @@ async def test_l3_group_workspace_delete_preserves_group_scope_for_approval(
         return [{"type": "function", "function": {"name": "delete_file"}}]
 
     async def reserve(db, **kwargs):
-        del db
-        assert kwargs["arguments"]["workspace_scope"] == "group"
-        return _reservation(execution)
+        raise AssertionError(
+            f"Waiting Group delete created a tool receipt: {db}, {kwargs}"
+        )
 
     async def check_and_enforce(db, agent_arg, action_type, details):
         del db
@@ -1651,16 +1787,10 @@ async def test_l3_group_workspace_delete_preserves_group_scope_for_approval(
             "allowed": False,
             "level": "L3",
             "approval_id": str(approval_id),
+            "approval_status": "pending",
+            "correlation_id": correlation_id,
             "message": "Approval requested from creator",
         }
-
-    async def mark_failed(db, **kwargs):
-        del db
-        execution.status = "failed"
-        execution.result_summary = kwargs["result_summary"]
-        execution.error_code = kwargs["error_code"]
-        execution.result_metadata = kwargs["metadata"]
-        return execution
 
     class _ForbiddenGroupToolService:
         async def execute_scoped_workspace_tool(self, *args, **kwargs):
@@ -1672,7 +1802,6 @@ async def test_l3_group_workspace_delete_preserves_group_scope_for_approval(
         raise AssertionError(f"Group delete reached Agent Workspace: {args}, {kwargs}")
 
     monkeypatch.setattr(tool_step_service, "reserve_tool_execution", reserve)
-    monkeypatch.setattr(tool_step_service, "mark_tool_execution_failed", mark_failed)
     monkeypatch.setattr(
         tool_step_service.autonomy_service,
         "check_and_enforce",
@@ -1689,7 +1818,19 @@ async def test_l3_group_workspace_delete_preserves_group_scope_for_approval(
     result = await service.execute_pending(state, context, (call,))
 
     assert result.error is None
-    assert result.messages[0]["error_code"] == "tool_approval_required"
+    assert result.messages == ()
+    assert result.pending_tool_calls == (call,)
+    assert result.waiting_request == {
+        "waiting_type": "user",
+        "correlation_id": correlation_id,
+        "reason": "tool_approval_required",
+        "question": (
+            "Workspace deletion requires approval. "
+            f"Approval ID: {approval_id}"
+        ),
+        "tool_call_id": "call-group-delete",
+        "approval_id": str(approval_id),
+    }
     assert captured_details == [
         {
             "tool": "delete_file",
@@ -1703,6 +1844,7 @@ async def test_l3_group_workspace_delete_preserves_group_scope_for_approval(
                 "run_id": context.run_id,
                 "session_id": context.session_id,
                 "workspace_scope": "group",
+                "tool_call_id": "call-group-delete",
                 "group_id": str(group_id),
                 "actor_participant_id": str(participant_id),
                 "workspace_path": "remove-me.md",
