@@ -23,6 +23,7 @@ from app.services.agent_runtime.a2a_runtime import (
 )
 from app.services.agent_runtime.command_worker import RuntimeSessionFactory
 from app.services.agent_runtime.group_runtime_tools import (
+    GROUP_DELETE_WORKSPACE_FILE,
     GROUP_READ_TOOL_NAMES,
     GROUP_SCOPED_WORKSPACE_TOOL_NAMES,
     GROUP_TOOL_NAMES,
@@ -74,6 +75,7 @@ from app.services.agent_runtime.tool_result_store import (
     ToolResultReconciler,
     ToolResultStore,
 )
+from app.services.autonomy_service import autonomy_service
 from app.services.agent_tools import (
     agentbay_run_scope_id,
     execute_builtin_tool_outcome,
@@ -477,6 +479,89 @@ def _is_group_workspace_mutation_call(
         tool_name in SCOPED_GROUP_WORKSPACE_MUTATION_TOOL_NAMES
         and _is_group_scoped_workspace_call(state, tool_name, arguments)
     )
+
+
+def _delete_autonomy_details(
+    state: RuntimeGraphState,
+    context: RuntimeContext,
+    agent: Agent,
+    tool_name: str,
+    arguments: Mapping[str, object],
+) -> dict | None:
+    if tool_name not in {"delete_file", GROUP_DELETE_WORKSPACE_FILE}:
+        return None
+    actor_user_id = context.actor_user_id or str(agent.creator_id)
+    runtime_scope = {
+        "tenant_id": context.tenant_id,
+        "run_id": context.run_id,
+        "session_id": context.session_id,
+        "workspace_scope": "agent",
+    }
+    is_group_delete = tool_name == GROUP_DELETE_WORKSPACE_FILE or (
+        tool_name == "delete_file"
+        and _is_group_scoped_workspace_call(
+            state,
+            tool_name,
+            arguments,
+        )
+    )
+    if is_group_delete:
+        initial_input = state["snapshots"].initial_input
+        group_id = initial_input.get("group_id")
+        participant_id = initial_input.get("target_participant_id")
+        group_context = initial_input.get("group_context")
+        context_agent = (
+            group_context.get("agent")
+            if isinstance(group_context, Mapping)
+            else None
+        )
+        context_agent_id = (
+            context_agent.get("agent_id")
+            if isinstance(context_agent, Mapping)
+            else None
+        )
+        try:
+            uuid.UUID(str(group_id))
+            uuid.UUID(str(participant_id))
+            uuid.UUID(context.session_id or "")
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError(
+                "group_tool_scope_invalid",
+                "Group delete approval scope is incomplete",
+            ) from exc
+        if context_agent_id != str(agent.id):
+            raise ToolExecutionError(
+                "group_tool_scope_invalid",
+                "Group delete approval Agent does not match the executing Agent",
+            )
+        path = arguments.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise ToolExecutionError(
+                "invalid_tool_call",
+                "delete_file requires a non-empty path",
+            )
+        workspace_path = path.replace("\\", "/").strip()
+        if workspace_path in {"", ".", "workspace", "workspace/"}:
+            raise ToolExecutionError(
+                "invalid_tool_call",
+                "delete_file must identify an item inside Group Workspace",
+            )
+        if workspace_path.startswith("workspace/"):
+            workspace_path = workspace_path.removeprefix("workspace/")
+        runtime_scope.update(
+            {
+                "workspace_scope": "group",
+                "group_id": str(group_id),
+                "actor_participant_id": str(participant_id),
+                "workspace_path": workspace_path,
+            }
+        )
+    return {
+        "tool": tool_name,
+        "args": dict(arguments),
+        "requested_by": actor_user_id,
+        "runtime_scope": runtime_scope,
+    }
 
 
 def _heartbeat_blocked_summary(
@@ -1073,6 +1158,76 @@ class RuntimeToolStepService:
             ),
         )
 
+    async def _delete_autonomy_outcome(
+        self,
+        *,
+        state: RuntimeGraphState,
+        context: RuntimeContext,
+        agent: Agent,
+        tool_name: str,
+        arguments: Mapping[str, object],
+    ) -> ToolExecutionOutcome | None:
+        details = _delete_autonomy_details(
+            state,
+            context,
+            agent,
+            tool_name,
+            arguments,
+        )
+        if details is None:
+            return None
+        try:
+            async with self._session_factory() as db:
+                async with db.begin():
+                    decision = await autonomy_service.check_and_enforce(
+                        db,
+                        agent,
+                        "delete_files",
+                        details,
+                    )
+        except Exception as exc:
+            return ToolExecutionOutcome(
+                status="failed",
+                result_summary=(
+                    "Workspace deletion was blocked because the autonomy "
+                    "policy check could not be completed."
+                ),
+                result_ref=None,
+                error_code="tool_autonomy_check_failed",
+                retryable=False,
+                metadata={"error_class": type(exc).__name__},
+            )
+        if decision.get("allowed"):
+            return None
+        level = str(decision.get("level") or "unknown")
+        approval_id = decision.get("approval_id")
+        if level == "L3" and isinstance(approval_id, str) and approval_id:
+            return ToolExecutionOutcome(
+                status="failed",
+                result_summary=(
+                    "Workspace deletion requires approval and was not "
+                    f"executed. Approval ID: {approval_id}"
+                ),
+                result_ref=None,
+                error_code="tool_approval_required",
+                retryable=False,
+                metadata={
+                    "approval_id": approval_id,
+                    "autonomy_level": level,
+                },
+            )
+        return ToolExecutionOutcome(
+            status="failed",
+            result_summary=str(
+                decision.get("message")
+                or "Workspace deletion was denied by the autonomy policy."
+            ),
+            result_ref=None,
+            error_code="tool_autonomy_denied",
+            retryable=False,
+            metadata={"autonomy_level": level},
+        )
+
     async def execute_pending(
         self,
         state: RuntimeGraphState,
@@ -1446,6 +1601,31 @@ class RuntimeToolStepService:
                         ),
                         pending_tool_calls=tool_calls[index:],
                     )
+
+                autonomy_outcome = await self._delete_autonomy_outcome(
+                    state=state,
+                    context=context,
+                    agent=agent,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                )
+                if autonomy_outcome is not None:
+                    outcome = await self._settle_outcome(
+                        tenant_id=tenant_id,
+                        reservation=reservation,
+                        lease_owner=lease_owner,
+                        policy=policy,
+                        outcome=autonomy_outcome,
+                    )
+                    messages.append(
+                        _result_message(
+                            run_id=run_id,
+                            call_id=call_id,
+                            tool_name=tool_name,
+                            outcome=outcome,
+                        )
+                    )
+                    continue
 
                 canonical_cross_space_action = builtin_cross_space_action(tool_name)
                 if (

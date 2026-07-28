@@ -14,6 +14,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database import async_session
 from app.models.agent import Agent
 from app.models.audit import ApprovalRequest, AuditLog
 from app.models.channel_config import ChannelConfig
@@ -193,6 +194,49 @@ class AutonomyService:
                         arguments = {}
             else:
                 arguments = args_raw
+
+            runtime_scope = details.get("runtime_scope")
+            if (
+                action_type == "delete_files"
+                and tool_name in {"delete_file", "group_delete_workspace_file"}
+                and isinstance(runtime_scope, dict)
+                and runtime_scope.get("workspace_scope") == "group"
+            ):
+                from app.services import group_file_service
+
+                tenant_id = uuid.UUID(str(runtime_scope["tenant_id"]))
+                group_id = uuid.UUID(str(runtime_scope["group_id"]))
+                participant_id = uuid.UUID(
+                    str(runtime_scope["actor_participant_id"])
+                )
+                session_id_raw = runtime_scope.get("session_id")
+                session_id = (
+                    uuid.UUID(str(session_id_raw))
+                    if session_id_raw
+                    else None
+                )
+                path = runtime_scope.get("workspace_path")
+                if not isinstance(path, str) or not path.strip():
+                    raise ValueError(
+                        "Approved Group Workspace delete is missing its path"
+                    )
+                expected_version_token = arguments.get(
+                    "expected_version_token"
+                )
+                if not isinstance(expected_version_token, str):
+                    expected_version_token = None
+                async with async_session() as action_db:
+                    await group_file_service.delete_workspace_file(
+                        action_db,
+                        tenant_id=tenant_id,
+                        group_id=group_id,
+                        actor_participant_id=participant_id,
+                        path=path,
+                        expected_version_token=expected_version_token,
+                        session_id=session_id,
+                    )
+                    await action_db.commit()
+                return f"✅ Deleted {path} from Group Workspace"
 
             # Import and call the tool's direct executor (no autonomy re-check)
             from app.services.agent_tools import _execute_tool_direct
