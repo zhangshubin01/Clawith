@@ -13,12 +13,11 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping
 
-from app.services.llm.finish import FINISH_TOOL_SEED
+WRITE_FILE_MAX_CONTENT_CHARS = 6_000
 
 
 # Builtin tool definitions — these map to the hardcoded AGENT_TOOLS
 _BUILTIN_TOOL_SOURCE = [
-    FINISH_TOOL_SEED,
     {
         "name": "list_files",
         "display_name": "List Files",
@@ -119,7 +118,7 @@ _BUILTIN_TOOL_SOURCE = [
     {
         "name": "write_file",
         "display_name": "Write File",
-        "description": "Write or update a file in the workspace. Before creating a new document under workspace/, first inspect the relevant directories with list_files, prefer an existing topical subfolder over the workspace root, and create a new subfolder when the content belongs to a new category. Avoid placing standalone document files directly in workspace/ root unless the user explicitly wants that. Can update memory/memory.md, create documents in workspace/, create skills in skills/.",
+        "description": "Write or incrementally append UTF-8 text to a file in the workspace. Each call accepts at most 6000 content characters. For a longer generated file such as HTML, CSS, JavaScript, or markdown, call write_file once with mode=overwrite for the first chunk, then use one mode=append call per later model turn for each remaining chunk; never emit the whole file or multiple large chunks in one response. Before creating a new document under workspace/, first inspect the relevant directories with list_files, prefer an existing topical subfolder over the workspace root, and create a new subfolder when the content belongs to a new category. Avoid placing standalone document files directly in workspace/ root unless the user explicitly wants that. Can update memory/memory.md, create documents in workspace/, create skills in skills/.",
         "category": "file",
         "icon": "✏️",
         "is_default": True,
@@ -127,7 +126,17 @@ _BUILTIN_TOOL_SOURCE = [
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "File path, e.g.: memory/memory.md, workspace/reports/report.md, workspace/knowledge_base/notes.md. Prefer a meaningful subfolder instead of writing loose files into workspace/ root."},
-                "content": {"type": "string", "description": "File content to write"},
+                "content": {
+                    "type": "string",
+                    "maxLength": WRITE_FILE_MAX_CONTENT_CHARS,
+                    "description": "One file-content chunk, at most 6000 characters. Keep long generated content split across later tool turns.",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["overwrite", "append"],
+                    "default": "overwrite",
+                    "description": "overwrite creates or replaces the file (default); append adds this chunk to an existing file after the previous write succeeds.",
+                },
             },
             "required": ["path", "content"],
         },
@@ -3966,7 +3975,7 @@ def builtin_readiness(name: str) -> str | None:
 
 def is_reserved_custom_tool_name(name: str) -> bool:
     """Prevent custom tools from replacing Runtime control/group contracts."""
-    return name in {"finish", "wait"} or name.startswith("group_")
+    return name in {"at", "finish", "wait"} or name.startswith("group_")
 
 
 def validate_builtin_tool_definitions() -> None:
@@ -4040,6 +4049,7 @@ __all__ = [
     "BUILTIN_TOOL_SEEDS",
     "GROUP_BUILTIN_TOOL_DEFINITIONS",
     "GROUP_RUNTIME_TOOL_DEFINITIONS",
+    "WRITE_FILE_MAX_CONTENT_CHARS",
     "builtin_model_definition",
     "builtin_model_definitions",
     "builtin_cross_space_action",
