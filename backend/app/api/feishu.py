@@ -1,5 +1,6 @@
 """Feishu OAuth and Channel API routes."""
 
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -143,6 +144,29 @@ async def configure_channel(
     if not is_agent_creator(current_user, agent):
         raise HTTPException(status_code=403, detail="Only creator can configure channel")
 
+    # 保存前验证凭据有效性（借鉴 DeepThink testFeishuCredentials）
+    if data.app_id and data.app_secret:
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=8) as _client:
+                _resp = await _client.post(
+                    f"{_FEISHU_BASE}/open-apis/auth/v3/tenant_access_token/internal",
+                    json={"app_id": data.app_id, "app_secret": data.app_secret},
+                )
+                _payload = _resp.json()
+                if _resp.status_code >= 400 or _payload.get("code") != 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Feishu credential test failed: {_payload.get('msg', 'Unknown error')} (code {_payload.get('code', 'N/A')})",
+                    )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Feishu credential test failed: {exc}",
+            )
+
     # Check existing
     result = await db.execute(select(ChannelConfig).where(
         ChannelConfig.agent_id == agent_id,
@@ -250,16 +274,21 @@ async def _resolve_feishu_sender(
     sender_open_id: str,
     sender_user_id: str,
 ):
-    """Resolve the stable tenant user while preserving Feishu identifiers."""
+    """Resolve the stable tenant user while preserving Feishu identifiers.
+
+    fail-closed: 如果 event 中没有 user_id 且 Contact API 调用失败，拒绝解析而非静默降级到仅 open_id。
+    借鉴 DeepThink botOpenId fail-closed 语义：信息不足时拒绝，由调用方提示用户，而非创建重复账号。
+    """
     import httpx
 
-    from app.services.channel_user_service import channel_user_service
+    from app.services.channel_user_service import channel_user_service, ChannelUserResolutionError
 
     resolved_user_id = sender_user_id.strip()
     extra_info: dict = {
         "open_id": sender_open_id,
         "external_id": resolved_user_id or None,
     }
+    contact_failed = False
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             token_response = await client.post(
@@ -298,6 +327,18 @@ async def _resolve_feishu_sender(
                     }
     except Exception as exc:
         logger.warning(f"[Feishu] Sender enrichment failed: {exc}")
+        contact_failed = True
+
+    # fail-closed: 如果 event 中缺少 user_id 且 Contact API 也调用失败，
+    # 拒绝解析以避免仅凭 open_id 创建不准确的用户记录。
+    if contact_failed and not resolved_user_id:
+        logger.error(
+            "[Feishu] Cannot resolve sender: no user_id in event and Contact API failed. "
+            "Refusing to proceed with open_id-only resolution to prevent duplicate user creation."
+        )
+        raise ChannelUserResolutionError(
+            "Feishu sender could not be resolved: no user_id in event and Contact API unavailable"
+        )
 
     return await channel_user_service.resolve_channel_user(
         db=db,
@@ -334,6 +375,11 @@ async def _accept_feishu_runtime_message(
         agent = agent_result.scalar_one_or_none()
         if agent is None:
             raise RuntimeError(f"Feishu Agent {agent_id} not found")
+        is_group = chat_type == "group" and bool(chat_id)
+        card_mode = (config.extra_config or {}).get("card_mode")
+        pregenerated_run_id = uuid.uuid4()
+        bridge = None
+        register_bridge = None
         user = await _resolve_feishu_sender(
             db,
             agent=agent,
@@ -341,7 +387,6 @@ async def _accept_feishu_runtime_message(
             sender_open_id=sender_open_id,
             sender_user_id=sender_user_id,
         )
-        is_group = chat_type == "group" and bool(chat_id)
         stable_sender = sender_user_id or sender_open_id
         external_conv_id = (
             f"feishu_group_{chat_id}" if is_group else f"feishu_p2p_{stable_sender}"
@@ -357,31 +402,95 @@ async def _accept_feishu_runtime_message(
             group_name=f"Feishu Group {chat_id[:8]}" if is_group else None,
             created_by_user_id=user.id,
         )
+        # 卡片创建 — session 后可用精确 resume 检查
+        if card_mode:
+            from app.models.agent_run import AgentRun as _AgentRun
+            from sqlalchemy import select as _select
+            resume_result = await db.execute(
+                _select(_AgentRun.id).where(
+                    _AgentRun.agent_id == agent_id,
+                    _AgentRun.session_id == session.id,
+                    _AgentRun.origin_user_id == user.id,
+                    _AgentRun.lane_held.is_(True),
+                    _AgentRun.source_type == "chat",
+                ).limit(1)
+            )
+            if resume_result.scalar_one_or_none() is None:
+                from app.services.agent_runtime.card_stream_bridge import (
+                    CardStreamBridge, register_bridge as _reg_bridge,
+                )
+                register_bridge = _reg_bridge
+                from app.services.feishu_service import feishu_service as fs
+                bridge = CardStreamBridge(
+                    feishu_service=fs,
+                    app_id=config.app_id or "",
+                    app_secret=config.app_secret or "",
+                    receive_id=chat_id if is_group else sender_open_id,
+                    receive_id_type="chat_id" if is_group else "open_id",
+                    agent_name=agent.name or str(agent.id),
+                    run_id=str(pregenerated_run_id),
+                )
+                card_task = asyncio.create_task(bridge.start())
+                card_task.add_done_callback(
+                    lambda t: (
+                        logger.error("[FEISHU-CARD] card_task_failed: %s", t.exception())
+                        if t.exception() else None
+                    )
+                )
+                register_bridge(str(pregenerated_run_id), bridge)
+                logger.info(
+                    "[FEISHU-CARD] bridge_created run_id={}", pregenerated_run_id,
+                )
         _, model, _ = await _load_agent_and_model(db, agent_id)
         sender_name = (user.display_name or "").strip()
         executable_content = (
             f"[发送者: {sender_name}] {content}" if sender_name else content
         )
-        intake = await enqueue_channel_chat_runtime(
-            db,
-            agent=agent,
-            user=user,
-            session=session,
-            model=model,
-            content=executable_content,
-            display_content=display_content,
-            source_channel="feishu",
-            channel_delivery_target={
-                "receive_id": chat_id if is_group else sender_open_id,
-                "receive_id_type": "chat_id" if is_group else "open_id",
-            },
-            message_id=channel_message_id(
-                agent_id,
-                "feishu",
-                external_event_id,
-            ),
-        )
-        await db.commit()
+        try:
+            intake = await enqueue_channel_chat_runtime(
+                db,
+                agent=agent,
+                user=user,
+                session=session,
+                model=model,
+                content=executable_content,
+                display_content=display_content,
+                source_channel="feishu",
+                run_id=pregenerated_run_id,
+                channel_delivery_target={
+                    "receive_id": chat_id if is_group else sender_open_id,
+                    "receive_id_type": "chat_id" if is_group else "open_id",
+                    **({
+                        "_card_config": {
+                            "app_id": config.app_id or "",
+                            "app_secret": config.app_secret or "",
+                        }
+                    } if card_mode else {}),
+                },
+                message_id=channel_message_id(
+                    agent_id,
+                    "feishu",
+                    external_event_id,
+                ),
+            )
+            await db.commit()
+        except Exception:
+            if bridge is not None:
+                try:
+                    await asyncio.wait_for(bridge._card_ready.wait(), timeout=15)
+                    await bridge.abort("消息处理失败")
+                except Exception:
+                    logger.exception("[FEISHU-CARD] abort_on_intake_failure_failed")
+            raise
+        # 验证 run_id 一致（幂等重试场景）— 双键注册
+        if bridge is not None:
+            actual_run_id = intake.handle.run_id
+            if actual_run_id != pregenerated_run_id:
+                logger.info(
+                    "[FEISHU-CARD] run_id_rebound from={} to={}",
+                    pregenerated_run_id, actual_run_id,
+                )
+                register_bridge(str(actual_run_id), bridge)
     return intake
 
 

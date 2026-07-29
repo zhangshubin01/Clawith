@@ -114,6 +114,7 @@ async def enqueue_channel_chat_runtime(
     channel_delivery_target: dict,
     display_content: str = "",
     file_name: str = "",
+    run_id: uuid.UUID | None = None,
 ) -> ChatRuntimeIntake:
     """Atomically attach a channel message to a new or waiting Chat Run."""
     if agent.tenant_id is None or model is None:
@@ -132,6 +133,7 @@ async def enqueue_channel_chat_runtime(
         )
         intake = await enqueue_chat_runtime(
             db,
+            run_id=run_id,
             agent=agent,
             user=user,
             session=session,

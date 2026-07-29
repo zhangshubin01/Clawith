@@ -191,6 +191,13 @@ def _runtime_context(
     command: RuntimeCommandRecord,
     executor: RuntimeNodeExecutor,
 ) -> RuntimeContext:
+    target = getattr(run, "delivery_target", None) or {}
+    card_cfg = target.get("_card_config", {}) if isinstance(target, dict) else {}
+    # receive_id / receive_id_type 在 delivery_target.channel_delivery.target 内,
+    # 需要从嵌套路径读取（chat_intake 不提升到顶层）
+    delivery_route = (target.get("channel_delivery", {}) if isinstance(target, dict) else {})
+    delivery_target = delivery_route.get("target", {}) if isinstance(delivery_route, dict) else {}
+    card_mode = bool(card_cfg.get("app_id"))
     return RuntimeContext(
         tenant_id=str(run.tenant_id),
         run_id=str(run.run_id),
@@ -210,6 +217,13 @@ def _runtime_context(
         model_turn_limit=run.model_turn_limit,
         actor_user_id=(str(command.actor_user_id) if command.actor_user_id is not None else None),
         actor_agent_id=(str(command.actor_agent_id) if command.actor_agent_id is not None else None),
+        # 卡片模式
+        card_mode=card_mode,
+        card_bridge_key=str(run.run_id) if card_mode else "",
+        card_app_id=card_cfg.get("app_id", ""),
+        card_app_secret=card_cfg.get("app_secret", ""),
+        card_receive_id=delivery_target.get("receive_id", "") if isinstance(delivery_target, dict) else "",
+        card_receive_id_type=delivery_target.get("receive_id_type", "") if isinstance(delivery_target, dict) else "",
     )
 
 

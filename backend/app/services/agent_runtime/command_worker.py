@@ -118,6 +118,7 @@ class RuntimeRunRecord:
     source_id: str | None = None
     scheduling_position_created_at: datetime | None = None
     scheduling_position_id: uuid.UUID | None = None
+    delivery_target: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,6 +430,7 @@ class RuntimeCommandWorker:
                         run.scheduling_position_created_at
                     ),
                     scheduling_position_id=run.scheduling_position_id,
+                    delivery_target=run.delivery_target,
                 )
 
     async def _renew_claim(self, command: RuntimeCommandRecord) -> None:

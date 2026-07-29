@@ -9,6 +9,7 @@ from dataclasses import asdict, replace
 import json
 import random
 import re
+import time
 from typing import Protocol, cast
 import uuid
 
@@ -284,6 +285,7 @@ class CompletionPort(Protocol):
         tools: list[dict] | None = None,
         agent_id: uuid.UUID | None = None,
         supports_vision: bool = False,
+        on_chunk: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMCompletionStep: ...
 
 
@@ -1444,6 +1446,8 @@ class RuntimeModelStepService:
         agent: Agent,
         messages: list[LLMMessage],
         tools: list[dict],
+        on_chunk: Callable[[str], Awaitable[None]] | None = None,
+        on_thinking: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMCompletionStep:
         return await self._completion(
             model,
@@ -1451,6 +1455,8 @@ class RuntimeModelStepService:
             tools=tools,
             agent_id=agent.id,
             supports_vision=bool(model.supports_vision),
+            on_chunk=on_chunk,
+            on_thinking=on_thinking,
         )
 
     async def _call_prepared_with_retry(
@@ -1460,6 +1466,8 @@ class RuntimeModelStepService:
         agent: Agent,
         messages: list[LLMMessage],
         tools: list[dict],
+        on_chunk: Callable[[str], Awaitable[None]] | None = None,
+        on_thinking: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMCompletionStep:
         """Retry only transient provider failures before model failover."""
         total_attempts = self._model_retry_attempts + 1
@@ -1470,6 +1478,8 @@ class RuntimeModelStepService:
                     agent=agent,
                     messages=messages,
                     tools=tools,
+                    on_chunk=on_chunk,
+                    on_thinking=on_thinking,
                 )
             except Exception as exc:
                 classification = classify_error(exc)
@@ -1541,6 +1551,67 @@ class RuntimeModelStepService:
     ) -> ModelStepResult:
         try:
             model, agent, ledger = await self._load(context, state)
+
+            # 卡片模式: 惰性创建 CardStreamBridge（首次模型调用时）
+            card_on_chunk = None
+            card_on_thinking = None
+            _flush = None
+            _do_push = None
+            if context.card_bridge_key:
+                from app.services.agent_runtime.card_stream_bridge import (
+                    CardStreamBridge, get_bridge, register_bridge,
+                )
+                from app.services.feishu_service import feishu_service as _fs
+                bridge = get_bridge(context.card_bridge_key)
+                if bridge is None or bridge._state == "error":
+                    # 卡片创建失败或桥丢失 — 重建
+                    # 从 DB 恢复 app_secret（chat_intake 写入 DB 前已剥离，需运行时回查）
+                    app_secret = context.card_app_secret
+                    if not app_secret and context.card_app_id and context.agent_id:
+                        try:
+                            async with self._session_factory() as db:
+                                from app.models.channel_config import ChannelConfig
+                                result = await db.execute(
+                                    select(ChannelConfig).where(
+                                        ChannelConfig.agent_id == uuid.UUID(context.agent_id),
+                                        ChannelConfig.channel_type == "feishu",
+                                        ChannelConfig.app_id == context.card_app_id,
+                                    )
+                                )
+                                cfg = result.scalars().first()
+                                if cfg and cfg.app_secret:
+                                    app_secret = cfg.app_secret
+                        except Exception:
+                            logger.exception("[FEISHU-CARD] failed to load app_secret from DB")
+                    bridge = CardStreamBridge(
+                        feishu_service=_fs,
+                        app_id=context.card_app_id,
+                        app_secret=app_secret,
+                        receive_id=context.card_receive_id,
+                        receive_id_type=context.card_receive_id_type,
+                        agent_name=agent.name or str(agent.id),
+                        run_id=context.run_id,
+                    )
+                    await bridge.start()
+                    register_bridge(context.card_bridge_key, bridge)
+                # 构建节流 on_chunk 回调 — 对齐 deepthink FlushController (600ms/30chars)
+                from app.services.agent_runtime.card_stream_bridge import FlushController
+                _flush = FlushController(min_interval=0.6, min_delta=30)
+                _acc = [""]
+                async def _do_push() -> None:
+                    current_bridge = get_bridge(context.card_bridge_key)
+                    if current_bridge is not None:
+                        await current_bridge.push_text(_acc[0])
+                async def _card_on_chunk(c: str) -> None:
+                    _acc[0] += c
+                    _flush.schedule(len(_acc[0]), _do_push)
+                async def _card_on_thinking(c: str) -> None:
+                    current_bridge = get_bridge(context.card_bridge_key)
+                    if current_bridge is not None:
+                        await current_bridge.push_thinking(c)
+                card_on_chunk = _card_on_chunk
+                card_on_thinking = _card_on_thinking
+
             allow_user_wait = not _is_group_agent_run(state)
             application_tools = (
                 with_group_runtime_tools(
@@ -1603,8 +1674,11 @@ class RuntimeModelStepService:
                     agent=agent,
                     messages=prepared,
                     tools=tools,
+                    on_chunk=card_on_chunk, on_thinking=card_on_thinking,
                 )
             except Exception as primary_error:
+                if _flush is not None:
+                    _flush.dispose()
                 primary_classification = classify_error(primary_error)
                 if primary_classification != FailoverErrorType.RETRYABLE:
                     logger.error(
@@ -1689,8 +1763,11 @@ class RuntimeModelStepService:
                         agent=agent,
                         messages=fallback_prepared,
                         tools=fallback_tools,
+                        on_chunk=card_on_chunk, on_thinking=card_on_thinking,
                     )
                 except Exception as fallback_error:
+                    if _flush is not None:
+                        _flush.dispose()
                     fallback_classification = classify_error(fallback_error)
                     if fallback_classification == FailoverErrorType.RETRYABLE:
                         return self._provider_retry_wait(
@@ -1836,6 +1913,16 @@ class RuntimeModelStepService:
                         failed_over_from.id
                     )
                 result = replace(result, assistant_message=assistant_message)
+            if _flush is not None and _do_push is not None:
+                try:
+                    await _do_push()
+                except Exception:
+                    logger.exception(
+                        "[FEISHU-CARD] final_flush_failed run_id={}",
+                        context.run_id,
+                    )
+                finally:
+                    _flush.dispose()
             return result
         except (
             ContextBuildError,

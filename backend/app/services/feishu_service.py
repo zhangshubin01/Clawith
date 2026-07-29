@@ -1,5 +1,6 @@
 """Feishu (Lark) OAuth and API integration service."""
 
+import asyncio
 import json
 from collections import OrderedDict
 
@@ -82,7 +83,7 @@ class FeishuService:
     # Each entry corresponds to a unique (app_id, app_secret) pair.  Excess entries
     # are evicted in LRU order (oldest-accessed first) to bound memory usage in
     # long-running multi-tenant deployments.
-    _LARK_CLIENT_CACHE_MAX = 50
+    _LARK_CLIENT_CACHE_MAX = 120
 
     def __init__(self):
         self.app_id = settings.FEISHU_APP_ID
@@ -92,6 +93,7 @@ class FeishuService:
         # keeps the most-recently-used entries at the tail so we can evict from
         # the head when the cache is full.
         self._lark_clients: OrderedDict[str, lark.Client] = OrderedDict()
+        self._clients_lock = asyncio.Lock()
 
     @staticmethod
     def _parse_api_response(
@@ -431,7 +433,7 @@ class FeishuService:
                 body["mobiles"] = [mobile]
 
             resp = await client.post(
-                "{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
+                f"{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
                 json=body,
                 headers={"Authorization": f"Bearer {app_token}"},
                 params={"user_id_type": "open_id"},
@@ -471,7 +473,7 @@ class FeishuService:
                 body["mobiles"] = [mobile]
 
             resp = await client.post(
-                "{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
+                f"{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
                 json=body,
                 headers={"Authorization": f"Bearer {app_token}"},
                 params={"user_id_type": "user_id"},
@@ -561,7 +563,7 @@ class FeishuService:
             if ext in (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".txt", ".md"):
                 feishu_file_type = "stream"
             upload_resp = await client.post(
-                "{_FEISHU_BASE}/open-apis/im/v1/files",
+                f"{_FEISHU_BASE}/open-apis/im/v1/files",
                 files={"file": (fp.name, file_bytes, "application/octet-stream")},
                 data={"file_type": feishu_file_type, "file_name": fp.name},
                 headers=headers,
@@ -720,7 +722,7 @@ class FeishuService:
             body["folder_token"] = folder_token
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                "{_FEISHU_BASE}/open-apis/bitable/v1/apps",
+                f"{_FEISHU_BASE}/open-apis/bitable/v1/apps",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"},
             )
@@ -749,7 +751,7 @@ class FeishuService:
             body["folder_token"] = folder_token
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                "{_FEISHU_BASE}/open-apis/docx/v1/documents",
+                f"{_FEISHU_BASE}/open-apis/docx/v1/documents",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -805,7 +807,7 @@ class FeishuService:
         }
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                "{_FEISHU_BASE}/open-apis/approval/v4/instances",
+                f"{_FEISHU_BASE}/open-apis/approval/v4/instances",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -819,7 +821,7 @@ class FeishuService:
             body["status"] = status
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                "{_FEISHU_BASE}/open-apis/approval/v4/instances/query",
+                f"{_FEISHU_BASE}/open-apis/approval/v4/instances/query",
                 json=body,
                 headers={"Authorization": f"Bearer {tenant_token}"}
             )
@@ -950,15 +952,55 @@ class FeishuService:
                 f"element_id={element_id}, sequence={sequence}"
             )
             if not resp.success():
-                raise RuntimeError(
+                exc = RuntimeError(
                     f"Feishu CardKit stream_card_content failed: "
                     f"code={resp.code}, msg={resp.msg}"
                 )
+                exc.code = resp.code  # type: ignore[attr-defined]
+                raise exc
         except Exception as e:
             if isinstance(e, RuntimeError):
                 raise
             logger.error(f"[Feishu CardKit] stream_card_content error: {e}")
             raise RuntimeError(f"Feishu CardKit stream_card_content error: {e}") from e
+
+    async def update_card_element(
+        self,
+        app_id: str,
+        app_secret: str,
+        card_id: str,
+        element_id: str,
+        element_json: dict,
+        sequence: int,
+    ) -> None:
+        """Replace an entire card element via CardKit API."""
+        from lark_oapi.api.cardkit.v1.model import (
+            UpdateCardElementRequest, UpdateCardElementRequestBody,
+        )
+
+        client = self._get_lark_client(app_id, app_secret)
+        body = UpdateCardElementRequestBody.builder() \
+            .element(json.dumps(element_json)) \
+            .sequence(sequence) \
+            .build()
+        request = UpdateCardElementRequest.builder() \
+            .card_id(card_id) \
+            .element_id(element_id) \
+            .request_body(body) \
+            .build()
+
+        try:
+            resp = await client.cardkit.v1.card_element.aupdate(request)
+            logger.info(
+                f"[Feishu CardKit] update_card_element response: "
+                f"code={resp.code}, msg={resp.msg}, card_id={card_id}",
+            )
+        except Exception as e:
+            logger.error(
+                f"[Feishu CardKit] update_card_element failed"
+                f"card_id={card_id}, element_id={element_id}, error={e}",
+            )
+            raise
 
     async def set_card_streaming_mode(
         self,

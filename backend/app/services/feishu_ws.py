@@ -88,6 +88,15 @@ if not _HAS_LARK:
     )
 
 
+async def _cancel_card_run(run_id: str, bridge) -> None:
+    """Cancel a LangGraph run and abort its streaming card."""
+    try:
+        logger.info("[FEISHU-CARD] interrupt_requested run_id={}", run_id)
+        await bridge.abort("⏹ 回复已中断")
+    except Exception:
+        logger.exception("[FEISHU-CARD] interrupt_abort_failed run_id={}", run_id)
+
+
 class FeishuWSManager:
     """Manages Feishu WebSocket clients for all agents."""
 
@@ -151,9 +160,38 @@ class FeishuWSManager:
                 except Exception as e:
                     logger.exception(f"[Feishu WS] Could not dispatch event to main loop: {e}")
 
+        def handle_card_action(data: Any) -> None:
+            """Handle card.action.trigger events (e.g. interrupt button)."""
+            try:
+                action_value = None
+                if isinstance(data, dict):
+                    action_value = data.get("action", {}).get("value", {})
+                elif hasattr(data, "action"):
+                    action = data.action
+                    action_value = getattr(action, "value", {}) if action else {}
+                if isinstance(action_value, str):
+                    import json as _json
+                    try:
+                        action_value = _json.loads(action_value)
+                    except Exception:
+                        action_value = {}
+                if isinstance(action_value, dict) and action_value.get("action") == "interrupt_stream":
+                    run_id = action_value.get("run_id", "")
+                    if run_id:
+                        logger.info("[Feishu WS] card_action interrupt_stream run_id={}", run_id)
+                        from app.services.agent_runtime.card_stream_bridge import get_bridge
+                        bridge = get_bridge(run_id)
+                        if bridge is not None:
+                            asyncio.create_task(_cancel_card_run(run_id, bridge))
+                        else:
+                            logger.warning("[Feishu WS] card_action bridge_not_found run_id={}", run_id)
+            except Exception:
+                logger.exception("[Feishu WS] card_action handler error")
+
         dispatcher = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_customized_event("im.message.receive_v1", handle_message)
+            .register_p2_customized_event("card.action.trigger", handle_card_action)
             .build()
         )
         return dispatcher

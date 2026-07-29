@@ -493,6 +493,7 @@ async def enqueue_chat_runtime(
     channel_delivery_target: dict | None = None,
     run_state_reader: RunStateReader | None = None,
     settings_override: Settings | None = None,
+    run_id: uuid.UUID | None = None,
 ) -> ChatRuntimeIntake | None:
     """Persist one chat message and its start/resume Command atomically.
 
@@ -668,7 +669,17 @@ async def enqueue_chat_runtime(
         }
     )
     if channel_delivery_route is not None:
-        delivery_target["channel_delivery"] = channel_delivery_route
+        # 卡片模式: 剥离 app_secret，仅保留 app_id（秘钥不入 DB）
+        import copy
+        route_copy = copy.deepcopy(channel_delivery_route)
+        # _card_config 在 channel_delivery_target._card_config 中, 被 build_channel_delivery_route
+        # 包装到 route_copy.target._card_config。提升到 delivery_target 顶层供 _runtime_context() 消费
+        target = route_copy.get("target", {})
+        card_cfg = target.get("_card_config", {})
+        if card_cfg.get("app_id"):
+            delivery_target["_card_config"] = {"app_id": card_cfg["app_id"]}
+            target["_card_config"] = {"app_id": card_cfg["app_id"]}
+        delivery_target["channel_delivery"] = route_copy
     is_direct_thread = session.session_type == "direct"
     scheduling_position_created_at = (
         persisted_message.created_at
@@ -721,6 +732,7 @@ async def enqueue_chat_runtime(
             },
             origin_user_id=user.id,
             actor_user_id=user.id,
+            run_id=run_id,
         )
     )
     return ChatRuntimeIntake(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -206,6 +207,18 @@ def delivery_from_checkpoint(
 ) -> DeliveryRequest | None:
     """Derive a user-visible request without consulting a product projection."""
     status = checkpoint.state["lifecycle"]["status"]
+    # 卡片模式: bridge 管理终态卡片替换，抑制 ChannelDelivery
+    target = getattr(run, 'delivery_target', None) or {}
+    if isinstance(target, dict) and target.get("_card_config", {}).get("app_id"):
+        from app.services.agent_runtime.card_stream_bridge import get_bridge, unregister_bridge
+        bridge = get_bridge(str(run.run_id))
+        if bridge is not None:
+            if status in _TERMINAL_STATUSES:
+                content = _terminal_content(checkpoint, status=status)
+                asyncio.create_task(bridge.finalize(content))
+                unregister_bridge(str(run.run_id))
+            return None  # bridge 活跃或已 finalize — 抑制 ChannelDelivery
+        # bridge 丢失（进程重启/崩溃）— 回退到 ChannelDelivery 纯文本
     if run.system_role == "group_planning" and status == "completed":
         return None
     if status == "waiting_user":

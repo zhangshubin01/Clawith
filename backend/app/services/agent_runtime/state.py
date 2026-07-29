@@ -213,3 +213,10 @@ class RuntimeContext:
     model_turn_limit: int | None = None
     actor_user_id: str | None = None
     actor_agent_id: str | None = None
+    # 卡片模式
+    card_mode: bool = False
+    card_bridge_key: str = ""
+    card_app_id: str = ""
+    card_app_secret: str = ""
+    card_receive_id: str = ""
+    card_receive_id_type: str = ""
