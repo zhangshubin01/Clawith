@@ -252,7 +252,7 @@ class FeishuWSManager:
         app_id: str,
         app_secret: str,
         stop_existing: bool = True,
-        domain: str = "https://open.feishu.cn",
+        domain: str = "https://open.larksuite.com",
     ):
         """Spawns a WebSocket client fully asynchronously inside FastAPI's loop."""
         if not _HAS_LARK:
