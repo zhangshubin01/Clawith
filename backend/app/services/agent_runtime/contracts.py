@@ -60,6 +60,7 @@ class StartRunCommand:
     delivery_target: JsonObject | None = None
     actor_user_id: uuid.UUID | None = None
     actor_agent_id: uuid.UUID | None = None
+    run_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

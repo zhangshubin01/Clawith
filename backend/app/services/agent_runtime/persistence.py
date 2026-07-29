@@ -326,6 +326,7 @@ async def register_run_with_start(
     start_idempotency_key: str,
     actor_user_id: uuid.UUID | None = None,
     actor_agent_id: uuid.UUID | None = None,
+    run_id_override: uuid.UUID | None = None,
 ) -> RegisteredRun:
     """Register a Run and start command in the caller's current transaction."""
     _validate_registration(registration)
@@ -343,7 +344,7 @@ async def register_run_with_start(
     if existing is not None:
         return existing
 
-    run_id = uuid.uuid4()
+    run_id = run_id_override or uuid.uuid4()
     run = AgentRun(
         id=run_id,
         runtime_thread_id=registration.runtime_thread_id or str(run_id),
@@ -596,42 +597,6 @@ def _claim_statement(now: datetime, *, max_attempts: int):
     )
 
 
-async def _acquire_start_lane(
-    db: AsyncSession,
-    *,
-    command: AgentRunCommand,
-    now: datetime,
-) -> bool:
-    """Claim one queued mention lane without consulting lifecycle projections."""
-    run_result = await db.execute(
-        select(AgentRun).where(AgentRun.id == command.run_id).with_for_update()
-    )
-    run = run_result.scalar_one_or_none()
-    if run is None or run.tenant_id != command.tenant_id:
-        raise RuntimePersistenceError(
-            "run_not_found",
-            "start command Run does not exist in its tenant",
-        )
-    if run.scheduling_lane_key is None or run.lane_held:
-        return True
-
-    holder_result = await db.execute(
-        select(AgentRun.id)
-        .where(
-            AgentRun.scheduling_lane_key == run.scheduling_lane_key,
-            AgentRun.id != run.id,
-            AgentRun.lane_held.is_(True),
-        )
-        .limit(1)
-        .with_for_update()
-    )
-    if holder_result.scalar_one_or_none() is not None:
-        return False
-    run.lane_held = True
-    run.lane_claimed_at = now
-    return True
-
-
 async def claim_next_command(
     db: AsyncSession,
     *,
@@ -653,15 +618,7 @@ async def claim_next_command(
     command = result.scalar_one_or_none()
     if command is None:
         return None
-    if (
-        command.attempt_count < max_attempts
-        and command.command_type == "start"
-        and not await _acquire_start_lane(
-            db,
-            command=command,
-            now=now,
-        )
-    ):
+    if command.command_type == "start" and command.attempt_count >= max_attempts:
         return None
 
     command.claimed_by = claimant

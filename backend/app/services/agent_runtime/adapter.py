@@ -327,6 +327,7 @@ class RuntimeCommandIntake:
             start_idempotency_key=command.idempotency_key,
             actor_user_id=command.actor_user_id,
             actor_agent_id=command.actor_agent_id,
+            run_id_override=command.run_id,
         )
         return self._handle(
             registered.run,

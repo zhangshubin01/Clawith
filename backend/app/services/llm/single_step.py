@@ -46,6 +46,8 @@ async def complete_llm_once(
     tools: list[dict] | None = None,
     agent_id: uuid.UUID | None = None,
     supports_vision: bool = False,
+    on_chunk=None,
+    on_thinking=None,
 ) -> LLMCompletionStep:
     """Call one pinned model exactly once and normalize its tool proposals.
 
@@ -61,16 +63,22 @@ async def complete_llm_once(
         timeout=_get_model_timeout(model),
     )
     try:
-        response = await client.complete(
-            messages=api_messages,
-            tools=tools or None,
-            temperature=model.temperature,
-            max_tokens=get_max_tokens(
-                model.provider,
-                model.model,
-                getattr(model, "max_output_tokens", None),
-            ),
-        )
+        if on_chunk:
+            response = await client.stream(
+                messages=api_messages,
+                tools=tools or None,
+                temperature=model.temperature,
+                max_tokens=get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None)),
+                on_chunk=on_chunk,
+                on_thinking=on_thinking,
+            )
+        else:
+            response = await client.complete(
+                messages=api_messages,
+                tools=tools or None,
+                temperature=model.temperature,
+                max_tokens=get_max_tokens(model.provider, model.model, getattr(model, "max_output_tokens", None)),
+            )
     finally:
         await client.close()
 

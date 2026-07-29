@@ -839,11 +839,28 @@ class DeterministicRuntimeNodeExecutor:
         # receipts share one retry counter.
         current_call = calls[0]
         tail_calls = calls[1:]
+
+        # 卡片模式: 标记工具开始执行
+        tool_call_id = current_call.get("id", "")
+        tool_name = (current_call.get("function") or {}).get("name", "") if isinstance(current_call.get("function"), dict) else ""
+        if context.card_bridge_key and tool_call_id and tool_name:
+            from app.services.agent_runtime.card_stream_bridge import get_bridge
+            bridge = get_bridge(context.card_bridge_key)
+            if bridge is not None:
+                bridge.start_tool(tool_call_id, tool_name)
+
         result = await self._tool_service.execute_pending(
             state,
             context,
             (current_call,),
         )
+
+        # 卡片模式: 标记工具执行完成
+        if context.card_bridge_key and tool_call_id:
+            from app.services.agent_runtime.card_stream_bridge import get_bridge
+            bridge = get_bridge(context.card_bridge_key)
+            if bridge is not None:
+                bridge.end_tool(tool_call_id, is_error=bool(result.error))
         pending_calls = (*result.pending_tool_calls, *tail_calls)
         lifecycle = dict(state["lifecycle"])
         lifecycle.update(
