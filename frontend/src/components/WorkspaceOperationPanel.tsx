@@ -494,7 +494,6 @@ export default function WorkspaceOperationPanel({
 
     const loadFileTree = async () => {
         const loadDir = async (path: string, depth: number): Promise<WorkspaceFileNode[]> => {
-            if (depth > 8) return [];
             const isRoot = path === (treeScope === 'workspace' ? WORKSPACE_ROOT : '');
             const isExpanded = expandedDirs.has(path);
             if (!isRoot && !isExpanded) {
