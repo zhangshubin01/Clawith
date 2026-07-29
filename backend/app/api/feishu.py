@@ -376,7 +376,7 @@ async def _accept_feishu_runtime_message(
         if agent is None:
             raise RuntimeError(f"Feishu Agent {agent_id} not found")
         is_group = chat_type == "group" and bool(chat_id)
-        card_mode = (config.extra_config or {}).get("card_mode")
+        card_mode = bool(config.app_id and config.app_secret)
         pregenerated_run_id = uuid.uuid4()
         bridge = None
         register_bridge = None
