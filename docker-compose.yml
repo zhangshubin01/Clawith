@@ -64,7 +64,7 @@ services:
       CORS_ORIGINS: '["*"]'
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
-      FEISHU_DOMAIN: ${FEISHU_DOMAIN:-https://open.feishu.cn}
+      FEISHU_DOMAIN: ${FEISHU_DOMAIN:-https://open.larksuite.com}
       SS_CONFIG_FILE: /data/ss-nodes.json
       # Android 构建沙箱镜像
       DEVBOX_ANDROID_IMAGE: ${DEVBOX_ANDROID_IMAGE:-clawith-devbox-android:latest}
