@@ -392,6 +392,11 @@ class FeishuWSManager:
             if not task.done():
                 task.cancel()
                 logger.info(f"[Feishu WS] Stopped client task for agent {agent_id}")
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        # Fallback: if client still registered (task cleanup missed), disconnect directly
         if agent_id in self._clients:
             client = self._clients.pop(agent_id)
             try:
