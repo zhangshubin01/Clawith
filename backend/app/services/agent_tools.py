@@ -40,6 +40,9 @@ from app.core.permissions import (
     evaluate_roster_human_visibility,
 )
 from app.database import async_session
+
+from app.config import get_settings
+_FEISHU_BASE = get_settings().FEISHU_DOMAIN
 from app.models.agent import Agent as AgentModel
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
@@ -12464,7 +12467,7 @@ async def _get_feishu_token(agent_id: uuid.UUID) -> tuple[str, str] | None:
 
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
-            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            "{_FEISHU_BASE}/open-apis/auth/v3/tenant_access_token/internal",
             json={"app_id": config.app_id, "app_secret": config.app_secret},
         )
         token = resp.json().get("tenant_access_token", "")
@@ -12480,7 +12483,7 @@ async def _get_agent_calendar_id(token: str) -> tuple[str | None, str | None]:
     import httpx
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
-            "https://open.feishu.cn/open-apis/calendar/v4/calendars/primary",
+            "{_FEISHU_BASE}/open-apis/calendar/v4/calendars/primary",
             headers={"Authorization": f"Bearer {token}"},
         )
     data = resp.json()
@@ -12510,7 +12513,7 @@ async def _feishu_resolve_open_id(token: str, email: str) -> str | None:
     import httpx
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
-            "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id",
+            "{_FEISHU_BASE}/open-apis/contact/v3/users/batch_get_id",
             json={"emails": [email]},
             headers={"Authorization": f"Bearer {token}"},
             params={"user_id_type": "open_id"},
@@ -12585,7 +12588,7 @@ async def _get_feishu_tenant_doc_url(tenant_token: str, doc_token: str, doc_type
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
-                "https://open.feishu.cn/open-apis/tenant/v2/tenant/query",
+                "{_FEISHU_BASE}/open-apis/tenant/v2/tenant/query",
                 headers={"Authorization": f"Bearer {tenant_token}"},
             )
         data = resp.json()
@@ -12618,7 +12621,7 @@ async def _get_feishu_bitable_url(tenant_token: str, app_token: str, table_id: s
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
-                "https://open.feishu.cn/open-apis/tenant/v2/tenant/query",
+                "{_FEISHU_BASE}/open-apis/tenant/v2/tenant/query",
                 headers={"Authorization": f"Bearer {tenant_token}"},
             )
         data = resp.json()
@@ -13674,7 +13677,7 @@ async def _feishu_wiki_get_node(token_str: str, auth_token: str) -> dict | None:
     import httpx
     async with httpx.AsyncClient(timeout=5) as client:
         r = await client.get(
-            "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node",
+            "{_FEISHU_BASE}/open-apis/wiki/v2/spaces/get_node",
             headers={"Authorization": f"Bearer {auth_token}"},
             params={"token": token_str, "obj_type": "wiki"},
         )
@@ -13871,7 +13874,7 @@ async def _feishu_wiki_list_outcome(
                     params["page_token"] = provider_page_token
                 try:
                     response = await client.get(
-                        f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/nodes",
+                        f"{_FEISHU_BASE}/open-apis/wiki/v2/spaces/{space_id}/nodes",
                         headers={"Authorization": f"Bearer {token}"},
                         params=params,
                     )
@@ -14086,7 +14089,7 @@ async def _feishu_doc_search_outcome(
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
-                "https://open.feishu.cn/open-apis/suite/docs-api/search/object",
+                "{_FEISHU_BASE}/open-apis/suite/docs-api/search/object",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
@@ -14331,7 +14334,7 @@ async def _feishu_doc_append_outcome(
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             metadata_response = await client.get(
-                "https://open.feishu.cn/open-apis/docx/v1/documents/"
+                "{_FEISHU_BASE}/open-apis/docx/v1/documents/"
                 f"{document_token}",
                 headers=headers,
             )
@@ -14362,7 +14365,7 @@ async def _feishu_doc_append_outcome(
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             append_response = await client.post(
-                "https://open.feishu.cn/open-apis/docx/v1/documents/"
+                "{_FEISHU_BASE}/open-apis/docx/v1/documents/"
                 f"{document_token}/blocks/{body_block_id}/children",
                 json={"children": children},
                 headers=headers,
@@ -14518,7 +14521,7 @@ async def _feishu_drive_share_outcome(
         )
     headers = {"Authorization": f"Bearer {token}"}
     base_url = (
-        "https://open.feishu.cn/open-apis/drive/v1/permissions/"
+        "{_FEISHU_BASE}/open-apis/drive/v1/permissions/"
         f"{document_token}/members"
     )
 
@@ -14707,7 +14710,7 @@ async def _feishu_drive_delete_outcome(
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.delete(
-                "https://open.feishu.cn/open-apis/drive/v1/files/"
+                "{_FEISHU_BASE}/open-apis/drive/v1/files/"
                 f"{file_token}",
                 params={"type": file_type},
                 headers={"Authorization": f"Bearer {token}"},
@@ -14794,7 +14797,7 @@ async def _feishu_doc_search(agent_id: uuid.UUID, arguments: dict) -> str:
 
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(
-            "https://open.feishu.cn/open-apis/suite/docs-api/search/object",
+            "{_FEISHU_BASE}/open-apis/suite/docs-api/search/object",
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
@@ -14882,7 +14885,7 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
         """Return flat list of {title, node_token, obj_token, has_child, depth}."""
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
-                f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/nodes",
+                f"{_FEISHU_BASE}/open-apis/wiki/v2/spaces/{space_id}/nodes",
                 headers=headers,
                 params={"parent_node_token": parent_token, "page_size": 50},
             )
@@ -15025,7 +15028,7 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
 
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
-                    f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{wiki_space_id}/nodes",
+                    f"{_FEISHU_BASE}/open-apis/wiki/v2/spaces/{wiki_space_id}/nodes",
                     json=body,
                     headers={"Authorization": f"Bearer {tenant_token}"},
                 )
@@ -15069,7 +15072,7 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
             if sender_open_id and doc_token:
                 async with httpx.AsyncClient(timeout=10) as client:
                     share_resp = await client.post(
-                        f"https://open.feishu.cn/open-apis/drive/v1/permissions/{doc_token}/members",
+                        f"{_FEISHU_BASE}/open-apis/drive/v1/permissions/{doc_token}/members",
                         params={"type": "docx"},
                         json={
                             "member_type": "openid",
@@ -15290,7 +15293,7 @@ async def _feishu_doc_append(agent_id: uuid.UUID, arguments: dict) -> str:
         import httpx
         async with httpx.AsyncClient(timeout=20) as client:
             meta_resp = (await client.get(
-                f"https://open.feishu.cn/open-apis/docx/v1/documents/{docx_token}",
+                f"{_FEISHU_BASE}/open-apis/docx/v1/documents/{docx_token}",
                 headers={"Authorization": f"Bearer {tenant_token}"},
             )).json()
             err = _check_feishu_err(meta_resp)
@@ -15304,7 +15307,7 @@ async def _feishu_doc_append(agent_id: uuid.UUID, arguments: dict) -> str:
             children = _markdown_to_feishu_blocks(content)
 
             result = (await client.post(
-                f"https://open.feishu.cn/open-apis/docx/v1/documents/{docx_token}/blocks/{body_block_id}/children",
+                f"{_FEISHU_BASE}/open-apis/docx/v1/documents/{docx_token}/blocks/{body_block_id}/children",
                 # Do NOT pass index: -1.  Omitting the field lets Feishu default to
                 # append-at-end, which is always valid.  Passing -1 explicitly can
                 # trigger error 1770001 (invalid param) with certain block type mixes.
@@ -15364,7 +15367,7 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
         use_token = obj_token if (is_wiki and obj_token) else document_token
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
-                f"https://open.feishu.cn/open-apis/drive/v1/permissions/{use_token}/members",
+                f"{_FEISHU_BASE}/open-apis/drive/v1/permissions/{use_token}/members",
                 params={"type": doc_type},
                 headers=headers,
             )
@@ -15426,7 +15429,7 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
                 # ── Wiki node: use wiki space members API ──────────────────
                 if is_wiki and space_id:
                     resp = await client.post(
-                        f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/members",
+                        f"{_FEISHU_BASE}/open-apis/wiki/v2/spaces/{space_id}/members",
                         json={"member_type": "openid", "member_id": oid, "member_role": wiki_role},
                         headers=headers,
                     )
@@ -15453,7 +15456,7 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
                     "perm": api_perm,
                 }
                 resp = await client.post(
-                    f"https://open.feishu.cn/open-apis/drive/v1/permissions/{document_token}/members",
+                    f"{_FEISHU_BASE}/open-apis/drive/v1/permissions/{document_token}/members",
                     json=body,
                     headers=headers,
                     params={"type": doc_type},
@@ -15482,7 +15485,7 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
             elif action == "remove":
                 if is_wiki and space_id:
                     resp = await client.delete(
-                        f"https://open.feishu.cn/open-apis/wiki/v2/spaces/{space_id}/members/{oid}",
+                        f"{_FEISHU_BASE}/open-apis/wiki/v2/spaces/{space_id}/members/{oid}",
                         headers=headers,
                         params={"member_type": "openid"},
                     )
@@ -15494,7 +15497,7 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
                     continue
 
                 resp = await client.delete(
-                    f"https://open.feishu.cn/open-apis/drive/v1/permissions/{document_token}/members/{oid}",
+                    f"{_FEISHU_BASE}/open-apis/drive/v1/permissions/{document_token}/members/{oid}",
                     headers=headers,
                     params={"type": doc_type, "member_type": "openid"},
                 )
@@ -15545,7 +15548,7 @@ async def _feishu_drive_delete(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.delete(
-                f"https://open.feishu.cn/open-apis/drive/v1/files/{file_token}",
+                f"{_FEISHU_BASE}/open-apis/drive/v1/files/{file_token}",
                 params={"type": file_type},
                 headers={"Authorization": f"Bearer {token}"},
             )
@@ -15652,7 +15655,7 @@ async def _feishu_calendar_list_outcome(
         if sender_open_id:
             try:
                 freebusy_response = await client.post(
-                    "https://open.feishu.cn/open-apis/calendar/v4/freebusy/list",
+                    "{_FEISHU_BASE}/open-apis/calendar/v4/freebusy/list",
                     headers={"Authorization": f"Bearer {token}"},
                     params={"user_id_type": "open_id"},
                     json={
@@ -15679,7 +15682,7 @@ async def _feishu_calendar_list_outcome(
 
         try:
             response = await client.get(
-                f"https://open.feishu.cn/open-apis/calendar/v4/calendars/{calendar_id}/events",
+                f"{_FEISHU_BASE}/open-apis/calendar/v4/calendars/{calendar_id}/events",
                 headers={"Authorization": f"Bearer {token}"},
                 params={
                     "start_time": str(int(start_epoch)),
@@ -15842,7 +15845,7 @@ async def _feishu_calendar_create_outcome(
     async with httpx.AsyncClient(timeout=20) as client:
         try:
             response = await client.post(
-                f"https://open.feishu.cn/open-apis/calendar/v4/calendars/{calendar_id}/events",
+                f"{_FEISHU_BASE}/open-apis/calendar/v4/calendars/{calendar_id}/events",
                 json=body,
                 headers={"Authorization": f"Bearer {token}"},
             )
@@ -15883,7 +15886,7 @@ async def _feishu_calendar_create_outcome(
             }
             try:
                 attendee_response = await client.post(
-                    f"https://open.feishu.cn/open-apis/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
+                    f"{_FEISHU_BASE}/open-apis/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees",
                     json={
                         "attendees": [
                             {"type": "user", "user_id": attendee_open_id}
@@ -15990,7 +15993,7 @@ async def _feishu_calendar_mutation_outcome(
     async with httpx.AsyncClient(timeout=20) as client:
         try:
             url = (
-                "https://open.feishu.cn/open-apis/calendar/v4/calendars/"
+                "{_FEISHU_BASE}/open-apis/calendar/v4/calendars/"
                 f"{calendar_id}/events/{event_id}"
             )
             if patch is not None:
@@ -16093,7 +16096,7 @@ async def _feishu_calendar_list(agent_id: uuid.UUID, arguments: dict) -> str:
         try:
             async with httpx.AsyncClient(timeout=10) as fb_client:
                 fb_resp = await fb_client.post(
-                    "https://open.feishu.cn/open-apis/calendar/v4/freebusy/list",
+                    "{_FEISHU_BASE}/open-apis/calendar/v4/freebusy/list",
                     headers={"Authorization": f"Bearer {token}"},
                     params={"user_id_type": "open_id"},
                     json={
@@ -16140,7 +16143,7 @@ async def _feishu_calendar_list(agent_id: uuid.UUID, arguments: dict) -> str:
 
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get(
-            f"https://open.feishu.cn/open-apis/calendar/v4/calendars/{agent_cal_id}/events",
+            f"{_FEISHU_BASE}/open-apis/calendar/v4/calendars/{agent_cal_id}/events",
             headers={"Authorization": f"Bearer {token}"},
             params=params,
         )
@@ -16221,7 +16224,7 @@ async def _feishu_calendar_create(agent_id: uuid.UUID, arguments: dict) -> str:
 
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.post(
-            f"https://open.feishu.cn/open-apis/calendar/v4/calendars/{agent_cal_id}/events",
+            f"{_FEISHU_BASE}/open-apis/calendar/v4/calendars/{agent_cal_id}/events",
             json=body,
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -16276,7 +16279,7 @@ async def _feishu_calendar_create(agent_id: uuid.UUID, arguments: dict) -> str:
         async with httpx.AsyncClient(timeout=20) as client:
             for oid in attendee_open_ids:
                 await client.post(
-                    f"https://open.feishu.cn/open-apis/calendar/v4/calendars/{agent_cal_id}/events/{event_id}/attendees",
+                    f"{_FEISHU_BASE}/open-apis/calendar/v4/calendars/{agent_cal_id}/events/{event_id}/attendees",
                     json={"attendees": [{"type": "user", "user_id": oid}]},
                     headers={"Authorization": f"Bearer {token}"},
                     params={"user_id_type": "open_id"},
@@ -16327,7 +16330,7 @@ async def _feishu_calendar_update(agent_id: uuid.UUID, arguments: dict) -> str:
 
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.patch(
-            f"https://open.feishu.cn/open-apis/calendar/v4/calendars/{agent_cal_id}/events/{event_id}",
+            f"{_FEISHU_BASE}/open-apis/calendar/v4/calendars/{agent_cal_id}/events/{event_id}",
             json=patch,
             headers={"Authorization": f"Bearer {token}"},
         )
@@ -16358,7 +16361,7 @@ async def _feishu_calendar_delete(agent_id: uuid.UUID, arguments: dict) -> str:
 
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.delete(
-            f"https://open.feishu.cn/open-apis/calendar/v4/calendars/{agent_cal_id}/events/{event_id}",
+            f"{_FEISHU_BASE}/open-apis/calendar/v4/calendars/{agent_cal_id}/events/{event_id}",
             headers={"Authorization": f"Bearer {token}"},
         )
 
@@ -16631,7 +16634,7 @@ async def _feishu_approval_query_outcome(
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
-                "https://open.feishu.cn/open-apis/approval/v4/instances/query",
+                "{_FEISHU_BASE}/open-apis/approval/v4/instances/query",
                 headers={"Authorization": f"Bearer {token}"},
                 json=body,
                 params=params,
@@ -16759,7 +16762,7 @@ async def _feishu_approval_get_outcome(
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.get(
-                "https://open.feishu.cn/open-apis/approval/v4/instances/"
+                "{_FEISHU_BASE}/open-apis/approval/v4/instances/"
                 + quote(stable_instance_id, safe=""),
                 headers={"Authorization": f"Bearer {token}"},
             )
@@ -16923,7 +16926,7 @@ async def _feishu_approval_create_outcome(
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             response = await client.post(
-                "https://open.feishu.cn/open-apis/approval/v4/instances",
+                "{_FEISHU_BASE}/open-apis/approval/v4/instances",
                 headers={"Authorization": f"Bearer {token}"},
                 json={
                     "approval_code": approval_code.strip(),

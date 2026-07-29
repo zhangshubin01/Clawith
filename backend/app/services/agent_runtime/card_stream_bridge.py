@@ -282,7 +282,6 @@ class CardStreamBridge:
             self._state = "error"
             self._card_ready.set()  # 防止后续 _card_ready.wait() 永久挂起
             raise
-            raise
         finally:
             self._creation_future.set_result(None)
 
