@@ -375,8 +375,9 @@ class FeishuWSManager:
                     logger.info(f"[Feishu WS] Task cancelled for agent {agent_id}")
                     try:
                         await client._disconnect()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"[Feishu WS] Disconnect error for {agent_id}: {e}")
+                    self._clients.pop(agent_id, None)
                     return
                 except Exception as e:
                     logger.exception(f"[Feishu WS] Health-watch error for agent {agent_id}: {e}")
