@@ -280,6 +280,10 @@ class FeishuWSManager:
             if old_task and not old_task.done():
                 old_task.cancel()
                 logger.info(f"[Feishu WS] Cancelled old WS task for {agent_id}")
+                try:
+                    await old_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         try:
             event_handler = self._create_event_handler(agent_id)
