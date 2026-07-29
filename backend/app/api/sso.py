@@ -1,6 +1,7 @@
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from app.config import get_settings
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -120,7 +121,8 @@ async def get_sso_config(sid: uuid.UUID, request: Request, db: AsyncSession = De
             app_id = p.config.get("app_id")
             if app_id:
                 redir = f"{public_base}/api/auth/feishu/callback"
-                url = f"https://open.feishu.cn/open-apis/authen/v1/index?app_id={app_id}&redirect_uri={quote(redir)}&state={sid}"
+                domain = get_settings().FEISHU_DOMAIN
+                url = f"{domain}/open-apis/authen/v1/index?app_id={app_id}&redirect_uri={quote(redir)}&state={sid}"
                 auth_urls.append({"provider_type": "feishu", "name": p.name, "url": url})
         
         elif p.provider_type == "dingtalk":
