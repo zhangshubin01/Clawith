@@ -15,6 +15,8 @@ from loguru import logger
 
 
 async def main():
+    from app.config import get_settings
+    _domain = get_settings().FEISHU_DOMAIN
     # Import ALL models so SQLAlchemy can resolve all FK relationships
     from app.models import (  # noqa: F401
         activity_log, agent, audit, channel_config, chat_session,
@@ -49,7 +51,7 @@ async def main():
         # Get app token
         async with httpx.AsyncClient() as client:
             tok_resp = await client.post(
-                "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal",
+                f"{_domain}/open-apis/auth/v3/app_access_token/internal",
                 json={"app_id": app_id, "app_secret": app_secret},
             )
             app_token = tok_resp.json().get("app_access_token", "")
@@ -78,7 +80,7 @@ async def main():
             try:
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(
-                        f"https://open.feishu.cn/open-apis/contact/v3/users/{member.open_id}",
+                        f"{_domain}/open-apis/contact/v3/users/{member.open_id}",
                         params={"user_id_type": "open_id"},
                         headers={"Authorization": f"Bearer {app_token}"},
                     )
