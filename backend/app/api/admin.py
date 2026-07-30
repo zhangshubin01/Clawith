@@ -395,7 +395,7 @@ async def get_platform_leaderboards(
             sqla_func.coalesce(sqla_func.sum(Agent.cache_read_tokens_total), 0).label('cache_read'),
         )
         .join(Agent, Agent.tenant_id == Tenant.id)
-        .group_by(Tenant.id)
+        .group_by(Tenant.id, Tenant.name)
         .order_by(sqla_func.sum(Agent.tokens_used_total).desc())
         .limit(20)
     )
