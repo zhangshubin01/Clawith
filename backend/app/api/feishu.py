@@ -259,6 +259,8 @@ async def delete_channel_config(
     config = result.scalar_one_or_none()
     if not config:
         raise HTTPException(status_code=404, detail="Channel not configured")
+    from app.services.feishu_ws import feishu_ws_manager
+    await feishu_ws_manager.stop_client(agent_id)
     await db.delete(config)
 
 

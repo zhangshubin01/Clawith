@@ -252,7 +252,7 @@ class FeishuWSManager:
         app_id: str,
         app_secret: str,
         stop_existing: bool = True,
-        domain: str = "https://open.feishu.cn",
+        domain: str = "https://open.larksuite.com",
     ):
         """Spawns a WebSocket client fully asynchronously inside FastAPI's loop."""
         if not _HAS_LARK:
@@ -280,6 +280,10 @@ class FeishuWSManager:
             if old_task and not old_task.done():
                 old_task.cancel()
                 logger.info(f"[Feishu WS] Cancelled old WS task for {agent_id}")
+                try:
+                    await old_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         try:
             event_handler = self._create_event_handler(agent_id)
@@ -375,8 +379,9 @@ class FeishuWSManager:
                     logger.info(f"[Feishu WS] Task cancelled for agent {agent_id}")
                     try:
                         await client._disconnect()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"[Feishu WS] Disconnect error for {agent_id}: {e}")
+                    self._clients.pop(agent_id, None)
                     return
                 except Exception as e:
                     logger.exception(f"[Feishu WS] Health-watch error for agent {agent_id}: {e}")
@@ -392,6 +397,11 @@ class FeishuWSManager:
             if not task.done():
                 task.cancel()
                 logger.info(f"[Feishu WS] Stopped client task for agent {agent_id}")
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        # Fallback: if client still registered (task cleanup missed), disconnect directly
         if agent_id in self._clients:
             client = self._clients.pop(agent_id)
             try:

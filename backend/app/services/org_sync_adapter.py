@@ -771,9 +771,21 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
 
     provider_type = "feishu"
 
-    FEISHU_APP_TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
-    FEISHU_DEPT_URL = "https://open.feishu.cn/open-apis/contact/v3/departments"
-    FEISHU_USERS_URL = "https://open.feishu.cn/open-apis/contact/v3/users/find_by_department"
+    @property
+    def _domain(self):
+        return get_settings().FEISHU_DOMAIN
+
+    @property
+    def _app_token_url(self):
+        return f"{self._domain}/open-apis/auth/v3/app_access_token/internal"
+
+    @property
+    def _dept_url(self):
+        return f"{self._domain}/open-apis/contact/v3/departments"
+
+    @property
+    def _users_url(self):
+        return f"{self._domain}/open-apis/contact/v3/users/find_by_department"
 
     def __init__(self, provider: IdentityProvider | None = None, config: dict | None = None, tenant_id: uuid.UUID | None = None):
         super().__init__(provider, config, tenant_id)
@@ -782,12 +794,12 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
 
     @property
     def api_base_url(self) -> str:
-        return "https://open.feishu.cn/open-apis"
+        return self._domain
 
     async def get_access_token(self) -> str:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                self.FEISHU_APP_TOKEN_URL,
+                self._app_token_url,
                 json={"app_id": self.app_id, "app_secret": self.app_secret},
             )
             data = resp.json()
@@ -825,7 +837,7 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
 
                     async with sem:
                         resp = await client.get(
-                            f"{self.FEISHU_DEPT_URL}/{parent_id}/children", 
+                            f"{self._dept_url}/{parent_id}/children", 
                             params=params, 
                             headers={"Authorization": f"Bearer {token}"}
                         )
@@ -902,7 +914,7 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                     params["page_token"] = page_token
 
                 resp = await client.get(
-                    self.FEISHU_USERS_URL,
+                    self._users_url,
                     params=params,
                     headers={"Authorization": f"Bearer {token}"},
                 )
