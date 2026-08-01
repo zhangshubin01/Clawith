@@ -13,11 +13,11 @@ try:
 except ImportError:
     lark = None  # type: ignore
     _HAS_LARK = False
-from sqlalchemy import select, or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.security import create_access_token, hash_password
+from app.core.security import create_access_token
 from app.models.user import User, Identity
 from app.models.identity import IdentityProvider
 
@@ -219,7 +219,6 @@ class FeishuService:
 
         open_id = feishu_user["open_id"]
         user_id = feishu_user.get("user_id", "")
-        union_id = feishu_user.get("union_id")
         fs_email = feishu_user.get("email", "")
         fs_name = feishu_user.get("name", "")
         fs_avatar = feishu_user.get("avatar_url", "")
@@ -494,19 +493,6 @@ class FeishuService:
                                   action_type: str, details: str, approval_id: str) -> dict:
         """Send an interactive approval card to the agent creator via Feishu."""
         import json
-        card_content = json.dumps({
-            "type": "template",
-            "data": {
-                "template_id": "",  # Use custom card
-                "template_variable": {
-                    "agent_name": agent_name,
-                    "action_type": action_type,
-                    "details": details,
-                    "approval_id": approval_id,
-                }
-            }
-        })
-        # Simplified — in production, use Feishu interactive card JSON
         text_content = json.dumps({
             "text": f"🔴 [{agent_name}] 请求审批\n操作: {action_type}\n详情: {details}\n\n请在 Clawith 平台审批。"
         })

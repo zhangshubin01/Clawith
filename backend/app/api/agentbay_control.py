@@ -204,7 +204,6 @@ async def _get_client(agent_id: uuid.UUID, session_id: str, env_type: str = "bro
 # interact directly with Chrome. Desktop sessions use the SDK's computer API.
 
 
-import asyncio
 
 
 def _is_browser_session(client) -> bool:

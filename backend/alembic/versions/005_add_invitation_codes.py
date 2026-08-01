@@ -4,7 +4,6 @@ This is an idempotent migration — uses CREATE TABLE IF NOT EXISTS.
 """
 
 from alembic import op
-import sqlalchemy as sa
 
 revision = "add_invitation_codes"
 down_revision = "add_chat_sessions"

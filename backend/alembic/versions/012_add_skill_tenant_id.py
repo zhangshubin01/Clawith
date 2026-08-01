@@ -4,7 +4,6 @@ Revision ID: add_skill_tenant_id
 Revises: add_llm_tenant_id
 """
 from alembic import op
-import sqlalchemy as sa
 
 revision = "add_skill_tenant_id"
 down_revision = "add_llm_tenant_id"

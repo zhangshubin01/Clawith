@@ -13,13 +13,6 @@ from app.models.identity import IdentityProvider
 from app.services.auth_provider import (
     PROVIDER_CLASSES,
     BaseAuthProvider,
-    DingTalkAuthProvider,
-    FeishuAuthProvider,
-    GitHubAuthProvider,
-    GoogleAuthProvider,
-    GoogleWorkspaceAuthProvider,
-    MicrosoftTeamsAuthProvider,
-    WeComAuthProvider,
 )
 from app.services.identity_provider_lookup import get_preferred_identity_provider
 
@@ -98,7 +91,7 @@ class AuthProviderRegistry:
             List of IdentityProvider records
         """
         async with identity_provider_dao.session() as db:
-            query = select(IdentityProvider).where(IdentityProvider.is_active == True)
+            query = select(IdentityProvider).where(IdentityProvider.is_active.is_(True))
 
             if tenant_id:
                 # Only include tenant-specific ones

@@ -13,7 +13,7 @@ from app.core.security import verify_password, hash_password
 from app.models.user import User
 from app.schemas.schemas import ForgotPasswordRequest, ResetPasswordRequest
 from app.services import password_reset_service, system_email_service
-from app.database import _session_ctx, transaction
+from app.database import transaction
 
 
 async def run_with_db(db, func, *args, **kwargs):
@@ -146,7 +146,6 @@ async def test_create_password_reset_token_invalidates_older_tokens(monkeypatch)
     async def fake_get_redis(): return mock_redis
     monkeypatch.setattr(password_reset_service, "get_redis", fake_get_redis)
 
-    db = RecordingDB()
 
     raw_token, expires_at = await password_reset_service.create_password_reset_token(user_id)
 
@@ -183,7 +182,6 @@ async def test_consume_password_reset_token_works_correctly(monkeypatch):
     async def fake_get_redis(): return mock_redis
     monkeypatch.setattr(password_reset_service, "get_redis", fake_get_redis)
 
-    db = RecordingDB()
     result = await password_reset_service.consume_password_reset_token(raw_token)
 
     assert result is not None

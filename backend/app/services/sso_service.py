@@ -44,7 +44,7 @@ class SSOService:
             .join(User.identity)
             .where(
                 Identity.email == email,
-                User.is_active == True,
+                User.is_active,
             )
             .options(selectinload(User.identity))
         )
@@ -70,7 +70,7 @@ class SSOService:
                     select(User)
                     .where(
                         User.identity_id == identity.id,
-                        User.is_active == True,
+                        User.is_active,
                     )
                     .options(selectinload(User.identity))
                     .limit(1)
@@ -106,7 +106,7 @@ class SSOService:
             .join(User.identity)
             .where(
                 Identity.phone == normalized_mobile,
-                User.is_active == True,
+                User.is_active,
             )
             .options(selectinload(User.identity))
         )
@@ -127,7 +127,7 @@ class SSOService:
                 select(User)
                 .where(
                     User.identity_id == identity.id,
-                    User.is_active == True,
+                    User.is_active,
                 )
                 .options(selectinload(User.identity))
                 .limit(1)

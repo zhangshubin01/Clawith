@@ -7,7 +7,6 @@ Create Date: 2026-03-21
 from typing import Sequence, Union
 
 from alembic import op
-import sqlalchemy as sa
 
 
 revision: str = 'add_notification_agent_id'

@@ -14,10 +14,7 @@
 
 from __future__ import annotations
 
-from loguru import logger
 
-from .compression_config import is_tool_excluded
-from .context_compressor import _est_tokens_str
 
 # 程序可读压缩标记（统一真源）。
 _COMPRESS_MARKER = "<!-- ctx:trimmed -->"

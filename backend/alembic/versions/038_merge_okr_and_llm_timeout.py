@@ -9,7 +9,6 @@ Revision ID: merge_okr_and_llm_timeout
 Revises: add_okr_tables, d9cbd43b62e5
 """
 
-from alembic import op
 
 # revision identifiers
 revision = "merge_okr_and_llm_timeout"

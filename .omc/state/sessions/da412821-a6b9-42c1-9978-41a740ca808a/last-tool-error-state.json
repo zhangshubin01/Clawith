@@ -1,0 +1,7 @@
+{
+  "tool_name": "mcp__codebase-memory-mcp__search_graph",
+  "tool_input_preview": "{\"query\":\"orca orchestration trigger auto\",\"project\":\"gfi-android-f-shubin-0725\"}",
+  "error": "{\"error\":\"project not found or not indexed\",\"hint\":\"Use list_projects to see all indexed projects, then pass it as the \\\"project\\\" argument.\",\"available_projects\":[\"Users-shubinzhang-Documents-agent-Clawith\",\"Users-shubinzhang-Documents-agent\",\"ComputerApp\",\"Users-shubinzhang-StudioProjects-wwth32\"],\"count\":4}",
+  "timestamp": "2026-08-01T15:33:45.374Z",
+  "retry_count": 1
+}

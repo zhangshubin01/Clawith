@@ -9,7 +9,6 @@ from typing import Sequence, Union
  
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 from sqlalchemy import inspect
  
 # revision identifiers, used by Alembic.
@@ -81,18 +80,24 @@ def upgrade() -> None:
         # Build map: (type, val) -> identity_id
         identity_map = {}
         for r in existing_idents:
-            if r[1]: identity_map[f"e:{r[1]}"] = r[0]
-            if r[2]: identity_map[f"p:{r[2]}"] = r[0]
-            if r[3]: identity_map[f"u:{r[3]}"] = r[0]
+            if r[1]:
+                identity_map[f"e:{r[1]}"] = r[0]
+            if r[2]:
+                identity_map[f"p:{r[2]}"] = r[0]
+            if r[3]:
+                identity_map[f"u:{r[3]}"] = r[0]
  
         for row in users_data:
             u_id, u_email, u_phone, u_username, u_pwd, u_email_verified, u_active, u_role = row
             
             # Check if this person already has an identity
             found_id = None
-            if u_email and f"e:{u_email}" in identity_map: found_id = identity_map[f"e:{u_email}"]
-            elif u_phone and f"p:{u_phone}" in identity_map: found_id = identity_map[f"p:{u_phone}"]
-            elif u_username and f"u:{u_username}" in identity_map: found_id = identity_map[f"u:{u_username}"]
+            if u_email and f"e:{u_email}" in identity_map:
+                found_id = identity_map[f"e:{u_email}"]
+            elif u_phone and f"p:{u_phone}" in identity_map:
+                found_id = identity_map[f"p:{u_phone}"]
+            elif u_username and f"u:{u_username}" in identity_map:
+                found_id = identity_map[f"u:{u_username}"]
             
             if not found_id:
                 # Create new identity
@@ -113,9 +118,12 @@ def upgrade() -> None:
                     "admin": is_platform_admin
                 })
                 # Update map to prevent duplicates in this loop
-                if u_email: identity_map[f"e:{u_email}"] = found_id
-                if u_phone: identity_map[f"p:{u_phone}"] = found_id
-                if u_username: identity_map[f"u:{u_username}"] = found_id
+                if u_email:
+                    identity_map[f"e:{u_email}"] = found_id
+                if u_phone:
+                    identity_map[f"p:{u_phone}"] = found_id
+                if u_username:
+                    identity_map[f"u:{u_username}"] = found_id
             
             # Update user
             conn.execute(sa.text("UPDATE users SET identity_id = :identity_id WHERE id = :user_id"), {

@@ -42,7 +42,6 @@ from app.core.permissions import (
 from app.database import async_session
 
 from app.config import get_settings
-_FEISHU_BASE = get_settings().FEISHU_DOMAIN
 from app.models.agent import Agent as AgentModel
 from app.models.audit import ChatMessage
 from app.models.chat_session import ChatSession
@@ -77,7 +76,6 @@ from app.services.workspace_collaboration import (
 from app.services.storage import get_storage_backend, normalize_storage_key
 from app.services.storage_runtime.base import WriteCondition, content_hash_bytes
 from app.services.workspace_locking import workspace_locks
-from app.config import get_settings
 from app.services.llm.finish import (
     FINISH_TOOL_NAME,
 )
@@ -95,6 +93,8 @@ from app.services.agent_runtime.tool_execution import (
     ToolExecutionOutcome,
     sanitize_tool_arguments,
 )
+
+_FEISHU_BASE = get_settings().FEISHU_DOMAIN
 
 
 _settings = get_settings()
@@ -747,7 +747,7 @@ async def _agent_has_any_channel(agent_id: uuid.UUID) -> bool:
             r = await db.execute(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             return r.scalar_one_or_none() is not None
@@ -817,7 +817,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
             visible_clauses = [Tool.source == "builtin"]
             # Admin tools: visible if they are global (tenant_id is NULL) or belong to the agent's tenant
-            admin_cond = (Tool.tenant_id == None)
+            admin_cond = (Tool.tenant_id.is_(None))
             if agent_tenant_id:
                 admin_cond = admin_cond | (Tool.tenant_id == agent_tenant_id)
             visible_clauses.append((Tool.source == "admin") & admin_cond)
@@ -827,7 +827,7 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
 
             # Get all tools visible within this agent's tenant boundary.
             all_tools_r = await db.execute(
-                select(Tool).where(Tool.enabled == True, or_(*visible_clauses))
+                select(Tool).where(Tool.enabled, or_(*visible_clauses))
             )
             all_tools = all_tools_r.scalars().all()
 
@@ -1937,8 +1937,8 @@ def _propose_experience_draft_outcome(
     arguments: dict,
 ) -> ToolExecutionOutcome:
     """Validate the human-gated draft without claiming a storage write."""
-    for field in ("title", "body", "applicability"):
-        value = arguments.get(field)
+    for fname in ("title", "body", "applicability"):
+        value = arguments.get(fname)
         if not isinstance(value, str) or not value.strip():
             return _typed_failure(
                 "propose_experience_draft requires non-empty title, body, and applicability.",
@@ -2808,7 +2808,7 @@ async def _android_compile_outcome(
 
     # 沙箱路由：合并四层配置（builtin → DB → env）
     from app.config import get_sandbox_config
-    from app.services.sandbox.config import SandboxConfig, SandboxType
+    from app.services.sandbox.config import SandboxConfig
     from app.services.sandbox.registry import get_sandbox_backend
 
     tool_config = await _get_tool_config(agent_id, "android_compile")
@@ -6659,7 +6659,7 @@ async def _smithery_auto_recover(api_key: str, mcp_url: str, namespace: str, con
         if "error" in conn_result:
             return (
                 f"❌ MCP tool connection expired and auto-recovery failed: {conn_result['error']}\n\n"
-                f"💡 Please re-authorize by telling me: `import_mcp_server(server_id=\"...\", reauthorize=true)`"
+                "💡 Please re-authorize by telling me: `import_mcp_server(server_id=\"...\", reauthorize=true)`"
             )
 
         if conn_result.get("auth_url"):
@@ -6668,10 +6668,10 @@ async def _smithery_auto_recover(api_key: str, mcp_url: str, namespace: str, con
             # a still-valid old connection is not overwritten by an unauthenticated
             # replacement. The user-facing auth URL is enough for recovery.
             return (
-                f"🔐 MCP tool connection expired. Re-authorization needed.\n\n"
-                f"Please visit the following URL to re-authorize:\n"
+                "🔐 MCP tool connection expired. Re-authorization needed.\n\n"
+                "Please visit the following URL to re-authorize:\n"
                 f"{conn_result['auth_url']}\n\n"
-                f"After completing authorization, the tools will work again automatically."
+                "After completing authorization, the tools will work again automatically."
             )
 
         # Update stored config with new connection info
@@ -7726,7 +7726,8 @@ async def _convert_csv_to_xlsx(agent_id: uuid.UUID, ws: Path, arguments: dict) -
         tgt_file = _resolve_tool_target_path(ws, target_path)
     except ValueError as exc:
         return str(exc)
-    if not src_file.exists(): return f"❌ Source file not found: {source_path}"
+    if not src_file.exists():
+        return f"❌ Source file not found: {source_path}"
 
     try:
         import csv
@@ -7793,13 +7794,15 @@ async def _convert_html_to_pptx(agent_id: uuid.UUID, ws: Path, arguments: dict) 
 async def _convert_markdown_to_docx(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
     source_path = arguments.get("source_path")
     target_path = arguments.get("target_path")
-    if not source_path or not target_path: return "❌ Missing paths."
+    if not source_path or not target_path:
+        return "❌ Missing paths."
     try:
         src_file = _resolve_tool_source_path(ws, source_path)
         tgt_file = _resolve_tool_target_path(ws, target_path)
     except ValueError as exc:
         return str(exc)
-    if not src_file.exists(): return "❌ Source file not found."
+    if not src_file.exists():
+        return "❌ Source file not found."
 
     try:
         from docx import Document
@@ -7883,13 +7886,15 @@ async def _convert_markdown_to_docx(agent_id: uuid.UUID, ws: Path, arguments: di
 async def _convert_markdown_to_pdf(agent_id: uuid.UUID, ws: Path, arguments: dict) -> str:
     source_path = arguments.get("source_path")
     target_path = arguments.get("target_path")
-    if not source_path or not target_path: return "❌ Missing paths."
+    if not source_path or not target_path:
+        return "❌ Missing paths."
     try:
         src_file = _resolve_tool_source_path(ws, source_path)
         tgt_file = _resolve_tool_target_path(ws, target_path)
     except ValueError as exc:
         return str(exc)
-    if not src_file.exists(): return "❌ Source file not found."
+    if not src_file.exists():
+        return "❌ Source file not found."
 
     try:
         from weasyprint import HTML
@@ -9277,7 +9282,7 @@ async def _send_slack_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "slack",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -9360,7 +9365,7 @@ async def _send_teams_channel_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "microsoft_teams",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -9385,7 +9390,7 @@ async def _send_teams_channel_message(
                     ChatSession.agent_id == agent_id,
                     ChatSession.user_id == platform_user.id,
                     ChatSession.source_channel == "microsoft_teams",
-                    ChatSession.is_group == False,
+                    ~ChatSession.is_group,
                 )
                 .order_by(ChatSession.last_message_at.desc(), ChatSession.created_at.desc())
                 .limit(1)
@@ -9440,7 +9445,7 @@ async def _send_wechat_channel_message(
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "wechat",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             config = config_result.scalar_one_or_none()
@@ -10199,7 +10204,6 @@ async def _plaza_add_comment(agent_id: uuid.UUID, arguments: dict) -> str:
                 mentions = re.findall(r'@(\S+)', content)
                 if mentions:
                     from app.services.notification_service import send_notification
-                    from app.models.user import User
                     # Load agents in tenant
                     a_q = select(AgentModel).where(AgentModel.id != agent_id)
                     if agent.tenant_id:
@@ -10996,7 +11000,7 @@ async def _handle_set_trigger_outcome(
             result = await db.execute(
                 select(sa_func.count()).select_from(AgentTrigger).where(
                     AgentTrigger.agent_id == agent_id,
-                    AgentTrigger.is_enabled == True,
+                    AgentTrigger.is_enabled,
                 )
             )
             count = result.scalar() or 0
@@ -11193,7 +11197,7 @@ async def _handle_update_trigger_outcome(
                         "invalid_tool_arguments",
                     )
                 trigger.reason = new_reason
-                changes.append(f"reason updated")
+                changes.append("reason updated")
 
             commit_started = True
             await db.commit()
@@ -11588,7 +11592,7 @@ async def _upload_image_outcome(
                 size = 0
             size_str = f"{size / 1024:.1f}KB" if size < 1024 * 1024 else f"{size / (1024 * 1024):.1f}MB"
             return _typed_success(
-                f"Image uploaded successfully!\n\n"
+                "Image uploaded successfully!\n\n"
                 f"**CDN URL**: {cdn_url}\n"
                 f"**File ID**: {file_id}\n"
                 f"**Size**: {size_str}\n"
@@ -12457,7 +12461,7 @@ async def _get_feishu_token(agent_id: uuid.UUID) -> tuple[str, str] | None:
             select(ChannelConfig).where(
                 ChannelConfig.agent_id == agent_id,
                 ChannelConfig.channel_type == "feishu",
-                ChannelConfig.is_configured == True,
+                ChannelConfig.is_configured,
             )
         )
         config = result.scalar_one_or_none()
@@ -12658,7 +12662,7 @@ def _parse_feishu_url(url: str) -> dict:
         result['table_id'] = table_match.group(1)
 
     # support URL with /tblxxxxxx
-    if not 'table_id' in result:
+    if 'table_id' not in result:
         tbl_match = re.search(r'/(tbl[a-zA-Z0-9_]+)', url)
         if tbl_match:
             result['table_id'] = tbl_match.group(1)
@@ -13320,7 +13324,8 @@ async def _bitable_list_tables(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.bitable_list_tables(app_id, app_secret, app_token)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         tables = resp.get("data", {}).get("items", [])
         if not tables:
@@ -13371,7 +13376,7 @@ async def _bitable_create_app(agent_id: uuid.UUID, arguments: dict) -> str:
             bitable_url = await _get_feishu_bitable_url(tenant_token, app_token)
 
         result = (
-            f"OK: Bitable created successfully!\n"
+            "OK: Bitable created successfully!\n"
             f"Name: {name}\n"
             f"App Token: {app_token}\n"
             f"URL: {bitable_url}"
@@ -13402,7 +13407,8 @@ async def _bitable_list_fields(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.bitable_list_fields(app_id, app_secret, app_token, table_id)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         fields = resp.get("data", {}).get("items", [])
         if not fields:
@@ -13566,7 +13572,8 @@ async def _bitable_delete_record(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.bitable_delete_record(app_id, app_secret, app_token, table_id, record_id)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         # Provide a user-accessible link so they can verify the deletion
         tenant_token = await feishu_service.get_tenant_access_token(app_id, app_secret)
@@ -13609,7 +13616,8 @@ async def _feishu_read_doc(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.read_feishu_doc(app_id, app_secret, doc_token)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         content = resp.get("data", {}).get("content", "")
         if not content:
@@ -13631,7 +13639,8 @@ async def _feishu_create_doc(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.create_feishu_doc(app_id, app_secret, folder_token or None, title)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         doc = resp.get("data", {}).get("document", {})
         doc_id = doc.get("document_id")
@@ -13663,7 +13672,8 @@ async def _feishu_append_doc(agent_id: uuid.UUID, arguments: dict) -> str:
         # Feishu uses the document_id as the root block_id to append entirely to the document
         resp = await feishu_service.append_feishu_doc(app_id, app_secret, doc_token, content)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
 
         return "OK: Content appended successfully to the end of the document."
     except Exception as e:
@@ -14879,7 +14889,7 @@ async def _feishu_wiki_list(agent_id: uuid.UUID, arguments: dict) -> str:
 
     space_id = node_info["space_id"]
     if not space_id:
-        return f"❌ 无法获取知识库 space_id，请检查 token 是否正确。"
+        return "❌ 无法获取知识库 space_id，请检查 token 是否正确。"
 
     async def _list_children(parent_token: str, depth: int) -> list[dict]:
         """Return flat list of {title, node_token, obj_token, has_child, depth}."""
@@ -14960,7 +14970,8 @@ async def _feishu_doc_read(agent_id: uuid.UUID, arguments: dict) -> str:
     try:
         resp = await feishu_service.read_feishu_doc(app_id, app_secret, read_token)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
         
         content = resp.get("data", {}).get("content", "")
         if not content:
@@ -15046,7 +15057,7 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
             doc_url = await _get_feishu_tenant_doc_url(tenant_token, node_token, doc_type="wiki")
 
             return (
-                f"✅ 知识库文档创建成功！\n"
+                "✅ 知识库文档创建成功！\n"
                 f"标题：{title}\n"
                 f"文档 Token（用于 feishu_doc_append）：{doc_token}\n"
                 f"Wiki Node Token：{node_token}\n"
@@ -15057,7 +15068,8 @@ async def _feishu_doc_create(agent_id: uuid.UUID, arguments: dict) -> str:
         # ── Regular Drive branch (original behavior) ─────────────────────
         resp = await feishu_service.create_feishu_doc(app_id, app_secret, folder_token, title)
         err = _check_feishu_err(resp)
-        if err: return err
+        if err:
+            return err
         
         doc = resp.get("data", {}).get("document", {})
         doc_token = doc.get("document_id", "")
@@ -15297,7 +15309,8 @@ async def _feishu_doc_append(agent_id: uuid.UUID, arguments: dict) -> str:
                 headers={"Authorization": f"Bearer {tenant_token}"},
             )).json()
             err = _check_feishu_err(meta_resp)
-            if err: return err
+            if err:
+                return err
 
             body_block_id = (
                 meta_resp.get("data", {}).get("document", {}).get("body", {}).get("block_id")
@@ -15316,7 +15329,8 @@ async def _feishu_doc_append(agent_id: uuid.UUID, arguments: dict) -> str:
             )).json()
 
             err = _check_feishu_err(result)
-            if err: return err
+            if err:
+                return err
 
         doc_url = await _get_feishu_tenant_doc_url(tenant_token, docx_token)
         return (
@@ -15442,7 +15456,7 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
                     elif _c == 131101:
                         # Public wiki space — everyone already has access
                         results.append(
-                            f"ℹ️ 这是一个**公开知识库**，所有人已可访问。\n"
+                            "ℹ️ 这是一个**公开知识库**，所有人已可访问。\n"
                             f"「{display}」无需单独添加权限。"
                         )
                     else:
@@ -15470,8 +15484,8 @@ async def _feishu_drive_share(agent_id: uuid.UUID, arguments: dict) -> str:
                         # Feishu platform policy: you cannot add yourself as a collaborator via API.
                         # Permissions must be granted by others, or set manually in the UI.
                         results.append(
-                            f"⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
-                            f"请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
+                            "⚠️ 飞书平台安全限制：无法通过 API 为自己添加协作权限。\n"
+                            "请手动操作：打开文档 → 右上角「分享」→ 添加自己并设置权限。"
                         )
                     elif _c in (99991672, 99991668):
                         return (
@@ -15562,7 +15576,7 @@ async def _feishu_drive_delete(agent_id: uuid.UUID, arguments: dict) -> str:
                 return (
                     f"✅ 已提交{type_label}删除任务（异步执行中）。\n"
                     f"📋 任务 ID: `{task_id}`\n"
-                    f"文件夹删除为异步操作，文件会被移至回收站。"
+                    "文件夹删除为异步操作，文件会被移至回收站。"
                 )
             return f"✅ {type_label} `{file_token}` 已删除（移至回收站）。"
 
@@ -15581,7 +15595,7 @@ async def _feishu_drive_delete(agent_id: uuid.UUID, arguments: dict) -> str:
         elif code == 1061007:
             return f"❌ 文件 `{file_token}` 已被删除。"
         elif code == 1061045:
-            return f"⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
+            return "⚠️ 接口频率限制，请稍后重试。（每秒最多 5 次）"
         else:
             return f"❌ 删除{type_label}失败：{msg} (code {code})"
 
@@ -15757,14 +15771,14 @@ async def _feishu_calendar_create_outcome(
         )
 
     required: dict[str, str] = {}
-    for field in ("summary", "start_time", "end_time"):
-        value = arguments.get(field)
+    for fname in ("summary", "start_time", "end_time"):
+        value = arguments.get(fname)
         if not isinstance(value, str) or not value.strip():
             return _typed_failure(
-                f"feishu_calendar_create requires {field}.",
+                f"feishu_calendar_create requires {fname}.",
                 "invalid_tool_arguments",
             )
-        required[field] = value.strip()
+        required[fname] = value.strip()
     timezone_name = arguments.get("timezone", "Asia/Shanghai")
     if not isinstance(timezone_name, str) or not timezone_name.strip():
         return _typed_failure(
@@ -16120,7 +16134,7 @@ async def _feishu_calendar_list(agent_id: uuid.UUID, arguments: dict) -> str:
                             busy_lines.append(f"  🔴 {s}–{e}")
                         except Exception:
                             busy_lines.append(f"  🔴 {slot.get('start_time')}–{slot.get('end_time')}")
-                    freebusy_section = f"\n📌 **用户真实日历（忙碌时段）**：\n" + "\n".join(busy_lines)
+                    freebusy_section = "\n📌 **用户真实日历（忙碌时段）**：\n" + "\n".join(busy_lines)
                 else:
                     freebusy_section = "\n📌 **用户真实日历**：该时段全部空闲。"
         except Exception as _fe:
@@ -16288,7 +16302,7 @@ async def _feishu_calendar_create(agent_id: uuid.UUID, arguments: dict) -> str:
     att_str = f"\n**参与人**: {', '.join(attendee_display)}" if attendee_display else ""
     invite_note = "\n（已向您发送日历邀请，请在飞书日历中确认）" if attendee_open_ids else ""
     return (
-        f"✅ 日历事件已创建！\n"
+        "✅ 日历事件已创建！\n"
         f"**标题**: {summary}\n"
         f"**时间**: {start_time} → {end_time}{att_str}\n"
         f"**Event ID**: `{event_id}`{invite_note}"
@@ -17370,14 +17384,14 @@ async def _read_emails_outcome(
         )
     except (socket.timeout, ConnectionError, OSError) as exc:
         return _typed_failure(
-            f"IMAP transport failed before the read completed: "
+            "IMAP transport failed before the read completed: "
             f"{type(exc).__name__}.",
             "email_imap_transport_failed",
             retryable=True,
         )
     except Exception as exc:
         return _typed_failure(
-            f"IMAP read failed before a reliable result was parsed: "
+            "IMAP read failed before a reliable result was parsed: "
             f"{type(exc).__name__}.",
             "email_imap_read_failed",
             retryable=True,
@@ -18083,7 +18097,7 @@ async def _publish_page_outcome(
 
     evidence_refs = (url,) if url.startswith(("http://", "https://")) else ()
     return _typed_success(
-        f"Published successfully!\n\n"
+        "Published successfully!\n\n"
         f"Public URL: {url}\n"
         f"Title: {title}\n\n"
         f"Anyone can access this page without logging in.{url_note}",
@@ -18638,7 +18652,7 @@ async def _agentbay_browser_navigate(agent_id: Optional[uuid.UUID], ws: Path, ar
                 img_id = store_temp_screenshot(raw_bytes)
                 parts.append(
                     f"Internal screenshot captured for analysis. [ImageID: {img_id}]\n"
-                    f"NOTE: This screenshot is for LLM vision only and is not saved to the user's workspace."
+                    "NOTE: This screenshot is for LLM vision only and is not saved to the user's workspace."
                 )
                 logger.info(f"[AgentBay] Browser navigate screenshot stored in memory (id={img_id})")
 
@@ -18685,7 +18699,7 @@ async def _agentbay_browser_screenshot(agent_id: Optional[uuid.UUID], ws: Path, 
         logger.info(f"[AgentBay] Browser screenshot stored in memory (id={img_id})")
         return (
             f"Internal screenshot captured for analysis. [ImageID: {img_id}]\n"
-            f"NOTE: This screenshot is for LLM vision only and is not saved to the user's workspace."
+            "NOTE: This screenshot is for LLM vision only and is not saved to the user's workspace."
         )
 
     except RuntimeError as e:
@@ -18740,7 +18754,7 @@ async def _agentbay_browser_click(agent_id: Optional[uuid.UUID], ws: Path, argum
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Browser click failed")
+        logger.exception("[AgentBay] Browser click failed")
         return f"❌ 点击失败: {str(e)[:200]}"
 
 
@@ -18762,7 +18776,7 @@ async def _agentbay_browser_type(agent_id: Optional[uuid.UUID], ws: Path, argume
     except RuntimeError as e:
         return f"❌ {str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Browser type failed")
+        logger.exception("[AgentBay] Browser type failed")
         return f"❌ 输入失败: {str(e)[:200]}"
 
 
@@ -19535,8 +19549,8 @@ def _agentbay_find_installed_app_match(query: str, apps: list) -> tuple[dict | N
             _agentbay_app_field(app, "start_cmd", "startCmd"),
             _agentbay_app_field(app, "work_directory", "workDirectory"),
         ]
-        for field in fields:
-            field_norm = _agentbay_normalize_text(field)
+        for fname in fields:
+            field_norm = _agentbay_normalize_text(fname)
             if not field_norm:
                 continue
             if query_norm == field_norm:
@@ -19649,7 +19663,7 @@ async def _agentbay_computer_screenshot(agent_id: Optional[uuid.UUID], ws: Path,
             "TARGETING NOTE: Before clicking dialog buttons, text buttons, tabs, menus, checkboxes, "
             "close buttons, small controls, or any target whose center is not unambiguous, call "
             "agentbay_computer_precision_screenshot around the target and click from that enlarged crop.\n"
-            f"NOTE: This screenshot is for LLM vision only and is not saved to the user's workspace."
+            "NOTE: This screenshot is for LLM vision only and is not saved to the user's workspace."
         )
 
     except RuntimeError as e:
@@ -19793,14 +19807,14 @@ async def _agentbay_computer_click(agent_id: Optional[uuid.UUID], ws: Path, argu
             note = f" within {screen_note}" if screen_note else ""
             return (
                 f"Clicked at ({x}, {y}) with {button} button{note}. "
-                f"This only confirms the mouse event was sent; call agentbay_computer_screenshot to verify the UI changed."
+                "This only confirms the mouse event was sent; call agentbay_computer_screenshot to verify the UI changed."
             )
         note = f" Coordinate system: {screen_note}." if screen_note else ""
         return f"Click failed at ({x}, {y}).{note}"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer click failed")
+        logger.exception("[AgentBay] Computer click failed")
         return f"Click failed: {str(e)[:200]}"
 
 
@@ -19821,11 +19835,11 @@ async def _agentbay_computer_input_text(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_input_text(text)
         if result.get("success"):
             return f"Typed text: {text[:100]}"
-        return f"Text input failed"
+        return "Text input failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer input_text failed")
+        logger.exception("[AgentBay] Computer input_text failed")
         return f"Text input failed: {str(e)[:200]}"
 
 
@@ -19853,7 +19867,7 @@ async def _agentbay_computer_press_keys(agent_id: Optional[uuid.UUID], ws: Path,
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer press_keys failed")
+        logger.exception("[AgentBay] Computer press_keys failed")
         return f"Key press failed: {str(e)[:200]}"
 
 
@@ -19875,11 +19889,11 @@ async def _agentbay_computer_scroll(agent_id: Optional[uuid.UUID], ws: Path, arg
         result = await client.computer_scroll(x, y, direction=direction, amount=amount)
         if result.get("success"):
             return f"Scrolled {direction} by {amount} step(s) at ({x}, {y})"
-        return f"Scroll failed"
+        return "Scroll failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer scroll failed")
+        logger.exception("[AgentBay] Computer scroll failed")
         return f"Scroll failed: {str(e)[:200]}"
 
 
@@ -19899,11 +19913,11 @@ async def _agentbay_computer_move_mouse(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_move_mouse(x, y)
         if result.get("success"):
             return f"Mouse moved to ({x}, {y})"
-        return f"Mouse move failed"
+        return "Mouse move failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer move_mouse failed")
+        logger.exception("[AgentBay] Computer move_mouse failed")
         return f"Mouse move failed: {str(e)[:200]}"
 
 
@@ -19926,11 +19940,11 @@ async def _agentbay_computer_drag_mouse(agent_id: Optional[uuid.UUID], ws: Path,
         result = await client.computer_drag_mouse(from_x, from_y, to_x, to_y, button=button)
         if result.get("success"):
             return f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})"
-        return f"Drag failed"
+        return "Drag failed"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer drag_mouse failed")
+        logger.exception("[AgentBay] Computer drag_mouse failed")
         return f"Drag failed: {str(e)[:200]}"
 
 
@@ -19954,7 +19968,7 @@ async def _agentbay_computer_get_screen_size(agent_id: Optional[uuid.UUID], ws: 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_screen_size failed")
+        logger.exception("[AgentBay] Computer get_screen_size failed")
         return f"Get screen size failed: {str(e)[:200]}"
 
 
@@ -19998,7 +20012,7 @@ async def _agentbay_computer_start_app(agent_id: Optional[uuid.UUID], ws: Path, 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer start_app failed")
+        logger.exception("[AgentBay] Computer start_app failed")
         return f"Start application failed: {str(e)[:200]}"
 
 
@@ -20027,14 +20041,14 @@ async def _agentbay_computer_get_installed_apps(agent_id: Optional[uuid.UUID], w
                 return "No installed applications found."
             return (
                 f"Installed applications ({len(apps)}). Use the returned start_cmd exactly with "
-                f"agentbay_computer_start_app; do not guess app launch commands.\n\n"
+                "agentbay_computer_start_app; do not guess app launch commands.\n\n"
                 f"{_agentbay_format_apps(apps, limit=80)}"
             )
         return f"Failed to get installed applications: {result.get('error_message', 'Unknown error')}"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_installed_apps failed")
+        logger.exception("[AgentBay] Computer get_installed_apps failed")
         return f"Get installed applications failed: {str(e)[:200]}"
 
 
@@ -20058,7 +20072,7 @@ async def _agentbay_computer_get_cursor_position(agent_id: Optional[uuid.UUID], 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_cursor_position failed")
+        logger.exception("[AgentBay] Computer get_cursor_position failed")
         return f"Get cursor position failed: {str(e)[:200]}"
 
 
@@ -20082,7 +20096,7 @@ async def _agentbay_computer_get_active_window(agent_id: Optional[uuid.UUID], ws
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer get_active_window failed")
+        logger.exception("[AgentBay] Computer get_active_window failed")
         return f"Get active window failed: {str(e)[:200]}"
 
 
@@ -20107,7 +20121,7 @@ async def _agentbay_computer_activate_window(agent_id: Optional[uuid.UUID], ws: 
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer activate_window failed")
+        logger.exception("[AgentBay] Computer activate_window failed")
         return f"Activate window failed: {str(e)[:200]}"
 
 
@@ -20132,17 +20146,17 @@ async def _agentbay_computer_list_windows(agent_id: Optional[uuid.UUID], ws: Pat
             windows_str = json.dumps(windows, ensure_ascii=False, indent=2)
             return (
                 f"OS-level root desktop windows ({len(windows)}). These window_id values refer to whole "
-                f"application windows. Use them for activation, or for closing only when the user explicitly "
-                f"asked to close/quit an entire desktop window or app. Do NOT use these IDs for in-app popups, "
-                f"modals, embedded marketplace/store panels, browser/app tabs, document tabs, or software-internal "
-                f"dialogs; close those with the app UI, Escape, Ctrl+W, or agentbay_computer_dismiss_dialog.\n\n"
+                "application windows. Use them for activation, or for closing only when the user explicitly "
+                "asked to close/quit an entire desktop window or app. Do NOT use these IDs for in-app popups, "
+                "modals, embedded marketplace/store panels, browser/app tabs, document tabs, or software-internal "
+                "dialogs; close those with the app UI, Escape, Ctrl+W, or agentbay_computer_dismiss_dialog.\n\n"
                 f"{windows_str[:5000]}"
             )
         return f"Failed to list windows: {result.get('error_message', 'Unknown error')}"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer list_windows failed")
+        logger.exception("[AgentBay] Computer list_windows failed")
         return f"List windows failed: {str(e)[:200]}"
 
 
@@ -20201,17 +20215,17 @@ async def _agentbay_computer_close_window(agent_id: Optional[uuid.UUID], ws: Pat
             candidates.sort(key=lambda item: item.get("match_score", 0), reverse=True)
             return (
                 f"Refusing to close by title-only match for `{title}` because it can close the wrong application. "
-                f"The candidates below are whole OS-level root windows. Choose a root window_id only if the user "
-                f"explicitly wants to close/quit that entire application window. For in-app popups, modals, "
-                f"embedded marketplace/store panels, browser/app tabs, document tabs, or software-internal dialogs, "
-                f"do not close a root window; use app UI controls, Escape, Ctrl+W, or "
-                f"agentbay_computer_dismiss_dialog instead.\n\n"
+                "The candidates below are whole OS-level root windows. Choose a root window_id only if the user "
+                "explicitly wants to close/quit that entire application window. For in-app popups, modals, "
+                "embedded marketplace/store panels, browser/app tabs, document tabs, or software-internal dialogs, "
+                "do not close a root window; use app UI controls, Escape, Ctrl+W, or "
+                "agentbay_computer_dismiss_dialog instead.\n\n"
                 f"{json.dumps(candidates[:8], ensure_ascii=False, indent=2)[:3000]}"
             )
         except RuntimeError as e:
             return f"{str(e)}"
         except Exception as e:
-            logger.exception(f"[AgentBay] Computer close_window candidate lookup failed")
+            logger.exception("[AgentBay] Computer close_window candidate lookup failed")
             return f"Close window requires window_id. Candidate lookup failed: {str(e)[:200]}"
 
     try:
@@ -20221,13 +20235,13 @@ async def _agentbay_computer_close_window(agent_id: Optional[uuid.UUID], ws: Pat
         if result.get("success"):
             return (
                 f"Closed OS-level root desktop window {window_id}; the whole application window may now be gone. "
-                f"Call agentbay_computer_screenshot to verify."
+                "Call agentbay_computer_screenshot to verify."
             )
         return f"Failed to close window {window_id}: {result.get('error_message', 'Unknown error')}"
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer close_window failed")
+        logger.exception("[AgentBay] Computer close_window failed")
         return f"Close window failed: {str(e)[:200]}"
 
 
@@ -20260,20 +20274,20 @@ async def _agentbay_computer_dismiss_dialog(agent_id: Optional[uuid.UUID], ws: P
             title_note = f" Target hint: `{title}`." if title else ""
             return (
                 f"Sent Escape to safely dismiss the active in-app popup/dialog.{title_note} "
-                f"Call agentbay_computer_screenshot to verify. This tool never closes the root application window; "
-                f"if Escape does not affect an in-app tab or embedded panel, use that app's own close control "
-                f"or a shortcut such as Ctrl+W instead of root-window close."
+                "Call agentbay_computer_screenshot to verify. This tool never closes the root application window; "
+                "if Escape does not affect an in-app tab or embedded panel, use that app's own close control "
+                "or a shortcut such as Ctrl+W instead of root-window close."
             )
 
         return (
-            f"Could not send Escape to dismiss the active popup/dialog: "
+            "Could not send Escape to dismiss the active popup/dialog: "
             f"{esc_result.get('error_message', 'Unknown error')}. "
-            f"Do not use this tool to close root application windows."
+            "Do not use this tool to close root application windows."
         )
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer dismiss_dialog failed")
+        logger.exception("[AgentBay] Computer dismiss_dialog failed")
         return f"Dismiss dialog failed: {str(e)[:200]}"
 
 
@@ -20299,7 +20313,7 @@ async def _agentbay_computer_list_visible_apps(agent_id: Optional[uuid.UUID], ws
     except RuntimeError as e:
         return f"{str(e)}"
     except Exception as e:
-        logger.exception(f"[AgentBay] Computer list_visible_apps failed")
+        logger.exception("[AgentBay] Computer list_visible_apps failed")
         return f"List applications failed: {str(e)[:200]}"
 
 
@@ -21373,10 +21387,10 @@ async def _update_kr_content_outcome(
             "At least one KR content field must be provided.",
             "invalid_tool_arguments",
         )
-    for field in ("title", "unit", "focus_ref"):
-        if field in updates and not isinstance(updates[field], str):
+    for fname in ("title", "unit", "focus_ref"):
+        if fname in updates and not isinstance(updates[fname], str):
             return _typed_failure(
-                f"{field} must be a string.",
+                f"{fname} must be a string.",
                 "invalid_tool_arguments",
             )
     if "title" in updates and not updates["title"].strip():
@@ -22226,10 +22240,10 @@ async def _create_key_result_outcome(
     )
     if argument_error is not None:
         return argument_error
-    for field in ("unit", "focus_ref"):
-        if field in arguments and not isinstance(arguments[field], str):
+    for fname in ("unit", "focus_ref"):
+        if fname in arguments and not isinstance(arguments[fname], str):
             return _typed_failure(
-                f"{field} must be a string.",
+                f"{fname} must be a string.",
                 "invalid_tool_arguments",
             )
     designated_error = await _require_designated_okr_agent(agent_id)
@@ -22545,10 +22559,10 @@ async def _update_objective_outcome(
             "update_objective requires at least one supported field to update.",
             "invalid_tool_arguments",
         )
-    for field in ("title", "description"):
-        if field in arguments and not isinstance(arguments[field], str):
+    for fname in ("title", "description"):
+        if fname in arguments and not isinstance(arguments[fname], str):
             return _typed_failure(
-                f"update_objective {field} must be a string.",
+                f"update_objective {fname} must be a string.",
                 "invalid_tool_arguments",
             )
     if "title" in arguments and not arguments["title"].strip():
@@ -22769,7 +22783,7 @@ async def _update_any_kr_progress(agent_id: uuid.UUID | None, user_id: uuid.UUID
 
             return f"Successfully updated KR '{kr.title}'. Progress: {old_val} -> {kr.current_value} {kr.unit or ''}. Status: {kr.status}"
     except Exception as e:
-        logger.exception(f"[OKR] update_any_kr_progress failed")
+        logger.exception("[OKR] update_any_kr_progress failed")
         return f"Failed to update kr progress: {str(e)[:200]}"
 
 

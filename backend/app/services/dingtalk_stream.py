@@ -665,7 +665,7 @@ class DingTalkStreamManager:
         async with async_session() as db:
             result = await db.execute(
                 select(ChannelConfig).where(
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                     ChannelConfig.channel_type == "dingtalk",
                 )
             )

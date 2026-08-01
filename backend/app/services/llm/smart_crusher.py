@@ -6,6 +6,16 @@ import json
 import re
 import statistics
 from typing import Any
+from .compression_config import (
+    FIRST_FRACTION,
+    JSON_PROTECT_KEYS,
+    LAST_FRACTION,
+    LOSSLESS_MIN_SAVINGS,
+    MAX_ITEMS_AFTER_CRUSH,
+    MUST_KEEP_RE,
+    VARIANCE_THRESHOLD,
+)
+from .context_compressor import CCR_SENTINEL_KEY
 
 _JSON_TRAILING_COMMA = re.compile(r",\s*([}\]])")
 
@@ -26,16 +36,6 @@ def parse_json_tiered(content: str) -> tuple[Any | None, str]:
         return None, "text"
 
 
-from .compression_config import (
-    FIRST_FRACTION,
-    JSON_PROTECT_KEYS,
-    LAST_FRACTION,
-    LOSSLESS_MIN_SAVINGS,
-    MAX_ITEMS_AFTER_CRUSH,
-    MUST_KEEP_RE,
-    VARIANCE_THRESHOLD,
-)
-from .context_compressor import CCR_SENTINEL_KEY
 
 _GREP_RE = re.compile(r"^(?:\.{0,2}/)?[^\s:]+:\d+:", re.MULTILINE)
 

@@ -1,7 +1,6 @@
 """search_text / find_file 结果 LRU — 默认关闭，需 SEARCH_CACHE_TTL>0 启用。"""
 from __future__ import annotations
 
-import json
 import os
 import time
 from collections import OrderedDict

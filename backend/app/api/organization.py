@@ -28,7 +28,7 @@ async def list_users(
     query = (
         select(User)
         .options(selectinload(User.identity))
-        .where(User.is_active == True)
+        .where(User.is_active)
     )
 
     target_tenant_id = current_user.tenant_id

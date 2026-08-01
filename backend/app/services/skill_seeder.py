@@ -1039,7 +1039,7 @@ async def push_default_skills_to_existing_agents():
     async with async_session() as db:
         # Load all is_default skills with their files
         default_skills_r = await db.execute(
-            select(Skill).where(Skill.is_default == True).options(selectinload(Skill.files))
+            select(Skill).where(Skill.is_default.is_(True)).options(selectinload(Skill.files))
         )
         default_skills = default_skills_r.scalars().all()
         if not default_skills:

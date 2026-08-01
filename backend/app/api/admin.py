@@ -7,6 +7,7 @@ and control platform-level settings.
 import secrets
 import uuid
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -211,8 +212,6 @@ async def toggle_company(
 
 # ─── Platform Metrics Dashboard ─────────────────────────
 
-from typing import Any
-from fastapi import Query
 
 @router.get("/metrics/timeseries", response_model=list[dict[str, Any]])
 async def get_platform_timeseries(

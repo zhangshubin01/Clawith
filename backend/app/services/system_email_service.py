@@ -8,11 +8,7 @@ Supports both:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
-import smtplib
-import ssl
-import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,7 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, make_msgid
 
-from app.core.email import force_ipv4, send_smtp_email
+from app.core.email import send_smtp_email
 
 logger = logging.getLogger(__name__)
 

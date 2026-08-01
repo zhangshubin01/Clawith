@@ -16,7 +16,6 @@ from app.core.security import (
 )
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-auth_security = HTTPBearer()
 from app.dao import identity_dao, system_setting_dao, tenant_dao, user_dao
 from app.database import transaction
 from app.models.user import User
@@ -43,6 +42,8 @@ from app.schemas.schemas import (
     UserUpdate,
     VerifyEmailRequest,
 )
+
+auth_security = HTTPBearer()
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

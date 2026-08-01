@@ -142,7 +142,7 @@ class AndroidBuildBackend(BaseSandboxBackend):
         try:
             self.client.ping()
             return True
-        except Exception as e:
+        except Exception:
             logger.opt(exception=True).error("[AndroidBuild] health_check 失败：Docker daemon 不可用")
             return False
 

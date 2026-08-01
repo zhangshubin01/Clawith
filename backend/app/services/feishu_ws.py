@@ -1,10 +1,11 @@
 """Feishu WebSocket Long Connection Manager."""
 
 import asyncio
-import json
-import threading
 from typing import Any, Dict
 import uuid
+from app.database import async_session
+from app.models.channel_config import ChannelConfig
+from sqlalchemy import select
 
 from loguru import logger
 try:
@@ -75,9 +76,6 @@ def _make_no_proxy_connect(orig_connect):
 
     return _scoped_no_proxy
 
-from app.database import async_session
-from app.models.channel_config import ChannelConfig
-from sqlalchemy import select
 
 
 if not _HAS_LARK:
@@ -418,8 +416,8 @@ class FeishuWSManager:
         async with async_session() as db:
             result = await db.execute(
                 select(ChannelConfig).where(
-                    ChannelConfig.is_configured == True,
                     ChannelConfig.channel_type == "feishu",
+                    ChannelConfig.is_configured,
                 )
             )
             configs = result.scalars().all()

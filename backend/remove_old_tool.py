@@ -1,6 +1,5 @@
 import asyncio
 from sqlalchemy.future import select
-from sqlalchemy import delete
 from app.db.session import async_session_maker
 from app.models.tool import Tool
 

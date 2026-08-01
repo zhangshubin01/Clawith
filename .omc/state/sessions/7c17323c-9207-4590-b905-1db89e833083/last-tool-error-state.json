@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"which codebase-memory-mcp 2>/dev/null; ls /usr/local/bin/codebase-memory* 2>/dev/null; echo \\\"---\\\"; ls ~/.claude/tools/codebase-memory* 2>/dev/null\",\"description\":\"Check if CBM binary exi...",
-  "error": "Exit code 1\ncodebase-memory-mcp not found\n(eval):1: no matches found: /usr/local/bin/codebase-memory*\n---\n(eval):1: no matches found: /Users/shubinzhang/.claude/tools/codebase-memory*",
-  "timestamp": "2026-07-26T02:12:38.657Z",
-  "retry_count": 1
-}

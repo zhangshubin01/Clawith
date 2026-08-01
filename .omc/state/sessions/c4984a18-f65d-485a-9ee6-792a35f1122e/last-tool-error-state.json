@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"docker logs clawith-agent-backend-1 2>&1 | grep -c \\\"complete_llm_once\\\" && echo \\\"---\\\" && docker logs clawith-agent-backend-1 2>&1 | grep \\\"complete_llm_once\\\" | tail -5\",\"description\":\"...",
-  "error": "Exit code 1\n0",
-  "timestamp": "2026-07-23T09:59:21.905Z",
-  "retry_count": 1
-}

@@ -13,8 +13,6 @@ from loguru import logger
 
 from app.config import get_settings
 
-settings = get_settings()
-
 from app.core.security import get_current_user
 from app.database import get_db
 from app.models.agent import Agent, AgentPermission, AgentTemplate
@@ -24,6 +22,8 @@ from app.models.participant import Participant
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.services.access_relationships import ensure_access_granted_platform_relationships
+
+settings = get_settings()
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 

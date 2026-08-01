@@ -17,7 +17,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from loguru import logger
 
@@ -35,6 +35,9 @@ from app.plugins.clawith_acp.search_dedup import (
     search_cache_enabled,
     store_search_result,
 )
+
+if TYPE_CHECKING:
+    from .terminal_policy import TerminalPolicy
 
 # ── 进行中读请求合并: 对同一 (session, method, params) 的并行读请求只发一次 IDE 调用 ──
 _METHODS_FOR_COALESCE = METHODS_FOR_COALESCE
@@ -506,12 +509,18 @@ async def _build_find_references_params(
         "scope": args.get("scope", "project_files"),
         "pageSize": int(args.get("pageSize", 100)),
     }
-    if args.get("file"): params["file"] = args["file"]
-    if args.get("line"): params["line"] = int(args["line"])
-    if args.get("column"): params["column"] = int(args["column"])
-    if args.get("language"): params["language"] = args["language"]
-    if args.get("symbol"): params["symbol"] = args["symbol"]
-    if args.get("cursor"): params["cursor"] = args["cursor"]
+    if args.get("file"):
+        params["file"] = args["file"]
+    if args.get("line"):
+        params["line"] = int(args["line"])
+    if args.get("column"):
+        params["column"] = int(args["column"])
+    if args.get("language"):
+        params["language"] = args["language"]
+    if args.get("symbol"):
+        params["symbol"] = args["symbol"]
+    if args.get("cursor"):
+        params["cursor"] = args["cursor"]
     logger.debug(f"[ACP] find_references file={args.get('file')}")
     return params
 
@@ -521,11 +530,16 @@ async def _build_find_definition_params(
 ) -> dict | str:
     """构建 find_definition 参数 — 导航到符号声明。"""
     params: dict[str, Any] = {"sessionId": session_id}
-    if args.get("file"): params["file"] = args["file"]
-    if args.get("line"): params["line"] = int(args["line"])
-    if args.get("column"): params["column"] = int(args["column"])
-    if args.get("language"): params["language"] = args["language"]
-    if args.get("symbol"): params["symbol"] = args["symbol"]
+    if args.get("file"):
+        params["file"] = args["file"]
+    if args.get("line"):
+        params["line"] = int(args["line"])
+    if args.get("column"):
+        params["column"] = int(args["column"])
+    if args.get("language"):
+        params["language"] = args["language"]
+    if args.get("symbol"):
+        params["symbol"] = args["symbol"]
     logger.debug(f"[ACP] find_definition file={args.get('file')}")
     return params
 
@@ -535,13 +549,20 @@ async def _build_find_implementations_params(
 ) -> dict | str:
     """构建 find_implementations 参数 — 查找接口/抽象方法的所有实现。"""
     params: dict[str, Any] = {"sessionId": session_id}
-    if args.get("file"): params["file"] = args["file"]
-    if args.get("line"): params["line"] = int(args["line"])
-    if args.get("column"): params["column"] = int(args["column"])
-    if args.get("language"): params["language"] = args["language"]
-    if args.get("symbol"): params["symbol"] = args["symbol"]
-    if args.get("scope"): params["scope"] = args["scope"]
-    if args.get("cursor"): params["cursor"] = args["cursor"]
+    if args.get("file"):
+        params["file"] = args["file"]
+    if args.get("line"):
+        params["line"] = int(args["line"])
+    if args.get("column"):
+        params["column"] = int(args["column"])
+    if args.get("language"):
+        params["language"] = args["language"]
+    if args.get("symbol"):
+        params["symbol"] = args["symbol"]
+    if args.get("scope"):
+        params["scope"] = args["scope"]
+    if args.get("cursor"):
+        params["cursor"] = args["cursor"]
     params["pageSize"] = int(args.get("pageSize", 100))
     logger.debug(f"[ACP] find_implementations file={args.get('file')}")
     return params
@@ -552,11 +573,16 @@ async def _build_find_super_methods_params(
 ) -> dict | str:
     """构建 find_super_methods 参数 — 查找方法重写链。"""
     params: dict[str, Any] = {"sessionId": session_id}
-    if args.get("file"): params["file"] = args["file"]
-    if args.get("line"): params["line"] = int(args["line"])
-    if args.get("column"): params["column"] = int(args["column"])
-    if args.get("language"): params["language"] = args["language"]
-    if args.get("symbol"): params["symbol"] = args["symbol"]
+    if args.get("file"):
+        params["file"] = args["file"]
+    if args.get("line"):
+        params["line"] = int(args["line"])
+    if args.get("column"):
+        params["column"] = int(args["column"])
+    if args.get("language"):
+        params["language"] = args["language"]
+    if args.get("symbol"):
+        params["symbol"] = args["symbol"]
     has_position = all(params.get(key) is not None for key in ("file", "line", "column"))
     symbol = str(params.get("symbol") or "").strip()
     if symbol and "#" not in symbol:
@@ -579,14 +605,21 @@ async def _build_call_hierarchy_params(
 ) -> dict | str:
     """构建 call_hierarchy 参数 — 分析调用层次。"""
     params: dict[str, Any] = {"sessionId": session_id}
-    if args.get("file"): params["file"] = args["file"]
-    if args.get("line"): params["line"] = int(args["line"])
-    if args.get("column"): params["column"] = int(args["column"])
-    if args.get("language"): params["language"] = args["language"]
-    if args.get("symbol"): params["symbol"] = args["symbol"]
-    if args.get("direction"): params["direction"] = args["direction"]
+    if args.get("file"):
+        params["file"] = args["file"]
+    if args.get("line"):
+        params["line"] = int(args["line"])
+    if args.get("column"):
+        params["column"] = int(args["column"])
+    if args.get("language"):
+        params["language"] = args["language"]
+    if args.get("symbol"):
+        params["symbol"] = args["symbol"]
+    if args.get("direction"):
+        params["direction"] = args["direction"]
     params["depth"] = int(args.get("depth", 3))
-    if args.get("scope"): params["scope"] = args["scope"]
+    if args.get("scope"):
+        params["scope"] = args["scope"]
     logger.debug(f"[ACP] call_hierarchy file={args.get('file')} direction={args.get('direction')}")
     return params
 
@@ -596,11 +629,16 @@ async def _build_type_hierarchy_params(
 ) -> dict | str:
     """构建 type_hierarchy 参数 — 获取类型继承层次。"""
     params: dict[str, Any] = {"sessionId": session_id}
-    if args.get("className"): params["className"] = args["className"]
-    if args.get("file"): params["file"] = args["file"]
-    if args.get("line"): params["line"] = int(args["line"])
-    if args.get("column"): params["column"] = int(args["column"])
-    if args.get("scope"): params["scope"] = args["scope"]
+    if args.get("className"):
+        params["className"] = args["className"]
+    if args.get("file"):
+        params["file"] = args["file"]
+    if args.get("line"):
+        params["line"] = int(args["line"])
+    if args.get("column"):
+        params["column"] = int(args["column"])
+    if args.get("scope"):
+        params["scope"] = args["scope"]
     logger.debug(f"[ACP] type_hierarchy className={args.get('className')}")
     return params
 
@@ -617,9 +655,12 @@ async def _build_diagnostics_params(
         "maxBuildErrors": int(args.get("maxBuildErrors", 100)),
         "maxTestResults": int(args.get("maxTestResults", 100)),
     }
-    if args.get("file"): params["file"] = args["file"]
-    if args.get("startLine"): params["startLine"] = int(args["startLine"])
-    if args.get("endLine"): params["endLine"] = int(args["endLine"])
+    if args.get("file"):
+        params["file"] = args["file"]
+    if args.get("startLine"):
+        params["startLine"] = int(args["startLine"])
+    if args.get("endLine"):
+        params["endLine"] = int(args["endLine"])
     logger.debug(f"[ACP] diagnostics file={args.get('file')} severity={params['severity']}")
     return params
 
@@ -632,11 +673,16 @@ async def _build_refactor_rename_params(
     if not new_name:
         return "❌ refactor_rename: newName 不能为空"
     params: dict[str, Any] = {"sessionId": session_id, "newName": new_name}
-    if args.get("file"): params["file"] = args["file"]
-    if args.get("line"): params["line"] = int(args["line"])
-    if args.get("column"): params["column"] = int(args["column"])
-    if args.get("overrideStrategy"): params["overrideStrategy"] = args["overrideStrategy"]
-    if args.get("relatedRenamingStrategy"): params["relatedRenamingStrategy"] = args["relatedRenamingStrategy"]
+    if args.get("file"):
+        params["file"] = args["file"]
+    if args.get("line"):
+        params["line"] = int(args["line"])
+    if args.get("column"):
+        params["column"] = int(args["column"])
+    if args.get("overrideStrategy"):
+        params["overrideStrategy"] = args["overrideStrategy"]
+    if args.get("relatedRenamingStrategy"):
+        params["relatedRenamingStrategy"] = args["relatedRenamingStrategy"]
     logger.debug(f"[ACP] refactor_rename file={args.get('file')} newName={new_name}")
     return params
 
@@ -664,8 +710,10 @@ async def _build_reformat_code_params(
     if not f_path:
         return "❌ reformat_code: file 不能为空"
     params: dict[str, Any] = {"sessionId": session_id, "file": f_path}
-    if args.get("startLine"): params["startLine"] = int(args["startLine"])
-    if args.get("endLine"): params["endLine"] = int(args["endLine"])
+    if args.get("startLine"):
+        params["startLine"] = int(args["startLine"])
+    if args.get("endLine"):
+        params["endLine"] = int(args["endLine"])
     params["optimizeImports"] = args.get("optimizeImports", True)
     params["rearrangeCode"] = args.get("rearrangeCode", True)
     logger.debug(f"[ACP] reformat_code file={f_path}")
@@ -747,8 +795,10 @@ async def _build_open_file_params(
     if not f_path:
         return "❌ open_file: file 不能为空"
     params: dict[str, Any] = {"sessionId": session_id, "file": f_path}
-    if args.get("line"): params["line"] = int(args["line"])
-    if args.get("column"): params["column"] = int(args["column"])
+    if args.get("line"):
+        params["line"] = int(args["line"])
+    if args.get("column"):
+        params["column"] = int(args["column"])
     logger.debug(f"[ACP] open_file file={f_path}")
     return params
 
@@ -1754,14 +1804,17 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                     return "(未找到引用)"
                 lines = [f"**引用结果** ({result.get('totalCount', 0)} 条):"]
                 for u in usages[:50]:
-                    f = u.get("file", "?"); l = u.get("line", "?")
-                    t = u.get("type", "?"); ctx = (u.get("context") or "")[:80]
-                    lines.append(f"- `{f}:{l}` [{t}] {ctx}")
+                    f = u.get("file", "?")
+                    line_num = u.get("line", "?")
+                    t = u.get("type", "?")
+                    ctx = (u.get("context") or "")[:80]
+                    lines.append(f"- `{f}:{line_num}` [{t}] {ctx}")
                 return "\n".join(lines)
         if method == "fs/find_definition":
             if isinstance(result, dict):
                 err = result.get("error")
-                if err: return f"⚠️ {err}"
+                if err:
+                    return f"⚠️ {err}"
                 return (
                     f"**定义**: `{result.get('symbolName', '?')}` → "
                     f"`{result.get('file', '?')}:{result.get('line', '?')}:{result.get('column', '?')}`\n"
@@ -1770,7 +1823,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         if method == "fs/find_implementations":
             if isinstance(result, dict):
                 impls = result.get("implementations", [])
-                if not impls: return "(未找到实现)"
+                if not impls:
+                    return "(未找到实现)"
                 lines = [f"**实现列表** ({result.get('totalCount', 0)} 条):"]
                 for i in impls[:30]:
                     lines.append(
@@ -1781,7 +1835,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         if method == "fs/find_super_methods":
             if isinstance(result, dict):
                 err = result.get("error")
-                if err: return f"⚠️ {err}"
+                if err:
+                    return f"⚠️ {err}"
                 hierarchy = result.get("hierarchy", [])
                 if not hierarchy:
                     return f"**父方法**: `{result.get('method', {}).get('name', '?')}` (无继承链)"
@@ -1793,7 +1848,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         if method == "fs/call_hierarchy":
             if isinstance(result, dict):
                 err = result.get("error")
-                if err: return f"⚠️ {err}"
+                if err:
+                    return f"⚠️ {err}"
                 el = result.get("element", {})
                 calls = result.get("calls", [])
                 lines = [f"**调用层次**: `{el.get('name', '?')}`"]
@@ -1803,7 +1859,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         if method == "fs/type_hierarchy":
             if isinstance(result, dict):
                 err = result.get("error")
-                if err: return f"⚠️ {err}"
+                if err:
+                    return f"⚠️ {err}"
                 el = result.get("element", {})
                 supers = result.get("supertypes", [])
                 subs = result.get("subtypes", [])
@@ -1824,22 +1881,25 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
                     return "(无诊断问题)"
                 lines = [f"**诊断结果** ({len(problems)} 问题, {len(intentions)} 快速修复):"]
                 for p in problems[:30]:
-                    sev = p.get("severity", "?"); msg = p.get("message", "?")
-                    f = p.get("file", "?"); l = p.get("line", "?")
-                    lines.append(f"- [{sev}] `{f}:{l}` {msg}")
+                    sev = p.get("severity", "?")
+                    msg = p.get("message", "?")
+                    f = p.get("file", "?")
+                    line_num = p.get("line", "?")
+                    lines.append(f"- [{sev}] `{f}:{line_num}` {msg}")
                 if intentions:
-                    lines.append(f"\n**快速修复建议**:")
+                    lines.append("\n**快速修复建议**:")
                     for i in intentions[:20]:
                         lines.append(f"- {i.get('description', '?')}")
                 if build_errors:
-                    lines.append(f"\n**编译错误**:")
+                    lines.append("\n**编译错误**:")
                     for be in build_errors[:10]:
                         lines.append(f"- {be.get('message', '?')}")
                 return "\n".join(lines)
         if method == "fs/file_structure":
             if isinstance(result, dict):
                 err = result.get("error")
-                if err: return f"⚠️ {err}"
+                if err:
+                    return f"⚠️ {err}"
                 return (
                     f"**文件结构** ({result.get('language', '')}):\n"
                     f"```\n{result.get('structure', '')}\n```"
@@ -1847,7 +1907,8 @@ async def _try_acp_execute(tool_name: str, args: dict, handler) -> str | None:
         if method == "fs/get_documentation":
             if isinstance(result, dict):
                 err = result.get("error")
-                if err: return f"⚠️ {err}"
+                if err:
+                    return f"⚠️ {err}"
                 doc = result.get("documentation", "")
                 return f"**API 文档**:\n```\n{doc}\n```" if doc else "(无文档)"
         if method == "git/status":

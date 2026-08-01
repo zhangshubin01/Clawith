@@ -11,11 +11,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, delete, func, or_, select, update
+from sqlalchemy import func, or_, select, update
 
 import httpx
 from loguru import logger
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.identity import IdentityProvider
@@ -45,7 +44,7 @@ except ImportError:  # pragma: no cover - lightweight fallback for minimal test 
         return [[ascii_value]]
 
 from app.config import get_settings
-from app.core.security import decrypt_data, hash_password
+from app.core.security import decrypt_data
 from app.services.auth_provider import GoogleWorkspaceAuthProvider
 from app.services.google_workspace_oauth import GOOGLE_HTTP_PROXY
 from jose import jwt
@@ -353,7 +352,6 @@ class BaseOrgSyncAdapter(ABC):
 
     async def _update_member_counts(self, db: AsyncSession, provider_id: uuid.UUID):
         """Update member_count for all departments to include all their recursive sub-department members."""
-        from sqlalchemy import update, select, func
 
         # 1. Update all departments to show their DIRECT member counts
         direct_subquery = (
@@ -752,7 +750,8 @@ class BaseOrgSyncAdapter(ABC):
                 select(User).join(User.identity).where(Identity.email == email)
             )
             u = result.scalars().first()
-            if u: return u
+            if u:
+                return u
 
         # 2. Try by mobile matching
         mobile = _normalize_contact(user.mobile)
@@ -761,7 +760,8 @@ class BaseOrgSyncAdapter(ABC):
                 select(User).join(User.identity).where(Identity.phone == mobile)
             )
             u = result.scalars().first()
-            if u: return u
+            if u:
+                return u
 
         return None
 
@@ -851,7 +851,8 @@ class FeishuOrgSyncAdapter(BaseOrgSyncAdapter):
                     items = res_data.get("items", []) or []
                     for item in items:
                         dept_id = item.get("open_department_id")
-                        if not dept_id: continue
+                        if not dept_id:
+                            continue
                         
                         # Since we fetched using parent_id, we intrinsically know the parent!
                         parent_external = parent_id if parent_id and parent_id != "0" else "0"
@@ -1112,7 +1113,6 @@ class DingTalkOrgSyncAdapter(BaseOrgSyncAdapter):
         users: list[ExternalUser] = []
         cursor = 0
         dept_id = int(department_external_id)
-        dept_path = self._dept_path_map.get(department_external_id, "")
 
         async with httpx.AsyncClient() as client:
             while True:

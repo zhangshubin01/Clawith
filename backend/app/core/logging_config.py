@@ -125,4 +125,4 @@ def intercept_standard_logging():
 
 
 # Configure on import
-logger = configure_logging()
+configure_logging()

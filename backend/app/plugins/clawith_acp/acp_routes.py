@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 # LLM 工具名 → ACP WebSocket method（bridge 执行用）
 ACP_METHOD_MAP: dict[str, str] = {
@@ -40,7 +39,6 @@ ACP_METHOD_MAP: dict[str, str] = {
     "acp_git_diff": "git/diff",
     "acp_git_stage": "git/stage",
     "acp_git_commit": "git/commit",
-    "acp_ide_screenshot": "acp_ide_screenshot",
     "acp_ide_screenshot": "acp_ide_screenshot",
 }
 

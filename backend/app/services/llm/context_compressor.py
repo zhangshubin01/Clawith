@@ -19,7 +19,6 @@ import time
 import hashlib
 import threading
 from collections import OrderedDict
-from typing import TYPE_CHECKING
 
 from loguru import logger
 
@@ -31,10 +30,6 @@ except ImportError:
     HAS_TIKTOKEN = False
     tiktoken = None  # type: ignore[assignment]
 
-from .client import LLMMessage
-
-if TYPE_CHECKING:
-    from .client import LLMModel
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
