@@ -13,15 +13,15 @@ from loguru import logger
 from pydantic import RootModel
 
 
-class GenericExtractSchema(RootModel[Any]):
-    pass
-
-
 from agentbay import AgentBay, CreateSessionParams
 from app.core.logging_config import _disable_agentbay_logger_override, configure_logging
 
 _disable_agentbay_logger_override()
 configure_logging()
+class GenericExtractSchema(RootModel[Any]):
+    pass
+
+
 
 
 def _sdk_result_mapping(result: object) -> dict[str, Any]:
@@ -746,7 +746,7 @@ async def get_agentbay_api_key_for_agent(agent_id: uuid.UUID, db=None) -> Option
             select(ChannelConfig).where(
                 ChannelConfig.agent_id == agent_id,
                 ChannelConfig.channel_type == "agentbay",
-                ChannelConfig.is_configured == True,
+                ChannelConfig.is_configured.is_(True),
             )
         )
         config = result.scalar_one_or_none()
@@ -772,7 +772,7 @@ async def get_agentbay_api_key_for_agent(agent_id: uuid.UUID, db=None) -> Option
         tool_result = await session.execute(
             select(Tool).where(
                 Tool.name == "agentbay_browser_navigate",
-                Tool.enabled == True,
+                Tool.enabled.is_(True),
             ).limit(1)
         )
         tool = tool_result.scalar_one_or_none()
@@ -784,7 +784,7 @@ async def get_agentbay_api_key_for_agent(agent_id: uuid.UUID, db=None) -> Option
         all_result = await session.execute(
             select(Tool).where(
                 Tool.category == "agentbay",
-                Tool.enabled == True,
+                Tool.enabled.is_(True),
             ).order_by(Tool.name)
         )
         candidate_tools.extend(

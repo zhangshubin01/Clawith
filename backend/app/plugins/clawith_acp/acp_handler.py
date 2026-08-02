@@ -45,6 +45,8 @@ from app.plugins.clawith_acp.turn_budget import (
     set_turn_budget,
 )
 
+from app.plugins.clawith_acp.acp_routes import ACP_KIND_MAP, ACP_TOOL_CN_NAME as _TOOL_CN_NAME
+
 ACP_PROTOCOL_VERSION = 1
 # 向后兼容：未设 ACP_COMPUTE_BUDGET_SECONDS 时 TurnBudget.from_env 读取此值
 LLM_TIMEOUT_SECONDS = int(os.getenv("ACP_LLM_TIMEOUT_SECONDS", "600"))
@@ -106,8 +108,6 @@ _SPLIT_NL_RE = re.compile(r"(?<=\n)")
 
 # Install ACP tool hooks (idempotent)
 install_acp_tool_hooks()
-# 工具名 → ACP ToolKind 映射 + 中文显示名，统一在 acp_routes.py 管理
-from app.plugins.clawith_acp.acp_routes import ACP_KIND_MAP, ACP_TOOL_CN_NAME as _TOOL_CN_NAME
 
 _kind_map = ACP_KIND_MAP
 
@@ -324,7 +324,7 @@ class AcpHandler:
 
                     if msg_id is not None:
                         await self._send_result(msg_id, result)
-                except Exception as e:
+                except Exception:
                     logger.error(f"[ACP] {method} 失败", exc_info=True)
                     await self._send_error(msg_id, -32603, "Internal error")
         finally:
@@ -596,7 +596,6 @@ class AcpHandler:
         async def push_chunk(chunk: str):
             # finish 正文常一次性较大：按行拆分推送，避免 IDE 长时间无更新后整段弹出
             if len(chunk) > 120 and "\n" in chunk:
-                import re
                 for part in _SPLIT_NL_RE.split(chunk):
                     if not part:
                         continue
@@ -706,7 +705,6 @@ class AcpHandler:
                 agent_row = None
                 if self.agent_id:
                     from app.models.agent import Agent as _AgentModel
-                    from app.models.llm import LLMModel as _LLMModel
                     from sqlalchemy.orm import joinedload
                     from app.database import async_session as _async_session
                     _log.info(f"[ACP-MODEL] 开始加载模型: agent_id={self.agent_id}")

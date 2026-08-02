@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"git push -u origin zhangshubin01/gfi-android-f-shubin-0725 2>&1\",\"timeout\":60000,\"description\":\"Push to remote\"}",
+  "error": "Exit code 143\nCommand timed out after 1m 0s",
+  "timestamp": "2026-08-01T16:10:15.198Z",
+  "retry_count": 1
+}

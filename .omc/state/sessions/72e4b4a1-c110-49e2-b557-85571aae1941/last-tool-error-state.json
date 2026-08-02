@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"claude --version\",\"description\":\"Verify Claude Code works after reinstall\"}",
-  "error": "Exit code 1\nError: claude native binary not installed.\n\nEither postinstall did not run (--ignore-scripts, some pnpm configs)\nor the platform-native optional dependency was not downloaded\n(--omit=optional).\n\nRun the postinstall manually (adjust path for local vs global install):\n  node node_modules/@anthropic-ai/claude-code/install.cjs\n\nOr reinstall without --ignore-scripts / --omit=optional.",
-  "timestamp": "2026-07-22T15:10:12.319Z",
-  "retry_count": 1
-}

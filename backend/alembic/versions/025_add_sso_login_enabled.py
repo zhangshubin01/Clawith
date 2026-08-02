@@ -5,7 +5,6 @@ Revises: user_refactor_v1
 Create Date: 2026-03-29
 """
 from alembic import op
-import sqlalchemy as sa
 
 revision = "add_sso_login_enabled"
 down_revision = "user_refactor_v1"

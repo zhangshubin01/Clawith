@@ -5,7 +5,6 @@ Revises: add_agent_focus_items
 Create Date: 2026-05-12
 """
 from alembic import op
-import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = 'perf_indexes'

@@ -9,11 +9,8 @@
 6. frozen=True dataclass 实例不可修改
 """
 
-import copy
 import dataclasses
-import re
 import sys
-import traceback
 
 sys.path.insert(0, "/app")
 

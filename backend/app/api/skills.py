@@ -18,7 +18,6 @@ from app.database import async_session
 from app.models.skill import Skill, SkillFile
 from app.core.security import get_current_admin, get_current_user, require_role
 from app.models.user import User
-from loguru import logger
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 

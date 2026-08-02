@@ -284,7 +284,7 @@ async def get_atlassian_api_key_for_agent(agent_id: uuid.UUID, db=None) -> str |
             select(ChannelConfig).where(
                 ChannelConfig.agent_id == agent_id,
                 ChannelConfig.channel_type == "atlassian",
-                ChannelConfig.is_configured == True,
+                ChannelConfig.is_configured,
             )
         )
         config = result.scalar_one_or_none()

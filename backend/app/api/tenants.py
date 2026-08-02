@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func as sqla_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
 from app.core.security import get_current_user, require_role, get_authenticated_user
 from app.database import get_db
 from app.models.agent import Agent
@@ -265,7 +264,7 @@ async def join_company(
     ic_result = await db.execute(
         select(InvitationCode).where(
             InvitationCode.code == data.invitation_code,
-            InvitationCode.is_active == True,
+            InvitationCode.is_active,
             InvitationCode.tenant_id.is_not(None),
         )
     )

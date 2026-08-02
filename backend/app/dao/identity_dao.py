@@ -1,8 +1,6 @@
 import re
-import uuid
-from typing import Any
-
 from sqlalchemy import select
+
 
 from app.dao.base import BaseDAO
 from app.models.user import Identity

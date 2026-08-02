@@ -73,7 +73,7 @@ async def list_users(
         count_result = await db.execute(
             select(func.count()).select_from(Agent).where(
                 Agent.creator_id == u.id,
-                Agent.is_expired == False,
+                not Agent.is_expired,
             )
         )
         agents_count = count_result.scalar() or 0
@@ -139,7 +139,7 @@ async def update_user_quota(
     count_result = await db.execute(
         select(func.count()).select_from(Agent).where(
             Agent.creator_id == user.id,
-            Agent.is_expired == False,
+            not Agent.is_expired,
         )
     )
     agents_count = count_result.scalar() or 0

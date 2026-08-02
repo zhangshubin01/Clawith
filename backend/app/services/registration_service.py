@@ -10,7 +10,6 @@ import re
 import uuid
 from typing import Any
 
-from app.config import get_settings
 from app.core.security import hash_password_async
 from app.dao import (
     identity_dao,
@@ -275,7 +274,6 @@ class RegistrationService:
             if not access_token:
                 return None, False, "Failed to get access token from provider"
 
-            from app.services.auth_provider import ExternalUserInfo
             user_info_obj = await auth_provider.get_user_info(access_token)
 
             user_info = {
@@ -336,7 +334,7 @@ class RegistrationService:
 
         except Exception:
             logger.exception("SSO registration failed for %s provider", provider_type)
-            return None, False, f"SSO registration failed"
+            return None, False, "SSO registration failed"
 
     # ── Tenant for registration ──────────────────────────────────────────────
 

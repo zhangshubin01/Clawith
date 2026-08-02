@@ -4,8 +4,6 @@ Revision ID: add_llm_tenant_id
 Revises: 20260313_column_modify
 """
 from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID
 
 revision = "add_llm_tenant_id"
 down_revision = "20260313_column_modify"

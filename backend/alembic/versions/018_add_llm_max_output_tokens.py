@@ -6,7 +6,6 @@ Create Date: 2026-03-22 23:15:00.000000
 
 """
 from alembic import op
-import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = 'add_llm_max_output_tokens'

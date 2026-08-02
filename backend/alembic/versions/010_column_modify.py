@@ -4,8 +4,6 @@ Revision ID: 20260313_column_modify
 Revises: add_microsoft_teams_support
 """
 from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID
 
 revision = "20260313_column_modify"
 down_revision = "add_microsoft_teams_support"

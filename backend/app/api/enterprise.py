@@ -14,7 +14,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.security import get_current_admin, get_current_user, require_role, encrypt_data
+from app.core.security import get_current_admin, get_current_user, encrypt_data
+from app.models.tenant import Tenant
+from app.models.system_settings import SystemSetting
+from app.models.invitation_code import InvitationCode
 from app.database import async_session, get_db
 from app.models.org import OrgDepartment, OrgMember
 from app.models.identity import IdentityProvider
@@ -706,7 +709,7 @@ async def get_enterprise_stats(
 
     # Base queries
     agent_q = select(func.count(Agent.id))
-    user_q = select(func.count(User.id)).where(User.is_active == True)
+    user_q = select(func.count(User.id)).where(User.is_active)
     approval_q = select(func.count(ApprovalRequest.id))
 
     if tid:
@@ -736,7 +739,7 @@ async def get_enterprise_stats(
 
 # ─── Tenant Quota Settings ──────────────────────────────
 
-from app.models.tenant import Tenant
+
 
 
 class TenantQuotaUpdate(BaseModel):
@@ -926,7 +929,6 @@ async def update_email_templates_endpoint(
 
 # ─── System Settings ───────────────────────────────────
 
-from app.models.system_settings import SystemSetting
 
 
 class SettingUpdate(BaseModel):
@@ -1126,8 +1128,8 @@ async def _sync_tenant_sso_state(db: AsyncSession, tenant_id: uuid.UUID):
     count_result = await db.execute(
         select(func.count(IdentityProvider.id)).where(
             IdentityProvider.tenant_id == tenant_id,
-            IdentityProvider.sso_login_enabled == True,
-            IdentityProvider.is_active == True,
+            IdentityProvider.sso_login_enabled,
+            IdentityProvider.is_active,
         )
     )
     active_sso_count = count_result.scalar() or 0
@@ -1630,7 +1632,6 @@ async def delete_identity_provider(
 
 # ─── Org Structure ──────────────────────────────────────
 
-from app.models.org import OrgDepartment, OrgMember
 
 
 @router.get("/org/departments")
@@ -1930,7 +1931,6 @@ async def wecom_callback_verify_universal(
 
 # ─── Invitation Codes ───────────────────────────────────
 
-from app.models.invitation_code import InvitationCode
 
 
 class InvitationCodeCreate(BaseModel):

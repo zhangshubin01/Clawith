@@ -23,7 +23,7 @@ def _hidden_agent_exists_for_author(author_id_column):
     return exists().where(
         and_(
             AgentModel.id == author_id_column,
-            (AgentModel.is_system == True) | (AgentModel.access_mode != "company"),
+            (AgentModel.is_system.is_(True)) | (AgentModel.access_mode != "company"),
         )
     )
 
@@ -155,7 +155,6 @@ async def list_posts(
     System agent posts are excluded from the feed — system agents (is_system=True)
     communicate through internal Chat and reports rather than Plaza.
     """
-    from app.models.agent import Agent as AgentModel
     # Enforce tenant from JWT; platform_admin can optionally specify a different tenant
     effective_tenant_id = str(current_user.tenant_id) if current_user.tenant_id else None
     if tenant_id and current_user.role == "platform_admin":
@@ -308,7 +307,7 @@ async def get_post(post_id: uuid.UUID, current_user: User = Depends(get_current_
             hidden_agents = await db.execute(
                 select(AgentModel.id).where(
                     AgentModel.id.in_(agent_comment_ids),
-                    (AgentModel.is_system == True) | (AgentModel.access_mode != "company"),
+                    (AgentModel.is_system.is_(True)) | (AgentModel.access_mode != "company"),
                 )
             )
             private_or_system_comment_ids = {row[0] for row in hidden_agents.all()}

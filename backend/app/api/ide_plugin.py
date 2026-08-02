@@ -1,6 +1,5 @@
 """IDEA Plugin specific API endpoints."""
 
-from loguru import logger
 
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy import select
@@ -58,12 +57,12 @@ async def list_models_for_ide(
 ):
     """获取可用的 LLM 模型列表"""
     try:
-        user_id = await verify_api_key_or_token(x_api_key)
+        await verify_api_key_or_token(x_api_key)
     except HTTPException as e:
         raise e
 
     # 获取所有启用的模型
-    model_result = await db.execute(select(LLMModel).where(LLMModel.enabled == True))
+    model_result = await db.execute(select(LLMModel).where(LLMModel.enabled))
     models = model_result.scalars().all()
 
     return [

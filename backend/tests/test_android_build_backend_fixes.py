@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
 
 import docker.errors
 import pytest
@@ -24,9 +23,7 @@ from app.services.sandbox.base import ExecutionResult
 from app.services.sandbox.config import SandboxConfig
 from app.services.sandbox.local.android_build_backend import (
     AndroidBuildBackend,
-    _detect_host_agent_data_root,
 )
-from app.services.sandbox.docker_client import get_docker_client
 
 # ─────────────────────────────────────────────────────────
 # 通用 Mock 工厂
@@ -240,7 +237,7 @@ class TestDevShmSize:
         """tmpfs 配置中 /dev/shm 的 size 必须是 1g。"""
         # 触发 execute 走 mock 容器路径
         # 先让 execute 能通过预检
-        result = asyncio.run(backend.execute(
+        asyncio.run(backend.execute(
             code="", language="java",
             timeout=30, work_dir="/workspace",
             project_path="/workspace/app",
@@ -477,7 +474,7 @@ class TestLogLevelCorrection:
         """路径不在 /data/agents 下 → logger.info（不是 warning）。"""
         # _resolve_host_path 在 _host_agent_data_root 非空时比较路径前缀
         # 传入一个不在 /data/agents 下的容器路径
-        result = backend._resolve_host_path("/tmp/custom/path")
+        backend._resolve_host_path("/tmp/custom/path")
 
         # 此时应有一条 logger.info 消息（原为 logger.warning）
         info_msgs = [m for m in logger_spy.messages if m[0] == "info"]
@@ -597,12 +594,12 @@ class TestTimeoutErrorIsolation:
 
         if isinstance(result, Exception):
             pytest.fail(
-                f"Fix 4 未应用：remove 异常传播到了外层。\n"
-                f"预期：exit_code=124 的超时结果\n"
+                "Fix 4 未应用：remove 异常传播到了外层。\n"
+                "预期：exit_code=124 的超时结果\n"
                 f"实际异常：{type(result).__name__}: {result}"
             )
 
-        assert result.exit_code == 124, f"超时应返回 exit_code=124"
+        assert result.exit_code == 124, "超时应返回 exit_code=124"
         assert "编译超时" in (result.error or "")
 
 

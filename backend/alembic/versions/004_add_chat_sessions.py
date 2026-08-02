@@ -1,7 +1,5 @@
 """Add chat_sessions table and update existing chat_messages conversation_ids."""
 
-import uuid
-import sqlalchemy as sa
 from alembic import op
 
 revision = "add_chat_sessions"
