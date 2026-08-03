@@ -77,13 +77,19 @@ class ConnectionManager:
     """Manage WebSocket connections per agent."""
 
     def __init__(self):
-        # agent_id_str -> list of (WebSocket, session_id_str | None, user_id_str | None)
-        self.active_connections: dict[str, list[tuple]] = {}
+        # agent_id_str -> {WebSocket: {"session_id": ..., "user_id": ..., "handler": ...}}
+        self.active_connections: dict[str, dict] = {}
+        self._lock = asyncio.Lock()
 
     async def connect(self, agent_id: str, websocket: WebSocket, session_id: str = None, user_id: str | None = None):
-        if agent_id not in self.active_connections:
-            self.active_connections[agent_id] = []
-        self.active_connections[agent_id].append((websocket, session_id, user_id))
+        async with self._lock:
+            if agent_id not in self.active_connections:
+                self.active_connections[agent_id] = {}
+            self.active_connections[agent_id][websocket] = {
+                "session_id": session_id,
+                "user_id": user_id,
+                "handler": None,
+            }
         await realtime_router.register_connection(
             agent_id=agent_id,
             websocket=websocket,
@@ -92,14 +98,56 @@ class ConnectionManager:
         )
 
     async def disconnect(self, agent_id: str, websocket: WebSocket):
-        if agent_id in self.active_connections:
-            self.active_connections[agent_id] = [
-                (ws, sid, uid) for ws, sid, uid in self.active_connections[agent_id] if ws != websocket
-            ]
+        async with self._lock:
+            if agent_id in self.active_connections:
+                self.active_connections[agent_id].pop(websocket, None)
         await realtime_router.unregister_connection(agent_id=agent_id, websocket=websocket)
 
+    def set_handler(self, agent_id: str, websocket: WebSocket, handler):
+        """Associate a WebSocketChatHandler with a connection for MCP proxy use."""
+        agent_conns = self.active_connections.get(agent_id, {})
+        conn = agent_conns.get(websocket)
+        if conn:
+            conn["handler"] = handler
+
+    def find_mcp_proxy_handler(self, agent_id: str, project_path: str = ""):
+        """Find an IDE plugin connection capable of handling MCP tool proxy.
+
+        Looks up the in-memory IDE tool registry first, then falls back to
+        scanning active WebSocket connections.
+        """
+        from app.services.ide_tool_registry import find_handler as ide_find_handler
+        handler = ide_find_handler(agent_id)
+        if handler is not None:
+            return handler
+
+        # Fallback: scan active connections for any MCP-enabled handler
+        candidates: list[tuple[str, object]] = []
+        for conn in self.active_connections.get(agent_id, {}).values():
+            handler = conn.get("handler")
+            if handler is None:
+                continue
+            if not getattr(handler, '_mcp_proxy_enabled', False):
+                continue
+            conn_path = getattr(handler, '_client_meta', {}).get("project_path", "")
+            candidates.append((conn_path, handler))
+
+        if not candidates:
+            return None
+
+        if project_path:
+            for conn_path, handler in candidates:
+                if conn_path == project_path:
+                    return handler
+
+        return candidates[0][1]
+
     def _local_connections(self, agent_id: str) -> list[tuple[WebSocket, str | None, str | None]]:
-        return self.active_connections.get(agent_id, [])
+        agent_conns = self.active_connections.get(agent_id, {})
+        return [
+            (ws, info["session_id"], info["user_id"])
+            for ws, info in agent_conns.items()
+        ]
 
     async def deliver_pubsub_message(
         self,
@@ -111,7 +159,9 @@ class ConnectionManager:
     ) -> None:
         if agent_id not in self.active_connections:
             return
-        for ws, sid, uid in list(self.active_connections[agent_id]):
+        for ws, info in list(self.active_connections[agent_id].items()):
+            sid = info.get("session_id")
+            uid = info.get("user_id")
             if session_id is not None and sid != session_id:
                 continue
             if user_id is not None and uid != user_id:
@@ -272,6 +322,14 @@ class WebSocketChatHandler:
         self.conversation: list[dict] = []
         self.current_user_text: str = ""
 
+        # MCP tool proxy
+        self._mcp_pending_calls: dict[str, asyncio.Future] = {}
+        self._mcp_stash: asyncio.Queue = asyncio.Queue()
+        self._client_type: str = "web"
+        self._client_meta: dict = {}
+        self._mcp_proxy_enabled: bool = False
+        self._source_channel: str = "web"  # "web" | "acp" — from IDE plugin
+
     async def run(self):
         """Main entry point for handling the lifecycle of the WebSocket connection."""
         set_trace_id(uuid.uuid4().hex[:12])
@@ -286,9 +344,11 @@ class WebSocketChatHandler:
 
         except WebSocketDisconnect:
             logger.info(f"[WS] Client disconnected: {getattr(self.user, 'id', 'unknown')}")
+            await self._mcp_cleanup()
             await manager.disconnect(str(self.agent_id), self.websocket)
         except Exception as e:
             logger.exception(f"[WS] Unexpected error: {e}")
+            await self._mcp_cleanup()
             await manager.disconnect(str(self.agent_id), self.websocket)
 
     async def setup(self) -> bool:
@@ -380,6 +440,7 @@ class WebSocketChatHandler:
         # Connect connection manager
         agent_id_str = str(self.agent_id)
         await manager.connect(agent_id_str, self.websocket, self.conv_id, str(user_id))
+        manager.set_handler(agent_id_str, self.websocket, self)
         logger.info(f"[WS] Ready! Agent={self.agent_name}")
 
         # Send session_id to frontend
@@ -431,7 +492,7 @@ class WebSocketChatHandler:
                     ChatSession.user_id == user_id,
                     ChatSession.session_type == "direct",
                     ChatSession.group_id.is_(None),
-                    ChatSession.source_channel == "web",
+                    ChatSession.source_channel == self._source_channel,
                     ChatSession.is_group.is_(False),
                     ChatSession.deleted_at.is_(None),
                 )
@@ -444,7 +505,7 @@ class WebSocketChatHandler:
                 or existing.user_id != user_id
                 or existing.session_type != "direct"
                 or existing.group_id is not None
-                or existing.source_channel != "web"
+                or existing.source_channel != self._source_channel
                 or existing.is_group
                 or existing.deleted_at is not None
             ):
@@ -466,7 +527,7 @@ class WebSocketChatHandler:
                     ChatSession.tenant_id == self.agent.tenant_id,
                     ChatSession.agent_id == self.agent_id,
                     ChatSession.user_id == user_id,
-                    ChatSession.source_channel == "web",
+                    ChatSession.source_channel == self._source_channel,
                     ChatSession.session_type == "direct",
                     ChatSession.group_id.is_(None),
                     ChatSession.is_group.is_(False),
@@ -479,7 +540,9 @@ class WebSocketChatHandler:
         latest = result.scalar_one_or_none()
         if latest:
             return str(latest.id)
-        new_session = await ensure_primary_platform_session(db, self.agent_id, user_id)
+        new_session = await ensure_primary_platform_session(
+            db, self.agent_id, user_id, source_channel=self._source_channel,
+        )
         await db.commit()
         await db.refresh(new_session)
         logger.info(f"[WS] Selected primary session {new_session.id}")
@@ -514,7 +577,13 @@ class WebSocketChatHandler:
             if pending_runs:
                 accepted = pending_runs.popleft()
             else:
-                data = await self.websocket.receive_json()
+                # ── MCP proxy: prioritize stash queue over raw WebSocket reads ──
+                try:
+                    data = self._mcp_stash.get_nowait()
+                except asyncio.QueueEmpty:
+                    data = await self.websocket.receive_json()
+                # ── end stash queue ──
+
                 if data.get("type") == "abort":
                     if self.agent_type == "openclaw":
                         continue
@@ -534,6 +603,36 @@ class WebSocketChatHandler:
                             {"role": "assistant", "content": outcome.content}
                         )
                     continue
+
+                # MCP tool result: IDE plugin returns tool execution result
+                if data.get("type") == "mcp_tool_result":
+                    call_id = data.get("call_id", "")
+                    future = self._mcp_pending_calls.pop(call_id, None)
+                    if future and not future.done():
+                        future.set_result({
+                            "output": data.get("output", ""),
+                            "is_error": data.get("is_error", False),
+                        })
+                    continue
+
+                # MCP register: IDE plugin declares local IDE tools
+                if data.get("type") == "mcp_register":
+                    asyncio.create_task(self._register_local_mcp_tools(
+                        data.get("url", ""),
+                        data.get("project_path", ""),
+                        data.get("tools", []),
+                    ))
+                    continue
+
+                # Client type identification: IDE plugin vs web frontend
+                if data.get("type") == "client_info":
+                    self._client_type = data.get("client_type", "web")
+                    self._client_meta = data.get("meta", {})
+                    sc = (data.get("source_channel") or "").strip()
+                    if sc:
+                        self._source_channel = sc
+                    continue
+
                 accepted = await self._accept_client_message(data)
                 if accepted is None:
                     continue
@@ -559,6 +658,143 @@ class WebSocketChatHandler:
                         accepted.runtime.onboarding_target_phase
                     )
             continue
+
+    # ── MCP WebSocket Proxy Methods ──────────────────────────────────────
+
+    async def send_mcp_tool_call(
+        self, tool_name: str, arguments: dict, timeout: float = 30.0
+    ) -> dict:
+        """Send MCP tool call request to IDE plugin via WebSocket.
+
+        Starts a temporary reader task that reads WebSocket responses.
+        Non-MCP messages are stashed to _mcp_stash queue for message_loop
+        to consume later.
+
+        Returns: {"output": str, "is_error": bool}
+        Raises: asyncio.TimeoutError, ConnectionError
+        """
+        call_id = uuid.uuid4().hex[:12]
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._mcp_pending_calls[call_id] = future
+
+        # Temporary reader: only consume mcp_tool_result, stash everything else
+        async def _mcp_result_reader():
+            while not future.done():
+                try:
+                    raw = await asyncio.wait_for(
+                        self.websocket.receive_json(), timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                except Exception:
+                    if not future.done():
+                        future.set_exception(
+                            ConnectionError("WebSocket read failed during MCP tool call")
+                        )
+                    return
+
+                msg_type = raw.get("type", "")
+                if msg_type == "mcp_tool_result":
+                    cid = raw.get("call_id", "")
+                    f = self._mcp_pending_calls.pop(cid, None)
+                    if f and not f.done():
+                        f.set_result({
+                            "output": raw.get("output", ""),
+                            "is_error": raw.get("is_error", False),
+                        })
+                    if cid == call_id:
+                        return  # Got our target result, exit
+                else:
+                    # Non-MCP message → stash for message_loop
+                    await self._mcp_stash.put(raw)
+
+        reader_task = asyncio.create_task(_mcp_result_reader())
+
+        try:
+            await self.websocket.send_json({
+                "type": "mcp_tool_call",
+                "call_id": call_id,
+                "name": tool_name,
+                "arguments": arguments,
+            })
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            self._mcp_pending_calls.pop(call_id, None)
+            raise
+        except Exception:
+            self._mcp_pending_calls.pop(call_id, None)
+            raise
+        finally:
+            reader_task.cancel()
+
+    async def _register_local_mcp_tools(
+        self, url: str, project_path: str, tools: list[dict]
+    ):
+        """Register IDE plugin's local MCP tools into the in-memory IDE tool registry.
+
+        Tools are connection-scoped — they disappear when the WebSocket disconnects.
+        No DB writes; the WebSocket message protocol is unchanged.
+        """
+        agent_id = self.agent_id
+        if not agent_id:
+            return
+
+        self._client_meta["project_path"] = project_path
+
+        from app.services.ide_tool_registry import register as ide_register
+
+        agent_id_str = str(agent_id)
+
+        if not tools:
+            self._mcp_proxy_enabled = False
+            ide_register(agent_id_str, [], None, project_path)
+            return
+
+        self._mcp_proxy_enabled = True
+
+        # Build OpenAI function-calling format tool schemas for LLM visibility.
+        # IDE tools use namespaced names like "fs/read_text_file" — the '/' is
+        # replaced with '_' by get_agent_tools_for_llm (LLM-safe name mapping).
+        tool_schemas = []
+        for tool_def in tools:
+            name = tool_def["name"]
+            tool_schemas.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool_def.get("description", ""),
+                    "parameters": tool_def.get("inputSchema") or {"type": "object", "properties": {}},
+                },
+            })
+
+        ide_register(agent_id_str, tool_schemas, self, project_path)
+        logger.info(
+            "[MCP] Registered %d IDE tools in memory for agent=%s", len(tools), agent_id_str
+        )
+
+    async def _mcp_cleanup(self):
+        """Clean up MCP proxy state: cancel pending calls, unregister tools."""
+        # Cancel all pending MCP tool calls
+        for call_id, future in self._mcp_pending_calls.items():
+            if not future.done():
+                future.cancel()
+        self._mcp_pending_calls.clear()
+
+        # Drain unprocessed stash messages
+        while not self._mcp_stash.empty():
+            try:
+                self._mcp_stash.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        # Unregister IDE tools from in-memory registry
+        if self._mcp_proxy_enabled and self.agent_id:
+            try:
+                from app.services.ide_tool_registry import unregister as ide_unregister
+                ide_unregister(str(self.agent_id))
+            except Exception:
+                logger.exception("[MCP] Failed to unregister IDE tools on cleanup")
 
     @staticmethod
     def _event_cursor(value: object) -> RuntimeEventCursor | None:
@@ -976,7 +1212,7 @@ class WebSocketChatHandler:
                     or session.user_id != user.id
                     or session.session_type != "direct"
                     or session.group_id is not None
-                    or session.source_channel != "web"
+                    or session.source_channel not in ("web", "acp")
                     or session.deleted_at is not None
                 ):
                     raise ChatRuntimeIntakeError(
@@ -1123,6 +1359,17 @@ class WebSocketChatHandler:
                         message,
                         expected_run_id=intake.handle.run_id,
                     )
+                    continue
+                # MCP tool result: route to pending future (avoids race with
+                # send_mcp_tool_call's temporary reader)
+                if message.get("type") == "mcp_tool_result":
+                    call_id = message.get("call_id", "")
+                    future = self._mcp_pending_calls.pop(call_id, None)
+                    if future and not future.done():
+                        future.set_result({
+                            "output": message.get("output", ""),
+                            "is_error": message.get("is_error", False),
+                        })
                     continue
                 accepted = await self._accept_client_message(message)
                 if accepted is None:
@@ -1456,3 +1703,4 @@ class WebSocketChatHandler:
             )
         except Exception as e:
             logger.warning(f"[WS] Failed to log activity: {e}")
+

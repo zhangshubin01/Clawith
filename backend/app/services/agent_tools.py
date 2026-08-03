@@ -582,7 +582,7 @@ RUNTIME_TYPED_APPLICATION_TOOL_NAMES = frozenset(
     }
 )
 
-
+# Server built-in tools that should be hidden when the IDE plugin registers
 # Core tools that should always be available to agents regardless of
 # DB configuration.
 # Note: send_channel_message is intentionally NOT here — it lives in
@@ -758,6 +758,12 @@ async def _agent_has_any_channel(agent_id: uuid.UUID) -> bool:
 # ─── Dynamic Tool Loading from DB ──────────────────────────────
 
 
+# Maps LLM-safe tool names (with '_' instead of '/') back to original
+# names as stored in the DB. Populated by get_agent_tools_for_llm when
+# it encounters IDE-plugin tools with '/' in their names.
+_LLM_SAFE_NAME_TO_ORIGINAL: dict[str, str] = {}
+
+
 def _canonicalize_llm_tool(tool_def: dict, *, source: str = "builtin") -> dict:
     """Replace stale DB schemas with the current model-facing contract."""
     name = tool_def.get("function", {}).get("name")
@@ -886,11 +892,25 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                 # OKR-system-only tools, even if the DB default says enabled.
                 if (t.config or {}).get("okr_agent_only") and not is_system_agent:
                     continue
-                # Build OpenAI function-calling format
+                # Skip legacy ws-proxy:// tools (migrated to in-memory registry).
+                # These rows may remain in DB from before the migration; they are
+                # unreachable because _resolve_mcp_execution_target no longer
+                # accepts the ws-proxy scheme.
+                if (t.mcp_server_url or "").startswith("ws-proxy://"):
+                    continue
+                # Build OpenAI function-calling format.
+                # LLM providers reject tool names containing '/' (only [a-zA-Z0-9_-]
+                # is allowed). IDE plugin tools use namespaced names like
+                # "fs/read_file" — replace '/' with '_' for the LLM and record
+                # the mapping so we can reverse it during dispatch.
+                llm_name = t.name
+                if "/" in llm_name:
+                    llm_name = llm_name.replace("/", "_")
+                    _LLM_SAFE_NAME_TO_ORIGINAL[llm_name] = t.name
                 tool_def = {
                     "type": "function",
                     "function": {
-                        "name": t.name,
+                        "name": llm_name,
                         "description": t.description,
                         "parameters": t.parameters_schema or {"type": "object", "properties": {}},
                     },
@@ -935,6 +955,35 @@ async def get_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
                     )
                 # Inject OS-aware paths into computer-related tool descriptions
                 result = _patch_computer_tool_descriptions(result, computer_os_type)
+                # Inject IDE tools from in-memory registry (connection-scoped, no DB writes).
+                # IDE tools use namespaced names like fs/read_text_file → fs_read_text_file,
+                # which never conflict with backend tools like read_file (agent workspace).
+                # Both coexist so the LLM can read IDE project files AND agent workspace files.
+                try:
+                    from app.services.ide_tool_registry import get_tool_schemas as _ide_schemas
+                    _ide_tools_raw = _ide_schemas(str(agent_id))
+                    if _ide_tools_raw:
+                        # Apply '/' → '_' name conversion for LLM safety
+                        for _t in _ide_tools_raw:
+                            _name = _t.get("function", {}).get("name", "")
+                            if "/" in _name:
+                                _llm_name = _name.replace("/", "_")
+                                _LLM_SAFE_NAME_TO_ORIGINAL[_llm_name] = _name
+                                _t = {
+                                    "type": "function",
+                                    "function": {
+                                        **_t["function"],
+                                        "name": _llm_name,
+                                    },
+                                }
+                            result.append(_t)
+                        logger.info(
+                            "[Tools] agent=%s injected %d IDE tools from registry, "
+                            "total=%d (backend tools preserved)", agent_id,
+                            len(_ide_tools_raw), len(result),
+                        )
+                except Exception:
+                    logger.exception("[Tools] Failed to inject IDE tools from registry")
                 # Final diagnostic: log the complete tool list and assignment stats
                 final_names = sorted(t["function"]["name"] for t in result)
                 logger.info(
@@ -1009,11 +1058,28 @@ async def _agent_is_designated_okr_agent(agent_id: uuid.UUID) -> bool:
 async def _get_runtime_dynamic_mcp_tool_names(
     agent_id: uuid.UUID,
 ) -> set[str]:
-    """Resolve locally ready dynamic MCP names without provider I/O."""
+    """Resolve locally ready dynamic MCP names without provider I/O.
+
+    Includes IDE tools from the in-memory registry plus DB-based MCP tools.
+    """
     from urllib.parse import urlparse
 
     from app.models.tool import AgentTool, Tool
+    from app.services.ide_tool_registry import get_tool_names as _ide_names
 
+    ready: set[str] = set()
+
+    # ── IDE tools from in-memory registry ──
+    try:
+        for name in _ide_names(str(agent_id)):
+            llm_name = name.replace("/", "_")
+            if llm_name != name:
+                _LLM_SAFE_NAME_TO_ORIGINAL[llm_name] = name
+            ready.add(llm_name)
+    except Exception:
+        pass
+
+    # ── DB-based MCP tools ──
     try:
         async with async_session() as db:
             result = await db.execute(
@@ -1032,9 +1098,8 @@ async def _get_runtime_dynamic_mcp_tool_names(
             "[Tools] Dynamic MCP readiness lookup failed: {}",
             type(exc).__name__,
         )
-        return set()
+        return ready
 
-    ready: set[str] = set()
     for tool in tools:
         name = str(tool.name or "")
         server_url = str(tool.mcp_server_url or "").strip()
@@ -1052,7 +1117,10 @@ async def _get_runtime_dynamic_mcp_tool_names(
                 name or "<unnamed>",
             )
             continue
-        ready.add(name)
+        llm_name = name.replace("/", "_")
+        if llm_name != name:
+            _LLM_SAFE_NAME_TO_ORIGINAL[llm_name] = name
+        ready.add(llm_name)
     return ready
 
 
@@ -1064,7 +1132,6 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
         tools,
         dynamic_mcp_names=dynamic_mcp_names,
     )
-    ready: list[dict] = []
     is_designated_okr_agent: bool | None = None
     for tool in resolved:
         name = str(tool.get("function", {}).get("name") or "")
@@ -3366,6 +3433,10 @@ async def execute_tool(
         .replace("\ufeff", "")
         .strip()
     )
+    # Map LLM-safe names (with '_') back to original DB names (with '/')
+    # See get_agent_tools_for_llm where the forward mapping is recorded.
+    tool_name = _LLM_SAFE_NAME_TO_ORIGINAL.get(tool_name, tool_name)
+
     if tool_name == FINISH_TOOL_NAME:
         content = arguments.get("content", "")
         return content if isinstance(content, str) else str(content)
@@ -3850,6 +3921,21 @@ async def execute_tool(
         elif tool_name == "neon_create_database":
             result = await _neon_create_database(agent_id, arguments)
         else:
+
+            # Try IDE tool execution (in-memory registry, WebSocket-proxied)
+            try:
+                from app.services.ide_tool_registry import is_ide_tool as _is_ide
+                if _is_ide(str(agent_id), tool_name):
+                    _outcome = await _execute_ide_tool(tool_name, arguments, agent_id)
+                    result = _legacy_tool_outcome_text(
+                        _outcome,
+                        fallback="IDE tool did not return a result.",
+                    )
+                    if agentbay_scope_token is not None:
+                        agentbay_session_scope_id.reset(agentbay_scope_token)
+                    return result
+            except Exception:
+                logger.exception("[IDE] Tool routing check failed: %s", tool_name)
 
             # Try MCP tool execution
             result = await _execute_mcp_tool(tool_name, arguments, agent_id=agent_id)
@@ -6231,9 +6317,13 @@ async def _resolve_mcp_execution_target(
 
     from app.models.tool import AgentTool, Tool
 
+    # Reverse LLM-safe name mapping (fs_find_references → fs/find_references)
+    # added by get_agent_tools_for_llm for IDE plugin tools.
+    resolved_name = _LLM_SAFE_NAME_TO_ORIGINAL.get(tool_name, tool_name)
+
     async with async_session() as db:
         result = await db.execute(
-            select(Tool).where(Tool.name == tool_name, Tool.type == "mcp")
+            select(Tool).where(Tool.name == resolved_name, Tool.type == "mcp")
         )
         tool = result.scalar_one_or_none()
 
@@ -6285,6 +6375,7 @@ async def _resolve_mcp_execution_target(
 
         server_url = str(tool.mcp_server_url or "").strip()
         parsed = urlparse(server_url)
+
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return {
                 "full_name": str(tool.name or tool_name),
@@ -6349,6 +6440,7 @@ async def _execute_resolved_mcp_target_outcome(
     async_completion = target.get("async_completion")
 
     hostname = (urlparse(server_url).hostname or "").lower()
+
     if hostname.endswith(".run.tools"):
         return await _execute_via_smithery_connect_outcome(
             server_url,
@@ -6394,6 +6486,64 @@ async def _execute_resolved_mcp_target_outcome(
         full_tool_name=full_name,
         arguments=arguments,
         async_completion=async_completion,
+    )
+
+
+async def _execute_ide_tool(
+    tool_name: str,
+    arguments: dict,
+    agent_id,
+) -> ToolExecutionOutcome:
+    """Execute an IDE tool by proxying through the /ws/chat WebSocket.
+
+    Looks up the handler from the in-memory IDE tool registry (no DB query).
+    The tool must have been registered via ``mcp_register`` from the IDE plugin.
+    """
+    from app.services.ide_tool_registry import find_handler as _ide_handler
+
+    agent_id_str = str(agent_id)
+
+    handler = _ide_handler(agent_id_str)
+    if handler is None:
+        return _typed_failure(
+            f"No active IDE connection for agent {agent_id_str}. "
+            "Please open the Clawith plugin in IntelliJ and connect.",
+            "mcp_ws_connection_unavailable",
+        )
+
+    try:
+        result = await handler.send_mcp_tool_call(
+            tool_name=tool_name,
+            arguments=arguments,
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        return _typed_failure(
+            f"IDE tool {tool_name} timed out after 30s.",
+            "mcp_ws_tool_timeout",
+        )
+    except Exception as exc:
+        return _typed_unknown(
+            f"IDE tool {tool_name} proxy error: {exc}",
+            "mcp_ws_proxy_error",
+        )
+
+    output = str(result.get("output", ""))
+    is_error = bool(result.get("is_error", False))
+
+    if is_error:
+        return _typed_failure(output, "mcp_ws_tool_error")
+
+    return ToolExecutionOutcome(
+        status="succeeded",
+        result_summary=output,
+        result_ref=None,
+        error_code=None,
+        retryable=False,
+        metadata={
+            "execution_mode": "ws_proxy",
+            "raw_tool_name": tool_name,
+        },
     )
 
 
