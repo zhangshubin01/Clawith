@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"gh ssh-key add ~/.ssh/id_ed25519.pub -t \\\"Clawith-mac\\\" 2>&1\",\"description\":\"Add SSH key to GitHub via gh CLI\"}",
+  "error": "Exit code 1\nHTTP 404: Not Found (https://api.github.com/user/keys?per_page=100)\nThis API operation needs the \"admin:public_key\" scope. To request it, run:  gh auth refresh -h github.com -s admin:public_key",
+  "timestamp": "2026-08-01T12:47:29.642Z",
+  "retry_count": 1
+}

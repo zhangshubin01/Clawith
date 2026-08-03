@@ -204,6 +204,7 @@ class CardStreamBridge:
         receive_id_type: str,
         agent_name: str,
         run_id: str,
+        initiator_open_id: str = "",
     ):
         self._fs = feishu_service
         self._app_id = app_id
@@ -212,6 +213,7 @@ class CardStreamBridge:
         self._receive_id_type = receive_id_type
         self._agent_name = agent_name
         self._run_id = run_id
+        self._initiator_open_id = initiator_open_id
 
         # Card identity
         self.card_id: str | None = None
@@ -294,6 +296,8 @@ class CardStreamBridge:
 
         MD5-deduplicated; no-op if the bridge is no longer streaming.
         """
+        if not self._streaming or not self.card_id:
+            return
         await self._card_ready.wait()  # wait for card creation (no-op once set)
         if not self._streaming or not self.card_id:
             return
@@ -335,7 +339,7 @@ class CardStreamBridge:
         Must be called exactly once when the LangGraph run reaches a terminal
         status (completed / failed / cancelled).
         """
-        if self._finalized or not self._streaming:
+        if self._finalized:
             return
         self._finalized = True
 
@@ -350,31 +354,35 @@ class CardStreamBridge:
             raise RuntimeError("Card creation failed, cannot finalize")
 
         self._state = "finalizing"
-        self._streaming = False
         self._aux_flush.dispose()
         self._footer_flush.dispose()
 
         try:
-            # Push terminal banner, then close streaming.
-            await self._enqueue_push(
-                "status_banner", "✅ 任务已经完成", "_last_banner_hash",
-            )
+            # Push terminal banner (skip if already degraded / streaming closed).
+            if self._streaming:
+                await self._enqueue_push(
+                    "status_banner", "✅ 任务已经完成", "_last_banner_hash",
+                    check_streaming=False,
+                )
 
-            self._sequence += 1
-            await self._fs.set_card_streaming_mode(
-                self._app_id, self._app_secret,
-                self.card_id, 0, self._sequence,
-            )
+            async with self._lock:
+                if self._streaming:
+                    self._streaming = False
+                    self._sequence += 1
+                    await self._fs.set_card_streaming_mode(
+                        self._app_id, self._app_secret,
+                        self.card_id, 0, self._sequence,
+                    )
 
-            # Replace with terminal card.
-            elapsed_ms = int((time.monotonic() - self._start_time) * 1000)
-            terminal_card = self._build_terminal_card(final_text, elapsed_ms)
+                # Replace with terminal card (always — even after degrade).
+                elapsed_ms = int((time.monotonic() - self._start_time) * 1000)
+                terminal_card = self._build_terminal_card(final_text, elapsed_ms)
 
-            self._sequence += 1
-            await self._fs.update_cardkit_card(
-                self._app_id, self._app_secret,
-                self.card_id, terminal_card, self._sequence,
-            )
+                self._sequence += 1
+                await self._fs.update_cardkit_card(
+                    self._app_id, self._app_secret,
+                    self.card_id, terminal_card, self._sequence,
+                )
 
             self._state = "terminal"
             logger.info(
@@ -387,46 +395,58 @@ class CardStreamBridge:
 
     async def abort(self, reason: str = "⏹ 回复已中断") -> None:
         """Interrupt — push banner, close streaming, replace with terminal card."""
+        if self._finalized:
+            return
         self._finalized = True
-        self._streaming = False
         self._aux_flush.dispose()
         self._footer_flush.dispose()
         try:
-            await self._enqueue_push(
-                "status_banner", "⚠️ 已中断", "_last_banner_hash",
-            )
-            seq = self._sequence + 1
-            await self._fs.set_card_streaming_mode(
-                self._app_id, self._app_secret, self.card_id, 0, seq,
-            )
-            elapsed_ms = int((time.monotonic() - self._start_time) * 1000)
-            terminal = self._build_terminal_card(reason or "⏹ 回复已中断", elapsed_ms)
-            seq += 1
-            await self._fs.update_cardkit_card(
-                self._app_id, self._app_secret, self.card_id, terminal, seq,
-            )
+            if self._streaming:
+                await self._enqueue_push(
+                    "status_banner", "⚠️ 已中断", "_last_banner_hash",
+                    check_streaming=False,
+                )
+            async with self._lock:
+                if self._streaming:
+                    self._streaming = False
+                    self._sequence += 1
+                    await self._fs.set_card_streaming_mode(
+                        self._app_id, self._app_secret, self.card_id, 0, self._sequence,
+                    )
+                elapsed_ms = int((time.monotonic() - self._start_time) * 1000)
+                terminal = self._build_terminal_card(reason or "⏹ 回复已中断", elapsed_ms)
+                self._sequence += 1
+                await self._fs.update_cardkit_card(
+                    self._app_id, self._app_secret, self.card_id, terminal, self._sequence,
+                )
         except Exception:
             await self._fallback_to_text(reason or "回复已中断")
 
     async def fallback_error(self, error: str) -> None:
         """Error — push banner, close streaming, show error card."""
+        if self._finalized:
+            return
         self._finalized = True
-        self._streaming = False
         self._aux_flush.dispose()
         self._footer_flush.dispose()
         try:
-            await self._enqueue_push(
-                "status_banner", "❌ 处理失败", "_last_banner_hash",
-            )
-            seq = self._sequence + 1
-            await self._fs.set_card_streaming_mode(
-                self._app_id, self._app_secret, self.card_id, 0, seq,
-            )
-            card = self._build_error_card(error)
-            seq += 1
-            await self._fs.update_cardkit_card(
-                self._app_id, self._app_secret, self.card_id, card, seq,
-            )
+            if self._streaming:
+                await self._enqueue_push(
+                    "status_banner", "❌ 处理失败", "_last_banner_hash",
+                    check_streaming=False,
+                )
+            async with self._lock:
+                if self._streaming:
+                    self._streaming = False
+                    self._sequence += 1
+                    await self._fs.set_card_streaming_mode(
+                        self._app_id, self._app_secret, self.card_id, 0, self._sequence,
+                    )
+                card = self._build_error_card(error)
+                self._sequence += 1
+                await self._fs.update_cardkit_card(
+                    self._app_id, self._app_secret, self.card_id, card, self._sequence,
+                )
         except Exception:
             await self._fallback_to_text(error)
 
@@ -562,6 +582,8 @@ class CardStreamBridge:
 
     async def push_thinking(self, content: str) -> None:
         """累积思考增量；由 aux flush 统一推送到思考面板。"""
+        if not self._streaming:
+            return
         await self._card_ready.wait()
         if not self._streaming:
             return

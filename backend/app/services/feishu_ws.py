@@ -162,11 +162,16 @@ class FeishuWSManager:
             """Handle card.action.trigger events (e.g. interrupt button)."""
             try:
                 action_value = None
+                operator_open_id = None
                 if isinstance(data, dict):
                     action_value = data.get("action", {}).get("value", {})
+                    operator_open_id = (data.get("operator") or {}).get("open_id", "")
                 elif hasattr(data, "action"):
                     action = data.action
                     action_value = getattr(action, "value", {}) if action else {}
+                    operator = getattr(data, "operator", None)
+                    if operator:
+                        operator_open_id = getattr(operator, "open_id", "") or ""
                 if isinstance(action_value, str):
                     import json as _json
                     try:
@@ -180,6 +185,26 @@ class FeishuWSManager:
                         from app.services.agent_runtime.card_stream_bridge import get_bridge
                         bridge = get_bridge(run_id)
                         if bridge is not None:
+                            # 授权检查：单聊只允许接收者本人中断；群聊只允许
+                            # 消息发起者中断自己的 run（v1 不校验群成员身份）。
+                            if bridge._receive_id_type == "open_id":
+                                allowed = bridge._receive_id
+                            else:
+                                allowed = bridge._initiator_open_id
+                            if not allowed:
+                                logger.warning(
+                                    "[Feishu WS] card_action no_allowed_operator "
+                                    "run_id={} type={}",
+                                    run_id, bridge._receive_id_type,
+                                )
+                                return
+                            if not operator_open_id or operator_open_id != allowed:
+                                logger.warning(
+                                    "[Feishu WS] card_action unauthorized_interrupt "
+                                    "run_id={} operator={}",
+                                    run_id, operator_open_id or "(missing)",
+                                )
+                                return
                             asyncio.create_task(_cancel_card_run(run_id, bridge))
                         else:
                             logger.warning("[Feishu WS] card_action bridge_not_found run_id={}", run_id)

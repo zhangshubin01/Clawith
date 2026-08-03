@@ -220,3 +220,4 @@ class RuntimeContext:
     card_app_secret: str = ""
     card_receive_id: str = ""
     card_receive_id_type: str = ""
+    card_initiator_open_id: str = ""

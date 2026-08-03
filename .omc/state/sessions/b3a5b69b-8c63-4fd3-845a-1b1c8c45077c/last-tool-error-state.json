@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"python3 -c \\\"\\nimport sys; sys.path.insert(0, 'backend')\\nimport inspect\\nfrom lark_oapi.event.dispatcher_handler import EventDispatcherHandlerBuilder\\nprint(inspect.getsource(EventDispatc...",
+  "error": "Exit code 1\nclass EventDispatcherHandlerBuilder(object):\n    def __init__(self, encrypt_key: str, verification_token: str) -> None:\n        self._encrypt_key = encrypt_key\n        self._verification_token = verification_token\n        self._processorMap = {}\n        self._callback_processor_map = {}\n\n    def register_p1_customized_event(self, event_type: str,\n                                     f: Callable[[CustomizedEvent], None]) -> \"EventDispatcherHandlerBuilder\":\n        t = f\"p1.{event_type...",
+  "timestamp": "2026-08-02T13:30:47.098Z",
+  "retry_count": 1
+}

@@ -1,2 +1,22 @@
 [permissions]
-allow = ["task"]
+allow = ["task", "Bash=docker start clawith-postgres 2>&1 || docker run -d --name clawith-postgres -e POSTGRES_USER=clawith -e POSTGRES_PASSWORD=clawith -e POSTGRES_DB=clawith -p 5432:5432 postgres:15-alpine 2>&1; for i in $(seq 1 10); do docker exec clawith-postgres pg_isready -U clawith 2>/dev/null && echo \"DB ready\" && break || sleep 2; done", "Bash=for i in $(seq 1 15); do docker ps --format \"{{.Names}}\" 2>/dev/null | head -1 && echo \"docker ready\" && break || sleep 2; done", "Bash=cd backend/app && for d in api services models schemas core plugins dao; do echo \"== $d ==\"; ls $d 2>/dev/null | head -50; echo \"  (files: $(ls $d 2>/dev/null | grep -v __pycache__ | wc -l | tr -d ' '))\"; done", "Bash=cd /Users/shubinzhang/Documents/agent/Clawith && git branch -a | head -20 && echo \"=====\" && for b in $(git branch -a | sed 's/^[* ] //' | head -8); do count=$(git show \"$b:backend/app/services/agent_runtime/persistence.py\" 2>/dev/null | grep -c \"_acquire_start_lane\"); echo \"$b: _acquire_start_lane 出现 $count 次\"; done"]
+
+# review / security_review 内置 subagent skills 的显式配置:
+# 让它们使用更强的 deepseek-pro 模型与 max 推理投入。
+[agent]
+subagent_models = { review = "deepseek-pro", security_review = "deepseek-pro" }
+subagent_efforts = { review = "max", security_review = "max" }
+
+# 放行 reasonix 自我升级(替换 ~/.local/bin/reasonix 需要写 /Users/shubinzhang/.local/bin)
+[sandbox]
+bash = "enforce"
+network = true
+allow_write = ["/Users/shubinzhang/.local/bin", "/Users/shubinzhang/.reasonix", "/tmp/reasonix-write-probe"]
+
+# 排除遮蔽内置 review/security_review subagent skills 的 global inline skills:
+# ~/.claude/skills/review(gstack)与 ~/.claude/skills/security-review(ECC)是 inline skill,
+# 按 project > custom > global > builtin 优先级遮蔽了内置 subagent 工具。
+[skills]
+paths = ["/tmp/reasonix-skill-probe"]
+excluded_paths = ["~/.agents/skills"]
+disabled_skills = ["probe-skill", "review"]

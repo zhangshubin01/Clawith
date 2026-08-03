@@ -431,6 +431,7 @@ async def _accept_feishu_runtime_message(
                     receive_id_type="chat_id" if is_group else "open_id",
                     agent_name=agent.name or str(agent.id),
                     run_id=str(pregenerated_run_id),
+                    initiator_open_id=sender_open_id,
                 )
                 card_task = asyncio.create_task(bridge.start())
                 card_task.add_done_callback(
@@ -462,6 +463,7 @@ async def _accept_feishu_runtime_message(
                 channel_delivery_target={
                     "receive_id": chat_id if is_group else sender_open_id,
                     "receive_id_type": "chat_id" if is_group else "open_id",
+                    "initiator_open_id": sender_open_id,
                     **({
                         "_card_config": {
                             "app_id": config.app_id or "",

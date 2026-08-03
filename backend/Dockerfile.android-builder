@@ -1,8 +1,7 @@
-# clawith-android-builder/Dockerfile
-# ARM64 原生构建镜像 — 零 QEMU 模拟开销
-# 构建: docker build -t clawith-android-builder:latest -f backend/Dockerfile.android-builder backend/
-# 大小: ~1.4GB（sdkmanager + 许可证，SDK 组件运行时下载到共享卷）
-
+ # clawith-devbox-android/Dockerfile
+ # ARM64 原生构建镜像 — 零 QEMU 模拟开销
+ # 构建: docker build -t clawith-devbox-android:latest -f backend/Dockerfile.android-builder backend/
+ # 大小: ~1.4GB（sdkmanager + 许可证，SDK 组件运行时下载到共享卷）
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -16,19 +15,25 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 ENV PATH="${PATH}:${ANDROID_HOME}/platform-tools" \
     ANDROID_SDK_ROOT="${ANDROID_HOME}"
-
-# ─── 第一层：运行时系统依赖 ───
-# git: 私有仓库克隆 | wget/curl: JDK entrypoint 下载 | unzip: JDK 解压
-# fontconfig/libfreetype6: AAPT2 字体渲染（处理 vector drawable）
-# util-linux: getopt/flock 等工具
-RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends \
-    git wget unzip curl ca-certificates \
-    fontconfig libfreetype6 util-linux \
-    default-jdk-headless \
-    && apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
+ 
+ 
+ 
+ # ─── 第一层：运行时系统依赖 ───
+ # git: 私有仓库克隆 | wget/curl: JDK entrypoint 下载 | unzip: JDK 解压
+ # fontconfig/libfreetype6: AAPT2 字体渲染（处理 vector drawable）
+ # util-linux: getopt/flock 等工具
+ RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+         sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
+     else \
+         sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list; \
+     fi && \
+     apt-get update -qq && \
+     apt-get install -y --no-install-recommends \
+     git wget unzip curl ca-certificates \
+     fontconfig libfreetype6 util-linux \
+     default-jdk-headless \
+     && apt-get clean && \
+     rm -rf /var/lib/apt/lists/*
 # ─── ARM64 上运行 x86_64 aapt2 必需的多架构库 ───
 # Google 不发布 Linux ARM64 aapt2，所有 Linux 版 aapt2 均为 x86_64
 # dpkg --add-architecture amd64 后安装 x86_64 版 glibc，OrbStack Rosetta 2 无缝转译
@@ -39,18 +44,16 @@ RUN dpkg --add-architecture amd64 && \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# ─── 第二层：Android cmdline-tools（运行时 SDKeyError 下载 SDK 到共享卷） ───
-ARG CMDLINE_TOOLS_VERSION=15859902
-ARG CMDLINE_TOOLS_URL=https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip
-
-RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
-    wget --timeout=300 --tries=3 ${CMDLINE_TOOLS_URL} -O /tmp/android_tools.zip && \
-    unzip -q /tmp/android_tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
-    mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
-    rm -f /tmp/android_tools.zip
-
-# SDK 版本标记（P4: 运行时漂移检测依赖 LABEL，卷内文件由 AGP 写入）
-LABEL clawith.sdk-version="${CMDLINE_TOOLS_VERSION}"
+ # ─── 第二层：Android cmdline-tools（运行时 AGP 下载 SDK 到共享卷） ───
+ # 预下载 zip 后 COPY，避免 Docker 构建时从 dl.google.com 慢速下载
+ COPY docker/android-builder/cache/commandlinetools-linux.zip /tmp/android_tools.zip
+ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools && \
+     unzip -q /tmp/android_tools.zip -d ${ANDROID_HOME}/cmdline-tools && \
+     mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest && \
+     rm -f /tmp/android_tools.zip
+ 
+ # SDK 版本标记（P4: 运行时漂移检测依赖 LABEL，卷内文件由 AGP 写入）
+ LABEL clawith.sdk-version="15859902"
 
 # 接受 SDK 许可证（写入 $ANDROID_HOME/licenses/，卷初始化时复制到共享卷）
 # SDK 组件 (platforms/build-tools/NDK) 由 AGP 运行时下载到共享卷，不在镜像中预装

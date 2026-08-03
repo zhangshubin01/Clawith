@@ -1,0 +1,13 @@
+{
+  "jobId": "ae967319-384b-4a5f-ab44-47ada88191fb",
+  "action": "wiki-capture",
+  "attempt": 1,
+  "runnerNonce": "8fa8ebfc-11ce-4c8a-b916-306291ab30aa",
+  "ownerNonce": "b8fd8a42-2cef-4920-b7fb-9182e3c0fa2d",
+  "runner": {
+    "pid": 3745,
+    "processStartIdentity": "1785588432000"
+  },
+  "deadlineAt": "2026-08-01T12:47:21.676Z",
+  "idempotencyKey": "5dfdd5e4e5d4564e8ecc55d54f0d966470b98f6cf6b9060c8487047fc6f806ae"
+}

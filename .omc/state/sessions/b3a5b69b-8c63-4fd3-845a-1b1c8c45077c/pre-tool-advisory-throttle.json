@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "entries": {
+    "466399dafa2d20f60587180bad0a07358eb7f2bce724df0ff682f038ad33f5ad": {
+      "last_emitted_at_ms": 1785678507011,
+      "message": "Read multiple files in parallel when possible for faster analysis."
+    },
+    "79a93d4a2f8f50b95f852280616242fee1855dc99a3c75211917f55e72e95fae": {
+      "last_emitted_at_ms": 1785678475052,
+      "message": "Use parallel execution for independent tasks. Use run_in_background for long operations (npm install, builds, tests)."
+    },
+    "502dadd11fe1bd8279dbd7b891bd150cffbe5e98f8975e7f88fb1c784ac13cae": {
+      "last_emitted_at_ms": 1785677227329,
+      "message": "Spawning agent: ecc:code-reviewer (sonnet) | Task: Review android_build_backend.py"
+    },
+    "e152824e6b1f456c5e98f99eb57162cac1f2a7a5a51ccc14ad5c97d459575a57": {
+      "last_emitted_at_ms": 1785677225198,
+      "message": "Spawning agent: ecc:code-reviewer (sonnet) | Task: Review context_compressor.py logic"
+    },
+    "57020462ddf0d184d1e9000f1274d689371897413c8bfbed147e2c129c3f7a8c": {
+      "last_emitted_at_ms": 1785677222506,
+      "message": "Spawning agent: ecc:code-reviewer (sonnet) | Task: Review feishu_ws.py race conditions"
+    },
+    "06c313f0808a988e94bc826519ce15fa6c43c2cce74a97e40a610d918197fb7f": {
+      "last_emitted_at_ms": 1785677220350,
+      "message": "Spawning agent: ecc:code-reviewer (sonnet) | Task: Review feishu.py logic issues"
+    }
+  },
+  "updated_at": "2026-08-02T13:48:27.011Z"
+}

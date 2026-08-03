@@ -1590,6 +1590,7 @@ class RuntimeModelStepService:
                         receive_id_type=context.card_receive_id_type,
                         agent_name=agent.name or str(agent.id),
                         run_id=context.run_id,
+                        initiator_open_id=context.card_initiator_open_id,
                     )
                     await bridge.start()
                     register_bridge(context.card_bridge_key, bridge)

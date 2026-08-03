@@ -139,27 +139,27 @@
   },
   "hotPaths": [
     {
+      "path": "backend/app/api/feishu.py",
+      "accessCount": 12,
+      "lastAccessed": 1785677254371,
+      "type": "file"
+    },
+    {
       "path": "backend/app/services/feishu_service.py",
       "accessCount": 11,
       "lastAccessed": 1785384769963,
       "type": "file"
     },
     {
-      "path": "backend/app/api/feishu.py",
-      "accessCount": 11,
-      "lastAccessed": 1785388735880,
-      "type": "file"
-    },
-    {
       "path": "backend/app/services/feishu_ws.py",
-      "accessCount": 8,
-      "lastAccessed": 1785384775243,
+      "accessCount": 9,
+      "lastAccessed": 1785677228289,
       "type": "file"
     },
     {
       "path": "backend/app/services/agent_runtime/card_stream_bridge.py",
-      "accessCount": 5,
-      "lastAccessed": 1785384770689,
+      "accessCount": 8,
+      "lastAccessed": 1785677427488,
       "type": "file"
     },
     {
@@ -175,6 +175,12 @@
       "type": "file"
     },
     {
+      "path": "backend/app/services/agent_runtime/persistence.py",
+      "accessCount": 5,
+      "lastAccessed": 1785678513872,
+      "type": "file"
+    },
+    {
       "path": "backend/app/services/agent_runtime/channel_provider_delivery.py",
       "accessCount": 4,
       "lastAccessed": 1785384787454,
@@ -184,12 +190,6 @@
       "path": "backend/app/services/im_safety.py",
       "accessCount": 4,
       "lastAccessed": 1785384807958,
-      "type": "file"
-    },
-    {
-      "path": "backend/app/services/agent_runtime/persistence.py",
-      "accessCount": 3,
-      "lastAccessed": 1785389032357,
       "type": "file"
     },
     {
@@ -238,6 +238,12 @@
       "path": "backend/app/services/agent_runtime/run_compactor.py",
       "accessCount": 2,
       "lastAccessed": 1785397013741,
+      "type": "file"
+    },
+    {
+      "path": "backend/app/services/llm/context_compressor.py",
+      "accessCount": 2,
+      "lastAccessed": 1785677234578,
       "type": "file"
     },
     {

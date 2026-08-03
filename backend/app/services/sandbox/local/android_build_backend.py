@@ -1,6 +1,6 @@
 """Android 项目编译沙箱后端。
 
-基于预构建的 clawith-android-builder 镜像 + 共享卷。
+ 基于预构建的 clawith-devbox-android 镜像 + 共享卷。
 Gradle 缓存按项目隔离，避免并发锁冲突。
 
 关键：通过 docker.sock 启动构建容器时，project_path 必须是宿主机路径。

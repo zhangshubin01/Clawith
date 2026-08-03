@@ -1,0 +1,14 @@
+{"t":0,"agent":"ae9e34c","agent_type":"untracked-native-fork","event":"agent_stop","success":true,"synthetic":true,"telemetry_status":"unmatched_stop","reason":"SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."}
+{"t":0,"agent":"a96358a","agent_type":"untracked-native-fork","event":"agent_stop","success":true,"synthetic":true,"telemetry_status":"unmatched_stop","reason":"SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."}
+{"t":0,"agent":"a356717","agent_type":"untracked-native-fork","event":"agent_stop","success":true,"synthetic":true,"telemetry_status":"unmatched_stop","reason":"SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."}
+{"t":0,"agent":"a617d38","agent_type":"ecc:code-reviewer","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a545429","agent_type":"ecc:code-reviewer","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"a088b72","agent_type":"ecc:code-reviewer","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"ad856c8","agent_type":"ecc:code-reviewer","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"ad856c8","agent_type":"ecc:code-reviewer","event":"agent_stop","success":true,"duration_ms":222764}
+{"t":0,"agent":"a617d38","agent_type":"ecc:code-reviewer","event":"agent_stop","success":true,"duration_ms":279131}
+{"t":0,"agent":"a088b72","agent_type":"ecc:code-reviewer","event":"agent_stop","success":true,"duration_ms":310666}
+{"t":0,"agent":"a545429","agent_type":"ecc:code-reviewer","event":"agent_stop","success":true,"duration_ms":374664}
+{"t":0,"agent":"a1d21be","agent_type":"untracked-native-fork","event":"agent_stop","success":true,"synthetic":true,"telemetry_status":"unmatched_stop","reason":"SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."}
+{"t":0,"agent":"aff8ce9","agent_type":"untracked-native-fork","event":"agent_stop","success":true,"synthetic":true,"telemetry_status":"unmatched_stop","reason":"SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."}
+{"t":0,"agent":"a622f56","agent_type":"untracked-native-fork","event":"agent_stop","success":true,"synthetic":true,"telemetry_status":"unmatched_stop","reason":"SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."}

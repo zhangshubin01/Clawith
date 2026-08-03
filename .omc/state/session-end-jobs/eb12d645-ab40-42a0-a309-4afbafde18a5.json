@@ -1,0 +1,345 @@
+{
+  "version": 1,
+  "jobId": "ae967319-384b-4a5f-ab44-47ada88191fb",
+  "sessionId": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+  "scopeKey": "b763a9b4d9820bc1874fa8736c5d09bc140bd4ac358295d83602c2b8b1dc1e3c",
+  "revision": 47,
+  "createdAt": "2026-08-01T12:47:12.531Z",
+  "updatedAt": "2026-08-01T12:47:13.511Z",
+  "producerGraceExpiresAt": "2026-08-01T12:47:42.532Z",
+  "bestEffortDeadlineAt": "2026-08-01T12:48:33.532Z",
+  "producers": {
+    "core": {
+      "state": "sealed",
+      "intentKey": "5eb54119e1f9bb55a29f44980808806b604124fc6bd042ada520ba6141f0c19d",
+      "payloadDigest": "5eb54119e1f9bb55a29f44980808806b604124fc6bd042ada520ba6141f0c19d",
+      "sealedAt": "2026-08-01T12:47:12.576Z",
+      "sealedBy": "foreground"
+    },
+    "wiki": {
+      "state": "sealed",
+      "intentKey": "c1f809f8d6e3e26a5f3166763f151868746f27add09985c5d25589f8053d9118",
+      "payloadDigest": "c1f809f8d6e3e26a5f3166763f151868746f27add09985c5d25589f8053d9118",
+      "sealedAt": "2026-08-01T12:47:12.561Z",
+      "sealedBy": "wiki-producer"
+    }
+  },
+  "actions": {
+    "foreground-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 0,
+      "idempotencyKey": "df0b874d9e5ff89fd69fe089f4ed036c2ba7e38b43074ee9a03d05c19ed3b4ed",
+      "payload": {
+        "transcriptPath": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+        "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+        "reason": "other",
+        "input": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "transcript_path": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+          "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+          "prompt_id": "144a4bea-f4d2-44c4-80de-5c1d0dd27966",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "ended_at": "2026-08-01T12:47:12.530Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {},
+        "foregroundResult": {
+          "removedTransientFiles": 5,
+          "completedAt": "2026-08-01T12:47:12.575Z"
+        }
+      },
+      "budgetMs": 9000,
+      "completedAt": "2026-08-01T12:47:12.576Z",
+      "lastOutcomeCode": "completed"
+    },
+    "wiki-capture": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "5dfdd5e4e5d4564e8ecc55d54f0d966470b98f6cf6b9060c8487047fc6f806ae",
+      "payload": {
+        "kind": "wiki-session-end-capture",
+        "root": "/Users/shubinzhang/Documents/agent/Clawith",
+        "sessionId": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+        "filename": "session-log-2026-08-01-24a51090.md",
+        "capturedAt": "2026-08-01T12:47:12.530Z",
+        "captureKey": "261762361d8ec7c0e41c9600225827063156332ffe2975a0658b3249bd23b9d7"
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-08-01T12:47:12.643Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "8fa8ebfc-11ce-4c8a-b916-306291ab30aa",
+        "phase": "terminal",
+        "deadlineAt": "2026-08-01T12:47:22.617Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-08-01T12:47:12.760Z"
+    },
+    "team-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "6c20dc56dae88ded8d3563728c6c55c6d02e7f04d8501e91818a5a9bab847dcd",
+      "payload": {
+        "transcriptPath": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+        "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+        "reason": "other",
+        "input": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "transcript_path": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+          "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+          "prompt_id": "144a4bea-f4d2-44c4-80de-5c1d0dd27966",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "ended_at": "2026-08-01T12:47:12.530Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-08-01T12:47:12.776Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "f0d7cc02-f246-427a-89ed-d71cca294bf4",
+        "phase": "terminal",
+        "deadlineAt": "2026-08-01T12:47:22.617Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-08-01T12:47:12.880Z"
+    },
+    "python-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "aa5cdbf13f2dcf3a598f41fdc0a0a3a3583348ecd0bf8403283a768f38f87d0e",
+      "payload": {
+        "transcriptPath": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+        "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+        "reason": "other",
+        "input": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "transcript_path": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+          "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+          "prompt_id": "144a4bea-f4d2-44c4-80de-5c1d0dd27966",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "ended_at": "2026-08-01T12:47:12.530Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-08-01T12:47:12.896Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "be772ac3-8f38-4b45-9ea5-f31172d1ef9d",
+        "phase": "terminal",
+        "deadlineAt": "2026-08-01T12:47:22.617Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-08-01T12:47:13.009Z"
+    },
+    "reply-cleanup": {
+      "class": "required",
+      "phase": "deferred-required",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "9767295d360f25cbea73b83c24528d70961fb399dd30b1ee5d4df74b889c1fd4",
+      "payload": {
+        "transcriptPath": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+        "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+        "reason": "other",
+        "input": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "transcript_path": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+          "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+          "prompt_id": "144a4bea-f4d2-44c4-80de-5c1d0dd27966",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "ended_at": "2026-08-01T12:47:12.530Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 9000,
+      "claimedAt": "2026-08-01T12:47:13.026Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "e98ed9fb-5862-409c-ba6d-43df70190262",
+        "phase": "terminal",
+        "deadlineAt": "2026-08-01T12:47:22.617Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-08-01T12:47:13.136Z"
+    },
+    "callback": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "8cdb293811e558b2640811d57d522672f628fd1ef5294a4a335aedfbcd033d48",
+      "payload": {
+        "transcriptPath": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+        "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+        "reason": "other",
+        "input": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "transcript_path": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+          "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+          "prompt_id": "144a4bea-f4d2-44c4-80de-5c1d0dd27966",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "ended_at": "2026-08-01T12:47:12.530Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-08-01T12:47:13.149Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "88192a1d-da16-4b68-a7de-fb703f944867",
+        "phase": "terminal",
+        "deadlineAt": "2026-08-01T12:47:22.617Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-08-01T12:47:13.244Z"
+    },
+    "notification": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "a801074d50eba0e30a773c39980ca7d2eca4ba848317d2131fbad1c324363297",
+      "payload": {
+        "transcriptPath": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+        "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+        "reason": "other",
+        "input": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "transcript_path": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+          "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+          "prompt_id": "144a4bea-f4d2-44c4-80de-5c1d0dd27966",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "ended_at": "2026-08-01T12:47:12.530Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-08-01T12:47:13.259Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "643dfceb-58c0-404a-baef-e2099b3a89fa",
+        "phase": "terminal",
+        "deadlineAt": "2026-08-01T12:47:22.617Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-08-01T12:47:13.355Z"
+    },
+    "openclaw": {
+      "class": "best-effort",
+      "phase": "deferred-best-effort",
+      "status": "completed",
+      "attempts": 1,
+      "idempotencyKey": "7752220c2671b76dc1854df73836cbc1d7c8d43c85ec060c6724a60069b5d71a",
+      "payload": {
+        "transcriptPath": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+        "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+        "reason": "other",
+        "input": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "transcript_path": "/Users/shubinzhang/.claude/projects/-Users-shubinzhang-Documents-agent-Clawith/eb12d645-ab40-42a0-a309-4afbafde18a5.jsonl",
+          "cwd": "/Users/shubinzhang/Documents/agent/Clawith",
+          "prompt_id": "144a4bea-f4d2-44c4-80de-5c1d0dd27966",
+          "hook_event_name": "SessionEnd",
+          "reason": "other"
+        },
+        "metrics": {
+          "session_id": "eb12d645-ab40-42a0-a309-4afbafde18a5",
+          "ended_at": "2026-08-01T12:47:12.530Z",
+          "reason": "other",
+          "agents_spawned": 0,
+          "agents_completed": 0,
+          "modes_used": []
+        },
+        "initialTeamNames": [],
+        "openClawEnabled": false,
+        "openClawRouting": {}
+      },
+      "budgetMs": 2000,
+      "claimedAt": "2026-08-01T12:47:13.370Z",
+      "runner": {
+        "attempt": 1,
+        "runnerNonce": "34427a96-8357-43d0-b6b6-24c3dd5bfe3d",
+        "phase": "terminal",
+        "deadlineAt": "2026-08-01T12:47:22.617Z"
+      },
+      "lastOutcomeCode": "completed",
+      "completedAt": "2026-08-01T12:47:13.473Z"
+    }
+  },
+  "owner": null,
+  "phase": "complete",
+  "completion": {
+    "completedAt": "2026-08-01T12:47:13.492Z",
+    "terminalDigest": "c6b1507c3f29c96bde7d832a6df9ee122d917befc2eb8a022588b9c30d869165",
+    "terminalRevision": 46
+  }
+}

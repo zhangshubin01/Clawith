@@ -193,6 +193,8 @@ def _runtime_context(
 ) -> RuntimeContext:
     target = getattr(run, "delivery_target", None) or {}
     card_cfg = target.get("_card_config", {}) if isinstance(target, dict) else {}
+    if not isinstance(card_cfg, dict):
+        card_cfg = {}
     # receive_id / receive_id_type 在 delivery_target.channel_delivery.target 内,
     # 需要从嵌套路径读取（chat_intake 不提升到顶层）
     delivery_route = (target.get("channel_delivery", {}) if isinstance(target, dict) else {})
@@ -224,6 +226,7 @@ def _runtime_context(
         card_app_secret=card_cfg.get("app_secret", ""),
         card_receive_id=delivery_target.get("receive_id", "") if isinstance(delivery_target, dict) else "",
         card_receive_id_type=delivery_target.get("receive_id_type", "") if isinstance(delivery_target, dict) else "",
+        card_initiator_open_id=delivery_target.get("initiator_open_id", "") if isinstance(delivery_target, dict) else "",
     )
 
 
