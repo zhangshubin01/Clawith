@@ -76,6 +76,23 @@ bash setup.sh
 # Start all services → http://localhost:3008
 bash restart.sh
 
+# ── Docker 镜像更新 ──────────────────────────────────
+# 修改 backend 代码后，重建镜像并重启容器：
+docker compose build backend && docker compose up -d backend
+
+# 修改 frontend 代码后，重建镜像并重启容器：
+docker compose build frontend && docker compose up -d frontend
+
+# 一键重建全部服务：
+docker compose build && docker compose up -d
+
+# 查看服务状态：
+docker compose ps
+
+# 查看 backend 日志：
+docker compose logs -f backend
+# ──────────────────────────────────────────────────────
+
 # Deploy to dev server (192.168.106.163, port 3009)
 # See .agents/workflows/deploy-dev.md for full steps
 ```
