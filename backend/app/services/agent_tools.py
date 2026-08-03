@@ -1133,6 +1133,7 @@ async def get_runtime_agent_tools_for_llm(agent_id: uuid.UUID) -> list[dict]:
         dynamic_mcp_names=dynamic_mcp_names,
     )
     is_designated_okr_agent: bool | None = None
+    ready: list[dict] = []
     for tool in resolved:
         name = str(tool.get("function", {}).get("name") or "")
         if name in _OKR_AGENT_ONLY_TOOL_NAMES:
