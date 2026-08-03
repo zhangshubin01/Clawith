@@ -58,24 +58,29 @@ def _active_direct_sessions(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     user_id: uuid.UUID,
+    source_channel: str | None = None,
 ):
-    return (
+    filters = (
         ChatSession.tenant_id == tenant_id,
         ChatSession.agent_id == agent_id,
         ChatSession.user_id == user_id,
         ChatSession.session_type == _DIRECT_SESSION_TYPE,
         ChatSession.deleted_at.is_(None),
     )
+    if source_channel is not None:
+        filters += (ChatSession.source_channel == source_channel,)
+    return filters
 
 
 def _best_active_direct_session_statement(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     user_id: uuid.UUID,
+    source_channel: str | None = None,
 ):
     return (
         select(ChatSession)
-        .where(*_active_direct_sessions(tenant_id, agent_id, user_id))
+        .where(*_active_direct_sessions(tenant_id, agent_id, user_id, source_channel=source_channel))
         .order_by(
             ChatSession.last_message_at.desc().nulls_last(),
             ChatSession.created_at.desc(),
@@ -91,12 +96,13 @@ async def get_primary_direct_session(
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
     user_id: uuid.UUID,
+    source_channel: str | None = None,
 ) -> ChatSession | None:
     """Return the active primary direct session for an exact tenant scope."""
     result = await db.execute(
         select(ChatSession)
         .where(
-            *_active_direct_sessions(tenant_id, agent_id, user_id),
+            *_active_direct_sessions(tenant_id, agent_id, user_id, source_channel=source_channel),
             ChatSession.is_primary.is_(True),
         )
         .execution_options(populate_existing=True)
@@ -114,6 +120,7 @@ def _new_direct_session(
     title: str | None,
     is_primary: bool,
     now: datetime,
+    source_channel: str = "web",
 ) -> ChatSession:
     return ChatSession(
         id=uuid.uuid4(),
@@ -124,7 +131,7 @@ def _new_direct_session(
         user_id=user_id,
         created_by_participant_id=created_by_participant_id,
         title=title or f"Session {now.strftime('%m-%d %H:%M')}",
-        source_channel="web",
+        source_channel=source_channel,
         is_group=False,
         is_primary=is_primary,
         deleted_at=None,
@@ -139,16 +146,17 @@ async def ensure_primary_direct_session(
     agent_id: uuid.UUID,
     user_id: uuid.UUID,
     created_by_participant_id: uuid.UUID,
+    source_channel: str = "web",
 ) -> ChatSession:
     """Reuse, promote, or create the primary direct session without committing."""
     await _lock_direct_scope(db, tenant_id, agent_id, user_id)
 
-    primary = await get_primary_direct_session(db, tenant_id, agent_id, user_id)
+    primary = await get_primary_direct_session(db, tenant_id, agent_id, user_id, source_channel=source_channel)
     if primary is not None:
         return primary
 
     result = await db.execute(
-        _best_active_direct_session_statement(tenant_id, agent_id, user_id)
+        _best_active_direct_session_statement(tenant_id, agent_id, user_id, source_channel=source_channel)
     )
     existing = result.scalar_one_or_none()
     if existing is not None:
@@ -166,6 +174,7 @@ async def ensure_primary_direct_session(
         title=None,
         is_primary=True,
         now=now,
+        source_channel=source_channel,
     )
     db.add(session)
     await db.flush()
@@ -345,6 +354,7 @@ async def ensure_primary_platform_session(
     db: AsyncSession,
     agent_id: uuid.UUID,
     user_id: uuid.UUID,
+    source_channel: str = "web",
 ) -> ChatSession:
     """Compatibility wrapper that resolves tenant and creator Participant first."""
     agent_result = await db.execute(
@@ -379,6 +389,7 @@ async def ensure_primary_platform_session(
         agent_id,
         user_id,
         participant.id,
+        source_channel=source_channel,
     )
 
 

@@ -3928,13 +3928,12 @@ async def execute_tool(
                 from app.services.ide_tool_registry import is_ide_tool as _is_ide
                 if _is_ide(str(agent_id), tool_name):
                     _outcome = await _execute_ide_tool(tool_name, arguments, agent_id)
-                    result = _legacy_tool_outcome_text(
-                        _outcome,
-                        fallback="IDE tool did not return a result.",
-                    )
                     if agentbay_scope_token is not None:
                         agentbay_session_scope_id.reset(agentbay_scope_token)
-                    return result
+                    # 直接返回 ToolExecutionOutcome，让 typed outcome pipeline 处理
+                    # 不能走 _legacy_tool_outcome_text，否则转成字符串后会被
+                    # tool_step_service 判定为 untyped_tool_outcome
+                    return _outcome
             except Exception:
                 logger.exception("[IDE] Tool routing check failed: %s", tool_name)
 
