@@ -2,21 +2,29 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dao import query_dao
+from app.config import get_settings
 from app.database import get_db
 from app.models.identity import SSOScanSession, IdentityProvider
 from app.schemas.schemas import UserOut
+from app.services.sso_session_security import (
+    is_valid_sso_browser_binding,
+    sign_sso_browser_binding,
+    sso_browser_cookie_name,
+)
 
 router = APIRouter(tags=["sso"])
+settings = get_settings()
 
 @router.post("/sso/session")
 async def create_sso_session(
+    response: Response,
     tenant_id: uuid.UUID | None = None,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """Create a new SSO scan session for QR code login."""
     session = SSOScanSession(
@@ -27,11 +35,26 @@ async def create_sso_session(
     )
     query_dao.add(db, session)
     await query_dao.commit(db)
+    response.set_cookie(
+        key=sso_browser_cookie_name(session.id),
+        value=sign_sso_browser_binding(session.id),
+        httponly=True,
+        secure=not settings.DEBUG,
+        samesite="lax",
+        max_age=5 * 60,
+    )
     return {"session_id": str(session.id), "expires_at": session.expires_at}
 
 @router.get("/sso/session/{sid}/status")
-async def get_sso_session_status(sid: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_sso_session_status(
+    sid: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Check the status of an SSO scan session."""
+    if not is_valid_sso_browser_binding(sid, request.cookies.get(sso_browser_cookie_name(sid))):
+        raise HTTPException(status_code=403, detail="SSO session is not bound to this browser")
+
     result = await query_dao.execute(db, select(SSOScanSession).where(SSOScanSession.id == sid))
     session = result.scalar_one_or_none()
     if not session:
@@ -91,8 +114,8 @@ async def get_sso_config(sid: uuid.UUID, request: Request, db: AsyncSession = De
         
     # 2. Query IdentityProviders for this tenant (only those that are active AND SSO-enabled)
     query = select(IdentityProvider).where(
-        IdentityProvider.is_active == True,
-        IdentityProvider.sso_login_enabled == True,
+        IdentityProvider.is_active,
+        IdentityProvider.sso_login_enabled,
     )
     if session.tenant_id:
         query = query.where(IdentityProvider.tenant_id == session.tenant_id)

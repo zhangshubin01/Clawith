@@ -1,11 +1,12 @@
 """Authentication API routes."""
 
+import secrets
 import uuid
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from loguru import logger
 from app.dao import query_dao
 from app.config import get_settings
@@ -909,6 +910,7 @@ async def list_providers(
 # Redis keys for OAuth two-step tenant selection
 _OAUTH_PENDING_PREFIX = "oauth_pending:"
 _OAUTH_PENDING_TTL = 600  # 10 minutes
+_OAUTH_STATE_COOKIE = "oauth_state"
 
 
 async def _cache_oauth_pending(
@@ -948,9 +950,9 @@ async def _get_oauth_pending(pending_token: str) -> dict | None:
 
 @router.get("/{provider}/authorize", response_model=OAuthAuthorizeResponse)
 async def authorize(
+    response: Response,
     provider: str,
     redirect_uri: str = Query(..., description="OAuth callback URI"),
-    state: str = Query("", description="CSRF state parameter"),
 ):
     """Start OAuth authorization flow for a provider."""
     from app.services.auth_registry import auth_provider_registry
@@ -959,6 +961,19 @@ async def authorize(
     auth_provider = await auth_provider_registry.get_provider(provider)
     if not auth_provider:
         raise HTTPException(status_code=404, detail=f"Provider '{provider}' not supported")
+
+    # Bind the provider callback to the browser that initiated this authorization.
+    # The state is intentionally generated server-side; caller supplied state values
+    # are not an adequate CSRF defense.
+    state = secrets.token_urlsafe(32)
+    response.set_cookie(
+        key=_OAUTH_STATE_COOKIE,
+        value=state,
+        httponly=True,
+        secure=not settings.DEBUG,
+        samesite="lax",
+        max_age=_OAUTH_PENDING_TTL,
+    )
 
     # Generate authorization URL
     try:
@@ -976,6 +991,7 @@ async def authorize(
 async def oauth_callback(
     provider: str,
     data: OAuthCallbackRequest,
+    request: Request,
 ):
     """Handle OAuth callback — supports a two-step flow for multi-tenant selection.
 
@@ -987,6 +1003,10 @@ async def oauth_callback(
     """
     import uuid as _uuid
     from app.services.auth_registry import auth_provider_registry
+
+    expected_state = request.cookies.get(_OAUTH_STATE_COOKIE)
+    if not expected_state or not secrets.compare_digest(data.state, expected_state):
+        raise HTTPException(status_code=400, detail="OAuth state is invalid or does not match this browser")
 
     # ── Step 2: User has selected a tenant ───────────────────────────────────
     if data.pending_token and data.tenant_id:
